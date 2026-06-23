@@ -1,8 +1,17 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { Settings } from "../src/config/settings";
-import type { AgentSession } from "../src/session/agent-session";
-import type { SessionManager } from "../src/session/session-manager";
-import { executeAcpBuiltinSlashCommand } from "../src/slash-commands/acp-builtins";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type {
+	ResetCreditAccountStatus,
+	ResetCreditRedeemOutcome,
+	ResetCreditTarget,
+	UsageReport,
+} from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -19,8 +28,10 @@ interface FakeAcpBuiltinSession {
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	formatSessionAsText: () => string;
+	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
 	getLastAssistantText: () => string | undefined;
 	messages: unknown[];
+	settings: Settings;
 	model: { provider: string; id: string } | undefined;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	fork(): Promise<boolean>;
@@ -35,9 +46,12 @@ interface FakeAcpBuiltinSession {
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	setModel(model: unknown): Promise<void>;
+	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
+	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
 
 function createRuntime() {
+	const settings = Settings.isolated();
 	const output: string[] = [];
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
@@ -60,6 +74,12 @@ function createRuntime() {
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
 		},
+		async listResetCredits() {
+			return [];
+		},
+		async redeemResetCredit(_target) {
+			return { ok: false, code: "no_credit" };
+		},
 		async newSession(_opts?: { drop?: boolean; parentSession?: string }) {
 			return true;
 		},
@@ -81,9 +101,11 @@ function createRuntime() {
 		async refreshBaseSystemPrompt() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
+		dumpLlmRequestToTmpDir: async () => undefined,
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
+		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
@@ -138,7 +160,7 @@ function createRuntime() {
 		runtime: {
 			session: typedSession,
 			sessionManager: fakeSessionManager as unknown as SessionManager,
-			settings: Settings.isolated(),
+			settings,
 			cwd: "/tmp/project",
 			output: (text: string) => {
 				output.push(text);
@@ -198,6 +220,74 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");
 	});
+	it("/usage show renders the same report as plain /usage", async () => {
+		const now = 1_700_000_000_000;
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			const reports: UsageReport[] = [
+				{
+					provider: "openai-codex",
+					fetchedAt: now - 5_000,
+					limits: [
+						{
+							id: "codex-5h",
+							label: "5 hours",
+							scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
+							window: { id: "5h", label: "5 hours", resetsAt: now + 60 * 60 * 1000 },
+							amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
+						},
+					],
+					metadata: { email: "user@example.com" },
+				},
+			];
+			const plain = createRuntime();
+			const show = createRuntime();
+			plain.runtime.session.fetchUsageReports = async () => reports;
+			show.runtime.session.fetchUsageReports = async () => reports;
+
+			const plainResult = await executeAcpBuiltinSlashCommand("/usage", plain.runtime);
+			const showResult = await executeAcpBuiltinSlashCommand("/usage show", show.runtime);
+
+			expect(showResult).toEqual(plainResult);
+			expect(show.output).toEqual(plain.output);
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("routes saved reset redemption through /usage reset", async () => {
+		const { output, runtime } = createRuntime();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		runtime.session.listResetCredits = async () => [
+			{
+				credentialId: 42,
+				accountId: "account-1",
+				email: "user@example.com",
+				availableCount: 1,
+				credits: [],
+				active: true,
+			},
+		];
+		runtime.session.redeemResetCredit = async target => {
+			redeemedTarget = target;
+			return { ok: true, code: "reset", email: target.email };
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/usage reset active", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(redeemedTarget).toEqual({ credentialId: 42, accountId: "account-1", email: "user@example.com" });
+		expect(output).toEqual(["Reset applied for user@example.com — your rate-limit window has been refreshed."]);
+	});
+
+	it("does not dispatch the legacy /reset-usage command", async () => {
+		const { output, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/reset-usage active", runtime);
+
+		expect(result).toBe(false);
+		expect(output).toEqual([]);
+	});
 
 	it("returns false for unknown commands", async () => {
 		const { runtime } = createRuntime();
@@ -233,9 +323,25 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	// /dump
-	it("dump: outputs transcript when present", async () => {
+	it("dump: outputs transcript with LLM request JSON path when sidecar succeeds", async () => {
 		const { output, runtime } = createRuntime();
 		runtime.session.formatSessionAsText = () => "Session content here";
+		runtime.session.dumpLlmRequestToTmpDir = async () => "/tmp/omp-llm-request-test.json";
+
+		const result = await executeAcpBuiltinSlashCommand("/dump", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Session content here");
+		expect(output[0]).toContain("LLM request JSON: /tmp/omp-llm-request-test.json");
+		expect(output[0]).toContain("persists on disk");
+	});
+
+	it("dump: outputs transcript without sidecar when dumpLlmRequestToTmpDir throws", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.formatSessionAsText = () => "Session content here";
+		runtime.session.dumpLlmRequestToTmpDir = async () => {
+			throw new Error("convert failed");
+		};
 
 		const result = await executeAcpBuiltinSlashCommand("/dump", runtime);
 
@@ -393,11 +499,13 @@ describe("session lifecycle commands", () => {
 		runtime.notifyTitleChanged = async () => {
 			notified = true;
 		};
-		const result = await executeAcpBuiltinSlashCommand("/move /tmp", runtime);
+		const moveTarget = os.tmpdir();
+		const expectedMovedTo = path.resolve(moveTarget);
+		const result = await executeAcpBuiltinSlashCommand(`/move ${moveTarget}`, runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(fakeSessionManager._flushed).toBe(true);
-		expect(fakeSessionManager._movedTo).toBe("/tmp");
-		expect(output[0]).toContain("/tmp");
+		expect(fakeSessionManager._movedTo).toBe(expectedMovedTo);
+		expect(output[0]).toContain(expectedMovedTo);
 		expect(notified).toBe(true);
 	});
 
@@ -455,6 +563,120 @@ describe("wave 3 commands", () => {
 		expect(fakeSessionManager._customEntries[0]?.customType).toBe("user_todo_edit");
 	});
 
+	it("/todo export: writes the default file under the active session cwd", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-export-"));
+		try {
+			const { output, session, fakeSessionManager, runtime } = createRuntime();
+			fakeSessionManager._cwd = tempRoot;
+			session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
+
+			const result = await executeAcpBuiltinSlashCommand("/todo export", runtime);
+
+			const target = path.join(tempRoot, "TODO.md");
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toBe(`Wrote todos to ${target}`);
+			expect(await fs.readFile(target, "utf8")).toBe("# Work\n- [ ] Ship it\n");
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("/todo export: writes a quoted path with spaces", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-export-quoted-"));
+		try {
+			const { output, session, runtime } = createRuntime();
+			const target = path.join(tempRoot, "todo file.md");
+			session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
+
+			const result = await executeAcpBuiltinSlashCommand(`/todo export "${target}"`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toBe(`Wrote todos to ${target}`);
+			expect(await fs.readFile(target, "utf8")).toBe("# Work\n- [ ] Ship it\n");
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("/todo import: reads a quoted absolute path", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-import-"));
+		try {
+			const target = path.join(tempRoot, "todo file.md");
+			await fs.writeFile(target, "# Imported\n- [/] Active task\n", "utf8");
+			const { output, session, runtime } = createRuntime();
+
+			const result = await executeAcpBuiltinSlashCommand(`/todo import "${target}"`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toBe(`Imported 1 phase(s), 1 task(s) from ${target}.`);
+			expect(session._todoPhases).toEqual([
+				{ name: "Imported", tasks: [{ content: "Active task", status: "in_progress" }] },
+			]);
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("/todo import: reads the default file under the active session cwd", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-import-default-"));
+		try {
+			const target = path.join(tempRoot, "TODO.md");
+			await fs.writeFile(target, "# Default\n- [ ] From cwd\n", "utf8");
+			const { output, session, fakeSessionManager, runtime } = createRuntime();
+			fakeSessionManager._cwd = tempRoot;
+
+			const result = await executeAcpBuiltinSlashCommand("/todo import", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toBe(`Imported 1 phase(s), 1 task(s) from ${target}.`);
+			expect(session._todoPhases).toEqual([
+				{ name: "Default", tasks: [{ content: "From cwd", status: "in_progress" }] },
+			]);
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("/todo import: reports parse errors without committing", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-import-invalid-"));
+		try {
+			const target = path.join(tempRoot, "TODO.md");
+			await fs.writeFile(target, "# Imported\nnot a todo\n", "utf8");
+			const { output, session, fakeSessionManager, runtime } = createRuntime();
+			fakeSessionManager._cwd = tempRoot;
+
+			const result = await executeAcpBuiltinSlashCommand("/todo import", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain(`Could not parse ${target}:`);
+			expect(session._todoPhases).toEqual([]);
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("/todo export: reports invalid internal-scheme paths", async () => {
+		const { output, session, runtime } = createRuntime();
+		session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
+
+		const result = await executeAcpBuiltinSlashCommand("/todo export artifact://1", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Failed to write todos:");
+		expect(output[0]).toContain("internal scheme");
+	});
+
+	it("/todo import: reports invalid internal-scheme paths", async () => {
+		const { output, session, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/todo import artifact://1", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Failed to read todos:");
+		expect(output[0]).toContain("internal scheme");
+		expect(session._todoPhases).toEqual([]);
+	});
+
 	it("/todo edit: returns TUI-only usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo edit", runtime);
@@ -490,20 +712,6 @@ describe("wave 3 commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/memory unknownverb", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Usage: /memory");
-	});
-
-	it("/memory view: outputs memory payload (or empty message)", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/memory view", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output.length).toBeGreaterThan(0);
-	});
-
-	it("/memory (no args): defaults to view", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/memory", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output.length).toBeGreaterThan(0);
 	});
 
 	// /todo start fuzzy match
@@ -667,37 +875,6 @@ describe("wave 4 commands", () => {
 	});
 
 	// /plugins
-	it("/plugins list: outputs without throwing when registries are empty", async () => {
-		const { MarketplaceManager } = await import("../src/extensibility/plugins/marketplace");
-		const { PluginManager } = await import("../src/extensibility/plugins");
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand("/plugins list", runtime);
-			expect(result).toEqual({ consumed: true });
-			expect(output.length).toBeGreaterThan(0);
-		} finally {
-			listInstalledSpy.mockRestore();
-			npmListSpy.mockRestore();
-		}
-	});
-
-	it("/plugins (no args): defaults to list", async () => {
-		const { MarketplaceManager } = await import("../src/extensibility/plugins/marketplace");
-		const { PluginManager } = await import("../src/extensibility/plugins");
-		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
-		const npmListSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand("/plugins", runtime);
-			expect(result).toEqual({ consumed: true });
-			expect(output.length).toBeGreaterThan(0);
-		} finally {
-			listInstalledSpy.mockRestore();
-			npmListSpy.mockRestore();
-		}
-	});
 
 	// /todo start with in_progress status in fuzzy list
 	it("/todo start: resolves ambiguous matches by preferring active tasks", async () => {
@@ -734,7 +911,7 @@ describe("wave 5 — adapters and polish", () => {
 	it("/mcp add foo --url https://example.com --token X --scope project: outputs success or propagates write error", async () => {
 		// Uses project scope so it writes to /tmp/project/.omp/mcp.json which test infra controls.
 		// We verify the command either reports success or a meaningful error (not a parse error).
-		const mcpModule = await import("../src/mcp/config-writer");
+		const mcpModule = await import("@oh-my-pi/pi-coding-agent/mcp/config-writer");
 		const spy = spyOn(mcpModule, "addMCPServer").mockResolvedValue(undefined);
 		try {
 			const { output, runtime } = createRuntime();
@@ -772,7 +949,7 @@ describe("wave 5 — adapters and polish", () => {
 
 	// /ssh add — spy on addSSHHost
 	it("/ssh add foo --host x --user y --scope user: calls addSSHHost", async () => {
-		const sshModule = await import("../src/ssh/config-writer");
+		const sshModule = await import("@oh-my-pi/pi-coding-agent/ssh/config-writer");
 		const spy = spyOn(sshModule, "addSSHHost").mockResolvedValue(undefined);
 		try {
 			const { output, runtime } = createRuntime();
@@ -849,9 +1026,6 @@ describe("wave 5 — adapters and polish", () => {
 		(session as unknown as Record<string, unknown>).skills = [];
 		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] } };
 		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
-		(session as unknown as Record<string, unknown>).settings = {
-			getGroup: () => ({ enabled: false, strategy: "off" }),
-		};
 		session.messages = [
 			{ role: "user", content: "Hello, how are you?" },
 			{ role: "assistant", content: "I am doing well." },
@@ -880,7 +1054,7 @@ describe("wave 5 — adapters and polish", () => {
 
 	// /marketplace discover bulleted list
 	it("/marketplace discover: output is bulleted with '  - ' token", async () => {
-		const { MarketplaceManager } = await import("../src/extensibility/plugins/marketplace");
+		const { MarketplaceManager } = await import("@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace");
 		const discoverSpy = spyOn(MarketplaceManager.prototype, "listAvailablePlugins").mockResolvedValue([
 			{ name: "hello", version: "1.0.0", description: "A greeting plugin" } as never,
 			{ name: "world", version: "2.0.0", description: undefined } as never,

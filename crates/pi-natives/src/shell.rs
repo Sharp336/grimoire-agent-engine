@@ -25,33 +25,43 @@ use crate::task;
 #[derive(Debug, Clone, Default)]
 pub struct MinimizerOptions {
 	/// Master switch. Absent / false = disabled.
-	pub enabled:           Option<bool>,
+	pub enabled:              Option<bool>,
 	/// Optional path to a TOML settings file whose values override
 	/// field-level defaults. `~` is expanded.
-	pub settings_path:     Option<String>,
+	pub settings_path:        Option<String>,
 	/// Optional xxHash64 digest (hex) of the settings file contents. When
 	/// supplied, the engine refuses to honor a settings file whose hash does
 	/// not match — a lightweight trust gate for agent-controllable paths.
-	pub settings_hash:     Option<String>,
+	pub settings_hash:        Option<String>,
 	/// Opt-in allowlist of program names (e.g. `"git"`). When empty or
 	/// absent, all built-in filters are active.
-	pub only:              Option<Vec<String>>,
+	pub only:                 Option<Vec<String>>,
 	/// Program names explicitly excluded from minimization.
-	pub except:            Option<Vec<String>>,
+	pub except:               Option<Vec<String>>,
 	/// Maximum captured bytes per command before the engine falls back to
 	/// the raw, un-minimized output. Default 4 MiB.
-	pub max_capture_bytes: Option<u32>,
+	pub max_capture_bytes:    Option<u32>,
+	/// Source-outline level for `cat <source-file>` minimization. Accepts
+	/// `"default"` (current behavior) or `"aggressive"` (strip function bodies).
+	pub source_outline_level: Option<String>,
+	/// Kill-switch to fall back to the pre-PR (legacy) filter behavior for
+	/// grep / find / pytest. When `Some(true)`, filters that opted into the
+	/// always-shrink Tier 1 / Tier 2 behavior skip the new code path. When
+	/// `None`, defers to the `OMP_MINIMIZER_LEGACY_FILTERS` env var.
+	pub legacy_filters:       Option<bool>,
 }
 
 impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 	fn from(value: MinimizerOptions) -> Self {
 		Self {
-			enabled:           value.enabled,
-			settings_path:     value.settings_path,
-			settings_hash:     value.settings_hash,
-			only:              value.only,
-			except:            value.except,
-			max_capture_bytes: value.max_capture_bytes,
+			enabled:              value.enabled,
+			settings_path:        value.settings_path,
+			settings_hash:        value.settings_hash,
+			only:                 value.only,
+			except:               value.except,
+			max_capture_bytes:    value.max_capture_bytes,
+			source_outline_level: value.source_outline_level,
+			legacy_filters:       value.legacy_filters,
 		}
 	}
 }
@@ -235,6 +245,15 @@ impl Shell {
 		self.inner.abort().await;
 		Ok(())
 	}
+
+	/// Count live background jobs (`&`/`nohup` children still running) on this
+	/// session. Completed jobs are reaped first. The host uses this to retain a
+	/// per-call shell whose background processes are still running instead of
+	/// dropping it (which would SIGKILL them via kill-on-drop).
+	#[napi]
+	pub async fn live_background_job_count(&self) -> u32 {
+		self.inner.live_background_job_count().await
+	}
 }
 
 /// Execute a brush shell command.
@@ -342,7 +361,9 @@ mod tests {
 		ShellRunOptions as CoreShellRunOptions,
 		cancel::{AbortReason, CancelToken},
 	};
-	use tokio::{sync::mpsc, time};
+	#[cfg(unix)]
+	use tokio::sync::mpsc;
+	use tokio::time;
 
 	use super::CoreShell;
 
@@ -414,9 +435,13 @@ mod tests {
 			.parse::<i32>()
 			.expect("child pid parses");
 		// SAFETY: `getsid(0)` only queries the current process session; the
-		// return value is checked below.
+		// return value is checked below. Inside a PID namespace (e.g. the
+		// containerized CI runner) the host's session leader can live outside
+		// the namespace, so `getsid(0)` legitimately reports 0 — only -1 is a
+		// real failure. The meaningful invariant is that the child detached
+		// into its own session (`child_sid == child_pid`, distinct from host).
 		let host_sid = unsafe { libc::getsid(0) };
-		assert!(host_sid > 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
+		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 		// SAFETY: `child_pid` is a live positive PID reported by the child; the
 		// return value is checked below.
 		let child_sid = unsafe { libc::getsid(child_pid) };

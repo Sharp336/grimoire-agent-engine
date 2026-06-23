@@ -6,10 +6,10 @@
  * Requests per-result summaries via `contents.summary` and synthesizes
  * them into a combined `answer` string on the SearchResponse.
  */
-import { type AuthStorage, getEnvApiKey } from "@oh-my-pi/pi-ai";
-import { settings } from "../../../config/settings";
-import { callExaTool, findApiKey, isSearchResponse } from "../../../exa/mcp-client";
-
+import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { getDefault, settings } from "../../../config/settings";
+import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
+import { parseSSE } from "../../../mcp/json-rpc";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { dateToAgeSeconds } from "../utils";
@@ -18,6 +18,88 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const EXA_API_URL = "https://api.exa.ai/search";
+const DEFAULT_EXA_SEARCH_DELAY_MS = getDefault("exa.searchDelayMs");
+
+let nextExaSearchRequestAt = 0;
+let exaSearchThrottle = Promise.resolve();
+
+function configuredExaSearchDelayMs(): number {
+	try {
+		const delayMs = settings.get("exa.searchDelayMs");
+		return Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
+	} catch {
+		return DEFAULT_EXA_SEARCH_DELAY_MS;
+	}
+}
+
+function rejectWithAbortReason(reject: (reason?: unknown) => void, signal: AbortSignal): void {
+	try {
+		signal.throwIfAborted();
+		reject(new DOMException("The operation was aborted.", "AbortError"));
+	} catch (error) {
+		reject(error);
+	}
+}
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	signal?.throwIfAborted();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	let timer: NodeJS.Timeout | undefined;
+	const cleanup = (): void => {
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		signal?.removeEventListener("abort", onAbort);
+	};
+	const onAbort = (): void => {
+		cleanup();
+		if (signal) rejectWithAbortReason(reject, signal);
+	};
+	timer = setTimeout(() => {
+		cleanup();
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	if (signal?.aborted) onAbort();
+	return promise;
+}
+
+function waitUntilDoneOrAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	signal.throwIfAborted();
+	const { promise: aborted, reject } = Promise.withResolvers<never>();
+	const onAbort = (): void => rejectWithAbortReason(reject, signal);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([promise, aborted]).finally(() => {
+		signal.removeEventListener("abort", onAbort);
+	});
+}
+
+async function waitForExaSearchSlot(signal: AbortSignal | undefined): Promise<void> {
+	const delayMs = configuredExaSearchDelayMs();
+	if (delayMs <= 0) return;
+
+	const prior = exaSearchThrottle.catch(() => {});
+	const queued = prior.then(async () => {
+		signal?.throwIfAborted();
+		const waitMs = Math.max(0, nextExaSearchRequestAt - Date.now());
+		if (waitMs > 0) {
+			await abortableSleep(waitMs, signal);
+		}
+		signal?.throwIfAborted();
+		nextExaSearchRequestAt = Date.now() + delayMs;
+	});
+	exaSearchThrottle = queued.catch(() => {});
+	await waitUntilDoneOrAborted(queued, signal);
+}
+
+/** Reset Exa request pacing state for isolated provider tests. */
+export function resetExaSearchThrottleForTest(): void {
+	nextExaSearchRequestAt = 0;
+	exaSearchThrottle = Promise.resolve();
+}
 
 type ExaSearchType = "neural" | "fast" | "auto" | "deep";
 
@@ -32,6 +114,7 @@ export interface ExaSearchParams {
 	start_published_date?: string;
 	end_published_date?: string;
 	signal?: AbortSignal;
+	fetch?: FetchImpl;
 	/**
 	 * Credential source. Resolved before falling back to `EXA_API_KEY` so
 	 * Exa works when the key is stored via the broker/auth pipeline.
@@ -60,6 +143,48 @@ interface ExaSearchResponse {
 function asRecord(value: unknown): Record<string, unknown> | null {
 	if (typeof value !== "object" || value === null) return null;
 	return value as Record<string, unknown>;
+}
+
+function parseJsonContent(text: string): unknown | null {
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		return null;
+	}
+}
+
+function normalizeExaMcpPayload(payload: unknown): unknown {
+	const candidates: unknown[] = [];
+	const root = asRecord(payload);
+
+	if (root) {
+		if (root.structuredContent !== undefined) candidates.push(root.structuredContent);
+		if (root.data !== undefined) candidates.push(root.data);
+		if (root.result !== undefined) candidates.push(root.result);
+		candidates.push(root);
+
+		const content = root.content;
+		if (Array.isArray(content)) {
+			for (const item of content) {
+				const part = asRecord(item);
+				if (!part) continue;
+				const text = part.text;
+				if (typeof text !== "string" || text.trim().length === 0) continue;
+				const parsed = parseJsonContent(text);
+				if (parsed !== null) candidates.push(parsed);
+			}
+		}
+	} else {
+		candidates.push(payload);
+	}
+
+	for (const candidate of candidates) {
+		if (isSearchResponse(candidate)) {
+			return candidate;
+		}
+	}
+
+	return payload;
 }
 
 function parseOptionalField(section: string, label: string): string | null | undefined {
@@ -180,7 +305,9 @@ export function buildExaRequestBody(params: ExaSearchParams): Record<string, unk
 async function callExaSearch(apiKey: string, params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const body = buildExaRequestBody(params);
 
-	const response = await fetch(EXA_API_URL, {
+	const fetchImpl = params.fetch ?? fetch;
+	await waitForExaSearchSlot(params.signal);
+	const response = await fetchImpl(EXA_API_URL, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
@@ -211,14 +338,53 @@ function buildExaMcpArgs(params: ExaSearchParams): Record<string, unknown> {
 }
 
 async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchResponse> {
-	const response = await callExaTool("web_search_exa", buildExaMcpArgs(params), findApiKey(), {
+	const query = new URLSearchParams();
+	const apiKey = findApiKey();
+	if (apiKey) query.set("exaApiKey", apiKey);
+	query.set("tools", "web_search_exa");
+	const fetchImpl = params.fetch ?? fetch;
+	await waitForExaSearchSlot(params.signal);
+	const response = await fetchImpl(`https://mcp.exa.ai/mcp?${query.toString()}`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+		},
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: Math.random().toString(36).slice(2),
+			method: "tools/call",
+			params: {
+				name: "web_search_exa",
+				arguments: buildExaMcpArgs(params),
+			},
+		}),
 		signal: withHardTimeout(params.signal),
 	});
-	if (isSearchResponse(response)) {
-		return response as ExaSearchResponse;
+	if (!response.ok) {
+		throw new Error(`MCP request failed: ${response.status} ${response.statusText}`);
+	}
+	const mcpResponse = parseSSE(await response.text()) as {
+		result?: {
+			content?: Array<{ type: string; text?: string }>;
+		};
+		error?: {
+			code: number;
+			message: string;
+		};
+	} | null;
+	if (!mcpResponse) {
+		throw new Error("Failed to parse MCP response");
+	}
+	if (mcpResponse.error) {
+		throw new Error(`MCP error: ${mcpResponse.error.message}`);
+	}
+	const responsePayload = normalizeExaMcpPayload(mcpResponse.result);
+	if (isSearchResponse(responsePayload)) {
+		return responsePayload as ExaSearchResponse;
 	}
 
-	const parsed = parseExaMcpTextPayload(response);
+	const parsed = parseExaMcpTextPayload(responsePayload);
 	if (parsed) {
 		return parsed;
 	}
@@ -228,11 +394,19 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 
 /** Execute Exa web search */
 export async function searchExa(params: ExaSearchParams): Promise<SearchResponse> {
+	// AuthStorage-backed key takes precedence (existing behavior); probe it once
+	// so the env-key and keyless-MCP fallbacks below stay intact, then drive the
+	// authStorage path through the central force-refresh/rotate retry policy.
 	const storedKey = params.authStorage
 		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal })
 		: undefined;
-	const apiKey = storedKey ?? getEnvApiKey("exa");
-	const response = apiKey ? await callExaSearch(apiKey, params) : await callExaMcpSearch(params);
+	const keyOrResolver: ApiKey | undefined =
+		storedKey && params.authStorage
+			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
+			: getEnvApiKey("exa");
+	const response = keyOrResolver
+		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
+		: await callExaMcpSearch(params);
 
 	// Convert to unified SearchResponse
 	const sources: SearchSource[] = [];
@@ -304,6 +478,7 @@ export class ExaProvider extends SearchProvider {
 			signal: params.signal,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
+			fetch: params.fetch,
 		});
 	}
 }

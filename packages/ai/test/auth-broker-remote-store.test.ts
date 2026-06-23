@@ -2,15 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
 	type AuthBrokerServerHandle,
-	AuthStorage,
-	REMOTE_REFRESH_SENTINEL,
 	RemoteAuthCredentialStore,
-	SqliteAuthCredentialStore,
+	type SnapshotResponse,
 	startAuthBroker,
-} from "../src";
+} from "@oh-my-pi/pi-ai/auth-broker";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
@@ -108,5 +107,27 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(disabled).toBe(true);
 		await waitUntil(() => remote!.snapshot.credentials.length === 1);
 		expect(remote!.snapshot.credentials[0].id).not.toBe(bId);
+	});
+
+	test("calls onSnapshot for broker snapshots but not the constructor snapshot", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		const callbacks: Array<{ snapshot: SnapshotResponse; generation: number }> = [];
+		remote = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+			onSnapshot: (snapshot, generation) => {
+				callbacks.push({ snapshot, generation });
+			},
+		});
+		expect(callbacks).toHaveLength(0);
+
+		const refreshed = await remote.refreshSnapshot();
+
+		expect(callbacks).toHaveLength(1);
+		expect(callbacks[0].generation).toBe(refreshed.generation);
+		expect(callbacks[0].snapshot).toEqual(refreshed);
 	});
 });

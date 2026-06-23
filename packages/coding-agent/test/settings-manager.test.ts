@@ -1,29 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getProjectAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	getDefault,
+	getEnumValues,
+	onAppendOnlyModeChanged,
+	onStatusLineSessionAccentChanged,
+	resetSettingsForTest,
+	type SettingPath,
+	Settings,
+} from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 describe("Settings", () => {
-	let testDir: string;
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
 	let agentDir: string;
 	let projectDir: string;
 
 	beforeEach(() => {
-		// Reset global singleton so each test gets a fresh instance
-		resetSettingsForTest();
+		settingsState = beginSettingsTest();
 
-		// Use snowflake to isolate parallel test runs (SQLite files can't be shared)
-		testDir = path.join(os.tmpdir(), "test-settings-tmp", Snowflake.next());
-		agentDir = path.join(testDir, "agent");
-		projectDir = path.join(testDir, "project");
+		// Use TempDir for Windows-safe cleanup (retries on EBUSY from SQLite
+		// file handle release delays).
+		tempDir = TempDir.createSync("@pi-settings-test-");
+		agentDir = tempDir.join("agent");
+		projectDir = tempDir.join("project");
 
-		if (fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true });
-		}
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
 	});
@@ -44,14 +50,161 @@ describe("Settings", () => {
 	};
 
 	afterEach(() => {
-		if (fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true });
-		}
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		tempDir?.removeSync();
 	});
 	describe("defaults", () => {
 		it("keeps eight inline images live by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
+		});
+
+		it("keeps the normal startup splash disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("startup.showSplash")).toBe(false);
+			expect(getDefault("startup.showSplash")).toBe(false);
+		});
+
+		it("exposes all tool calling mode options", () => {
+			const values = getEnumValues("tools.format");
+			expect(values).toEqual([
+				"auto",
+				"native",
+				"glm",
+				"hermes",
+				"kimi",
+				"xml",
+				"anthropic",
+				"deepseek",
+				"harmony",
+				"pi",
+				"qwen3",
+				"gemini",
+				"gemma",
+				"minimax",
+			]);
+		});
+	});
+
+	describe("get()", () => {
+		it("resolves overrides, schema defaults, and falsey values", () => {
+			const isolated = Settings.isolated({
+				"display.showTokenUsage": false,
+				setupVersion: 0,
+				shellPath: "",
+				enabledModels: [],
+			});
+
+			expect(isolated.get("display.showTokenUsage")).toBe(false);
+			expect(isolated.get("setupVersion")).toBe(0);
+			expect(isolated.get("shellPath")).toBe("");
+			expect(isolated.get("enabledModels")).toEqual([]);
+			expect(isolated.get("tui.maxInlineImages")).toBe(getDefault("tui.maxInlineImages"));
+		});
+
+		it("invalidates cached resolved values after set, override, and clearOverride", () => {
+			const isolated = Settings.isolated();
+
+			expect(isolated.get("display.showTokenUsage")).toBe(false);
+			isolated.set("display.showTokenUsage", true);
+			expect(isolated.get("display.showTokenUsage")).toBe(true);
+
+			isolated.override("display.showTokenUsage", false);
+			expect(isolated.get("display.showTokenUsage")).toBe(false);
+
+			isolated.clearOverride("display.showTokenUsage");
+			expect(isolated.get("display.showTokenUsage")).toBe(true);
+		});
+
+		it("re-resolves path-scoped arrays when cwd changes", async () => {
+			const otherDir = path.join(tempDir.toString(), "other-project");
+			fs.mkdirSync(otherDir, { recursive: true });
+
+			const settings = await Settings.init({
+				cwd: projectDir,
+				agentDir,
+				inMemory: true,
+				overrides: {
+					enabledModels: [
+						"always-model",
+						{ path: projectDir, models: ["project-model"] },
+						{ path: otherDir, models: ["other-model"] },
+					],
+					disabledProviders: [
+						"always-provider",
+						{ pathPrefix: projectDir, providers: ["project-provider"] },
+						{ pathPrefix: otherDir, providers: ["other-provider"] },
+					],
+				},
+			});
+
+			expect(settings.get("enabledModels")).toEqual(["always-model", "project-model"]);
+			expect(settings.get("disabledProviders")).toEqual(["always-provider", "project-provider"]);
+
+			await settings.reloadForCwd(otherDir);
+
+			expect(settings.get("enabledModels")).toEqual(["always-model", "other-model"]);
+			expect(settings.get("disabledProviders")).toEqual(["always-provider", "other-provider"]);
+		});
+
+		it("migrates legacy snapcompact system prompt booleans to scoped modes", () => {
+			expect(Settings.isolated({ "snapcompact.systemPrompt": true }).get("snapcompact.systemPrompt")).toBe("all");
+			const nestedLegacy = { snapcompact: { systemPrompt: false } } as Partial<Record<SettingPath, unknown>>;
+			expect(Settings.isolated(nestedLegacy).get("snapcompact.systemPrompt")).toBe("none");
+		});
+	});
+
+	describe("statusLine.sessionAccent hooks", () => {
+		it("notifies subscribers only when the effective value changes", () => {
+			const isolated = Settings.isolated();
+			const values: boolean[] = [];
+			const unsubscribe = onStatusLineSessionAccentChanged(() => {
+				values.push(isolated.get("statusLine.sessionAccent"));
+			});
+
+			try {
+				isolated.set("statusLine.sessionAccent", true);
+				expect(values).toEqual([]);
+
+				isolated.set("statusLine.sessionAccent", false);
+				expect(values).toEqual([false]);
+
+				isolated.override("statusLine.sessionAccent", false);
+				expect(values).toEqual([false]);
+
+				isolated.override("statusLine.sessionAccent", true);
+				expect(values).toEqual([false, true]);
+
+				isolated.clearOverride("statusLine.sessionAccent");
+				expect(values).toEqual([false, true, false]);
+			} finally {
+				unsubscribe();
+			}
+
+			isolated.set("statusLine.sessionAccent", true);
+			expect(values).toEqual([false, true, false]);
+		});
+	});
+
+	describe("provider.appendOnlyContext hooks", () => {
+		it("isolates a throwing listener so the rest still receive the value", () => {
+			const isolated = Settings.isolated();
+			const received: string[] = [];
+			const unsubscribeThrower = onAppendOnlyModeChanged(() => {
+				throw new Error("boom");
+			});
+			const unsubscribeOk = onAppendOnlyModeChanged(value => {
+				received.push(value);
+			});
+
+			try {
+				expect(() => isolated.set("provider.appendOnlyContext", "on")).not.toThrow();
+				expect(received).toEqual(["on"]);
+			} finally {
+				unsubscribeThrower();
+				unsubscribeOk();
+			}
 		});
 	});
 
@@ -282,6 +435,155 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/new.db");
+		});
+
+		it("migrates boolean task.eager/todo.eager true to always", async () => {
+			await writeSettings({
+				task: { eager: true },
+				todo: { eager: true },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// `true` reproduced the previous "on" behavior, now `always`.
+			expect(settings.get("task.eager")).toBe("always");
+			expect(settings.get("todo.eager")).toBe("always");
+		});
+
+		it("migrates boolean task.eager/todo.eager false to default", async () => {
+			await writeSettings({
+				task: { eager: false },
+				todo: { eager: false },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Load-bearing direction: consumers treat any non-`default` value as enabled
+			// (`false !== "default"`), so an un-coerced boolean `false` would read as ON.
+			expect(settings.get("task.eager")).toBe("default");
+			expect(settings.get("todo.eager")).toBe("default");
+		});
+
+		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
+			await writeSettings({ lastChangelogVersion: "0.40.0" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Marker seeded from the legacy key.
+			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.40.0");
+
+			// Key stripped from config.yml on the next save.
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const onDisk = await readSettings();
+			expect("lastChangelogVersion" in onDisk).toBe(false);
+			expect((onDisk.display as Record<string, unknown>).showTokenUsage).toBe(true);
+		});
+
+		it("never clobbers an existing marker with the legacy config value", async () => {
+			fs.writeFileSync(path.join(agentDir, "last-changelog-version"), "0.41.0");
+			await writeSettings({ lastChangelogVersion: "0.40.0" });
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
+		});
+
+		it("migrates from settings.json containing comments", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(
+				jsonPath,
+				`{
+					// This is a comment
+					"display": {
+						/* Multiline comment */
+						"showTokenUsage": true
+					}
+				}`,
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("display.showTokenUsage")).toBe(true);
+			expect(fs.existsSync(jsonPath)).toBe(false);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+		});
+		it("migrates legacy power booleans with system=true to system level", async () => {
+			await writeSettings({
+				power: {
+					preventIdleSleep: true,
+					preventSystemSleep: true,
+					declareUserActive: false,
+					preventDisplaySleep: false,
+				},
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("system");
+		});
+
+		it("migrates legacy power booleans with display=true to display level", async () => {
+			await writeSettings({
+				power: {
+					preventIdleSleep: true,
+					preventSystemSleep: false,
+					declareUserActive: false,
+					preventDisplaySleep: true,
+				},
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("display");
+		});
+
+		it("migrates legacy power booleans with declareUserActive=true to system level", async () => {
+			await writeSettings({
+				power: {
+					preventIdleSleep: true,
+					preventSystemSleep: false,
+					declareUserActive: true,
+					preventDisplaySleep: false,
+				},
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("system");
+		});
+
+		it("preserves old idle default when only non-idle keys are set", async () => {
+			// Old default was preventIdleSleep=true; user only set display=false.
+			// Migration should yield "idle", not "off".
+			await writeSettings({
+				power: { preventDisplaySleep: false },
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("idle");
+		});
+
+		it("migrates all-false power booleans to off", async () => {
+			await writeSettings({
+				power: {
+					preventIdleSleep: false,
+					preventSystemSleep: false,
+					declareUserActive: false,
+					preventDisplaySleep: false,
+				},
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("off");
+		});
+
+		it("migrates flat-key power booleans to the enum", async () => {
+			await writeSettings({
+				"power.preventIdleSleep": true,
+				"power.preventDisplaySleep": true,
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("display");
+		});
+
+		it("does not overwrite an explicit power.sleepPrevention", async () => {
+			await writeSettings({
+				power: { sleepPrevention: "off", preventIdleSleep: true },
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("off");
 		});
 	});
 });

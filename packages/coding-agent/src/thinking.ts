@@ -1,5 +1,6 @@
 import { type ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { clampThinkingLevelForModel, Effort, getSupportedEfforts, type Model, THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { Effort, type Model, THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 
 /**
  * Metadata used to render thinking selector values in the coding-agent UI.
@@ -36,21 +37,40 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 	},
 };
 
-const THINKING_LEVELS = new Set<string>([ThinkingLevel.Inherit, ThinkingLevel.Off, ...THINKING_EFFORTS]);
-const EFFORT_LEVELS = new Set<string>(THINKING_EFFORTS);
+const EFFORT_BY_SELECTOR: Readonly<Record<string, Effort>> = {
+	[Effort.Minimal]: Effort.Minimal,
+	[Effort.Low]: Effort.Low,
+	[Effort.Medium]: Effort.Medium,
+	[Effort.High]: Effort.High,
+	[Effort.XHigh]: Effort.XHigh,
+	max: Effort.XHigh,
+};
+const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
+	[ThinkingLevel.Inherit]: ThinkingLevel.Inherit,
+	[ThinkingLevel.Off]: ThinkingLevel.Off,
+	[ThinkingLevel.Minimal]: ThinkingLevel.Minimal,
+	[ThinkingLevel.Low]: ThinkingLevel.Low,
+	[ThinkingLevel.Medium]: ThinkingLevel.Medium,
+	[ThinkingLevel.High]: ThinkingLevel.High,
+	[ThinkingLevel.XHigh]: ThinkingLevel.XHigh,
+};
+
+function getOwnSelector<T>(selectors: Readonly<Record<string, T>>, value: string | null | undefined): T | undefined {
+	return value === undefined || value === null || !Object.hasOwn(selectors, value) ? undefined : selectors[value];
+}
 
 /**
  * Parses a provider-facing effort value.
  */
 export function parseEffort(value: string | null | undefined): Effort | undefined {
-	return value !== undefined && value !== null && EFFORT_LEVELS.has(value) ? (value as Effort) : undefined;
+	return getOwnSelector(EFFORT_BY_SELECTOR, value);
 }
 
 /**
  * Parses an agent-local thinking selector.
  */
 export function parseThinkingLevel(value: string | null | undefined): ThinkingLevel | undefined {
-	return value !== undefined && value !== null && THINKING_LEVELS.has(value) ? (value as ThinkingLevel) : undefined;
+	return getOwnSelector(THINKING_LEVEL_BY_SELECTOR, value);
 }
 
 /**
@@ -68,6 +88,13 @@ export function toReasoningEffort(level: ThinkingLevel | undefined): Effort | un
 		return undefined;
 	}
 	return level;
+}
+
+/**
+ * True when a selector explicitly requests provider-side reasoning disablement.
+ */
+export function shouldDisableReasoning(level: ThinkingLevel | undefined): boolean {
+	return level === ThinkingLevel.Off;
 }
 
 /**
@@ -117,12 +144,33 @@ const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
  */
 export function parseConfiguredThinkingLevel(value: string | null | undefined): ConfiguredThinkingLevel | undefined {
 	if (value === AUTO_THINKING) return AUTO_THINKING;
+	if (value === "max") return ThinkingLevel.XHigh;
 	return parseThinkingLevel(value);
 }
 
 /** Returns display metadata for a configured selector, including `auto`. */
 export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLevel): ConfiguredThinkingLevelMetadata {
 	return level === AUTO_THINKING ? AUTO_THINKING_METADATA : getThinkingLevelMetadata(level);
+}
+
+/**
+ * Thinking selectors accepted by the `--thinking` CLI flag, in display order:
+ * `off`, every concrete effort (`minimal`..`xhigh`), then `auto`. Single source
+ * for the flag's `options` list, shell completions, and the "invalid level"
+ * warning so all three stay in sync.
+ */
+export const CLI_THINKING_LEVELS: readonly string[] = [ThinkingLevel.Off, ...THINKING_EFFORTS, AUTO_THINKING];
+
+/**
+ * Parses a `--thinking` CLI value. Accepts every {@link parseConfiguredThinkingLevel}
+ * selector (`off`, `auto`, `minimal`..`xhigh`, plus the `max` alias) but rejects
+ * `inherit`: an explicit `inherit` on the command line would suppress the
+ * settings/scoped-model fallback during startup resolution only to resolve back
+ * to the provider default, which is never what the user means.
+ */
+export function parseCliThinkingLevel(value: string | null | undefined): ConfiguredThinkingLevel | undefined {
+	const level = parseConfiguredThinkingLevel(value);
+	return level === ThinkingLevel.Inherit ? undefined : level;
 }
 
 /**

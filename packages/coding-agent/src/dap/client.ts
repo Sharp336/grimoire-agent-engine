@@ -1,5 +1,7 @@
-import { logger, ptree } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
+import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
 import type {
 	DapCapabilities,
@@ -28,34 +30,6 @@ type DapReverseRequestHandler = (args: unknown) => unknown | Promise<unknown>;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
-function findHeaderEnd(buffer: Uint8Array): number {
-	for (let index = 0; index < buffer.length - 3; index += 1) {
-		if (buffer[index] === 13 && buffer[index + 1] === 10 && buffer[index + 2] === 13 && buffer[index + 3] === 10) {
-			return index;
-		}
-	}
-	return -1;
-}
-
-function parseMessage(
-	buffer: Buffer,
-): { message: DapResponseMessage | DapEventMessage | DapRequestMessage; remaining: Buffer } | null {
-	const headerEndIndex = findHeaderEnd(buffer);
-	if (headerEndIndex === -1) return null;
-	const headerText = new TextDecoder().decode(buffer.slice(0, headerEndIndex));
-	const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-	if (!contentLengthMatch) return null;
-	const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-	const messageStart = headerEndIndex + 4;
-	const messageEnd = messageStart + contentLength;
-	if (buffer.length < messageEnd) return null;
-	const messageText = new TextDecoder().decode(buffer.subarray(messageStart, messageEnd));
-	return {
-		message: JSON.parse(messageText) as DapResponseMessage | DapEventMessage | DapRequestMessage,
-		remaining: buffer.subarray(messageEnd),
-	};
-}
-
 async function writeMessage(sink: DapWriteSink, message: DapRequestMessage | DapResponseMessage): Promise<void> {
 	const content = JSON.stringify(message);
 	sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
@@ -80,7 +54,7 @@ export class DapClient {
 	readonly #socket?: { end(): void };
 	#requestSeq = 0;
 	#pendingRequests = new Map<number, DapPendingRequest>();
-	#messageBuffer = Buffer.alloc(0);
+	#messageBuffer: Buffer = Buffer.alloc(0);
 	#isReading = false;
 	#disposed = false;
 	#lastActivity = Date.now();
@@ -165,19 +139,7 @@ export class DapClient {
 			detached: true,
 		});
 
-		// Wait for the socket file to appear (dlv needs to start listening)
-		await waitForCondition(
-			() => {
-				try {
-					Bun.file(socketPath).size;
-					return true;
-				} catch {
-					return false;
-				}
-			},
-			10_000,
-			proc,
-		);
+		await waitForCondition(() => isUnixSocketReady(socketPath), 10_000, proc);
 
 		const { readable, writeSink, socket } = await connectSocket({ unix: socketPath });
 		const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
@@ -427,32 +389,52 @@ export class DapClient {
 		if (this.#isReading) return;
 		this.#isReading = true;
 		const reader = this.#readable.getReader();
+
+		const framer = new MessageFramer(this.#messageBuffer);
+
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				const currentBuffer = Buffer.concat([this.#messageBuffer, value]);
-				this.#messageBuffer = currentBuffer;
-				let workingBuffer = currentBuffer;
-				let parsed = parseMessage(workingBuffer);
-				while (parsed) {
-					const { message, remaining } = parsed;
-					workingBuffer = Buffer.from(remaining);
+
+				framer.push(Buffer.from(value));
+
+				// Drain every complete message currently buffered.
+				for (const messageText of framer.drain(headerText => {
+					// Non-protocol bytes (e.g. an adapter printing to stdout).
+					// Drop past the bogus terminator and resync instead of
+					// stalling on the same junk header forever.
+					logger.warn("DAP framing resync: header block without Content-Length", {
+						adapter: this.adapter.name,
+						header: headerText.slice(0, 200),
+					});
+				})) {
 					this.#lastActivity = Date.now();
-					if (message.type === "response") {
-						this.#handleResponse(message);
-					} else if (message.type === "event") {
-						await this.#dispatchEvent(message);
-					} else {
-						await this.#handleAdapterRequest(message);
+
+					// A malformed message must not kill the reader — later
+					// messages are still well-framed.
+					try {
+						const message = JSON.parse(messageText) as DapResponseMessage | DapEventMessage | DapRequestMessage;
+						if (message.type === "response") {
+							this.#handleResponse(message);
+						} else if (message.type === "event") {
+							await this.#dispatchEvent(message);
+						} else {
+							await this.#handleAdapterRequest(message);
+						}
+					} catch (error) {
+						logger.warn("DAP message handling failed", {
+							adapter: this.adapter.name,
+							error: toErrorMessage(error),
+						});
 					}
-					parsed = parseMessage(workingBuffer);
 				}
-				this.#messageBuffer = workingBuffer;
 			}
 		} catch (error) {
 			this.#rejectPendingRequests(new Error(`DAP connection closed: ${toErrorMessage(error)}`));
 		} finally {
+			// Persist any unparsed remainder so a restarted reader resumes mid-message.
+			this.#messageBuffer = framer.remainder();
 			reader.releaseLock();
 			this.#isReading = false;
 		}
@@ -553,15 +535,24 @@ export class DapClient {
 	}
 }
 
+async function isUnixSocketReady(socketPath: string): Promise<boolean> {
+	try {
+		return (await fs.stat(socketPath)).isSocket();
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
 /** Poll a condition until it returns true, or timeout/process exit. */
 async function waitForCondition(
-	check: () => boolean,
+	check: () => boolean | Promise<boolean>,
 	timeoutMs: number,
 	proc: { exitCode: number | null },
 ): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
-		if (check()) return;
+		if (await check()) return;
 		if (proc.exitCode !== null) {
 			throw new Error("Adapter process exited before socket was ready");
 		}

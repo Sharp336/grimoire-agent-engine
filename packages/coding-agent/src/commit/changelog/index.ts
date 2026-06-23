@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { CHANGELOG_CATEGORIES } from "../../commit/types";
 import * as git from "../../utils/git";
@@ -15,7 +15,7 @@ const DEFAULT_MAX_DIFF_CHARS = 120_000;
 export interface ChangelogFlowInput {
 	cwd: string;
 	model: Model<Api>;
-	apiKey: string;
+	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
 	stagedFiles: string[];
 	dryRun: boolean;
@@ -138,7 +138,7 @@ export async function applyChangelogProposals({
 
 function truncateDiff(diff: string, maxChars: number): string {
 	if (diff.length <= maxChars) return diff;
-	return `${diff.slice(0, maxChars)}\n... (truncated)`;
+	return `${diff.slice(0, maxChars)}\n[…${diff.length - maxChars}ch elided…]`;
 }
 
 function formatExistingEntries(entries: Record<string, string[]>): string {

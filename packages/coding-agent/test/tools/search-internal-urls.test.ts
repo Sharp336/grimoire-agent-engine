@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	type InternalResource,
 	type InternalUrl,
@@ -10,10 +11,11 @@ import {
 	LocalProtocolHandler,
 	type ProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
-import { AgentRegistry } from "../../src/registry/agent-registry";
 
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -89,6 +91,7 @@ describe("SearchTool internal URL resolution", () => {
 		AgentRegistry.resetGlobalForTests();
 		LocalProtocolHandler.resetOverrideForTests();
 		InternalUrlRouter.resetForTests();
+		resetActiveSkillsForTests();
 	});
 
 	function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
@@ -101,6 +104,57 @@ describe("SearchTool internal URL resolution", () => {
 			...overrides,
 		};
 	}
+
+	async function registerSkillDirectory(): Promise<string> {
+		const skillDir = path.join(tmpDir, "skills", "demo");
+		await fs.mkdir(path.join(skillDir, "references", "docs"), { recursive: true });
+		await Bun.write(path.join(skillDir, "SKILL.md"), "# Demo\n");
+		await Bun.write(path.join(skillDir, "references", "index.md"), "install needle\n");
+		await Bun.write(path.join(skillDir, "references", "docs", "guide.md"), "deep needle\n");
+		setActiveSkills([
+			{
+				name: "demo",
+				description: "demo skill",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		]);
+		return skillDir;
+	}
+
+	it("lists skill:// directory subpaths through the read tool", async () => {
+		const skillDir = await registerSkillDirectory();
+		const session = createSession();
+		const tool = new ReadTool(session);
+
+		const result = await tool.execute("test-call", { path: "skill://demo/references" });
+
+		const text = getResultText(result);
+		expect(text).toContain("index.md");
+		expect(text).toContain("docs/");
+		expect(result.details?.resolvedPath).toBe(path.join(skillDir, "references"));
+	});
+
+	it("walks skill:// directory subpaths for search and find", async () => {
+		await registerSkillDirectory();
+		const session = createSession({ hasEditTool: true });
+		const searchTool = new SearchTool(session);
+		const findTool = new FindTool(session);
+
+		const searchResult = await searchTool.execute("test-search", {
+			pattern: "deep needle",
+			paths: ["skill://demo/references"],
+		});
+		const findResult = await findTool.execute("test-find", {
+			paths: ["skill://demo/references"],
+		});
+
+		const searchText = getResultText(searchResult);
+		expect(searchText).toContain("deep needle");
+		expect(searchText).not.toMatch(/^\[[^#\r\n]+#[0-9A-F]{4}\]$/m);
+		expect(getResultText(findResult)).toContain("guide.md");
+	});
 
 	it("resolves artifact:// URL to backing file and greps it", async () => {
 		const content = "line one\nfound the needle here\nline three\n";
@@ -183,6 +237,20 @@ describe("SearchTool internal URL resolution", () => {
 		expect(text).toContain("Search file contents with a regex across files");
 	});
 
+	it("expands omp://docs to grep embedded documentation files", async () => {
+		const session = createSession();
+		const tool = new SearchTool(session);
+
+		const result = await tool.execute("test-call", {
+			pattern: "Read files, directories, archives",
+			paths: ["omp://docs"],
+		});
+
+		const text = getResultText(result);
+		expect(text).toContain("# omp://tools/read.md");
+		expect(text).toContain("Read files, directories, archives");
+	});
+
 	it("throws when internal URL has no sourcePath", async () => {
 		const session = createSession();
 		const tool = new SearchTool(session);
@@ -237,7 +305,7 @@ describe("SearchTool internal URL resolution", () => {
 		const text = getResultText(result);
 		expect(text).toContain("needle");
 		// No hashline section headers or numbered editable lines for immutable sources.
-		expect(text).not.toMatch(/^¶.*#[0-9A-F]{4}$/m);
+		expect(text).not.toMatch(/^\[[^#\r\n]+#[0-9A-F]{4}\]$/m);
 		expect(text).not.toMatch(/^\*?\s*\d+:/m);
 	});
 
@@ -259,6 +327,28 @@ describe("SearchTool internal URL resolution", () => {
 		expect(text).toContain("PLAN.md");
 	});
 
+	it("walks local:// directory subpaths for read and find", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "PLAN.md"), "# Plan\n");
+
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const session = createSession({ hasEditTool: true });
+		const readResult = await new ReadTool(session).execute("test-read", { path: "local://notes" });
+		const findResult = await new FindTool(session).execute("test-find", {
+			paths: ["local://notes"],
+		});
+		const dirResource = await InternalUrlRouter.instance().resolve("local://notes");
+
+		const readText = getResultText(readResult);
+		expect(readText).toContain("PLAN.md");
+		// Directory listings must stay immutable so hashline edit anchors never key on a directory path.
+		expect(readText).not.toMatch(/^\[[^#\r\n]+#[0-9A-F]{4}\]$/m);
+		expect(dirResource.immutable).toBe(true);
+		expect(getResultText(findResult)).toContain("PLAN.md");
+	});
+
 	it("keeps hashline anchors when searching mutable local:// sources", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -277,7 +367,7 @@ describe("SearchTool internal URL resolution", () => {
 		const text = getResultText(result);
 		expect(text).toContain("needle");
 		// Mutable local:// sources keep a hashline section header plus numbered match lines.
-		expect(text).toMatch(/^¶.*#[0-9A-F]{4}$/m);
+		expect(text).toMatch(/^\[[^#\r\n]+#[0-9A-F]{4}\]$/m);
 		expect(text).toMatch(/^\*\d+:.*needle/m);
 	});
 
@@ -308,5 +398,51 @@ describe("SearchTool internal URL resolution", () => {
 		expect(tool.execute("test-call", { pattern: "foo", paths: ["artifact://999"] })).rejects.toThrow(
 			"Artifact 999 not found",
 		);
+	});
+
+	it("emits forward-only, deduplicated context lines for adjacent virtual matches", async () => {
+		registerVirtualDocs(new Map([["doc.md", "l1\nneedle a\nl3\nneedle b\nl5\nl6\nl7\nl8\n"]]));
+
+		const session = createSession({
+			settings: Settings.isolated({ "search.contextBefore": 1, "search.contextAfter": 3 }),
+		});
+		const tool = new SearchTool(session);
+
+		const result = await tool.execute("test-call", {
+			pattern: "needle",
+			paths: ["virtual://doc.md"],
+		});
+
+		const text = getResultText(result);
+		const lineNumbers = text
+			.split("\n")
+			.map(line => /^[* ](\d+)\|/.exec(line)?.[1])
+			.filter((n): n is string => n !== undefined)
+			.map(Number);
+		expect(lineNumbers.length).toBeGreaterThan(0);
+		for (let i = 1; i < lineNumbers.length; i++) {
+			expect(lineNumbers[i]).toBeGreaterThan(lineNumbers[i - 1]);
+		}
+		// Context between the two matches appears exactly once.
+		expect(lineNumbers.filter(n => n === 3)).toHaveLength(1);
+	});
+
+	it("reports 'No more results' instead of 'No matches found' when skip is past the end", async () => {
+		await Bun.write(path.join(tmpDir, "a.txt"), "needle in a\n");
+		await Bun.write(path.join(tmpDir, "b.txt"), "needle in b\n");
+
+		const session = createSession();
+		const tool = new SearchTool(session);
+
+		const result = await tool.execute("test-call", {
+			pattern: "needle",
+			paths: ["."],
+			skip: 5,
+		});
+
+		const text = getResultText(result);
+		expect(text).toContain("No more results");
+		expect(text).toContain("2 files total");
+		expect(text).not.toContain("No matches found");
 	});
 });

@@ -1,4 +1,4 @@
-import * as z from "zod/v4";
+import { type } from "arktype";
 import type { CommitAgentState, SplitCommitGroup, SplitCommitPlan } from "../../../commit/agentic/state";
 import { computeDependencyOrder } from "../../../commit/agentic/topo-sort";
 import {
@@ -15,32 +15,28 @@ import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import * as git from "../../../utils/git";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
 
-const hunkSelectorSchema = z.discriminatedUnion("type", [
-	z.object({ type: z.literal("all") }),
-	z.object({ type: z.literal("indices"), indices: z.array(z.number()).min(1) }),
-	z.object({ type: z.literal("lines"), start: z.number(), end: z.number() }),
-]);
+const hunkSelectorSchema = type({ type: "'all'" })
+	.or({ type: "'indices'", indices: "number[]" })
+	.or({ type: "'lines'", start: "number", end: "number" });
 
-const fileChangeSchema = z.object({
-	path: z.string(),
+const fileChangeSchema = type({
+	path: "string",
 	hunks: hunkSelectorSchema,
 });
 
-const splitCommitSchema = z.object({
-	commits: z
-		.array(
-			z.object({
-				changes: z.array(fileChangeSchema).min(1),
-				type: commitTypeSchema,
-				scope: z.union([z.string(), z.null()]),
-				summary: z.string(),
-				details: z.array(detailSchema).optional(),
-				issue_refs: z.array(z.string()).optional(),
-				rationale: z.string().optional(),
-				dependencies: z.array(z.number()).optional(),
-			}),
-		)
-		.min(2),
+const commitItemSchema = type({
+	changes: fileChangeSchema.array(),
+	type: commitTypeSchema,
+	scope: type("string").or("null"),
+	summary: "string",
+	"details?": detailSchema.array(),
+	"issue_refs?": "string[]",
+	"rationale?": "string",
+	"dependencies?": "number[]",
+});
+
+const splitCommitSchema = type({
+	commits: commitItemSchema.array(),
 });
 
 interface SplitCommitResponse {
@@ -68,6 +64,7 @@ export function createSplitCommitTool(
 			const errors: string[] = [];
 			const warnings: string[] = [];
 			const diffText = await git.diff(cwd, { cached: true });
+			const validateHunksForDiff = git.createHunkSelectionValidator(diffText);
 
 			const commits: SplitCommitGroup[] = params.commits.map((commit, index) => {
 				const scope = commit.scope?.trim() || null;
@@ -102,7 +99,7 @@ export function createSplitCommitTool(
 				}
 				warnings.push(...summaryValidation.warnings.map(warning => `Commit ${index + 1}: ${warning}`));
 				warnings.push(...typeValidation.warnings.map(warning => `Commit ${index + 1}: ${warning}`));
-				const hunkValidation = validateHunkSelectors(index, changes, files);
+				const hunkValidation = validateHunkSelectors(index, changes, files, validateHunksForDiff);
 				warnings.push(...hunkValidation.warnings);
 				errors.push(...hunkValidation.errors);
 				errors.push(...validateDependencies(index, dependencies, params.commits.length));
@@ -186,6 +183,7 @@ function validateHunkSelectors(
 	commitIndex: number,
 	changes: SplitCommitGroup["changes"],
 	files: string[],
+	validateHunksForDiff: (changes: SplitCommitGroup["changes"]) => git.HunkSelectionValidationError[],
 ): { errors: string[]; warnings: string[] } {
 	const errors: string[] = [];
 	const warnings: string[] = [];
@@ -213,6 +211,11 @@ function validateHunkSelectors(
 			if (Math.floor(start) !== start || Math.floor(end) !== end || start < 1 || end < start) {
 				errors.push(`${prefix}: invalid line range for ${change.path}`);
 			}
+		}
+	}
+	if (errors.length === 0) {
+		for (const error of validateHunksForDiff(changes)) {
+			errors.push(`${prefix}: ${error.message}`);
 		}
 	}
 	return { errors, warnings };

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { Effort } from "../src/model-thinking";
-import { getBundledModel } from "../src/models";
-import { streamAnthropic } from "../src/providers/anthropic";
-import { streamOpenAIResponses } from "../src/providers/openai-responses";
-import type { Context, Model } from "../src/types";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const testContext: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
@@ -56,9 +56,15 @@ describe("GitHub Copilot reasoning request construction", () => {
 		const payload = (await captureAnthropicPayload(model)) as {
 			thinking?: { type?: string };
 			output_config?: { effort?: string };
+			context_management?: unknown;
 		};
 
 		expect(payload.thinking).toEqual({ type: "adaptive" });
 		expect(payload.output_config).toEqual({ effort: "high" });
+		// The Copilot Anthropic proxy strips Anthropic betas and demotes
+		// thinking blocks to text upstream — the `context_management` field
+		// would have no replayed thinking to keep and risks proxy rejection
+		// of an unrecognized field. The field MUST NOT be sent (#3288).
+		expect(payload.context_management).toBeUndefined();
 	});
 });

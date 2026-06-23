@@ -1,8 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import type {
+	ChatCompletionAssistantMessageParam,
+	ChatCompletionMessageParam,
+	ChatCompletionToolMessageParam,
+} from "@oh-my-pi/pi-ai/providers/openai-chat-wire";
+import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
 	Api,
 	AssistantMessage,
+	Context,
 	DeveloperMessage,
 	Message,
 	Model,
@@ -10,6 +17,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 /**
  * Regression test for: "each tool_use must have a single result. Found multiple tool_result blocks with id"
@@ -19,7 +27,7 @@ import type {
  * transformMessages should NOT add duplicate synthetic tool results.
  */
 describe("Duplicate Tool Results Regression", () => {
-	const model: Model<"anthropic-messages"> = {
+	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
 		id: "claude-3-5-sonnet-20241022",
@@ -30,7 +38,44 @@ describe("Duplicate Tool Results Regression", () => {
 		maxTokens: 8192,
 		contextWindow: 200000,
 		reasoning: true,
-	};
+	});
+
+	const makeEvalAssistantMessage = (id: string, timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: [{ type: "toolCall", id, name: "eval", arguments: {} }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-3-5-sonnet-20241022",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const makeEvalToolResult = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "eval",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	const getAssistantToolIds = (messages: Message[]): string[] =>
+		messages.flatMap(message =>
+			message.role === "assistant"
+				? message.content.filter((block): block is ToolCall => block.type === "toolCall").map(block => block.id)
+				: [],
+		);
+
+	const getToolResults = (messages: Message[]): ToolResultMessage[] =>
+		messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
 
 	it("should not duplicate tool results for errored messages when results already exist", () => {
 		const toolCallId = "toolu_019xqMTvqWZiTDy8XxmjxrTo";
@@ -148,6 +193,43 @@ describe("Duplicate Tool Results Regression", () => {
 
 		expect(toolResults).toHaveLength(1);
 		expect((toolResults[0] as ToolResultMessage).content).toEqual([{ type: "text", text: "todo updated" }]);
+	});
+
+	it("routes a reused tool-call id to its own result, never an earlier orphaned one", () => {
+		// Compaction folded the assistant turn that originally issued `sharedId`
+		// into a summary string, but its tool result survived as an orphan. A
+		// later turn reuses the same id, and a developer note sits between that
+		// call and its real result — forcing a pending-call flush before the real
+		// result is reached. The flush must pull THIS turn's result, not the
+		// earlier orphan's output (regression: a tool call returning an earlier,
+		// unrelated command's output).
+		const sharedId = "toolu_shared_reuse_1";
+		const messages: Message[] = [
+			{ role: "user", content: "first request", timestamp: 1 },
+			// Orphaned result: its originating tool_use was compacted away.
+			makeEvalToolResult(sharedId, "OUTPUT FROM EARLIER COMMAND", 2),
+			{ role: "user", content: "second request", timestamp: 3 },
+			makeEvalAssistantMessage(sharedId, 4),
+			{ role: "developer", content: "guidance between call and result", timestamp: 5 },
+			makeEvalToolResult(sharedId, "OUTPUT FROM CURRENT COMMAND", 6),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		const results = getToolResults(transformed).filter(result => result.toolCallId === sharedId);
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "OUTPUT FROM CURRENT COMMAND" }]);
+
+		// The surviving result must land immediately after the reusing assistant turn.
+		const assistantIdx = transformed.findIndex(
+			message =>
+				message.role === "assistant" &&
+				message.content.some(block => block.type === "toolCall" && block.id === sharedId),
+		);
+		expect(transformed[assistantIdx + 1]?.role).toBe("toolResult");
+		expect((transformed[assistantIdx + 1] as ToolResultMessage).content).toEqual([
+			{ type: "text", text: "OUTPUT FROM CURRENT COMMAND" },
+		]);
 	});
 
 	it("should not duplicate tool results for aborted messages when results already exist", () => {
@@ -316,6 +398,234 @@ describe("Duplicate Tool Results Regression", () => {
 		expect(result2.length).toBe(1);
 		expect(result3.length).toBe(1);
 	});
+
+	it("deduplicates repeated tool call ids and preserves call/result pairing", () => {
+		const duplicateId = "functions.eval:301";
+		const distinctId = "functions.eval:302";
+		const normalizedDuplicateId = "functions_eval_301";
+		const normalizedDistinctId = "functions_eval_302";
+
+		const messages: Message[] = [
+			makeEvalAssistantMessage(duplicateId, 1),
+			makeEvalToolResult(duplicateId, "first", 2),
+			makeEvalAssistantMessage(duplicateId, 3),
+			makeEvalToolResult(duplicateId, "second", 4),
+			makeEvalAssistantMessage(duplicateId, 5),
+			makeEvalAssistantMessage(distinctId, 6),
+			makeEvalToolResult(distinctId, "third", 7),
+		];
+
+		const transformed = transformMessages(messages, model);
+		const assistantToolIds = getAssistantToolIds(transformed);
+		const toolResults = getToolResults(transformed);
+
+		expect(assistantToolIds).toEqual([
+			normalizedDuplicateId,
+			`${normalizedDuplicateId}_dup1`,
+			`${normalizedDuplicateId}_dup2`,
+			normalizedDistinctId,
+		]);
+		expect(toolResults.map(result => result.toolCallId)).toEqual([
+			normalizedDuplicateId,
+			`${normalizedDuplicateId}_dup1`,
+			`${normalizedDuplicateId}_dup2`,
+			normalizedDistinctId,
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup1`)?.content).toEqual([
+			{ type: "text", text: "second" },
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup2`)?.content).toEqual([
+			{ type: "text", text: "No result provided" },
+		]);
+	});
+
+	it("deduplicates repeated ids without colliding with existing generated-looking ids", () => {
+		const duplicateId = "functions.eval:301";
+		const generatedLookingId = `${duplicateId}_dup1`;
+		const normalizedDuplicateId = "functions_eval_301";
+		const normalizedGeneratedLookingId = `${normalizedDuplicateId}_dup1`;
+		const messages: Message[] = [
+			makeEvalAssistantMessage(duplicateId, 1),
+			makeEvalToolResult(duplicateId, "first", 2),
+			makeEvalAssistantMessage(generatedLookingId, 3),
+			makeEvalToolResult(generatedLookingId, "already-used", 4),
+			makeEvalAssistantMessage(duplicateId, 5),
+			makeEvalToolResult(duplicateId, "second", 6),
+		];
+
+		const transformed = transformMessages(messages, model);
+		const assistantToolIds = getAssistantToolIds(transformed);
+		const toolResults = getToolResults(transformed);
+
+		expect(assistantToolIds).toEqual([
+			normalizedDuplicateId,
+			normalizedGeneratedLookingId,
+			`${normalizedDuplicateId}_dup2`,
+		]);
+		expect(toolResults.map(result => result.toolCallId)).toEqual([
+			normalizedDuplicateId,
+			normalizedGeneratedLookingId,
+			`${normalizedDuplicateId}_dup2`,
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup2`)?.content).toEqual([
+			{ type: "text", text: "second" },
+		]);
+	});
+
+	it("preserves delayed duplicate tool results across message gaps", () => {
+		const duplicateId = "functions.eval:301";
+		const normalizedDuplicateId = "functions_eval_301";
+		const developerMessage: DeveloperMessage = { role: "developer", content: "handoff summary", timestamp: 4 };
+		const messages: Message[] = [
+			makeEvalAssistantMessage(duplicateId, 1),
+			makeEvalToolResult(duplicateId, "first", 2),
+			makeEvalAssistantMessage(duplicateId, 3),
+			developerMessage,
+			makeEvalToolResult(duplicateId, "second", 5),
+		];
+
+		const transformed = transformMessages(messages, model);
+		const toolResults = getToolResults(transformed);
+
+		expect(getAssistantToolIds(transformed)).toEqual([normalizedDuplicateId, `${normalizedDuplicateId}_dup1`]);
+		expect(toolResults.map(result => result.toolCallId)).toEqual([
+			normalizedDuplicateId,
+			`${normalizedDuplicateId}_dup1`,
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup1`)?.content).toEqual([
+			{ type: "text", text: "second" },
+		]);
+	});
+
+	it("routes the late result to the most recent duplicate call when a new turn re-emits the id across a gap", () => {
+		const duplicateId = "functions.eval:301";
+		const normalizedDuplicateId = "functions_eval_301";
+		const developerMessage: DeveloperMessage = { role: "developer", content: "handoff summary", timestamp: 4 };
+		const messages: Message[] = [
+			makeEvalAssistantMessage(duplicateId, 1),
+			makeEvalToolResult(duplicateId, "first", 2),
+			makeEvalAssistantMessage(duplicateId, 3),
+			developerMessage,
+			makeEvalAssistantMessage(duplicateId, 5),
+			makeEvalToolResult(duplicateId, "second", 6),
+		];
+
+		const transformed = transformMessages(messages, model);
+		const toolResults = getToolResults(transformed);
+
+		expect(getAssistantToolIds(transformed)).toEqual([
+			normalizedDuplicateId,
+			`${normalizedDuplicateId}_dup1`,
+			`${normalizedDuplicateId}_dup2`,
+		]);
+		expect(toolResults.map(result => result.toolCallId)).toEqual([
+			normalizedDuplicateId,
+			`${normalizedDuplicateId}_dup1`,
+			`${normalizedDuplicateId}_dup2`,
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup1`)?.content).toEqual([
+			{ type: "text", text: "No result provided" },
+		]);
+		expect(toolResults.find(result => result.toolCallId === `${normalizedDuplicateId}_dup2`)?.content).toEqual([
+			{ type: "text", text: "second" },
+		]);
+	});
+
+	it("keeps duplicate-id rewrites within the 64-char tool-call id limit", () => {
+		const baseId = `toolu_${"a".repeat(58)}`;
+		expect(baseId.length).toBe(64);
+		const messages: Message[] = [
+			makeEvalAssistantMessage(baseId, 1),
+			makeEvalToolResult(baseId, "first", 2),
+			makeEvalAssistantMessage(baseId, 3),
+			makeEvalToolResult(baseId, "second", 4),
+		];
+
+		const transformed = transformMessages(messages, model);
+		const assistantToolIds = getAssistantToolIds(transformed);
+		const toolResults = getToolResults(transformed);
+
+		expect(assistantToolIds).toHaveLength(2);
+		for (const id of assistantToolIds) {
+			expect(id.length).toBeLessThanOrEqual(64);
+			expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
+		}
+		const rewrittenId = assistantToolIds[1];
+		expect(rewrittenId).not.toBe(baseId);
+		expect(rewrittenId.endsWith("_dup1")).toBe(true);
+		expect(toolResults.map(result => result.toolCallId)).toEqual([baseId, rewrittenId]);
+		expect(toolResults.find(result => result.toolCallId === rewrittenId)?.content).toEqual([
+			{ type: "text", text: "second" },
+		]);
+	});
+
+	it("keeps duplicate ids distinct after OpenAI completions provider caps", () => {
+		const assistantWireMessages = (messages: ChatCompletionMessageParam[]): ChatCompletionAssistantMessageParam[] =>
+			messages.filter(
+				(message): message is ChatCompletionAssistantMessageParam =>
+					message.role === "assistant" && Array.isArray(message.tool_calls),
+			);
+		const toolWireIds = (messages: ChatCompletionMessageParam[]): string[] =>
+			messages
+				.filter((message): message is ChatCompletionToolMessageParam => message.role === "tool")
+				.map(message => message.tool_call_id);
+
+		const cases: Array<{
+			model: Model<"openai-completions">;
+			duplicateId: string;
+			expectedDuplicateId: string;
+		}> = [
+			{
+				model: buildModel({
+					api: "openai-completions",
+					provider: "openai",
+					id: "gpt-4o-mini",
+					name: "GPT-4o Mini",
+					baseUrl: "https://api.openai.com/v1",
+					input: ["text"],
+					cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					maxTokens: 8192,
+					contextWindow: 128000,
+					reasoning: false,
+				}),
+				duplicateId: `call_${"a".repeat(35)}`,
+				expectedDuplicateId: `${`call_${"a".repeat(35)}`.slice(0, 35)}_dup1`,
+			},
+			{
+				model: buildModel({
+					api: "openai-completions",
+					provider: "mistral",
+					id: "mistral-large-latest",
+					name: "Mistral Large",
+					baseUrl: "https://api.mistral.ai/v1",
+					input: ["text"],
+					cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+					maxTokens: 8192,
+					contextWindow: 128000,
+					reasoning: false,
+				}),
+				duplicateId: "ABCDEF123",
+				expectedDuplicateId: "ABCDEdup1",
+			},
+		];
+
+		for (const { model: providerModel, duplicateId, expectedDuplicateId } of cases) {
+			const messages: Message[] = [
+				makeEvalAssistantMessage(duplicateId, 1),
+				makeEvalToolResult(duplicateId, "first", 2),
+				makeEvalAssistantMessage(duplicateId, 3),
+				makeEvalToolResult(duplicateId, "second", 4),
+			];
+			const context: Context = { messages };
+			const wireMessages = convertMessages(providerModel, context, providerModel.compat);
+			const assistantIds = assistantWireMessages(wireMessages).flatMap(
+				message => message.tool_calls?.map(toolCall => toolCall.id) ?? [],
+			);
+
+			expect(assistantIds, providerModel.provider).toEqual([duplicateId, expectedDuplicateId]);
+			expect(toolWireIds(wireMessages), providerModel.provider).toEqual([duplicateId, expectedDuplicateId]);
+		}
+	});
 });
 
 /**
@@ -331,7 +641,7 @@ describe("Duplicate Tool Results Regression", () => {
  * request is rejected.
  */
 describe("Orphan Tool Result (handoff/compaction) Regression", () => {
-	const model: Model<"anthropic-messages"> = {
+	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
 		id: "claude-3-5-sonnet-20241022",
@@ -342,7 +652,7 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
 		maxTokens: 8192,
 		contextWindow: 200000,
 		reasoning: true,
-	};
+	});
 
 	const makeAssistantWithToolCall = (
 		id: string,
@@ -713,10 +1023,9 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
 			transformed.filter(m => m.role === "toolResult" && (m as ToolResultMessage).toolCallId === orphanId).length,
 		).toBe(0);
 
-		// 2. No premature developer note for the orphan: a developer message would
-		//    break assistant→toolResult contiguity. The only developer message
-		//    allowed is the `turnAbortedGuidance` injected by
-		//    `flushPendingAbortedToolCalls` at its natural turn boundary.
+		// 2. No developer note for the orphan: a developer message would break
+		//    assistant→toolResult contiguity, and we no longer inject any synthetic
+		//    aborted-turn note at all.
 		const orphanNotes = transformed.filter(
 			(m): m is DeveloperMessage =>
 				m.role === "developer" &&
@@ -772,7 +1081,7 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
 			{ role: "user", content: "Resume work.", timestamp: 4 },
 		];
 
-		const openaiModel: Model<"openai-responses"> = {
+		const openaiModel: Model<"openai-responses"> = buildModel({
 			api: "openai-responses",
 			provider: "openai",
 			id: "gpt-5",
@@ -783,7 +1092,7 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
 			maxTokens: 8192,
 			contextWindow: 200000,
 			reasoning: true,
-		};
+		});
 
 		for (const m of [model, openaiModel] as Model<Api>[]) {
 			const transformed = transformMessages(buildMessages(), m);
@@ -828,10 +1137,9 @@ describe("Orphan Tool Result (handoff/compaction) Regression", () => {
  * Tests for Codex-style abort handling:
  * - Tool calls are preserved (not converted to text summaries)
  * - Synthetic "aborted" tool results are injected
- * - A <turn-aborted> guidance marker is added as synthetic user message
  */
 describe("Codex-style Abort Handling", () => {
-	const model: Model<"anthropic-messages"> = {
+	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
 		id: "claude-3-5-sonnet-20241022",
@@ -842,7 +1150,7 @@ describe("Codex-style Abort Handling", () => {
 		maxTokens: 8192,
 		contextWindow: 200000,
 		reasoning: true,
-	};
+	});
 
 	it("should preserve tool call structure in aborted messages", () => {
 		const toolCallId = "toolu_preserve_test";
@@ -885,39 +1193,6 @@ describe("Codex-style Abort Handling", () => {
 		// Text content should also be preserved
 		const textContent = assistantMsg.content.find(b => b.type === "text");
 		expect(textContent).toBeDefined();
-	});
-
-	it("should inject turn-aborted guidance marker as synthetic user message", () => {
-		const assistantMessage: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "toolCall", id: "toolu_marker_test", name: "bash", arguments: { command: "sleep 10" } }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-3-5-sonnet-20241022",
-			usage: {
-				input: 100,
-				output: 50,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 150,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "error",
-			errorMessage: "Request was aborted",
-			timestamp: 1000,
-		};
-
-		const messages = [{ role: "user" as const, content: "Run command", timestamp: 500 }, assistantMessage];
-
-		const transformed = transformMessages(messages, model);
-
-		// Should have: user, assistant, toolResult, developer(guidance)
-		expect(transformed.length).toBe(4);
-
-		// Last message should be the guidance marker
-		const guidanceMsg = transformed[3] as DeveloperMessage;
-		expect(guidanceMsg.role).toBe("developer");
-		expect(guidanceMsg.content).toContain("<turn-aborted>");
 	});
 
 	it("should inject synthetic 'aborted' tool results with isError true", () => {

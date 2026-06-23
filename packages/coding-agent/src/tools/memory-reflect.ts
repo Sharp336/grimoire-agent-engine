@@ -1,16 +1,16 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
-import { ensureBankMission } from "../hindsight/bank";
+import { type } from "arktype";
+import { ensureBankExists } from "../hindsight/bank";
 import reflectDescription from "../prompts/tools/reflect.md" with { type: "text" };
 import type { ToolSession } from ".";
 
-const memoryReflectSchema = z.object({
-	query: z.string().describe("question to answer"),
-	context: z.string().describe("optional context").optional(),
+const memoryReflectSchema = type({
+	query: type("string").describe("question to answer"),
+	"context?": type("string").describe("optional context"),
 });
 
-export type MemoryReflectParams = z.infer<typeof memoryReflectSchema>;
+export type MemoryReflectParams = typeof memoryReflectSchema.infer;
 
 export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> {
 	readonly name = "reflect";
@@ -67,7 +67,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 			}
 
 			try {
-				await ensureBankMission(state.client, state.bankId, state.config, state.missionsSet);
+				await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
 				const response = await state.client.reflect(state.bankId, params.query, {
 					context: params.context,
 					budget: state.config.recallBudget,

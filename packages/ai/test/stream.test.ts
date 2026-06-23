@@ -4,12 +4,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-ai/models";
+import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { complete, getEnvApiKey, stream } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
-import { __resetVertexTokenCache } from "../src/providers/google-auth";
+import { type } from "arktype";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -35,12 +36,10 @@ function hasBedrockCredentials(): boolean {
 }
 
 // Calculator tool definition (same as examples)
-const calculatorSchema = z.object({
-	a: z.number().describe("First number"),
-	b: z.number().describe("Second number"),
-	operation: z
-		.enum(["add", "subtract", "multiply", "divide"])
-		.describe("The operation to perform. One of 'add', 'subtract', 'multiply', 'divide'."),
+const calculatorSchema = type({
+	a: "number",
+	b: "number",
+	operation: "'add'|'subtract'|'multiply'|'divide'",
 });
 
 const calculatorTool: Tool<typeof calculatorSchema> = {
@@ -309,7 +308,9 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: Options
 				expect(block.id).toBeTruthy();
 				expect(block.arguments).toBeTruthy();
 
-				const { a, b, operation } = block.arguments;
+				const a = Number(block.arguments.a);
+				const b = Number(block.arguments.b);
+				const operation = typeof block.arguments.operation === "string" ? block.arguments.operation : "";
 				let result: number;
 				switch (operation) {
 					case "add":
@@ -566,7 +567,7 @@ describe("Generate E2E Tests", () => {
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(
 				path.join(os.tmpdir(), `vertex-adc-absent-${Date.now()}`),
 			);
-			const model: Model<"anthropic-messages"> = {
+			const model: Model<"anthropic-messages"> = buildModel({
 				id: "claude-sonnet-4@20250514",
 				name: "Claude Sonnet 4",
 				api: "anthropic-messages",
@@ -578,8 +579,13 @@ describe("Generate E2E Tests", () => {
 				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 				contextWindow: 200_000,
 				maxTokens: 64_000,
-			};
-			const captured = Promise.withResolvers<{ url: string; authorization: string | null; body: unknown }>();
+			});
+			const captured = Promise.withResolvers<{
+				url: string;
+				authorization: string | null;
+				betaHeader: string | null;
+				body: unknown;
+			}>();
 
 			try {
 				__resetVertexTokenCache();
@@ -597,6 +603,7 @@ describe("Generate E2E Tests", () => {
 					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
 					{
 						apiKey: "<authenticated>",
+						thinkingEnabled: true,
 						fetch: async (input, init) => {
 							const url = input instanceof Request ? input.url : input.toString();
 							if (
@@ -610,6 +617,7 @@ describe("Generate E2E Tests", () => {
 							captured.resolve({
 								url,
 								authorization: headers.get("authorization"),
+								betaHeader: headers.get("anthropic-beta"),
 								body: JSON.parse(bodyText),
 							});
 							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), { status: 400 });
@@ -631,9 +639,144 @@ describe("Generate E2E Tests", () => {
 					stream: true,
 				});
 				expect((request.body as Record<string, unknown>).model).toBeUndefined();
+				expect((request.body as Record<string, { type?: string }>).thinking?.type).toBe("enabled");
+				expect((request.body as Record<string, unknown>).context_management).toBeUndefined();
+				expect(request.betaHeader ?? "").not.toContain("context-management-2025-06-27");
 			} finally {
 				__resetVertexTokenCache();
 				homedirSpy.mockRestore();
+				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
+				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
+				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;
+				else Bun.env.GCP_PROJECT = originalGcpProject;
+				if (originalGcloudProject === undefined) delete Bun.env.GCLOUD_PROJECT;
+				else Bun.env.GCLOUD_PROJECT = originalGcloudProject;
+				if (originalVertexLocation === undefined) delete Bun.env.GOOGLE_VERTEX_LOCATION;
+				else Bun.env.GOOGLE_VERTEX_LOCATION = originalVertexLocation;
+				if (originalCloudLocation === undefined) delete Bun.env.GOOGLE_CLOUD_LOCATION;
+				else Bun.env.GOOGLE_CLOUD_LOCATION = originalCloudLocation;
+				if (originalLocation === undefined) delete Bun.env.VERTEX_LOCATION;
+				else Bun.env.VERTEX_LOCATION = originalLocation;
+				if (originalApiKey === undefined) delete Bun.env.GOOGLE_CLOUD_API_KEY;
+				else Bun.env.GOOGLE_CLOUD_API_KEY = originalApiKey;
+				if (originalGac === undefined) delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+				else Bun.env.GOOGLE_APPLICATION_CREDENTIALS = originalGac;
+			}
+		});
+
+		it("routes impersonated_service_account ADC through IAM to the Vertex request", async () => {
+			const originalProject = Bun.env.GOOGLE_CLOUD_PROJECT;
+			const originalGcpProject = Bun.env.GCP_PROJECT;
+			const originalGcloudProject = Bun.env.GCLOUD_PROJECT;
+			const originalVertexLocation = Bun.env.GOOGLE_VERTEX_LOCATION;
+			const originalCloudLocation = Bun.env.GOOGLE_CLOUD_LOCATION;
+			const originalLocation = Bun.env.VERTEX_LOCATION;
+			const originalApiKey = Bun.env.GOOGLE_CLOUD_API_KEY;
+			const originalGac = Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+			const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-impersonation-"));
+			const adcPath = path.join(tmpDir, "impersonated-adc.json");
+			await Bun.write(
+				adcPath,
+				JSON.stringify({
+					type: "impersonated_service_account",
+					service_account_impersonation_url:
+						"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/target@project.iam.gserviceaccount.com:generateAccessToken",
+					source_credentials: {
+						type: "authorized_user",
+						client_id: "client-id",
+						client_secret: "client-secret",
+						refresh_token: "refresh-token",
+					},
+					delegates: ["projects/-/serviceAccounts/delegate@project.iam.gserviceaccount.com"],
+				}),
+			);
+			const model: Model<"anthropic-messages"> = buildModel({
+				id: "claude-sonnet-4@20250514",
+				name: "Claude Sonnet 4",
+				api: "anthropic-messages",
+				provider: "google-vertex",
+				baseUrl:
+					"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			});
+			const callOrder: string[] = [];
+			let iamRequest: { url: string; authorization: string | null; body: unknown } | undefined;
+			const captured = Promise.withResolvers<{ url: string; authorization: string | null }>();
+
+			try {
+				__resetVertexTokenCache();
+				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
+				Bun.env.GOOGLE_VERTEX_LOCATION = "global";
+				delete Bun.env.GCP_PROJECT;
+				delete Bun.env.GCLOUD_PROJECT;
+				delete Bun.env.GOOGLE_CLOUD_LOCATION;
+				delete Bun.env.VERTEX_LOCATION;
+				delete Bun.env.GOOGLE_CLOUD_API_KEY;
+				Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+
+				const events = stream(
+					model,
+					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+					{
+						apiKey: "<authenticated>",
+						fetch: async (input, init) => {
+							const url = input instanceof Request ? input.url : input.toString();
+							const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+							if (url === "https://oauth2.googleapis.com/token") {
+								callOrder.push("source");
+								return new Response(JSON.stringify({ access_token: "source-token", expires_in: 3600 }));
+							}
+							if (url.startsWith("https://iamcredentials.googleapis.com/")) {
+								callOrder.push("iam");
+								const bodyText =
+									input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
+								iamRequest = { url, authorization: headers.get("authorization"), body: JSON.parse(bodyText) };
+								return new Response(
+									JSON.stringify({
+										accessToken: "impersonated-token",
+										expireTime: new Date(Date.now() + 3_600_000).toISOString(),
+									}),
+								);
+							}
+							callOrder.push("vertex");
+							captured.resolve({ url, authorization: headers.get("authorization") });
+							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), { status: 400 });
+						},
+					},
+				);
+
+				for await (const _event of events) {
+				}
+
+				const request = await captured.promise;
+
+				// Source refresh, then IAM generateAccessToken, then the actual Vertex call.
+				expect(callOrder).toEqual(["source", "iam", "vertex"]);
+
+				// IAM exchange is authorized by the freshly minted source token, posts the
+				// reconstructed canonical URL, and forwards the configured delegates verbatim.
+				expect(iamRequest?.url).toBe(
+					"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/target@project.iam.gserviceaccount.com:generateAccessToken",
+				);
+				expect(iamRequest?.authorization).toBe("Bearer source-token");
+				expect(iamRequest?.body).toEqual({
+					delegates: ["projects/-/serviceAccounts/delegate@project.iam.gserviceaccount.com"],
+					scope: ["https://www.googleapis.com/auth/cloud-platform"],
+					lifetime: "3600s",
+				});
+
+				// The impersonated token (not the source token) authorizes the Vertex request.
+				expect(request.url).toBe(
+					"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
+				);
+				expect(request.authorization).toBe("Bearer impersonated-token");
+			} finally {
+				__resetVertexTokenCache();
+				await fs.rm(tmpDir, { recursive: true, force: true });
 				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
 				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
 				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;
@@ -1692,7 +1835,7 @@ describe("Generate E2E Tests", () => {
 				setTimeout(checkServer, 1000); // Initial delay
 			});
 
-			llm = {
+			llm = buildModel({
 				id: "gpt-oss:20b",
 				api: "openai-completions",
 				provider: "ollama",
@@ -1708,7 +1851,7 @@ describe("Generate E2E Tests", () => {
 					cacheWrite: 0,
 				},
 				name: "Ollama GPT-OSS 20B",
-			};
+			});
 		}, 30000); // 30 second timeout for setup
 
 		afterAll(() => {

@@ -2,11 +2,12 @@
  * TUI rendering for the eval tool.
  *
  * Split out from `eval.ts` so the renderer can be imported by `renderers.ts`
- * without dragging the eval *runtime* (JS/Python backends -> agent bridge ->
- * task executor -> sdk -> extension loader -> root barrel) into the renderer
- * module graph. That transitive chain re-enters `renderers.ts` while `eval.ts`
- * is still initializing, which previously crashed module load with a TDZ
- * `Cannot access 'evalToolRenderer' before initialization`.
+ * without dragging the eval *runtime* (JS/Python/Ruby/Julia backends ->
+ * agent bridge -> task executor -> sdk -> extension loader -> root barrel)
+ * into the renderer module graph. That transitive chain re-enters
+ * `renderers.ts` while `eval.ts` is still initializing, which previously
+ * crashed module load with a TDZ `Cannot access 'evalToolRenderer' before
+ * initialization`.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Text } from "@oh-my-pi/pi-tui";
@@ -16,9 +17,8 @@ import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } f
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
-import { shimmerEnabled } from "../modes/theme/shimmer";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
-import { borderShimmerTick, renderCodeCell } from "../tui";
+import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
 import {
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -34,16 +34,19 @@ import {
 	formatDuration,
 	formatStatusIcon,
 	formatTitle,
+	previewWindowRows,
 	replaceTabs,
 	shortenPath,
 	truncateToWidth,
 	wrapBrackets,
 } from "./render-utils";
-
 export const EVAL_DEFAULT_PREVIEW_LINES = 10;
 
-function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" {
-	return language === "js" ? "javascript" : "python";
+function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "ruby" | "julia" {
+	if (language === "js") return "javascript";
+	if (language === "ruby") return "ruby";
+	if (language === "julia") return "julia";
+	return "python";
 }
 
 interface EvalRenderCellArg {
@@ -53,6 +56,9 @@ interface EvalRenderCellArg {
 }
 
 interface EvalRenderArgs {
+	language?: string;
+	code?: string;
+	title?: string;
 	cells?: EvalRenderCellArg[];
 	__partialJson?: string;
 }
@@ -71,12 +77,15 @@ interface EvalRenderCell {
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
-	return value === "js" ? "js" : "python";
+	if (value === "js") return "js";
+	if (value === "rb" || value === "ruby") return "ruby";
+	if (value === "jl" || value === "julia") return "julia";
+	return "python";
 }
 
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
-	const raw = args?.cells;
-	if (!Array.isArray(raw)) return [];
+	if (!args) return [];
+	const raw = Array.isArray(args.cells) ? args.cells : typeof args.code === "string" ? [args] : [];
 	const out: EvalRenderCell[] = [];
 	for (const cell of raw) {
 		if (!cell || typeof cell !== "object") continue;
@@ -174,7 +183,7 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 		const status = agentEventStatus(event.status);
 		const iconStatus =
 			status === "completed"
-				? "success"
+				? "done"
 				: status === "failed"
 					? "error"
 					: status === "aborted"
@@ -184,10 +193,13 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 							: "running";
 		const iconColor =
 			status === "completed" ? "success" : status === "failed" || status === "aborted" ? "error" : "accent";
-		const icon = formatStatusIcon(iconStatus, theme, status === "running" ? spinnerFrame : undefined);
+		const icon =
+			status === "completed"
+				? theme.styledSymbol("tool.eval", "accent")
+				: theme.fg(iconColor, formatStatusIcon(iconStatus, theme, status === "running" ? spinnerFrame : undefined));
 
 		const id = eventString(event.id) ?? "agent";
-		let line = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", theme.bold(id))}`;
+		let line = `${prefix} ${icon} ${theme.fg("accent", theme.bold(id))}`;
 
 		if (status === "failed" || status === "aborted") {
 			line += ` ${formatBadge(status, iconColor, theme)}`;
@@ -229,14 +241,12 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 	const opIcons: Record<string, AvailableIcon> = {
 		read: "icon.file",
 		write: "icon.file",
-		append: "icon.file",
 		cat: "icon.file",
 		touch: "icon.file",
 		ls: "icon.folder",
 		cd: "icon.folder",
 		pwd: "icon.folder",
 		mkdir: "icon.folder",
-		tree: "icon.folder",
 		git_status: "icon.git",
 		git_diff: "icon.git",
 		git_log: "icon.git",
@@ -248,7 +258,7 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 		sh: "icon.package",
 		env: "icon.package",
 		batch: "icon.package",
-		llm: "icon.package",
+		completion: "icon.package",
 		log: "icon.package",
 		phase: "icon.package",
 	};
@@ -268,7 +278,6 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 			if (data.path) parts.push(`from ${shortenPath(String(data.path))}`);
 			break;
 		case "write":
-		case "append":
 			parts.push(`${data.chars ?? data.bytes ?? 0} chars`);
 			if (data.path) parts.push(`to ${shortenPath(String(data.path))}`);
 			break;
@@ -307,17 +316,10 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 			parts.push(`${data.lines} line${(data.lines as number) !== 1 ? "s" : ""}`);
 			if (data.staged) parts.push("(staged)");
 			break;
-		case "diff":
-			if (data.identical) {
-				parts.push("files identical");
-			} else {
-				parts.push("files differ");
-			}
-			break;
 		case "batch":
 			parts.push(`${data.files} file${(data.files as number) !== 1 ? "s" : ""} processed`);
 			break;
-		case "llm":
+		case "completion":
 			if (data.model) parts.push(String(data.model));
 			if (data.tier && data.tier !== data.model) parts.push(`(${data.tier})`);
 			parts.push(`${data.chars ?? 0} chars`);
@@ -403,8 +405,6 @@ function formatStatusEventExpanded(event: EvalStatusEvent, theme: Theme): string
 		case "cat":
 		case "head":
 		case "tail":
-		case "tree":
-		case "diff":
 		case "git_diff":
 		case "sh":
 			if (data.preview) addPreview(String(data.preview));
@@ -454,28 +454,38 @@ function formatCellOutputLines(
 	previewLines: number,
 	theme: Theme,
 	width: number,
-): { lines: string[]; hiddenCount: number } {
+): { lines: readonly string[]; hiddenCount: number } {
 	if (!cell.output) {
 		return { lines: [], hiddenCount: 0 };
 	}
 
+	// Cell output lands in renderCodeCell → renderOutputBlock, which re-wraps it
+	// at the box's inner content width. Bound the collapsed tail by VISUAL rows
+	// at that width so a long-line tail can't wrap into more rows than budgeted
+	// and scroll its mutating preview above the live-region window — the
+	// duplicate "ctrl+o to expand" scrollback spray.
+	const innerWidth = outputBlockContentWidth(width);
+
 	if (cell.hasMarkdown && cell.status !== "error") {
 		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());
-		const allLines = md.render(width);
+		const allLines = md.render(innerWidth);
 		const displayLines = expanded ? allLines : allLines.slice(-previewLines);
 		const hiddenCount = allLines.length - displayLines.length;
 		return { lines: displayLines, hiddenCount };
 	}
 
-	const rawLines = cell.output.split("\n");
-	const displayLines = expanded ? rawLines : rawLines.slice(-previewLines);
-	const hiddenCount = rawLines.length - displayLines.length;
-	const outputLines = displayLines.map(line => {
-		const cleaned = replaceTabs(line);
-		return cell.status === "error" ? theme.fg("error", cleaned) : theme.fg("toolOutput", cleaned);
-	});
-
-	return { lines: outputLines, hiddenCount };
+	const styledOutput = cell.output
+		.split("\n")
+		.map(line => {
+			const cleaned = replaceTabs(line);
+			return cell.status === "error" ? theme.fg("error", cleaned) : theme.fg("toolOutput", cleaned);
+		})
+		.join("\n");
+	if (expanded) {
+		return { lines: styledOutput.split("\n"), hiddenCount: 0 };
+	}
+	const { visualLines, skippedCount } = truncateToVisualLines(styledOutput, previewLines, innerWidth);
+	return { lines: visualLines, hiddenCount: skippedCount };
 }
 
 export const evalToolRenderer = {
@@ -490,10 +500,9 @@ export const evalToolRenderer = {
 
 		let cached: { key: string; width: number; result: string[] } | undefined;
 
-		return {
-			render: (width: number): string[] => {
-				const animate = options.isPartial && shimmerEnabled();
-				const key = `${animate ? borderShimmerTick() : 0}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
+		return markFramedBlockComponent({
+			render: (width: number): readonly string[] => {
+				const key = `${options.expanded ? 1 : 0}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
 				if (cached && cached.key === key && cached.width === width) {
 					return cached.result;
 				}
@@ -505,14 +514,18 @@ export const evalToolRenderer = {
 						{
 							code: cell.code,
 							language: languageForHighlighter(cell.language),
+							showLanguage: true,
 							index: i,
 							total: cells.length,
 							title: cell.title,
 							status: "pending",
 							width,
-							codeMaxLines: EVAL_DEFAULT_PREVIEW_LINES,
-							expanded: true,
-							animate,
+							// Viewport-sized tail window following the newest streamed code
+							// line; renderResult keeps the same cap so the cell never snaps
+							// open on completion. Only ctrl+o uncaps.
+							codeTail: true,
+							codeMaxLines: previewWindowRows(),
+							expanded: options.expanded,
 						},
 						uiTheme,
 					);
@@ -527,7 +540,7 @@ export const evalToolRenderer = {
 			invalidate: () => {
 				cached = undefined;
 			},
-		};
+		});
 	},
 
 	renderResult(
@@ -571,12 +584,14 @@ export const evalToolRenderer = {
 		if (cellResults && cellResults.length > 0) {
 			let cached: { key: string; width: number; result: string[] } | undefined;
 
-			return {
-				render: (width: number): string[] => {
+			return markFramedBlockComponent({
+				render: (width: number): readonly string[] => {
 					const expanded = options.renderContext?.expanded ?? options.expanded;
-					const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
-					const animate = options.isPartial && shimmerEnabled();
-					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${animate ? borderShimmerTick() : 0}`;
+					const previewLines = Math.min(
+						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+						previewWindowRows(),
+					);
+					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}`;
 					if (cached && cached.key === key && cached.width === width) {
 						return cached.result;
 					}
@@ -605,6 +620,7 @@ export const evalToolRenderer = {
 							{
 								code: cell.code,
 								language: languageForHighlighter(cell.language ?? details?.language),
+								showLanguage: true,
 								index: i,
 								total: cellResults.length,
 								title: cell.title,
@@ -613,10 +629,13 @@ export const evalToolRenderer = {
 								duration: cell.durationMs,
 								output: outputLines.length > 0 ? outputLines.join("\n") : undefined,
 								outputMaxLines: outputLines.length,
-								codeMaxLines: expanded ? Number.POSITIVE_INFINITY : EVAL_DEFAULT_PREVIEW_LINES,
+								// Same viewport-sized tail window as the pending preview so the
+								// cell never snaps open on completion; only ctrl+o uncaps.
+								// `output` keeps its own preview cap from above.
+								codeTail: true,
+								codeMaxLines: previewWindowRows(),
 								expanded,
 								width,
-								animate,
 							},
 							uiTheme,
 						);
@@ -649,7 +668,7 @@ export const evalToolRenderer = {
 				invalidate: () => {
 					cached = undefined;
 				},
-			};
+			});
 		}
 
 		const displayOutput = output;
@@ -696,13 +715,16 @@ export const evalToolRenderer = {
 		const textContent = `\n${styledOutput}`;
 
 		let cachedWidth: number | undefined;
-		let cachedLines: string[] | undefined;
+		let cachedLines: readonly string[] | undefined;
 		let cachedSkipped: number | undefined;
 		let cachedPreviewLines: number | undefined;
 
 		return {
-			render: (width: number): string[] => {
-				const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
+			render: (width: number): readonly string[] => {
+				const previewLines = Math.min(
+					options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+					previewWindowRows(),
+				);
 				if (cachedLines === undefined || cachedWidth !== width || cachedPreviewLines !== previewLines) {
 					const result = truncateToVisualLines(textContent, previewLines, width);
 					cachedLines = result.visualLines;
@@ -745,6 +767,12 @@ export const evalToolRenderer = {
 			},
 		};
 	},
+
 	mergeCallAndResult: true,
 	inline: true,
+	// Collapsed pending preview shows tail-window code cells; the result render
+	// interleaves each cell's output under its code, re-laying-out every row
+	// below the first cell. Expanded output is top-anchored enough for the
+	// transcript to commit its settled prefix.
+	provisionalPendingPreview: "collapsed",
 };

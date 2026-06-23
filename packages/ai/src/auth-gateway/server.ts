@@ -17,16 +17,19 @@
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
  */
-import { extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
-import { Effort } from "../model-thinking";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
-import { isUsageLimitError } from "../rate-limit-utils";
+import { isUsageLimitError, isUsageLimitOutcome } from "../rate-limit-utils";
 import { streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { captureRequestHeaders, corsHeaders, isAuthorized, json, resolvePeer, withCors } from "./http";
 import type {
@@ -108,30 +111,28 @@ function deriveSessionId(modelId: string, context: Context): string {
 		parts.push(JSON.stringify({ role: first.role, content: first.content }));
 	}
 	const seed = parts.join("\u0000");
-	const hex = new Bun.CryptoHasher("sha256").update(seed).digest("hex");
-	// Format the leading 128 bits as a v4-shape UUID (8-4-4-4-12). Codex's
-	// `normalizeOpenAIResponsesPromptCacheKey` accepts ≤64 chars verbatim, so
-	// the 36-char UUID flows through unchanged.
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+	// The 36-char UUID flows through unchanged: Codex's
+	// `normalizeOpenAIResponsesPromptCacheKey` accepts ≤64 chars verbatim.
+	return deterministicUuid(seed);
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal };
 	const { options } = parsed;
-	// Codex backend rejects `temperature` / `top_p` (per-model defaults only),
-	// so we drop them silently for that one provider. Every other unsupported
-	// option is just ignored by `streamSimple` if the underlying provider
-	// doesn't honour it.
+	// Codex backend rejects every sampling control with
+	// `Unsupported parameter: …` (#3117). Strip the full set for that one
+	// provider; everything else is harmless to forward — `streamSimple` ignores
+	// what the underlying provider doesn't honour.
 	const isCodex = api === "openai-codex-responses";
 	if (options.maxOutputTokens !== undefined) opts.maxTokens = options.maxOutputTokens;
 	if (options.temperature !== undefined && !isCodex) opts.temperature = options.temperature;
 	if (options.topP !== undefined && !isCodex) opts.topP = options.topP;
-	if (options.topK !== undefined) opts.topK = options.topK;
-	if (options.minP !== undefined) opts.minP = options.minP;
-	if (options.stopSequences !== undefined) opts.stopSequences = options.stopSequences;
-	if (options.presencePenalty !== undefined) opts.presencePenalty = options.presencePenalty;
-	if (options.frequencyPenalty !== undefined) opts.frequencyPenalty = options.frequencyPenalty;
-	if (options.repetitionPenalty !== undefined) opts.repetitionPenalty = options.repetitionPenalty;
+	if (options.topK !== undefined && !isCodex) opts.topK = options.topK;
+	if (options.minP !== undefined && !isCodex) opts.minP = options.minP;
+	if (options.stopSequences !== undefined && !isCodex) opts.stopSequences = options.stopSequences;
+	if (options.presencePenalty !== undefined && !isCodex) opts.presencePenalty = options.presencePenalty;
+	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
+	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
 	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
 	if (options.toolChoice !== undefined) {
@@ -227,11 +228,10 @@ export function classifyGatewayError(err: unknown): { status: number; type: stri
 	if (/\baborted\b|\babort signal\b/i.test(message)) {
 		return { status: 499, type: "request_aborted", message };
 	}
-	if (/\b(?:unauthorized|forbidden)\b/i.test(message)) {
-		return { status: 401, type: "authentication_error", message };
-	}
 	if (
-		// Match rate-limit phrasings without colliding with
+		// Match rate-limit phrasings before auth wording: some providers
+		// describe throttling as "unauthorized due to rate limit".
+		// Keep boundaries so this does not collide with
 		// `GenerateContentRequest`, `accelerate`, `iterate`, `deprecated`, etc.
 		/\brate[- _]?limit(?:s|ed|ing)?\b|\bquota(?:_exceeded| exceeded)?\b|\btoo[- _]many[- _]requests\b/i.test(
 			message,
@@ -246,6 +246,9 @@ export function classifyGatewayError(err: unknown): { status: number; type: stri
 		isUsageLimitError(message)
 	) {
 		return { status: 429, type: "rate_limit_error", message };
+	}
+	if (/\b(?:unauthorized|forbidden)\b/i.test(message)) {
+		return { status: 401, type: "authentication_error", message };
 	}
 	if (/\b(?:unsupported|invalid_request|invalid request|bad request|malformed)\b/i.test(message)) {
 		return { status: 400, type: "invalid_request_error", message };
@@ -312,11 +315,12 @@ async function refreshGatewayApiKeyAfterAuthError(
 	peer: string,
 ): Promise<string | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
-	if (isUsageLimitError(message)) {
+	if (isUsageLimitOutcome(extractHttpStatusFromError(error), message)) {
 		const retryAfterMs = extractRetryHint(undefined, message);
-		const switched = await storage.markUsageLimitReached(provider, sessionId, {
+		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
 			baseUrl: model.baseUrl,
+			modelId: model.id,
 			signal,
 		});
 		logger.debug("auth-gateway retrying provider request after usage-limit block", {
@@ -325,6 +329,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			peer,
 			switched,
 			retryAfterMs,
+			retryAtMs,
 			error: message,
 		});
 		if (!switched) return undefined;
@@ -338,6 +343,60 @@ async function refreshGatewayApiKeyAfterAuthError(
 		error: message,
 	});
 	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+}
+
+/**
+ * Build the {@link ApiKeyResolver} handed to `streamSimple` for a gateway
+ * request. Drives the central a/b/c auth-retry policy server-side:
+ *
+ * - initial resolve → the credential already resolved for this request.
+ * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
+ *   (a peer/broker may have rotated its token out from under our cached copy).
+ * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
+ *   to a sibling (usage-limit block vs credential invalidation by error class).
+ *
+ * `lastKey` tracks the most recent bearer so the switch step invalidates the
+ * credential that actually failed.
+ */
+function buildGatewayApiKeyResolver(
+	storage: AuthStorage,
+	model: Model<Api>,
+	sessionId: string,
+	initialKey: string,
+	requestSignal: AbortSignal,
+	format: string,
+	peer: string,
+): ApiKeyResolver {
+	let lastKey = initialKey;
+	return async ({ lastChance, error, signal }) => {
+		const sig = signal ?? requestSignal;
+		if (error === undefined) {
+			lastKey = initialKey;
+			return initialKey;
+		}
+		if (!lastChance) {
+			const refreshed = await storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: sig,
+				forceRefresh: true,
+			});
+			lastKey = refreshed ?? lastKey;
+			return refreshed;
+		}
+		const next = await refreshGatewayApiKeyAfterAuthError(
+			storage,
+			model,
+			sessionId,
+			model.provider,
+			lastKey,
+			error,
+			sig,
+			format,
+			peer,
+		);
+		lastKey = next ?? lastKey;
+		return next;
+	};
 }
 
 function clientClosedResponse(route: { module: FormatModule }): Response {
@@ -447,19 +506,15 @@ async function handleFormatEndpoint(
 	}
 
 	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-	streamOpts.apiKey = apiKey;
-	streamOpts.onAuthError = (provider, oldKey, error) =>
-		refreshGatewayApiKeyAfterAuthError(
-			bootOpts.storage,
-			model,
-			sessionId,
-			provider,
-			oldKey,
-			error,
-			controller.signal,
-			route.label,
-			peer,
-		);
+	streamOpts.apiKey = buildGatewayApiKeyResolver(
+		bootOpts.storage,
+		model,
+		sessionId,
+		apiKey,
+		controller.signal,
+		route.label,
+		peer,
+	);
 
 	logger.info("auth-gateway request", {
 		format: route.label,
@@ -514,7 +569,14 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options);
+	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+		signal: controller.signal,
+		onCancel: reason => {
+			if (!controller.signal.aborted) {
+				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+			}
+		},
+	});
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
@@ -601,24 +663,27 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
-	// only inject server-controlled fields. The codex temperature/topP strip
-	// matches `buildStreamOptions` — Codex rejects them with a 400.
+	// only inject server-controlled fields. The codex sampling strip mirrors
+	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
 	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
-	streamOpts.onAuthError = (provider, oldKey, error) =>
-		refreshGatewayApiKeyAfterAuthError(
-			bootOpts.storage,
-			model,
-			sessionId,
-			provider,
-			oldKey,
-			error,
-			controller.signal,
-			"pi-native",
-			peer,
-		);
+	streamOpts.apiKey = buildGatewayApiKeyResolver(
+		bootOpts.storage,
+		model,
+		sessionId,
+		apiKey,
+		controller.signal,
+		"pi-native",
+		peer,
+	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
+		delete streamOpts.topK;
+		delete streamOpts.minP;
+		delete streamOpts.stopSequences;
+		delete streamOpts.presencePenalty;
+		delete streamOpts.frequencyPenalty;
+		delete streamOpts.repetitionPenalty;
 	}
 	// Merge gateway-captured passthrough headers under the client's own
 	// headers — the client's values win when they collide.
@@ -675,7 +740,14 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const sseStream = piNative.encodeStream(events);
+	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
+		signal: controller.signal,
+		onCancel: reason => {
+			if (!controller.signal.aborted) {
+				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+			}
+		},
+	});
 	return new Response(sseStream, {
 		status: 200,
 		headers: {

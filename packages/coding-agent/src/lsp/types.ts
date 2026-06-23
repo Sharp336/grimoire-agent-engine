@@ -1,38 +1,24 @@
 import type { ptree } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
 
 // =============================================================================
 // Tool Schema
 // =============================================================================
 
-export const lspSchema = z.object({
-	action: z.enum([
-		"diagnostics",
-		"definition",
-		"references",
-		"hover",
-		"symbols",
-		"rename",
-		"rename_file",
-		"code_actions",
-		"type_definition",
-		"implementation",
-		"status",
-		"reload",
-		"capabilities",
-		"request",
-	]),
-	file: z.string().describe("file path or source path for rename_file").optional(),
-	line: z.number().describe("line number (1-indexed)").optional(),
-	symbol: z.string().describe("symbol substring on the line").optional(),
-	query: z.string().describe("search query or code-action selector").optional(),
-	new_name: z.string().describe("new symbol name or destination path").optional(),
-	apply: z.boolean().describe("apply edits").optional(),
-	timeout: z.number().describe("request timeout in seconds").optional(),
-	payload: z.string().describe("json-encoded request params").optional(),
+export const lspSchema = type({
+	action:
+		"'diagnostics' | 'definition' | 'references' | 'hover' | 'symbols' | 'rename' | 'rename_file' | 'code_actions' | 'type_definition' | 'implementation' | 'status' | 'reload' | 'capabilities' | 'request'",
+	file: "string?",
+	line: "number?",
+	symbol: "string?",
+	query: "string?",
+	new_name: "string?",
+	apply: "boolean?",
+	timeout: "number?",
+	payload: "string?",
 });
 
-export type LspParams = z.infer<typeof lspSchema>;
+export type LspParams = typeof lspSchema.infer;
 
 export interface LspToolDetails {
 	serverName?: string;
@@ -356,6 +342,16 @@ export interface ServerConfig {
 	disabled?: boolean;
 	/** Per-server warmup timeout in milliseconds. Overrides the global WARMUP_TIMEOUT_MS for this server during startup. */
 	warmupTimeoutMs?: number;
+	/**
+	 * Per-server overrides for rust-analyzer workspace-ready polling. When omitted, the module
+	 * defaults are used. Primarily a tuning/test seam to bound the multi-second settle window.
+	 */
+	workspaceReadyTimings?: {
+		timeoutMs?: number;
+		pollMs?: number;
+		settleMs?: number;
+		statusRequestTimeoutMs?: number;
+	};
 	capabilities?: ServerCapabilities;
 	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
 	isLinter?: boolean;
@@ -403,9 +399,11 @@ export interface LspClient {
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	openFiles: Map<string, OpenFile>;
-	pendingRequests: Map<number, PendingRequest>;
+	pendingRequests: Map<number | string, PendingRequest>;
 	messageBuffer: Uint8Array;
 	isReading: boolean;
+	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
+	status: "connecting" | "ready" | "error";
 	serverCapabilities?: LspServerCapabilities;
 	lastActivity: number;
 	/** Serializes outbound JSON-RPC writes to the server process. */
@@ -422,16 +420,19 @@ export interface LspClient {
 // JSON-RPC Protocol Types
 // =============================================================================
 
+/** JSON-RPC request/response identifier accepted by LSP peers. */
+export type LspJsonRpcId = number | string;
+
 export interface LspJsonRpcRequest {
 	jsonrpc: "2.0";
-	id: number;
+	id: LspJsonRpcId;
 	method: string;
 	params: unknown;
 }
 
 export interface LspJsonRpcResponse {
 	jsonrpc: "2.0";
-	id?: number;
+	id?: LspJsonRpcId;
 	result?: unknown;
 	error?: { code: number; message: string; data?: unknown };
 }

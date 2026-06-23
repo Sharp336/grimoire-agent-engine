@@ -7,6 +7,7 @@ import {
 	cleanOutput,
 	configuredLlmWillHandleCall,
 	llmAvailable,
+	type RemoteLlmOptions,
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
 
@@ -32,10 +33,6 @@ function llmEnabled(): boolean {
 
 function hostLlmEnabled(): boolean {
 	return envBool("MNEMOPI_HOST_LLM_ENABLED", false);
-}
-
-function llmBaseUrl(): string {
-	return env("MNEMOPI_LLM_BASE_URL").replace(/\/+$/, "");
 }
 
 function llmMaxTokens(): number {
@@ -231,7 +228,7 @@ async function localFallback(prompt: string, sourceText: string, diag = getDiagn
 	return [];
 }
 
-export async function extractFacts(text: string | null | undefined): Promise<string[]> {
+export async function extractFacts(text: string | null | undefined, options: RemoteLlmOptions = {}): Promise<string[]> {
 	const diag = getDiagnostics();
 	if (typeof text !== "string" || text.trim() === "") {
 		return [];
@@ -300,23 +297,21 @@ export async function extractFacts(text: string | null | undefined): Promise<str
 		return [];
 	}
 
-	if (llmEnabled() && llmBaseUrl() !== "") {
-		diag.recordAttempt("remote");
-		try {
-			const raw = await callRemoteLlm(prompt, 0);
-			if (raw !== null) {
-				const facts = parseFacts(cleanOutput(raw));
-				if (facts.length > 0) {
-					diag.recordSuccess("remote", facts.length);
-					diag.recordCall({ succeeded: true });
-					return facts;
-				}
+	diag.recordAttempt("remote");
+	try {
+		const raw = await callRemoteLlm(prompt, 0, options);
+		if (raw !== null) {
+			const facts = parseFacts(cleanOutput(raw));
+			if (facts.length > 0) {
+				diag.recordSuccess("remote", facts.length);
+				diag.recordCall({ succeeded: true });
+				return facts;
 			}
-			diag.recordNoOutput("remote");
-		} catch (exc) {
-			diag.recordFailure("remote", exc, "remote_call_raised");
-			console.warn(`extractFacts: remote LLM raised: ${safeForLog(exc)}`);
 		}
+		diag.recordNoOutput("remote");
+	} catch (exc) {
+		diag.recordFailure("remote", exc, "remote_call_raised");
+		console.warn(`extractFacts: remote LLM raised: ${safeForLog(exc)}`);
 	}
 
 	return localFallback(prompt, text, diag);

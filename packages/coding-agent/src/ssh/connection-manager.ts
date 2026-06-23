@@ -65,7 +65,7 @@ async function deleteHostInfoFromDisk(hostName: string): Promise<void> {
 	}
 }
 
-async function validateKeyPermissions(keyPath?: string): Promise<void> {
+async function validateKeyPermissions(keyPath?: string, platform: SshPlatform = process.platform): Promise<void> {
 	if (!keyPath) return;
 	let stats: fs.Stats;
 	try {
@@ -79,6 +79,7 @@ async function validateKeyPermissions(keyPath?: string): Promise<void> {
 	if (!stats.isFile()) {
 		throw new Error(`SSH key is not a file: ${keyPath}`);
 	}
+	if (platform === "win32") return;
 	const mode = stats.mode & 0o777;
 	if ((mode & 0o077) !== 0) {
 		throw new Error(`SSH key permissions must be 600 or stricter: ${keyPath}`);
@@ -355,6 +356,33 @@ export async function getHostInfoForHost(host: SSHConnectionTarget): Promise<SSH
 	return await loadHostInfoFromDisk(host);
 }
 
+/**
+ * Synchronous, probe-free host info lookup for startup paths.
+ *
+ * Checks the in-memory cache, then falls back to a synchronous read of the
+ * persisted host-info cache file. Never opens a connection or probes the
+ * remote host — callers get `undefined` when nothing is cached yet.
+ */
+export function getCachedHostInfoSync(host: SSHConnectionTarget): SSHHostInfo | undefined {
+	const cached = hostInfoCache.get(host.name);
+	if (cached) {
+		const resolved = applyCompatOverride(host, cached);
+		if (resolved !== cached) hostInfoCache.set(host.name, resolved);
+		return resolved;
+	}
+	try {
+		const parsed = parseHostInfo(JSON.parse(fs.readFileSync(getHostInfoPath(host.name), "utf-8")));
+		if (!parsed) return undefined;
+		const resolved = applyCompatOverride(host, parsed);
+		hostInfoCache.set(host.name, resolved);
+		return resolved;
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		logger.warn("Failed to load SSH host info", { host: host.name, error: String(err) });
+		return undefined;
+	}
+}
+
 export async function ensureHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 	const cached = hostInfoCache.get(host.name);
 	if (cached) {
@@ -375,7 +403,7 @@ export async function buildRemoteCommand(
 	command: string,
 	options?: SSHArgsOptions,
 ): Promise<string[]> {
-	await validateKeyPermissions(host.keyPath);
+	await validateKeyPermissions(host.keyPath, options?.platform);
 	return [...buildCommonArgs(host, options), buildSshTarget(host.username, host.host), command];
 }
 

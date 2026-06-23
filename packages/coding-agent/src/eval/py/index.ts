@@ -1,26 +1,35 @@
 import type { ToolSession } from "../../tools";
-import type { ExecutorBackend, ExecutorBackendExecOptions, ExecutorBackendResult } from "../backend";
+import {
+	type ExecutorBackend,
+	type ExecutorBackendExecOptions,
+	type ExecutorBackendResult,
+	resolveEvalUrlRoots,
+} from "../backend";
+import {
+	readSetting,
+	namespaceSessionId as sharedNamespace,
+	readInterpreterSetting as sharedReadInterpreterSetting,
+	toExecutorBackendResult,
+} from "../backend-helpers";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
 
 const PYTHON_SESSION_PREFIX = "python:";
 
 export function namespaceSessionId(sessionId: string): string {
-	return sessionId.startsWith(PYTHON_SESSION_PREFIX) ? sessionId : `${PYTHON_SESSION_PREFIX}${sessionId}`;
+	return sharedNamespace(sessionId, PYTHON_SESSION_PREFIX);
 }
 
-function readSetting<T>(session: ToolSession, key: string): T | undefined {
-	const settings = session.settings as { get?: (key: string) => T | undefined } | undefined;
-	return settings?.get?.(key);
+function readInterpreterSetting(session: ToolSession): string | undefined {
+	return sharedReadInterpreterSetting(session, "python.interpreter");
 }
-
 export default {
 	id: "python",
 	label: "Python",
 	highlightLang: "python",
 
 	async isAvailable(session: ToolSession): Promise<boolean> {
-		const availability = await checkPythonKernelAvailability(session.cwd);
+		const availability = await checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session));
 		return availability.ok;
 	},
 
@@ -32,28 +41,17 @@ export default {
 			signal: opts.signal,
 			sessionId: namespaceSessionId(opts.sessionId),
 			kernelMode,
+			interpreter: readInterpreterSetting(opts.session),
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
+			localRoots: resolveEvalUrlRoots(opts.session),
 			kernelOwnerId: opts.kernelOwnerId,
 			reset: opts.reset,
-			artifactPath: opts.artifactPath,
-			artifactId: opts.artifactId,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			toolSession: opts.session,
 		};
 		const result = await executePython(code, executorOptions);
-		return {
-			output: result.output,
-			exitCode: result.exitCode,
-			cancelled: result.cancelled,
-			truncated: result.truncated,
-			artifactId: result.artifactId,
-			totalLines: result.totalLines,
-			totalBytes: result.totalBytes,
-			outputLines: result.outputLines,
-			outputBytes: result.outputBytes,
-			displayOutputs: result.displayOutputs,
-		};
+		return toExecutorBackendResult(result);
 	},
 } satisfies ExecutorBackend;

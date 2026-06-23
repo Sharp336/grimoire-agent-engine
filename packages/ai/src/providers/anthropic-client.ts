@@ -21,6 +21,7 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
+import { ProviderHttpError } from "../errors";
 import type { FetchImpl } from "../types";
 import type { MessageCreateParamsStreaming } from "./anthropic-wire";
 
@@ -38,12 +39,16 @@ export interface AnthropicRequestOptions {
 	timeout?: number;
 	/** Per-request retry budget override. */
 	maxRetries?: number;
+	/** Per-request headers merged after client defaults. */
+	headers?: Record<string, string>;
 }
 
 /**
  * Extra `RequestInit` fields merged into every fetch call. Bun extends
  * `RequestInit` with a `tls` option used for the Claude Code TLS profile and
- * Foundry mTLS.
+ * Foundry mTLS. Core request fields (`method`, `headers`, `body`, `signal`)
+ * are owned by the client and cannot be overridden from here — the timeout
+ * controller's signal in particular must always win.
  */
 export type AnthropicFetchOptions = RequestInit & {
 	tls?: {
@@ -54,6 +59,8 @@ export type AnthropicFetchOptions = RequestInit & {
 		cert?: string;
 		key?: string;
 	};
+	/** Bun extension: see {@link FetchWithRetryOptions.timeout} — `false` disables Bun's native fetch TTFT timeout (issue #2422). */
+	timeout?: number | false;
 };
 
 export interface AnthropicClientOptions {
@@ -71,16 +78,13 @@ export interface AnthropicClientOptions {
 }
 
 /** Non-2xx response from the Anthropic API. */
-export class AnthropicApiError extends Error {
-	readonly status: number;
-	readonly headers: Headers;
+export class AnthropicApiError extends ProviderHttpError {
+	declare readonly headers: Headers;
 	readonly requestId: string | null;
 
 	constructor(status: number, message: string, headers: Headers) {
-		super(message);
+		super(message, status, { headers });
 		this.name = "AnthropicApiError";
-		this.status = status;
-		this.headers = headers;
 		this.requestId = headers.get("request-id");
 	}
 
@@ -121,7 +125,7 @@ function shouldRetryResponse(response: Response): boolean {
 }
 
 /** Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). */
-function retryDelayFromHeaders(headers: Headers | undefined): number | undefined {
+export function retryDelayFromHeaders(headers: Headers | undefined): number | undefined {
 	if (!headers) return undefined;
 	const retryAfterMs = headers.get("retry-after-ms");
 	if (retryAfterMs) {
@@ -138,7 +142,7 @@ function retryDelayFromHeaders(headers: Headers | undefined): number | undefined
 	return undefined;
 }
 
-function defaultRetryDelayMs(attempt: number): number {
+export function calculateAnthropicRetryDelayMs(attempt: number): number {
 	const sleepSeconds = Math.min(INITIAL_RETRY_DELAY_S * 2 ** attempt, MAX_RETRY_DELAY_S);
 	const jitter = 1 - Math.random() * 0.25;
 	return sleepSeconds * jitter * 1000;
@@ -215,7 +219,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		return new AnthropicApiRequest(() => this.#send(path, params, options));
 	}
 
-	#buildHeaders(): Record<string, string> {
+	#buildHeaders(requestHeaders?: Record<string, string>): Record<string, string> {
 		const opts = this.#options;
 		const defaults = opts.defaultHeaders ?? {};
 		const headers: Record<string, string> = {};
@@ -226,6 +230,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 			headers.Authorization = `Bearer ${opts.authToken}`;
 		}
 		Object.assign(headers, defaults);
+		Object.assign(headers, requestHeaders);
 		return headers;
 	}
 
@@ -240,7 +245,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
 		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
-		const headers = this.#buildHeaders();
+		const headers = this.#buildHeaders(options?.headers);
 		const body = JSON.stringify(params);
 
 		for (let attempt = 0; ; attempt++) {
@@ -288,11 +293,11 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		callerSignal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			return await fetchFn(url, {
+				...(this.#options.fetchOptions ?? {}),
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-				...(this.#options.fetchOptions ?? {}),
 			});
 		} catch (error) {
 			if (timedOut && !callerSignal?.aborted) throw new AnthropicConnectionTimeoutError();
@@ -308,7 +313,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		responseHeaders: Headers | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<void> {
-		const delayMs = retryDelayFromHeaders(responseHeaders) ?? defaultRetryDelayMs(attempt);
+		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
 			await scheduler.wait(delayMs, { signal });
 		} catch {

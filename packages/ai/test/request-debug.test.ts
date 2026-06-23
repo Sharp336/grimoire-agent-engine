@@ -2,22 +2,22 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hookFetch } from "@oh-my-pi/pi-utils";
-import { clearCustomApis, registerCustomApi } from "../src/api-registry";
-import { stream } from "../src/stream";
-import type { AssistantMessage, FetchImpl, Model } from "../src/types";
-import { AssistantMessageEventStream } from "../src/utils/event-stream";
-import { wrapFetchForRequestDebug } from "../src/utils/request-debug";
+import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
+import { stream } from "@oh-my-pi/pi-ai/stream";
+import type { AssistantMessage, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { wrapFetchForRequestDebug } from "@oh-my-pi/pi-ai/utils/request-debug";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const enc = new TextEncoder();
 
-let previousCwd: string;
 let previousDebugFlag: string | undefined;
+let previousCwd: string;
 let tempDir: string | undefined;
 
 beforeEach(async () => {
-	previousCwd = process.cwd();
 	previousDebugFlag = Bun.env.PI_REQ_DEBUG;
+	previousCwd = process.cwd();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-req-debug-"));
 	process.chdir(tempDir);
 });
@@ -47,15 +47,6 @@ function chunkedResponse(chunks: Uint8Array[]): Response {
 	);
 }
 
-async function debugFiles(): Promise<{ requestPath: string; responsePath: string }> {
-	const files = await fs.readdir(tempDir!);
-	const requestPath = files.find(file => /^rr-session-\d+\.json$/.test(file));
-	expect(requestPath).toBeDefined();
-	const responsePath = requestPath!.replace(/\.json$/, ".res.log");
-	expect(files.includes(responsePath)).toBe(true);
-	return { requestPath: path.join(tempDir!, requestPath!), responsePath: path.join(tempDir!, responsePath) };
-}
-
 function splitResponseLog(bytes: Uint8Array): { headers: string; body: Uint8Array } {
 	const separator = enc.encode("\r\n\r\n");
 	let separatorIndex = -1;
@@ -79,11 +70,66 @@ function splitResponseLog(bytes: Uint8Array): { headers: string; body: Uint8Arra
 	};
 }
 
+/** Find the latest rr-session-*.json written to the temp dir by PI_REQ_DEBUG
+ * and derive its matching .res.log (rr-session-N.res.log, not .json.res.log). */
+async function findDebugFiles(): Promise<{ requestPath: string; responsePath: string }> {
+	const entries = await fs.readdir(tempDir!);
+	const jsonFiles = entries.filter(f => /^rr-session-\d+\.json$/.test(f));
+	expect(jsonFiles.length).toBeGreaterThan(0);
+	jsonFiles.sort((a, b) => {
+		const na = Number(a.match(/\d+/)![0]);
+		const nb = Number(b.match(/\d+/)![0]);
+		return na - nb;
+	});
+	const latest = jsonFiles[jsonFiles.length - 1]!;
+	const id = latest.match(/\d+/)![0];
+	return {
+		requestPath: path.join(tempDir!, latest),
+		responsePath: path.join(tempDir!, `rr-session-${id}.res.log`),
+	};
+}
+
 describe("PI_REQ_DEBUG request/response recording", () => {
 	it("leaves fetch untouched when the flag is disabled", () => {
 		delete Bun.env.PI_REQ_DEBUG;
 		const fetchImpl: FetchImpl = async () => new Response("ok");
 		expect(wrapFetchForRequestDebug(fetchImpl)).toBe(fetchImpl);
+	});
+
+	it("records every fetch while the env flag is enabled", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		let calls = 0;
+		const fetchImpl: FetchImpl = async () => {
+			calls += 1;
+			return new Response(calls === 1 ? "first" : "second", { headers: { "x-call": String(calls) } });
+		};
+		const wrapped = wrapFetchForRequestDebug(fetchImpl);
+
+		const first = await wrapped("https://provider.test/first", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ first: true }),
+		});
+		await first.text();
+		const second = await wrapped("https://provider.test/second", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ second: true }),
+		});
+		await second.text();
+
+		expect(calls).toBe(2);
+		const { requestPath, responsePath } = await findDebugFiles();
+		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
+		expect(request).toMatchObject({
+			protocol: "http",
+			method: "POST",
+			url: "https://provider.test/second",
+			body: { second: true },
+		});
+		const log = splitResponseLog(await fs.readFile(responsePath));
+		expect(log.headers).toContain("x-call: 2");
+		expect(new TextDecoder().decode(log.body)).toBe("second");
 	});
 
 	it("records request JSON before fetch and raw response bytes after headers", async () => {
@@ -99,7 +145,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		});
 		expect(new Uint8Array(await response.arrayBuffer())).toEqual(responseBody);
 
-		const { requestPath, responsePath } = await debugFiles();
+		const { requestPath, responsePath } = await findDebugFiles();
 		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
 		expect(request).toMatchObject({
 			protocol: "http",
@@ -138,15 +184,15 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		expect(firstRead.value).toEqual(firstChunk);
 		await reader.cancel("turn aborted");
 
-		const { responsePath } = await debugFiles();
+		const { responsePath } = await findDebugFiles();
 		const log = splitResponseLog(await fs.readFile(responsePath));
 		expect(log.headers).toContain("HTTP 201 Created");
 		expect(log.body).toEqual(firstChunk);
 	});
 
-	it("injects the debug fetch into provider options when callers did not pass fetch", async () => {
+	it("wraps provider fetch options with request debug recording", async () => {
 		Bun.env.PI_REQ_DEBUG = "1";
-		using _hook = hookFetch(() => new Response("ok", { headers: { "x-debug": "yes" } }));
+		const fetchMock: FetchImpl = async () => new Response("ok", { headers: { "x-debug": "yes" } });
 		registerCustomApi("req-debug-test", (_model, _context, options) => {
 			const events = new AssistantMessageEventStream();
 			void (async () => {
@@ -180,7 +226,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 			return events;
 		});
 
-		const model: Model = {
+		const model: Model = buildModel({
 			id: "debug-model",
 			name: "Debug Model",
 			api: "req-debug-test",
@@ -191,15 +237,15 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 4096,
 			maxTokens: 1024,
-		};
+		} as ModelSpec);
 		const events = stream(
 			model,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ apiKey: "key" },
+			{ apiKey: "key", fetch: fetchMock },
 		);
 		await events.result();
 
-		const { requestPath, responsePath } = await debugFiles();
+		const { requestPath, responsePath } = await findDebugFiles();
 		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
 		expect(request.url).toBe("https://provider.test/custom");
 		expect(request.body).toEqual({ ok: true });

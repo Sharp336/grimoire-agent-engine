@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { isCompiledBinary } from "@oh-my-pi/pi-utils";
+import { workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
@@ -13,6 +13,7 @@ import {
 	getModelPerformanceSeries,
 	getModelTimeSeries,
 	getOverallStats,
+	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
 	getTimeSeries,
@@ -24,15 +25,10 @@ import {
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
-// Worker entry. Bun's `--compile` bundler statically discovers the string
-// literal in `new Worker("./packages/stats/src/sync-worker.ts", …)` below and
-// emits the worker as an additional entrypoint (registered in
-// `packages/coding-agent/scripts/build-binary.ts`). In dev runs we resolve
-// the same source file through `import.meta.url`, so the literal only has to
-// be valid relative to the `--root` directory (repo root). Importing the
-// source as `with { type: "file" }` is NOT sufficient — that copies the file
-// as a raw asset and does not bundle the worker's relative imports, so the
-// worker would crash on first `import` (issue #1011, PR #1027).
+// Coding-agent binary/bundle workers route through the CLI entrypoint with a
+// hidden argv mode, so the compiled binary and npm bundle only need one
+// JavaScript entry. Standalone source `omp-stats` keeps using this package's
+// own sync-worker source file.
 import type { BehaviorDashboardStats, DashboardStats, MessageStats, RequestDetails } from "./types";
 
 /**
@@ -89,17 +85,18 @@ interface WorkerHandle {
 }
 
 /**
- * Create a fresh sync worker. In a `--compile` binary the literal-string
- * specifier is what Bun's static analyzer needs (the file is also listed as
- * an additional `--compile` entrypoint in
- * `packages/coding-agent/scripts/build-binary.ts`). In dev runs we resolve
- * the source URL via `import.meta.url` so the worker survives `cwd` changes
- * by callers.
+ * Create a fresh sync worker. When the process was started from a
+ * self-dispatching CLI entry (omp in source, npm-bundle, or compiled form),
+ * re-enter that entry with a worker argv selector; otherwise (standalone
+ * omp-stats, bun test, SDK embedding) load the worker module directly, so this
+ * package keeps zero runtime dependency on `@oh-my-pi/pi-coding-agent`.
  */
 function createSyncWorker(): Worker {
-	return isCompiledBinary()
-		? new Worker("./packages/stats/src/sync-worker.ts", { type: "module" })
-		: new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
+	const hostEntry = workerHostEntry();
+	if (hostEntry) {
+		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_sync"] });
+	}
+	return new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
 }
 
 function spawnWorker(): WorkerHandle {
@@ -259,6 +256,7 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const FIVE_MIN_MS = 5 * 60 * 1000;
 
 type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
@@ -278,11 +276,11 @@ const DEFAULT_TIME_RANGE: TimeRange = "24h";
 const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
 	"1h": {
 		timeSeriesHours: 1,
-		timeSeriesBucketMs: HOUR_MS,
+		timeSeriesBucketMs: FIVE_MIN_MS,
 		modelSeriesDays: 1,
-		modelSeriesBucketMs: HOUR_MS,
+		modelSeriesBucketMs: FIVE_MIN_MS,
 		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: HOUR_MS,
+		modelPerformanceBucketMs: FIVE_MIN_MS,
 		costSeriesDays: 1,
 	},
 	"24h": {
@@ -367,6 +365,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		overall: getOverallStats(cutoff ?? undefined),
 		byModel: getStatsByModel(cutoff ?? undefined),
 		byFolder: getStatsByFolder(cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(cutoff ?? undefined),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
 		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
@@ -374,12 +373,15 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 	};
 }
 
-export async function getOverviewStats(range?: string | null): Promise<Pick<DashboardStats, "overall" | "timeSeries">> {
+export async function getOverviewStats(
+	range?: string | null,
+): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
 	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
 
 	return {
 		overall: getOverallStats(cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(cutoff ?? undefined),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 	};
 }

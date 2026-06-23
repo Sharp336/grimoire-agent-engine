@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getDefaultPasteImageKeys, KeybindingsManager } from "../src/config/keybindings";
+import { getDefaultPasteImageKeys, KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 
 describe("KeybindingsManager.getDisplayString", () => {
 	it("formats a single binding as a human-readable key hint", () => {
@@ -8,6 +8,12 @@ describe("KeybindingsManager.getDisplayString", () => {
 		});
 
 		expect(keybindings.getDisplayString("app.message.dequeue")).toBe("Alt+Up");
+	});
+
+	it("defaults retry to Alt+R", () => {
+		const keybindings = KeybindingsManager.inMemory();
+
+		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
 	});
 
 	it("formats multiple bindings with the existing separator", () => {

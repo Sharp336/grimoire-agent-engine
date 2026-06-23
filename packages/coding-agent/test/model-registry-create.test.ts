@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { ConfigFile } from "@oh-my-pi/pi-coding-agent/config/config-file";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { ConfigFile } from "../src/config/config-file";
-import { ModelRegistry } from "../src/config/model-registry";
-import { ModelsConfigSchema } from "../src/config/models-config-schema";
 
 describe("ModelRegistry.create() factory (F6)", () => {
 	let tempDir: TempDir;
@@ -68,5 +68,24 @@ describe("ModelRegistry.create() factory (F6)", () => {
 		cf.tryLoad();
 		const mtime2 = fs.statSync(yml).mtimeMs;
 		expect(mtime2).toBe(mtime1);
+	});
+
+	test("ConfigFile migrates legacy models.json containing comments", async () => {
+		const yml = path.join(tempDir.path(), "models.yml");
+		const json = path.join(tempDir.path(), "models.json");
+		await Bun.write(
+			json,
+			`{
+				// Custom models comment
+				"providers": {
+					/* Block comment */
+				}
+			}`,
+		);
+
+		const cf = new ConfigFile("models", ModelsConfigSchema, yml);
+		const result = cf.tryLoad();
+		expect(result.status).toBe("ok");
+		expect(fs.existsSync(yml)).toBe(true);
 	});
 });

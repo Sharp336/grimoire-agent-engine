@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	escapeXmlText,
 	GoalRuntime,
 	type GoalRuntimeHost,
 	goalTokenDelta,
@@ -8,6 +7,7 @@ import {
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { escapeXmlText } from "@oh-my-pi/pi-utils";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
 	return {
@@ -80,6 +80,9 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 	return {
 		runtime: new GoalRuntime(host),
 		getState: () => cloneState(state),
+		setState: (next: GoalModeState | undefined) => {
+			state = cloneState(next);
+		},
 		setUsage: (next: Partial<GoalTokenUsage>) => {
 			usage = createUsage(next);
 		},
@@ -118,6 +121,7 @@ describe("goal runtime", () => {
 
 		harness.runtime.onTurnStart("turn-1", createUsage());
 		harness.advance(2_500);
+		harness.setUsage(createUsage({ input: 1 }));
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
 		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(2_000);
@@ -130,10 +134,85 @@ describe("goal runtime", () => {
 		expect(harness.persists).toHaveLength(1);
 
 		harness.advance(700);
+		harness.setUsage(createUsage({ input: 2 }));
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(3);
 		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(3_000);
 		expect(harness.persists).toHaveLength(2);
+	});
+
+	it("does not persist snapshots on wall-clock-only flushes", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.advance(2_500);
+		// Flush wall-clock time without any token usage changes.
+		await harness.runtime.flushUsage("suppressed");
+		// The in-memory state should still be updated.
+		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
+		// But it should not write/persist to the session log.
+		expect(harness.persists).toHaveLength(0);
+	});
+
+	it("persists wall-clock-only usage before internal compaction or session-switch aborts", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.advance(2_500);
+		await harness.runtime.onTaskAborted({ reason: "internal" });
+
+		expect(harness.getState()?.enabled).toBe(true);
+		expect(harness.getState()?.goal.status).toBe("active");
+		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
+		expect(harness.persists).toHaveLength(1);
+		expect(harness.persists[0]).toMatchObject({
+			mode: "goal",
+			state: { goal: { timeUsedSeconds: 2 } },
+		});
+	});
+
+	it("resets wall-clock baseline when preserving an active goal after a no-goal switch", async () => {
+		const goal = createGoal();
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.setState(undefined);
+		harness.advance(10_000);
+		harness.setState({ enabled: true, mode: "active", goal });
+
+		const resumed = await harness.runtime.onThreadResumed({ preserveActiveGoal: true });
+		harness.advance(1_000);
+		await harness.runtime.flushUsage("suppressed");
+
+		expect(resumed?.goal.status).toBe("active");
+		expect(harness.getState()?.goal.timeUsedSeconds).toBe(1);
+		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(11_000);
+	});
+
+	it("clears stale accounting when reconciling to a no-goal session", async () => {
+		const goal = createGoal();
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.setState(undefined);
+		harness.runtime.clearAccounting();
+		harness.advance(10_000);
+		harness.setState({ enabled: true, mode: "active", goal });
+
+		await harness.runtime.onThreadResumed({ preserveActiveGoal: true });
+		harness.advance(1_000);
+		await harness.runtime.flushUsage("suppressed");
+
+		expect(harness.getState()?.goal.timeUsedSeconds).toBe(1);
+		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(11_000);
 	});
 
 	it("steers only once until a budget mutation resets the cycle", async () => {
@@ -200,6 +279,20 @@ describe("goal runtime", () => {
 		expect(harness.getState()?.enabled).toBe(false);
 		expect(harness.getState()?.goal.status).toBe("paused");
 		expect(harness.persists.at(-1)?.mode).toBe("goal_paused");
+	});
+
+	it("preserves an active goal during internal session-switch reconciliation", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		const resumed = await harness.runtime.onThreadResumed({ preserveActiveGoal: true });
+
+		expect(resumed?.enabled).toBe(true);
+		expect(resumed?.goal.status).toBe("active");
+		expect(harness.getState()?.enabled).toBe(true);
+		expect(harness.getState()?.goal.status).toBe("active");
+		expect(harness.persists).toHaveLength(0);
 	});
 
 	it("escapes XML in goal helpers and rendered prompts", () => {

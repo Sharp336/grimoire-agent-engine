@@ -4,7 +4,7 @@ exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored"]
 resolver = "3"
 
 [workspace.package]
-version = "15.9.1"
+version = "16.1.16"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
@@ -182,6 +182,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 # ──────────────────────────────────────────────────────────────────────────────
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
+base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -274,11 +275,13 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
+png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
    "regex-fancy",
+   "yaml-load",
 ] }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -315,7 +318,9 @@ tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
 tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
 tree-sitter-elixir = "0.3"
+tree-sitter-elisp = "1.6.1"
 tree-sitter-erlang = "0.16.0"
+tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
 tree-sitter-graphql = "0.1.0"
 tree-sitter-haskell = "0.23"

@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
 import {
 	type FileDiagnosticsResult,
 	flushLspWritethroughBatch,
@@ -17,6 +17,7 @@ import {
 	type WritethroughDeferredHandle,
 } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFile } from "../../tools/auto-generated-guard";
 import {
 	invalidateFsScanAfterDelete,
@@ -40,6 +41,7 @@ import {
 	countLeadingWhitespace,
 	detectLineEnding,
 	getLeadingWhitespace,
+	normalizeForFuzzy,
 	normalizeToLF,
 	restoreLineEndings,
 	stripBom,
@@ -1008,6 +1010,41 @@ async function readExistingPatchFile(fileSystem: FileSystem, absolutePath: strin
 }
 
 /**
+ * A prefix/substring strategy matched pattern lines that cover only part of
+ * the corresponding file lines; replacing whole lines would silently drop the
+ * uncovered text the model never saw. Allow the replacement only when every
+ * discarded piece (normalized) survives somewhere in the hunk's new lines.
+ */
+function assertPartialMatchPreservesDiscardedText(
+	path: string,
+	pattern: string[],
+	matchedLines: string[],
+	newLines: string[],
+	matchStartIndex: number,
+): void {
+	let newLinesNorm: string | undefined;
+	for (let j = 0; j < pattern.length; j++) {
+		const lineNorm = normalizeForFuzzy(matchedLines[j]);
+		const patternNorm = normalizeForFuzzy(pattern[j]);
+		if (lineNorm === patternNorm) continue;
+		const at = lineNorm.indexOf(patternNorm);
+		if (at === -1) continue;
+		const discardedParts = [lineNorm.slice(0, at).trim(), lineNorm.slice(at + patternNorm.length).trim()];
+		for (const part of discardedParts) {
+			if (part.length === 0) continue;
+			newLinesNorm ??= newLines.map(normalizeForFuzzy).join("\n");
+			if (!newLinesNorm.includes(part)) {
+				throw new ApplyPatchError(
+					`Refusing partial-line match in ${path} at line ${matchStartIndex + j + 1}: ` +
+						`the file line also contains ${JSON.stringify(part)}, which the replacement would silently drop. ` +
+						`Provide the complete line in the hunk.`,
+				);
+			}
+		}
+	}
+}
+
+/**
  * Compute replacements needed to transform originalLines using the diff hunks.
  */
 function computeReplacements(
@@ -1253,6 +1290,18 @@ function computeReplacements(
 		if (searchResult.strategy === "fuzzy-dominant") {
 			const similarity = Math.round(searchResult.confidence * 100);
 			warnings.push(`Dominant fuzzy match selected in ${path} near line ${found + 1} (${similarity}% similar).`);
+		} else if (
+			searchResult.strategy === "comment-prefix" ||
+			searchResult.strategy === "prefix" ||
+			searchResult.strategy === "substring" ||
+			searchResult.strategy === "fuzzy" ||
+			searchResult.strategy === "character"
+		) {
+			const similarity = Math.round(searchResult.confidence * 100);
+			warnings.push(
+				`Inexact match in ${path} near line ${found + 1}: matched via ${searchResult.strategy} strategy ` +
+					`(${similarity}% similar). Re-read the file if the result is not what you intended.`,
+			);
 		}
 
 		// Reject if match is ambiguous (prefix/substring matching found multiple matches)
@@ -1303,6 +1352,10 @@ function computeReplacements(
 		if (isNoOp) {
 			lineIndex = found + pattern.length;
 			continue;
+		}
+
+		if (searchResult.strategy === "prefix" || searchResult.strategy === "substring") {
+			assertPartialMatchPreservesDiscardedText(path, pattern, actualMatchedLines, newSlice, found);
 		}
 
 		const adjustedNewLines = adjustLinesIndentation(pattern, actualMatchedLines, newSlice);
@@ -1571,29 +1624,28 @@ export async function computePatchDiff(
 		if (!normalizedOld && !normalizedNew) {
 			return { diff: "", firstChangedLine: undefined };
 		}
-		return generateUnifiedDiffString(normalizedOld, normalizedNew);
+		return generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
+			path: result.change.newPath ?? result.change.path,
+		});
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };
 	}
 }
 
-export const patchEditEntrySchema = z
-	.object({
-		op: z.enum(["create", "delete", "update"]).optional().describe("operation (default update)"),
-		rename: z.string().describe("new path for move").optional(),
-		diff: z.string().describe("diff hunks or full content for create").optional(),
-	})
-	.strict();
+export const patchEditEntrySchema = type({
+	"op?": "'create' | 'delete' | 'update'",
+	"rename?": "string",
+	"diff?": "string",
+});
 
-export const patchEditSchema = z
-	.object({
-		path: z.string().describe("file path"),
-		edits: z.array(patchEditEntrySchema).min(1).describe("patch operations"),
-	})
-	.strict();
+export type PatchEditEntry = typeof patchEditEntrySchema.infer;
 
-export type PatchEditEntry = z.infer<typeof patchEditEntrySchema>;
-export type PatchParams = z.infer<typeof patchEditSchema>;
+export const patchEditSchema = type({
+	path: "string",
+	edits: patchEditEntrySchema.array(),
+});
+
+export type PatchParams = typeof patchEditSchema.infer;
 
 export interface ExecutePatchSingleOptions {
 	session: ToolSession;
@@ -1612,6 +1664,8 @@ class LspFileSystem implements FileSystem {
 	#fileCache: Record<string, Bun.BunFile> = {};
 
 	constructor(
+		private readonly session: ToolSession,
+		private readonly requestedPath: string,
 		private readonly writethrough: WritethroughCallback,
 		private readonly signal?: AbortSignal,
 		private readonly batchRequest?: LspBatchRequest,
@@ -1641,8 +1695,14 @@ class LspFileSystem implements FileSystem {
 	}
 
 	async write(path: string, content: string): Promise<void> {
-		const file = this.#getFile(path);
 		const finalContent = await serializeEditFileText(path, path, content);
+
+		// Route through ACP bridge when available; skips internal artifacts and local:// paths.
+		if (await routeWriteThroughBridge(this.session, this.requestedPath, path, finalContent)) {
+			return;
+		}
+
+		const file = this.#getFile(path);
 		const deferredForPath = this.deferredForPath;
 		const result = await this.writethrough(
 			path,
@@ -1734,7 +1794,14 @@ export async function executePatchSingle(
 	}
 
 	const input: PatchInput = { path: resolvedPath, op, rename: resolvedRename, diff };
-	const patchFileSystem = new LspFileSystem(writethrough, signal, batchRequest, beginDeferredDiagnosticsForPath);
+	const patchFileSystem = new LspFileSystem(
+		session,
+		path, // original user-provided path for bridge guard (may be local://, vault://, etc.)
+		writethrough,
+		signal,
+		batchRequest,
+		beginDeferredDiagnosticsForPath,
+	);
 	const result = await applyPatch(input, {
 		cwd: session.cwd,
 		fs: patchFileSystem,
@@ -1785,7 +1852,9 @@ export async function executePatchSingle(
 	if (result.change.type === "update" && result.change.oldContent && result.change.newContent) {
 		const normalizedOld = normalizeToLF(stripBom(result.change.oldContent).text);
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
-		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew);
+		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
+			path: result.change.newPath ?? result.change.path,
+		});
 	}
 
 	let resultText: string;

@@ -5,6 +5,8 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { getWorktreeDir, hashPath, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
+import * as jj from "../utils/jj";
+import { mapWithConcurrencyLimit } from "./parallel";
 
 const { IsoBackendKind } = natives;
 type IsoBackendKind = natives.IsoBackendKind;
@@ -27,12 +29,19 @@ export interface WorktreeBaseline {
 }
 
 export async function getRepoRoot(cwd: string): Promise<string> {
-	const repoRoot = await git.repo.root(cwd);
-	if (!repoRoot) {
-		throw new Error("Git repository not found for isolated task execution.");
+	// Pure-jj check runs first so a jj workspace nested under an unrelated
+	// outer Git checkout is rejected at its own root rather than silently
+	// mutating the surrounding Git tree behind jj's back.
+	if (await jj.isPureJjRepo(cwd)) {
+		throw new Error(
+			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+		);
 	}
 
-	return repoRoot;
+	const repoRoot = await git.repo.root(cwd);
+	if (repoRoot) return repoRoot;
+
+	throw new Error("Git repository not found for isolated task execution.");
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
@@ -82,16 +91,16 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 async function captureUntrackedPatch(repoRoot: string, untracked: readonly string[]): Promise<string> {
 	if (untracked.length === 0) return "";
 	const nullPath = getGitNoIndexNullPath();
-	const untrackedDiffs = await Promise.all(
-		untracked.map(entry =>
-			git.diff(repoRoot, {
-				allowFailure: true,
-				binary: true,
-				noIndex: { left: nullPath, right: entry },
-			}),
-		),
+	// Bound concurrent git spawns; large untracked sets would otherwise fork one
+	// process per file at once.
+	const { results: untrackedDiffs } = await mapWithConcurrencyLimit([...untracked], 8, entry =>
+		git.diff(repoRoot, {
+			allowFailure: true,
+			binary: true,
+			noIndex: { left: nullPath, right: entry },
+		}),
 	);
-	return untrackedDiffs.filter(diff => diff.trim()).join("\n");
+	return untrackedDiffs.filter((diff): diff is string => !!diff?.trim()).join("\n");
 }
 
 async function captureRepoBaseline(repoRoot: string): Promise<RepoBaseline> {
@@ -185,6 +194,19 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 
 /**
  * Apply nested repo patches directly to their working directories after parent merge.
+ *
+ * Pre-existing dirty state in a nested repo is stashed before the patch is
+ * applied and popped back (with `--index` so staged WIP stays staged) after
+ * the commit, so unrelated user edits never get folded into the agent's
+ * commit. A failing `git stash pop` (e.g. user edits collide with the patched
+ * lines) leaves the stash entry intact, emits a `logger.warn`, and is
+ * returned to the caller as a human-readable warning string — the agent
+ * commit already landed, so this is a partial success the workflow needs to
+ * see, not a thrown failure.
+ *
+ * Returns the collected stash-restore warnings (empty when every nested repo
+ * was restored cleanly). Throws when the patch apply itself fails.
+ *
  * @param commitMessage Optional async function to generate a commit message from the combined diff.
  *                      If omitted or returns null, falls back to a generic message.
  */
@@ -192,7 +214,8 @@ export async function applyNestedPatches(
 	repoRoot: string,
 	patches: NestedRepoPatch[],
 	commitMessage?: (diff: string) => Promise<string | null>,
-): Promise<void> {
+): Promise<string[]> {
+	const warnings: string[] = [];
 	// Group patches by target repo to apply all at once and commit
 	const byRepo = new Map<string, NestedRepoPatch[]>();
 	for (const p of patches) {
@@ -211,17 +234,40 @@ export async function applyNestedPatches(
 		}
 
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		for (const { patch } of repoPatches) {
-			await git.patch.applyText(nestedDir, patch);
-		}
 
-		// Commit so nested repo history reflects the task changes
-		if ((await git.status(nestedDir)).trim().length > 0) {
-			const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
-			await git.stage.files(nestedDir);
-			await git.commit(nestedDir, msg);
+		// Preserve any pre-existing dirty state (tracked + untracked) so we
+		// commit only the agent delta, not the user's in-flight work.
+		const stashed =
+			(await git.status(nestedDir)).trim().length > 0
+				? await git.stash.push(nestedDir, `omp-isolation-${Snowflake.next()}`)
+				: false;
+		try {
+			for (const { patch } of repoPatches) {
+				await git.patch.applyText(nestedDir, patch);
+			}
+			if ((await git.status(nestedDir)).trim().length > 0) {
+				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+				await git.stage.files(nestedDir);
+				await git.commit(nestedDir, msg);
+			}
+		} finally {
+			if (stashed) {
+				try {
+					await git.stash.pop(nestedDir, { index: true });
+				} catch (popErr) {
+					const message = popErr instanceof Error ? popErr.message : String(popErr);
+					logger.warn("Pre-existing nested-repo dirty state could not be auto-restored", {
+						nestedDir,
+						error: message,
+					});
+					warnings.push(
+						`Pre-existing dirty state in nested repo \`${relativePath}\` could not be auto-restored after the agent commit; stash entry preserved (${message}).`,
+					);
+				}
+			}
 		}
 	}
+	return warnings;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -427,6 +473,8 @@ export interface MergeBranchResult {
 	merged: string[];
 	failed: string[];
 	conflict?: string;
+	/** Set when cherry-picks landed on HEAD but restoring the stashed working tree failed. */
+	stashConflict?: string;
 }
 
 /**
@@ -438,64 +486,69 @@ export async function mergeTaskBranches(
 	repoRoot: string,
 	branches: Array<{ branchName: string; taskId: string; description?: string }>,
 ): Promise<MergeBranchResult> {
-	const merged: string[] = [];
-	const failed: string[] = [];
+	// Serialize against other in-process git mutations on this repo: concurrent
+	// background merges interleaving stash push/pop + cherry-pick would corrupt
+	// the working tree (lost uncommitted changes, mixed-up stash entries).
+	return git.withRepoLock(repoRoot, async () => {
+		const merged: string[] = [];
+		const failed: string[] = [];
 
-	// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
-	// Without this, cherry-pick refuses to run when uncommitted changes exist.
-	const didStash = await git.stash.push(repoRoot, "omp-task-merge");
+		// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
+		// Without this, cherry-pick refuses to run when uncommitted changes exist.
+		const didStash = await git.stash.push(repoRoot, "omp-task-merge");
 
-	let conflictResult: MergeBranchResult | undefined;
+		let conflictResult: MergeBranchResult | undefined;
 
-	try {
-		for (const { branchName } of branches) {
-			try {
-				await git.cherryPick(repoRoot, branchName);
-			} catch (err) {
+		try {
+			for (const { branchName } of branches) {
 				try {
-					await git.cherryPick.abort(repoRoot);
-				} catch {
-					/* no state to abort */
-				}
-				const stderr =
-					err instanceof git.GitCommandError
-						? err.result.stderr.trim()
-						: err instanceof Error
-							? err.message
-							: String(err);
-				failed.push(branchName);
-				conflictResult = {
-					merged,
-					failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
-					conflict: `${branchName}: ${stderr}`,
-				};
-				break;
-			}
-
-			merged.push(branchName);
-		}
-	} finally {
-		if (didStash) {
-			try {
-				await git.stash.pop(repoRoot, { index: true });
-			} catch {
-				// Stash-pop conflicts mean the replayed changes clash with the user's
-				// uncommitted edits. Treat this as a merge failure so the caller preserves
-				// recovery branches instead of reporting success and deleting them.
-				logger.warn("Failed to restore stashed changes after task merge; stash entry preserved");
-				if (!conflictResult) {
+					await git.cherryPick(repoRoot, branchName);
+				} catch (err) {
+					try {
+						await git.cherryPick.abort(repoRoot);
+					} catch {
+						/* no state to abort */
+					}
+					const stderr =
+						err instanceof git.GitCommandError
+							? err.result.stderr.trim()
+							: err instanceof Error
+								? err.message
+								: String(err);
+					failed.push(branchName);
 					conflictResult = {
 						merged,
-						failed: merged,
-						conflict:
-							"stash pop: cherry-picked changes conflict with uncommitted edits. Run `git stash pop` and resolve manually.",
+						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
+						conflict: `${branchName}: ${stderr}`,
 					};
+					break;
+				}
+
+				merged.push(branchName);
+			}
+		} finally {
+			if (didStash) {
+				try {
+					await git.stash.pop(repoRoot, { index: true });
+				} catch {
+					// Stash-pop conflicts mean the replayed changes clash with the user's
+					// uncommitted edits. The cherry-picked commits are already on HEAD, so
+					// the merged branches DID land — report them as merged and surface the
+					// stash conflict separately instead of claiming they are unmerged.
+					logger.warn("Failed to restore stashed changes after task merge; stash entry preserved");
+					const stashConflict =
+						"stash pop: cherry-picked changes conflict with uncommitted edits. The merged commits are on HEAD; run `git stash pop` and resolve manually.";
+					if (conflictResult) {
+						conflictResult.stashConflict = stashConflict;
+					} else {
+						conflictResult = { merged, failed: [], stashConflict };
+					}
 				}
 			}
 		}
-	}
 
-	return conflictResult ?? { merged, failed };
+		return conflictResult ?? { merged, failed };
+	});
 }
 
 /** Clean up temporary task branches. */

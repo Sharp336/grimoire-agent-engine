@@ -11,6 +11,7 @@
  * collisions across repeated or nested task invocations.
  */
 import * as fs from "node:fs/promises";
+import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 
 /**
  * Manages agent output ID allocation to ensure uniqueness.
@@ -29,6 +30,10 @@ export class AgentOutputManager {
 	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string }) {
 		this.#getArtifactsDir = getArtifactsDir;
 		this.#parentPrefix = options?.parentPrefix;
+		// Reserve the advisor transcript stem: a subagent allocated this id would
+		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
+		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
+		this.#taken.add(ADVISOR_TRANSCRIPT_STEM);
 	}
 
 	/**
@@ -84,16 +89,5 @@ export class AgentOutputManager {
 	async allocate(id: string): Promise<string> {
 		await this.#ensureInitialized();
 		return this.#allocateUnique(id);
-	}
-
-	/**
-	 * Allocate unique IDs for a batch of tasks.
-	 *
-	 * @param ids Array of requested IDs
-	 * @returns Array of unique IDs in same order
-	 */
-	async allocateBatch(ids: string[]): Promise<string[]> {
-		await this.#ensureInitialized();
-		return ids.map(id => this.#allocateUnique(id));
 	}
 }

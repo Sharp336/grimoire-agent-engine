@@ -1,4 +1,6 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 // ─── Generic Tool Discovery Types ────────────────────────────────────────────
 
@@ -64,7 +66,13 @@ export function isMCPToolName(name: string): boolean {
 	return name.startsWith("mcp__");
 }
 
-function getSchemaPropertyKeys(parameters: unknown): string[] {
+function getSchemaPropertyKeys(tool: Pick<AiTool, "name" | "description" | "parameters">): string[] {
+	let parameters: unknown = tool.parameters;
+	try {
+		parameters = toolWireSchema(tool as AiTool);
+	} catch {
+		// Schema may contain functions or cycles; fall back to the raw shape.
+	}
 	if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return [];
 	const properties = (parameters as { properties?: unknown }).properties;
 	if (!properties || typeof properties !== "object" || Array.isArray(properties)) return [];
@@ -147,7 +155,14 @@ export function getDiscoverableTool(
 		source,
 		serverName: typeof toolRecord.mcpServerName === "string" ? toolRecord.mcpServerName : undefined,
 		mcpToolName: typeof toolRecord.mcpToolName === "string" ? toolRecord.mcpToolName : undefined,
-		schemaKeys: getSchemaPropertyKeys(toolRecord.parameters),
+		schemaKeys:
+			toolRecord.parameters === undefined
+				? []
+				: getSchemaPropertyKeys({
+						name: tool.name,
+						description: rawDescription,
+						parameters: toolRecord.parameters as AiTool["parameters"],
+					}),
 	};
 }
 

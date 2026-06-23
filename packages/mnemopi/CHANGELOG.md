@@ -2,6 +2,100 @@
 
 ## [Unreleased]
 
+## [16.1.8] - 2026-06-20
+
+### Fixed
+
+- Capped per-input length in `embed()` at `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS` (default 8192 chars, override via the env var or `embeddings.maxInputChars` runtime option; `0` disables) so a long retention transcript can no longer overflow the embedding model's context window. Oversized inputs are clipped with a head/tail split so chronological transcripts keep both the opening setup and the most recent turns instead of losing the latest content under a naive prefix slice. llama.cpp's `/embeddings` server used to reject the request with `request (N tokens) exceeds the available context size`, silently dropping vector recall for that memory ([#3126](https://github.com/can1357/oh-my-pi/issues/3126)).
+- Fixed the proactive-linking write path ignoring host configuration: `proactiveLinkIfEnabled` read `MNEMOPI_PROACTIVE_LINKING` directly, so a host that enabled proactive linking through `configureRecallFeatures()` had no effect unless the environment variable was also set. `proactiveLinking` is now a `RecallFeatureFlags` option resolved through a `proactiveLinkingEnabled()` fallback, matching the existing polyphonic and enhanced recall flags, with the `MNEMOPI_PROACTIVE_LINKING` environment variable still taking precedence whenever it is set. ([#2440](https://github.com/can1357/oh-my-pi/issues/2440))
+
+## [16.1.3] - 2026-06-19
+
+### Added
+
+- Exposed `setLocalModelInitializer` (and the `LocalEmbeddingModel`, `LocalModelInitializer`, `LocalModelInitOptions`, `StandardEmbeddingModel` types) so hosts can route fastembed loads through a dedicated subprocess and keep `onnxruntime-node`'s NAPI constructor + finalizer out of their own address space. Same wipe semantics as the existing `setLocalModelInitializerForTests` seam; the agent CLI uses it to crash-proof Windows when `memory.backend: mnemopi` is enabled ([#3031](https://github.com/can1357/oh-my-pi/issues/3031)).
+
+### Fixed
+
+- Fixed background fact extraction skipping runtime-configured remote LLM endpoints when `MNEMOPI_LLM_BASE_URL` was unset, so `remember(..., { extract: true })` now stores remote-distilled facts from `mnemopi.llm` config instead of falling back to regex heuristics. ([#3041](https://github.com/can1357/oh-my-pi/issues/3041))
+- Fixed local fastembed startup on macOS ARM64 by letting `fastembed@2.1.0` install its matching `onnxruntime-node@1.21.0` native runtime instead of forcing `1.26.0`, and by repairing missing tokenizer sidecars from the upstream Hugging Face model cache when a stale fastembed archive lacks them. ([#3054](https://github.com/can1357/oh-my-pi/issues/3054))
+
+## [16.0.6] - 2026-06-18
+
+### Fixed
+
+- Forced the on-demand fastembed runtime install to override fastembed's archived `onnxruntime-node@1.21.0` transitive pin with Mnemopi's `onnxruntime-node@1.26.0` pin, fixing local embedding startup on macOS ARM64. ([#2920](https://github.com/can1357/oh-my-pi/issues/2920))
+
+### Changed
+
+- Updated OpenRouter request headers to use standard shared headers from the pi-ai package
+
+## [16.0.5] - 2026-06-17
+
+### Fixed
+
+- Capped `sleep_consolidation` episodic rows at `maxEpisodeChars` (default 100KB, `MNEMOPI_MAX_EPISODE_CHARS`) so raw session transcripts cannot be stored and extracted as multi-megabyte episodes. ([#2869](https://github.com/can1357/oh-my-pi/issues/2869))
+- Skipped regex-only entity and pattern fact extraction for oversized raw transcripts so progress/log noise cannot flood MEMORIA with junk facts. ([#2868](https://github.com/can1357/oh-my-pi/issues/2868))
+
+## [15.13.1] - 2026-06-15
+
+### Added
+
+- Added a wipe-and-rebuild reconcile (`reconcileEmbeddingModel`) that runs when the configured embedding model changes. At store open, if the model stamped on stored `memory_embeddings` rows differs from the active `currentEmbeddingModel()`, the stale embeddings and their binary vectors are dropped and every existing memory is enqueued for background re-embedding (in bounded batches) at the new model/dimension. The destructive wipe is skipped whenever it could not be rebuilt — embeddings disabled via the runtime option or the `MNEMOPI_NO_EMBEDDINGS` env, an unresolved (empty) active model, or a read-only open (`reconcile: false`, used by ephemeral stats readers that would exit before the async rebuild finished) — so a stale-but-valid corpus is never destroyed without a replacement. Recall degrades gracefully (FTS-only) for memories whose vectors are not yet rebuilt ([#2476](https://github.com/can1357/oh-my-pi/issues/2476))
+
+### Fixed
+
+- Normalized enhanced recall fact scoring against lexical coverage so high-confidence facts that only match generic query tokens no longer outrank exact working-memory hits. ([#2441](https://github.com/can1357/oh-my-pi/issues/2441))
+
+## [15.12.4] - 2026-06-13
+
+### Fixed
+
+- Fixed `consolidateToEpisodic` (the function backing `sleep` / `sleepAllSessions`) never populating the episodic graph: the `gists` and `graph_edges` tables stayed at 0 rows across every bank even after multiple consolidation cycles, so Polyphonic Recall's `graph` voice (BFS over `findGistsByParticipant` / `findRelatedMemories`) always returned nothing. Consolidation now best-effort ingests the new episodic memory into `EpisodicGraph` so the gist row, gist→memory `ctx` edge, fact edges, and cross-memory similarity/entity/temporal edges land alongside the episodic row. Independent of the existing `MNEMOPI_PROACTIVE_LINKING` flag, which still gates the same enrichment on the `remember()` write path. ([#2435](https://github.com/can1357/oh-my-pi/issues/2435))
+
+## [15.12.0] - 2026-06-12
+
+### Changed
+
+- Moved `fastembed` and `onnxruntime-node` from `dependencies` to optional `peerDependencies` pinned to exact versions. When the peers are absent (bundled CLI, compiled binary, or installs that skip optional peers), the local embedding path `bun install`s the pinned pair into `~/.omp/cache/fastembed-runtime/<version-key>` on first use and loads fastembed from there — restoring local embeddings in bundled distributions and removing ~270MB of eager native downloads from default installs ([#2389](https://github.com/can1357/oh-my-pi/issues/2389))
+
+## [15.11.4] - 2026-06-12
+
+### Added
+
+- Added `configureRecallFeatures()` (exported from the package root, `core`, and `config`) so hosts can enable the polyphonic recall engine and the enhanced recall query cache programmatically. `polyphonicRecallEnabled()`, `enhancedRecallEnabled()`, and `isEnhancedRecallEnabled()` now fall back to these configured defaults, with the `MNEMOPI_POLYPHONIC_RECALL` / `MNEMOPI_ENHANCED_RECALL` environment variables still taking precedence whenever they are set. ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
+
+### Fixed
+
+- Fixed the embedding pipeline's silent `catch {}` blocks (`runEmbedding()`, `getLocalModel()`, and the local-model path of `embed()`) swallowing failures with zero diagnostics. These best-effort paths still degrade gracefully (return `null` / skip the write), but now emit structured `logger.debug` entries with the error and per-site context (item count, model name). The `mnemopi.debug` config flag now propagates into the core library via runtime options (`MnemopiOptions.debug` → `ResolvedMnemopiRuntimeOptions.debug`) and escalates these logs to `warn` so they surface at the default log level. ([#2322](https://github.com/can1357/oh-my-pi/issues/2322))
+
+### Changed
+
+- Extraction, embedding, and remote-LLM clients now accept an `ApiKey` (static string or resolver) and resolve it per request through `withAuth`, so 401s force-refresh and rotate credentials via the central auth-retry policy instead of failing with a stale key. Empty-key setups (local/proxy endpoints without `Authorization`) and pinned literal keys behave exactly as before.
+- Embedding and remote-LLM 401 errors now throw pi-ai's typed `ProviderHttpError` instead of `Object.assign`-patched `Error`s, keeping the same structural `.status` contract for the auth-retry classifier.
+- SHMR consolidation clustering (`core/shmr`) now uses the real embedding provider when one is configured instead of always hashing: `embed()`, the new `embedBatch()`, `clusterBySimilarity()`, `computeHarmonyScore()`, `harmonize()`, and `recallBeliefs()` are now async, batch-embed candidate texts in a single provider call, and reuse precomputed vectors from `memory_embeddings` for episodic candidates. The SHA1 bag-of-words hash remains as the deterministic fallback when no provider is available or embedding fails. ([#2324](https://github.com/can1357/oh-my-pi/issues/2324))
+
+## [15.10.12] - 2026-06-10
+
+### Changed
+
+- Reworked the in-memory fallback vector search to build a normalized exact vector index per query, matching the shape needed for future quantized or TurboVec-style backends without adding a new dependency yet.
+
+## [15.10.11] - 2026-06-10
+
+### Fixed
+
+- Fixed embedding provider detection to match `openrouter` by URL host, so custom embedding endpoints are now recognized correctly instead of being misclassified by substring matching
+- Fixed the check for OpenRouter base URLs so only true `openrouter` hosts are treated as non-custom
+
+## [15.10.8] - 2026-06-09
+
+### Added
+
+- Added a `fetch` option to `ExtractionClient` to inject a custom fetch implementation for remote LLM requests
+- Added an optional `fetch` option to `extractFacts` to control the transport used for remote extraction calls
+- Added support for passing a custom `fetch` implementation through `complete` and `summarizeMemories` via remote LLM options
+
 ## [15.9.1] - 2026-06-04
 
 ### Breaking Changes
@@ -24,6 +118,7 @@
 - Fixed the `darwin-x64` release build failing in `bun build --compile` because the Windows ORT 1.24 preload pulled `onnxruntime-node` into the static graph and there is no `darwin/x64` prebuilt for that line. The preload is now guarded behind a `process.platform === "win32"` literal that Bun dead-code-eliminates on non-Windows targets; macOS/Linux load fastembed's bundled ORT 1.21 binding as before.
 
 ## [15.7.3] - 2026-05-31
+
 ### Changed
 
 - Changed embedding result normalization to return `Float32Array` vectors so `embed` and `embedQuery` now cache and emit float32 rows

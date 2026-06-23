@@ -21,12 +21,12 @@ import {
 	type Component,
 	Container,
 	Editor,
-	extractPrintableText,
 	fuzzyMatch,
 	Input,
 	matchesKey,
 	padding,
 	replaceTabs,
+	ScrollView,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -51,8 +51,14 @@ import { discoverAgents } from "../../task/discovery";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { getEditorTheme, theme } from "../theme/theme";
-import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
+import {
+	matchesAppFollowUp,
+	matchesAppInterrupt,
+	matchesSelectDown,
+	matchesSelectUp,
+} from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
+import { clampSelection, handleTabSwitchKey, padLinesToHeight, searchableChar } from "./selector-helpers";
 
 type SourceTabId = "all" | AgentSource;
 type AgentScope = "project" | "user";
@@ -193,7 +199,7 @@ class AgentListPane implements Component {
 		private readonly maxVisible: number,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const lines: string[] = [];
 		const searchPrefix = theme.fg("muted", "Search: ");
 		const searchText = this.searchQuery || theme.fg("dim", "type to filter");
@@ -205,9 +211,12 @@ class AgentListPane implements Component {
 			return lines;
 		}
 
+		const overflow = this.agents.length > this.maxVisible;
+		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
 		const start = this.scrollOffset;
 		const end = Math.min(start + this.maxVisible, this.agents.length);
 
+		const rows: string[] = [];
 		for (let i = start; i < end; i++) {
 			const agent = this.agents[i];
 			const selected = i === this.selectedIndex;
@@ -224,12 +233,17 @@ class AgentListPane implements Component {
 				line = theme.fg("dim", line);
 			}
 
-			lines.push(truncateToWidth(line, width));
+			rows.push(truncateToWidth(line, rowWidth));
 		}
 
-		if (this.agents.length > this.maxVisible) {
-			lines.push(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.agents.length})`));
-		}
+		const sv = new ScrollView(rows, {
+			height: rows.length,
+			scrollbar: "auto",
+			totalRows: this.agents.length,
+			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+		});
+		sv.setScrollOffset(this.scrollOffset);
+		lines.push(...sv.render(width));
 
 		return lines;
 	}
@@ -246,7 +260,7 @@ class AgentInspectorPane implements Component {
 		private readonly effectiveResolution: ModelResolution | undefined,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		if (!this.agent) {
 			return [theme.fg("muted", "Select an agent"), theme.fg("dim", "to inspect settings")];
 		}
@@ -305,14 +319,14 @@ class TwoColumnBody implements Component {
 		private readonly maxHeight: number,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const leftWidth = Math.floor(width * 0.5);
 		const rightWidth = width - leftWidth - 3;
 		const leftLines = this.leftPane.render(leftWidth);
 		const rightLines = this.rightPane.render(rightWidth);
 		const lineCount = this.maxHeight;
 		const out: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
+		const separator = theme.fg("dim", ` ${theme.boxRound.vertical} `);
 
 		for (let i = 0; i < lineCount; i++) {
 			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);
@@ -498,7 +512,7 @@ export class AgentDashboard extends Container {
 		return Math.max(3, this.#computeBodyHeight() - 3);
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		// Rebuild when terminal geometry changes so the full-screen overlay
 		// re-fits on resize.
 		if (this.#terminalRows() !== this.#builtRows || this.#uiWidth() !== this.#builtCols) {
@@ -508,27 +522,18 @@ export class AgentDashboard extends Container {
 		// Pad to the full viewport so every state (list, edit, create) covers the
 		// screen as a true full-screen view instead of letting the transcript peek
 		// through below it.
-		const rows = this.#terminalRows();
-		while (lines.length < rows) lines.push("");
-		return lines;
+		return padLinesToHeight(lines, this.#terminalRows());
 	}
 
 	#clampSelection(): void {
-		if (this.#filteredAgents.length === 0) {
-			this.#selectedIndex = 0;
-			this.#scrollOffset = 0;
-			return;
-		}
-
-		this.#selectedIndex = Math.min(this.#selectedIndex, this.#filteredAgents.length - 1);
-		this.#selectedIndex = Math.max(0, this.#selectedIndex);
-
-		const maxVisible = this.#getMaxVisibleItems();
-		if (this.#selectedIndex < this.#scrollOffset) {
-			this.#scrollOffset = this.#selectedIndex;
-		} else if (this.#selectedIndex >= this.#scrollOffset + maxVisible) {
-			this.#scrollOffset = this.#selectedIndex - maxVisible + 1;
-		}
+		const next = clampSelection(
+			this.#selectedIndex,
+			this.#scrollOffset,
+			this.#filteredAgents.length,
+			this.#getMaxVisibleItems(),
+		);
+		this.#selectedIndex = next.selectedIndex;
+		this.#scrollOffset = next.scrollOffset;
 	}
 
 	#persistDisabledAgents(): void {
@@ -894,7 +899,7 @@ export class AgentDashboard extends Container {
 		this.addChild(new Spacer(1));
 		const hints = this.#createGenerating
 			? " Generating..."
-			: " Ctrl+Enter: generate  Enter: newline  Tab: toggle scope  Esc: cancel";
+			: " Ctrl+Q/Ctrl+Enter: generate  Enter: newline  Tab: toggle scope  Esc: cancel";
 		this.addChild(new Text(theme.fg("dim", hints), 0, 0));
 	}
 
@@ -1085,10 +1090,7 @@ export class AgentDashboard extends Container {
 				}
 				return;
 			}
-			if (
-				!this.#createGenerating &&
-				(matchesKey(data, "ctrl+enter") || (data.charCodeAt(0) === 10 && data.length > 1))
-			) {
+			if (!this.#createGenerating && matchesAppFollowUp(data)) {
 				this.#submitCreateDescription();
 				return;
 			}
@@ -1136,12 +1138,7 @@ export class AgentDashboard extends Container {
 			return;
 		}
 
-		if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-			this.#switchTab(1);
-			return;
-		}
-		if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
-			this.#switchTab(-1);
+		if (handleTabSwitchKey(data, direction => this.#switchTab(direction))) {
 			return;
 		}
 
@@ -1176,17 +1173,11 @@ export class AgentDashboard extends Container {
 			return;
 		}
 
-		const printableText = extractPrintableText(data);
-		if (printableText && printableText.length === 1) {
-			const printableCharCode = printableText.charCodeAt(0);
-			if (printableCharCode > 32 && printableCharCode < 127) {
-				if (printableText === "j" || printableText === "k") {
-					return;
-				}
-				this.#searchQuery += printableText;
-				this.#applyFilters();
-				this.#buildLayout();
-			}
+		const char = searchableChar(data);
+		if (char !== null) {
+			this.#searchQuery += char;
+			this.#applyFilters();
+			this.#buildLayout();
 		}
 	}
 }

@@ -1,21 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import {
+	buildTransformedCodexRequestBody,
 	convertOpenAICodexResponsesTools as convertCodexTools,
 	normalizeCodexToolChoice,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
+	buildParams,
 	convertTools,
 	mapOpenAIResponsesToolChoiceForTools,
 	supportsFreeformApplyPatch,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import {
 	appendResponsesToolResultMessages,
 	convertResponsesAssistantMessage,
 	processResponsesStream,
-} from "@oh-my-pi/pi-ai/providers/openai-responses-shared";
-import type { AssistantMessage, Model, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
-import type { ResponseStreamEvent } from "openai/resources/responses/responses";
-import * as z from "zod/v4";
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type { AssistantMessage, Model, ModelSpec, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { type } from "arktype";
 
 const GRAMMAR = [
 	"// top-level comment",
@@ -27,8 +30,8 @@ const GRAMMAR = [
 ].join("\n");
 const COMPACT_GRAMMAR = 'start: "*** Begin Patch" LF\nPATH: /https?:\\/\\/[^\\n]+/\nLITERAL: "//"';
 
-function makeModel(overrides: Partial<Model<"openai-responses">> = {}): Model<"openai-responses"> {
-	return {
+function makeModel(overrides: Partial<ModelSpec<"openai-responses">> = {}): Model<"openai-responses"> {
+	return buildModel({
 		id: "gpt-5",
 		name: "GPT-5",
 		api: "openai-responses",
@@ -40,11 +43,11 @@ function makeModel(overrides: Partial<Model<"openai-responses">> = {}): Model<"o
 		contextWindow: 400000,
 		maxTokens: 128000,
 		...overrides,
-	};
+	} as ModelSpec<"openai-responses">);
 }
 
-function makeCodexModel(overrides: Partial<Model<"openai-codex-responses">> = {}): Model<"openai-codex-responses"> {
-	return {
+function makeCodexModel(overrides: Partial<ModelSpec<"openai-codex-responses">> = {}): Model<"openai-codex-responses"> {
+	return buildModel({
 		id: "gpt-5",
 		name: "GPT-5",
 		api: "openai-codex-responses",
@@ -56,22 +59,29 @@ function makeCodexModel(overrides: Partial<Model<"openai-codex-responses">> = {}
 		contextWindow: 272000,
 		maxTokens: 128000,
 		...overrides,
-	};
+	} as ModelSpec<"openai-codex-responses">);
 }
 
 const editTool: Tool = {
 	name: "edit",
 	customWireName: "apply_patch",
 	description: "edit files",
-	parameters: z.object({ input: z.string() }),
+	parameters: type({ input: "string" }),
 	customFormat: { syntax: "lark", definition: GRAMMAR },
 };
 
 const plainTool: Tool = {
 	name: "read_file",
 	description: "read a file",
-	parameters: z.object({ path: z.string() }),
+	parameters: type({ path: "string" }),
 };
+
+function hasCustomTool(tools: unknown): boolean {
+	return (
+		Array.isArray(tools) &&
+		tools.some(tool => typeof tool === "object" && tool !== null && (tool as { type?: unknown }).type === "custom")
+	);
+}
 
 const unionBranches = [
 	{
@@ -217,6 +227,31 @@ describe("tool choice mapping: freeform emission", () => {
 			type: "custom",
 			name: "apply_patch",
 		});
+	});
+});
+
+describe("request params: freeform custom tools", () => {
+	test("openai responses leaves parallel tool calls unset", () => {
+		const { params } = buildParams(
+			makeModel({ applyPatchToolType: "freeform" }),
+			{ messages: [{ role: "user", content: "edit", timestamp: 0 }], tools: [editTool] },
+			undefined,
+			undefined,
+		);
+
+		expect(hasCustomTool(params.tools)).toBe(true);
+		expect(params.parallel_tool_calls).toBeUndefined();
+	});
+
+	test("codex responses leaves parallel tool calls unset for custom tools", async () => {
+		const params = await buildTransformedCodexRequestBody(
+			makeCodexModel({ applyPatchToolType: "freeform" }),
+			{ messages: [{ role: "user", content: "edit", timestamp: 0 }], tools: [editTool] },
+			undefined,
+		);
+
+		expect(hasCustomTool(params.tools)).toBe(true);
+		expect(params.parallel_tool_calls).toBeUndefined();
 	});
 });
 
@@ -512,13 +547,13 @@ describe("dispatcher wire-name matching", () => {
 			name: "edit",
 			customWireName: "apply_patch",
 			description: "edit files",
-			parameters: z.object({ input: z.string() }),
+			parameters: type({ input: "string" }),
 			customFormat: { syntax: "lark", definition: GRAMMAR },
 		};
 		const readTool: Tool = {
 			name: "read_file",
 			description: "read",
-			parameters: z.object({ path: z.string() }),
+			parameters: type({ path: "string" }),
 		};
 		const tools = [editLikeTool, readTool];
 		const toolCall = { name: "apply_patch" };
@@ -539,13 +574,13 @@ describe("dispatcher wire-name matching", () => {
 		const nameMatch: Tool = {
 			name: "foo",
 			description: "",
-			parameters: z.object({}),
+			parameters: type({}),
 		};
 		const wireMatch: Tool & { customWireName: string } = {
 			name: "bar",
 			customWireName: "foo",
 			description: "",
-			parameters: z.object({}),
+			parameters: type({}),
 		};
 		const tools = [wireMatch, nameMatch]; // wireMatch listed first
 		const toolCall = { name: "foo" };
@@ -658,8 +693,17 @@ describe("history replay: custom_tool_call round-trip", () => {
 		};
 		const knownCallIds = new Set<string>(["call_1"]);
 		const customCallIds = new Set<string>(["call_1"]);
+		const model = makeModel();
 
-		appendResponsesToolResultMessages(messages as never, toolResult, makeModel(), true, knownCallIds, customCallIds);
+		appendResponsesToolResultMessages(
+			messages as never,
+			toolResult,
+			model,
+			true,
+			model.compat.supportsImageDetailOriginal,
+			knownCallIds,
+			customCallIds,
+		);
 
 		expect(messages).toHaveLength(1);
 		const item = messages[0] as { type: string; call_id: string; output: string };
@@ -680,8 +724,17 @@ describe("history replay: custom_tool_call round-trip", () => {
 		};
 		const knownCallIds = new Set<string>(["call_2"]);
 		const customCallIds = new Set<string>(); // call_2 not custom
+		const model = makeModel();
 
-		appendResponsesToolResultMessages(messages as never, toolResult, makeModel(), true, knownCallIds, customCallIds);
+		appendResponsesToolResultMessages(
+			messages as never,
+			toolResult,
+			model,
+			true,
+			model.compat.supportsImageDetailOriginal,
+			knownCallIds,
+			customCallIds,
+		);
 
 		const item = messages[0] as { type: string };
 		expect(item.type).toBe("function_call_output");

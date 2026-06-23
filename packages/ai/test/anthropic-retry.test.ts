@@ -34,6 +34,21 @@ describe("isProviderRetryableError", () => {
 		).toBe(true);
 	});
 
+	it("retries Anthropic TLS server transport errors", () => {
+		expect(
+			isProviderRetryableError(
+				new Error(
+					'Post "https://api.anthropic.com/v1/messages?beta=true": remote error: tls: bad record MAC (type=server_error)',
+				),
+				"anthropic",
+			),
+		).toBe(true);
+	});
+
+	it("does not retry permanent TLS configuration failures (no server annotation)", () => {
+		expect(isProviderRetryableError(new Error("tls: failed to verify certificate"), "anthropic")).toBe(false);
+	});
+
 	it("retries Bun socket closure errors", () => {
 		expect(
 			isProviderRetryableError(
@@ -53,6 +68,23 @@ describe("isProviderRetryableError", () => {
 	it("does not retry non-transient validation errors", () => {
 		expect(isProviderRetryableError(new Error("Invalid tool schema"))).toBe(false);
 		expect(isProviderRetryableError(new Error("Bad request"))).toBe(false);
+	});
+
+	it("does not retry persistent account usage/quota limits despite rate-limit wording", () => {
+		// Account-level 429 that says "rate limit" but is really a parked
+		// credential (long retry-after). Must surface immediately so the
+		// credential-rotation layer takes over instead of looping on backoff.
+		expect(
+			isProviderRetryableError(
+				new Error(
+					'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+				),
+			),
+		).toBe(false);
+		expect(isProviderRetryableError(new Error("usage_limit_reached"))).toBe(false);
+		expect(isProviderRetryableError(new Error("You have hit your ChatGPT usage limit"))).toBe(false);
+		// A generic transient rate limit (no account/usage framing) still retries.
+		expect(isProviderRetryableError(new Error("Rate limit exceeded"))).toBe(true);
 	});
 
 	it("retries Copilot transient model_not_supported only for github-copilot provider", () => {

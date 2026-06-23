@@ -48,13 +48,12 @@ describe("EventController idle compaction teardown", () => {
 		const runIdleCompaction = vi.fn();
 		const context = {
 			isInitialized: true,
-			isBackgrounded: false,
 			loadingAnimation: undefined,
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			pendingTools: new Map<string, unknown>(),
 			flushPendingModelSwitch: async () => {},
-			ui: { requestRender: vi.fn(), setEagerNativeScrollbackRebuild: vi.fn() },
+			ui: { requestRender: vi.fn() },
 			chatContainer: { removeChild: vi.fn() },
 			statusContainer: { clear: vi.fn() },
 			statusLine: { invalidate: vi.fn() },
@@ -65,8 +64,13 @@ describe("EventController idle compaction teardown", () => {
 				isCompacting: false,
 				isStreaming: false,
 				runIdleCompaction,
+				getContextUsage: () => ({ tokens: 210 }),
 				agent: { state: { messages: [createAssistantMessage()] } },
 			},
+			get viewSession() {
+				return (this as typeof context).session;
+			},
+			clearTransientSessionUi: () => {},
 		} as unknown as InteractiveModeContext;
 
 		const controller = new EventController(context);

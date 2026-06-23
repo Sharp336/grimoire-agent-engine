@@ -484,6 +484,9 @@ def _run_rpc_blocking(
     rpc_env.update(_prepare_slot_runtime_env(inputs.workspace, inputs.slot_uid))
     rpc_env.update(_safe_directory_env(bindings.workspace.repo_dir))
     rpc_env.update(_git_identity_env(inputs.settings.resolved_author_name, inputs.settings.git_author_email))
+    # Bare worktrees have no node_modules; install (idempotently) so the agent
+    # can resolve workspace packages (@oh-my-pi/pi-*) and actually run tests.
+    host_tools.ensure_workspace_dependencies(bindings)
     resuming = _has_prior_session(bindings.workspace.session_dir)
     extra_args: tuple[str, ...] = ("--continue",) if resuming else ()
     log.info(
@@ -512,9 +515,19 @@ def _run_rpc_blocking(
     )
     inputs.db.set_event_model(inputs.delivery_id, chosen_model)
     append_system_prompt = (
-        persona.system_append_pr_review(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        persona.system_append_pr_review(
+            repo=inputs.repo,
+            issue=inputs.issue,
+            workspace=inputs.workspace,
+            bot_login=inputs.settings.bot_login,
+        )
         if task_kind == "review_pr"
-        else persona.system_append(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        else persona.system_append(
+            repo=inputs.repo,
+            issue=inputs.issue,
+            workspace=inputs.workspace,
+            bot_login=inputs.settings.bot_login,
+        )
     )
 
     with RpcClient(
@@ -644,6 +657,13 @@ def _run_rpc_blocking(
                 hard_timer.cancel()
             if hard_timeout_fired.is_set():
                 raise TimeoutError("omp task exceeded hard timeout")
+            if turn is not None and turn.assistant_message is not None:
+                stop_reason = turn.assistant_message.get("stopReason")
+                if stop_reason == "error":
+                    error_msg = turn.assistant_message.get("errorMessage") or "model returned error"
+                    raise RuntimeError(
+                        f"omp agent error (stopReason=error): {error_msg}"
+                    )
             log.info(
                 "rpc_done",
                 extra={

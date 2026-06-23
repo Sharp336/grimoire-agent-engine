@@ -3,35 +3,7 @@ import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { create, fromBinary, fromJson, type JsonValue, toBinary, toJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
-import { $env, extractHttpStatusFromError, sanitizeText } from "@oh-my-pi/pi-utils";
-import { calculateCost } from "../models";
-import type {
-	Api,
-	AssistantMessage,
-	Context,
-	CursorExecHandlerResult,
-	CursorExecHandlers,
-	CursorMcpCall,
-	CursorShellStreamCallbacks,
-	CursorToolResultHandler,
-	ImageContent,
-	Message,
-	Model,
-	StreamFunction,
-	StreamOptions,
-	TextContent,
-	ThinkingContent,
-	Tool,
-	ToolCall,
-	ToolResultMessage,
-} from "../types";
-import { normalizeSystemPrompts } from "../utils";
-import { AssistantMessageEventStream } from "../utils/event-stream";
-import { parseStreamingJson } from "../utils/json-parse";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
-import { toolWireSchema } from "../utils/schema/wire";
-import type { McpToolDefinition } from "./cursor/gen/agent_pb";
+import type { McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import {
 	AgentClientMessageSchema,
 	AgentConversationTurnStructureSchema,
@@ -128,7 +100,37 @@ import {
 	WriteShellStdinErrorSchema,
 	WriteShellStdinResultSchema,
 	WriteSuccessSchema,
-} from "./cursor/gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { $env, extractHttpStatusFromError, sanitizeText } from "@oh-my-pi/pi-utils";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	CursorExecHandlerResult,
+	CursorExecHandlers,
+	CursorMcpCall,
+	CursorShellStreamCallbacks,
+	CursorToolResultHandler,
+	ImageContent,
+	Message,
+	Model,
+	StreamFunction,
+	StreamOptions,
+	TextContent,
+	ThinkingContent,
+	Tool,
+	ToolCall,
+	ToolResultMessage,
+} from "../types";
+import { normalizeSystemPrompts } from "../utils";
+import { deterministicUuid } from "../utils/deterministic-id";
+import { AssistantMessageEventStream } from "../utils/event-stream";
+import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse";
+import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
+import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
+import { toolWireSchema } from "../utils/schema/wire";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
@@ -376,7 +378,15 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					})
 				: undefined;
 
-			h2Client = http2.connect(baseUrl);
+			const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
+			if (proxyUrl) {
+				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl);
+				h2Client = http2.connect(baseUrl, {
+					createConnection: () => tlsSocket,
+				});
+			} else {
+				h2Client = http2.connect(baseUrl);
+			}
 
 			h2Request = h2Client.request(requestHeaders);
 
@@ -548,24 +558,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				}
 			});
 
-			if (state.currentTextBlock) {
-				const idx = output.content.indexOf(state.currentTextBlock);
-				stream.push({
-					type: "text_end",
-					contentIndex: idx,
-					content: state.currentTextBlock.text,
-					partial: output,
-				});
-			}
-			if (state.currentThinkingBlock) {
-				const idx = output.content.indexOf(state.currentThinkingBlock);
-				stream.push({
-					type: "thinking_end",
-					contentIndex: idx,
-					content: state.currentThinkingBlock.thinking,
-					partial: output,
-				});
-			}
+			endCurrentTextBlock(output, stream, state);
+			endCurrentThinkingBlock(output, stream, state);
 			if (state.currentToolCall) {
 				const idx = output.content.indexOf(state.currentToolCall);
 				state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall.partialJson);
@@ -612,9 +606,9 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 	return stream;
 };
 
-type ToolCallState = ToolCall & { index: number; partialJson?: string; kind: "mcp" | "todo" };
+export type ToolCallState = ToolCall & { index: number; partialJson?: string; kind: "mcp" | "todo" };
 
-interface BlockState {
+export interface BlockState {
 	currentTextBlock: (TextContent & { index: number }) | null;
 	currentThinkingBlock: (ThinkingContent & { index: number }) | null;
 	currentToolCall: ToolCallState | null;
@@ -625,7 +619,7 @@ interface BlockState {
 	setFirstTokenTime: () => void;
 }
 
-interface UsageState {
+export interface UsageState {
 	sawTokenDelta: boolean;
 }
 
@@ -1797,13 +1791,10 @@ function parseToolArgsJson(text: string): unknown {
 		return text;
 	}
 	try {
-		const normalized = trimmed
-			.replace(/\bNone\b/g, "null")
-			.replace(/\bTrue\b/g, "true")
-			.replace(/\bFalse\b/g, "false");
-		return Bun.JSON5.parse(normalized);
-	} catch {}
-	return text;
+		return parseJsonWithRepair<unknown>(trimmed);
+	} catch {
+		return text;
+	}
 }
 
 function decodeMcpArgValue(value: Uint8Array): unknown {
@@ -1940,7 +1931,72 @@ function buildMcpErrorResult(error: string) {
 	});
 }
 
-function processInteractionUpdate(
+/**
+ * Merge the decoded completion-frame `McpArgs` map into the args assembled
+ * from streamed `args_text_delta` snapshots.
+ *
+ * The completion frame is authoritative for the scalars it carries — but it
+ * can omit oversized parameters entirely and can downgrade a structured value
+ * to its raw string fallback when `decodeMcpArgValue` cannot parse it as
+ * JSON. Overwriting the streamed args wholesale therefore loses data (e.g.
+ * the task tool's `tasks` array on multi-subagent dispatches, issue #2615).
+ *
+ * Rules per key:
+ * - completion key absent  → keep the streamed value.
+ * - completion is a string while the streamed value is structured (object or
+ *   array) → keep the streamed value (the completion frame downgraded it).
+ * - otherwise               → completion wins.
+ */
+export function mergeCursorMcpToolCallArgs(
+	streamed: Record<string, unknown> | undefined,
+	completion: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
+	if (!completion) return merged;
+	for (const [key, completionValue] of Object.entries(completion)) {
+		const streamedValue = merged[key];
+		if (typeof completionValue === "string" && streamedValue !== null && typeof streamedValue === "object") {
+			continue;
+		}
+		merged[key] = completionValue;
+	}
+	return merged;
+}
+
+function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
+	const block = state.currentTextBlock;
+	if (!block) return;
+	const idx = output.content.indexOf(block);
+	delete (block as { index?: number }).index;
+	stream.push({
+		type: "text_end",
+		contentIndex: idx,
+		content: block.text,
+		partial: output,
+	});
+	state.setTextBlock(null);
+}
+
+function endCurrentThinkingBlock(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+): void {
+	const block = state.currentThinkingBlock;
+	if (!block) return;
+	const idx = output.content.indexOf(block);
+	delete (block as { index?: number }).index;
+	stream.push({
+		type: "thinking_end",
+		contentIndex: idx,
+		content: block.thinking,
+		partial: output,
+	});
+	state.setThinkingBlock(null);
+}
+
+/** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
+export function processInteractionUpdate(
 	update: any,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
@@ -1984,18 +2040,10 @@ function processInteractionUpdate(
 		const idx = output.content.indexOf(state.currentThinkingBlock!);
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
-		if (state.currentThinkingBlock) {
-			const idx = output.content.indexOf(state.currentThinkingBlock);
-			delete (state.currentThinkingBlock as any).index;
-			stream.push({
-				type: "thinking_end",
-				contentIndex: idx,
-				content: state.currentThinkingBlock.thinking,
-				partial: output,
-			});
-			state.setThinkingBlock(null);
-		}
+		endCurrentThinkingBlock(output, stream, state);
 	} else if (updateCase === "toolCallStarted") {
+		endCurrentTextBlock(output, stream, state);
+		endCurrentThinkingBlock(output, stream, state);
 		const toolCall = update.message.value.toolCall;
 		if (toolCall) {
 			const mcpCall = toolCall.mcpToolCall;
@@ -2034,20 +2082,30 @@ function processInteractionUpdate(
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
 		if (state.currentToolCall?.kind === "mcp") {
-			const delta = update.message.value.argsTextDelta || "";
-			state.currentToolCall.partialJson = `${state.currentToolCall.partialJson ?? ""}${delta}`;
-			state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall.partialJson ?? "");
+			// Cursor's `args_text_delta` is "aggregated args text so far" per agent.proto: each
+			// delta is a cumulative snapshot of the JSON-text args. Strip the prefix we already
+			// have to recover the new suffix; fall back to treating the value as an incremental
+			// fragment when it doesn't extend the buffer.
+			const snapshot: string = update.message.value.argsTextDelta || "";
+			const current = state.currentToolCall.partialJson ?? "";
+			const chunk = snapshot.startsWith(current) ? snapshot.slice(current.length) : snapshot;
+			if (chunk.length === 0) {
+				return;
+			}
+			state.currentToolCall.partialJson = current + chunk;
+			state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall.partialJson);
 			const idx = output.content.indexOf(state.currentToolCall);
-			stream.push({ type: "toolcall_delta", contentIndex: idx, delta, partial: output });
+			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: chunk, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
 		if (state.currentToolCall) {
 			const toolCall = update.message.value.toolCall;
 			if (state.currentToolCall.kind === "mcp") {
 				const decodedArgs = decodeMcpArgsMap(toolCall?.mcpToolCall?.args?.args);
-				if (decodedArgs) {
-					state.currentToolCall.arguments = decodedArgs;
-				}
+				state.currentToolCall.arguments = mergeCursorMcpToolCallArgs(
+					state.currentToolCall.arguments as Record<string, unknown> | undefined,
+					decodedArgs,
+				);
 			} else if (state.currentToolCall.kind === "todo" && toolCall) {
 				const todoArgs = buildTodoArgs(toolCall);
 				if (todoArgs) {
@@ -2211,19 +2269,6 @@ function extractAssistantMessageText(msg: Message): string {
 }
 
 /**
- * Derive a stable, UUID-formatted `message_id` from a content key.
- * Ensures identical historical messages hash to the same blob IDs across
- * requests, so `conversationBlobStores` does not grow unboundedly and
- * unchanged history reuses existing blob IDs.
- */
-type CursorMessageId = `${string}-${string}-${string}-${string}-${string}`;
-
-function deterministicMessageId(key: string): CursorMessageId {
-	const hex = createHash("sha256").update(key).digest("hex");
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
-
-/**
  * Index of the last user/developer message in `messages`, or -1 if none.
  * Used to exclude the current user turn from history builders — it goes in
  * `ConversationActionSchema.userMessageAction`, not in history structures.
@@ -2292,9 +2337,10 @@ function buildRootPromptMessagesJson(
 		} else if (msg.role === "toolResult") {
 			const text = toolResultToText(msg);
 			if (!text) continue;
+			const prefix = msg.isError ? "[Tool Error]" : "[Tool Result]";
 			pushJson({
 				role: "user",
-				content: [{ type: "text", text: `[Tool Result]\n${text}` }],
+				content: [{ type: "text", text: `${prefix}\n${text}` }],
 			});
 		}
 	}
@@ -2345,7 +2391,7 @@ function buildConversationTurns(
 		const userMessage = createCursorUserMessage(
 			msg.content,
 			userText,
-			deterministicMessageId(`u:${turns.length}:${cursorUserContentKey(msg.content)}`),
+			deterministicUuid(`u:${turns.length}:${cursorUserContentKey(msg.content)}`),
 		);
 		const userMessageBytes = toBinary(UserMessageSchema, userMessage);
 		const userMessageBlobId = storeCursorBlob(blobStore, userMessageBytes);
@@ -2372,10 +2418,11 @@ function buildConversationTurns(
 				// Include tool results as assistant text for context
 				const text = toolResultToText(stepMsg);
 				if (text) {
+					const prefix = stepMsg.isError ? "[Tool Error]" : "[Tool Result]";
 					const step = create(ConversationStepSchema, {
 						message: {
 							case: "assistantMessage",
-							value: create(AssistantMessageSchema, { text: `[Tool Result]\n${text}` }),
+							value: create(AssistantMessageSchema, { text: `${prefix}\n${text}` }),
 						},
 					});
 					stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));

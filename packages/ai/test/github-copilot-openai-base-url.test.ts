@@ -1,13 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getBundledModel } from "../src/models";
-import { streamOpenAICompletions } from "../src/providers/openai-completions";
-import { streamOpenAIResponses } from "../src/providers/openai-responses";
-import type { Context, Model } from "../src/types";
-
-const originalFetch = global.fetch;
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 afterEach(() => {
-	global.fetch = originalFetch;
 	vi.restoreAllMocks();
 });
 
@@ -42,17 +39,24 @@ function createUnauthorizedResponse(): Response {
 
 const testToken = "ghu_test_copilot_token";
 const enterpriseApiKey = JSON.stringify({ token: testToken, enterpriseUrl: "ghe.example.com" });
+const businessApiKey = JSON.stringify({
+	token: testToken,
+	apiEndpoint: "https://api.business.githubcopilot.com",
+});
 
 describe("GitHub Copilot OpenAI transport base URL", () => {
 	it("uses model baseUrl for chat completions", async () => {
 		const requestedUrls: string[] = [];
-		global.fetch = vi.fn(async (input: string | URL | Request) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			requestedUrls.push(getRequestUrl(input));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
-		const result = await streamOpenAICompletions(model, testContext, { apiKey: testToken }).result();
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/chat/completions");
@@ -60,13 +64,16 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 	it("uses model baseUrl for responses API", async () => {
 		const requestedUrls: string[] = [];
-		global.fetch = vi.fn(async (input: string | URL | Request) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			requestedUrls.push(getRequestUrl(input));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-5-mini") as Model<"openai-responses">;
-		const result = await streamOpenAIResponses(model, testContext, { apiKey: testToken }).result();
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/responses");
@@ -75,47 +82,94 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 	it("routes structured enterprise credentials to the enterprise chat completions host", async () => {
 		const requestedUrls: string[] = [];
 		const requestedAuthHeaders: Array<string | null> = [];
-		global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedUrls.push(getRequestUrl(input));
 			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
-		const result = await streamOpenAICompletions(model, testContext, { apiKey: enterpriseApiKey }).result();
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: enterpriseApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://copilot-api.ghe.example.com/chat/completions");
 		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
 	});
 
-	it("routes structured enterprise credentials to the enterprise responses host", async () => {
+	it("routes structured business credentials to the business chat completions host", async () => {
 		const requestedUrls: string[] = [];
 		const requestedAuthHeaders: Array<string | null> = [];
-		global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedUrls.push(getRequestUrl(input));
 			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: businessApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedUrls[0]).toBe("https://api.business.githubcopilot.com/chat/completions");
+		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
+	});
+
+	it("routes structured enterprise credentials to the enterprise responses host", async () => {
+		const requestedUrls: string[] = [];
+		const requestedAuthHeaders: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedUrls.push(getRequestUrl(input));
+			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
+			return createUnauthorizedResponse();
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-5-mini") as Model<"openai-responses">;
-		const result = await streamOpenAIResponses(model, testContext, { apiKey: enterpriseApiKey }).result();
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: enterpriseApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://copilot-api.ghe.example.com/responses");
 		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
 	});
 
+	it("routes structured business credentials to the business responses host", async () => {
+		const requestedUrls: string[] = [];
+		const requestedAuthHeaders: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedUrls.push(getRequestUrl(input));
+			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
+			return createUnauthorizedResponse();
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-5-mini") as Model<"openai-responses">;
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: businessApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedUrls[0]).toBe("https://api.business.githubcopilot.com/responses");
+		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
+	});
+
 	it("forwards initiatorOverride to chat completions requests", async () => {
 		const requestedInitiators: Array<string | null> = [];
-		global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedInitiators.push(getRequestHeader(input, init, "X-Initiator"));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
 		const result = await streamOpenAICompletions(model, testContext, {
 			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
 			initiatorOverride: "agent",
 		}).result();
 
@@ -125,14 +179,15 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 	it("forwards initiatorOverride to responses requests", async () => {
 		const requestedInitiators: Array<string | null> = [];
-		global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedInitiators.push(getRequestHeader(input, init, "X-Initiator"));
 			return createUnauthorizedResponse();
-		}) as unknown as typeof fetch;
+		});
 
 		const model = getBundledModel("github-copilot", "gpt-5-mini") as Model<"openai-responses">;
 		const result = await streamOpenAIResponses(model, testContext, {
 			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
 			initiatorOverride: "agent",
 		}).result();
 

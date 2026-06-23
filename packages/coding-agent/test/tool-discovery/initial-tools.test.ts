@@ -1,21 +1,21 @@
 import { describe, expect, it } from "bun:test";
-import { Settings } from "../../src/config/settings";
-import type { ToolSession } from "../../src/tools/index";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { BuiltinToolLoadMode, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	AskTool,
 	BUILTIN_TOOLS,
 	computeEssentialBuiltinNames,
 	createTools,
 	DEFAULT_ESSENTIAL_TOOL_NAMES,
+	filterInitialToolsForDiscoveryAll,
 	IrcTool,
 	JobTool,
 	SshTool,
-} from "../../src/tools/index";
+} from "@oh-my-pi/pi-coding-agent/tools";
 
 const allToolsSettings = Settings.isolated({
 	"astGrep.enabled": true,
 	"astEdit.enabled": true,
-	"renderMermaid.enabled": true,
 	"debug.enabled": true,
 	"find.enabled": true,
 	"search.enabled": true,
@@ -27,6 +27,7 @@ const allToolsSettings = Settings.isolated({
 	"checkpoint.enabled": true,
 	"todo.enabled": true,
 	"memory.backend": "mnemopi",
+	"autolearn.enabled": true,
 	"tools.discoveryMode": "all",
 });
 
@@ -73,6 +74,21 @@ describe("built-in tool loadMode annotations", () => {
 		}
 		expect(missing).toEqual([]);
 	});
+
+	it("marks eval essential so it survives tools.discoveryMode 'all'", async () => {
+		const metadata = await getToolMetadata();
+		expect(metadata.get("eval")?.loadMode).toBe("essential");
+		// Essential loadMode keeps eval active under discovery-all even when it is
+		// absent from the essential-names set — not relying on the names list.
+		const kept = filterInitialToolsForDiscoveryAll(["eval"], {
+			loadModeOf: name => metadata.get(name)?.loadMode as BuiltinToolLoadMode | undefined,
+			essentialNames: new Set<string>(),
+			explicitlyRequested: new Set<string>(),
+			restored: new Set<string>(),
+			forceActive: new Set<string>(),
+		});
+		expect(kept).toEqual(["eval"]);
+	});
 });
 
 describe("computeEssentialBuiltinNames", () => {
@@ -111,8 +127,54 @@ describe("computeEssentialBuiltinNames", () => {
 });
 
 describe("tools.discoveryMode settings schema", () => {
+	it("defaults to auto discovery mode", () => {
+		const settings = Settings.isolated({});
+		expect(settings.get("tools.discoveryMode")).toBe("auto");
+	});
+
 	it("back-compat: mcp.discoveryMode still accepted", () => {
 		const settings = Settings.isolated({ "mcp.discoveryMode": true });
 		expect(settings.get("mcp.discoveryMode")).toBe(true);
+	});
+});
+
+describe("filterInitialToolsForDiscoveryAll", () => {
+	const loadModes: Record<string, BuiltinToolLoadMode> = {
+		read: "essential",
+		edit: "essential",
+		todo: "discoverable",
+		search: "discoverable",
+	};
+	const base = {
+		loadModeOf: (name: string): BuiltinToolLoadMode | undefined => loadModes[name],
+		essentialNames: new Set(["read", "bash", "edit", "write", "find"]),
+		explicitlyRequested: new Set<string>(),
+		restored: new Set<string>(),
+		forceActive: new Set<string>(),
+	};
+
+	it("hides non-essential discoverable built-ins", () => {
+		expect(filterInitialToolsForDiscoveryAll(["read", "edit", "todo", "search"], base)).toEqual(["read", "edit"]);
+	});
+
+	it("keeps discoverable tools required by a forced tool_choice (eager todo)", () => {
+		const result = filterInitialToolsForDiscoveryAll(["read", "todo", "search"], {
+			...base,
+			forceActive: new Set(["todo"]),
+		});
+		expect(result).toEqual(["read", "todo"]);
+	});
+
+	it("keeps explicitly requested and restored discoverable tools", () => {
+		const result = filterInitialToolsForDiscoveryAll(["todo", "search"], {
+			...base,
+			explicitlyRequested: new Set(["search"]),
+			restored: new Set(["todo"]),
+		});
+		expect([...result].sort()).toEqual(["search", "todo"]);
+	});
+
+	it("never hides tools without a built-in loadMode (MCP/custom/extension)", () => {
+		expect(filterInitialToolsForDiscoveryAll(["mcp__server__tool", "search"], base)).toEqual(["mcp__server__tool"]);
 	});
 });

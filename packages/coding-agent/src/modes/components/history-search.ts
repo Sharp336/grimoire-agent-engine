@@ -21,6 +21,7 @@ import {
 import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
 import { DynamicBorder } from "./dynamic-border";
 import { rawKeyHint } from "./keybinding-hints";
+import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
 const MAX_VISIBLE = 10;
@@ -97,7 +98,7 @@ class HistoryResultsList implements Component {
 		// No cached state to invalidate currently
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const lines: string[] = [];
 
 		if (this.#results.length === 0) {
@@ -109,11 +110,10 @@ class HistoryResultsList implements Component {
 		const cursorSymbol = `${theme.nav.cursor} `;
 		const gutterWidth = visibleWidth(cursorSymbol);
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.#selectedIndex - Math.floor(this.#maxVisible / 2), this.#results.length - this.#maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.#maxVisible, this.#results.length);
+		const { startIndex, endIndex } = centeredWindow(this.#selectedIndex, this.#results.length, this.#maxVisible);
+
+		const rowWidth = contentRowWidth(width, this.#results.length, this.#maxVisible);
+		const rows: string[] = [];
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const entry = this.#results[i];
@@ -121,9 +121,9 @@ class HistoryResultsList implements Component {
 
 			const timeStr = relativeTime(entry.created_at);
 			const timeWidth = visibleWidth(timeStr);
-			const showTime = width >= gutterWidth + 12 + timeWidth;
+			const showTime = rowWidth >= gutterWidth + 12 + timeWidth;
 
-			const promptBudget = Math.max(4, width - gutterWidth - (showTime ? timeWidth + 1 : 0));
+			const promptBudget = Math.max(4, rowWidth - gutterWidth - (showTime ? timeWidth + 1 : 0));
 			const normalized = entry.prompt.replace(/\s+/g, " ").trim();
 			const plain = truncateToWidth(normalized, promptBudget);
 			const highlighted = highlightTokens(plain, this.#tokens);
@@ -133,21 +133,17 @@ class HistoryResultsList implements Component {
 
 			if (showTime) {
 				// Pad the prompt region so the timestamp sits flush right with a one-cell gap.
-				line = `${truncateToWidth(line, width - timeWidth - 1, Ellipsis.Unicode, true)} ${theme.fg("dim", timeStr)}`;
+				line = `${truncateToWidth(line, rowWidth - timeWidth - 1, Ellipsis.Unicode, true)} ${theme.fg("dim", timeStr)}`;
 			}
 
-			lines.push(
+			rows.push(
 				isSelected
-					? theme.bg("selectedBg", truncateToWidth(line, width, Ellipsis.Omit, true))
-					: truncateToWidth(line, width),
+					? theme.bg("selectedBg", truncateToWidth(line, rowWidth, Ellipsis.Omit, true))
+					: truncateToWidth(line, rowWidth),
 			);
 		}
 
-		if (startIndex > 0 || endIndex < this.#results.length) {
-			const scrollText = `  ${this.#selectedIndex + 1}/${this.#results.length}`;
-			lines.push(theme.fg("muted", truncateToWidth(scrollText, width, Ellipsis.Omit)));
-		}
-
+		lines.push(...renderScrollableList(rows, { width, totalRows: this.#results.length, scrollOffset: startIndex }));
 		return lines;
 	}
 }

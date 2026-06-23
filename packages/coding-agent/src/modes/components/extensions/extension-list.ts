@@ -5,17 +5,11 @@
  * that toggles the entire provider. All items below are dimmed when the
  * master switch is off.
  */
-import {
-	type Component,
-	extractPrintableText,
-	matchesKey,
-	padding,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
+import { type Component, matchesKey, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { isProviderEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
+import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
 import { applyFilter } from "./state-manager";
 import type { Extension, ExtensionKind, ExtensionState } from "./types";
 
@@ -112,7 +106,7 @@ export class ExtensionList implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const lines: string[] = [];
 
 		// Search bar
@@ -134,25 +128,31 @@ export class ExtensionList implements Component {
 		const startIdx = this.#scrollOffset;
 		const endIdx = Math.min(startIdx + this.#maxVisible, this.#listItems.length);
 
+		// Reserve the rightmost column for the scrollbar when overflowing
+		const rowWidth = contentRowWidth(width, this.#listItems.length, this.#maxVisible);
+
 		// Render visible items
+		const rows: string[] = [];
 		for (let i = startIdx; i < endIdx; i++) {
 			const listItem = this.#listItems[i];
 			const isSelected = this.#focused && i === this.#selectedIndex;
 
 			if (listItem.type === "master") {
-				lines.push(this.#renderMasterSwitch(listItem, isSelected, width));
+				rows.push(this.#renderMasterSwitch(listItem, isSelected, rowWidth));
 			} else if (listItem.type === "kind-header") {
-				lines.push(this.#renderKindHeader(listItem, isSelected, width));
+				rows.push(this.#renderKindHeader(listItem, isSelected, rowWidth));
 			} else {
-				lines.push(this.#renderExtensionRow(listItem.item, isSelected, width, masterDisabled));
+				rows.push(this.#renderExtensionRow(listItem.item, isSelected, rowWidth, masterDisabled));
 			}
 		}
 
-		// Scroll indicator
-		if (this.#listItems.length > this.#maxVisible) {
-			const indicator = theme.fg("muted", `  (${this.#selectedIndex + 1}/${this.#listItems.length})`);
-			lines.push(indicator);
-		}
+		lines.push(
+			...renderScrollableList(rows, {
+				width,
+				totalRows: this.#listItems.length,
+				scrollOffset: this.#scrollOffset,
+			}),
+		);
 
 		return lines;
 	}
@@ -382,21 +382,9 @@ export class ExtensionList implements Component {
 	}
 
 	#clampSelection(): void {
-		if (this.#listItems.length === 0) {
-			this.#selectedIndex = 0;
-			this.#scrollOffset = 0;
-			return;
-		}
-
-		this.#selectedIndex = Math.min(this.#selectedIndex, this.#listItems.length - 1);
-		this.#selectedIndex = Math.max(0, this.#selectedIndex);
-
-		// Adjust scroll offset
-		if (this.#selectedIndex < this.#scrollOffset) {
-			this.#scrollOffset = this.#selectedIndex;
-		} else if (this.#selectedIndex >= this.#scrollOffset + this.#maxVisible) {
-			this.#scrollOffset = this.#selectedIndex - this.#maxVisible + 1;
-		}
+		const next = clampSelection(this.#selectedIndex, this.#scrollOffset, this.#listItems.length, this.#maxVisible);
+		this.#selectedIndex = next.selectedIndex;
+		this.#scrollOffset = next.scrollOffset;
 	}
 
 	handleInput(data: string): void {
@@ -453,16 +441,9 @@ export class ExtensionList implements Component {
 		}
 
 		// Printable characters -> search
-		const printableText = extractPrintableText(data);
-		if (printableText && printableText.length === 1) {
-			const printableCharCode = printableText.charCodeAt(0);
-			if (printableCharCode > 32 && printableCharCode < 127) {
-				if (printableText === "j" || printableText === "k") {
-					return;
-				}
-				this.setSearchQuery(this.#searchQuery + printableText);
-				return;
-			}
+		const char = searchableChar(data);
+		if (char !== null) {
+			this.setSearchQuery(this.#searchQuery + char);
 		}
 	}
 

@@ -6,8 +6,12 @@ import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMeta
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
+import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
+import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -43,6 +47,8 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionCompactingResult,
+	SessionStopEvent,
+	SessionStopEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -66,6 +72,28 @@ let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
+}
+
+/**
+ * Dedicated cap for `session_shutdown` handlers. The generic 30s budget is
+ * appropriate for events extensions can observe (e.g. `session_start`,
+ * `before_provider_request`), but `session_shutdown` is fire-and-forget
+ * teardown — extensions receive no result and the user has already asked to
+ * leave. A hung handler (e.g. an extension waiting on a stuck IPC pipe to a
+ * companion app) MUST NOT hold Ctrl+C / `/exit` hostage for the full window.
+ * See issue #2600.
+ */
+export const SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS = 2_000;
+let sessionShutdownHandlerTimeoutMs = SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS;
+
+export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void {
+	sessionShutdownHandlerTimeoutMs = timeoutMs;
+}
+
+/** Per-event handler budget. Defaults to the generic cap; `session_shutdown`
+ *  uses its own short cap so teardown stays prompt. */
+function handlerTimeoutForEvent(eventType: string): number {
+	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
@@ -110,19 +138,13 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				? SessionBeforeTreeResult | undefined
 				: TEvent extends { type: "session.compacting" }
 					? SessionCompactingResult | undefined
-					: undefined;
+					: TEvent extends { type: "session_stop" }
+						? SessionStopEventResult | undefined
+						: undefined;
 
-export type NewSessionHandler = (options?: {
-	parentSession?: string;
-	setup?: (sessionManager: SessionManager) => Promise<void>;
-}) => Promise<{ cancelled: boolean }>;
-
-export type BranchHandler = (entryId: string) => Promise<{ cancelled: boolean }>;
-
-export type NavigateTreeHandler = (
-	targetId: string,
-	options?: { summarize?: boolean },
-) => Promise<{ cancelled: boolean }>;
+// Session-lifecycle handler types live once in session-handler-types (imported
+// above for local use); re-exported here to keep this module's public API stable.
+export type { BranchHandler, NavigateTreeHandler, NewSessionHandler };
 
 export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled: boolean }>;
 
@@ -187,6 +209,7 @@ export class ExtensionRunner {
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
+	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#initialized = false;
 	/**
@@ -204,8 +227,11 @@ export class ExtensionRunner {
 		private readonly cwd: string,
 		private readonly sessionManager: SessionManager,
 		private readonly modelRegistry: ModelRegistry,
+		getMemory?: () => MemoryRuntimeContext | undefined,
+		private readonly settings?: Settings,
 	) {
 		this.#uiContext = noOpUIContext;
+		this.#getMemoryFn = getMemory;
 	}
 
 	initialize(
@@ -293,6 +319,10 @@ export class ExtensionRunner {
 		await this.emit({ type: "credential_disabled", ...event });
 	}
 
+	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
+		return await this.emit({ type: "session_stop", ...event });
+	}
+
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
 	}
@@ -354,6 +384,9 @@ export class ExtensionRunner {
 		"ctrl+o": true,
 		"ctrl+t": true,
 		"ctrl+g": true,
+		"alt+m": true,
+		// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
+		"ctrl+q": true,
 		"shift+tab": true,
 		"shift+ctrl+p": true,
 		"alt+enter": true,
@@ -424,7 +457,7 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
-	getRegisteredCommands(reserved?: Set<string>): RegisteredCommand[] {
+	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {
 		this.#commandDiagnostics = [];
 
 		const commands = new Map<string, RegisteredCommand>();
@@ -472,11 +505,13 @@ export class ExtensionRunner {
 			get model() {
 				return getModel();
 			},
+			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			memory: this.#getMemoryFn?.(),
 		};
 	}
 
@@ -509,7 +544,9 @@ export class ExtensionRunner {
 			event.type === "session_before_tree"
 		);
 	}
-
+	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
+		return event.type === "session_shutdown";
+	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, TResult>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<TResult | undefined> | TResult | undefined,
 		event: TEvent,
@@ -551,12 +588,32 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext();
-		let result: SessionBeforeEventResult | SessionCompactingResult | undefined;
+		// Defer the per-event context allocation (and the Promise.race/Bun.sleep
+		// timeout machinery) to the first matching handler. Streaming sessions emit
+		// message_update / tool_execution_* per delta with usually no extension
+		// subscribed; building `ctx` for a zero-handler event is pure waste.
+		let ctx: ExtensionContext | undefined;
+		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
+
+		if (this.#isSessionShutdownEvent(event)) {
+			const timeoutMs = handlerTimeoutForEvent(event.type);
+			const promises: Promise<unknown>[] = [];
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+				ctx ??= this.createContext();
+				for (const handler of handlers) {
+					promises.push(this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs));
+				}
+			}
+			if (promises.length > 0) await Promise.all(promises);
+			return result as RunnerEmitResult<TEvent>;
+		}
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
 
 			for (const handler of handlers) {
 				const handlerResult = await this.#runHandlerWithTimeout(
@@ -564,7 +621,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					handlerTimeoutForEvent(event.type),
 				);
 
 				if (this.#isSessionBeforeEvent(event) && handlerResult) {
@@ -576,6 +633,16 @@ export class ExtensionRunner {
 
 				if (event.type === "session.compacting" && handlerResult) {
 					result = handlerResult as SessionCompactingResult;
+				}
+
+				if (event.type === "session_stop" && handlerResult) {
+					result = handlerResult as SessionStopEventResult;
+					const hasContinuationContext =
+						(typeof result.additionalContext === "string" && result.additionalContext.length > 0) ||
+						(typeof result.reason === "string" && result.reason.length > 0);
+					if ((result.continue === true || result.decision === "block") && hasContinuationContext) {
+						return result as RunnerEmitResult<TEvent>;
+					}
 				}
 			}
 		}
@@ -895,7 +962,8 @@ export class ExtensionRunner {
 						messages.push(result.message);
 					}
 					if (result.systemPrompt !== undefined) {
-						currentSystemPrompt = result.systemPrompt;
+						currentSystemPrompt =
+							typeof result.systemPrompt === "string" ? [result.systemPrompt] : result.systemPrompt;
 						systemPromptModified = true;
 					}
 				}

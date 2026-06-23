@@ -1,4 +1,12 @@
-import { type Component, matchesKey, padding, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	matchesKey,
+	padding,
+	replaceTabs,
+	ScrollView,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../modes/theme/theme";
 import { copyToClipboard } from "../utils/clipboard";
@@ -139,21 +147,27 @@ export class RawSseViewerComponent implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		this.#lastRenderWidth = Math.max(MIN_VIEWER_WIDTH, width);
 		this.#followIfNeeded();
 
 		const innerWidth = Math.max(1, this.#lastRenderWidth - 2);
 		const bodyHeight = this.#bodyHeight();
 		const rawLines = this.#renderRawLines(innerWidth);
-		const body = rawLines.slice(this.#scrollOffset, this.#scrollOffset + bodyHeight);
-		while (body.length < bodyHeight) body.push("");
+		const sv = new ScrollView(rawLines.slice(this.#scrollOffset, this.#scrollOffset + bodyHeight), {
+			height: bodyHeight,
+			scrollbar: "auto",
+			totalRows: rawLines.length,
+			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+		});
+		sv.setScrollOffset(this.#scrollOffset);
+		const bodyRows = sv.render(innerWidth);
 
 		return [
 			this.#frameTop(innerWidth),
 			this.#frameLine(this.#summaryText(), innerWidth),
 			this.#frameSeparator(innerWidth),
-			...body.map(line => this.#frameLine(line, innerWidth)),
+			...bodyRows.map(line => this.#frameLine(line, innerWidth)),
 			this.#frameLine(this.#statusText(), innerWidth),
 			this.#frameBottom(innerWidth),
 		];
@@ -259,20 +273,20 @@ export class RawSseViewerComponent implements Component {
 	}
 
 	#frameTop(innerWidth: number): string {
-		return `${theme.boxSharp.topLeft}${theme.boxSharp.horizontal.repeat(innerWidth)}${theme.boxSharp.topRight}`;
+		return `${theme.boxRound.topLeft}${theme.boxRound.horizontal.repeat(innerWidth)}${theme.boxRound.topRight}`;
 	}
 
 	#frameSeparator(innerWidth: number): string {
-		return `${theme.boxSharp.teeRight}${theme.boxSharp.horizontal.repeat(innerWidth)}${theme.boxSharp.teeLeft}`;
+		return `${theme.boxRound.teeRight}${theme.boxRound.horizontal.repeat(innerWidth)}${theme.boxRound.teeLeft}`;
 	}
 
 	#frameBottom(innerWidth: number): string {
-		return `${theme.boxSharp.bottomLeft}${theme.boxSharp.horizontal.repeat(innerWidth)}${theme.boxSharp.bottomRight}`;
+		return `${theme.boxRound.bottomLeft}${theme.boxRound.horizontal.repeat(innerWidth)}${theme.boxRound.bottomRight}`;
 	}
 
 	#frameLine(content: string, innerWidth: number): string {
 		const truncated = truncateToWidth(content, innerWidth);
 		const remaining = Math.max(0, innerWidth - visibleWidth(truncated));
-		return `${theme.boxSharp.vertical}${truncated}${padding(remaining)}${theme.boxSharp.vertical}`;
+		return `${theme.boxRound.vertical}${truncated}${padding(remaining)}${theme.boxRound.vertical}`;
 	}
 }

@@ -1,27 +1,29 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
-import { type Api, type AssistantMessage, getBundledModel, type Model } from "@oh-my-pi/pi-ai";
-import { isSubcommand } from "../src/cli-commands";
-import { getDefault, getEnumValues, getUi } from "../src/config/settings-schema";
-import { TinyTitleDownloadProgressComponent } from "../src/modes/components/tiny-title-download-progress";
-import { initTheme } from "../src/modes/theme/theme";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { isSubcommand } from "@oh-my-pi/pi-coding-agent/cli-commands";
+import { getDefault, getEnumValues, getUi } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tiny-title-download-progress";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
 	TINY_MODEL_DEVICE_SETTING_VALUES,
-} from "../src/tiny/device";
+} from "@oh-my-pi/pi-coding-agent/tiny/device";
 import {
 	TINY_MODEL_DTYPE_DEFAULT,
 	TINY_MODEL_DTYPE_SETTING_OPTIONS,
 	TINY_MODEL_DTYPE_SETTING_VALUES,
-} from "../src/tiny/dtype";
-import { ONLINE_TINY_TITLE_MODEL_KEY, TINY_TITLE_MODEL_OPTIONS, TINY_TITLE_MODEL_VALUES } from "../src/tiny/models";
-import { tinyTitleClient } from "../src/tiny/title-client";
-import { generateSessionTitle, raceFirstNonNull, TITLE_LOCAL_FALLBACK_DELAY_MS } from "../src/utils/title-generator";
-
-async function flushMicrotasks(turns = 4): Promise<void> {
-	for (let i = 0; i < turns; i += 1) await Promise.resolve();
-}
+} from "@oh-my-pi/pi-coding-agent/tiny/dtype";
+import {
+	ONLINE_TINY_TITLE_MODEL_KEY,
+	TINY_TITLE_MODEL_OPTIONS,
+	TINY_TITLE_MODEL_VALUES,
+} from "@oh-my-pi/pi-coding-agent/tiny/models";
+import { createTinyTitleSubprocess, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import type { Subprocess } from "bun";
 
 function getModelOrThrow(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);
@@ -48,7 +50,35 @@ function createRegistry(model: Model<Api>) {
 	return {
 		getAvailable: () => [model],
 		getApiKey: async () => "test-key",
+		resolver: vi.fn(() => async () => "test-key"),
 	} as never;
+}
+
+type TinyWorkerSpawnOptions = Bun.SpawnOptions.SpawnOptions<"ignore", "ignore", "ignore">;
+
+type TinyWorkerSpawnCall = {
+	options: TinyWorkerSpawnOptions & { cmd: string[] };
+};
+
+function createTinyWorkerSpawnMock(calls: TinyWorkerSpawnCall[]) {
+	function mockSpawn(options: TinyWorkerSpawnOptions & { cmd: string[] }): Subprocess<"ignore", "ignore", "ignore">;
+	function mockSpawn(cmd: string[], options?: TinyWorkerSpawnOptions): Subprocess<"ignore", "ignore", "ignore">;
+	function mockSpawn(
+		first: string[] | (TinyWorkerSpawnOptions & { cmd: string[] }),
+		second?: TinyWorkerSpawnOptions,
+	): Subprocess<"ignore", "ignore", "ignore"> {
+		const options = Array.isArray(first) ? { ...(second ?? {}), cmd: first } : first;
+		calls.push({ options });
+		return {
+			pid: 12345,
+			send: () => undefined,
+			kill: () => true,
+			unref: () => undefined,
+			exited: Promise.resolve(0),
+		} as unknown as Subprocess<"ignore", "ignore", "ignore">;
+	}
+
+	return mockSpawn;
 }
 
 function mockOnlineTitle(title: string | null) {
@@ -74,102 +104,6 @@ beforeAll(() => {
 afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
-});
-
-describe("raceFirstNonNull", () => {
-	it("resolves with local result without starting fallback", async () => {
-		let fallbackStarted = false;
-		const title = await raceFirstNonNull(
-			Promise.resolve("Local Title"),
-			() => {
-				fallbackStarted = true;
-				return Promise.resolve("Online Title");
-			},
-			TITLE_LOCAL_FALLBACK_DELAY_MS,
-		);
-
-		expect(title).toBe("Local Title");
-		expect(fallbackStarted).toBe(false);
-	});
-
-	it("starts fallback after the hardcoded delay", async () => {
-		vi.useFakeTimers();
-		const local = Promise.withResolvers<string | null>();
-		let fallbackStarted = false;
-		const result = raceFirstNonNull(
-			local.promise,
-			() => {
-				fallbackStarted = true;
-				return Promise.resolve("Online Title");
-			},
-			TITLE_LOCAL_FALLBACK_DELAY_MS,
-		);
-
-		await flushMicrotasks();
-		expect(fallbackStarted).toBe(false);
-		vi.advanceTimersByTime(TITLE_LOCAL_FALLBACK_DELAY_MS - 1);
-		await flushMicrotasks();
-		expect(fallbackStarted).toBe(false);
-		vi.advanceTimersByTime(1);
-		await flushMicrotasks();
-
-		expect(fallbackStarted).toBe(true);
-		await expect(result).resolves.toBe("Online Title");
-		local.resolve(null);
-	});
-
-	it("starts fallback immediately when local fails", async () => {
-		let fallbackStarted = false;
-		const title = await raceFirstNonNull(
-			Promise.reject(new Error("local failed")),
-			() => {
-				fallbackStarted = true;
-				return Promise.resolve("Online Title");
-			},
-			TITLE_LOCAL_FALLBACK_DELAY_MS,
-		);
-
-		expect(title).toBe("Online Title");
-		expect(fallbackStarted).toBe(true);
-	});
-
-	it("returns null only after local and fallback return null", async () => {
-		const title = await raceFirstNonNull(
-			Promise.resolve(null),
-			() => Promise.resolve(null),
-			TITLE_LOCAL_FALLBACK_DELAY_MS,
-		);
-
-		expect(title).toBeNull();
-	});
-
-	it("runs the loser-cancel callback when local wins after fallback starts", async () => {
-		vi.useFakeTimers();
-		const local = Promise.withResolvers<string | null>();
-		const fallback = Promise.withResolvers<string | null>();
-		let fallbackStarted = false;
-		let cancelCount = 0;
-		const result = raceFirstNonNull(
-			local.promise,
-			() => {
-				fallbackStarted = true;
-				return fallback.promise;
-			},
-			TITLE_LOCAL_FALLBACK_DELAY_MS,
-			() => {
-				cancelCount += 1;
-			},
-		);
-
-		vi.advanceTimersByTime(TITLE_LOCAL_FALLBACK_DELAY_MS);
-		await flushMicrotasks();
-		expect(fallbackStarted).toBe(true);
-
-		local.resolve("Local Title");
-		await expect(result).resolves.toBe("Local Title");
-		expect(cancelCount).toBe(1);
-		fallback.resolve(null);
-	});
 });
 
 describe("tiny title generator routing", () => {
@@ -205,10 +139,31 @@ describe("tiny title generator routing", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("starts online fallback immediately when local returns null", async () => {
+	it("passes the resolved TITLE_SYSTEM.md prompt to the local client", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		vi.spyOn(tinyTitleClient, "generate").mockResolvedValue(null);
+		const customPrompt = "Generate lowercase colon-delimited session names.";
+		const local = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local Title");
 		const online = mockOnlineTitle("Online Title");
+
+		const title = await generateSessionTitle(
+			"Investigate routing",
+			createRegistry(model),
+			createSettings(model, "lfm2-350m"),
+			undefined,
+			undefined,
+			undefined,
+			customPrompt,
+		);
+
+		expect(title).toBe("Local Title");
+		expect(local).toHaveBeenCalledWith("lfm2-350m", "Investigate routing", { systemPrompt: customPrompt });
+		expect(online).not.toHaveBeenCalled();
+	});
+
+	it("does NOT fall back to online when local returns null (issue #3187)", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const local = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue(null);
+		const online = mockOnlineTitle("Billed Online Title");
 
 		const title = await generateSessionTitle(
 			"Investigate fallback",
@@ -216,63 +171,54 @@ describe("tiny title generator routing", () => {
 			createSettings(model, "lfm2-350m"),
 		);
 
-		expect(title).toBe("Online Title");
-		expect(online).toHaveBeenCalledTimes(1);
+		expect(title).toBeNull();
+		expect(local).toHaveBeenCalledTimes(1);
+		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("aborts the online request when delayed local generation wins", async () => {
-		vi.useFakeTimers();
+	it("does NOT fall back to online when local throws", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const local = Promise.withResolvers<string | null>();
-		const onlineHold = Promise.withResolvers<AssistantMessage>();
-		let onlineSignal: AbortSignal | undefined;
-		vi.spyOn(tinyTitleClient, "generate").mockReturnValue(local.promise);
-		vi.spyOn(ai, "completeSimple").mockImplementation((_model, _context, options) => {
-			onlineSignal = options?.signal;
-			return onlineHold.promise;
-		});
+		vi.spyOn(tinyTitleClient, "generate").mockRejectedValue(new Error("worker crashed"));
+		const online = mockOnlineTitle("Billed Online Title");
 
-		const result = generateSessionTitle(
-			"Investigate cancellation",
-			createRegistry(model),
-			createSettings(model, "lfm2-350m"),
-		);
-
-		vi.advanceTimersByTime(TITLE_LOCAL_FALLBACK_DELAY_MS);
-		await flushMicrotasks();
-		expect(onlineSignal?.aborted).toBe(false);
-
-		local.resolve("Local Title");
-		await expect(result).resolves.toBe("Local Title");
-		expect(onlineSignal?.aborted).toBe(true);
-		onlineHold.resolve({ stopReason: "abort", content: [] } as never);
-	});
-
-	it("keeps local generation alive when the delayed online fallback wins", async () => {
-		vi.useFakeTimers();
-		const model = getModelOrThrow("claude-sonnet-4-5");
-		const local = Promise.withResolvers<string | null>();
-		let localSettled = false;
-		void local.promise.then(() => {
-			localSettled = true;
-		});
-		vi.spyOn(tinyTitleClient, "generate").mockReturnValue(local.promise);
-		mockOnlineTitle("Online Title");
-
-		const result = generateSessionTitle(
-			"Investigate background download",
+		const title = await generateSessionTitle(
+			"Investigate crash",
 			createRegistry(model),
 			createSettings(model, "lfm2-700m"),
 		);
 
-		vi.advanceTimersByTime(TITLE_LOCAL_FALLBACK_DELAY_MS);
-		await flushMicrotasks();
-		await expect(result).resolves.toBe("Online Title");
-		expect(localSettled).toBe(false);
+		expect(title).toBeNull();
+		expect(online).not.toHaveBeenCalled();
+	});
 
-		local.resolve("Late Local Title");
-		await flushMicrotasks();
-		expect(localSettled).toBe(true);
+	it("does NOT call the local worker or online path for an unknown tinyModel key", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const local = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Late Local");
+		const online = mockOnlineTitle("Billed Online Title");
+
+		const title = await generateSessionTitle(
+			"Investigate unknown",
+			createRegistry(model),
+			createSettings(model, "ollama:gpt-oss"),
+		);
+
+		expect(title).toBeNull();
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+	});
+});
+
+describe("tiny title subprocess", () => {
+	it("does not inherit worker output into the interactive terminal", async () => {
+		const calls: TinyWorkerSpawnCall[] = [];
+		vi.spyOn(Bun, "spawn").mockImplementation(createTinyWorkerSpawnMock(calls));
+
+		const worker = createTinyTitleSubprocess();
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.options.stdout).toBe("ignore");
+		expect(calls[0]?.options.stderr).toBe("ignore");
+		await worker.proc.exited;
 	});
 });
 

@@ -1,10 +1,23 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { resolveEvalBackends } from "@oh-my-pi/pi-coding-agent/tools/eval-backends";
 
+let originalPiPy: string | undefined;
+let originalPiJs: string | undefined;
+let originalPiRb: string | undefined;
+let originalPiJl: string | undefined;
+
+function restoreEnv(name: "PI_PY" | "PI_JS" | "PI_RB" | "PI_JL", value: string | undefined): void {
+	if (value === undefined) {
+		delete Bun.env[name];
+		return;
+	}
+	Bun.env[name] = value;
+}
 function makeSession(settings = Settings.isolated()): ToolSession {
 	return {
 		cwd: "/tmp/eval-test",
@@ -29,8 +42,23 @@ const mockResult = {
 };
 
 describe("EvalTool language dispatch", () => {
+	beforeEach(() => {
+		originalPiPy = Bun.env.PI_PY;
+		originalPiJs = Bun.env.PI_JS;
+		originalPiRb = Bun.env.PI_RB;
+		originalPiJl = Bun.env.PI_JL;
+		delete Bun.env.PI_PY;
+		delete Bun.env.PI_JS;
+		delete Bun.env.PI_RB;
+		delete Bun.env.PI_JL;
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
+		restoreEnv("PI_PY", originalPiPy);
+		restoreEnv("PI_JS", originalPiJs);
+		restoreEnv("PI_RB", originalPiRb);
+		restoreEnv("PI_JL", originalPiJl);
 	});
 
 	it('dispatches to the JS backend when cell.language === "js"', async () => {
@@ -39,7 +67,8 @@ describe("EvalTool language dispatch", () => {
 
 		const tool = new EvalTool(makeSession());
 		await tool.execute("call-js", {
-			cells: [{ language: "js", code: "const x = 1;" }],
+			language: "js",
+			code: "const x = 1;",
 		});
 
 		expect(jsExecuteSpy).toHaveBeenCalledTimes(1);
@@ -54,26 +83,23 @@ describe("EvalTool language dispatch", () => {
 
 		const tool = new EvalTool(makeSession());
 		await tool.execute("call-py", {
-			cells: [{ language: "py", code: "print('hi')" }],
+			language: "py",
+			code: "print('hi')",
 		});
 
 		expect(pythonExecuteSpy).toHaveBeenCalledTimes(1);
 		expect(jsExecuteSpy).not.toHaveBeenCalled();
 	});
 
-	it("interleaves backends across cells in a single call", async () => {
+	it("dispatches each call to the backend named by its language", async () => {
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockResolvedValue(true);
 		const pythonExecuteSpy = vi.spyOn(evalIndex.pythonBackend, "execute").mockResolvedValue(mockResult);
 		const jsExecuteSpy = vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(mockResult);
 
 		const tool = new EvalTool(makeSession());
-		await tool.execute("call-mixed", {
-			cells: [
-				{ language: "py", code: "x = 1" },
-				{ language: "js", code: "const y = 2;" },
-			],
-		});
+		await tool.execute("call-py", { language: "py", code: "x = 1" });
+		await tool.execute("call-js", { language: "js", code: "const y = 2;" });
 
 		expect(pythonExecuteSpy).toHaveBeenCalledTimes(1);
 		expect(jsExecuteSpy).toHaveBeenCalledTimes(1);
@@ -85,7 +111,8 @@ describe("EvalTool language dispatch", () => {
 		const tool = new EvalTool(makeSession(settings));
 		await expect(
 			tool.execute("call-py-disabled", {
-				cells: [{ language: "py", code: "print('hi')" }],
+				language: "py",
+				code: "print('hi')",
 			}),
 		).rejects.toThrow(/eval\.py = false/);
 	});
@@ -96,8 +123,37 @@ describe("EvalTool language dispatch", () => {
 		const tool = new EvalTool(makeSession(settings));
 		await expect(
 			tool.execute("call-js-disabled", {
-				cells: [{ language: "js", code: "const x = 1;" }],
+				language: "js",
+				code: "const x = 1;",
 			}),
 		).rejects.toThrow(/eval\.js = false/);
+	});
+
+	it("uses settings for eval backends whose env flag is unset", () => {
+		Bun.env.PI_PY = "1";
+		const settings = Settings.isolated();
+		settings.set("eval.py", false);
+		settings.set("eval.js", false);
+
+		expect(resolveEvalBackends(makeSession(settings))).toEqual({
+			python: true,
+			js: false,
+			ruby: false,
+			julia: false,
+		});
+	});
+
+	it("lets PI_JS disable js execution even when eval.js is enabled", async () => {
+		Bun.env.PI_JS = "0";
+		const settings = Settings.isolated();
+		settings.set("eval.js", true);
+		const tool = new EvalTool(makeSession(settings));
+
+		await expect(
+			tool.execute("call-js-env-disabled", {
+				language: "js",
+				code: "const x = 1;",
+			}),
+		).rejects.toThrow(/PI_JS=0/);
 	});
 });

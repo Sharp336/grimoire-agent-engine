@@ -9,6 +9,7 @@ import type {
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -256,13 +257,16 @@ function mapAssistantMessageUpdate(
 				progress.textEmitted = true;
 			}
 			break;
-		case "thinking_delta":
+		case "thinking_delta": {
+			const block = event.assistantMessageEvent.partial?.content?.[event.assistantMessageEvent.contentIndex];
+			if (block?.type === "thinking" && !canonicalizeMessage(block.thinking)) return [];
 			sessionUpdate = "agent_thought_chunk";
 			text = event.assistantMessageEvent.delta;
 			if (text.length > 0 && progress) {
 				progress.thoughtEmitted = true;
 			}
 			break;
+		}
 		case "done":
 			if (progress?.textEmitted) {
 				return [];
@@ -464,8 +468,13 @@ function buildEvalStartText(args: unknown): string | undefined {
 	if (typeof args !== "object" || args === null || Array.isArray(args)) {
 		return undefined;
 	}
-	const cells = (args as EvalCellContainer).cells;
-	if (!Array.isArray(cells) || cells.length === 0) {
+	const container = args as EvalCellContainer & EvalCellLike;
+	const cells = Array.isArray(container.cells)
+		? container.cells
+		: typeof container.code === "string"
+			? [container]
+			: [];
+	if (cells.length === 0) {
 		return undefined;
 	}
 	const lines: string[] = [];

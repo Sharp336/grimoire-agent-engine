@@ -32,16 +32,11 @@
  * (OpenRouter, OpenCode, Kilo, Fireworks, …) translates thinking into its
  * own native format and would reject the extra key.
  */
-import { afterEach, describe, expect, it } from "bun:test";
-import { getBundledModel } from "../src/models";
-import { streamOpenAICompletions } from "../src/providers/openai-completions";
-import type { AssistantMessage, Context, Model } from "../src/types";
-
-const originalFetch = global.fetch;
-
-afterEach(() => {
-	global.fetch = originalFetch;
-});
+import { describe, expect, it } from "bun:test";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import type { AssistantMessage, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function abortedSignal(): AbortSignal {
 	const controller = new AbortController();
@@ -56,31 +51,35 @@ function sseDoneResponse(): Response {
 	});
 }
 
-function mockFetch(): typeof fetch {
+function mockFetch(): FetchImpl {
 	const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> => sseDoneResponse();
-	return Object.assign(fn, { preconnect: originalFetch.preconnect });
+	return Object.assign(fn, { preconnect: fetch.preconnect });
 }
 
 function moonshotKimiModel(id: string, reasoning = true): Model<"openai-completions"> {
-	return {
-		...getBundledModel("openai", "gpt-4o-mini"),
+	const base = getBundledModel("openai", "gpt-4o-mini");
+	return buildModel({
+		...base,
 		api: "openai-completions",
 		provider: "moonshot",
 		baseUrl: "https://api.moonshot.ai/v1",
 		id,
 		reasoning,
-	};
+		compat: base.compatConfig,
+	} as ModelSpec<"openai-completions">);
 }
 
 function openRouterKimiModel(id: string): Model<"openai-completions"> {
-	return {
-		...getBundledModel("openai", "gpt-4o-mini"),
+	const base = getBundledModel("openai", "gpt-4o-mini");
+	return buildModel({
+		...base,
 		api: "openai-completions",
 		provider: "openrouter",
 		baseUrl: "https://openrouter.ai/api/v1",
 		id,
 		reasoning: true,
-	};
+		compat: base.compatConfig,
+	} as ModelSpec<"openai-completions">);
 }
 
 function basicContext(): Context {
@@ -95,18 +94,36 @@ async function capturePayload(
 	context: Context = basicContext(),
 ): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
-	global.fetch = mockFetch();
 	streamOpenAICompletions(model, context, {
 		apiKey: "test-key",
 		signal: abortedSignal(),
 		onPayload: payload => resolve(payload),
 		...opts,
+		fetch: mockFetch(),
 	});
 	return promise;
 }
 
+interface CompletionAssistantWireMessage {
+	role: "assistant";
+	reasoning_content?: unknown;
+}
+
 interface CompletionBody {
 	thinking?: { type?: string; keep?: string };
+	messages?: unknown[];
+	stream?: boolean;
+}
+
+function isCompletionAssistantWireMessage(message: unknown): message is CompletionAssistantWireMessage {
+	if (typeof message !== "object" || message === null) return false;
+	return (message as { role?: unknown }).role === "assistant";
+}
+
+function findCompletionAssistantWireMessage(
+	messages: readonly unknown[] | undefined,
+): CompletionAssistantWireMessage | undefined {
+	return messages?.find(isCompletionAssistantWireMessage);
 }
 
 describe("issue #1838 — kimi-k2.6 preserves historical reasoning across tool calls", () => {
@@ -119,14 +136,16 @@ describe("issue #1838 — kimi-k2.6 preserves historical reasoning across tool c
 		// Sanity: the Moonshot-native gate is provider+baseUrl driven, not id-only.
 		// A made-up host with `kimi-k2.6` in the id but a non-Moonshot baseUrl must
 		// never get the Moonshot-only `keep` parameter on the wire.
-		const customModel: Model<"openai-completions"> = {
-			...getBundledModel("openai", "gpt-4o-mini"),
+		const base = getBundledModel("openai", "gpt-4o-mini");
+		const customModel: Model<"openai-completions"> = buildModel({
+			...base,
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://example.com/v1",
 			id: "kimi-k2.6",
 			reasoning: true,
-		};
+			compat: base.compatConfig,
+		} as ModelSpec<"openai-completions">);
 		const payload = (await capturePayload(customModel, { reasoning: "high" })) as CompletionBody;
 		expect(payload.thinking).toBeUndefined();
 	});
@@ -190,14 +209,16 @@ describe("issue #1838 — kimi-k2.6 preserves historical reasoning across tool c
 		// Fireworks publishes Kimi K2.6 under the `accounts/fireworks/routers/`
 		// namespace. The `keep` flag is Moonshot-specific, so a Fireworks-hosted
 		// K2.6 (which never speaks the Moonshot wire) must not see it.
-		const fireworksModel: Model<"openai-completions"> = {
-			...getBundledModel("openai", "gpt-4o-mini"),
+		const base = getBundledModel("openai", "gpt-4o-mini");
+		const fireworksModel: Model<"openai-completions"> = buildModel({
+			...base,
 			api: "openai-completions",
 			provider: "fireworks",
 			baseUrl: "https://api.fireworks.ai/inference/v1",
 			id: "accounts/fireworks/routers/kimi-k2.6",
 			reasoning: true,
-		};
+			compat: base.compatConfig,
+		} as ModelSpec<"openai-completions">);
 		const payload = (await capturePayload(fireworksModel, { reasoning: "high" })) as CompletionBody;
 		// Fireworks → reasoning_effort path; thinking object never set.
 		expect(payload.thinking).toBeUndefined();
@@ -245,11 +266,11 @@ describe("issue #1838 — kimi-k2.6 preserves historical reasoning across tool c
 					},
 				],
 			},
-		)) as CompletionBody & { messages?: Array<Record<string, unknown>>; stream?: boolean };
+		)) as CompletionBody;
 		expect(payload.thinking).toEqual({ type: "enabled", keep: "all" });
 		expect(payload.stream).toBe(true);
-		const assistant = payload.messages?.find(m => m.role === "assistant");
+		const assistant = findCompletionAssistantWireMessage(payload.messages);
 		expect(assistant).toBeDefined();
-		expect(Reflect.get(assistant as object, "reasoning_content")).toBe("Need to read the file first.");
+		expect(assistant?.reasoning_content).toBe("Need to read the file first.");
 	});
 });

@@ -1,9 +1,12 @@
+import * as path from "node:path";
 import { isEnoent, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { applyWorkspaceEdit } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import type {
 	LspClient,
+	LspJsonRpcId,
 	LspJsonRpcNotification,
 	LspJsonRpcRequest,
 	LspJsonRpcResponse,
@@ -20,6 +23,10 @@ import { detectLanguageId, fileToUri } from "./utils";
 const clients = new Map<string, LspClient>();
 const clientLocks = new Map<string, Promise<LspClient>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+
+/** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
+const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
+const initFailures = new Map<string, { at: number; message: string }>();
 
 // Idle timeout configuration (disabled by default)
 let idleTimeoutMs: number | null = null;
@@ -147,6 +154,7 @@ const CLIENT_CAPABILITIES = {
 			failureHandling: "textOnlyTransactional",
 		},
 		configuration: true,
+		workspaceFolders: true,
 		symbol: {
 			dynamicRegistration: false,
 			symbolKind: {
@@ -171,49 +179,6 @@ const CLIENT_CAPABILITIES = {
 // =============================================================================
 // LSP Message Protocol
 // =============================================================================
-
-/**
- * Parse a single LSP message from a buffer.
- * Returns the parsed message and remaining buffer, or null if incomplete.
- */
-function parseMessage(
-	buffer: Buffer,
-): { message: LspJsonRpcResponse | LspJsonRpcNotification; remaining: Buffer } | null {
-	// Only decode enough to find the header
-	const headerEndIndex = findHeaderEnd(buffer);
-	if (headerEndIndex === -1) return null;
-
-	const headerText = new TextDecoder().decode(buffer.slice(0, headerEndIndex));
-	const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-	if (!contentLengthMatch) return null;
-
-	const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-	const messageStart = headerEndIndex + 4; // Skip \r\n\r\n
-	const messageEnd = messageStart + contentLength;
-
-	if (buffer.length < messageEnd) return null;
-
-	const messageBytes = buffer.subarray(messageStart, messageEnd);
-	const messageText = new TextDecoder().decode(messageBytes);
-	const remaining = buffer.subarray(messageEnd);
-
-	return {
-		message: JSON.parse(messageText),
-		remaining,
-	};
-}
-
-/**
- * Find the end of the header section (before \r\n\r\n)
- */
-function findHeaderEnd(buffer: Uint8Array): number {
-	for (let i = 0; i < buffer.length - 3; i++) {
-		if (buffer[i] === 13 && buffer[i + 1] === 10 && buffer[i + 2] === 13 && buffer[i + 3] === 10) {
-			return i;
-		}
-	}
-	return -1;
-}
 
 async function writeMessage(
 	sink: Bun.FileSink,
@@ -247,64 +212,86 @@ async function startMessageReader(client: LspClient): Promise<void> {
 
 	const reader = (client.proc.stdout as ReadableStream<Uint8Array>).getReader();
 
+	const framer = new MessageFramer(Buffer.from(client.messageBuffer));
+
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
 
-			// Atomically update buffer before processing
-			const currentBuffer: Buffer = Buffer.concat([client.messageBuffer, value]);
-			client.messageBuffer = currentBuffer;
+			framer.push(Buffer.from(value));
 
-			// Process all complete messages in buffer
-			// Use local variable to avoid race with concurrent buffer updates
-			let workingBuffer = currentBuffer;
-			let parsed = parseMessage(workingBuffer);
-			while (parsed) {
-				const { message, remaining } = parsed;
-				workingBuffer = remaining;
+			// Drain every complete message currently buffered.
+			for (const messageText of framer.drain(headerText => {
+				// Non-protocol bytes on stdout (e.g. a wrapper script printing).
+				// Drop past the bogus terminator and resync instead of stalling
+				// on the same junk header forever.
+				logger.warn("LSP framing resync: header block without Content-Length", {
+					server: client.name,
+					header: headerText.slice(0, 200),
+				});
+			})) {
+				// A malformed message or a throwing server-request handler must not
+				// kill the reader — later messages are still well-framed.
+				try {
+					const message: LspJsonRpcResponse | LspJsonRpcNotification = JSON.parse(messageText);
 
-				// Route message
-				if ("id" in message && message.id !== undefined) {
-					// Response to a request
-					const pending = client.pendingRequests.get(message.id);
-					if (pending) {
-						client.pendingRequests.delete(message.id);
-						if ("error" in message && message.error) {
-							pending.reject(new Error(`LSP error: ${message.error.message}`));
+					// Route message. A JSON-RPC message carrying a `method` is always
+					// server-originated: a request when it also has an `id`, a
+					// notification otherwise. A message with only an `id` is a response
+					// to one of our requests. Disambiguate on `method` FIRST: a
+					// server's request ids live in its own id space and routinely
+					// collide with our in-flight client request ids (e.g. a
+					// basedpyright `workspace/configuration` pull arriving while a
+					// `documentSymbol` request with the same id is pending). Matching
+					// pending requests first would swallow that pull as a bogus
+					// response -- dropping the config answer the server blocks on and
+					// resolving our request with `undefined`, wedging the lazy
+					// cold-start handshake (#3001).
+					if ("method" in message) {
+						if ("id" in message && message.id !== undefined) {
+							// Server-initiated request: must be answered.
+							await handleServerRequest(client, message as LspJsonRpcRequest);
 						} else {
-							pending.resolve(message.result);
+							// Server notification
+							if (message.method === "textDocument/publishDiagnostics" && message.params) {
+								const params = message.params as PublishDiagnosticsParams;
+								client.diagnostics.set(params.uri, {
+									diagnostics: params.diagnostics,
+									version: params.version ?? null,
+								});
+								client.diagnosticsVersion += 1;
+							} else if (message.method === "$/progress" && message.params) {
+								const params = message.params as { token: string | number; value?: { kind?: string } };
+								if (params.value?.kind === "begin") {
+									client.activeProgressTokens.add(params.token);
+								} else if (params.value?.kind === "end") {
+									client.activeProgressTokens.delete(params.token);
+									if (client.activeProgressTokens.size === 0) {
+										client.resolveProjectLoaded();
+									}
+								}
+							}
 						}
-					} else if ("method" in message) {
-						await handleServerRequest(client, message as LspJsonRpcRequest);
-					}
-				} else if ("method" in message) {
-					// Server notification
-					if (message.method === "textDocument/publishDiagnostics" && message.params) {
-						const params = message.params as PublishDiagnosticsParams;
-						client.diagnostics.set(params.uri, {
-							diagnostics: params.diagnostics,
-							version: params.version ?? null,
-						});
-						client.diagnosticsVersion += 1;
-					} else if (message.method === "$/progress" && message.params) {
-						const params = message.params as { token: string | number; value?: { kind?: string } };
-						if (params.value?.kind === "begin") {
-							client.activeProgressTokens.add(params.token);
-						} else if (params.value?.kind === "end") {
-							client.activeProgressTokens.delete(params.token);
-							if (client.activeProgressTokens.size === 0) {
-								client.resolveProjectLoaded();
+					} else if ("id" in message && message.id !== undefined) {
+						// Response to one of our requests.
+						const pending = client.pendingRequests.get(message.id);
+						if (pending) {
+							client.pendingRequests.delete(message.id);
+							if ("error" in message && message.error) {
+								pending.reject(new Error(`LSP error: ${message.error.message}`));
+							} else {
+								pending.resolve(message.result);
 							}
 						}
 					}
+				} catch (err) {
+					logger.warn("LSP message handling failed", {
+						server: client.name,
+						error: err instanceof Error ? err.message : String(err),
+					});
 				}
-
-				parsed = parseMessage(workingBuffer);
 			}
-
-			// Atomically commit processed buffer
-			client.messageBuffer = workingBuffer;
 		}
 	} catch (err) {
 		// Connection closed or error - reject all pending requests
@@ -313,16 +300,48 @@ async function startMessageReader(client: LspClient): Promise<void> {
 		}
 		client.pendingRequests.clear();
 	} finally {
+		// Persist any unparsed remainder so a restarted reader resumes mid-message.
+		client.messageBuffer = framer.remainder();
 		reader.releaseLock();
 		client.isReading = false;
+		// Reader exited while the server process is still alive (unrecoverable
+		// read error or bad stream state): nothing will route responses anymore,
+		// so tear the client down — the next call respawns instead of timing out.
+		if (client.proc.exitCode === null) {
+			client.status = "error";
+			if (clients.get(client.name) === client) {
+				clients.delete(client.name);
+			}
+			const teardownErr = new Error("LSP reader stopped; client torn down");
+			for (const pending of client.pendingRequests.values()) {
+				pending.reject(teardownErr);
+			}
+			client.pendingRequests.clear();
+			client.resolveProjectLoaded();
+			client.proc.kill();
+		}
 	}
+}
+
+/**
+ * Build the workspace folder list advertised to the server. Identical shape
+ * for `initialize` params and `workspace/workspaceFolders` server requests.
+ */
+function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: string }> {
+	return [{ uri: fileToUri(client.cwd), name: path.basename(client.cwd) || "workspace" }];
+}
+
+/**
+ * Handle workspace/workspaceFolders requests from the server.
+ */
+async function handleWorkspaceFoldersRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
+	await sendResponse(client, message.id, currentWorkspaceFolders(client), "workspace/workspaceFolders");
 }
 
 /**
  * Handle workspace/configuration requests from the server.
  */
 async function handleConfigurationRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
-	if (typeof message.id !== "number") return;
 	const params = message.params as { items?: Array<{ section?: string }> };
 	const items = params?.items ?? [];
 	const result = items.map(item => {
@@ -336,7 +355,6 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
-	if (typeof message.id !== "number") return;
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -364,18 +382,48 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 		await handleConfigurationRequest(client, message);
 		return;
 	}
+	if (message.method === "workspace/workspaceFolders") {
+		await handleWorkspaceFoldersRequest(client, message);
+		return;
+	}
 	if (message.method === "workspace/applyEdit") {
 		await handleApplyEditRequest(client, message);
 		return;
 	}
 	if (message.method === "window/workDoneProgress/create") {
-		// Accept progress token registration from the server
-		if (typeof message.id === "number") {
-			await sendResponse(client, message.id, null, message.method);
-		}
+		// Accept progress token registration from the server.
+		await sendResponse(client, message.id, null, message.method);
 		return;
 	}
-	if (typeof message.id !== "number") return;
+	if (message.method === "client/registerCapability" || message.method === "client/unregisterCapability") {
+		// Some servers block semantic requests until dynamic registration succeeds.
+		await sendResponse(client, message.id, null, message.method);
+		return;
+	}
+	if (message.method === "window/showMessageRequest") {
+		// Headless: no UI to surface the prompt. Spec says null = "no action selected".
+		await sendResponse(client, message.id, null, message.method);
+		return;
+	}
+	if (message.method === "window/showDocument") {
+		// Headless: nothing to display. Spec result is `{ success: boolean }`.
+		await sendResponse(client, message.id, { success: false }, message.method);
+		return;
+	}
+	if (
+		message.method === "workspace/semanticTokens/refresh" ||
+		message.method === "workspace/inlayHint/refresh" ||
+		message.method === "workspace/codeLens/refresh" ||
+		message.method === "workspace/codeAction/refresh" ||
+		message.method === "workspace/inlineValue/refresh" ||
+		message.method === "workspace/foldingRange/refresh" ||
+		message.method === "workspace/diagnostic/refresh"
+	) {
+		// Void acknowledgement per spec; servers that stall waiting for a reply
+		// (same failure mode as the dynamic-registration hang in #3029) move on.
+		await sendResponse(client, message.id, null, message.method);
+		return;
+	}
 	await sendResponse(client, message.id, null, message.method, {
 		code: -32601,
 		message: `Method not found: ${message.method}`,
@@ -387,7 +435,7 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
  */
 async function sendResponse(
 	client: LspClient,
-	id: number,
+	id: LspJsonRpcId,
 	result: unknown,
 	method: string,
 	error?: { code: number; message: string; data?: unknown },
@@ -412,7 +460,66 @@ async function sendResponse(
 /** Timeout for warmup initialize requests (5 seconds) */
 export const WARMUP_TIMEOUT_MS = 5000;
 
-/** Max time to wait for the server to report project loading completion via $/progress */
+/** Max time to poll rust-analyzer after progress ends but before Cargo workspaces are ready. */
+const RUST_ANALYZER_WORKSPACE_READY_TIMEOUT_MS = 5_000;
+const RUST_ANALYZER_WORKSPACE_READY_POLL_MS = 100;
+const RUST_ANALYZER_WORKSPACE_READY_SETTLE_MS = 2_000;
+const RUST_ANALYZER_STATUS_REQUEST_TIMEOUT_MS = 1_000;
+const rustAnalyzerReadyClients = new WeakSet<LspClient>();
+
+function commandBasename(command: string): string {
+	const slash = command.lastIndexOf("/");
+	const backslash = command.lastIndexOf("\\");
+	const separator = Math.max(slash, backslash);
+	return separator === -1 ? command : command.slice(separator + 1);
+}
+
+function isRustAnalyzerClient(client: LspClient): boolean {
+	return (
+		commandBasename(client.config.command) === "rust-analyzer" ||
+		(client.config.resolvedCommand ? commandBasename(client.config.resolvedCommand) === "rust-analyzer" : false)
+	);
+}
+
+function isRustAnalyzerStatusTimeout(err: unknown): boolean {
+	return err instanceof Error && err.message.startsWith("LSP request rust-analyzer/analyzerStatus timed out after ");
+}
+
+async function waitForRustAnalyzerWorkspace(client: LspClient, signal?: AbortSignal): Promise<void> {
+	if (rustAnalyzerReadyClients.has(client)) {
+		return;
+	}
+	const timings = client.config.workspaceReadyTimings;
+	const timeoutMs = timings?.timeoutMs ?? RUST_ANALYZER_WORKSPACE_READY_TIMEOUT_MS;
+	const pollMs = timings?.pollMs ?? RUST_ANALYZER_WORKSPACE_READY_POLL_MS;
+	const settleMs = timings?.settleMs ?? RUST_ANALYZER_WORKSPACE_READY_SETTLE_MS;
+	const statusRequestTimeoutMs = timings?.statusRequestTimeoutMs ?? RUST_ANALYZER_STATUS_REQUEST_TIMEOUT_MS;
+	const started = Date.now();
+	const deadline = started + timeoutMs;
+	while (true) {
+		throwIfAborted(signal);
+		let status: unknown;
+		try {
+			status = await sendRequest(client, "rust-analyzer/analyzerStatus", {}, signal, statusRequestTimeoutMs);
+		} catch (err) {
+			if (!isRustAnalyzerStatusTimeout(err) || Date.now() >= deadline) {
+				return;
+			}
+			await Bun.sleep(pollMs);
+			continue;
+		}
+		const ready = typeof status === "string" && !status.startsWith("No workspaces");
+		if (ready && Date.now() - started >= settleMs) {
+			rustAnalyzerReadyClients.add(client);
+			return;
+		}
+		if (Date.now() >= deadline) {
+			return;
+		}
+		await Bun.sleep(pollMs);
+	}
+}
+
 const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 
 /** Max time to wait for graceful LSP shutdown and process exit. */
@@ -439,6 +546,16 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 	const existingLock = clientLocks.get(key);
 	if (existingLock) {
 		return existingLock;
+	}
+
+	// Fail fast on a recent deterministic init failure instead of re-spawning
+	// a broken server (and paying its full init wait) on every call.
+	const recentFailure = initFailures.get(key);
+	if (recentFailure) {
+		if (Date.now() - recentFailure.at < INIT_FAILURE_BACKOFF_MS) {
+			throw new Error(`LSP server ${config.command} failed to initialize recently: ${recentFailure.message}`);
+		}
+		initFailures.delete(key);
 	}
 
 	// Create new client with lock
@@ -481,18 +598,18 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			pendingRequests: new Map(),
 			messageBuffer: new Uint8Array(0),
 			isReading: false,
+			status: "connecting",
 			lastActivity: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
 			projectLoaded,
 			resolveProjectLoaded,
 		};
-		clients.set(key, client);
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
-			clients.delete(key);
-			clientLocks.delete(key);
+			if (clients.get(key) === client) clients.delete(key);
+			if (clientLocks.get(key) === clientPromise) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 
 			// Reject any pending requests — the server is gone, they will never complete.
@@ -530,7 +647,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 					rootPath: cwd,
 					capabilities: CLIENT_CAPABILITIES,
 					initializationOptions: config.initOptions ?? {},
-					workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split("/").pop() ?? "workspace" }],
+					workspaceFolders: currentWorkspaceFolders(client),
 				},
 				undefined, // signal
 				initTimeoutMs,
@@ -545,12 +662,26 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			// Send initialized notification
 			await sendNotification(client, "initialized", {});
 
+			client.status = "ready";
+			// Publish only after init succeeds: pre-init clients are reachable
+			// solely through clientLocks, so concurrent callers (warmup vs first
+			// tool call) wait for init instead of using an unacknowledged client.
+			clients.set(key, client);
+			initFailures.delete(key);
 			return client;
 		} catch (err) {
 			// Clean up on initialization failure
-			clients.delete(key);
-			clientLocks.delete(key);
+			client.status = "error";
+			if (clients.get(key) === client) clients.delete(key);
 			proc.kill();
+			const message = err instanceof Error ? err.message : String(err);
+			// Negative-cache deterministic failures. Timeouts under a
+			// caller-shortened deadline (warmup/writethrough) are not cached —
+			// the server may simply be slow and a later call with the full
+			// deadline can still succeed.
+			if (!(initTimeoutMs !== undefined && message.includes("timed out"))) {
+				initFailures.set(key, { at: Date.now(), message });
+			}
 			throw err;
 		} finally {
 			clientLocks.delete(key);
@@ -635,6 +766,9 @@ export async function waitForProjectLoaded(client: LspClient, signal?: AbortSign
 			? [new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))]
 			: []),
 	]);
+	if (isRustAnalyzerClient(client)) {
+		await waitForRustAnalyzerWorkspace(client, signal);
+	}
 }
 
 /**
@@ -819,18 +953,28 @@ export async function shutdownClient(key: string): Promise<void> {
 // LSP Protocol Methods
 // =============================================================================
 
-/** Default timeout for LSP requests (30 seconds) */
+/** Default timeout for LSP requests when no abort signal is provided (30 seconds) */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
 /**
  * Send an LSP request and wait for response.
+ *
+ * Timeout policy:
+ * - If `timeoutMs` is explicitly provided, that value is used.
+ * - Else, if `signal` is provided, no internal timer is installed (the caller
+ *   owns the deadline via the signal — typically a wall-clock `AbortSignal.timeout`
+ *   from the LSP tool). Installing a second hard-coded 30s timer here used to
+ *   cause "timed out after 30000ms" errors even when the caller had requested
+ *   `timeout: 60`.
+ * - Else (no signal, no explicit timeout), fall back to `DEFAULT_REQUEST_TIMEOUT_MS`
+ *   to avoid leaking pending requests forever.
  */
 export async function sendRequest(
 	client: LspClient,
 	method: string,
 	params: unknown,
 	signal?: AbortSignal,
-	timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+	timeoutMs?: number,
 ): Promise<unknown> {
 	// Atomically increment and capture request ID
 	const id = ++client.requestId;
@@ -866,15 +1010,17 @@ export async function sendRequest(
 		reject(reason);
 	};
 
-	// Set timeout
-	timeout = setTimeout(() => {
-		if (client.pendingRequests.has(id)) {
-			client.pendingRequests.delete(id);
-			const err = new Error(`LSP request ${method} timed out after ${timeoutMs}ms`);
-			cleanup();
-			reject(err);
-		}
-	}, timeoutMs);
+	const effectiveTimeoutMs = timeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
+	if (effectiveTimeoutMs !== undefined) {
+		timeout = setTimeout(() => {
+			if (client.pendingRequests.has(id)) {
+				client.pendingRequests.delete(id);
+				const err = new Error(`LSP request ${method} timed out after ${effectiveTimeoutMs}ms`);
+				cleanup();
+				reject(err);
+			}
+		}, effectiveTimeoutMs);
+	}
 	if (signal) {
 		signal.addEventListener("abort", abortHandler, { once: true });
 		if (signal.aborted) {
@@ -928,7 +1074,22 @@ export async function sendNotification(client: LspClient, method: string, params
 export async function shutdownAll(): Promise<void> {
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
-	await Promise.allSettled(clientsToShutdown.map(client => shutdownClientInstance(client)));
+	// Mid-initialize clients live only in clientLocks (publication is deferred
+	// until init succeeds) — without this, their server processes outlive
+	// shutdown. Failed init promises already cleaned up after themselves.
+	const pendingClients = Array.from(clientLocks.values());
+	clientLocks.clear();
+	const seen = new Set<LspClient>(clientsToShutdown);
+	await Promise.allSettled([
+		...clientsToShutdown.map(client => shutdownClientInstance(client)),
+		...pendingClients.map(pending =>
+			pending.then(client => {
+				if (seen.has(client)) return;
+				seen.add(client);
+				return shutdownClientInstance(client);
+			}),
+		),
+	]);
 }
 
 /** Status of an LSP server */
@@ -945,7 +1106,7 @@ export interface LspServerStatus {
 export function getActiveClients(): LspServerStatus[] {
 	return Array.from(clients.values()).map(client => ({
 		name: client.config.command,
-		status: "ready" as const,
+		status: client.status,
 		fileTypes: client.config.fileTypes,
 	}));
 }

@@ -26,6 +26,7 @@ import { Settings } from "../../../config/settings";
 import { DynamicBorder } from "../../../modes/components/dynamic-border";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
+import { handleTabSwitchKey, padLinesToHeight } from "../selector-helpers";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
 import {
@@ -137,7 +138,7 @@ export class ExtensionDashboard extends Container {
 		return Math.max(3, this.#computeBodyHeight() - 3);
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		// Rebuild when terminal geometry changes so the full-screen overlay
 		// re-fits on resize.
 		if (this.#terminalRows() !== this.#builtRows || this.#uiWidth() !== this.#builtCols) {
@@ -146,9 +147,7 @@ export class ExtensionDashboard extends Container {
 		const lines = super.render(width);
 		// Pad to the full viewport so the dashboard covers the screen instead of
 		// letting the transcript peek through below it.
-		const rows = this.#terminalRows();
-		while (lines.length < rows) lines.push("");
-		return lines;
+		return padLinesToHeight(lines, this.#terminalRows());
 	}
 
 	#buildLayout(): void {
@@ -336,12 +335,7 @@ export class ExtensionDashboard extends Container {
 		}
 
 		// Tab/Shift+Tab or Left/Right: Cycle through tabs
-		if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-			this.#switchTab(1);
-			return;
-		}
-		if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
-			this.#switchTab(-1);
+		if (handleTabSwitchKey(data, direction => this.#switchTab(direction))) {
 			return;
 		}
 
@@ -367,7 +361,7 @@ class TwoColumnBody implements Component {
 		private readonly maxHeight: number,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const leftWidth = Math.floor(width * 0.5);
 		const rightWidth = Math.max(0, width - leftWidth - 3);
 
@@ -377,7 +371,7 @@ class TwoColumnBody implements Component {
 		// Fill the full body height so the dashboard reads as a full-screen view.
 		const numLines = this.maxHeight;
 		const combined: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
+		const separator = theme.fg("dim", ` ${theme.boxRound.vertical} `);
 
 		for (let i = 0; i < numLines; i++) {
 			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);

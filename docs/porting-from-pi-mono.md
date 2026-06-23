@@ -47,6 +47,9 @@ Upstream uses different package scopes. Replace them consistently.
   - `@mariozechner/pi-agent-core` → `@oh-my-pi/pi-agent-core`
   - `@mariozechner/pi-tui` → `@oh-my-pi/pi-tui`
   - `@mariozechner/pi-ai` → `@oh-my-pi/pi-ai`
+  - `@mariozechner/pi-utils` → `@oh-my-pi/pi-utils`
+- Some upstream packages publish under the `@earendil-works/*` scope instead of `@mariozechner/*`. Map it the same way (`@earendil-works/pi-coding-agent` → `@oh-my-pi/pi-coding-agent`, and so on).
+- The bare `typebox` package is not an `@oh-my-pi/*` scope; do not rewrite it as one. See the Extensions divergence in section 15 for how tool-parameter schemas map.
 
 ## 4) Use Bun APIs where they improve on Node
 
@@ -97,7 +100,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "myapp-"));
 
 ## 5) Prefer Bun embeds (no copying)
 
-Do not add new runtime asset copy steps. Keep assets in repo and prefer Bun embeds/imports; preserve existing explicit generation workflows such as `packages/coding-agent/src/export/html/template.generated.ts`.
+Do not add new runtime asset copy steps. Keep assets in repo and prefer Bun embeds/imports; preserve existing explicit generation workflows such as `packages/coding-agent/src/export/html/tool-views.generated.js` (built from collab-web sources via `bun run build-tool-views`).
 
 - If upstream copies assets into a dist folder, replace with Bun-friendly embeds.
 - Prompts are static `.md` files; use Bun text imports (`with { type: "text" }`) and Handlebars instead of inline prompt strings.
@@ -303,7 +306,7 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 | ------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------- |
 | `FooterDataProvider` class                  | `StatusLineComponent`                                     | Simpler, integrated status line                                       |
 | `ctx.ui.setHeader()` / `ctx.ui.setFooter()` | No-op stubs in current extension contexts                 | Not currently wired to replace the TUI status/header UI               |
-| `ctx.ui.setEditorComponent()`               | No-op stubs in current extension contexts                 | Custom editor replacement is not currently wired                      |
+| `ctx.ui.setEditorComponent()`               | Wired in interactive mode; no-op stubs in ACP/RPC/headless contexts | Custom editor replacement works in the interactive TUI; non-TUI runtimes keep stubs |
 | `InteractiveModeOptions` options object     | Positional constructor args (options type still exported) | Keep constructor signature; update the type when upstream adds fields |
 
 ### Component Naming
@@ -353,10 +356,13 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 ### Extensions
 
-| Upstream                      | Our Fork                                          |
-| ----------------------------- | ------------------------------------------------- |
-| `jiti` for TypeScript loading | Native Bun `import()`                             |
-| `pkg.pi` manifest field       | `pkg.omp` preferred; fallback to `pkg.pi` remains |
+| Upstream                                                         | Our Fork                                                                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `jiti` for TypeScript loading                                    | Native Bun `import()`                                                                              |
+| `pkg.pi` manifest field                                          | `pkg.omp` preferred; fallback to `pkg.pi` remains                                                  |
+| `StringEnum` from `pi-ai`                                        | `Type.Enum` from the `pi.typebox` shim (or author the schema with `pi.zod`); `pi-ai` no longer exports `StringEnum` |
+| `formatSize` from `pi-coding-agent`                              | `formatBytes` from `@oh-my-pi/pi-utils`                                                            |
+| `DefaultResourceLoader` / `DefaultPackageManager` / `SettingsManager` / `createEventBus` | Capability-based discovery (`loadCapability(...)`) plus the `Settings` singleton and `EventBus` |
 
 ### Skip These Upstream Features
 

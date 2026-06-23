@@ -8,7 +8,7 @@
  * string twice — once from the body content, once as the styled warning line.
  */
 import { describe, expect, it } from "bun:test";
-import { formatOutputNotice, type OutputMeta, stripOutputNotice } from "../../src/tools/output-meta";
+import { formatOutputNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 const truncation: OutputMeta = {
 	truncation: {
@@ -45,7 +45,7 @@ const limitsOnly: OutputMeta = {
 
 describe("stripOutputNotice", () => {
 	it("removes the exact notice appended by the wrapper for middle elision", () => {
-		const body = "line1\nline2\n[… 4 lines elided (215B) …]\nline7\nline8";
+		const body = "line1\nline2\n[…4ln elided…]\nline7\nline8";
 		const notice = formatOutputNotice(truncation);
 		const combined = body + notice;
 

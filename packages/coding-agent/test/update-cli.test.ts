@@ -1,8 +1,17 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildBunInstallArgs, replaceBinaryForUpdate, resolveUpdateMethodForTest } from "../src/cli/update-cli";
+import {
+	buildBunInstallArgs,
+	buildHomebrewUpdateArgs,
+	buildMiseForceInstallArgs,
+	buildMiseUpgradeArgs,
+	replaceBinaryForUpdate,
+	resolveUpdateMethodForTest,
+	sweepStaleBackups,
+} from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 
 const tempDirs: string[] = [];
 
@@ -32,6 +41,54 @@ describe("update-cli install target detection", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.local/bin/omp", undefined);
 
 		expect(method).toBe("binary");
+	});
+
+	it("uses Homebrew update when prioritized omp resolves into the Homebrew formula", async () => {
+		const dir = await makeTempDir();
+		const prefix = path.join(dir, "opt", "omp");
+		const linkedBin = path.join(dir, "bin");
+		await fs.mkdir(path.join(prefix, "bin"), { recursive: true });
+		await fs.mkdir(linkedBin, { recursive: true });
+		await Bun.write(path.join(prefix, "bin", "omp"), "binary");
+		await fs.symlink(path.join(prefix, "bin", "omp"), path.join(linkedBin, "omp"));
+
+		const method = resolveUpdateMethodForTest(path.join(linkedBin, "omp"), "/Users/test/.bun/bin", {
+			homebrewPrefix: prefix,
+		});
+
+		expect(method).toBe("brew");
+	});
+
+	it("uses mise update when prioritized omp is in an active mise bin path", () => {
+		const method = resolveUpdateMethodForTest(
+			"/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin/omp",
+			undefined,
+			{
+				miseBinDirs: ["/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin"],
+			},
+		);
+
+		expect(method).toBe("mise");
+	});
+
+	it("uses mise update when prioritized omp is a mise shim", () => {
+		const method = resolveUpdateMethodForTest("/Users/test/.local/share/mise/shims/omp", undefined, {
+			miseDataDir: "/Users/test/.local/share/mise",
+		});
+
+		expect(method).toBe("mise");
+	});
+});
+
+describe("update-cli package manager commands", () => {
+	it("targets the Homebrew tap formula and switches to reinstall for forced updates", () => {
+		expect(buildHomebrewUpdateArgs(false)).toEqual(["upgrade", "can1357/tap/omp"]);
+		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
+	});
+
+	it("targets the mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
+		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump"]);
+		expect(buildMiseForceInstallArgs("15.10.5")).toEqual(["install", "--force", "github:can1357/oh-my-pi@15.10.5"]);
 	});
 });
 
@@ -124,5 +181,70 @@ describe("update-cli binary replacement", () => {
 		expect(await Bun.file(targetPath).text()).toBe("new binary");
 		expect(await Bun.file(tempPath).exists()).toBe(false);
 		expect(await Bun.file(backupPath).exists()).toBe(false);
+	});
+});
+
+describe("update-cli binary replacement on locked backups", () => {
+	it("treats an EPERM on backup cleanup as a successful, completed update", async () => {
+		// Regression: on Windows the binary moved aside during the swap is still
+		// the running process image, so unlinking it throws EPERM. That cleanup
+		// failure must not turn a verified swap into "Update failed" (issue #845).
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "omp.exe");
+		const tempPath = `${targetPath}.new`;
+		const backupPath = `${targetPath}.1700000000000.4242.bak`;
+		await Bun.write(targetPath, "old binary");
+		await Bun.write(tempPath, "new binary");
+
+		const realUnlink = nodeFs.promises.unlink.bind(nodeFs.promises);
+		const spy = spyOn(nodeFs.promises, "unlink").mockImplementation(async (p: nodeFs.PathLike) => {
+			if (String(p) === backupPath) {
+				const err = new Error(`EPERM: operation not permitted, unlink '${p}'`) as NodeJS.ErrnoException;
+				err.code = "EPERM";
+				throw err;
+			}
+			return realUnlink(p);
+		});
+		try {
+			const result = await replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.8",
+				verifyInstalledVersion: async () => ({ ok: true, actual: "15.1.8", path: targetPath }),
+			});
+			expect(result.ok).toBe(true);
+		} finally {
+			spy.mockRestore();
+		}
+
+		// New binary is installed and the temp consumed even though the locked
+		// backup survives; the next run's sweep reclaims it once it is unlocked.
+		expect(await Bun.file(targetPath).text()).toBe("new binary");
+		expect(await Bun.file(tempPath).exists()).toBe(false);
+		expect(await Bun.file(backupPath).text()).toBe("old binary");
+	});
+});
+
+describe("update-cli stale backup sweep", () => {
+	it("reclaims timestamped and legacy backups while leaving unrelated .bak files", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "omp.exe");
+		await Bun.write(targetPath, "current binary");
+		await Bun.write(`${targetPath}.bak`, "legacy backup");
+		await Bun.write(`${targetPath}.1700000000000.4242.bak`, "timestamped backup");
+		await Bun.write(`${targetPath}.1800000000000.99.bak`, "another backup");
+		// Must survive: foreign basename and a non-numeric middle segment.
+		await Bun.write(path.join(dir, "notes.bak"), "keep me");
+		await Bun.write(`${targetPath}.config.bak`, "keep me too");
+
+		await sweepStaleBackups(targetPath);
+
+		expect(await Bun.file(targetPath).exists()).toBe(true);
+		expect(await Bun.file(`${targetPath}.bak`).exists()).toBe(false);
+		expect(await Bun.file(`${targetPath}.1700000000000.4242.bak`).exists()).toBe(false);
+		expect(await Bun.file(`${targetPath}.1800000000000.99.bak`).exists()).toBe(false);
+		expect(await Bun.file(path.join(dir, "notes.bak")).exists()).toBe(true);
+		expect(await Bun.file(`${targetPath}.config.bak`).exists()).toBe(true);
 	});
 });

@@ -3,16 +3,26 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import type { AgentSideConnection, SessionNotification } from "@agentclientprotocol/sdk";
-import { zSessionNotification } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
+import { type } from "arktype";
+
+const arkSessionNotification = type({
+	sessionId: "string",
+	update: {
+		sessionUpdate:
+			"'agent_thought_chunk' | 'agent_message_chunk' | 'tool_call' | 'tool_call_update' | 'plan' | 'plan_update' | 'available_commands_update' | 'current_mode_update' | 'config_option_update' | 'session_info_update' | 'usage_update'",
+	},
+});
+
 import type { Model } from "@oh-my-pi/pi-ai";
-import { AcpAgent } from "../src/modes/acp/acp-agent";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
-} from "../src/modes/acp/acp-event-mapper";
-import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
-import { SessionManager } from "../src/session/session-manager";
+} from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { expectAcpStructure, expectAcpStructureRejects } from "./helpers/acp-schema";
 
 function makeAssistantMessage(text: string) {
@@ -42,11 +52,11 @@ function getChunkMessageId(event: { update: object }): string | undefined {
 
 function expectAcpNotifications(updates: SessionNotification[]): void {
 	for (const update of updates) {
-		expectAcpStructure(zSessionNotification, update);
+		expectAcpStructure(arkSessionNotification, update);
 	}
 }
 
-const TEST_MODEL: Model = {
+const TEST_MODEL: Model = buildModel({
 	id: "claude-sonnet-4-20250514",
 	name: "Claude Sonnet",
 	api: "anthropic-messages",
@@ -57,7 +67,7 @@ const TEST_MODEL: Model = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 200_000,
 	maxTokens: 8_192,
-};
+});
 
 class ReplayTestSession {
 	sessionManager: SessionManager;
@@ -237,7 +247,7 @@ describe("ACP event mapper", () => {
 				type: "tool_execution_start",
 				toolCallId: "tc-eval-start",
 				toolName: "eval",
-				args: { cells: [{ language: "js", title: "sum", code: "return 1 + 1;" }] },
+				args: { language: "js", title: "sum", code: "return 1 + 1;" },
 				intent: "sum",
 			} as AgentSessionEvent,
 			"session-1",
@@ -257,7 +267,7 @@ describe("ACP event mapper", () => {
 		expect(update.title).toBe("[js] sum\nreturn 1 + 1;");
 		expect(update.kind).toBe("execute");
 		expect(update.status).toBe("pending");
-		expect(update.rawInput).toEqual({ cells: [{ language: "js", title: "sum", code: "return 1 + 1;" }] });
+		expect(update.rawInput).toEqual({ language: "js", title: "sum", code: "return 1 + 1;" });
 		expect(update.content).toContainEqual({
 			type: "content",
 			content: { type: "text", text: "[js] sum\nreturn 1 + 1;" },
@@ -295,7 +305,7 @@ describe("ACP event mapper", () => {
 				type: "tool_execution_start",
 				toolCallId: "tc-eval-long-source",
 				toolName: "eval",
-				args: { cells: [{ language: "js", code: source }] },
+				args: { language: "js", code: source },
 			} as AgentSessionEvent,
 			"session-1",
 		);
@@ -794,7 +804,7 @@ describe("ACP event mapper", () => {
 			status: "completed",
 		});
 
-		expectAcpStructure(zSessionNotification, { sessionId: "session-1", update });
+		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
 		expect(update).toMatchObject({
 			sessionUpdate: "tool_call",
 			toolCallId: "toolu_replay_1",
@@ -816,7 +826,7 @@ describe("ACP event mapper", () => {
 			status: "completed",
 		});
 
-		expectAcpStructure(zSessionNotification, { sessionId: "session-1", update });
+		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
 		expect(update).toMatchObject({
 			sessionUpdate: "tool_call",
 			toolCallId: "toolu_replay_read",
@@ -838,7 +848,7 @@ describe("ACP event mapper", () => {
 			status: "completed",
 		});
 
-		expectAcpStructure(zSessionNotification, { sessionId: "session-1", update });
+		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
 		expect(update).toMatchObject({
 			sessionUpdate: "tool_call",
 			toolCallId: "toolu_replay_bad",
@@ -861,7 +871,7 @@ describe("ACP event mapper", () => {
 		});
 
 		expect(replayArgs.args).toBe(rawArgs);
-		expectAcpStructure(zSessionNotification, { sessionId: "session-1", update });
+		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
 		expect(update).toMatchObject({
 			title: "$ bun test",
 			status: "completed",
@@ -945,11 +955,11 @@ describe("ACP event mapper", () => {
 			"session-1",
 		);
 
-		expectAcpStructure(zSessionNotification, notification);
-		expectAcpStructureRejects(zSessionNotification, {
+		expectAcpStructure(arkSessionNotification, notification);
+		expectAcpStructureRejects(arkSessionNotification, {
 			...notification,
 			update: { ...notification!.update, sessionUpdate: "tool_call_updates" },
 		});
-		expectAcpStructureRejects(zSessionNotification, { ...notification, sessionId: 42 });
+		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
 	});
 });

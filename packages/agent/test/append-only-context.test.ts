@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { Message, Tool } from "@oh-my-pi/pi-ai";
-import { AppendOnlyContextManager, AppendOnlyLog, StablePrefix } from "../src/append-only-context";
-import type { AgentContext, AgentTool } from "../src/types";
+import { AppendOnlyContextManager, AppendOnlyLog, StablePrefix } from "@oh-my-pi/pi-agent-core/append-only-context";
+import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import type { Message, Tool, ToolExample } from "@oh-my-pi/pi-ai";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { type } from "arktype";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,12 +18,18 @@ function makeContext(overrides?: Partial<AgentContext>): AgentContext {
 	};
 }
 
-function makeTool(name: string, description?: string, parameters?: Record<string, unknown>): AgentTool {
+function makeTool(
+	name: string,
+	description?: string,
+	parameters?: Tool["parameters"],
+	examples?: readonly ToolExample[],
+): AgentTool {
 	return {
 		name,
 		description: description ?? `Tool ${name}`,
 		parameters: parameters ?? { type: "object", properties: {} },
 		label: name,
+		examples,
 		execute: async () => ({ content: [{ type: "text", text: "done" }] }),
 	} as AgentTool;
 }
@@ -584,7 +592,7 @@ describe("message sync", () => {
 // ---------------------------------------------------------------------------
 
 describe("intent injection through build()", () => {
-	it("injects required `_i` into tool schemas when intentTracing is true", () => {
+	it("injects required `i` into tool schemas when intentTracing is true", () => {
 		const mgr = new AppendOnlyContextManager();
 		const tool = makeTool("read", "Read", {
 			type: "object",
@@ -596,11 +604,24 @@ describe("intent injection through build()", () => {
 		const result = mgr.build(ctx, { intentTracing: true });
 		const params = result.tools?.[0]?.parameters as { properties?: Record<string, unknown>; required?: string[] };
 		expect(params?.properties).toBeDefined();
-		expect(params!.properties!._i).toBeDefined();
-		expect(params!.required).toContain("_i");
+		expect(params!.properties![INTENT_FIELD]).toBeDefined();
+		expect(params!.required).toContain(INTENT_FIELD);
 	});
 
-	it("omits `_i` when intentTracing is false", () => {
+	it("materializes ArkType params and keeps `i` first in authored order", () => {
+		const mgr = new AppendOnlyContextManager();
+		const tool = makeTool("write", "Write", type({ path: "string", content: "string" }));
+		const ctx = makeContext({ tools: [tool] });
+
+		const result = mgr.build(ctx, { intentTracing: true });
+		const params = result.tools?.[0]?.parameters as { properties?: Record<string, unknown>; required?: string[] };
+		// `i` must lead; authored order (path before content) is preserved rather
+		// than ArkType's alphabetized-by-hash order (content, path).
+		expect(Object.keys(params.properties ?? {})).toEqual([INTENT_FIELD, "path", "content"]);
+		expect(params.required).toContain(INTENT_FIELD);
+	});
+
+	it("omits `i` when intentTracing is false", () => {
 		const mgr = new AppendOnlyContextManager();
 		const tool = makeTool("read", "Read", {
 			type: "object",
@@ -611,8 +632,8 @@ describe("intent injection through build()", () => {
 
 		const result = mgr.build(ctx, { intentTracing: false });
 		const params = result.tools?.[0]?.parameters as { properties?: Record<string, unknown>; required?: string[] };
-		expect(params?.properties?._i).toBeUndefined();
-		expect(params?.required ?? []).not.toContain("_i");
+		expect(params?.properties?.[INTENT_FIELD]).toBeUndefined();
+		expect(params?.required ?? []).not.toContain(INTENT_FIELD);
 	});
 
 	it("intentTracing flip invalidates the fingerprint cache", () => {
@@ -626,6 +647,61 @@ describe("intent injection through build()", () => {
 		const fpWithIntent = mgr.prefix.fingerprint;
 
 		expect(fpNoIntent).not.toBe(fpWithIntent);
+	});
+});
+
+describe("tool examples injection through build()", () => {
+	const findExamples: readonly ToolExample[] = [{ caption: "Find files", call: { paths: ["src/**/*.ts"] } }];
+	const findParams = {
+		type: "object",
+		properties: { paths: { type: "array", items: { type: "string" } } },
+	};
+
+	it("injects examples when exampleDialect is provided", () => {
+		const mgr = new AppendOnlyContextManager();
+		const tool = makeTool("find", "Find files.", findParams, findExamples);
+		const ctx = makeContext({ tools: [tool] });
+
+		const result = mgr.build(ctx, { intentTracing: false, exampleDialect: "anthropic" });
+		const desc = result.tools?.[0]?.description ?? "";
+		expect(desc).toContain("<examples>");
+		expect(desc).toContain("# Find files");
+		expect(desc).toContain('<invoke name="find">');
+	});
+
+	it("omits examples when exampleDialect is undefined", () => {
+		const mgr = new AppendOnlyContextManager();
+		const tool = makeTool("find", "Find files.", findParams, findExamples);
+		const ctx = makeContext({ tools: [tool] });
+
+		const result = mgr.build(ctx, { intentTracing: false });
+		const desc = result.tools?.[0]?.description ?? "";
+		expect(desc).toBe("Find files.");
+	});
+
+	it("injects the `i` placeholder into examples when intentTracing is on", () => {
+		const mgr = new AppendOnlyContextManager();
+		const tool = makeTool("find", "Find files.", findParams, findExamples);
+		const ctx = makeContext({ tools: [tool] });
+
+		const result = mgr.build(ctx, { intentTracing: true, exampleDialect: "anthropic" });
+		const desc = result.tools?.[0]?.description ?? "";
+		expect(desc).toContain(`<parameter name="${INTENT_FIELD}"`);
+		expect(desc).toContain("…");
+	});
+
+	it("exampleDialect flip invalidates the fingerprint cache", () => {
+		const mgr = new AppendOnlyContextManager();
+		const tool = makeTool("find", "Find files.", undefined, findExamples);
+		const ctx = makeContext({ tools: [tool] });
+
+		mgr.build(ctx, { intentTracing: false });
+		const fpNoExamples = mgr.prefix.fingerprint;
+
+		mgr.build(ctx, { intentTracing: false, exampleDialect: "anthropic" });
+		const fpWithExamples = mgr.prefix.fingerprint;
+
+		expect(fpNoExamples).not.toBe(fpWithExamples);
 	});
 });
 

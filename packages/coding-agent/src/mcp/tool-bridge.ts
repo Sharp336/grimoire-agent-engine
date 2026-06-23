@@ -15,6 +15,7 @@ import type {
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
+import type { OutputMeta } from "../tools/output-meta";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
 import { renderMCPCall, renderMCPResult } from "./render";
@@ -71,6 +72,8 @@ export interface MCPToolDetails {
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
 	providerName?: string;
+	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
+	meta?: OutputMeta;
 }
 /**
  * Format MCP content for LLM consumption.
@@ -220,6 +223,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
 
@@ -305,6 +309,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpToolName: string;
 	/** Server name */
 	readonly mcpServerName: string;
+	readonly approval = "write" as const;
 	/** Render completed MCP calls with the result header replacing the pending call header. */
 	readonly mergeCallAndResult = true;
 

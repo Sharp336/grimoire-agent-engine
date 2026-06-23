@@ -20,9 +20,11 @@ import { Filesystem, NotFoundError, type WriteResult } from "@oh-my-pi/hashline"
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFileContent } from "../../tools/auto-generated-guard";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+import { canonicalSnapshotKey } from "../file-snapshot-store";
 import { readEditFileText, serializeEditFileText } from "../read-file";
 import type { LspBatchRequest } from "../renderer";
 
@@ -81,7 +83,7 @@ export class HashlineFilesystem extends Filesystem {
 	}
 
 	canonicalPath(relativePath: string): string {
-		return this.resolveAbsolute(relativePath);
+		return canonicalSnapshotKey(this.resolveAbsolute(relativePath));
 	}
 
 	async readText(relativePath: string): Promise<string> {
@@ -109,6 +111,13 @@ export class HashlineFilesystem extends Filesystem {
 		await this.preflightWrite(relativePath);
 		const absolutePath = this.resolveAbsolute(relativePath);
 		const finalContent = await serializeEditFileText(absolutePath, relativePath, content);
+
+		// Route through ACP bridge when available; skips internal artifacts.
+		if (await routeWriteThroughBridge(this.session, relativePath, absolutePath, finalContent)) {
+			this.#diagnosticsByPath.set(relativePath, undefined);
+			return { text: finalContent };
+		}
+
 		const diagnostics = await this.#writethrough(
 			absolutePath,
 			finalContent,

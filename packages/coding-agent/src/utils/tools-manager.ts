@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, APP_NAME, getToolsDir, logger, ptree, TempDir } from "@oh-my-pi/pi-utils";
+import { extractArchive } from "./zip";
 
 const TOOLS_DIR = getToolsDir();
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -14,6 +15,16 @@ interface ToolConfig {
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	isDirectBinary?: boolean; // If true, asset is a direct binary (not an archive)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+}
+
+// ffmpeg static-binary asset names (eugeneware/ffmpeg-static direct binaries).
+// Maps node arch (arm64|x64) only; everything else is unsupported.
+export function ffmpegAssetName(_version: string, plat: string, architecture: string): string | null {
+	if (architecture !== "arm64" && architecture !== "x64") return null;
+	if (plat === "darwin") return `ffmpeg-darwin-${architecture}`;
+	if (plat === "linux") return `ffmpeg-linux-${architecture}`;
+	if (plat === "win32") return architecture === "x64" ? "ffmpeg-win32-x64" : null;
+	return null;
 }
 
 const TOOLS: Record<string, ToolConfig> = {
@@ -72,6 +83,14 @@ const TOOLS: Record<string, ToolConfig> = {
 			return null;
 		},
 	},
+	ffmpeg: {
+		name: "ffmpeg",
+		repo: "eugeneware/ffmpeg-static",
+		binaryName: "ffmpeg",
+		tagPrefix: "",
+		isDirectBinary: true,
+		getAssetName: ffmpegAssetName,
+	},
 };
 
 // CLI packages installed via uv/pip
@@ -89,7 +108,7 @@ const PYTHON_TOOLS: Record<string, PythonPackageToolConfig> = {
 	},
 };
 
-export type ToolName = "sd" | "sg" | "yt-dlp" | "trafilatura";
+export type ToolName = "sd" | "sg" | "yt-dlp" | "trafilatura" | "ffmpeg";
 
 // Get the path to a tool (system-wide or in our tools dir)
 export function getToolPath(tool: ToolName): string | null {
@@ -202,17 +221,7 @@ async function downloadTool(tool: ToolName, signal?: AbortSignal): Promise<strin
 		}
 
 		try {
-			const archive = new Bun.Archive(await Bun.file(archivePath).arrayBuffer());
-			const files = await archive.files();
-			const extractRoot = path.resolve(tmp.path());
-
-			for (const [filePath, file] of files) {
-				const outputPath = path.resolve(extractRoot, filePath);
-				if (!outputPath.startsWith(extractRoot + path.sep)) {
-					throw new Error(`Archive entry escapes extraction dir: ${filePath}`);
-				}
-				await Bun.write(outputPath, file);
-			}
+			await extractArchive(archivePath, tmp.path());
 		} catch (err) {
 			throw new Error(`Failed to extract ${assetName}: ${err instanceof Error ? err.message : String(err)}`);
 		}

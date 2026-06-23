@@ -3,7 +3,9 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import os, json, math
+    import os, json, math, re
+    from urllib.parse import unquote
+    INTENT_FIELD = "i"
 
     # __omp_display is injected by runner.py before the prelude executes; it
     # mirrors IPython's display() semantics with the same MIME bundle output.
@@ -53,9 +55,47 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("env", key=key, value=val, action="get")
         return val
 
-    def read(path: str | Path, *, offset: int = 1, limit: int | None = None) -> str:
+    _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
+
+    def _resolve_omp_path(path: str | Path) -> Path:
+        """Map a helper path to a real filesystem Path.
+
+        A `scheme://…` whose scheme has an injected on-disk root (e.g.
+        `local://`, via PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it
+        lands where `read local://…` resolves — not a literal `local:/`
+        directory under the cwd (which `Path("local://x")` collapses to). Plain
+        paths pass through unchanged; any other `scheme://` is rejected."""
+        if not isinstance(path, str):
+            return Path(path)
+        match = _OMP_INTERNAL_URL_RE.match(path)
+        if not match:
+            return Path(path)
+        scheme = match.group(1).lower()
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            roots = {}
+        root = roots.get(scheme) if isinstance(roots, dict) else None
+        if not root:
+            raise ValueError(f"Protocol paths are not supported by this helper: {path}")
+        relative = unquote(match.group(2).replace("\\", "/"))
+        # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
+        # make absolute WITHOUT realpath'ing symlinks (Path.resolve would turn
+        # /tmp into /private/tmp and diverge from the read-side resolution).
+        root_path = os.path.abspath(root)
+        if relative == "":
+            return Path(root_path)
+        rel_path = Path(relative)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            raise ValueError(f"Unsafe {scheme}:// path (absolute or traversal): {path}")
+        resolved = os.path.abspath(os.path.join(root_path, relative))
+        if resolved != root_path and not resolved.startswith(root_path + os.sep):
+            raise ValueError(f"{scheme}:// path escapes its root: {path}")
+        return Path(resolved)
+
+    def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file contents. offset/limit are 1-indexed line numbers."""
-        p = Path(path)
+        p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")
         lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
@@ -69,108 +109,11 @@ if "__omp_prelude_loaded__" not in globals():
 
     def write(path: str | Path, content: str) -> Path:
         """Write file contents (create parents)."""
-        p = Path(path)
+        p = _resolve_omp_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         _emit_status("write", path=str(p), chars=len(content))
         return p
-
-    def append(path: str | Path, content: str) -> Path:
-        """Append to file."""
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(content)
-        _emit_status("append", path=str(p), chars=len(content))
-        return p
-
-    def sort(text: str, *, reverse: bool = False, unique: bool = False) -> str:
-        """Sort lines of text."""
-        lines = text.splitlines()
-        if unique:
-            lines = list(dict.fromkeys(lines))
-        lines = sorted(lines, reverse=reverse)
-        out = "\n".join(lines)
-        _emit_status("sort", lines=len(lines), unique=unique, reverse=reverse)
-        return out
-
-    def uniq(text: str, *, count: bool = False) -> str | list[tuple[int, str]]:
-        """Remove duplicate adjacent lines (like uniq)."""
-        lines = text.splitlines()
-        if not lines:
-            _emit_status("uniq", groups=0)
-            return [] if count else ""
-        groups: list[tuple[int, str]] = []
-        current = lines[0]
-        current_count = 1
-        for line in lines[1:]:
-            if line == current:
-                current_count += 1
-                continue
-            groups.append((current_count, current))
-            current = line
-            current_count = 1
-        groups.append((current_count, current))
-        _emit_status("uniq", groups=len(groups), count_mode=count)
-        if count:
-            return groups
-        return "\n".join(line for _, line in groups)
-
-    def counter(
-        items: str | list,
-        *,
-        limit: int | None = None,
-        reverse: bool = True,
-    ) -> list[tuple[int, str]]:
-        """Count occurrences and sort by frequency. Like sort | uniq -c | sort -rn.
-        
-        items: text (splits into lines) or list of strings
-        reverse: True for descending (most common first), False for ascending
-        Returns: [(count, item), ...] sorted by count
-        """
-        from collections import Counter
-        if isinstance(items, str):
-            items = items.splitlines()
-        counts = Counter(items)
-        sorted_items = sorted(counts.items(), key=lambda x: (x[1], x[0]), reverse=reverse)
-        if limit is not None:
-            sorted_items = sorted_items[:limit]
-        result = [(count, item) for item, count in sorted_items]
-        _emit_status("counter", unique=len(counts), total=sum(counts.values()), top=result[:10])
-        return result
-    def tree(path: str | Path = ".", *, max_depth: int = 3, show_hidden: bool = False) -> str:
-        """Return directory tree."""
-        base = Path(path)
-        lines = []
-        def walk(p: Path, prefix: str, depth: int):
-            if depth > max_depth:
-                return
-            items = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-            items = [i for i in items if show_hidden or not i.name.startswith(".")]
-            for i, item in enumerate(items):
-                is_last = i == len(items) - 1
-                connector = "└── " if is_last else "├── "
-                suffix = "/" if item.is_dir() else ""
-                lines.append(f"{prefix}{connector}{item.name}{suffix}")
-                if item.is_dir():
-                    ext = "    " if is_last else "│   "
-                    walk(item, prefix + ext, depth + 1)
-        lines.append(str(base) + "/")
-        walk(base, "", 1)
-        out = "\n".join(lines)
-        _emit_status("tree", path=str(base), entries=len(lines) - 1, preview=out[:1000])
-        return out
-
-    def diff(a: str | Path, b: str | Path) -> str:
-        """Compare two files, return unified diff."""
-        import difflib
-        path_a, path_b = Path(a), Path(b)
-        lines_a = path_a.read_text(encoding="utf-8").splitlines(keepends=True)
-        lines_b = path_b.read_text(encoding="utf-8").splitlines(keepends=True)
-        result = difflib.unified_diff(lines_a, lines_b, fromfile=str(path_a), tofile=str(path_b))
-        out = "".join(result)
-        _emit_status("diff", file_a=str(path_a), file_b=str(path_b), identical=not out, preview=out[:500])
-        return out
 
     def output(
         *ids: str,
@@ -440,8 +383,8 @@ if "__omp_prelude_loaded__" not in globals():
                     f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})"
                 )
             merged.update(kwargs)
-            if "_i" not in merged:
-                merged["_i"] = "py prelude"
+            if INTENT_FIELD not in merged:
+                merged[INTENT_FIELD] = "py prelude"
             return _bridge_call(self._name, merged)
 
     class _ToolProxy:
@@ -463,8 +406,8 @@ if "__omp_prelude_loaded__" not in globals():
 
     tool = _ToolProxy()
 
-    def llm(prompt, *, model="default", system=None, schema=None):
-        """Oneshot, stateless LLM call against a model tier.
+    def completion(prompt, *, model="default", system=None, schema=None):
+        """Oneshot, stateless completion against a model tier.
 
         `model` selects a tier: "smol", "default" (the session's active model),
         or "slow". Pass `system` for a system prompt. Pass a JSON-Schema dict
@@ -476,32 +419,94 @@ if "__omp_prelude_loaded__" not in globals():
             args["system"] = system
         if schema is not None:
             args["schema"] = schema
-        res = _bridge_call("__llm__", args)
+        res = _bridge_call("__completion__", args)
         text = res.get("text") if isinstance(res, dict) else res
         return json.loads(text) if schema is not None else text
 
-    def agent(prompt, *, agent_type="task", model=None, context=None, label=None, schema=None):
+    def agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
         """Run a subagent and return its final output.
 
-        `agent_type` selects the subagent definition (default "task"). Pass
-        `model` to override that agent's model, `context` for shared background,
-        `label` for the output artifact id, and `schema` to request structured
-        JSON output; when `schema` is supplied the parsed object is returned.
+        `agent` selects the subagent definition (default "task"). Pass
+        `model` to override that agent's model, `label` for the output artifact
+        id, and `schema` to request structured JSON output; when `schema` is
+        supplied the parsed object is returned. Share background by writing a
+        local:// file and referencing it in the prompt.
+
+        Pass `isolated=True` to run the subagent inside an isolation worktree
+        (copy-on-write of the parent repo) so parallel `agent()` spawns can
+        edit overlapping files safely. Strict opt-in, mirroring the `task`
+        tool: the default is non-isolated regardless of `task.isolation.mode`.
+        `isolated=True` while the setting is `"none"` errors out instead of
+        silently downgrading.
+
+        When isolated, `apply=False` keeps captured changes inside the
+        worktree and surfaces the root patch path, branch name, and nested
+        repository patches through the DAG node dict (combine with
+        `handle=True` to receive them — see below; the bare return type
+        stays bytes/string/parsed object and has nowhere to expose artifacts).
+        `merge=False` forces patch mode even when `task.isolation.merge` is
+        `"branch"`, avoiding the per-call git lock + repo mutation that branch
+        mode performs.
+
+        Set `handle=True` to receive a DAG node dict instead of bare
+        text: ``{"text", "output", "handle", "id", "agent"}`` where ``handle``
+        is the spawned agent's recoverable ``agent://<id>`` URI. A downstream
+        ``pipeline``/``parallel`` stage embeds that ``handle`` (or ``output``)
+        in its prompt so a large transcript flows through the graph by
+        reference, never re-inlined. When ``schema`` is also set the parsed
+        object lands under ``"data"``. When the spawn ran isolated the node
+        also carries ``"isolated"`` and, when present, ``"patch_path"``,
+        ``"branch_name"``, ``"nested_patches"``, ``"changes_applied"``
+        (``True``/``False``/``None`` — ``None`` means ``apply=False``), and
+        ``"isolation_summary"``. If
+        the bridge returns no recoverable id the node still resolves with
+        ``handle=None`` — the helper never throws.
         """
         args = {"prompt": prompt}
-        if agent_type is not None:
-            args["agentType"] = agent_type
+        if agent is not None:
+            args["agent"] = agent
         if model is not None:
             args["model"] = model
-        if context is not None:
-            args["context"] = context
         if label is not None:
             args["label"] = label
         if schema is not None:
             args["schema"] = schema
+        if isolated is not None:
+            args["isolated"] = bool(isolated)
+        if apply is not None:
+            args["apply"] = bool(apply)
+        if merge is not None:
+            args["merge"] = bool(merge)
+        if handle:
+            args["handle"] = True
         res = _bridge_call("__agent__", args)
         text = res.get("text") if isinstance(res, dict) else res
-        return json.loads(text) if schema is not None else text
+        parsed = json.loads(text) if schema is not None else text
+        if not handle:
+            return parsed
+        details = res.get("details") if isinstance(res, dict) else None
+        if not isinstance(details, dict) or details.get("id") is None:
+            return {"text": text, "output": text, "handle": None, "id": None, "agent": None}
+        node = {
+            "text": text,
+            "output": text,
+            "handle": f"agent://{details['id']}",
+            "id": details["id"],
+            "agent": details.get("agent"),
+        }
+        if schema is not None:
+            node["data"] = parsed
+        for src_key, dst_key in (
+            ("isolated", "isolated"),
+            ("patchPath", "patch_path"),
+            ("branchName", "branch_name"),
+            ("nestedPatches", "nested_patches"),
+            ("changesApplied", "changes_applied"),
+            ("isolationSummary", "isolation_summary"),
+        ):
+            if src_key in details:
+                node[dst_key] = details[src_key]
+        return node
 
     def _concurrency_limit():
         """Worker-pool ceiling from the host ``task.maxConcurrency`` setting.

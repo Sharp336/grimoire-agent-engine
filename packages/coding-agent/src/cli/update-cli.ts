@@ -2,9 +2,10 @@
  * Update CLI command handler.
  *
  * Handles `omp update` to check for and install updates.
- * Uses bun if available, otherwise downloads binary from GitHub releases.
+ * Uses the installer that owns the active omp executable when it can be detected.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
@@ -14,6 +15,8 @@ import { theme } from "../modes/theme/theme";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
+const HOMEBREW_FORMULA = "can1357/tap/omp";
+const MISE_TOOL = "github:can1357/oh-my-pi";
 /**
  * Official npm registry origin.
  *
@@ -102,6 +105,46 @@ async function getBunGlobalBinDir(): Promise<string | undefined> {
 	}
 }
 
+async function getHomebrewFormulaPrefix(): Promise<string | undefined> {
+	if (!$which("brew")) return undefined;
+	for (const formula of [HOMEBREW_FORMULA, APP_NAME]) {
+		try {
+			const result = await $`brew --prefix ${formula}`.quiet().nothrow();
+			if (result.exitCode !== 0) continue;
+			const output = result.text().trim();
+			if (output.length > 0) return output;
+		} catch {}
+	}
+	return undefined;
+}
+
+async function getMiseBinDirs(): Promise<string[]> {
+	if (!$which("mise")) return [];
+	try {
+		const result = await $`mise bin-paths ${MISE_TOOL}`.quiet().nothrow();
+		if (result.exitCode !== 0) return [];
+		return result
+			.text()
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(line => line.length > 0);
+	} catch {
+		return [];
+	}
+}
+
+function getMiseDataDir(): string {
+	const override = process.env.MISE_DATA_DIR;
+	if (override && override.length > 0) return override;
+	if (process.platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA;
+		if (localAppData && localAppData.length > 0) return path.join(localAppData, "mise");
+	}
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	if (xdgDataHome && xdgDataHome.length > 0) return path.join(xdgDataHome, "mise");
+	return path.join(os.homedir(), ".local", "share", "mise");
+}
+
 function normalizePathForComparison(filePath: string): string {
 	const normalized = path.normalize(filePath);
 	if (process.platform === "win32") return normalized.toLowerCase();
@@ -129,34 +172,61 @@ function isPathInDirectory(filePath: string, directoryPath: string): boolean {
 	// is a junction when Bun is installed via Scoop, so `bun pm bin -g` and the
 	// PATH-resolved omp path can refer to the same directory through different
 	// strings. path.resolve does not traverse junctions/symlinks; realpath does.
-	// Resolve the file's parent directory to tolerate the file itself not yet
-	// existing (e.g. a fresh install path) while still catching link-traversed
-	// equality once the directory exists.
-	const fileDir = tryRealpath(path.dirname(path.resolve(filePath)));
+	// Resolve both the file and its parent directory: the file catches manager
+	// links like Homebrew's `bin/omp -> Cellar/.../bin/omp`; the parent fallback
+	// still tolerates fresh install paths where the file does not exist yet.
 	const dirReal = tryRealpath(path.resolve(directoryPath));
-	if (!fileDir || !dirReal) return false;
+	if (!dirReal) return false;
+	const fileReal = tryRealpath(path.resolve(filePath));
+	if (fileReal && isPathInDirectoryLexical(fileReal, dirReal)) return true;
+	const fileDir = tryRealpath(path.dirname(path.resolve(filePath)));
+	if (!fileDir) return false;
 	const resolvedFile = path.join(fileDir, path.basename(filePath));
 	return isPathInDirectoryLexical(resolvedFile, dirReal);
 }
 
-type UpdateTarget = { method: "bun" } | { method: "binary"; path: string };
+type UpdateMethod = "brew" | "mise" | "bun" | "binary";
 
-function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
-	if (!bunBinDir) return "binary";
-	return isPathInDirectory(ompPath, bunBinDir) ? "bun" : "binary";
+interface UpdateMethodResolutionOptions {
+	homebrewPrefix?: string;
+	miseBinDirs?: readonly string[];
+	miseDataDir?: string;
 }
 
-export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
-	return resolveUpdateMethod(ompPath, bunBinDir);
+type UpdateTarget = { method: "brew" } | { method: "mise" } | { method: "bun" } | { method: "binary"; path: string };
+
+function resolveUpdateMethod(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions = {},
+): UpdateMethod {
+	const { homebrewPrefix, miseBinDirs = [], miseDataDir } = options;
+	if (homebrewPrefix && isPathInDirectory(ompPath, path.join(homebrewPrefix, "bin"))) return "brew";
+	if (miseBinDirs.some(dir => isPathInDirectory(ompPath, dir))) return "mise";
+	if (miseDataDir && isPathInDirectory(ompPath, path.join(miseDataDir, "shims"))) return "mise";
+	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir)) return "bun";
+	return "binary";
+}
+
+export function resolveUpdateMethodForTest(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions = {},
+): UpdateMethod {
+	return resolveUpdateMethod(ompPath, bunBinDir, options);
 }
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const bunBinDir = await getBunGlobalBinDir();
+	const homebrewPrefix = await getHomebrewFormulaPrefix();
+	const miseAvailable = $which("mise") !== undefined;
+	const miseBinDirs = miseAvailable ? await getMiseBinDirs() : [];
+	const miseDataDir = miseAvailable ? getMiseDataDir() : undefined;
 	const ompPath = resolveOmpPath();
 
 	if (ompPath) {
-		const method = resolveUpdateMethod(ompPath, bunBinDir);
-		if (method === "bun") return { method };
-		return { method, path: ompPath };
+		const method = resolveUpdateMethod(ompPath, bunBinDir, { homebrewPrefix, miseBinDirs, miseDataDir });
+		if (method === "binary") return { method, path: ompPath };
+		return { method };
 	}
 
 	if (bunBinDir) return { method: "bun" };
@@ -301,12 +371,63 @@ async function unlinkIfExists(filePath: string): Promise<void> {
 }
 
 /**
+ * Remove a backup binary without letting the removal abort a completed update.
+ *
+ * On Windows the executable that was just moved aside is still mapped as the
+ * running process image, so unlinking it fails with EPERM/EACCES until this
+ * process exits (issue #845). The replacement and verification already
+ * succeeded by the time we get here, so every error is swallowed; the leftover
+ * is reclaimed by {@link sweepStaleBackups} on the next update once it is no
+ * longer in use. Returns whether the file is gone.
+ */
+async function removeBackupBestEffort(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.unlink(filePath);
+		return true;
+	} catch (err) {
+		return isEnoent(err);
+	}
+}
+
+/**
+ * Best-effort removal of binary-update backups left by earlier runs.
+ *
+ * Each self-update moves the previous executable to `<binary>.<timestamp>.<pid>.bak`
+ * before swapping the new one in. On Windows that backup cannot be deleted
+ * while the updating process is alive, so it is left for a later run to reclaim
+ * once its owning process has exited. Also matches the legacy fixed
+ * `<binary>.bak` name produced before backups were timestamped, so users
+ * upgrading from a buggy release get the orphaned file cleaned up.
+ */
+export async function sweepStaleBackups(targetPath: string): Promise<void> {
+	const dir = path.dirname(targetPath);
+	const base = path.basename(targetPath);
+	let entries: string[];
+	try {
+		entries = await fs.promises.readdir(dir);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.startsWith(`${base}.`) || !entry.endsWith(".bak")) continue;
+		// Legacy "<base>.bak" → empty middle; new "<base>.<timestamp>.<pid>.bak"
+		// → dot-separated numeric run. Anything else is an unrelated *.bak file.
+		const middle = entry.slice(base.length + 1, entry.length - ".bak".length);
+		if (middle.length > 0 && !/^\d+(\.\d+)*$/.test(middle)) continue;
+		await removeBackupBestEffort(path.join(dir, entry));
+	}
+}
+
+/**
  * Atomically replace the installed binary and roll back if version verification fails.
  */
 export async function replaceBinaryForUpdate(options: BinaryReplacementOptions): Promise<InstalledVersionVerification> {
 	let backupReady = false;
 	try {
-		await unlinkIfExists(options.backupPath);
+		// `backupPath` is unique per attempt (see updateViaBinaryAt), so this rename
+		// never has to overwrite — or unlink — a possibly-locked leftover from an
+		// earlier run. Renaming the running executable itself is permitted on
+		// Windows; only deleting its still-mapped image is not.
 		await fs.promises.rename(options.targetPath, options.backupPath);
 		backupReady = true;
 		await fs.promises.rename(options.tempPath, options.targetPath);
@@ -319,7 +440,10 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 		}
 
 		backupReady = false;
-		await unlinkIfExists(options.backupPath);
+		// Swap done and verified. On Windows the backup is still the running
+		// process image and cannot be unlinked until this process exits, so a
+		// failure here must NOT fail an otherwise-successful update.
+		await removeBackupBestEffort(options.backupPath);
 		return verification;
 	} catch (err) {
 		if (backupReady) {
@@ -376,6 +500,18 @@ export function buildBunInstallArgs(expectedVersion: string, nativeTag: string =
 	return args;
 }
 
+export function buildHomebrewUpdateArgs(force: boolean): string[] {
+	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
+}
+
+export function buildMiseUpgradeArgs(): string[] {
+	return ["upgrade", MISE_TOOL, "--bump"];
+}
+
+export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
+	return ["install", "--force", `${MISE_TOOL}@${expectedVersion}`];
+}
+
 /**
  * Update via bun package manager.
  */
@@ -390,6 +526,42 @@ async function updateViaBun(expectedVersion: string): Promise<void> {
 	await printVerification(expectedVersion);
 }
 
+async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
+	console.log(chalk.dim("Updating Homebrew formulae..."));
+	const update = await $`brew update`.nothrow();
+	if (update.exitCode !== 0) {
+		throw new Error(`brew update failed with exit code ${update.exitCode}`);
+	}
+
+	console.log(chalk.dim("Updating via Homebrew..."));
+	const args = buildHomebrewUpdateArgs(force);
+	const result = await $`brew ${args}`.nothrow();
+	if (result.exitCode !== 0) {
+		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
+	}
+
+	await printVerification(expectedVersion);
+}
+
+async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
+	console.log(chalk.dim("Updating via mise..."));
+	const args = buildMiseUpgradeArgs();
+	const result = await $`mise ${args}`.nothrow();
+	if (result.exitCode !== 0) {
+		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
+	}
+
+	if (force) {
+		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
+		const forceResult = await $`mise ${forceArgs}`.nothrow();
+		if (forceResult.exitCode !== 0) {
+			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
+		}
+	}
+
+	await printVerification(expectedVersion);
+}
+
 /**
  * Download a release binary to a target path, replacing an existing file.
  */
@@ -399,7 +571,11 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	const url = `https://github.com/${REPO}/releases/download/${tag}/${binaryName}`;
 
 	const tempPath = `${targetPath}.new`;
-	const backupPath = `${targetPath}.bak`;
+	// Unique per attempt: a stale backup from an earlier update may still be
+	// locked (it is the previous process image on Windows), and a fixed name
+	// would force the move-aside rename to overwrite it. pid + timestamp keeps
+	// two forced updates in the same millisecond from colliding.
+	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 
 	const response = await fetch(url, { redirect: "follow" });
@@ -417,6 +593,8 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 		expectedVersion,
 		verifyInstalledVersion,
 	});
+	// Reclaim backups from earlier updates whose owning process has since exited.
+	await sweepStaleBackups(targetPath);
 	printVerifiedVersion(expectedVersion);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
@@ -457,7 +635,11 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	// Choose update method based on the prioritized omp binary in PATH
 	try {
 		const target = await resolveUpdateTarget();
-		if (target.method === "bun") {
+		if (target.method === "brew") {
+			await updateViaHomebrew(release.version, opts.force);
+		} else if (target.method === "mise") {
+			await updateViaMise(release.version, opts.force);
+		} else if (target.method === "bun") {
 			await updateViaBun(release.version);
 		} else {
 			await updateViaBinaryAt(target.path, release.version);

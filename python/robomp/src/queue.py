@@ -301,8 +301,25 @@ class WorkerPool:
                 self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
             else:
                 tb = traceback.format_exc(limit=20)
-                log.exception("event handler failed", extra={"delivery": row.delivery_id})
-                self.db.mark_event(row.delivery_id, "failed", error=f"{exc}\n{tb}")
+                err = f"{exc}\n{tb}"
+                max_retries = self.settings.event_max_retries
+                delay = self.settings.retry_delay_seconds(row.attempts)
+                if 0 < row.attempts <= max_retries and self.db.schedule_retry(
+                    row.delivery_id, delay_seconds=delay, error=err
+                ):
+                    log.warning(
+                        "event retry scheduled",
+                        extra={
+                            "delivery": row.delivery_id,
+                            "key": row.issue_key,
+                            "attempt": row.attempts,
+                            "max_retries": max_retries,
+                            "retry_in_seconds": round(delay, 1),
+                        },
+                    )
+                else:
+                    log.exception("event handler failed", extra={"delivery": row.delivery_id})
+                    self.db.mark_event(row.delivery_id, "failed", error=err)
         finally:
             self._cancelled.discard(row.delivery_id)
             self._shutdown_cancelled.discard(row.delivery_id)
@@ -374,7 +391,7 @@ class WorkerPool:
                     attempts=row.attempts,
                     slot_uid=slot_uid,
                 )
-        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review"):
+        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,

@@ -1,5 +1,5 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import type { ResponseInput } from "openai/resources/responses/responses";
+import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
@@ -8,27 +8,7 @@ export { isRecord } from "@oh-my-pi/pi-utils";
 export function normalizeSystemPrompts(systemPrompt: readonly string[] | string | undefined | null): string[] {
 	if (systemPrompt === undefined || systemPrompt === null) return [];
 	const prompts = Array.isArray(systemPrompt) ? systemPrompt : typeof systemPrompt === "string" ? [systemPrompt] : [];
-	return prompts.map(prompt => prompt.toWellFormed()).filter(prompt => prompt.length > 0);
-}
-
-export function toNumber(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value === "string" && value.trim()) {
-		const parsed = Number(value);
-		return Number.isFinite(parsed) ? parsed : undefined;
-	}
-	return undefined;
-}
-
-export function toPositiveNumber(value: unknown, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-		return fallback;
-	}
-	return value;
-}
-
-export function toBoolean(value: unknown): boolean | undefined {
-	return typeof value === "boolean" ? value : undefined;
+	return prompts.map(prompt => prompt.toWellFormed()).filter(prompt => prompt.trim().length > 0);
 }
 
 export function normalizeToolCallId(id: string): string {
@@ -97,6 +77,8 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	normalizedCallIds: Map<string, string>,
 ): OpenAIResponsesReplayItem | undefined {
 	if (item.type === "item_reference") return undefined;
+	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);
+	if (item.type === "reasoning") return sanitizeOpenAIResponsesReasoningItemForReplay(item);
 
 	// providerPayload stores raw output items; replay strips item ids and keeps only normalized call_id.
 	const { id: _id, ...sanitizedItem } = item;
@@ -105,6 +87,33 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	}
 
 	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
+}
+
+function sanitizeOpenAIResponsesReasoningItemForReplay(item: Record<string, unknown>): OpenAIResponsesReplayItem {
+	const sanitizedItem: Record<string, unknown> = { type: "reasoning" };
+	if (Array.isArray(item.summary)) sanitizedItem.summary = item.summary;
+	if (Array.isArray(item.content)) sanitizedItem.content = item.content;
+	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
+		sanitizedItem.encrypted_content = item.encrypted_content;
+	}
+	if (item.status === "in_progress" || item.status === "completed" || item.status === "incomplete") {
+		sanitizedItem.status = item.status;
+	}
+	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
+}
+
+function sanitizeOpenAIResponsesImageGenerationCallForReplay(
+	item: Record<string, unknown>,
+): ResponseInputItem.ImageGenerationCall | undefined {
+	if (typeof item.id !== "string" || item.status !== "completed" || typeof item.result !== "string") {
+		return undefined;
+	}
+	return {
+		id: truncateResponseItemId(item.id, "ig"),
+		type: "image_generation_call",
+		status: "completed",
+		result: item.result,
+	};
 }
 
 function normalizeReplayedResponsesHistoryCallId(value: string, normalizedValues: Map<string, string>): string {
@@ -159,8 +168,4 @@ export function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRet
 	if (cacheRetention) return cacheRetention;
 	if ($env.PI_CACHE_RETENTION === "long") return "long";
 	return "short";
-}
-
-export function isAnthropicOAuthToken(key: string): boolean {
-	return key.includes("sk-ant-oat");
 }

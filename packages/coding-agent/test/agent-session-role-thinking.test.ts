@@ -1,15 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { Effort, getBundledModel } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	AUTO_THINKING,
+	clampAutoThinkingEffort,
+	resolveProvisionalAutoLevel,
+} from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import * as autoThinkingClassifier from "../src/auto-thinking/classifier";
-import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } from "../src/thinking";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("AgentSession role model thinking behavior", () => {
@@ -234,9 +239,11 @@ describe("AgentSession role model thinking behavior", () => {
 
 		expect(session.cycleThinkingLevel()).toBe("off");
 		expect(session.thinkingLevel).toBe("off");
+		expect(agent.state.disableReasoning).toBe(true);
 		expect(session.cycleThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.thinkingLevel).toBe(resolveProvisionalAutoLevel(model));
+		expect(agent.state.disableReasoning).toBe(false);
 		expect(session.cycleThinkingLevel()).toBe(Effort.Minimal);
 		expect(session.thinkingLevel).toBe(Effort.Minimal);
 	});
@@ -265,7 +272,7 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
-	it("restores the last resolved auto effort instead of pending auto on resume", async () => {
+	it("keeps auto active on resume (pending until the next turn reclassifies)", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const agent = new Agent({
 			initialState: {
@@ -304,10 +311,106 @@ describe("AgentSession role model thinking behavior", () => {
 		await session.sessionManager.flush();
 
 		expect(await session.switchSession(sessionFile!)).toBe(true);
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		// Resumes in auto and pending — not frozen to the last resolved level, and
+		// not pre-seeded; the next user turn reclassifies.
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("keeps a manual concrete pin (not auto) on resume even when the global default is auto", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model),
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-manual-resume.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-manual-resume.yml"));
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		// User pins a concrete level mid-session; it must survive resume as-is and
+		// must not be reinterpreted as `auto` just because the global default is auto.
+		session.setThinkingLevel(Effort.Low);
+		expect(session.isAutoThinking).toBe(false);
+		await session.prompt("Pinned concrete turn");
+		expect(classifierSpy).not.toHaveBeenCalled();
+		session.sessionManager.appendMessage(createAssistantMessage("done"));
+
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionFile!)).toBe(true);
+		expect(session.isAutoThinking).toBe(false);
+		expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("persists a concrete pin that matches the auto-resolved effort so resume stays concrete", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model),
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-pin-eq.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-pin-eq.yml"));
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		// Auto resolves to medium.
+		await session.prompt("Implement a focused parser fix");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+
+		// User then pins the *same* effort: selector changes auto -> medium even though
+		// the effort is unchanged, so it must persist as a concrete pin (entry +
+		// defaultThinkingLevel), not silently stay `configured: "auto"`.
+		session.setThinkingLevel(Effort.Medium, true);
+		expect(session.isAutoThinking).toBe(false);
+		expect(sessionSettings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+		session.sessionManager.appendMessage(createAssistantMessage("done"));
+
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionFile!)).toBe(true);
 		expect(session.isAutoThinking).toBe(false);
 		expect(session.configuredThinkingLevel()).toBe(Effort.Medium);
-		expect(session.thinkingLevel).toBe(Effort.Medium);
-		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
 	it("falls back to a concrete auto level when classification fails", async () => {

@@ -1,49 +1,33 @@
-Sends short text messages to other live agents in this process and receives their prose replies.
+Send/receive short text messages between agents in this process.
 
 <instruction>
-- The main agent is addressable as `Main`. Subagents reuse their task id (e.g. `AuthLoader`, or `AuthLoader-2` when the name repeats).
-- `op: "list"` returns the current set of visible peers. Use it before sending if you are not sure who is live.
-- `op: "send"` delivers `message` to `to`. `to` may be a specific id or `"all"` to broadcast.
-- The recipient generates the reply via an ephemeral side-channel turn that uses their current model, system prompt, and history — it does **not** wait for the recipient's main loop to be free, so it is safe to IRC an agent that is currently inside a long-running tool call.
-- The exchange (incoming question + auto-reply) is queued for injection into the recipient's persisted history; the recipient sees it on its next turn and can follow up if needed.
+- Main agent is `Main`; subagents reuse their task id (`AuthLoader`, `AuthLoader-2` on repeat).
+- `op: "list"` — peers with status (`running` | `idle` | `parked`), unread count, parent, last activity. Use when unsure who exists.
+- `op: "send"` — fire-and-forget; returns per-recipient receipts immediately, NEVER waits for the recipient to act. Outcomes: delivered, or `failed` (unreachable). `to: "all"` broadcasts to live peers.
+- Messaging an `idle`/`parked` peer wakes it — no separate revive call.
+- `op: "wait"` — block for a message (optionally only `from` one peer); consumes + returns it. Timeout = clean "no message", not an error.
+- `op: "inbox"` — drain pending messages without blocking.
+- Replies arrive only when the recipient sends one. For peer background, `read` `history://<id>`, don't interrogate.
 </instruction>
 
 <when_to_use>
-You SHOULD reach for `irc` proactively when continuing alone is wasteful or wrong. When in doubt, prefer messaging.
-- **Unexpected state.** You hit something the original task did not describe — a missing file, a config that contradicts the assignment, an API behaving differently than you were told, a tool failing in a way that suggests the spec is wrong. DM `Main` (or the spawning agent) for guidance instead of guessing.
-- **Blocked by another agent.** A peer holds the file/branch/resource you need, has already started the change you are about to make, or owns a decision you depend on. DM that peer (or broadcast to discover who) before duplicating or stepping on work.
-- **Decision points outside your scope.** A genuine fork in the road that the assignment did not pre-decide (e.g. which of two viable APIs to use, whether to refactor adjacent code). Ask the requester rather than picking unilaterally.
-- **Coordination opportunities.** You realize a peer's in-flight work would benefit from yours, or vice-versa.
+Reach for `irc` when going alone is wasteful or wrong; when in doubt, message.
+- **Unexpected state** — missing file, config contradicting the assignment, API/tool behaving differently than told. DM `Main` (or your spawner), don't guess.
+- **Blocked by another agent** — a peer holds the file/branch/resource/decision you need, or started your change. DM them (or broadcast to find who) before duplicating work.
+- **Decision outside your scope** — a genuine fork the assignment didn't pre-decide. Ask the requester, don't pick unilaterally.
+- **Coordination** — a peer's in-flight work overlaps yours (roster shows each peer's role + activity); message before editing a shared file or duplicating a sibling's change.
 
-Do **not** use `irc` for: routine progress updates, things you can verify with a tool call, or questions whose answer is already in your assignment / repo / docs.
+NEVER for: routine progress updates, things a tool call can verify, questions your assignment/repo/docs already answer.
 </when_to_use>
 
 <etiquette>
-These rules apply to both sending and replying.
-- **Plain prose only.** Do not send structured JSON status payloads (e.g. `{"type":"task_completed",…}`). Write a normal sentence: "Done with the auth refactor — left a TODO in `src/server/auth.ts` for the rate limiter."
-- **Do not quote the message you are replying to.** The sender already saw it; the TUI already renders it. Lead with the answer.
-- **Use IRC, not terminal tools, to learn about peers.** Do not `grep` artifacts, read other sessions' JSONL files, or shell-poke around to figure out what another agent is doing. DM them — they have the live answer and you do not.
-- **One round-trip is enough.** Replies arrive synchronously when the recipient is reachable. Do not follow up with "did you get my message?" — they did. If `delivered` is empty or the result was `failed`, the peer is unavailable; move on or report the blocker, do not retry in a loop.
-- **Stay terse.** A DM is a chat message, not a memo. One question per send when you can. Share file paths and artifacts via `local://` / `memory://` / `artifact://` URLs instead of pasting blobs.
-- **Address peers by id.** Use the exact id from `op: "list"` (e.g. `AuthLoader`, `Main`). Do not invent friendly names.
-- **Do not IRC for things a tool would answer.** If a `read`, `grep`, or build command would resolve the question, do that first.
-- **When you receive an IRC message, answer it before continuing.** The recipient injects the question + your auto-reply into your history; address it directly, do not repeat it back to the user.
+Applies to sending + replying.
+- **Plain prose only.** NEVER JSON status payloads like `{"type":"task_completed",…}` — write a normal sentence.
+- **NEVER quote the message you answer.** Lead with the answer; set `replyTo`.
+- **Learn about peers via IRC** — NEVER grep artifacts, read other sessions' JSONL, or shell-poke. DM them, or `read` `history://<id>`.
+- **Send, then keep working.** `wait`/`await: true` only when you cannot proceed. NEVER "did you get my message?". A `failed` receipt = peer unreachable — move on; NEVER retry in a loop.
+- **Answer expected questions** via `irc send` to the sender (finish your current step first).
+- **Stay terse.** One question per send; share files via `local://`/`memory://`/`artifact://` URLs, never pasted blobs.
+- **Address peers by exact id** from `op: "list"` (e.g. `AuthLoader`, `Main`). NEVER invent friendly names.
+- **NEVER IRC what a tool answers.** A `read`, grep, or build resolves it? Do that first.
 </etiquette>
-
-<output>
-- `send`: returns each recipient that received the message and any prose replies that arrived.
-- `list`: returns peers and channels visible to the caller.
-</output>
-
-<examples>
-# List peers
-`{"op": "list"}`
-# Direct message to the main agent (waits for prose reply)
-`{"op": "send", "to": "Main", "message": "Should I prefer JWT or session cookies for the auth flow?"}`
-# Unexpected state — ask the originator
-`{"op": "send", "to": "Main", "message": "Assignment says edit src/auth/jwt.ts but the file does not exist. Is the new path src/server/auth/jwt.ts?"}`
-# Blocked by a peer — ask them directly
-`{"op": "send", "to": "AuthLoader", "message": "Are you still touching src/server/auth.ts? I need to add a 401 path; OK to proceed or should I wait?"}`
-# Broadcast to discover who owns something (no replies, just informs them)
-`{"op": "send", "to": "all", "message": "About to refactor src/server/middleware/*. Anyone already in there?", "awaitReply": false}`
-</examples>

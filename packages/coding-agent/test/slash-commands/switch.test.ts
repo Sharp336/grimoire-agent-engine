@@ -5,7 +5,6 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 function createRuntime() {
 	const showModelSelector = vi.fn();
 	const setText = vi.fn();
-	const handleBackgroundCommand = vi.fn();
 	return {
 		showModelSelector,
 		setText,
@@ -13,12 +12,22 @@ function createRuntime() {
 			ctx: {
 				editor: { setText } as unknown as InteractiveModeContext["editor"],
 				showModelSelector,
-				handleBackgroundCommand,
 			} as unknown as InteractiveModeContext,
-			handleBackgroundCommand,
 		},
 	};
 }
+
+describe("/model slash command", () => {
+	it("opens the model setup picker for role and thinking assignment", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/model", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showModelSelector.mock.calls).toEqual([[]]);
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+});
 
 describe("/switch slash command", () => {
 	it("opens the temporary model selector (mirrors alt+p)", async () => {

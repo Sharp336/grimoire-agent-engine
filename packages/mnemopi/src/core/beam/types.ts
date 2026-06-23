@@ -53,6 +53,8 @@ export interface BeamConfig {
 	importanceWeight: number;
 	useCloud: boolean;
 	localLlmEnabled: boolean;
+	maxEpisodeChars: number;
+	proactiveLinking?: boolean;
 }
 
 export interface BeamMemoryOptions {
@@ -62,6 +64,7 @@ export interface BeamMemoryOptions {
 	authorType?: string | null;
 	channelId?: string | null;
 	useCloud?: boolean;
+	proactiveLinking?: boolean;
 	eventEmitter?: (event: BeamEvent) => void;
 	pluginManager?: BeamPluginManager | null;
 	annotations?: AnnotationStoreLike | null;

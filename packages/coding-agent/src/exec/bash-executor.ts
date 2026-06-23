@@ -6,11 +6,12 @@
 import * as fs from "node:fs/promises";
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { executeShell, type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
-import { NON_INTERACTIVE_ENV } from "./non-interactive-env";
+import { buildNonInteractiveEnv } from "./non-interactive-env";
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -22,6 +23,8 @@ export interface BashExecutorOptions {
 	sessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
+	/** Run through the configured user shell instead of brush parsing directly. */
+	useUserShell?: boolean;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -53,6 +56,44 @@ export interface BashResult {
 const shellSessions = new Map<string, Shell>();
 const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
+/** Session keys with a command currently in flight on the persistent Shell. */
+const shellSessionsInUse = new Set<string>();
+
+/**
+ * Shells retained past their turn because a background (`nohup`/`&`) job is
+ * still running. A per-call `:async:` Shell is normally dropped at teardown,
+ * which SIGKILLs its children via kill-on-drop. Keeping the reference alive lets
+ * the process survive across turns; the Shell is dropped once its last
+ * background job exits (reaped by the poll loop below). Children stay
+ * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ */
+const retainedShells = new Set<Shell>();
+const RETAIN_REAP_INTERVAL_MS = 5_000;
+
+async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
+	let live: number;
+	try {
+		live = await shell.liveBackgroundJobCount();
+	} catch {
+		return;
+	}
+	if (live <= 0) return;
+	retainedShells.add(shell);
+	const interval = setInterval(() => {
+		void shell
+			.liveBackgroundJobCount()
+			.then(remaining => {
+				if (remaining > 0) return;
+				clearInterval(interval);
+				retainedShells.delete(shell);
+			})
+			.catch(() => {
+				clearInterval(interval);
+				retainedShells.delete(shell);
+			});
+	}, RETAIN_REAP_INTERVAL_MS);
+	interval.unref?.();
+}
 
 function quarantineShellSession(
 	sessionKey: string,
@@ -95,22 +136,98 @@ export function buildMinimizerOptions(group: ShellMinimizerSettings): MinimizerO
 		only: group.only.length > 0 ? group.only : undefined,
 		except: group.except.length > 0 ? group.except : undefined,
 		maxCaptureBytes: group.maxCaptureBytes,
+		sourceOutlineLevel: group.sourceOutlineLevel === "default" ? undefined : group.sourceOutlineLevel,
+		legacyFilters: group.legacyFilters,
+	};
+}
+
+function shellBasename(shell: string): string {
+	return shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+}
+
+function isBashShell(shell: string): boolean {
+	const basename = shellBasename(shell);
+	return basename.includes("bash");
+}
+
+function needsInteractiveShellArg(shell: string): boolean {
+	const basename = shellBasename(shell);
+	return basename.includes("zsh");
+}
+
+function supportsAutoUserShell(shell: string): boolean {
+	const basename = shellBasename(shell);
+	return basename.includes("bash") || basename.includes("zsh") || basename.includes("fish");
+}
+
+function hasInteractiveShellArg(args: string[]): boolean {
+	return args.some(arg => arg === "--interactive" || /^-[^-]*i/.test(arg));
+}
+
+function ensureInteractiveShellArgs(shell: string, args: string[]): string[] {
+	if (!needsInteractiveShellArg(shell) || hasInteractiveShellArg(args)) return args;
+
+	const commandIndex = args.findIndex(arg => arg === "-c" || arg === "--command");
+	if (commandIndex !== -1) {
+		return [...args.slice(0, commandIndex), "-i", ...args.slice(commandIndex)];
+	}
+
+	const compactCommandIndex = args.findIndex(arg => /^-[^-]*c[^-]*$/.test(arg));
+	if (compactCommandIndex !== -1) {
+		return args.map((arg, index) => (index === compactCommandIndex ? arg.replace("c", "ic") : arg));
+	}
+
+	return [...args, "-i"];
+}
+
+function quoteShellArg(value: string): string {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function buildUserShellCommand(shell: string, args: string[], command: string): string {
+	return [shell, ...ensureInteractiveShellArgs(shell, args), command].map(quoteShellArg).join(" ");
+}
+
+function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {
+	const customShellPath = settings.get("shellPath");
+	const envShell = Bun.env.SHELL;
+	if (customShellPath || process.platform === "win32" || !envShell || envShell === baseConfig.shell) {
+		return baseConfig;
+	}
+	if (!supportsAutoUserShell(envShell) || !isExecutable(envShell)) {
+		return baseConfig;
+	}
+
+	return {
+		...baseConfig,
+		shell: envShell,
+		env: {
+			...baseConfig.env,
+			SHELL: envShell,
+		},
 	};
 }
 
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
-	const { shell, env: shellEnv, prefix } = settings.getShellConfig();
-	const snapshotPath = shell.includes("bash") ? await getOrCreateSnapshot(shell, shellEnv) : null;
+	const baseShellConfig = settings.getShellConfig();
+	const shellConfig =
+		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
+	const { shell, args, env: shellEnv, prefix } = shellConfig;
+	const bashShell = isBashShell(shell);
+	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = await resolveShellCwd(options?.cwd);
-	const commandEnv = options?.env ? { ...NON_INTERACTIVE_ENV, ...options.env } : NON_INTERACTIVE_ENV;
+	const commandEnv = buildNonInteractiveEnv(options?.env);
 
 	// Apply command prefix if configured
 	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
-	const finalCommand = prefixedCommand;
+	const finalCommand =
+		options?.useUserShell === true && !bashShell
+			? buildUserShellCommand(shell, args, prefixedCommand)
+			: prefixedCommand;
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
@@ -144,14 +261,24 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		shellSessions.delete(sessionKey);
 	}
 
-	let shellSession = persistentSessionBroken ? undefined : shellSessions.get(sessionKey);
-	if (!shellSession && !persistentSessionBroken) {
+	// A persistent Shell runs one command at a time (the native session is a
+	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
+	// parallel bash calls overlap on the same key, the first one owns the
+	// persistent session; the rest degrade to isolated one-shot shells — the
+	// same path quarantined sessions take.
+	const sessionBusy = shellSessionsInUse.has(sessionKey);
+	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
+	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell({
 			sessionEnv: shellEnv,
 			snapshotPath: snapshotPath ?? undefined,
 			minimizer,
 		});
 		shellSessions.set(sessionKey, shellSession);
+	}
+	const ownsPersistentSession = shellSession !== undefined;
+	if (ownsPersistentSession) {
+		shellSessionsInUse.add(sessionKey);
 	}
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
@@ -314,8 +441,21 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		if (userSignal) {
 			userSignal.removeEventListener("abort", abortHandler);
 		}
-		if (resetSession) {
-			shellSessions.delete(sessionKey);
+		if (ownsPersistentSession) {
+			shellSessionsInUse.delete(sessionKey);
+			if (resetSession || options?.sessionKey?.includes(":async:")) {
+				// `:async:` keys are per-job (jobId is unique), so the Shell would
+				// otherwise stay in the process-global map forever after completion.
+				shellSessions.delete(sessionKey);
+				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
+				// any `nohup`/`&` children (kill-on-drop). If the command left a live
+				// background job, retain the Shell so the process survives across
+				// turns; it is reaped once its last job exits and still dies with the
+				// harness. Skip on resetSession (cancel/error) — those tear down.
+				if (!resetSession && shellSession) {
+					await retainShellWithLiveBackgroundJobs(shellSession);
+				}
+			}
 		}
 	}
 }

@@ -632,7 +632,13 @@ pub(crate) fn execute_external_command(
 	match session_action {
 		ChildSessionAction::DetachSession => {
 			// setsid() creates the fresh session + process group; no process_group().
-			cmd.detach_session();
+			// A reparenting operand (`nohup cmd &`) additionally double-forks so it
+			// leaves the host's descendant tree and survives the teardown walk.
+			if context.params.detach_reparent {
+				cmd.detach_session_reparent();
+			} else {
+				cmd.detach_session();
+			}
 		}
 		ChildSessionAction::TakeForeground if command_leads_session => {
 			// Don't set process_group(0) - setsid() in pre_exec will handle it.
@@ -814,8 +820,19 @@ pub(crate) async fn invoke_shell_function(
 
 	// Handle control-flow.
 	match result.next_control_flow {
-		ExecutionControlFlow::BreakLoop { .. } | ExecutionControlFlow::ContinueLoop { .. } => {
-			return error::unimp("break or continue returned from function invocation");
+		ExecutionControlFlow::BreakLoop { .. } => {
+			writeln!(
+				context.params.stderr(context.shell),
+				"break: only meaningful in a `for', `while', or `until' loop"
+			)?;
+			result.next_control_flow = ExecutionControlFlow::Normal;
+		},
+		ExecutionControlFlow::ContinueLoop { .. } => {
+			writeln!(
+				context.params.stderr(context.shell),
+				"continue: only meaningful in a `for', `while', or `until' loop"
+			)?;
+			result.next_control_flow = ExecutionControlFlow::Normal;
 		},
 		ExecutionControlFlow::ReturnFromFunctionOrScript => {
 			// It's now been handled.

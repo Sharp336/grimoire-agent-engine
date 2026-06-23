@@ -10,7 +10,8 @@ import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import * as natives from "@oh-my-pi/pi-natives";
-import { hookFetch, ptree, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
+import { asGlobalFetch } from "../helpers/fetch-mock";
 
 const withMissingSystemPython = () => {
 	const whichSpy = vi.spyOn(Bun, "which").mockImplementation(() => null);
@@ -34,7 +35,7 @@ describe("read tool URL selector shorthands", () => {
 		fs.rmSync(testDir, { recursive: true, force: true });
 	});
 
-	const createSession = (): ToolSession => {
+	const createSession = (settingsOverrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
 		const sessionFile = path.join(testDir, "session.jsonl");
 		const artifactsDir = sessionFile.slice(0, -6);
 		let nextArtifactId = 0;
@@ -53,6 +54,7 @@ describe("read tool URL selector shorthands", () => {
 			},
 			settings: Settings.isolated({
 				"fetch.enabled": true,
+				...settingsOverrides,
 			}),
 		};
 	};
@@ -165,11 +167,6 @@ describe("read tool URL handling", () => {
 			ok: true,
 			buffer: imageBytes,
 		});
-		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: false,
-			content: "",
-			error: "markit unavailable",
-		});
 		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
 			buffer: imageBytes,
 			mimeType: "image/png",
@@ -220,11 +217,7 @@ describe("read tool URL handling", () => {
 			ok: true,
 			buffer: new Uint8Array([137, 80, 78, 71]),
 		});
-		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: false,
-			content: "",
-			error: "markit unavailable",
-		});
+		const convertSpy = vi.spyOn(scraperUtils, "convertWithMarkit");
 
 		const result = await tool.execute("fetch-image-resized", { path: "https://example.com/image.png" });
 		const imageBlock = result.content.find(
@@ -238,52 +231,9 @@ describe("read tool URL handling", () => {
 		expect(imageBlock?.data).toBe("cmVzaXplZA==");
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("displayed at 1000x500");
+		expect(convertSpy).not.toHaveBeenCalled();
 	});
 
-	it("keeps markit extracted text for image responses", async () => {
-		const session = createSession();
-		const tool = new ReadTool(session);
-		const extractedText = "Converted image text content that is definitely longer than fifty characters.";
-		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
-			buffer: new Uint8Array([1, 2, 3]),
-			mimeType: "image/png",
-			originalWidth: 100,
-			originalHeight: 100,
-			width: 100,
-			height: 100,
-			wasResized: false,
-			get data() {
-				return "aW1hZ2U=";
-			},
-		});
-		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
-			ok: true,
-			status: 200,
-			contentType: "image/png",
-			finalUrl: "https://example.com/image.png",
-			content: "",
-		});
-		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
-			ok: true,
-			buffer: new Uint8Array([137, 80, 78, 71]),
-		});
-		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: true,
-			content: extractedText,
-		});
-
-		const result = await tool.execute("fetch-image-with-ocr", { path: "https://example.com/image.png" });
-		const textBlock = result.content.find(content => content.type === "text");
-		const imageBlock = result.content.find(
-			(content): content is { type: "image"; data: string; mimeType: string } => content.type === "image",
-		);
-
-		expect(result.details?.method).toBe("image");
-		expect(textBlock?.type).toBe("text");
-		expect(textBlock?.text).toContain(extractedText);
-		expect(imageBlock?.mimeType).toBe("image/png");
-		expect(imageBlock?.data).toBe("aW1hZ2U=");
-	});
 	it("falls back to text-only output for unsupported image MIME types", async () => {
 		const session = createSession();
 		const tool = new ReadTool(session);
@@ -305,39 +255,6 @@ describe("read tool URL handling", () => {
 		expect(imageBlock).toBeUndefined();
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("<svg></svg>");
-	});
-
-	it("uses binary conversion fallback for unsupported image MIME when extension is convertible", async () => {
-		const session = createSession();
-		const tool = new ReadTool(session);
-		const convertedText = "Converted image text from markit fallback with sufficient length to pass threshold.";
-		const fetchBinarySpy = vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
-			ok: true,
-			buffer: new Uint8Array([255, 216, 255, 224]),
-		});
-		const convertSpy = vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: true,
-			content: convertedText,
-		});
-		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
-			ok: true,
-			status: 200,
-			contentType: "image/jpg",
-			finalUrl: "https://example.com/image.jpg",
-			content: "\u0000\u0001garbage",
-		});
-
-		const result = await tool.execute("fetch-image-jpg-fallback", { path: "https://example.com/image.jpg" });
-		const imageBlock = result.content.find(content => content.type === "image");
-		const textBlock = result.content.find(content => content.type === "text");
-
-		expect(result.details?.method).toBe("markit");
-		expect(fetchBinarySpy).toHaveBeenCalledTimes(1);
-		expect(convertSpy).toHaveBeenCalledTimes(1);
-		expect(result.details?.notes).toContain("Attempting binary conversion fallback for unsupported image MIME type");
-		expect(imageBlock).toBeUndefined();
-		expect(textBlock?.type).toBe("text");
-		expect(textBlock?.text).toContain(convertedText);
 	});
 
 	it("does not treat text/html at .png paths as inline images", async () => {
@@ -401,11 +318,6 @@ describe("read tool URL handling", () => {
 		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
 			ok: true,
 			buffer: new Uint8Array([60, 104, 116, 109, 108]),
-		});
-		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: false,
-			content: "",
-			error: "conversion failed",
 		});
 		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
 			buffer: new Uint8Array([60, 104, 116, 109, 108]),
@@ -475,7 +387,6 @@ describe("read tool URL handling", () => {
 				content: "",
 			};
 		});
-		using hook = hookFetch(() => new Response("blocked", { status: 500, statusText: "Blocked" }));
 		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
 		vi.spyOn(natives, "htmlToMarkdown").mockResolvedValue(renderedMarkdown);
 
@@ -490,11 +401,11 @@ describe("read tool URL handling", () => {
 		expect(requestedUrls).not.toContain("https://bun.com/llms.txt");
 		expect(requestedUrls).not.toContain("https://bun.com/llms.md");
 		void missingSystemPython;
-		void hook;
 	});
 
 	it("uses section-scoped llms.txt fallback without requesting the site-wide file", async () => {
 		const session = createSession();
+		session.fetch = asGlobalFetch(() => new Response("blocked", { status: 500, statusText: "Blocked" }));
 		const tool = new ReadTool(session);
 		const pageUrl = "https://example.com/docs/reference/widget";
 		const pageHtml = "<html><body><nav>Docs</nav><main><h1>Widget</h1></main></body></html>";
@@ -557,7 +468,6 @@ describe("read tool URL handling", () => {
 				content: "",
 			};
 		});
-		using hook = hookFetch(() => new Response("blocked", { status: 500, statusText: "Blocked" }));
 		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue("/usr/bin/trafilatura");
 
 		const result = await tool.execute("fetch-section-llms", { path: pageUrl });
@@ -573,13 +483,38 @@ describe("read tool URL handling", () => {
 		expect(requestedUrls).not.toContain("https://example.com/llms.txt");
 		expect(requestedUrls).not.toContain("https://example.com/llms.md");
 		void missingSystemPython;
-		void hook;
 	});
-	it("prefers Parallel extract before other HTML renderers when configured", async () => {
+	it("prefers Parallel extract first when providers.fetch is set to parallel", async () => {
 		process.env.PARALLEL_API_KEY = "test-parallel-key";
-		const session = createSession();
+		const session = createSession({ "providers.fetch": "parallel" });
 		const tool = new ReadTool(session);
 		const pageUrl = "https://example.com/parallel-page";
+		session.fetch = asGlobalFetch(input => {
+			if (String(input) === "https://api.parallel.ai/v1beta/extract") {
+				return new Response(
+					JSON.stringify({
+						extract_id: "extract-fetch-1",
+						results: [
+							{
+								url: pageUrl,
+								title: "Parallel Page",
+								excerpts: [
+									"Parallel-rendered content that is comfortably longer than one hundred characters. ".repeat(
+										2,
+									),
+								],
+								full_content: null,
+							},
+						],
+						errors: [],
+						warnings: null,
+						usage: null,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("blocked", { status: 500, statusText: "Blocked" });
+		});
 		const pageHtml = "<html><body><main><h1>Parallel Page</h1></main></body></html>";
 		const ensureToolSpy = vi.spyOn(toolsManager, "ensureTool");
 		const htmlToMarkdownSpy = vi.spyOn(natives, "htmlToMarkdown");
@@ -612,34 +547,6 @@ describe("read tool URL handling", () => {
 				content: "",
 			};
 		});
-		using parallelExtractHook = hookFetch(input => {
-			const requestedUrl = String(input);
-			if (requestedUrl === "https://api.parallel.ai/v1beta/extract") {
-				return new Response(
-					JSON.stringify({
-						extract_id: "extract-fetch-1",
-						results: [
-							{
-								url: pageUrl,
-								title: "Parallel Page",
-								excerpts: [
-									"Parallel-rendered content that is comfortably longer than one hundred characters. ".repeat(
-										2,
-									),
-								],
-								full_content: null,
-							},
-						],
-						errors: [],
-						warnings: null,
-						usage: null,
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
-			}
-
-			return new Response("blocked", { status: 500, statusText: "Blocked" });
-		});
 
 		const result = await tool.execute("fetch-parallel-html", { path: pageUrl });
 		const textBlock = result.content.find(content => content.type === "text");
@@ -649,7 +556,6 @@ describe("read tool URL handling", () => {
 		expect(textBlock?.text).toContain("Parallel-rendered content");
 		expect(ensureToolSpy).not.toHaveBeenCalled();
 		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
-		void parallelExtractHook;
 	});
 
 	it("reuses cached output for repeated plain URL reads", async () => {
