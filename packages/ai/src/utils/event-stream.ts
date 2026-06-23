@@ -68,14 +68,14 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
-			waiter.resolve({ value: undefined as any, done: true });
+			waiter.resolve({ value: undefined, done: true });
 		}
 	}
 
 	endWaiting(): void {
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
-			waiter.resolve({ value: undefined as any, done: true });
+			waiter.resolve({ value: undefined, done: true });
 		}
 	}
 

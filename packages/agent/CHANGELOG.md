@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed unnecessary `as any` casts when accessing `errorMessage` on `AssistantMessage` in `Agent` turn-end handling — the field is already on the type.
+
 ## [16.1.16] - 2026-06-23
 
 ### Added

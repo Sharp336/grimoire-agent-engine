@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Removed redundant `undefined as any` casts in `EventStream.end()` and `endWaiting()` — `IteratorResult<T>` already allows `undefined` for the `value` field when `done: true`.
+
 ## [16.1.16] - 2026-06-23
 
 ### Fixed
