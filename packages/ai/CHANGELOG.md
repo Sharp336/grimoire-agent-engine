@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Removed redundant `undefined as any` casts in `EventStream.end()` and `endWaiting()` — `IteratorResult<T>` already allows `undefined` for the `value` field when `done: true`.
+- Removed redundant `undefined as any` casts in `EventStream.end()` and `endWaiting()`. The waiter type is now explicitly `IteratorResult<T, undefined>` (instead of the default `IteratorResult<T, any>`), so the `undefined` value is type-checked without relying on the implicit `any` for `TReturn`.
 
 ## [16.1.16] - 2026-06-23
 
