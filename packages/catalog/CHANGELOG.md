@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Umans dynamic discovery preserving bundled `umans-glm-5.2` thinking efforts when `/models/info` reports only a subset of levels, including mapping the UI `xhigh` tier to the upstream `max` effort. ([#3286](https://github.com/can1357/oh-my-pi/issues/3286))
+
 ## [16.1.14] - 2026-06-22
 
 ### Added

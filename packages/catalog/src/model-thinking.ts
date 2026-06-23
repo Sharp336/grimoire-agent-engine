@@ -178,11 +178,13 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	thinking: ThinkingConfig,
 ): ThinkingConfig {
 	const parsed = parseKnownModel(spec.id);
+	const normalizedMode = getModelDefinedThinkingMode(spec) ?? thinking.mode;
+	const modeChanged = normalizedMode !== thinking.mode;
 	const normalizedEfforts = getModelDefinedEfforts(spec, compat) ?? thinking.efforts;
 	const effortsChanged = !sameEffortList(normalizedEfforts, thinking.efforts);
 	const effortMap =
 		thinking.effortMap === undefined
-			? inferEffortMap(spec, compat, parsed, thinking.mode, normalizedEfforts)
+			? inferEffortMap(spec, compat, parsed, normalizedMode, normalizedEfforts)
 			: effortsChanged
 				? filterEffortMapToSupportedEfforts(thinking.effortMap, normalizedEfforts)
 				: undefined;
@@ -192,10 +194,13 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
 	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
-	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort) {
+	if (!modeChanged && !effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
+	if (modeChanged) {
+		filled.mode = normalizedMode;
+	}
 	if (effortsChanged) {
 		filled.efforts = normalizedEfforts;
 	}
@@ -321,8 +326,19 @@ function getModelDefinedEfforts<TApi extends Api>(
 		: undefined;
 }
 
+function getModelDefinedThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>): ThinkingConfig["mode"] | undefined {
+	if (isUmansGlm52ReasoningEffortModel(spec)) {
+		return "anthropic-budget-effort";
+	}
+	return undefined;
+}
+
 function isOllamaCloudGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	return spec.api === "ollama-chat" && spec.provider === "ollama-cloud" && isGlm52ReasoningEffortModelId(spec.id);
+}
+
+function isUmansGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return spec.api === "anthropic-messages" && spec.provider === "umans" && isGlm52ReasoningEffortModelId(spec.id);
 }
 
 function isMinimaxReasoningModelOnAnthropicEndpoint<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
@@ -387,6 +403,9 @@ function inferDetectedEffortMap<TApi extends Api>(
 		return ZAI_GLM_52_REASONING_EFFORT_MAP;
 	}
 	if (isOllamaCloudGlm52ReasoningEffortModel(spec)) {
+		return GLM_52_XHIGH_MAX_EFFORT_MAP;
+	}
+	if (isUmansGlm52ReasoningEffortModel(spec)) {
 		return GLM_52_XHIGH_MAX_EFFORT_MAP;
 	}
 	if (isSakanaFuguReasoningModel(spec)) {
@@ -574,6 +593,9 @@ function inferThinkingControlMode<TApi extends Api>(
 				: "budget";
 
 		case "anthropic-messages":
+			if (isUmansGlm52ReasoningEffortModel(spec)) {
+				return "anthropic-budget-effort";
+			}
 			if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
 				return "anthropic-adaptive";
 			}

@@ -620,9 +620,34 @@ function mapUmansReasoningEfforts(value: unknown): readonly Effort[] {
 	return efforts.length > 0 ? efforts : UMANS_DEFAULT_REASONING_EFFORTS;
 }
 
-function mapUmansThinkingConfig(value: unknown): ThinkingConfig | undefined {
+function mergeUmansReasoningEfforts(
+	discoveredEfforts: readonly Effort[],
+	referenceThinking: ThinkingConfig | undefined,
+): readonly Effort[] {
+	const referenceEfforts = referenceThinking?.efforts;
+	if (referenceEfforts === undefined || referenceEfforts.length === 0) {
+		return discoveredEfforts;
+	}
+	const efforts: Effort[] = [];
+	for (const effort of referenceEfforts) {
+		if (!efforts.includes(effort)) {
+			efforts.push(effort);
+		}
+	}
+	for (const effort of discoveredEfforts) {
+		if (!efforts.includes(effort)) {
+			efforts.push(effort);
+		}
+	}
+	return efforts;
+}
+
+function mapUmansThinkingConfig(
+	value: unknown,
+	referenceThinking: ThinkingConfig | undefined,
+): ThinkingConfig | undefined {
 	if (!umansReasoningSupported(value)) return undefined;
-	const efforts = mapUmansReasoningEfforts(value);
+	const efforts = mergeUmansReasoningEfforts(mapUmansReasoningEfforts(value), referenceThinking);
 	const thinking: ThinkingConfig = { mode: "budget", efforts };
 	if (isRecord(value)) {
 		if (value.can_disable === false) {
@@ -647,7 +672,7 @@ function mapUmansModelInfo(
 	if (!modelId) return null;
 	const capabilities = isRecord(raw.capabilities) ? raw.capabilities : {};
 	const supportsTools = capabilities.supports_tools;
-	const thinking = mapUmansThinkingConfig(capabilities.reasoning);
+	const thinking = mapUmansThinkingConfig(capabilities.reasoning, reference?.thinking);
 	return {
 		...reference,
 		id: modelId,

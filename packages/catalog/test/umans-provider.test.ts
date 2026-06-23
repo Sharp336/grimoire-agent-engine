@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -91,6 +92,37 @@ describe("umans provider catalog", () => {
 			maxTokens: 32_768,
 			thinking: { defaultLevel: "medium", requiresEffort: true },
 			compat: { escapeBuiltinToolNames: true },
+		});
+	});
+
+	it("preserves bundled Umans reasoning efforts when discovery reports a subset", async () => {
+		const result = await resolveProviderModels(
+			umansModelManagerOptions({
+				fetch: async () =>
+					new Response(
+						JSON.stringify({
+							"umans-glm-5.2": {
+								display_name: "Umans GLM 5.2",
+								capabilities: {
+									context_window: 405_504,
+									recommended_max_tokens: 131_071,
+									supports_vision: "via-handoff",
+									supports_tools: true,
+									reasoning: { supported: true, levels: ["minimal", "low", "medium"] },
+								},
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					),
+			}),
+			"online",
+		);
+
+		const model = result.models.find(item => item.id === "umans-glm-5.2");
+		expect(model?.thinking).toMatchObject({
+			mode: "anthropic-budget-effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			effortMap: { [Effort.XHigh]: "max" },
 		});
 	});
 

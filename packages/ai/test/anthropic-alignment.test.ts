@@ -1870,6 +1870,40 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(maxPayload.output_config).toEqual({ effort: "max" });
 	});
 
+	it("maps Umans GLM 5.2 xhigh reasoning to Anthropic max effort", async () => {
+		const payload = (await captureAnthropicPayload(
+			buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				id: "umans-glm-5.2",
+				name: "Umans GLM 5.2",
+				provider: "umans",
+				baseUrl: "https://api.code.umans.ai",
+				input: ["text"],
+				contextWindow: 405_504,
+				maxTokens: 131_071,
+				thinking: {
+					mode: "budget",
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+			}),
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{
+				thinkingEnabled: true,
+				reasoning: Effort.XHigh,
+			},
+		)) as {
+			thinking?: { type?: string; budget_tokens?: number; display?: string };
+			output_config?: { effort?: string };
+		};
+
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(payload.output_config).toEqual({ effort: "max" });
+	});
+
 	it("keeps summarized adaptive thinking by default for API-key Opus 4.7+ requests", async () => {
 		const payload = (await captureAnthropicPayload(
 			buildModel({
