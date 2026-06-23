@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { parseAnySearchMarkdown, searchAnySearch } from "@oh-my-pi/pi-coding-agent/web/search/providers/anysearch";
+import { parseAnySearchMarkdown, searchAnySearch } from "../../src/web/search/providers/anysearch";
 
 describe("AnySearch web search provider", () => {
 	beforeEach(() => {
