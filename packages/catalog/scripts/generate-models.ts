@@ -33,6 +33,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	EUROPEAN_GATEWAY_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -497,6 +498,9 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("sakana")) {
 		allModels.push(...SAKANA_FUGU_STATIC_MODELS);
 	}
+	// Seed European gateway defaults so provider entries remain available when
+	// catalog regeneration lacks live credentials or provider discovery is down.
+	allModels.push(...EUROPEAN_GATEWAY_STATIC_MODELS);
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.

@@ -6,9 +6,11 @@ import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
+import { cortecsProvider } from "./cortecs";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { eurouterProvider } from "./eurouter";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -25,12 +27,14 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
+import { meliousProvider } from "./melious";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
 import { mistralProvider } from "./mistral";
 import { moonshotProvider } from "./moonshot";
 import { nanogptProvider } from "./nanogpt";
+import { nebiusProvider } from "./nebius";
 import { nvidiaProvider } from "./nvidia";
 import { ollamaProvider } from "./ollama";
 import { ollamaCloudProvider } from "./ollama-cloud";
@@ -114,6 +118,10 @@ const ALL = [
 	waferServerlessProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
+	cortecsProvider,
+	eurouterProvider,
+	meliousProvider,
+	nebiusProvider,
 	litellmProvider,
 	kiloProvider,
 	zenmuxProvider,

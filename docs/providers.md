@@ -98,13 +98,17 @@ Each provider has one or more environment variables that supply a key when no st
 | Provider ID | Environment variable(s) |
 |---|---|
 | `cerebras` | `CEREBRAS_API_KEY` |
+| `cortecs` | `CORTECS_API_KEY` |
 | `deepseek` | `DEEPSEEK_API_KEY` |
+| `eurouter` | `EUROUTER_API_KEY` |
 | `fireworks` | `FIREWORKS_API_KEY` |
 | `together` | `TOGETHER_API_KEY` |
 | `nvidia` | `NVIDIA_API_KEY` |
 | `huggingface` | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN` |
+| `melious` | `MELIOUS_API_KEY` |
 | `moonshot` | `MOONSHOT_API_KEY` |
 | `nanogpt` | `NANO_GPT_API_KEY` |
+| `nebius` | `NEBIUS_API_KEY` |
 | `venice` | `VENICE_API_KEY` |
 | `vercel-ai-gateway` | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
 | `cloudflare-ai-gateway` | `CLOUDFLARE_AI_GATEWAY_API_KEY` |

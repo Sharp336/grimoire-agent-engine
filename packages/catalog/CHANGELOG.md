@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added catalog and discovery entries for Melious, Nebius Token Factory, Cortecs, and EUrouter European inference gateways. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
+
 ## [16.1.14] - 2026-06-22
 
 ### Added

@@ -467,6 +467,165 @@ function isLikelyNanoGptTextModelId(id: string): boolean {
 
 type SimpleProviderConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
 
+type EuropeanGatewayProviderId = "melious" | "nebius" | "cortecs" | "eurouter";
+
+type EuropeanGatewayConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
+
+const EUROPEAN_GATEWAY_BASE_URLS: Record<EuropeanGatewayProviderId, string> = {
+	melious: "https://api.melious.ai/v1",
+	nebius: "https://api.tokenfactory.nebius.com/v1",
+	cortecs: "https://api.cortecs.ai/v1",
+	eurouter: "https://api.eurouter.ai/api/v1",
+};
+
+const EUROPEAN_GATEWAY_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "melious",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.melious,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 131_000,
+		maxTokens: 8192,
+	},
+	{
+		id: "deepseek-ai/DeepSeek-R1-0528",
+		name: "DeepSeek R1 0528",
+		api: "openai-completions",
+		provider: "nebius",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.nebius,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 164_000,
+		maxTokens: 8192,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "cortecs",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.cortecs,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 131_000,
+		maxTokens: 8192,
+	},
+	{
+		id: "mistral-large-3",
+		name: "Mistral Large 3",
+		api: "openai-completions",
+		provider: "eurouter",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.eurouter,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+];
+
+function toStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.filter((item): item is string => typeof item === "string");
+}
+
+function toGatewayCostPerMillion(value: unknown): number | undefined {
+	const parsed = toNumber(value);
+	if (parsed === undefined || parsed === null) {
+		return undefined;
+	}
+	if (parsed > 0 && parsed < 0.0001) {
+		return parsed * 1_000_000;
+	}
+	return parsed;
+}
+
+function toGatewayInputCapabilities(
+	entry: OpenAICompatibleModelRecord,
+	fallback: ModelSpec<Api>["input"],
+): ("text" | "image")[] {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const inputModalities = toStringArray(architecture?.input_modalities ?? entry.input_modalities);
+	if (inputModalities.includes("image")) {
+		return ["text", "image"];
+	}
+	const tags = toStringArray(entry.tags).map(tag => tag.toLowerCase());
+	if (tags.includes("image")) {
+		return ["text", "image"];
+	}
+	return fallback;
+}
+
+function mapEuropeanGatewayModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const supportedParameters = toStringArray(entry.supported_parameters);
+	const tags = toStringArray(entry.tags).map(tag => tag.toLowerCase());
+	return {
+		...model,
+		name: toModelName(entry.name, model.name),
+		reasoning: model.reasoning || supportedParameters.includes("reasoning") || tags.includes("reasoning"),
+		input: toGatewayInputCapabilities(entry, model.input),
+		cost: {
+			input: toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ?? model.cost.input,
+			output: toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ?? model.cost.output,
+			cacheRead:
+				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ?? model.cost.cacheRead,
+			cacheWrite:
+				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ?? model.cost.cacheWrite,
+		},
+		contextWindow: toPositiveNumber(
+			entry.context_length,
+			toPositiveNumber(entry.context_size, toPositiveNumber(topProvider?.context_length, model.contextWindow)),
+		),
+		maxTokens: toPositiveNumber(
+			entry.max_completion_tokens,
+			toPositiveNumber(topProvider?.max_completion_tokens, model.maxTokens),
+		),
+	};
+}
+
+function createEuropeanGatewayModelManagerOptions(
+	providerId: EuropeanGatewayProviderId,
+	defaultBaseUrl: string,
+	config?: EuropeanGatewayConfig,
+	allowUnauthenticatedDiscovery = false,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? defaultBaseUrl;
+	const hasApiKey = typeof apiKey === "string" && apiKey.length > 0;
+	const canFetchDynamicModels = hasApiKey || allowUnauthenticatedDiscovery;
+	const resolveReference = createReferenceResolver(new Map<string, ModelSpec<"openai-completions">>());
+	return {
+		providerId,
+		...(canFetchDynamicModels && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapEuropeanGatewayModel(entry, defaults, resolveReference(defaults.id)),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
 export function createSimpleOpenAICompletionsOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
 	defaultBaseUrl: string,
@@ -2887,6 +3046,26 @@ export function nanoGptModelManagerOptions(
 			},
 		}),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// 24. European inference gateways
+// ---------------------------------------------------------------------------
+
+export function meliousModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("melious", EUROPEAN_GATEWAY_BASE_URLS.melious, config);
+}
+
+export function nebiusModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("nebius", EUROPEAN_GATEWAY_BASE_URLS.nebius, config);
+}
+
+export function cortecsModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("cortecs", EUROPEAN_GATEWAY_BASE_URLS.cortecs, config, true);
+}
+
+export function eurouterModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("eurouter", EUROPEAN_GATEWAY_BASE_URLS.eurouter, config, true);
 }
 
 // ---------------------------------------------------------------------------
