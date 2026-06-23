@@ -43,6 +43,63 @@ describe("repairDoubleEncodedJsonString", () => {
 	});
 });
 
+describe("repairDoubleEncodedJsonString — backslash-backslash", () => {
+	it("decodes a double-encoded backslash-backslash sequence", () => {
+		// The \\ triggers detection (structural escape); JSON.parse decodes \\ to \
+		expect(repairDoubleEncodedJsonString("Path is C:\\\\Users\\\\test")).toBe("Path is C:\\Users\\test");
+	});
+});
+
+describe("repairTaskParams — batch and defensive cases", () => {
+	it("repairs double-encoded context in batch form", () => {
+		const params = {
+			agent: "coder",
+			context: 'Background\\"info\\"\\nhere',
+			tasks: [{ assignment: "Do thing" }],
+		} as unknown as TaskParams;
+		const result = repairTaskParams(params);
+		expect(result.context).toBe('Background"info"\nhere');
+	});
+
+	it("repairs double-encoded fields in batch task items", () => {
+		const params = {
+			agent: "coder",
+			context: "shared context",
+			tasks: [
+				{ assignment: 'Task \\"one\\"\\nwith newline', description: 'Desc\\"1\\"' },
+				{ assignment: "Task two", description: "Normal desc" },
+			],
+		} as unknown as TaskParams;
+		const result = repairTaskParams(params);
+		expect(result.tasks![0].assignment).toBe('Task "one"\nwith newline');
+		expect(result.tasks![0].description).toBe('Desc"1"');
+		expect(result.tasks![1].assignment).toBe("Task two");
+		expect(result.tasks![1].description).toBe("Normal desc");
+	});
+
+	it("handles null/undefined params defensively", () => {
+		expect(repairTaskParams(null as unknown as TaskParams)).toBeNull();
+		expect(repairTaskParams(undefined as unknown as TaskParams)).toBeUndefined();
+	});
+
+	it("handles params with undefined optional fields", () => {
+		const params = { agent: "coder" } as unknown as TaskParams;
+		expect(repairTaskParams(params)).toBe(params);
+	});
+
+	it("handles partially streamed params (missing fields)", () => {
+		const params = {
+			agent: "coder",
+			assignment: 'Fix \\"bug\\"\\n here',
+		} as unknown as TaskParams;
+		const result = repairTaskParams(params);
+		expect(result.assignment).toBe('Fix "bug"\n here');
+		expect(result.description).toBeUndefined();
+		expect(result.context).toBeUndefined();
+		expect(result.tasks).toBeUndefined();
+	});
+});
+
 describe("repairTaskParams", () => {
 	it("repairs assignment and description, leaving agent/id intact", () => {
 		const params = {
