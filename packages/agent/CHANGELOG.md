@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced inline `(block as { text?: unknown }).text` casts with `"text" in block` property checks in `normalizeToolResult` (`agent-loop.ts`), using idiomatic TypeScript narrowing instead of fabricated shape casts
+
 ## [16.1.16] - 2026-06-23
 
 ### Added

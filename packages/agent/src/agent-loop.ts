@@ -256,14 +256,16 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			invalidBlocks++;
 			continue;
 		}
-		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
-			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
+		if (block.type === "text" && "text" in block && typeof block.text === "string") {
+			content.push({ type: "text", text: sanitizeText(block.text) });
 		} else if (
 			block.type === "image" &&
-			typeof (block as { data?: unknown }).data === "string" &&
-			typeof (block as { mimeType?: unknown }).mimeType === "string"
+			"data" in block &&
+			typeof block.data === "string" &&
+			"mimeType" in block &&
+			typeof block.mimeType === "string"
 		) {
-			content.push(block as { type: "image"; data: string; mimeType: string });
+			content.push({ type: "image", data: block.data, mimeType: block.mimeType });
 		} else {
 			invalidBlocks++;
 		}
