@@ -121,6 +121,7 @@ export class SelectorController {
 					model: this.ctx.session.model,
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
+					availableFastContextModels: buildFastContextModelOptions(this.ctx.session.modelRegistry),
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
@@ -1290,4 +1291,27 @@ export class SelectorController {
 		this.ctx.ui.setFocus(hub);
 		this.ctx.ui.requestRender();
 	}
+}
+
+/** Curated FastContext-suitable models offered in the model picker. Only those
+ * that resolve against the session's registry (i.e. the provider is logged in)
+ * are shown; a "Local llama.cpp server" sentinel is always appended. */
+const FAST_CONTEXT_MODEL_CHOICES: ReadonlyArray<{ id: string; label: string }> = [
+	{ id: "devin/swe-1-6-fast", label: "Devin SWE 1.6 Fast" },
+	{ id: "devin/swe-1-6", label: "Devin SWE 1.6" },
+	{ id: "devin/swe-1-6-slow", label: "Devin SWE 1.6 Slow" },
+	{ id: "zai/glm-5-turbo", label: "Z.AI GLM 5 Turbo" },
+	{ id: "pi/smol", label: "Pi Smol" },
+];
+
+function buildFastContextModelOptions(
+	registry: { getAvailable(): Array<{ provider: string; id: string }> } | undefined,
+): ReadonlyArray<{ value: string; label: string }> {
+	const available = new Set((registry?.getAvailable() ?? []).map(m => `${m.provider}/${m.id}`));
+	const options = FAST_CONTEXT_MODEL_CHOICES.filter(c => available.has(c.id)).map(c => ({
+		value: c.id,
+		label: c.label,
+	}));
+	options.push({ value: "local", label: "Local llama.cpp server" });
+	return options;
 }

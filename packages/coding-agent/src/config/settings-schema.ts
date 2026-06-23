@@ -1659,7 +1659,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Fast Context",
 			label: "Enable FastContext",
 			description:
-				"Allow the explore subagent to call a local FastContext model through a read-only adapter before falling back to normal search.",
+				"Enable the `fast_context` read-only retrieval adapter. When on, the main agent and the `explore` subagent can call `fast_context` to get a ranked file shortlist (via the configured FastContext model, e.g. devin/swe-1-6-fast) for broad queries, then verify with `read`/`search`.",
 		},
 	},
 
@@ -1669,10 +1669,10 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			group: "Fast Context",
-			label: "FastContext URL",
+			label: "FastContext Server URL",
 			description:
-				"Base URL for the locally served FastContext OpenAI-compatible chat completions endpoint, for example llama.cpp at http://127.0.0.1:8080.",
-			condition: "fastContextEnabled",
+				"Base URL for the locally served FastContext OpenAI-compatible chat completions endpoint (e.g. llama.cpp at http://127.0.0.1:8080). Only used when the FastContext Model is set to the local server.",
+			condition: "fastContextUsesLocalServer",
 		},
 	},
 
@@ -1684,7 +1684,96 @@ export const SETTINGS_SCHEMA = {
 			group: "Fast Context",
 			label: "FastContext Model",
 			description:
-				"Model for FastContext. A provider-prefixed id (e.g. devin/swe-1-6-slow, zai/glm-5-turbo, pi/smol) routes FastContext through the model registry using your configured provider credentials — no local server needed. A bare id (e.g. qwen2.5-coder) or blank uses the local OpenAI-compatible endpoint's /v1/models.",
+				"Model FastContext uses for query expansion. Pick a provider model (e.g. devin/swe-1-6-fast, zai/glm-5-turbo) to route through your configured provider credentials — no local server needed — or the local llama.cpp server. When unset and Devin is logged in, devin/swe-1-6-fast is used automatically.",
+			condition: "fastContextEnabled",
+			options: "runtime",
+		},
+	},
+
+	"fastContext.mode": {
+		type: "string",
+		default: "hint",
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Mode",
+			description:
+				"Default retrieval mode. Hint (default) expands the query into keywords/globs/grep patterns in one model turn, then runs native search (~2-3s). Agent runs the full multi-turn FastContext loop with Read/Glob/Grep (slower, more thorough).",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "hint", label: "Hint", description: "Fast: one turn → keywords/globs/grep (~2-3s)" },
+				{ value: "agent", label: "Agent", description: "Full multi-turn loop (slower, more thorough)" },
+			],
+		},
+	},
+
+	"fastContext.snippets": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Snippets",
+			description:
+				"Include short code snippets alongside the ranked file list (hint mode). Turn off for a compact file-only shortlist.",
+			condition: "fastContextEnabled",
+		},
+	},
+
+	"fastContext.snippetLines": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Snippet Lines",
+			description: "Lines of context per code snippet in hint mode (when snippets are on).",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "3", label: "3 lines" },
+				{ value: "5", label: "5 lines" },
+				{ value: "8", label: "8 lines" },
+				{ value: "10", label: "10 lines" },
+				{ value: "15", label: "15 lines" },
+				{ value: "20", label: "20 lines" },
+				{ value: "30", label: "30 lines" },
+			],
+		},
+	},
+
+	"fastContext.maxReadLines": {
+		type: "number",
+		default: 200,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Max Read Lines",
+			description:
+				"Agent mode: max lines read per file in the FastContext Read/Glob/Grep loop. Higher = more context per file but slower.",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "100", label: "100 lines" },
+				{ value: "200", label: "200 lines" },
+				{ value: "300", label: "300 lines" },
+				{ value: "400", label: "400 lines" },
+				{ value: "500", label: "500 lines" },
+				{ value: "750", label: "750 lines" },
+				{ value: "1000", label: "1000 lines" },
+				{ value: "1500", label: "1500 lines" },
+				{ value: "2000", label: "2000 lines" },
+			],
+		},
+	},
+
+	"fastContext.fastTools": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Fast Tools",
+			description:
+				"Force fast_context into agent mode — SWE-grep-style parallel retrieval (up to 8 parallel Read/Glob/Grep calls per turn, ≤4 turns) that returns thorough file:line citations. Overrides the mode setting; turn on for deep retrieval that shouldn't need re-searching.",
 			condition: "fastContextEnabled",
 		},
 	},
@@ -4707,6 +4796,11 @@ export interface FastContextSettings {
 	enabled: boolean;
 	baseUrl: string | undefined;
 	model: string | undefined;
+	mode: "hint" | "agent";
+	snippets: boolean;
+	snippetLines: number;
+	maxReadLines: number;
+	fastTools: boolean;
 }
 
 export interface CompactionSettings {

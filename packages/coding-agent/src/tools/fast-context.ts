@@ -7,16 +7,22 @@ import type { Api, AssistantMessage, Context, Message, Model, TextContent, Tool,
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { GrepMatch } from "@oh-my-pi/pi-natives";
 import { GrepOutputMode, glob, grep } from "@oh-my-pi/pi-natives";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
+import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import type { Theme } from "../modes/theme/theme";
 import fastContextDescription from "../prompts/tools/fast-context.md" with { type: "text" };
 import citationRetryPrompt from "../prompts/tools/fast-context-citation-retry.md" with { type: "text" };
 import finalTurnPrompt from "../prompts/tools/fast-context-final.md" with { type: "text" };
 import hintSystemPrompt from "../prompts/tools/fast-context-hint-system.md" with { type: "text" };
 import fastContextSystemPrompt from "../prompts/tools/fast-context-system.md" with { type: "text" };
+import { Ellipsis, fileHyperlink, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import type { OutputMeta } from "./output-meta";
+import { createCachedComponent, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
 import { toolResult } from "./tool-result";
 
 const fastContextSchema = type({
@@ -100,7 +106,7 @@ interface ModelsResponse {
 	error?: { message?: string };
 }
 
-interface FastContextToolDetails {
+export interface FastContextToolDetails {
 	meta?: OutputMeta;
 	baseUrl?: string;
 	model: string;
@@ -157,7 +163,7 @@ const HINT_MAX_SNIPPET_FILES = 15;
 const HINT_MAX_SNIPPET_BYTES = 12000;
 const HINT_DEFAULT_MAX_RESULT_TOKENS = 4000;
 const HINT_MAX_RESULT_FILES = 20;
-const MAX_WORKSPACE_LISTING = 60;
+const MAX_WORKSPACE_LISTING = 30;
 const MAX_PARALLEL_TOOL_CALLS = 8;
 const REQUEST_TIMEOUT_MS = 120_000;
 const TOOL_TIMEOUT_MS = 10_000;
@@ -797,7 +803,15 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		return untilAborted(signal, async () => {
 			const apiBaseUrl = normalizeFastContextBaseUrl(this.#session.settings.get("fastContext.baseUrl"));
 			const backend = await this.#resolveBackend(apiBaseUrl, signal);
-			const mode = params.mode ?? "hint";
+			// Fast Tools forces agent mode (SWE-grep-style parallel retrieval).
+			// Otherwise honor an explicit non-default mode; a reflexive `mode: "hint"`
+			// yields to the user's configured fastContext.mode so the setting wins.
+			const mode =
+				this.#session.settings.get("fastContext.fastTools") === true
+					? "agent"
+					: params.mode && params.mode !== "hint"
+						? params.mode
+						: (this.#session.settings.get("fastContext.mode") ?? "hint");
 			return mode === "hint"
 				? this.#executeHint(backend, params, signal)
 				: this.#executeAgent(backend, params, signal);
@@ -881,7 +895,11 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				}
 			}
 			if (response.toolCalls.length === 0) {
-				finalText = response.message.content ?? "";
+				// Strip <final_answer> wrapper so both the TUI-facing result text
+				// and parseCitations receive clean content (the early-termination
+				// path at ~L878 already uses extractFinalAnswer). The LLM consumes
+				// this via the tool-result text too, so tag-free is correct for both.
+				finalText = extractFinalAnswer(response.message.content ?? "");
 				const { citations, lowConfidenceCitations } = await parseCitations(
 					finalText,
 					this.#session.cwd,
@@ -1001,7 +1019,11 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 			// 30s hint timeout tuned for a fast local model — otherwise the single
 			// query-expansion turn times out before the model emits a plan.
 			const hintTimeout = backend.kind === "registry" ? REQUEST_TIMEOUT_MS : HINT_REQUEST_TIMEOUT_MS;
-			const response = await this.#chat(backend, hintMessages, signal, 2048, null, hintTimeout);
+			// Hint plans are ~100-200 tokens of JSON. 512 gives 2.7x headroom
+			// over the worst case (maxed arrays). The llama.cpp server allocates
+			// compute proportional to max_completion_tokens even when the model
+			// stops early, so capping this cuts hint latency ~75%.
+			const response = await this.#chat(backend, hintMessages, signal, 512, null, hintTimeout, undefined, 0);
 			rawText = response.message.content ?? "";
 		} catch (err) {
 			const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1082,7 +1104,21 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		// containing "agent", not files inside an "agent/" directory.
 		// Segments <5 chars (e.g. "tool") are excluded to avoid flooding
 		// (every file in tools/ would match).
-		const dirGlobs = [...identifierSegments].filter(seg => seg.length >= 5).map(seg => `**/${seg}/**/*`);
+		const idDirGlobs = [...identifierSegments].filter(seg => seg.length >= 5).map(seg => `**/${seg}/**/*`);
+		// Keyword-derived directory globs: query keywords like "identity",
+		// "session", "streaming" frequently match directory names containing
+		// the GT file (identity/classify.ts, session/session-context.ts). These
+		// are only generated from keywords ≥6 chars to avoid flooding from
+		// short generic names (e.g. "model" → every file in model/ dirs).
+		// Identifier-segment directory globs (above) already handle CamelCase
+		// query terms; this catches natural-language keywords that aren't
+		// CamelCase identifiers but still correspond to directory names.
+		const kwDirGlobs = queryKws
+			.filter(kw => kw.length >= 6 && !identifierSegments.has(kw))
+			.filter((kw, i, arr) => arr.indexOf(kw) === i)
+			.slice(0, 4)
+			.map(kw => `**/${kw}/**/*`);
+		const dirGlobs = [...idDirGlobs, ...kwDirGlobs];
 		// Directory globs come first (most targeted — files in a named
 		// directory), then segment globs (filename matches), then prefix
 		// globs, then generic keyword globs. All must survive the 200-file
@@ -1093,7 +1129,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		const allGrepCandidates = [...effectivePlan.keywords, ...queryKws]
 			.filter(kw => kw.length >= 5)
 			.sort(byIdentifierThenLength);
-		const supplementaryGrepKws = allGrepCandidates.slice(0, 2);
+		const supplementaryGrepKws = allGrepCandidates.slice(0, 1);
 
 		// Execute plan + supplementary searches in ONE batch (saves ~150-200ms
 		// by eliminating a sequential round-trip — supplementary patterns are
@@ -1113,9 +1149,24 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				: Promise.resolve([[]] as string[][]),
 		]);
 
-		let grepFileSet = new Set(grepResults.flat());
+		const planGrepFileSet = new Set(grepResults.flat());
+		let grepFileSet = new Set(planGrepFileSet);
 		const globMatchedSet = new Set<string>();
-		let allFiles = [...new Set([...globResults.flat(), ...grepResults.flat()])].slice(0, MAX_TOOL_LINES);
+		const planGlobMatchedSet = new Set<string>();
+		const suppGlobMatchedSet = new Set<string>();
+		// Sort plan glob result arrays by specificity (fewer matches = more
+		// targeted) before flattening. Without this, a broad glob like
+		// `**/utils/**` (100 matches, fills the cap with unrelated files) can
+		// displace a specific glob like `**/*temp*` (15 matches, contains the
+		// target definition file) when the combined results are sliced to
+		// MAX_TOOL_LINES. Specific globs first ensures targeted matches survive.
+		const globResultsBySpec = [...globResults].sort((a, b) => a.length - b.length);
+		const globFlat = globResultsBySpec.flat();
+		for (const f of globFlat) {
+			globMatchedSet.add(f);
+			planGlobMatchedSet.add(f);
+		}
+		let allFiles = [...new Set([...globFlat, ...grepResults.flat()])].slice(0, MAX_TOOL_LINES);
 		let effectiveKeywords = effectivePlan.keywords;
 		let fallbackUsed = false;
 
@@ -1129,9 +1180,26 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 			// first so they survive the 200-file cap — without this, a grep for
 			// "tempdir" returns 200+ importing files and pushes temp.ts (matched
 			// only by the segment glob `**/*temp*`) past the cap.
+			const planGlobFiles = new Set(globFlat);
 			allFiles = [...new Set([...suppGlobFiles, ...suppGrepFiles, ...allFiles])].slice(0, 200);
+			// Re-inject displaced plan-glob-matched files after the cap. Plan
+			// globs are the model's deliberate filename matches — they should
+			// always get content-scored. Without this, broad supplementary
+			// globs (e.g. `**/*file*` = 100+ matches) flood the 200-cap and
+			// displace targeted plan-glob matches like `**/*temp*` → temp.ts.
+			// Only plan GLOB files are re-injected (not grep — grep matches are
+			// content mentions that could be importers, not definition sites).
+			// The ranking pipeline re-sorts by content/path score, so adding
+			// files to the pool doesn't displace existing rankings — it only
+			// gives plan-glob files a fair shot at being scored.
+			for (const f of planGlobFiles) {
+				if (!allFiles.includes(f)) allFiles.push(f);
+			}
 			for (const f of suppGrepFiles) grepFileSet.add(f);
-			for (const f of suppGlobFiles) globMatchedSet.add(f);
+			for (const f of suppGlobFiles) {
+				globMatchedSet.add(f);
+				suppGlobMatchedSet.add(f);
+			}
 		}
 
 		// Query-derived fallback when everything above yields nothing
@@ -1186,7 +1254,14 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 						/\/docs\//.test(normalizedPath) ||
 						(/\.md$/.test(normalizedPath) && !/\/(prompts|agents)\//.test(normalizedPath));
 					const isInfra = /\/(\.github|infra)\//.test(normalizedPath);
-					const isScript = /\/scripts\//.test(normalizedPath);
+					const isScript = /\/(scripts|examples|bench|prompts)\//.test(normalizedPath);
+					// Config/data files (JSON, YAML, TOML, theme defaults) are not
+					// code definitions — they match keyword globs/greps but contain
+					// no logic. Penalize at the script tier (0.7x) so they don't
+					// outrank source files via convergence boost.
+					const isConfig = /\.(json|ya?ml|toml|csv|svg)$/.test(normalizedPath);
+					const isTypeDef = /\.d\.ts$/.test(normalizedPath);
+					const isCompat = /\/(compat|_compat|legacy)\//.test(normalizedPath);
 					// Pre-sort uses the strong additive penalty (-100) so test/doc
 					// files stay out of the top-30 content-scoring pool. The graduated
 					// multiplier (semble_rs-inspired) is applied to the FINAL score
@@ -1194,14 +1269,12 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 					// grep/glob-matched path aren't completely zeroed out.
 					// - STRONG 0.3x: test, docs, .github/infra
 					// - MODERATE 0.5x: type-def stubs (.d.ts), compat/legacy dirs
-					// - MILD 0.7x: scripts
-					const isTypeDef = /\.d\.ts$/.test(normalizedPath);
-					const isCompat = /\/(compat|_compat|legacy)\//.test(normalizedPath);
+					// - MILD 0.7x: scripts, config/data files (.json/.yaml/.toml)
 					let typeMultiplier = 1;
 					if (isTest || isDoc || isInfra) typeMultiplier = 0.3;
 					else if (isTypeDef || isCompat) typeMultiplier = 0.5;
-					else if (isScript) typeMultiplier = 0.7;
-					const typePenalty = isTest || isDoc || isInfra ? -100 : isScript ? -1 : 0;
+					else if (isScript || isConfig) typeMultiplier = 0.7;
+					const typePenalty = isTest || isDoc || isInfra ? -100 : isScript || isConfig ? -1 : 0;
 					return { file: f, pathScore: pathMatches + typePenalty, typeMultiplier, rawPathScore: pathMatches };
 				});
 				pathScored.sort((a, b) => b.pathScore - a.pathScore);
@@ -1224,7 +1297,8 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 							// Size guard: large files get a 4k byte-range read
 							const file = Bun.file(entry.file);
 							const blob = file.size > 100_000 ? file.slice(0, 4000) : file;
-							const lower = (await blob.text()).toLowerCase();
+							const rawText = await blob.text();
+							const lower = rawText.toLowerCase();
 							// Weight identifier matches 3x — a file containing
 							// READ_ONLY_TOOL_NAMES is the definition site; a file
 							// containing generic "read" and "tool" is just noise.
@@ -1255,6 +1329,8 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 								}
 								return bonus;
 							}, 0);
+							const defKeywords =
+								"(?:export\\s+(?:async\\s+)?(?:function|class|enum|interface|const|struct)|pub\\s+(?:fn|struct|enum))";
 							// Definition-site boost (semble_rs-inspired): files that
 							// DEFINE the queried identifier outrank files that merely
 							// reference it. Uses the full identifierSet (which includes
@@ -1263,18 +1339,64 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 							// boosted). The three filters on identifierKeywords ensure
 							// property accessors and call-site references don't
 							// trigger false boosts.
+							// Same line-start anchor + case-sensitive + export-required
+							// semantics as the plan-symbol boost below — see comments there.
 							if (identifierSet.size > 0) {
-								const defKeywords =
-									"(?:export\\s+)?(?:async\\s+)?(?:function|class|enum|interface|const|struct|pub\\s+(?:fn|struct|enum))";
 								for (const id of identifierSet) {
 									const defPattern = new RegExp(
-										`${defKeywords}\\s+[a-z_]*${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-										"i",
+										`^\\s*${defKeywords}\\s+[a-z_]*${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+										"m",
 									);
-									if (defPattern.test(lower)) {
+									if (defPattern.test(rawText)) {
 										contentScore += 8;
 										break;
 									}
+								}
+							}
+							// Plan-symbol definition boost: the model plan's
+							// grep_patterns carry exact symbol names (toolResult,
+							// declareWorkerHostEntry) absent from natural-language
+							// queries. Boost files that DECLARE them with the symbol
+							// at the START of the name (function toolResult, class
+							// ToolResultBuilder). The start anchor is precise — it
+							// avoids the substring over-match of [a-z_]*id (which
+							// The line-start anchor (^ with multiline) prevents false
+							// boosts from comments that mention the symbol name — e.g.
+							// fast-context.ts line 1044 says `class TempDir` in a comment,
+							// which would wrongly boost it above the real definition file.
+							// Case-SENSITIVE matching against original-case text (no `i`
+							// flag) prevents matching different-cased variables: `Message`
+							// must not match `const messages`, `TempDir` must not match
+							// `TempDirGuard`. Plan grep_patterns carry exact symbol names
+							// from the model, so case-sensitive is correct semantics.
+							// Requiring `export` (TS/JS) or `pub` (Rust) before the def
+							// keyword prevents false boosts from LOCAL variables — e.g.
+							// `const gitStatus` inside a method in component.ts matched
+							// and outranked the actual definition file git.ts. Only
+							// exported definitions are public API worth boosting.
+							for (const sym of effectivePlan.grep_patterns) {
+								if (!/^[A-Za-z][A-Za-z0-9_]{3,}$/.test(sym) || /^[a-z]+$/.test(sym)) continue;
+								const escSym = sym.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+								if (new RegExp(`^\\s*${defKeywords}\\s+${escSym}[a-z0-9_]*\\b`, "m").test(rawText)) {
+									contentScore += 8;
+									break;
+								}
+							}
+							// Path-aligned class-name boost: when a query keyword (≥6 chars)
+							// both appears in the file's path AND names a class defined in
+							// the file (`class Settings`, `class Changelog`), boost it. This
+							// catches definition files for natural-language queries whose
+							// keywords aren't CamelCase (so the identifier/plan-symbol boosts
+							// miss them). The path-alignment requirement is the discriminator
+							// — without it, every file defining `class Context` or `class
+							// Version` would be boosted for a generic keyword.
+							const lowerPath = entry.file.replace(/\\/g, "/").toLowerCase();
+							for (const kw of lowerKeywords) {
+								if (kw.length < 8 || CITATION_STOP_WORDS.has(kw)) continue;
+								if (!lowerPath.includes(kw)) continue;
+								if (new RegExp(`(?:export\\s+)?class\\s+${kw}\\b`, "i").test(lower)) {
+									contentScore += 8;
+									break;
 								}
 							}
 							// Barrel boost: index.ts/index.js files whose parent
@@ -1315,6 +1437,18 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 									contentScore += 2;
 								}
 							}
+							// Multi-signal convergence boost: a file matched by multiple
+							// independent signals (plan glob + plan grep + supplementary
+							// glob) is far more likely to be the GT. Added to contentScore
+							// BEFORE the type multiplier so test/doc files (0.3x) get a
+							// dampened convergence bonus too — without this, a test file
+							// matching all 3 signals would get the same +6 as a source file.
+							const norm = entry.file.replace(/\\/g, "/");
+							let sigCount = 0;
+							if (planGlobMatchedSet.has(entry.file) || planGlobMatchedSet.has(norm)) sigCount++;
+							if (planGrepFileSet.has(entry.file) || planGrepFileSet.has(norm)) sigCount++;
+							if (suppGlobMatchedSet.has(entry.file) || suppGlobMatchedSet.has(norm)) sigCount++;
+							contentScore += Math.max(0, sigCount - 1) * 3;
 						} catch {}
 						return {
 							file: entry.file,
@@ -1334,10 +1468,14 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				const remaining = pathScored.filter(e => !topSet.has(e.file)).map(e => e.file);
 				// Boost files found by supplementary grep or glob — grep matched
 				// content keywords; glob matched a query keyword in the filename.
-				// Within the boosted set, sort by content score (identifier-weighted)
-				// then path score as tiebreaker. When 275 files all grep-match the
-				// same identifier, the file that defines it should rank above files
-				// that merely reference it.
+				// Within the boosted set, sort by the final multiplied score
+				// (content + path, WITH the graduated test/doc/script type
+				// penalty), then path score as tiebreaker. Using raw
+				// contentScore here would bypass the 0.3x penalty — a test file
+				// mentioning the identifier many times would outrank the source
+				// definition file. When many files grep-match the same
+				// identifier, the file that defines it (source, 1.0x) must rank
+				// above files that merely reference it (test/doc, 0.3x).
 				const isMatched = (f: string) => {
 					const norm = f.replace(/\\/g, "/");
 					return grepFileSet.has(f) || grepFileSet.has(norm) || globMatchedSet.has(f) || globMatchedSet.has(norm);
@@ -1347,9 +1485,19 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				const boostedSorted = pathScored
 					.filter(e => boosted.includes(e.file))
 					.sort((a, b) => {
-						const ca = contentByFile.get(a.file)?.contentScore ?? 0;
-						const cb = contentByFile.get(b.file)?.contentScore ?? 0;
-						return cb - ca || b.pathScore - a.pathScore;
+						const sa = contentByFile.get(a.file)?.score ?? 0;
+						const sb = contentByFile.get(b.file)?.score ?? 0;
+						if (sb !== sa) return sb - sa;
+						if (b.pathScore !== a.pathScore) return b.pathScore - a.pathScore;
+						// Third tiebreaker: prefer plan-glob-matched files (the model's
+						// deliberate filename matches) over supplementary-matched files
+						// (query-derived patterns). When scores are tied, the file the
+						// model specifically globbed for is more likely the target.
+						const aPlan =
+							planGlobMatchedSet.has(a.file) || planGlobMatchedSet.has(a.file.replace(/\\/g, "/")) ? 1 : 0;
+						const bPlan =
+							planGlobMatchedSet.has(b.file) || planGlobMatchedSet.has(b.file.replace(/\\/g, "/")) ? 1 : 0;
+						return bPlan - aPlan;
 					})
 					.map(e => e.file);
 				const nonBoosted = rankedTop.filter(f => !boosted.includes(f));
@@ -1357,8 +1505,16 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 			}
 		}
 
-		const includeSnippets = params.include_snippets ?? true;
-		const snippetLines = Math.min(Math.max(params.snippet_lines ?? HINT_DEFAULT_SNIPPET_LINES, 3), 30);
+		const includeSnippets = this.#session.settings.get("fastContext.snippets") ?? params.include_snippets ?? true;
+		const snippetLines = Math.min(
+			Math.max(
+				this.#session.settings.get("fastContext.snippetLines") ??
+					params.snippet_lines ??
+					HINT_DEFAULT_SNIPPET_LINES,
+				3,
+			),
+			30,
+		);
 		const maxResultTokens = Math.max(
 			100,
 			Math.min(params.max_result_tokens ?? HINT_DEFAULT_MAX_RESULT_TOKENS, 16000),
@@ -1625,54 +1781,80 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		return results.flat();
 	}
 	async #resolveBackend(apiBaseUrl: string, signal?: AbortSignal): Promise<FastContextBackend> {
-		const configured = this.#session.settings.get("fastContext.model")?.trim();
+		const raw = this.#session.settings.get("fastContext.model")?.trim() || "";
+		// "local" sentinel = explicit local server (auto-discovers the model via
+		// /v1/models). Anything else containing "/" is a provider-prefixed id that
+		// routes through the registry.
+		const configured = raw === "local" ? undefined : raw || undefined;
 
-		// Registry backend: a provider-prefixed model id (e.g. devin/swe-1-6-slow,
-		// zai/glm-5-turbo) routes through the model registry via completeSimple,
-		// removing the need to host a local OpenAI-compatible server.
+		// Registry backend: an explicit provider-prefixed model id routes through
+		// the model registry via completeSimple, removing the need for a local
+		// OpenAI-compatible server.
 		if (configured?.includes("/")) {
-			const modelRegistry = this.#session.modelRegistry;
-			if (!modelRegistry) {
-				// No registry available — fall back to the local endpoint (some
-				// OpenAI-compatible servers accept arbitrary model strings).
-				return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
-			}
-			const resolveModel = (): Model<Api> | undefined => {
-				const available = modelRegistry.getAvailable();
-				return resolveModelFromString(
-					expandRoleAlias(configured, this.#session.settings),
-					available,
-					getModelMatchPreferences(this.#session.settings),
-					modelRegistry,
-				);
-			};
-			let model = resolveModel();
-			if (!model) {
-				// Dynamic providers (e.g. Devin) populate getAvailable() via
-				// background discovery that may not have completed yet — refresh
-				// then retry once.
-				await modelRegistry.refreshProvider(configured.split("/")[0]!, "online-if-uncached");
-				model = resolveModel();
-			}
-			if (!model) {
+			const backend = await this.#resolveRegistryBackend(configured);
+			if (!backend) {
 				throw new Error(
 					`FastContext model "${configured}" could not be resolved against available registered ` +
 						`models. Check provider credentials and model id, or set fastContext.model to a bare ` +
 						`id to use the local OpenAI-compatible endpoint.`,
 				);
 			}
-			const apiKey = await modelRegistry.getApiKey(model);
-			if (!apiKey) {
-				throw new Error(
-					`FastContext model "${configured}" resolved to ${model.provider}/${model.id} but no API ` +
-						`key is available. Configure credentials for the ${model.provider} provider.`,
-				);
-			}
-			return { kind: "registry", model, apiKey, modelId: `${model.provider}/${model.id}` };
+			return backend;
 		}
 
-		// Local backend: bare model id or unset → existing /chat/completions path.
+		// Auto-default: no explicit model is set. When Devin credentials are
+		// present, prefer devin/swe-1-6-fast (fast, accurate, no local server
+		// needed) and persist the resolved id so the model picker and the
+		// baseUrl-visibility condition reflect the effective backend. Any explicit
+		// choice (including the "local" sentinel) is preserved. Falls back to the
+		// local endpoint if the default model can't resolve.
+		if (configured === undefined && this.#session.modelRegistry?.authStorage?.hasAuth("devin")) {
+			const backend = await this.#resolveRegistryBackend("devin/swe-1-6-fast");
+			if (backend) {
+				try {
+					this.#session.settings.set("fastContext.model", backend.modelId);
+				} catch {
+					// Best-effort persist: the effective default still works for this call.
+				}
+				return backend;
+			}
+		}
+
+		// Local backend: bare model id, "local" sentinel, or unset → /chat/completions.
 		return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
+	}
+
+	/**
+	 * Resolve a provider-prefixed model id through the registry. Returns
+	 * `undefined` (rather than throwing) when the model can't be resolved or has
+	 * no API key, so callers can choose between surfacing an error (an explicit
+	 * model choice) and falling back to the local endpoint (the auto-default).
+	 */
+	async #resolveRegistryBackend(
+		modelId: string,
+	): Promise<Extract<FastContextBackend, { kind: "registry" }> | undefined> {
+		const modelRegistry = this.#session.modelRegistry;
+		if (!modelRegistry) return undefined;
+		const resolveModel = (): Model<Api> | undefined => {
+			const available = modelRegistry.getAvailable();
+			return resolveModelFromString(
+				expandRoleAlias(modelId, this.#session.settings),
+				available,
+				getModelMatchPreferences(this.#session.settings),
+				modelRegistry,
+			);
+		};
+		let model = resolveModel();
+		if (!model) {
+			// Dynamic providers (e.g. Devin) populate getAvailable() via background
+			// discovery that may not have completed yet — refresh then retry once.
+			await modelRegistry.refreshProvider(modelId.split("/")[0]!, "online-if-uncached");
+			model = resolveModel();
+		}
+		if (!model) return undefined;
+		const apiKey = await modelRegistry.getApiKey(model);
+		if (!apiKey) return undefined;
+		return { kind: "registry", model, apiKey, modelId: `${model.provider}/${model.id}` };
 	}
 
 	async #resolveLocalBackend(
@@ -1715,6 +1897,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		tools: readonly unknown[] | null = FAST_CONTEXT_TOOLS,
 		timeoutMs: number = REQUEST_TIMEOUT_MS,
 		sessionId?: string,
+		temperature: number = 0.3,
 	): Promise<{ message: ChatMessage; toolCalls: FastContextToolCall[] }> {
 		if (backend.kind === "registry") {
 			// Registry backend: route through the registered provider (e.g. Devin)
@@ -1735,7 +1918,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				...(sessionId ? { sessionId } : {}),
 				signal: requestSignal(signal, timeoutMs),
 				maxTokens: maxCompletionTokens,
-				temperature: 0.3,
+				temperature,
 				disableReasoning: true,
 				...(ompTools ? { toolChoice: "auto" } : {}),
 			});
@@ -1756,7 +1939,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				messages,
 				...(tools && tools.length > 0 ? { tools, parallel_tool_calls: true } : {}),
 				max_completion_tokens: maxCompletionTokens,
-				temperature: 0.3,
+				temperature,
 				top_p: 0.9,
 				top_k: 20,
 				chat_template_kwargs: { enable_thinking: false },
@@ -1807,13 +1990,14 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		if (!stat.isFile()) return `Read Tool: ${args.path} is not a file.`;
 		const rawLines = splitFileLines(await Bun.file(filePath).text());
 		if (rawLines.length === 0) return "File is empty.";
+		const maxReadLines = this.#session.settings.get("fastContext.maxReadLines") ?? MAX_READ_LINES;
 		let offset = Number.isFinite(args.offset) && (args.offset ?? 0) > 0 ? Math.floor(args.offset ?? 1) : 1;
 		if (offset > rawLines.length) offset = rawLines.length;
 		let endLine = rawLines.length;
 		if (Number.isFinite(args.limit) && (args.limit ?? 0) > 0) {
-			endLine = Math.min(rawLines.length, offset + Math.floor(args.limit ?? MAX_READ_LINES) - 1);
+			endLine = Math.min(rawLines.length, offset + Math.floor(args.limit ?? maxReadLines) - 1);
 		}
-		endLine = Math.min(endLine, offset + MAX_READ_LINES - 1);
+		endLine = Math.min(endLine, offset + maxReadLines - 1);
 		const lines = rawLines.slice(offset - 1, endLine);
 		if (signal?.aborted) throw new Error("Read Tool: aborted.");
 		return formatReadOutput(filePath, offset, endLine, lines);
@@ -1899,4 +2083,149 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		}
 		return formatContentMatches(result.matches, searchPath, args["-n"] ?? true, limit);
 	}
+}
+
+// =============================================================================
+// TUI Renderer
+// =============================================================================
+
+/** Render args for fast_context (subset of {@link FastContextToolInput}). */
+interface FastContextRenderArgs {
+	query?: string;
+	mode?: "hint" | "agent";
+}
+
+/** Cap displayed citations in collapsed mode; expanded shows all. */
+const FC_COLLAPSED_CITATIONS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+
+/**
+ * Parse a `path:line` / `path:line-line` citation into the file path and an
+ * optional leading line number for OSC 8 hyperlinking. The path may be
+ * relative (fileHyperlink resolves it against the process cwd) or absolute.
+ */
+function parseCitationTarget(citation: string): { filePath: string; line?: number } {
+	const colon = citation.lastIndexOf(":");
+	if (colon <= 0) return { filePath: citation };
+	const pathPart = citation.slice(0, colon);
+	const rangePart = citation.slice(colon + 1);
+	const firstNum = Number.parseInt(rangePart.split("-")[0] ?? "", 10);
+	return {
+		filePath: pathPart,
+		line: Number.isFinite(firstNum) && firstNum > 0 ? firstNum : undefined,
+	};
+}
+
+/**
+ * Inline renderer for the `fast_context` tool result.
+ *
+ * Mirrors `findToolRenderer` (not `readToolRenderer`): fast_context returns a
+ * file/citation shortlist, so the output shape is a list, not file content.
+ * `inline: true` keeps the block inline (no collapsed ctrl+o window) and
+ * `mergeCallAndResult: true` fuses the call + result into one card — the same
+ * shape `find` uses. The citation list comes from structured
+ * `FastContextToolDetails.citations`, NEVER from parsing `<final_answer>` text.
+ */
+export const fastContextToolRenderer = {
+	inline: true,
+	renderCall(args: FastContextRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
+		const text = renderStatusLine(
+			{
+				icon: "pending",
+				title: "FastContext",
+				titleColor: "toolTitle",
+				description: args.query || (args.mode ? `${args.mode} mode` : ""),
+				meta: args.mode && args.mode !== "hint" ? [args.mode] : undefined,
+			},
+			uiTheme,
+		);
+		return new Text(text, 1, 0);
+	},
+
+	renderResult(
+		result: {
+			content: Array<{ type: string; text?: string }>;
+			details?: FastContextToolDetails;
+			isError?: boolean;
+		},
+		options: RenderResultOptions,
+		uiTheme: Theme,
+		args?: FastContextRenderArgs,
+	): Component {
+		const details = result.details;
+
+		// Error case: error-styled inline block.
+		if (result.isError || details?.error) {
+			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
+			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
+		}
+
+		// Structured citations are the source of truth — do NOT parse result text.
+		let citations = details?.citations ?? [];
+
+		// Fallback only when citations are empty: pull file lines out of the
+		// `[FC hint: N files]\n\nFiles:\n…` hint-mode packet, never from
+		// <final_answer> text.
+		if (citations.length === 0) {
+			const rawText = result.content?.find(c => c.type === "text")?.text ?? "";
+			citations = extractHintFileList(rawText);
+		}
+
+		const fileCount = citations.length;
+		const model = details?.model ?? "fast-context";
+		const mode = details?.mode ?? args?.mode ?? "hint";
+		const header = renderStatusLine(
+			{
+				icon: fileCount > 0 ? undefined : "warning",
+				iconOverride: fileCount > 0 ? uiTheme.styledSymbol("icon.fast", "accent") : undefined,
+				title: "FastContext",
+				titleColor: "toolTitle",
+				description: `${model} · ${mode}`,
+				meta: [fileCount === 1 ? "1 file" : `${fileCount} files`],
+			},
+			uiTheme,
+		);
+
+		if (fileCount === 0) {
+			const lines = [header, uiTheme.fg("dim", "(no files found)")];
+			return new Text(lines.join("\n"), 1, 0);
+		}
+
+		return createCachedComponent(
+			() => options.expanded,
+			width => {
+				const listLines = renderTreeList(
+					{
+						items: citations,
+						expanded: options.expanded,
+						maxCollapsed: FC_COLLAPSED_CITATIONS,
+						itemType: "file",
+						renderItem: (citation: string) => {
+							const safe = replaceTabs(citation);
+							const target = parseCitationTarget(citation);
+							return fileHyperlink(target.filePath, safe, target.line ? { line: target.line } : undefined);
+						},
+					},
+					uiTheme,
+				);
+				return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+			},
+			{ paddingX: 1 },
+		);
+	},
+	mergeCallAndResult: true,
+};
+
+/**
+ * Fallback parser for hint-mode result packets shaped
+ * `[FC hint: N files]\n\nFiles:\n<path>\n<path>\n...`. Used only when
+ * `details.citations` is empty (e.g. a result reconstructed without details).
+ * Returns plain file paths (no line numbers); never inspects `<final_answer>`.
+ */
+function extractHintFileList(text: string): string[] {
+	const filesMatch = text.match(/\nFiles:\n([\s\S]*?)(?:\n\n|\n---|\n\[|$)/);
+	if (!filesMatch) return [];
+	return filesMatch[1]
+		.split("\n")
+		.map(l => l.trim())
+		.filter(l => l.length > 0 && !l.startsWith("["));
 }

@@ -519,9 +519,10 @@ memory:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `contextPromotion.enabled` | boolean | `true` | Promote relevant earlier context. |
-| `fastContext.enabled` | boolean | `false` | Enables the `fast_context` read-only adapter for the bundled `explore` subagent. The adapter calls a local FastContext model and returns only validated file-line citations; citation-free output is treated as a fallback signal. See [FastContext setup](./fast-context.md) for installation and usage. |
-| `fastContext.baseUrl` | string | `http://127.0.0.1:8080` | Local FastContext OpenAI-compatible endpoint. Root and `/v1` forms are accepted; requests use Chat Completions at `/v1/chat/completions`. |
-| `fastContext.model` | string | unset | Optional model id. When unset, OMP uses the first id from `/v1/models`. |
+| `fastContext.enabled` | boolean | `false` | Enables the `fast_context` read-only retrieval adapter for the **main agent** and the bundled `explore` subagent. Returns only validated file-line citations; citation-free output is treated as a fallback signal. See [FastContext setup](./fast-context.md) for installation and usage. |
+| `fastContext.model` | string | unset | Model for query expansion. A provider-prefixed id (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) routes through the model registry using your credentials — no local server needed; picked from a dropdown in `/settings`. When unset and Devin is logged in, `devin/swe-1-6-fast` is used automatically. A `local` sentinel or bare id uses the local server. |
+| `fastContext.mode` | enum | `hint` | Default retrieval mode the explore subagent uses: `hint` (one model turn → keywords/globs/grep, then native search, ~2-3s) or `agent` (full multi-turn Read/Glob/Grep loop). Picked in `/settings`. |
+| `fastContext.baseUrl` | string | `http://127.0.0.1:8080` | Local FastContext OpenAI-compatible endpoint. Only used when the model is set to the local server. Root and `/v1` forms are accepted; requests use Chat Completions at `/v1/chat/completions`. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
 | `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |

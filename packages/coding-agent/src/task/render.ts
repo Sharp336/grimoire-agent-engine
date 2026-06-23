@@ -12,6 +12,7 @@ import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
+import type { FastContextToolDetails } from "../tools/fast-context";
 import {
 	formatBadge,
 	formatDuration,
@@ -33,7 +34,7 @@ import {
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./types";
+import type { AgentProgress, FastContextSummary, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./types";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
 interface TaskRenderContext {
@@ -787,6 +788,14 @@ function renderAgentProgress(
 		}
 	}
 
+	// FastContext badge: surface when the subagent has called fast_context,
+	// so the parent sees exploration fired without drilling into the transcript.
+	const fcCallsLive = progress.extractedToolData?.fast_context as FastContextToolDetails[] | undefined;
+	const fcBadge = renderFastContextBadge(aggregateFastContext(fcCallsLive), theme);
+	if (fcBadge) {
+		lines.push(`${continuePrefix}${theme.tree.hook} ${fcBadge}`);
+	}
+
 	// Retry detail line: surface why the subagent is paused and roughly how
 	// long until the next attempt. Without this, the parent UI would just
 	// keep spinning while a child sleeps on a 3-hour provider rate-limit.
@@ -836,6 +845,10 @@ function renderAgentProgress(
 			// also merges in the in-flight snapshot — skip the generic inline
 			// path so we don't render twice.
 			if (toolName === "task") continue;
+
+			// FastContext has its own badge line rendered above — skip the generic
+			// inline path so the tool isn't listed twice.
+			if (toolName === "fast_context") continue;
 
 			const handler = subprocessToolRegistry.getHandler(toolName);
 			if (handler?.renderInline) {
@@ -1065,6 +1078,15 @@ function renderAgentResult(
 			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
 		);
 	}
+
+	// FastContext badge: surface when the subagent called fast_context so the
+	// parent sees exploration fired without drilling into the subagent transcript.
+	const fcCallsResult = result.extractedToolData?.fast_context as FastContextToolDetails[] | undefined;
+	const fcBadgeResult = renderFastContextBadge(aggregateFastContext(fcCallsResult), theme);
+	if (fcBadgeResult) {
+		lines.push(`${continuePrefix}${theme.tree.hook} ${fcBadgeResult}`);
+	}
+
 	// Check for review result (yield with review schema + report_finding)
 	// Check for review result (yield with review schema + report_finding).
 	// `normalizeYieldData` guards against a stray non-array `yield` slot —
@@ -1105,6 +1127,9 @@ function renderAgentResult(
 		for (const [toolName, dataArray] of Object.entries(result.extractedToolData)) {
 			// Skip review tools - handled above
 			if (toolName === "yield" || toolName === "report_finding") continue;
+
+			// FastContext has its own badge line rendered above — skip here.
+			if (toolName === "fast_context") continue;
 
 			const isTaskTool = toolName === "task";
 			if (isTaskTool && (dataArray as unknown[]).length > 0) {
@@ -1438,6 +1463,19 @@ function isTaskToolDetails(value: unknown): value is TaskToolDetails {
 	);
 }
 
+/**
+ * Render the FastContext badge line for the task-tool card. Compact, muted,
+ * one line: `{icon.fast} fast_context · {model} · {calls} call(s) · {files} files`.
+ * Returns the empty string when FastContext was not used.
+ */
+function renderFastContextBadge(summary: FastContextSummary | undefined, theme: Theme): string {
+	if (!summary) return "";
+	const callWord = summary.calls === 1 ? "call" : "calls";
+	const fileWord = summary.files === 1 ? "file" : "files";
+	const label = `${theme.styledSymbol("icon.fast", "dim")} fast_context${theme.sep.dot}${truncateToWidth(replaceTabs(summary.model), 32)}${theme.sep.dot}${summary.calls} ${callWord}${theme.sep.dot}${summary.files} ${fileWord}`;
+	return theme.fg("dim", label);
+}
+
 // Nested subagent snapshots sit one or more levels below the frame border, so
 // they keep tree guides to convey depth (the parent prepends its own continue
 // prefix). Only the top-level agent list drops guides (the frame is its box).
@@ -1550,6 +1588,41 @@ subprocessToolRegistry.register<TaskToolDetails>("task", {
 		return new Text(lines.join("\n"), 0, 0);
 	},
 });
+
+/**
+ * Extract a `FastContextToolDetails` from a `fast_context` tool-end event.
+ * Registered as a subprocess handler so the executor accumulates one entry
+ * per invocation into `extractedToolData.fast_context[]`, which both the live
+ * and rebuilt render paths read to surface the badge.
+ */
+subprocessToolRegistry.register<FastContextToolDetails>("fast_context", {
+	extractData: event => {
+		if (event.isError) return undefined;
+		const details = event.result?.details;
+		if (!details || typeof details !== "object") return undefined;
+		const record = details as Record<string, unknown>;
+		// Require the two fields the badge needs; everything else is optional.
+		if (typeof record.model !== "string" || !Array.isArray(record.citations)) return undefined;
+		return details as FastContextToolDetails;
+	},
+});
+
+/**
+ * Aggregate `fast_context` invocation details (from `extractedToolData`) into
+ * a single summary for the task-tool card badge. Returns `undefined` when no
+ * calls were made so the common path stays untouched.
+ */
+export function aggregateFastContext(calls: FastContextToolDetails[] | undefined): FastContextSummary | undefined {
+	if (!calls || calls.length === 0) return undefined;
+	let model = "";
+	let files = 0;
+	for (const call of calls) {
+		if (call.model) model = call.model;
+		files += call.citations?.length ?? 0;
+	}
+	if (!model) return undefined;
+	return { used: true, model, calls: calls.length, files };
+}
 
 export const taskToolRenderer = {
 	renderCall,

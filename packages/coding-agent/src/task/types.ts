@@ -398,4 +398,23 @@ export interface TaskToolDetails {
 		jobId: string;
 		type: "task";
 	};
+	/**
+	 * Aggregated FastContext usage across all subagents, set when at least one
+	 * subagent called the `fast_context` tool. Drives the badge line in the
+	 * task-tool card so users can see exploration fired without drilling in.
+	 */
+	fastContext?: FastContextSummary;
+}
+
+/**
+ * Aggregated FastContext usage summary for the task-tool card badge.
+ * `model` is the last-seen FastContext model (hint or agent mode); `calls`
+ * is the total number of `fast_context` invocations across subagents;
+ * `files` is the sum of cited files across all calls.
+ */
+export interface FastContextSummary {
+	used: true;
+	model: string;
+	calls: number;
+	files: number;
 }

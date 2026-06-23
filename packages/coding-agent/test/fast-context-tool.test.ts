@@ -29,16 +29,27 @@ describe("FastContext tool", () => {
 		expect(normalizeFastContextBaseUrl("http://127.0.0.1:8080/v1/")).toBe("http://127.0.0.1:8080/v1");
 	});
 
-	it("only exposes fast_context when FastContext is enabled", async () => {
+	it("exposes fast_context to the main agent and explore when enabled", async () => {
+		// Disabled → never exposed, even when explicitly requested.
 		const disabledTools = await createTools(createSession(process.cwd()), ["fast_context"]);
 		expect(disabledTools.some(tool => tool.name === "fast_context")).toBe(false);
-		const defaultTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }));
-		expect(defaultTools.some(tool => tool.name === "fast_context")).toBe(false);
 
-		const enabledTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
+		// Main agent (no requestedTools) → exposed when enabled (first-class tool).
+		const mainAgentTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }));
+		expect(mainAgentTools.some(tool => tool.name === "fast_context")).toBe(true);
+
+		// explore (explicitly requests it) → exposed when enabled.
+		const exploreTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
 			"fast_context",
 		]);
-		expect(enabledTools.some(tool => tool.name === "fast_context")).toBe(true);
+		expect(exploreTools.some(tool => tool.name === "fast_context")).toBe(true);
+
+		// A subagent with a restricted tool list that omits fast_context → not exposed.
+		const restrictedTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
+			"search",
+			"read",
+		]);
+		expect(restrictedTools.some(tool => tool.name === "fast_context")).toBe(false);
 	});
 
 	it("runs a Chat Completions loop with exact FastContext tool names and citations", async () => {
@@ -106,7 +117,12 @@ describe("FastContext tool", () => {
 			expect(result.details?.citations).toEqual([`${targetPath}:1-3`]);
 			expect(result.content[0]?.type).toBe("text");
 			if (result.content[0]?.type === "text") {
-				expect(result.content[0].text).toContain("<final_answer>");
+				// Tag leak fix: the result text is tag-stripped at the source
+				// (extractFinalAnswer), so <final_answer> never reaches the
+				// model-facing or TUI-facing text. The citation still appears.
+				expect(result.content[0].text).not.toContain("<final_answer>");
+				expect(result.content[0].text).not.toContain("</final_answer>");
+				expect(result.content[0].text).toContain(`${targetPath}:1-3`);
 			}
 		} finally {
 			await temp.remove();
@@ -604,6 +620,148 @@ describe("FastContext registry backend", () => {
 			await expect(tool.execute("call", { query: "anything", mode: "hint" })).rejects.toThrow(
 				/could not be resolved/,
 			);
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("treats the 'local' sentinel as the local server endpoint, not the registry", async () => {
+		const temp = TempDir.createSync("omp-fc-local-sentinel-");
+		try {
+			const cwd = path.resolve(temp.path());
+			await Bun.write(path.join(cwd, "y.ts"), "export const y = 2;\n");
+			let completeCalls = 0;
+			let chatCalls = 0;
+			const fetchMock = async (url: string): Promise<Response> => {
+				if (url.endsWith("/models")) {
+					return Response.json({ data: [{ id: "FastContext-1.0-4B-RL-Q4_K_M" }] });
+				}
+				if (url.endsWith("/chat/completions")) {
+					chatCalls++;
+					return Response.json({
+						choices: [
+							{
+								message: {
+									role: "assistant",
+									content: `<final_answer>\n${path.join(cwd, "y.ts")}:1-1\n</final_answer>`,
+								},
+							},
+						],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			};
+			const completeFn = (async () => {
+				completeCalls++;
+				return fcFakeAssistantMessage([]);
+			}) as unknown as typeof completeSimple;
+			const session = createSession(cwd, {
+				"fastContext.enabled": true,
+				"fastContext.model": "local",
+			});
+			// Devin IS logged in — the sentinel must still override the auto-default.
+			session.modelRegistry = {
+				getAvailable: () => [],
+				getApiKey: async () => undefined,
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: () => true },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			await tool.execute("call", { query: "find y", mode: "agent", max_turns: 1 });
+
+			expect(completeCalls).toBe(0);
+			expect(chatCalls).toBeGreaterThanOrEqual(1);
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("auto-defaults to devin/swe-1-6-fast when unset and Devin is logged in, and persists it", async () => {
+		const temp = TempDir.createSync("omp-fc-autodefault-");
+		try {
+			const cwd = path.resolve(temp.path());
+			const targetPath = path.join(cwd, "src", "login.ts");
+			await Bun.write(targetPath, "export function login() {}\n");
+			let fetchCalled = false;
+			const fetchMock = async (): Promise<Response> => {
+				fetchCalled = true;
+				return new Response("local endpoint should not be hit", { status: 500 });
+			};
+			const completeFn = (async () =>
+				fcFakeAssistantMessage([
+					{ type: "text", text: `Found it.\n\n<final_answer>\n${targetPath}:1-1\n</final_answer>` },
+				])) as unknown as typeof completeSimple;
+			const session = createSession(cwd, { "fastContext.enabled": true });
+			const fastModel = {
+				...fcFakeDevinModel(),
+				id: "swe-1-6-fast",
+				name: "SWE 1.6 fast",
+			} as unknown as Model<Api>;
+			session.modelRegistry = {
+				getAvailable: () => [fastModel],
+				getApiKey: async () => "devin-session-token$fake",
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: (p: string) => p === "devin" },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			const result = await tool.execute("call", { query: "where is login", mode: "agent", max_turns: 1 });
+
+			expect(fetchCalled).toBe(false);
+			expect(result.details?.baseUrl).toBe("registry");
+			expect(result.details?.model).toBe("devin/swe-1-6-fast");
+			// The effective default is persisted so the UI condition + picker stay in sync.
+			expect(session.settings.get("fastContext.model")).toBe("devin/swe-1-6-fast");
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("does not auto-default when Devin is not logged in (keeps the local endpoint, no persist)", async () => {
+		const temp = TempDir.createSync("omp-fc-no-autodefault-");
+		try {
+			const cwd = path.resolve(temp.path());
+			await Bun.write(path.join(cwd, "z.ts"), "export const z = 3;\n");
+			let chatCalls = 0;
+			let completeCalls = 0;
+			const fetchMock = async (url: string): Promise<Response> => {
+				if (url.endsWith("/models")) {
+					return Response.json({ data: [{ id: "qwen-test" }] });
+				}
+				if (url.endsWith("/chat/completions")) {
+					chatCalls++;
+					return Response.json({
+						choices: [
+							{
+								message: {
+									role: "assistant",
+									content: `<final_answer>\n${path.join(cwd, "z.ts")}:1-1\n</final_answer>`,
+								},
+							},
+						],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			};
+			const completeFn = (async () => {
+				completeCalls++;
+				return fcFakeAssistantMessage([]);
+			}) as unknown as typeof completeSimple;
+			const session = createSession(cwd, { "fastContext.enabled": true });
+			session.modelRegistry = {
+				getAvailable: () => [],
+				getApiKey: async () => undefined,
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: () => false },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			await tool.execute("call", { query: "find z", mode: "agent", max_turns: 1 });
+
+			expect(completeCalls).toBe(0);
+			expect(chatCalls).toBeGreaterThanOrEqual(1);
+			expect(session.settings.get("fastContext.model")).toBeUndefined();
 		} finally {
 			await temp.remove();
 		}

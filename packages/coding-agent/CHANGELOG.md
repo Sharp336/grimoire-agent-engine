@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- FastContext now auto-selects `devin/swe-1-6-fast` when no model is explicitly set and Devin credentials are present, so enabling FastContext works with zero configuration for Devin users (no local llama.cpp server required). The resolved default is persisted on first use so the model picker and the server-URL field reflect the effective backend.
+
+- FastContext usage is now visible in the TUI. When a spawned subagent (e.g. the bundled `explore`) calls `fast_context`, the task-tool card shows a compact badge line (`{icon.fast} fast_context · {model} · {calls} call(s) · {files} files`) in both the live-streaming and rebuilt-transcript views, so you can see exploration fired without drilling into the subagent transcript. The badge is aggregated from the structured `FastContextToolDetails` (model + citation count), not parsed from result text.
+
+- Added a `fastContext.mode` setting (Hint / Agent) under Context → Fast Context, selectable in `/settings`. Controls the default retrieval mode the explore subagent uses: Hint (default, ~2-3s — one model turn expands the query into keywords/globs/grep, then native search runs) or Agent (the full multi-turn FastContext Read/Glob/Grep loop — slower, more thorough). The `fast_context` tool defaults to it and the explore subagent honors it.
+
+- Added `fastContext.snippets` (snippets on/off), `fastContext.snippetLines` (lines per snippet, 3-30), and `fastContext.maxReadLines` (agent-mode per-file read cap, 100-2000) settings under Context → Fast Context. The tool honors these over per-call params — the main agent was reflexively passing defaults (`mode:"hint"`, `snippet_lines:8`) that overrode the user's configured settings.
+
+- Added a `fastContext.fastTools` setting (Fast Tools) that forces fast_context into agent mode — SWE-grep-style parallel retrieval (up to 8 parallel Read/Glob/Grep calls per turn, ≤4 turns) returning thorough file:line citations. Also added `devin/swe-1-6` (the normal SWE-1.6) to the model picker alongside the Fast/Slow variants.
+
+### Changed
+
+- `fast_context` is now a first-class tool available to the **main agent** (and any agent that requests it), not just the `explore` subagent. When `fastContext.enabled` is on, the main agent can call `fast_context` directly for broad repository retrieval — a ranked file shortlist via the configured model (e.g. `devin/swe-1-6-fast`) — instead of only reaching it through explore. The `search` and `ast_grep` tool guidance now points to `fast_context` first for open-ended / cross-subsystem retrieval. Previously the tool gate required the caller to explicitly request `fast_context` (only `explore` did), so the main agent never used it.
+- The main-agent system prompt now makes `fast_context` the **first action** for any codebase-retrieval question (where / find / is-there / list X, dead code, unused refs) — a forceful directive in the Exploration section, ahead of `find`/`search`/`read`/`bash`. It is conditioned on `fast_context` being active (`{{#has tools "fast_context"}}`), so it never fires for agents that don't have it (e.g. librarian/plan/reviewer, or when FastContext is disabled) — verified by a rendering test.
+- `fast_context` results now render **inline** in the chat like the `find` tool — a framed file/citation list (`FastContext · {model} · {mode} · {N} files` + the list), with no collapsed ctrl+o window. It has a registered renderer (`fastContextToolRenderer`, `inline` + `mergeCallAndResult`) in the `toolRenderers` map, so it no longer falls through to the generic collapsing renderer.
+- The `fast_context` result header now shows a ⚡ (`icon.fast`) instead of the success checkmark. The `fastContext.mode` setting is now honored even when the caller reflexively passes `mode:"hint"` — an explicit non-default mode still overrides, so the Agent/Hint choice you configured actually applies.
+- Rewrote the `fast_context` tool description to eliminate read-reversion. The original prompt said "then `read` the top hits" — directly instructing agents to call `read` after fast_context, defeating the tool's purpose. The new prompt incorporates canonical principles from Microsoft's FastContext SKILL.md: trust the results (snippets are sufficient in most cases), don't re-search, re-ask FC with a sharper query instead of manual grep/find, read narrowly only when snippets are insufficient, and a "When NOT to use" section with clear skip conditions.
+- Improved the FastContext hint-system prompt (the system prompt for the FC model in hint mode) with GLM-specific guidance: extract CamelCase identifiers from queries, prefer specific filename globs over broad directory globs, use grep_patterns for exact symbol names. Lowered hint-mode temperature from 0.3 to 0.0 (matching canonical GLM-Kimi prompts for deterministic planning).
+- Improved the FastContext agent-mode system prompt with read discipline: read narrowly (30-80 line ranges), don't re-read files already seen, batch parallel reads, skip known files.
+- Reduced FastContext hint-mode latency: `max_completion_tokens` 2048→512 (hint plans are ~100-200 tokens of JSON; llama.cpp allocates compute proportional to max tokens even when the model stops early), workspace listing 60→30 entries, supplementary grep 2→1 keywords per query.
+- FastContext hint-mode ranking improvements: fixed a scope-mixing bug where the boosted-sort re-ranked by raw content score (bypassing test/doc/script penalties), added definition-site boosts for plan grep patterns (with line-start anchor, case-sensitive matching, and export/pub requirement to prevent false positives from comments, variable names, and local declarations), added path-aligned class-name boost for natural-language queries, sorted plan globs by specificity, and re-injected displaced plan-glob files after the 200-file candidate cap. Penalized `prompts/` directory files (0.7×) to prevent prompt template contamination of results.
+- FastContext model selection is now a picker instead of a free-text field. `fastContext.model` renders as a dropdown listing provider models from your logged-in providers (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) plus a "Local llama.cpp server" option; a `local` sentinel explicitly selects the local server and auto-discovers its model via `/v1/models`.
+- The `fastContext.baseUrl` (local server URL) field is now hidden whenever a provider model is in use — there is no reason to configure a local OpenAI-compatible endpoint when FastContext routes through a provider. It only appears for the local-server backend (the "Local llama.cpp server" picker choice, a bare model id, or an unset model with no logged-in provider default).
+
+### Fixed
+
+- FastContext agent mode no longer leaks raw `<final_answer>…</final_answer>` tags into the chat. The result text is run through `extractFinalAnswer` at the source (the normal-completion path previously rendered the raw model content), so both the model-facing and TUI-facing text are tag-free.
+
 ## [16.1.14] - 2026-06-22
 
 ### Added
