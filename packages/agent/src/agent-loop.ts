@@ -7,6 +7,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	type ImageContent,
 	isApiKeyResolver,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
@@ -265,7 +266,11 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			"mimeType" in block &&
 			typeof block.mimeType === "string"
 		) {
-			content.push({ type: "image", data: block.data, mimeType: block.mimeType });
+			const imageBlock: ImageContent = { type: "image", data: block.data, mimeType: block.mimeType };
+			if ("detail" in block && typeof block.detail === "string") {
+				imageBlock.detail = block.detail as ImageContent["detail"];
+			}
+			content.push(imageBlock);
 		} else {
 			invalidBlocks++;
 		}

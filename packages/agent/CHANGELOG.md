@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Replaced inline `(block as { text?: unknown }).text` casts with `"text" in block` property checks in `normalizeToolResult` (`agent-loop.ts`), using idiomatic TypeScript narrowing instead of fabricated shape casts
+- Replaced inline `(block as { text?: unknown }).text` casts with `"text" in block` property checks in `coerceToolResult` (`agent-loop.ts`), using idiomatic TypeScript narrowing instead of fabricated shape casts, and preserved the optional image `detail` field when reconstructing image content blocks
 
 ## [16.1.16] - 2026-06-23
 
