@@ -321,7 +321,7 @@ Fourteen backends. Pin one, or let `auto` walk the chain in order.
 | ------------ | ---------------------- |
 | `auto`       | chain                  |
 | `exa`        | `EXA_API_KEY` (or mcp) |
-| `brave`      | `BRAVE_API_KEY`        |
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Antigravity `oauth` · xAI · Mistral · Groq · Cerebras · Fireworks · Together · Hugging Face · NVIDIA · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Command Code · Perplexity `oauth`
 | `jina`       | `JINA_API_KEY`         |
 | `kimi`       | `MOONSHOT_API_KEY`     |
 | `zai`        | `ZAI_API_KEY`          |

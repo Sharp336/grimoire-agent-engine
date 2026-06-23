@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the **Command Code** provider to the catalog table: OpenAI-compatible (`https://api.commandcode.ai/provider/v1`), runtime-discovered via `GET /provider/v1/models` (not on models.dev), env var `COMMANDCODE_API_KEY`, default model `deepseek/deepseek-v4-pro`. ([#3298](https://github.com/can1357/oh-my-pi/pull/3298) by [@oldschoola](https://github.com/oldschoola))
+
 ## [16.1.14] - 2026-06-22
 
 ### Added
