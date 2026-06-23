@@ -149,11 +149,21 @@ interface GrepArguments {
 }
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080";
-const DEFAULT_MAX_TURNS = 4;
+// Agent-mode default turns. The reference MCP (SammySnake-d/fast-context-mcp)
+// uses FC_MAX_TURNS=3 for its single-mode remote API. omp defaults to 4 because
+// agent mode runs multi-turn tool calls (Read/Glob/Grep) that need an extra
+// synthesis turn. Override via FC_MAX_TURNS env var.
+const DEFAULT_MAX_TURNS = Number(Bun.env.FC_MAX_TURNS) > 0 ? Number(Bun.env.FC_MAX_TURNS) : 4;
 const MAX_MAX_TURNS = 8;
-const MAX_TOOL_LINES = 100;
+// Tool output truncation. The reference MCP uses FC_RESULT_MAX_LINES=50 (raw rg
+// output). omp uses 100 because agent mode runs multi-turn retrieval that
+// accumulates more candidate files per call. Override via FC_RESULT_MAX_LINES.
+const MAX_TOOL_LINES = Number(Bun.env.FC_RESULT_MAX_LINES) > 0 ? Number(Bun.env.FC_RESULT_MAX_LINES) : 100;
 const MAX_READ_LINES = Number(Bun.env.FC_MAX_READ_LINES) > 0 ? Number(Bun.env.FC_MAX_READ_LINES) : 200;
-const MAX_LINE_LENGTH = 2000;
+// Line truncation. The reference MCP uses FC_LINE_MAX_CHARS=250 (raw grep lines).
+// omp uses 2000 because hint mode returns ranked snippets with surrounding
+// context, not raw grep output. Override via FC_LINE_MAX_CHARS.
+const MAX_LINE_LENGTH = Number(Bun.env.FC_LINE_MAX_CHARS) > 0 ? Number(Bun.env.FC_LINE_MAX_CHARS) : 2000;
 const HINT_REQUEST_TIMEOUT_MS = 30_000;
 const HINT_MAX_GLOBS = 5;
 const HINT_MAX_GREPS = 5;
@@ -162,6 +172,9 @@ const HINT_DEFAULT_SNIPPET_LINES = 10;
 const HINT_MAX_SNIPPET_FILES = 15;
 const HINT_MAX_SNIPPET_BYTES = 12000;
 const HINT_DEFAULT_MAX_RESULT_TOKENS = 4000;
+// Max ranked files returned in hint mode. The reference MCP uses max_results=10.
+// omp uses 20 because hint mode returns a ranked shortlist with snippets, not
+// raw file paths — the caller (main agent) needs enough candidates to verify.
 const HINT_MAX_RESULT_FILES = 20;
 const MAX_WORKSPACE_LISTING = 30;
 const MAX_PARALLEL_TOOL_CALLS = 8;
