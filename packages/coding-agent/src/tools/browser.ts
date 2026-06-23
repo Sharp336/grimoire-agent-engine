@@ -81,12 +81,12 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 		return { kind: "spawned", path: exe };
 	}
 	const cmuxKind = resolveCmuxKind({
-		settingEnabled: session.settings.get("browser.cmux") as boolean | undefined,
+		settingEnabled: session.settings.get("browser.cmux"),
 	});
 	if (cmuxKind) {
 		return cmuxKind;
 	}
-	const headless = session.settings.get("browser.headless") as boolean;
+	const headless = session.settings.get("browser.headless");
 	return { kind: "headless", headless };
 }
 

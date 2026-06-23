@@ -1734,7 +1734,7 @@ export class AgentSession {
 			},
 		});
 
-		this.#advisorEnabled = this.settings.get("advisor.enabled") as boolean;
+		this.#advisorEnabled = this.settings.get("advisor.enabled");
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 
 		// Always subscribe to agent events for internal handling
