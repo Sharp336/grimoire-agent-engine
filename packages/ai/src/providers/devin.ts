@@ -394,6 +394,19 @@ function decodeDevinUserJwtResponse(payload: Uint8Array) {
 	}
 }
 
+/** Minimum temperature accepted by the Devin agent API — `0` causes `invalid_argument`. */
+const DEVIN_MIN_TEMPERATURE = 0.01;
+
+/**
+ * Resolve the sampling temperature for a Devin chat request. The Devin agent API
+ * rejects `temperature: 0` with `invalid_argument`, so callers requesting
+ * deterministic output (e.g. FastContext hint mode passing `0`) are clamped to
+ * a near-zero floor instead. `undefined` falls back to the server default.
+ */
+export function resolveDevinTemperature(requested: number | undefined): number {
+	return Math.max(requested ?? 0.4, DEVIN_MIN_TEMPERATURE);
+}
+
 /**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
@@ -411,6 +424,15 @@ function buildDevinChatRequest(
 		options?.stopSequences && options.stopSequences.length > 0
 			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
 			: DEVIN_DEFAULT_STOP_PATTERNS;
+	const toolDefs = (context.tools ?? []).map((tool: Tool) =>
+		create(ChatToolDefinitionSchema, {
+			name: tool.name,
+			description: tool.description,
+			jsonSchemaString: JSON.stringify(toolWireSchema(tool)),
+			strict: tool.strict ?? false,
+		}),
+	);
+	const temperature = resolveDevinTemperature(options?.temperature);
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, {
 			apiKey,
@@ -426,7 +448,11 @@ function buildDevinChatRequest(
 		chatModelUid: options?.chatModelUid ?? model.requestModelId ?? model.id,
 		requestType: ChatMessageRequestType.CASCADE,
 		plannerMode: ConversationalPlannerMode.DEFAULT,
-		toolChoice: create(ChatToolChoiceSchema, { choice: { case: "optionName", value: "auto" } }),
+		// toolChoice: "auto" is only valid when tools are present — sending it with
+		// an empty tools array makes the Devin agent API reject with invalid_argument.
+		...(toolDefs.length > 0
+			? { toolChoice: create(ChatToolChoiceSchema, { choice: { case: "optionName", value: "auto" } }) }
+			: {}),
 		systemPromptCacheOptions: create(PromptCacheOptionsSchema, { type: CacheControlType.EPHEMERAL }),
 		disableParallelToolCalls: true,
 		cascadeId,
@@ -435,21 +461,14 @@ function buildDevinChatRequest(
 			numCompletions: 1n,
 			maxTokens: BigInt(options?.maxTokens ?? model.maxTokens ?? 64000),
 			maxNewlines: 200n,
-			temperature: options?.temperature ?? 0.4,
-			firstTemperature: options?.temperature ?? 0.4,
+			temperature,
+			firstTemperature: temperature,
 			topK: 50n,
 			topP: options?.topP ?? 1,
 			stopPatterns,
 			fimEotProbThreshold: 1,
 		}),
-		tools: (context.tools ?? []).map((tool: Tool) =>
-			create(ChatToolDefinitionSchema, {
-				name: tool.name,
-				description: tool.description,
-				jsonSchemaString: JSON.stringify(toolWireSchema(tool)),
-				strict: tool.strict ?? false,
-			}),
-		),
+		tools: toolDefs,
 	});
 }
 

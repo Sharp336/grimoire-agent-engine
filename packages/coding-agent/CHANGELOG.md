@@ -31,6 +31,7 @@
 ### Fixed
 
 - FastContext agent mode no longer leaks raw `<final_answer>…</final_answer>` tags into the chat. The result text is run through `extractFinalAnswer` at the source (the normal-completion path previously rendered the raw model content), so both the model-facing and TUI-facing text are tag-free.
+- FastContext hint mode with `devin/swe-1-6-fast` previously failed silently — the Devin agent API rejects `temperature: 0` with `invalid_argument`, and hint mode passes `temperature: 0` for deterministic planning. The Devin adapter now clamps the temperature to a near-zero floor (0.01), so devin models work in hint mode without the API error. Bench: `plan_parse_rate` 0% → 100%, MRR 0.71 → 0.81.
 
 ## [16.1.14] - 2026-06-22
 

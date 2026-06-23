@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Devin agent API rejects `temperature: 0` with `invalid_argument`. The Devin adapter now clamps the sampling temperature to a near-zero floor (0.01), so callers requesting deterministic output (e.g. FastContext hint mode) no longer trigger a server-side validation error. Also made `toolChoice: "auto"` conditional on tools being present — sending it with an empty tools array is a redundant request shape that the API may reject.
+
 ## [16.1.14] - 2026-06-22
 
 ### Added
