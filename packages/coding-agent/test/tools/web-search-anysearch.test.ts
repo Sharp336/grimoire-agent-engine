@@ -146,4 +146,74 @@ describe("AnySearch web search provider", () => {
 		expect(authHeader).toBeNull();
 		expect(response.authMode).toBe("anonymous");
 	});
+
+	it("throws SearchProviderError on HTTP error status", async () => {
+		const fetchMock = async () => new Response("Internal Server Error", { status: 500 });
+		expect(
+			searchAnySearch({
+				...makeParams("test"),
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("AnySearch API error (500)");
+	});
+
+	it("throws SearchProviderError when JSON-RPC parse fails", async () => {
+		const fetchMock = async () => new Response("invalid sse data", { status: 200 });
+		expect(
+			searchAnySearch({
+				...makeParams("test"),
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("Failed to parse AnySearch MCP response");
+	});
+
+	it("throws SearchProviderError when JSON-RPC returns error", async () => {
+		const payload = {
+			jsonrpc: "2.0",
+			id: 1,
+			error: { code: -32603, message: "Internal tool call error" },
+		};
+		const fetchMock = async () => new Response(JSON.stringify(payload), { status: 200 });
+		expect(
+			searchAnySearch({
+				...makeParams("test"),
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("AnySearch MCP error (-32603): Internal tool call error");
+	});
+
+	it("throws SearchProviderError when tool result isError is true", async () => {
+		const payload = {
+			jsonrpc: "2.0",
+			id: 1,
+			result: {
+				isError: true,
+				content: [{ type: "text", text: "Database connection failed" }],
+			},
+		};
+		const fetchMock = async () => new Response(JSON.stringify(payload), { status: 200 });
+		expect(
+			searchAnySearch({
+				...makeParams("test"),
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("Database connection failed");
+	});
+
+	it("throws SearchProviderError when tool result contains no text", async () => {
+		const payload = {
+			jsonrpc: "2.0",
+			id: 1,
+			result: {
+				content: [],
+			},
+		};
+		const fetchMock = async () => new Response(JSON.stringify(payload), { status: 200 });
+		expect(
+			searchAnySearch({
+				...makeParams("test"),
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("AnySearch returned no text content");
+	});
 });

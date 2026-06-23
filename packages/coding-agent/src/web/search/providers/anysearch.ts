@@ -71,6 +71,21 @@ function cleanSnippet(section: string): string | undefined {
 	return snippet || undefined;
 }
 
+/**
+ * Parses the Markdown response returned by the AnySearch MCP search tool.
+ * The AnySearch server response has the following layout convention:
+ *
+ * ## Search Results (N results, Time)
+ * [Optional preamble/answer text here]
+ *
+ * ### 1. Document Title
+ * - **URL**: https://example.com/url
+ * - Snippet text line 1
+ * - Snippet text line 2
+ *
+ * ### 2. Next Document Title
+ * ...
+ */
 export function parseAnySearchMarkdown(markdown: string): { answer?: string; sources: SearchSource[] } {
 	const normalized = markdown.replace(/\r\n?/g, "\n").trim();
 	if (!normalized) return { sources: [] };
@@ -116,13 +131,13 @@ async function callAnySearchSearch(apiKey: string | undefined, params: AnySearch
 		},
 		body: JSON.stringify({
 			jsonrpc: "2.0",
-			id: Math.random().toString(36).slice(2),
+			id: crypto.randomUUID(),
 			method: "tools/call",
 			params: {
 				name: ANYSEARCH_TOOL_NAME,
 				arguments: {
 					query: params.query,
-					max_results: clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS),
+					max_results: params.num_results,
 				},
 			},
 		}),
@@ -174,9 +189,11 @@ async function callAnySearchSearch(apiKey: string | undefined, params: AnySearch
 }
 
 export async function searchAnySearch(params: SearchParams): Promise<SearchResponse> {
+	const numResults = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
+
 	const request: AnySearchSearchParams = {
 		query: params.query,
-		num_results: params.numSearchResults ?? params.limit,
+		num_results: numResults,
 		signal: params.signal,
 		fetch: params.fetch,
 		authStorage: params.authStorage,
@@ -193,7 +210,6 @@ export async function searchAnySearch(params: SearchParams): Promise<SearchRespo
 		: await callAnySearchSearch(undefined, request);
 
 	const parsed = parseAnySearchMarkdown(markdown);
-	const numResults = clampNumResults(request.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 
 	return {
 		provider: "anysearch",
