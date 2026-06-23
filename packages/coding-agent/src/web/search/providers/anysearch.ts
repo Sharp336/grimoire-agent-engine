@@ -65,6 +65,7 @@ function cleanSnippet(section: string): string | undefined {
 		.map(line => line.trim())
 		.filter(line => line.length > 0 && !/^[*-]\s+\*\*URL\*\*:/i.test(line) && !/^###\s+/.test(line))
 		.map(line => line.replace(/^[*-]\s+/, ""))
+		.map(line => line.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1"))
 		.join(" ")
 		.trim();
 	return snippet || undefined;

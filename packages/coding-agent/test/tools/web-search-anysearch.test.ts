@@ -44,7 +44,7 @@ describe("AnySearch web search provider", () => {
 
 ### 2. DeepMind | Google
 - **URL**: https://deepmind.google/
-- DeepMind is a pioneer in AI research...
+- [Google DeepMind](https://deepmind.google/) is a pioneer in [AI research](https://example.com/ai)...
 `;
 		const parsed = parseAnySearchMarkdown(md);
 		expect(parsed.sources).toHaveLength(2);
@@ -53,7 +53,7 @@ describe("AnySearch web search provider", () => {
 		expect(parsed.sources[0]?.snippet).toBe("OpenAI is an AI research and deployment company...");
 		expect(parsed.sources[1]?.title).toBe("DeepMind | Google");
 		expect(parsed.sources[1]?.url).toBe("https://deepmind.google/");
-		expect(parsed.sources[1]?.snippet).toBe("DeepMind is a pioneer in AI research...");
+		expect(parsed.sources[1]?.snippet).toBe("Google DeepMind is a pioneer in AI research...");
 	});
 
 	it("executes search and returns SearchResponse", async () => {
