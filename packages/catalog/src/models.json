@@ -12286,6 +12286,410 @@
 			}
 		}
 	},
+	"byteplus-coding-plan": {
+		"ark-code-latest": {
+			"id": "ark-code-latest",
+			"name": "Ark Code Latest",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"auto": {
+			"id": "auto",
+			"name": "Auto",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 32768,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"bytedance-seed-code": {
+			"id": "bytedance-seed-code",
+			"name": "ByteDance Seed Code",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 32768,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			}
+		},
+		"deepseek-v4-flash": {
+			"id": "deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "high",
+					"low": "high",
+					"medium": "high",
+					"high": "high",
+					"xhigh": "max"
+				}
+			}
+		},
+		"deepseek-v4-pro": {
+			"id": "deepseek-v4-pro",
+			"name": "DeepSeek V4 Pro",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "high",
+					"low": "high",
+					"medium": "high",
+					"high": "high",
+					"xhigh": "max"
+				}
+			}
+		},
+		"dola-seed-2.0-code": {
+			"id": "dola-seed-2.0-code",
+			"name": "Dola Seed 2.0 Code",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"dola-seed-2.0-lite": {
+			"id": "dola-seed-2.0-lite",
+			"name": "Dola Seed 2.0 Lite",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"dola-seed-2.0-pro": {
+			"id": "dola-seed-2.0-pro",
+			"name": "Dola Seed 2.0 Pro",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"glm-4.7": {
+			"id": "glm-4.7",
+			"name": "GLM 4.7",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 204800,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"glm-5.1": {
+			"id": "glm-5.1",
+			"name": "GLM 5.1",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 204800,
+			"maxTokens": 131072,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"gpt-oss-120b": {
+			"id": "gpt-oss-120b",
+			"name": "GPT OSS 120B",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 32768,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
+		"kimi-k2.5": {
+			"id": "kimi-k2.5",
+			"name": "Kimi K2.5",
+			"api": "openai-completions",
+			"provider": "byteplus-coding-plan",
+			"baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 32768,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		}
+	},
 	"cerebras": {
 		"gpt-oss-120b": {
 			"id": "gpt-oss-120b",
@@ -12918,7 +13322,7 @@
 				"cacheRead": 0.3,
 				"cacheWrite": 3.75
 			},
-			"contextWindow": 1000000,
+			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "anthropic-budget-effort",
@@ -23774,8 +24178,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
-			"maxTokens": null
+			"contextWindow": 262144,
+			"maxTokens": 131072
 		},
 		"bytedance-seed/seed-1.6": {
 			"id": "bytedance-seed/seed-1.6",
@@ -80519,6 +80923,14 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"omitReasoningEffort": false
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -80531,14 +80943,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"omitReasoningEffort": false
 			}
 		},
 		"grok-4.3": {
@@ -80560,6 +80964,14 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"omitReasoningEffort": false
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -80572,14 +80984,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"omitReasoningEffort": false
 			}
 		},
 		"grok-build": {
@@ -80631,12 +81035,12 @@
 			"contextWindow": 256000,
 			"maxTokens": 256000,
 			"compat": {
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"omitReasoningEffort": true,
 				"reasoningEffortMap": {
 					"minimal": "low"
 				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"omitReasoningEffort": true,
 				"supportsReasoningEffort": false
 			}
 		},

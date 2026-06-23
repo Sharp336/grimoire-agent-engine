@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added BytePlus Coding Plan catalog coverage for the current ModelArk Coding Plan lineup: `ark-code-latest`/`auto`, Dola Seed 2.0 Pro/Lite/Code, ByteDance Seed Code, Kimi K2.5, GLM 5.1/4.7, DeepSeek V4 Flash/Pro, and GPT-OSS-120b.
+
 ## [16.1.14] - 2026-06-22
 
 ### Added

@@ -285,6 +285,124 @@ function applyFireworksDeepSeekReasoningShape(models: readonly ModelSpec[]): Mod
 	});
 }
 
+const BYTEPLUS_CODING_PLAN_BASE_URL = "https://ark.ap-southeast.bytepluses.com/api/coding/v3";
+const BYTEPLUS_CODING_PLAN_MODELS: ReadonlyArray<{
+	id: string;
+	name: string;
+	reasoning: boolean;
+	input?: ("text" | "image")[];
+	contextWindow: number;
+	maxTokens: number;
+}> = [
+	{
+		id: "ark-code-latest",
+		name: "Ark Code Latest",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 262_144,
+		maxTokens: 131_072,
+	},
+	{
+		id: "auto",
+		name: "Auto",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
+		id: "bytedance-seed-code",
+		name: "ByteDance Seed Code",
+		reasoning: false,
+		input: ["text", "image"],
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
+		id: "dola-seed-2.0-code",
+		name: "Dola Seed 2.0 Code",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 262_144,
+		maxTokens: 131_072,
+	},
+	{
+		id: "dola-seed-2.0-lite",
+		name: "Dola Seed 2.0 Lite",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 131_072,
+	},
+	{ id: "dola-seed-2.0-pro", name: "Dola Seed 2.0 Pro", reasoning: true, contextWindow: 262_144, maxTokens: 131_072 },
+	{
+		id: "deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 393_216,
+	},
+	{
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 393_216,
+	},
+	{ id: "glm-4.7", name: "GLM 4.7", reasoning: true, contextWindow: 204_800, maxTokens: 131_072 },
+	{ id: "glm-5.1", name: "GLM 5.1", reasoning: true, contextWindow: 204_800, maxTokens: 131_072 },
+	{ id: "gpt-oss-120b", name: "GPT OSS 120B", reasoning: true, contextWindow: 131_072, maxTokens: 32_768 },
+	{
+		id: "kimi-k2.5",
+		name: "Kimi K2.5",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+];
+
+function buildBytePlusCodingPlanStaticSeed(): ModelSpec<"openai-completions">[] {
+	return BYTEPLUS_CODING_PLAN_MODELS.map(model => ({
+		id: model.id,
+		name: model.name,
+		api: "openai-completions",
+		provider: "byteplus-coding-plan",
+		baseUrl: BYTEPLUS_CODING_PLAN_BASE_URL,
+		reasoning: model.reasoning,
+		input: model.input ?? ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+		},
+	}));
+}
+
+function applyBytePlusCodingPlanCuratedModels(models: readonly ModelSpec[]): ModelSpec[] {
+	const references = new Map(BYTEPLUS_CODING_PLAN_MODELS.map(model => [model.id, model]));
+	return models.flatMap(model => {
+		if (model.provider !== "byteplus-coding-plan") {
+			return [model];
+		}
+		const reference = references.get(model.id);
+		if (!reference) {
+			return [];
+		}
+		return [
+			{
+				...model,
+				reasoning: reference.reasoning,
+				input: reference.input ?? ["text"],
+				compat: {
+					...model.compat,
+					supportsStore: false,
+					supportsDeveloperRole: false,
+				},
+			},
+		];
+	});
+}
 /**
  * Z.AI's `/v1/models` advertises context-tier variants with a `[1m]` suffix
  * (e.g. `glm-5.2[1m]`). That suffix is a Claude Code-side convention — Z.AI's
@@ -491,6 +609,7 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	allModels.push(...buildBytePlusCodingPlanStaticSeed());
 	// Seed Sakana's documented Fugu models so the provider is usable when
 	// catalog generation has no live API key. If live `/v1/models` succeeds,
 	// Sakana is authoritative and stale seed IDs must stay out.
@@ -550,7 +669,7 @@ async function generateModels() {
 		}
 	}
 
-	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	allModels = applyBytePlusCodingPlanCuratedModels(applyGlobalModelsDevFallback(allModels, modelsDevModels));
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);

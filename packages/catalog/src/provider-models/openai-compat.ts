@@ -1219,6 +1219,54 @@ export function zhipuCodingPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 6.8 BytePlus Coding Plan
+// ---------------------------------------------------------------------------
+
+export interface BytePlusCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function byteplusCodingPlanModelManagerOptions(
+	config?: BytePlusCodingPlanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://ark.ap-southeast.bytepluses.com/api/coding/v3";
+	const references = createBundledReferenceMap<"openai-completions">("byteplus-coding-plan");
+	return {
+		providerId: "byteplus-coding-plan",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "byteplus-coding-plan",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						if (!reference) {
+							return null;
+						}
+						const model = mapWithBundledReference(entry, defaults, reference);
+						return {
+							...model,
+							reasoning: reference.reasoning,
+							input: reference.input,
+							compat: {
+								...model.compat,
+								supportsStore: false,
+								supportsDeveloperRole: false,
+							},
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 
@@ -3681,6 +3729,18 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			allowsSyntheticReasoningContentForToolCalls: false,
 		},
 	}),
+	// --- BytePlus Coding Plan ---
+	openAiCompletionsDescriptor(
+		"byteplus",
+		"byteplus-coding-plan",
+		"https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+		{
+			compat: {
+				supportsStore: false,
+				supportsDeveloperRole: false,
+			},
+		},
+	),
 	// --- MiniMax Coding Plan ---
 	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
 		compat: {

@@ -4,6 +4,7 @@ import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
+import { byteplusCodingPlanProvider } from "./byteplus-coding-plan";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { cursorProvider } from "./cursor";
@@ -87,6 +88,7 @@ const ALL = [
 	xaiOauthProvider,
 	gitlabDuoProvider,
 	alibabaCodingPlanProvider,
+	byteplusCodingPlanProvider,
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
 	umansProvider,

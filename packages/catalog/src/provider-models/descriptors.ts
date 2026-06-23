@@ -12,6 +12,7 @@ import {
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	anthropicModelManagerOptions,
+	byteplusCodingPlanModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -66,6 +67,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["ALIBABA_CODING_PLAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => alibabaCodingPlanModelManagerOptions(config),
 		catalogDiscovery: { label: "Alibaba Coding Plan" },
+	},
+	{
+		id: "byteplus-coding-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["BYTEPLUS_CODING_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => byteplusCodingPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "BytePlus Coding Plan" },
 	},
 	{
 		id: "amazon-bedrock",
