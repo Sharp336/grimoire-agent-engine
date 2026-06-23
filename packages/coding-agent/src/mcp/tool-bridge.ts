@@ -50,12 +50,71 @@ export function isRetriableConnectionError(error: unknown): boolean {
 }
 
 type MCPToolArgs = NonNullable<MCPToolCallParams["arguments"]>;
+type MCPInputSchema = MCPToolDefinition["inputSchema"];
 
 function normalizeToolArgs(value: unknown): MCPToolArgs {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return {};
 	}
-	return value as MCPToolArgs;
+	return { ...(value as Record<string, unknown>) };
+}
+
+function sanitizeToolArgsForSchema(value: unknown, schema: MCPInputSchema): MCPToolArgs {
+	const args = normalizeToolArgs(value);
+	const required = new Set(
+		Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : [],
+	);
+
+	for (const [key, argValue] of Object.entries(args)) {
+		if (!required.has(key) && isEmptyOptionalMCPValue(argValue)) {
+			delete args[key];
+		}
+	}
+
+	for (const [field, dependency] of collectConditionalFields(schema)) {
+		if (!required.has(field) && Object.hasOwn(args, field) && !Object.hasOwn(args, dependency)) {
+			delete args[field];
+		}
+	}
+
+	return args;
+}
+
+function isEmptyOptionalMCPValue(value: unknown): boolean {
+	return (
+		value === undefined ||
+		value === null ||
+		(typeof value === "string" && value.trim().length === 0) ||
+		(Array.isArray(value) && value.length === 0) ||
+		isPlainEmptyObject(value)
+	);
+}
+
+function isPlainEmptyObject(value: unknown): boolean {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value as Record<string, unknown>).length === 0
+	);
+}
+
+function collectConditionalFields(schema: MCPInputSchema): Map<string, string> {
+	const fields = new Map<string, string>();
+	const properties = schema.properties;
+	if (!properties) return fields;
+
+	for (const [field, property] of Object.entries(properties)) {
+		if (typeof property !== "object" || property === null || Array.isArray(property)) continue;
+		const description = (property as { description?: unknown }).description;
+		if (typeof description !== "string") continue;
+		const match = /Required when using ['"]([^'"]+)['"] parameter/i.exec(description);
+		if (match && Object.hasOwn(properties, match[1])) {
+			fields.set(field, match[1]);
+		}
+	}
+
+	return fields;
 }
 
 /** Details included in MCP tool results for rendering */
@@ -246,11 +305,11 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	}
 
 	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
+		return renderMCPCall(sanitizeToolArgsForSchema(args, this.tool.inputSchema), theme, this.label);
 	}
 
 	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
+		return renderMCPResult(result, options, theme, sanitizeToolArgsForSchema(args, this.tool.inputSchema));
 	}
 
 	async execute(
@@ -261,7 +320,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = normalizeToolArgs(params);
+		const args = sanitizeToolArgsForSchema(params, this.tool.inputSchema);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 
@@ -345,11 +404,11 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	}
 
 	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
+		return renderMCPCall(sanitizeToolArgsForSchema(args, this.tool.inputSchema), theme, this.label);
 	}
 
 	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
+		return renderMCPResult(result, options, theme, sanitizeToolArgsForSchema(args, this.tool.inputSchema));
 	}
 
 	async execute(
@@ -360,7 +419,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = normalizeToolArgs(params);
+		const args = sanitizeToolArgsForSchema(params, this.tool.inputSchema);
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 

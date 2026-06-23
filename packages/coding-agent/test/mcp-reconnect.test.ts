@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { DeferredMCPTool, isRetriableConnectionError, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type {
+	MCPServerConnection,
+	MCPToolCallResult,
+	MCPToolDefinition,
+	MCPTransport,
+} from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +86,129 @@ describe("isRetriableConnectionError", () => {
 		expect(isRetriableConnectionError(null)).toBe(false);
 		expect(isRetriableConnectionError(undefined)).toBe(false);
 		expect(isRetriableConnectionError({ message: "ECONNREFUSED" })).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// MCP tool argument sanitization
+// ---------------------------------------------------------------------------
+
+describe("MCP tool argument sanitization", () => {
+	const noop = () => {};
+	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
+
+	const TOOL_DEF_WITH_OPTIONALS: MCPToolDefinition = {
+		name: "search",
+		inputSchema: {
+			type: "object",
+			properties: {
+				query: { type: "string" },
+				cursor: { type: "string" },
+				filters: { type: "object" },
+			},
+		},
+	};
+
+	const CONDITIONAL_DEF: MCPToolDefinition = {
+		name: "lookup",
+		inputSchema: {
+			type: "object",
+			properties: {
+				file: { type: "string" },
+				line: { type: "integer" },
+				column: { type: "integer" },
+				language: {
+					type: "string",
+					enum: ["Java"],
+					description: "Language of the symbol. Required when using 'symbol' parameter.",
+				},
+				symbol: { type: "string" },
+			},
+		},
+	};
+
+	function captureToolCall(definition: MCPToolDefinition, args: Record<string, unknown>) {
+		let capturedParams: Record<string, unknown> | undefined;
+		const captureTransport = mockTransport(async (method, params) => {
+			if (method === "tools/call") {
+				capturedParams = params;
+			}
+			return toolCallResult("ok");
+		});
+
+		const tool = new MCPTool(makeConnection(captureTransport), definition);
+		return tool.execute("call-1", args, noop, noCtx).then(() => capturedParams);
+	}
+
+	it("omits empty optional top-level fields", async () => {
+		const capturedParams = await captureToolCall(TOOL_DEF_WITH_OPTIONALS, {
+			query: "events",
+			cursor: "",
+			filters: {},
+		});
+
+		expect(capturedParams).toEqual({ name: "search", arguments: { query: "events" } });
+	});
+
+	it("omits conditional fields when their trigger field is absent after empty pruning", async () => {
+		const capturedParams = await captureToolCall(CONDITIONAL_DEF, {
+			file: "x.ts",
+			line: 1,
+			column: 1,
+			language: "Java",
+			symbol: "",
+		});
+
+		expect(capturedParams).toEqual({ name: "lookup", arguments: { file: "x.ts", line: 1, column: 1 } });
+	});
+
+	it("preserves conditional fields when their trigger field exists", async () => {
+		const capturedParams = await captureToolCall(CONDITIONAL_DEF, {
+			language: "Java",
+			symbol: "com.example.Service",
+		});
+
+		expect(capturedParams).toEqual({
+			name: "lookup",
+			arguments: { language: "Java", symbol: "com.example.Service" },
+		});
+	});
+
+	it("preserves required empty fields", async () => {
+		const capturedParams = await captureToolCall(
+			{
+				name: "search",
+				inputSchema: {
+					type: "object",
+					required: ["query"],
+					properties: {
+						query: { type: "string" },
+					},
+				},
+			},
+			{ query: "" },
+		);
+
+		expect(capturedParams).toEqual({ name: "search", arguments: { query: "" } });
+	});
+
+	it("preserves numeric and boolean values", async () => {
+		const capturedParams = await captureToolCall(
+			{
+				name: "lookup",
+				inputSchema: {
+					type: "object",
+					properties: {
+						line: { type: "integer" },
+						column: { type: "integer" },
+						enabled: { type: "boolean" },
+					},
+				},
+			},
+			{ line: 0, column: -1, enabled: false },
+		);
+
+		expect(capturedParams).toEqual({ name: "lookup", arguments: { line: 0, column: -1, enabled: false } });
 	});
 });
 
