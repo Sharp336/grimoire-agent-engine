@@ -3,6 +3,7 @@ import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
+import { anysearchProvider } from "./anysearch";
 import { azureProvider } from "./azure";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
@@ -120,6 +121,7 @@ const ALL = [
 	opencodeZenProvider,
 	opencodeGoProvider,
 	tavilyProvider,
+	anysearchProvider,
 	kagiProvider,
 	parallelProvider,
 	ollamaProvider,
