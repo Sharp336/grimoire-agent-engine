@@ -563,8 +563,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			if (state.currentToolCall) {
 				const idx = output.content.indexOf(state.currentToolCall);
 				state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall.partialJson);
-				delete (state.currentToolCall as any).partialJson;
-				delete (state.currentToolCall as any).index;
+				delete state.currentToolCall.partialJson;
+				delete state.currentToolCall.index;
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: idx,
@@ -606,7 +606,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 	return stream;
 };
 
-export type ToolCallState = ToolCall & { index: number; partialJson?: string; kind: "mcp" | "todo" };
+export type ToolCallState = ToolCall & { index?: number; partialJson?: string; kind?: "mcp" | "todo" };
 
 export interface BlockState {
 	currentTextBlock: (TextContent & { index: number }) | null;
@@ -2113,9 +2113,9 @@ export function processInteractionUpdate(
 				}
 			}
 			const idx = output.content.indexOf(state.currentToolCall);
-			delete (state.currentToolCall as any).partialJson;
-			delete (state.currentToolCall as any).index;
-			delete (state.currentToolCall as any).kind;
+			delete state.currentToolCall.partialJson;
+			delete state.currentToolCall.index;
+			delete state.currentToolCall.kind;
 			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: state.currentToolCall, partial: output });
 			state.setToolCall(null);
 		}

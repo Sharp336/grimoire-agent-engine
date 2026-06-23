@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made `index`, `partialJson`, and `kind` optional on Cursor's `ToolCallState` type, eliminating `as any` casts when deleting these runtime-only fields before pushing tool-call events.
+
 ## [16.1.16] - 2026-06-23
 
 ### Fixed
