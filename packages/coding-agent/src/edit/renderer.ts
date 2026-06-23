@@ -22,6 +22,7 @@ import {
 	invalidateRenderedStringCache,
 	type LspBatchRequest,
 	PREVIEW_LIMITS,
+	previewWindowRows,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -340,6 +341,7 @@ function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string
 function formatStreamingDiff(
 	diff: string,
 	rawPath: string,
+	width: number,
 	uiTheme: Theme,
 	expanded: boolean,
 	label = "streaming",
@@ -347,15 +349,32 @@ function formatStreamingDiff(
 	cache?: RenderedStringCache,
 ): string {
 	if (!diff) return "";
-	let text = cachedRenderedString(cache, uiTheme, expanded, rawPath, diff, () => {
-		// Collapsed uses a "Cursor" tail window: pin the last
-		// EDIT_STREAMING_PREVIEW_LINES rows to the bottom so freshly streamed changes
-		// stay on screen. The whole-file diff is recomputed on every streamed chunk
-		// and its Myers alignment is not monotonic in payload length, so a hunk-aware
-		// window stutters as rows move between hunks. Expanded deliberately lifts that
-		// cap for the approval-time full view.
+	// Clamp the collapsed tail to the viewport so a tall or fast-growing diff
+	// cannot outgrow the live window. Otherwise its mutating tail scrolls above
+	// the native-scrollback commit boundary and the engine re-commits a fresh
+	// snapshot every streamed frame, stacking duplicate "… more lines above"
+	// previews in history. The budget is VISUAL rows (a long wrapped line counts
+	// for more than one) at the framed block's inner width (border only —
+	// contentPaddingLeft is 0); only the visible suffix is syntax-colored, so the
+	// cheap raw-line wrap walk keeps the per-chunk cost bounded. innerWidth/budget
+	// are in the cache salt so a resize re-slices.
+	const innerWidth = Math.max(1, width - 2);
+	const budget = expanded ? Number.POSITIVE_INFINITY : Math.min(EDIT_STREAMING_PREVIEW_LINES, previewWindowRows());
+	let text = cachedRenderedString(cache, uiTheme, expanded, `${rawPath}:${innerWidth}:${budget}`, diff, () => {
+		// "Cursor" tail window: pin the last rows to the bottom so freshly streamed
+		// changes stay on screen. The whole-file diff is recomputed every chunk and
+		// its Myers alignment is not monotonic in payload length, so a hunk-aware
+		// window stutters as rows move between hunks. Expanded lifts the cap.
 		const allLines = diff.replace(/\n+$/u, "").split("\n");
-		const hiddenLines = expanded ? 0 : Math.max(0, allLines.length - EDIT_STREAMING_PREVIEW_LINES);
+		let visualUsed = 0;
+		let cut = allLines.length;
+		for (let i = allLines.length - 1; i >= 0; i--) {
+			const lineRows = Math.max(1, wrapTextWithAnsi(replaceTabs(allLines[i]!), innerWidth).length);
+			if (visualUsed + lineRows > budget && visualUsed > 0) break;
+			visualUsed += lineRows;
+			cut = i;
+		}
+		const hiddenLines = cut;
 		const visible = hiddenLines > 0 ? allLines.slice(hiddenLines) : allLines;
 		let rendered = "\n\n";
 		if (hiddenLines > 0) {
@@ -384,6 +403,7 @@ function formatStreamingDiff(
 
 function formatMultiFileStreamingDiff(
 	previews: PerFileDiffPreview[],
+	width: number,
 	uiTheme: Theme,
 	expanded: boolean,
 	spinnerFrame?: number,
@@ -405,7 +425,7 @@ function formatMultiFileStreamingDiff(
 			const isLast = index === previews.length - 1;
 			const cache = previewCacheAt(caches, index);
 			parts.push(
-				`${header}${formatStreamingDiff(preview.diff, preview.path, uiTheme, expanded, "preview", isLast ? spinnerFrame : undefined, cache)}`,
+				`${header}${formatStreamingDiff(preview.diff, preview.path, width, uiTheme, expanded, "preview", isLast ? spinnerFrame : undefined, cache)}`,
 			);
 		}
 	}
@@ -415,6 +435,7 @@ function formatMultiFileStreamingDiff(
 function getCallPreview(
 	args: EditRenderArgs,
 	rawPath: string,
+	width: number,
 	uiTheme: Theme,
 	renderContext: EditRenderContext | undefined,
 	expanded: boolean,
@@ -423,14 +444,14 @@ function getCallPreview(
 ): string {
 	const multi = renderContext?.perFileDiffPreview;
 	if (multi && multi.length > 1 && multi.some(p => p.diff || p.error)) {
-		return formatMultiFileStreamingDiff(multi, uiTheme, expanded, spinnerFrame, caches);
+		return formatMultiFileStreamingDiff(multi, width, uiTheme, expanded, spinnerFrame, caches);
 	}
 	const cache = previewCacheAt(caches, 0);
 	if (args.previewDiff) {
-		return formatStreamingDiff(args.previewDiff, rawPath, uiTheme, expanded, "preview", spinnerFrame, cache);
+		return formatStreamingDiff(args.previewDiff, rawPath, width, uiTheme, expanded, "preview", spinnerFrame, cache);
 	}
 	if (args.diff && args.op) {
-		return formatStreamingDiff(args.diff, rawPath, uiTheme, expanded, "streaming", spinnerFrame, cache);
+		return formatStreamingDiff(args.diff, rawPath, width, uiTheme, expanded, "streaming", spinnerFrame, cache);
 	}
 	if (args.diff) {
 		return renderPlainTextPreview(args.diff, uiTheme, rawPath);
@@ -628,6 +649,7 @@ export const editToolRenderer = {
 			let body = getCallPreview(
 				editArgs,
 				rawPath,
+				width,
 				uiTheme,
 				renderContext,
 				options.expanded,
