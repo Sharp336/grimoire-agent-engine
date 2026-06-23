@@ -8,7 +8,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
-import { theme } from "../../modes/theme/theme";
+import { fgOrPlain, theme } from "../../modes/theme/theme";
 import tipsText from "./tips.txt" with { type: "text" };
 
 /** Tips embedded at build time, one per line; blanks dropped. */
@@ -96,17 +96,15 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	if (wrappedBody.length === 0) return [];
 
 	const encoding: ColorEncoding = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
-	const purple = Bun.color("#b48cff", encoding) ?? "";
-	const lightBlue = Bun.color("#9ccfff", encoding) ?? "";
 	const italic = "\x1b[3m";
-	const dim = "\x1b[2m";
 	const reset = "\x1b[0m";
 	const continuationIndent = padding(labelWidth);
+	const labelColored = fgOrPlain("customMessageLabel", label);
 
 	const lines = wrappedBody.map((line, index) =>
 		index === 0
-			? ` ${italic}${purple}${label}${dim}${lightBlue}${line}${reset}`
-			: ` ${italic}${continuationIndent}${dim}${lightBlue}${line}${reset}`,
+			? ` ${italic}${labelColored}${fgOrPlain("muted", line)}${reset}`
+			: ` ${italic}${continuationIndent}${fgOrPlain("muted", line)}${reset}`,
 	);
 
 	if (isNew) {
