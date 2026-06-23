@@ -384,7 +384,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
+			const arg = command.args.trim().toLowerCase();
 			if (!arg || arg === "toggle") {
 				const enabled = runtime.session.toggleFastMode();
 				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
@@ -776,7 +776,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return runtime.ctx.settings.get("browser.headless" as SettingPath) ? "Browser: headless" : "Browser: visible";
 		},
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
+			const arg = command.args.trim().toLowerCase();
 			const enabled = runtime.settings.get("browser.enabled" as SettingPath) as boolean;
 			if (!enabled) return usage("Browser tool is disabled (enable in settings).", runtime);
 			const current = runtime.settings.get("browser.headless" as SettingPath) as boolean;
@@ -803,7 +803,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
+			const arg = command.args.trim().toLowerCase();
 			const current = settings.get("browser.headless" as SettingPath) as boolean;
 			let next = current;
 			if (!(settings.get("browser.enabled" as SettingPath) as boolean)) {
