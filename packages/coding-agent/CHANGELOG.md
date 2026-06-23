@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added contract tests for `repairDoubleEncodedJsonString` and `repairTaskParams` in `packages/coding-agent/test/task/repair-args.test.ts`, covering double-encode detection, structural-escape repair, false-positive avoidance (Windows paths, regexes, lone `\n` mentions), and defensive handling of partially streamed params.
+
 ## [16.1.16] - 2026-06-23
 
 ### Breaking Changes
