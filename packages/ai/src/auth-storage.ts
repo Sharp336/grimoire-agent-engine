@@ -787,23 +787,23 @@ function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 function raceUsageWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
 	if (!signal) return promise;
 	if (signal.aborted) return Promise.reject(new Error("usage fetch aborted"));
-	return new Promise<T>((resolve, reject) => {
-		const onAbort = (): void => {
+	const { promise: raced, resolve, reject } = Promise.withResolvers<T>();
+	const onAbort = (): void => {
+		signal.removeEventListener("abort", onAbort);
+		reject(new Error("usage fetch aborted"));
+	};
+	signal.addEventListener("abort", onAbort, { once: true });
+	promise.then(
+		value => {
 			signal.removeEventListener("abort", onAbort);
-			reject(new Error("usage fetch aborted"));
-		};
-		signal.addEventListener("abort", onAbort, { once: true });
-		promise.then(
-			value => {
-				signal.removeEventListener("abort", onAbort);
-				resolve(value);
-			},
-			err => {
-				signal.removeEventListener("abort", onAbort);
-				reject(err);
-			},
-		);
-	});
+			resolve(value);
+		},
+		err => {
+			signal.removeEventListener("abort", onAbort);
+			reject(err);
+		},
+	);
+	return raced;
 }
 
 function raceCredentialRefreshWithSignal<T>(

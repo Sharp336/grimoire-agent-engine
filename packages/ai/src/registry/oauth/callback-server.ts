@@ -207,15 +207,14 @@ export abstract class OAuthCallbackFlow {
 		const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT);
 		const signal = this.ctrl.signal ? AbortSignal.any([this.ctrl.signal, timeoutSignal]) : timeoutSignal;
 
-		const callbackPromise = new Promise<CallbackResult>((resolve, reject) => {
-			this.#callbackResolve = resolve;
-			this.#callbackReject = reject;
+		const { promise: callbackPromise, resolve, reject } = Promise.withResolvers<CallbackResult>();
+		this.#callbackResolve = resolve;
+		this.#callbackReject = reject;
 
-			signal.addEventListener("abort", () => {
-				this.#callbackResolve = undefined;
-				this.#callbackReject = undefined;
-				reject(new Error(`OAuth callback cancelled: ${signal.reason}`));
-			});
+		signal.addEventListener("abort", () => {
+			this.#callbackResolve = undefined;
+			this.#callbackReject = undefined;
+			reject(new Error(`OAuth callback cancelled: ${signal.reason}`));
 		});
 
 		// Manual input race (if supported)

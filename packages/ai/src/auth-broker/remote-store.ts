@@ -539,23 +539,23 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 		if (!signal) return promise;
 		if (signal.aborted) return Promise.reject(new Error("auth-broker request aborted"));
-		return new Promise<T>((resolve, reject) => {
-			const onAbort = (): void => {
+		const { promise: raced, resolve, reject } = Promise.withResolvers<T>();
+		const onAbort = (): void => {
+			signal.removeEventListener("abort", onAbort);
+			reject(new Error("auth-broker request aborted"));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			value => {
 				signal.removeEventListener("abort", onAbort);
-				reject(new Error("auth-broker request aborted"));
-			};
-			signal.addEventListener("abort", onAbort, { once: true });
-			promise.then(
-				value => {
-					signal.removeEventListener("abort", onAbort);
-					resolve(value);
-				},
-				err => {
-					signal.removeEventListener("abort", onAbort);
-					reject(err);
-				},
-			);
-		});
+				resolve(value);
+			},
+			err => {
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+		return raced;
 	}
 
 	#loadUsageReports(): Promise<UsageReport[] | null> {
