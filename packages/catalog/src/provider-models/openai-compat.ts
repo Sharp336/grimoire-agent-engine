@@ -2833,6 +2833,46 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 22.5. Command Code
+// ---------------------------------------------------------------------------
+
+export interface CommandCodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Command Code Provider API — OpenAI-compatible (`/provider/v1/chat/completions`).
+ * Not listed on models.dev, so models come purely from runtime discovery against
+ * `GET /provider/v1/models` (same shape as vLLM / NanoGPT).
+ */
+export function commandCodeModelManagerOptions(
+	config?: CommandCodeModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.commandcode.ai/provider/v1";
+	const references = createBundledReferenceMap<"openai-completions">(
+		"commandcode" as Parameters<typeof getBundledModels>[0],
+	);
+	return {
+		providerId: "commandcode",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "commandcode",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) =>
+						mapWithBundledReference(entry, defaults, references.get(defaults.id)),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 23. NanoGPT
 // ---------------------------------------------------------------------------
 

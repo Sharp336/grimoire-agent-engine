@@ -14,6 +14,7 @@ import {
 	anthropicModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
+	commandCodeModelManagerOptions,
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
@@ -94,6 +95,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
+	},
+	{
+		id: "commandcode",
+		defaultModel: "deepseek/deepseek-v4-pro",
+		envVars: ["COMMANDCODE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandCodeModelManagerOptions(config),
+		catalogDiscovery: { label: "Command Code", oauthProvider: "commandcode" },
 	},
 	{
 		id: "cursor",

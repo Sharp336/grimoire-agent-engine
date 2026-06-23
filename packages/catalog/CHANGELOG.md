@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the **Command Code** provider to the catalog table: OpenAI-compatible (`https://api.commandcode.ai/provider/v1`), runtime-discovered via `GET /provider/v1/models` (not on models.dev), env var `COMMANDCODE_API_KEY`, default model `deepseek/deepseek-v4-pro`.
+
 
 ## [16.1.14] - 2026-06-22
 

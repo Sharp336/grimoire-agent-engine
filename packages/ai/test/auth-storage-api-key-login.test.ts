@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as commandCodeModule from "@oh-my-pi/pi-ai/registry/commandcode";
 import * as deepseekModule from "@oh-my-pi/pi-ai/registry/deepseek";
 import * as kagiModule from "@oh-my-pi/pi-ai/registry/kagi";
 import * as ollamaCloudModule from "@oh-my-pi/pi-ai/registry/ollama-cloud";
@@ -44,6 +45,7 @@ describe("AuthStorage api-key login upsert", () => {
 	let loginDeepSeekSpy: Mock<typeof deepseekModule.loginDeepSeek>;
 	let loginKagiSpy: Mock<typeof kagiModule.loginKagi>;
 	let loginOllamaCloudSpy: Mock<typeof ollamaCloudModule.loginOllamaCloud>;
+	let loginCommandCodeSpy: Mock<typeof commandCodeModule.loginCommandCode>;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-api-key-login-"));
@@ -53,6 +55,7 @@ describe("AuthStorage api-key login upsert", () => {
 		loginDeepSeekSpy = vi.spyOn(deepseekModule, "loginDeepSeek");
 		loginKagiSpy = vi.spyOn(kagiModule, "loginKagi");
 		loginOllamaCloudSpy = vi.spyOn(ollamaCloudModule, "loginOllamaCloud");
+		loginCommandCodeSpy = vi.spyOn(commandCodeModule, "loginCommandCode");
 	});
 
 	afterEach(async () => {
@@ -181,5 +184,30 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(stored.credential.key).toBe("same-deepseek-key");
 		expect(store.getApiKey("deepseek")).toBe("same-deepseek-key");
 		expect(await authStorage.getApiKey("deepseek", "session-deepseek-relogin")).toBe("same-deepseek-key");
+	});
+
+	it("stores a commandcode api-key credential via the login dispatch", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+
+		loginCommandCodeSpy.mockResolvedValueOnce("same-cc-key");
+
+		const controller = {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		};
+
+		await authStorage.login("commandcode", controller);
+
+		expect(countCredentialRows(dbPath, "commandcode")).toBe(1);
+		const ccCredentials = store.listAuthCredentials("commandcode");
+		expect(ccCredentials).toHaveLength(1);
+		const [ccStored] = ccCredentials;
+		expect(ccStored?.credential.type).toBe("api_key");
+		if (!ccStored || ccStored.credential.type !== "api_key") {
+			throw new Error("expected stored api-key credential");
+		}
+		expect(ccStored.credential.key).toBe("same-cc-key");
+		expect(store.getApiKey("commandcode")).toBe("same-cc-key");
+		expect(await authStorage.getApiKey("commandcode", "session-cc-login")).toBe("same-cc-key");
 	});
 });

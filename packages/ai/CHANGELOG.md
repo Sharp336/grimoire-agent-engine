@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the **Command Code** provider (`/login commandcode`), backed by Command Code's OpenAI-compatible Provider API (`https://api.commandcode.ai/provider/v1`). Authenticate by pasting a key (Command Code Studio → API Keys) or setting `COMMANDCODE_API_KEY`; models are discovered at runtime from `GET /provider/v1/models`. Follows the same registry shape as other OpenAI-compatible API-key providers (Cerebras, Moonshot, Together, vLLM).
+
 
 ## [16.1.16] - 2026-06-23
 
@@ -1357,6 +1361,9 @@
 - Fixed `pi-ai login <provider>` crashing with `Unknown provider` for providers that only the `auth-storage` `login()` switch knew about (perplexity, alibaba-coding-plan, gitlab-duo, huggingface, opencode-zen/go, lm-studio, ollama, cerebras, fireworks, qianfan, synthetic, venice, litellm, moonshot, together, cloudflare/vercel ai gateways, vllm, qwen-portal, nvidia, xiaomi, and any custom OAuth provider). The CLI now delegates to `SqliteAuthCredentialStore.login()` instead of duplicating a smaller switch, so the auth-broker `omp auth-broker login <provider>` flow works for every registered OAuth provider.
 
 ## [15.1.4] - 2026-05-19
+### Added
+
+- Added the **Command Code** provider (`/login commandcode`), backed by Command Code's OpenAI-compatible Provider API (`https://api.commandcode.ai/provider/v1`). Models are discovered at runtime from `GET /provider/v1/models`; authenticate by pasting a key (Command Code Studio → API Keys) or setting `COMMANDCODE_API_KEY`. Follows the same shape as other OpenAI-compatible API-key providers (Cerebras, Moonshot, Together, vLLM).
 
 ### Changed
 
