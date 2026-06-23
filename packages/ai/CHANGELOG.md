@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `new Promise((resolve, reject) => ...)` with `Promise.withResolvers()` in `EventStream` async iterator, per the project convention.
+
 ## [16.1.16] - 2026-06-23
 
 ### Fixed
