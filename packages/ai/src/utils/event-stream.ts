@@ -3,7 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent } from "../types";
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	queue: T[] = [];
-	waiting: Array<{ resolve: (value: IteratorResult<T>) => void; reject: (err: unknown) => void }> = [];
+	waiting: Array<{ resolve: (value: IteratorResult<T, undefined>) => void; reject: (err: unknown) => void }> = [];
 	done = false;
 	/** True once finalResultPromise has been resolved or rejected. */
 	resultSettled = false;
@@ -68,14 +68,14 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
-			waiter.resolve({ value: undefined as any, done: true });
+			waiter.resolve({ value: undefined, done: true });
 		}
 	}
 
 	endWaiting(): void {
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
-			waiter.resolve({ value: undefined as any, done: true });
+			waiter.resolve({ value: undefined, done: true });
 		}
 	}
 
@@ -101,7 +101,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			} else if (this.done) {
 				return;
 			} else {
-				const { promise, resolve, reject } = Promise.withResolvers<IteratorResult<T>>();
+				const { promise, resolve, reject } = Promise.withResolvers<IteratorResult<T, undefined>>();
 				this.waiting.push({ resolve, reject });
 				const result = await promise;
 				if (result.done) return;
