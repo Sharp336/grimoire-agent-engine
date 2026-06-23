@@ -590,3 +590,35 @@ describe("SettingsList", () => {
 		expect(routed).toEqual([[2, 7, true]]);
 	});
 });
+
+describe("SettingsList non-string currentValue", () => {
+	beforeEach(() => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+	});
+
+	afterEach(() => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+	});
+
+	it("renders a non-string currentValue without crashing", () => {
+		// A string-valued enum stored as a bare number in YAML (e.g.
+		// advisor.syncBacklog: 1) reaches the list as a non-string because the
+		// `as string` cast in settings-selector.ts is erased at runtime. The
+		// native truncateToWidth binding throws on non-string input.
+		const list = new SettingsList(
+			[
+				{
+					id: "advisor.syncBacklog",
+					label: "Advisor Sync Backlog",
+					currentValue: 1 as unknown as string,
+					values: ["off", "1", "3", "5"],
+				},
+			],
+			3,
+			testTheme,
+			() => {},
+			() => {},
+		);
+		expect(() => list.render(40)).not.toThrow();
+	});
+});

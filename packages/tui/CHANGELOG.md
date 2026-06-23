@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `SettingsList` crashing the TUI when a setting value parsed as a non-string by YAML (e.g. a bare-number enum like `advisor.syncBacklog: 1`) reached the native `truncateToWidth` binding, which throws on non-string input. The renderer now coerces `currentValue` to a string before the native call ([#3338](https://github.com/can1357/oh-my-pi/issues/3338)).
+
 ## [16.1.10] - 2026-06-21
 
 ### Fixed
