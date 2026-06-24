@@ -30,6 +30,7 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
+import { handleExpertMode, handleExpertModeAcp, handleSimpleMode, handleSimpleModeAcp } from "./helpers/collab-modes";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -2215,6 +2216,71 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "expert",
+		description:
+			"Expert mode: architect↔implementer design dialogue, implementation, and code review with auto-commit and PR",
+		acpDescription: "Expert mode: collaborative architect-implementer loop with auto-commit and PR",
+		acpInputHint: "[task description]",
+		inlineHint: "[task description]",
+		allowArgs: true,
+		handle: (command) => {
+			return handleExpertModeAcp(command);
+		},
+		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			const adapted: SlashCommandRuntime = {
+				session: ctx.session,
+				sessionManager: ctx.sessionManager,
+				settings: ctx.settings,
+				cwd: ctx.sessionManager.getCwd(),
+				output: (text: string) => {
+					ctx.showStatus(text);
+				},
+				refreshCommands: () => ctx.refreshSlashCommandState(),
+				reloadPlugins: async () => {
+					const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+					clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+					await ctx.refreshSlashCommandState();
+					await ctx.session.refreshSshTool({ activateIfAvailable: true });
+				},
+			};
+			ctx.editor.setText("");
+			return handleExpertMode(command, adapted);
+		},
+	},
+	{
+		name: "simple",
+		description: "Simple mode: one-shot task execution with auto-commit and PR",
+		acpDescription: "Simple mode: one-shot task with auto-commit and PR",
+		acpInputHint: "[task description]",
+		inlineHint: "[task description]",
+		allowArgs: true,
+		handle: (command) => {
+			return handleSimpleModeAcp(command);
+		},
+		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			const adapted: SlashCommandRuntime = {
+				session: ctx.session,
+				sessionManager: ctx.sessionManager,
+				settings: ctx.settings,
+				cwd: ctx.sessionManager.getCwd(),
+				output: (text: string) => {
+					ctx.showStatus(text);
+				},
+				refreshCommands: () => ctx.refreshSlashCommandState(),
+				reloadPlugins: async () => {
+					const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+					clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+					await ctx.refreshSlashCommandState();
+					await ctx.session.refreshSshTool({ activateIfAvailable: true });
+				},
+			};
+			ctx.editor.setText("");
+			return handleSimpleMode(command, adapted);
 		},
 	},
 	{
