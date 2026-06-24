@@ -56,6 +56,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	find: findRenderer,
 	generate_image: generateImageRenderer,
 	github: githubRenderer,
+	gitlab: githubRenderer,
 	goal: goalRenderer,
 	inspect_image: inspectImageRenderer,
 	irc: ircRenderer,

@@ -8,6 +8,7 @@ import {
 	createTools,
 	DEFAULT_ESSENTIAL_TOOL_NAMES,
 	filterInitialToolsForDiscoveryAll,
+	GitlabTool,
 	IrcTool,
 	JobTool,
 	SshTool,
@@ -20,6 +21,7 @@ const allToolsSettings = Settings.isolated({
 	"find.enabled": true,
 	"search.enabled": true,
 	"github.enabled": true,
+	"gitlab.enabled": true,
 	"lsp.enabled": true,
 	"inspect_image.enabled": true,
 	"web_search.enabled": true,
@@ -48,6 +50,7 @@ async function getToolMetadata(): Promise<Map<string, { loadMode?: string; summa
 	for (const tool of [
 		new AskTool({ ...toolSession, hasUI: true }),
 		new SshTool(toolSession, [], new Map(), ""),
+		new GitlabTool(toolSession),
 		new JobTool(toolSession),
 		new IrcTool(toolSession),
 	]) {
