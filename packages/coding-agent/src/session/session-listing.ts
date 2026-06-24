@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message, TextContent } from "@oh-my-pi/pi-ai";
 import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import type { WorkspaceIdentifierMode } from "../utils/workspace-storage-identifier";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 
@@ -566,8 +567,9 @@ export async function resolveResumableSession(
 	cwd: string,
 	sessionDir?: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	mode: WorkspaceIdentifierMode = "path",
 ): Promise<ResolvedSessionMatch | undefined> {
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
+	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage, undefined, mode);
 	const localSessions = await listSessions(localSessionDir, storage);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {

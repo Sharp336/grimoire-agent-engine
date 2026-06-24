@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { resolveWorkspaceStorageIdentity, type WorkspaceIdentifierMode } from "../utils/workspace-storage-identifier";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -111,10 +112,15 @@ function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string, sessio
 	}
 }
 
-export function resolveManagedSessionRoot(sessionDir: string, cwd: string): string | undefined {
+export function resolveManagedSessionRoot(
+	sessionDir: string,
+	cwd: string,
+	mode: WorkspaceIdentifierMode = "path",
+): string | undefined {
 	const currentDirName = path.basename(sessionDir);
-	const { encodedDirName } = getDefaultSessionDirName(cwd);
-	if (currentDirName !== encodedDirName && currentDirName !== encodeLegacyAbsoluteSessionDirName(cwd)) {
+	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const identity = resolveWorkspaceStorageIdentity(resolvedCwd, mode, encodedDirName);
+	if (currentDirName !== identity.segment && currentDirName !== encodeLegacyAbsoluteSessionDirName(cwd)) {
 		return undefined;
 	}
 	return path.dirname(sessionDir);
@@ -129,11 +135,13 @@ export function computeDefaultSessionDir(
 	cwd: string,
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
+	mode: WorkspaceIdentifierMode = "path",
 ): string {
 	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
-	migrateHomeSessionDirs(sessionsRoot);
-	const sessionDir = path.join(sessionsRoot, encodedDirName);
-	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
+	const identity = resolveWorkspaceStorageIdentity(resolvedCwd, mode, encodedDirName);
+	if (identity.mode === "path") migrateHomeSessionDirs(sessionsRoot);
+	const sessionDir = path.join(sessionsRoot, identity.segment);
+	if (identity.mode === "path") migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
 }

@@ -1153,6 +1153,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
 	const skillsSettings = settings.getGroup("skills");
+	const workspaceMode = settings.get("workspace.identifier");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
 		options.skills === undefined
@@ -1181,9 +1182,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const sessionManager =
 		options.sessionManager ??
-		logger.time("sessionManager", () =>
-			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
-		);
+		logger.time("sessionManager", () => {
+			const computedDir = SessionManager.getDefaultSessionDir(cwd, agentDir, undefined, workspaceMode);
+			return SessionManager.create(cwd, computedDir, undefined, workspaceMode);
+		});
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	// Startup model *selection* only needs to know whether auth is configured for
 	// a candidate's provider — never the resolved key bytes. Use the synchronous,
