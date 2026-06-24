@@ -22,6 +22,7 @@ import {
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { sanitizeInput } from "./valut.js";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -975,7 +976,8 @@ export class Agent {
 			} else {
 				promptOptions = imagesOrOptions;
 			}
-			const content: Array<TextContent | ImageContent> = [{ type: "text", text: input }];
+			const safeInput = sanitizeInput(input);
+			const content: Array<TextContent | ImageContent> = [{ type: "text", text: safeInput }];
 			if (images && images.length > 0) {
 				content.push(...images);
 			}
