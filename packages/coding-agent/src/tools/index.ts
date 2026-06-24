@@ -46,6 +46,7 @@ import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
+import { GitlabTool } from "./gitlab";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
 import { JobTool } from "./job";
@@ -84,6 +85,7 @@ export * from "./eval";
 export * from "./eval-backends";
 export * from "./find";
 export * from "./gh";
+export * from "./gitlab";
 export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
@@ -449,6 +451,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	eval: s => new EvalTool(s),
 	ssh: loadSshTool,
 	github: GithubTool.createIf,
+	gitlab: GitlabTool.createIf,
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
 	lsp: LspTool.createIf,
@@ -605,6 +608,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "search") return session.settings.get("search.enabled");
 		if (name === "github") return session.settings.get("github.enabled");
+		if (name === "gitlab") return session.settings.get("gitlab.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
