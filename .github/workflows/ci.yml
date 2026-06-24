@@ -147,6 +147,7 @@ jobs:
                 "pi-natives-darwin-x64-baseline-h${hash}"
                 "pi-natives-darwin-arm64-h${hash}"
                 "pi-natives-win32-x64-baseline-h${hash}"
+                "pi-natives-win32-arm64-h${hash}"
               )
               linux_x64_run_id=""
               cross_platform_run_id=""
@@ -247,6 +248,7 @@ jobs:
             include:
                - { os: omp-kata, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
                - { os: omp-kata, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline }
+               - { os: omp-kata, platform: win32, arch: arm64, target: aarch64-pc-windows-msvc }
       runs-on: ${{ matrix.os }}
       steps:
          - uses: actions/checkout@v4
@@ -603,6 +605,13 @@ jobs:
                     arch: x64,
                     target_id: win32-x64,
                     binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
+                 }
+               - {
+                    os: ubuntu-22.04,
+                    platform: win32,
+                    arch: arm64,
+                    target_id: win32-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-windows-arm64.exe,
                  }
       runs-on: ${{ matrix.os }}
       permissions:

@@ -79,7 +79,9 @@ export function ffmpegAssetName(_version: string, plat: string, architecture: st
 	if (architecture !== "arm64" && architecture !== "x64") return null;
 	if (plat === "darwin") return `ffmpeg-darwin-${architecture}`;
 	if (plat === "linux") return `ffmpeg-linux-${architecture}`;
-	if (plat === "win32") return architecture === "x64" ? "ffmpeg-win32-x64" : null;
+	// ffmpeg-static has no win32-arm64 build; Windows-on-ARM runs the x64 binary
+	// under emulation, so fall back to it rather than reporting no ffmpeg.
+	if (plat === "win32") return "ffmpeg-win32-x64";
 	return null;
 }
 

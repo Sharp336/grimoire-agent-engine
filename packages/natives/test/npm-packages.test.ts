@@ -55,6 +55,7 @@ describe("generated native npm leaf packages", () => {
 				"pi_natives.darwin-x64-baseline.node",
 				"pi_natives.darwin-arm64.node",
 				"pi_natives.win32-x64-baseline.node",
+				"pi_natives.win32-arm64.node",
 			];
 			for (const file of addonFiles) {
 				await Bun.write(path.join(packageDir, "native", file), file);
@@ -67,6 +68,7 @@ describe("generated native npm leaf packages", () => {
 				"darwin-x64",
 				"darwin-arm64",
 				"win32-x64",
+				"win32-arm64",
 			]);
 			const linuxX64 = leaves.find(leaf => leaf.tag === "linux-x64");
 			expect(linuxX64?.files).toEqual(["pi_natives.linux-x64-baseline.node", "pi_natives.linux-x64-modern.node"]);
@@ -95,6 +97,7 @@ describe("generated native npm leaf packages", () => {
 				"linux-arm64",
 				"darwin-x64",
 				"win32-x64",
+				"win32-arm64",
 			]);
 			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/package.json")).exists()).toBe(false);
 		} finally {

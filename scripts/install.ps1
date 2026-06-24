@@ -19,7 +19,13 @@ $ErrorActionPreference = "Stop"
 $Repo = "can1357/oh-my-pi"
 $Package = "@oh-my-pi/pi-coding-agent"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
-$BinaryName = "omp-windows-x64.exe"
+# OSArchitecture reports the true OS arch even when PowerShell runs under x64
+# emulation on Windows-on-ARM (unlike $env:PROCESSOR_ARCHITECTURE).
+$BinaryName = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") {
+    "omp-windows-arm64.exe"
+} else {
+    "omp-windows-x64.exe"
+}
 $MinimumBunVersion = "1.3.14"
 
 function Test-BunInstalled {
