@@ -24,6 +24,7 @@ import { kiloProvider } from "./kilo";
 import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
+import { llmGatewayProvider } from "./llmgateway";
 import { lmStudioProvider } from "./lm-studio";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
@@ -115,6 +116,7 @@ const ALL = [
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
 	litellmProvider,
+	llmGatewayProvider,
 	kiloProvider,
 	zenmuxProvider,
 	opencodeZenProvider,
