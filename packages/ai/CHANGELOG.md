@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added LLM Gateway (DevPass) to the provider registry with an API-key login flow validated against chat completions (`LLM_GATEWAY_API_KEY`).
+
 ## [16.1.19] - 2026-06-25
 
 ### Fixed

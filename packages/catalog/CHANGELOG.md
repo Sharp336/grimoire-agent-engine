@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `llmgateway` provider (LLM Gateway / DevPass) with generated model-catalog discovery against `https://api.llmgateway.io/v1`, including cost, reasoning, vision, and tool-capable chat model metadata parsed from its `/v1/models` shape.
+
 ## [16.1.17] - 2026-06-24
 
 ### Fixed

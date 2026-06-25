@@ -2086,6 +2086,74 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 10.7 LLM Gateway (DevPass)
+// ---------------------------------------------------------------------------
+
+export interface LLMGatewayModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function llmGatewayModelManagerOptions(
+	config?: LLMGatewayModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.llmgateway.io/v1";
+	return {
+		providerId: "llmgateway",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "llmgateway",
+				baseUrl,
+				apiKey,
+				// Drop routing pseudo-entries and non-chat catalog rows (embeddings,
+				// TTS, image generation). This provider is used for coding-agent chat.
+				filterModel: entry => {
+					const providers = Array.isArray(entry.providers) ? entry.providers : [];
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const outputModalities = Array.isArray(architecture?.output_modalities)
+						? architecture.output_modalities
+						: [];
+					const textOutputOnly =
+						outputModalities.length === 0 || outputModalities.every(modality => modality === "text");
+					return (
+						entry.id !== "custom" &&
+						entry.id !== "auto" &&
+						textOutputOnly &&
+						providers.some(p => isRecord(p) && p.tools === true)
+					);
+				},
+				mapModel: (entry, defaults) => {
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+					const providers = Array.isArray(entry.providers) ? entry.providers : [];
+					const reasoning = providers.some(p => isRecord(p) && p.reasoning === true);
+					const toolsSupported = providers.some(p => isRecord(p) && p.tools === true);
+					return {
+						...defaults,
+						name: toModelName(entry.name, defaults.name),
+						reasoning: reasoning || defaults.reasoning,
+						input: toInputCapabilities(architecture?.input_modalities),
+						...(toolsSupported ? {} : { supportsTools: false }),
+						// LLM Gateway pricing is per-token; catalog cost is $/million tokens.
+						cost: {
+							input: (toNumber(pricing?.prompt) ?? 0) * 1_000_000,
+							output: (toNumber(pricing?.completion) ?? 0) * 1_000_000,
+							cacheRead: (toNumber(pricing?.input_cache_read) ?? 0) * 1_000_000,
+							cacheWrite: (toNumber(pricing?.input_cache_write) ?? 0) * 1_000_000,
+						},
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Alibaba Coding Plan
 // ---------------------------------------------------------------------------
 
