@@ -197,6 +197,7 @@ import {
 	warmupLspServers,
 } from "./tools";
 import { ToolContextStore } from "./tools/context";
+import { applyComposerWebSearchToolSwap } from "./web/search/composer-surface";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { queueResolveHandler } from "./tools/resolve";
@@ -2344,6 +2345,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			status: "running",
 		});
 		hasRegistered = true;
+
+		initialToolNames = applyComposerWebSearchToolSwap(initialToolNames, model);
 
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",

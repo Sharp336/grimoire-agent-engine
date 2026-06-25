@@ -260,6 +260,14 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+import {
+	applyComposerWebSearchToolSwap,
+	buildComposerWebSearchForceSequence,
+	CURSOR_WEB_SEARCH_TOOL_NAME,
+	normalizeToolNameForRegistry,
+	resolveWebSearchForcedToolName,
+} from "../web/search/composer-surface";
+import { containsWebSearchIntent, findLastUserPromptText } from "../web/search/search-intent";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
@@ -1832,11 +1840,12 @@ export class AgentSession {
 	 * calls exactly the forced tool once and then cannot call another.
 	 */
 	setForcedToolChoice(toolName: string): void {
-		if (!this.getActiveToolNames().includes(toolName)) {
+		const resolvedToolName = resolveWebSearchForcedToolName(toolName, this.model);
+		if (!this.getActiveToolNames().includes(resolvedToolName)) {
 			throw new Error(`Tool "${toolName}" is not currently active.`);
 		}
 
-		const forced = buildNamedToolChoice(toolName, this.model);
+		const forced = buildNamedToolChoice(resolvedToolName, this.model);
 		if (!forced || typeof forced === "string") {
 			throw new Error("Current model does not support forcing a specific tool.");
 		}
@@ -3948,6 +3957,13 @@ export class AgentSession {
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt may surface the active model; a switch makes the cached prompt stale.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
+		if (modelChanged) {
+			const swapped = applyComposerWebSearchToolSwap(this.getActiveToolNames(), this.model);
+			if (swapped.join("\u0001") !== this.getActiveToolNames().join("\u0001")) {
+				await this.#applyActiveToolsByName(swapped, { persistMCPSelection: false });
+				if (!editModeChanged) return;
+			}
+		}
 		if (editModeChanged || modelChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
@@ -4217,7 +4233,10 @@ export class AgentSession {
 		toolNames: string[],
 		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
 	): Promise<void> {
-		toolNames = [...new Set(toolNames.map(name => name.toLowerCase()))];
+		toolNames = applyComposerWebSearchToolSwap(
+			[...new Set(toolNames.map(normalizeToolNameForRegistry))],
+			this.model,
+		);
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -5116,6 +5135,15 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
+			const queuedComposerWebSearchForce =
+				!options?.synthetic
+					? buildComposerWebSearchForceSequence(this.model, this.getActiveToolNames(), expandedText)
+					: undefined;
+			if (queuedComposerWebSearchForce) {
+				this.#toolChoiceQueue.pushSequence(queuedComposerWebSearchForce, {
+					label: "composer-web-search-intent",
+				});
+			}
 			return true;
 		}
 
@@ -5125,6 +5153,10 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTaskPrelude(expandedText) : undefined;
+		const composerWebSearchForce =
+			!options?.synthetic && !hasPendingUserDirective
+				? buildComposerWebSearchForceSequence(this.model, this.getActiveToolNames(), expandedText)
+				: undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -5149,6 +5181,11 @@ export class AgentSession {
 		if (eagerTaskPrelude) {
 			preludeMessages.push(eagerTaskPrelude);
 		}
+		if (composerWebSearchForce) {
+			this.#toolChoiceQueue.pushSequence(composerWebSearchForce, {
+				label: "composer-web-search-intent",
+			});
+		}
 
 		try {
 			await this.#promptWithMessage(message, expandedText, {
@@ -5161,6 +5198,7 @@ export class AgentSession {
 			// Clean up residual eager-todo directive if the prompt never consumed it
 			// (e.g., compaction aborted, validation failed).
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
+			this.#toolChoiceQueue.removeByLabel("composer-web-search-intent");
 		}
 		if (!options?.synthetic) {
 			await this.#enforcePlanModeToolDecision();
@@ -7522,6 +7560,7 @@ export class AgentSession {
 			return true;
 		}
 		this.#removeEmptyStopFromActiveContext(assistantMessage);
+		this.#maybeQueueComposerWebSearchForceOnEmptyStop();
 		this.agent.appendMessage({
 			role: "developer",
 			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
@@ -7560,6 +7599,31 @@ export class AgentSession {
 		return prompt.render(emptyStopRetryTemplate, {
 			retryCount: this.#emptyStopRetryCount,
 			maxRetries: EMPTY_STOP_MAX_RETRIES,
+			composerWebSearch: this.#shouldUseComposerWebSearchEmptyStopReminder(),
+			webSearchToolName: CURSOR_WEB_SEARCH_TOOL_NAME,
+		});
+	}
+
+	#shouldUseComposerWebSearchEmptyStopReminder(): boolean {
+		const lastUserText = findLastUserPromptText(this.agent.state.messages);
+		if (!lastUserText || !containsWebSearchIntent(lastUserText)) return false;
+		return (
+			buildComposerWebSearchForceSequence(this.model, this.getActiveToolNames(), lastUserText) !== undefined
+		);
+	}
+
+	#maybeQueueComposerWebSearchForceOnEmptyStop(): void {
+		const lastUserText = findLastUserPromptText(this.agent.state.messages);
+		if (!lastUserText) return;
+		const forceSequence = buildComposerWebSearchForceSequence(
+			this.model,
+			this.getActiveToolNames(),
+			lastUserText,
+		);
+		if (!forceSequence) return;
+		if (this.#toolChoiceQueue.inspect().includes("composer-web-search-empty-stop")) return;
+		this.#toolChoiceQueue.pushSequence(forceSequence, {
+			label: "composer-web-search-empty-stop",
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {

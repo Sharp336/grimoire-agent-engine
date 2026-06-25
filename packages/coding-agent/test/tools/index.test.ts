@@ -81,6 +81,7 @@ describe("createTools", () => {
 		expect(names).toContain("task");
 		expect(names).toContain("todo");
 		expect(names).toContain("web_search");
+		expect(names).toContain("WebSearch");
 		expect(names).toContain("resolve");
 		expect(names).not.toContain("fetch");
 		expect(names).not.toContain("vim");
@@ -267,6 +268,7 @@ describe("createTools", () => {
 
 	it("HIDDEN_TOOLS contains review tools and goal", () => {
 		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual([
+			"WebSearch",
 			"goal",
 			"report_finding",
 			"report_tool_issue",

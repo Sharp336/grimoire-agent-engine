@@ -82,5 +82,14 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
+	WebSearch: {
+		...webSearchToolRenderer,
+		renderCall: (args, options, theme) =>
+			webSearchToolRenderer.renderCall(
+				{ ...args, query: typeof args.query === "string" ? args.query : args.search_term },
+				options,
+				theme,
+			),
+	} as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
 };

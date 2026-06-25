@@ -30,7 +30,8 @@ import { canSpawnAtDepth } from "../task/types";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
 import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-discovery/tool-index";
 import type { EventBus } from "../utils/event-bus";
-import { WebSearchTool } from "../web/search";
+import { CursorWebSearchTool } from "../web/search/cursor-alias";
+import { CURSOR_WEB_SEARCH_TOOL_NAME, WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -454,6 +455,7 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	report_tool_issue: s => createReportToolIssueTool(s),
 	resolve: s => new ResolveTool(s),
 	goal: s => new GoalTool(s),
+	[CURSOR_WEB_SEARCH_TOOL_NAME]: s => new CursorWebSearchTool(s),
 };
 
 export type ToolName = BuiltinToolName;
@@ -565,7 +567,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
-		if (name === "web_search") return session.settings.get("web_search.enabled");
+		if (name === "web_search" || name === CURSOR_WEB_SEARCH_TOOL_NAME) {
+			return session.settings.get("web_search.enabled");
+		}
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
 		if (name === "browser") return session.settings.get("browser.enabled");
@@ -620,6 +624,20 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-inject report_tool_issue when autoqa is enabled (env or setting).
 	// Injected unconditionally into every agent, regardless of requested tool list.
 	const autoQA = isAutoQaEnabled(session.settings);
+	if (
+		tools.some(tool => tool.name === "web_search") &&
+		!tools.some(tool => tool.name === CURSOR_WEB_SEARCH_TOOL_NAME)
+	) {
+		const cursorWebSearch = await logger.time(
+			`createTools:${CURSOR_WEB_SEARCH_TOOL_NAME}`,
+			HIDDEN_TOOLS[CURSOR_WEB_SEARCH_TOOL_NAME],
+			session,
+		);
+		if (cursorWebSearch) {
+			tools.push(wrapToolWithMetaNotice(cursorWebSearch));
+		}
+	}
+
 	if (autoQA && !tools.some(t => t.name === "report_tool_issue")) {
 		// Build the enum from tools we just constructed via BUILTIN_TOOLS / HIDDEN_TOOLS.
 		// Extension overrides (e.g. a user's custom `bash`) get added later by

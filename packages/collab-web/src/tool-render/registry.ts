@@ -80,6 +80,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	task: taskRenderer,
 	todo: todoRenderer,
 	web_search: webSearchRenderer,
+	WebSearch: webSearchRenderer,
 	write: writeRenderer,
 	yield: yieldRenderer,
 };
