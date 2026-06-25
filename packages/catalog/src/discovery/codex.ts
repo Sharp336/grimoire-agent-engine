@@ -1,11 +1,18 @@
 import { type } from "arktype";
 import type { ModelSpec } from "../types";
-import { isRecord } from "../utils";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
+// OpenAI publishes GPT-5.5 in Codex as a 400K total window. The Codex
+// `/codex/models` response has historically reported the 272K prompt/input
+// budget in `context_window`; keep OMP's `contextWindow` as the total window
+// and preserve the 128K output cap in `maxTokens`.
+const PUBLISHED_CODEX_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+	"gpt-5.5": 400_000,
+};
+
 const DEFAULT_CODEX_CLIENT_VERSION = "0.99.0";
 const NPM_CODEX_LATEST_URL = "https://registry.npmjs.org/@openai%2Fcodex/latest";
 
@@ -18,6 +25,8 @@ const codexModelEntrySchema = type({
 	"id?": "unknown",
 	"display_name?": "unknown",
 	"context_window?": "unknown",
+	"max_context_window?": "unknown",
+	"max_context_window_tokens?": "unknown",
 	"default_reasoning_level?": "unknown",
 	"supported_reasoning_levels?": "unknown",
 	"input_modalities?": "unknown",
@@ -208,6 +217,19 @@ function isAbortError(error: unknown): error is Error {
 	return error instanceof Error && error.name === "AbortError";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function resolveContextWindow(payload: CodexModelEntry, slug: string): number {
+	const explicitTotalWindow =
+		toPositiveInt(payload.max_context_window) ?? toPositiveInt(payload.max_context_window_tokens);
+	const reportedWindow = toPositiveInt(payload.context_window);
+	const publishedWindow = PUBLISHED_CODEX_CONTEXT_WINDOWS[slug.toLowerCase()] ?? null;
+	const contextWindow = Math.max(explicitTotalWindow ?? 0, reportedWindow ?? 0, publishedWindow ?? 0);
+	return contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW;
+}
+
 function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"openai-codex-responses">[] | null {
 	const parsedResponse = codexModelsResponseSchema(payload);
 	if (parsedResponse instanceof type.errors) {
@@ -251,7 +273,7 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 	}
 
 	const name = toNonEmptyString(payload.display_name) ?? slug;
-	const contextWindow = toPositiveInt(payload.context_window) ?? DEFAULT_CONTEXT_WINDOW;
+	const contextWindow = resolveContextWindow(payload, slug);
 	const maxTokens = Math.min(DEFAULT_MAX_TOKENS, contextWindow);
 	const reasoning = supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels);
 	const input = normalizeInputModalities(payload.input_modalities);

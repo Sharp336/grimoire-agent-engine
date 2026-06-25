@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI Codex discovery treating GPT-5.5's 272K prompt budget as its total context window; discovery now uses the largest explicit, reported, or published Codex window and maps GPT-5.5 Codex to the published 400K total window.
+
 ## [16.1.17] - 2026-06-24
 
 ### Fixed

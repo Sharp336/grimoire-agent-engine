@@ -9,6 +9,10 @@ const COPILOT_PREMIUM_MULTIPLIERS: Record<string, number> = {
 	"github-copilot/grok-code-fast-1": 0.25,
 };
 
+const PUBLISHED_CODEX_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+	"openai-codex/gpt-5.5": 400_000,
+};
+
 import * as path from "node:path";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { OAuthAccess } from "@oh-my-pi/pi-ai/auth-storage";
@@ -249,6 +253,17 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
 			...model,
 			cost: { ...openAICost },
 		};
+	});
+}
+
+function applyPublishedCodexContextWindows(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		const publishedWindow = PUBLISHED_CODEX_CONTEXT_WINDOWS[`${model.provider}/${model.id}`];
+		if (publishedWindow === undefined || model.contextWindow === publishedWindow) {
+			return model;
+		}
+		const contextWindow = Math.max(model.contextWindow ?? 0, publishedWindow);
+		return contextWindow === model.contextWindow ? model : { ...model, contextWindow };
 	});
 }
 
@@ -567,6 +582,7 @@ async function generateModels() {
 		return name === model.name ? model : { ...model, name };
 	});
 	applyGeneratedModelPolicies(allModels);
+	allModels = applyPublishedCodexContextWindows(allModels);
 	linkOpenAIPromotionTargets(allModels);
 	// Collapse effort-tier variants AFTER the policy re-bake: live-discovery
 	// entries are already collapsed (rebake skips them); this pass folds
