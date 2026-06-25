@@ -142,6 +142,21 @@ describe("AgentSession auto-compaction queue resume", () => {
 		}
 	});
 
+	it("reports manual compaction as active before abort teardown settles", async () => {
+		const compacting = session.compact().catch(() => {});
+
+		// The input controller routes steers/follow-ups through the compaction
+		// queue based on this getter. Manual compact() aborts the active turn before
+		// installing the controller, so the getter must already be true in that
+		// teardown window.
+		expect(session.isCompacting).toBe(true);
+
+		vi.advanceTimersByTime(200);
+		await compacting;
+
+		expect(session.isCompacting).toBe(false);
+	});
+
 	it("resumes after threshold compaction when only agent-level queued messages exist", async () => {
 		session.agent.followUp({
 			role: "custom",

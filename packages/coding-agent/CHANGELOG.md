@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the first steering/follow-up message submitted during a manual `/compact` being silently dropped before the compaction controller finished installing; manual compaction now reports as compacting through abort teardown so input queues for post-compaction delivery.
+
 ## [16.1.19] - 2026-06-25
 
 ### Fixed

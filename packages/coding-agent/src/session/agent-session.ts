@@ -1182,6 +1182,10 @@ export class AgentSession {
 	#acpPermissionDecisions: Map<string, "allow_always" | "reject_always"> = new Map();
 
 	// Compaction state
+	// Manual compact() starts by aborting the active turn before installing the
+	// real compaction controller; this flag keeps user input routed to the
+	// compaction queue during that teardown window.
+	#compactionStarting = false;
 	#compactionAbortController: AbortController | undefined = undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
 
@@ -5261,9 +5265,13 @@ export class AgentSession {
 		);
 	}
 
-	/** Whether auto-compaction is currently running */
+	/** Whether any manual or auto compaction is currently running or starting */
 	get isCompacting(): boolean {
-		return this.#autoCompactionAbortController !== undefined || this.#compactionAbortController !== undefined;
+		return (
+			this.#compactionStarting ||
+			this.#autoCompactionAbortController !== undefined ||
+			this.#compactionAbortController !== undefined
+		);
 	}
 
 	/**
@@ -7801,12 +7809,14 @@ export class AgentSession {
 		if (compactMode?.rejectsFocus && customInstructions) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
-		this.#disconnectFromAgent();
-		await this.abort({ goalReason: "internal" });
-		const compactionAbortController = new AbortController();
-		this.#compactionAbortController = compactionAbortController;
+		this.#compactionStarting = true;
+		let compactionAbortController: AbortController | undefined;
 
 		try {
+			this.#disconnectFromAgent();
+			await this.abort({ goalReason: "internal" });
+			compactionAbortController = new AbortController();
+			this.#compactionAbortController = compactionAbortController;
 			if (!this.model) {
 				throw new Error("No model selected");
 			}
@@ -8046,9 +8056,10 @@ export class AgentSession {
 			options?.onError?.(err);
 			throw error;
 		} finally {
-			if (this.#compactionAbortController === compactionAbortController) {
+			if (compactionAbortController && this.#compactionAbortController === compactionAbortController) {
 				this.#compactionAbortController = undefined;
 			}
+			this.#compactionStarting = false;
 			this.#reconnectToAgent();
 		}
 	}
