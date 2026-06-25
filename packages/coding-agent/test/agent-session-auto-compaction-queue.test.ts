@@ -143,7 +143,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("reports manual compaction as active before abort teardown settles", async () => {
-		const compacting = session.compact().catch(() => {});
+		const compacting = session.compact();
 
 		// The input controller routes steers/follow-ups through the compaction
 		// queue based on this getter. Manual compact() aborts the active turn before
@@ -151,8 +151,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// teardown window.
 		expect(session.isCompacting).toBe(true);
 
-		vi.advanceTimersByTime(200);
-		await compacting;
+		await expect(compacting).rejects.toThrow("Nothing to compact");
 
 		expect(session.isCompacting).toBe(false);
 	});
