@@ -25,6 +25,16 @@ describe("llmgateway provider support", () => {
 		const models = getBundledModels("llmgateway");
 		expect(models.length).toBeGreaterThan(0);
 		expect(models.some(model => model.id === "gpt-5.5")).toBe(true);
+		const gpt55 = models.find(model => model.id === "gpt-5.5");
+		expect(gpt55?.api).toBe("openai-completions");
+		expect(gpt55?.provider).toBe("llmgateway");
+		expect(gpt55?.baseUrl).toBe("https://api.llmgateway.io/v1");
+		expect(gpt55?.input).toContain("text");
+		expect(gpt55?.cost.input).toBeGreaterThan(0.001);
+		expect(gpt55?.cost.input).toBeLessThan(1000);
+		expect(gpt55?.cost.output).toBeGreaterThan(0.001);
+		expect(gpt55?.cost.output).toBeLessThan(1000);
+		expect(gpt55?.contextWindow).toBeGreaterThan(0);
 		expect(models.some(model => model.id === "auto" || model.id === "custom")).toBe(false);
 		expect(models.some(model => /(?:tts|image|embed|embedding)/i.test(model.id))).toBe(false);
 		expect(models.some(model => model.supportsTools === false)).toBe(false);
@@ -65,6 +75,14 @@ describe("llmgateway provider support", () => {
 							architecture: { input_modalities: ["text"], output_modalities: ["image"] },
 							context_length: 32000,
 							providers: [{ tools: false }],
+							supported_parameters: ["tools", "tool_choice"],
+						},
+						{
+							id: "creative-renderer-v1",
+							name: "Creative Renderer",
+							architecture: { input_modalities: ["text"], output_modalities: ["image"] },
+							context_length: 32000,
+							providers: [{ tools: true }],
 							supported_parameters: ["tools", "tool_choice"],
 						},
 					],

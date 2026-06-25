@@ -2113,8 +2113,17 @@ export function llmGatewayModelManagerOptions(
 				// TTS, image generation). This provider is used for coding-agent chat.
 				filterModel: entry => {
 					const providers = Array.isArray(entry.providers) ? entry.providers : [];
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const outputModalities = Array.isArray(architecture?.output_modalities)
+						? architecture.output_modalities
+						: [];
+					const textOutputOnly =
+						outputModalities.length === 0 || outputModalities.every(modality => modality === "text");
 					return (
-						entry.id !== "custom" && entry.id !== "auto" && providers.some(p => isRecord(p) && p.tools === true)
+						entry.id !== "custom" &&
+						entry.id !== "auto" &&
+						textOutputOnly &&
+						providers.some(p => isRecord(p) && p.tools === true)
 					);
 				},
 				mapModel: (entry, defaults) => {
