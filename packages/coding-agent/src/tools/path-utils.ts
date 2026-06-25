@@ -356,6 +356,27 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	return { path, sel: chunks.join(":") };
 }
 
+/**
+ * Peel a read-tool selector off an internal-URL write target so `write` resolves
+ * the same file `read` does (e.g. `ssh://h/f:raw` -> `ssh://h/f`). Only the
+ * whole-file display modes `raw`/`conflicts` are accepted (they do not change
+ * which bytes are written); any other selector-shaped tail `splitInternalUrlSel`
+ * peels — a line range, a compound like `raw:1-20`, or a malformed `:-N` — throws,
+ * because `write` addresses a whole file, not a partial range, and silently
+ * stripping it would write to a path the caller never named. Non-URL paths and
+ * URLs without a selector pass through unchanged.
+ */
+export function peelWriteUrlSelector(rawPath: string): string {
+	const { path, sel } = splitInternalUrlSel(rawPath);
+	if (sel === undefined) return rawPath;
+	// Case-insensitive to match read's selector grammar (parseSel + the /i regexes above).
+	if (/^(?:raw|conflicts)$/i.test(sel)) return path;
+	throw new ToolError(
+		`write does not accept the trailing selector ":${sel}" — it writes a whole file. ` +
+			`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
+	);
+}
+
 function assertNotInternalUrl(expanded: string, original: string): void {
 	for (const prefix of TOP_LEVEL_INTERNAL_URL_PREFIXES) {
 		if (expanded.startsWith(prefix)) {
@@ -377,6 +398,20 @@ export function isInternalUrlPath(filePath: string): boolean {
 		if (expandedAndNormalized.startsWith(prefix)) return true;
 	}
 	return false;
+}
+
+/**
+ * True when a tool path argument references the `ssh://` scheme anywhere.
+ *
+ * Substring (not anchored) on purpose: it feeds the read/search/write approval
+ * tier, which runs synchronously on the raw args. `search` only flattens a
+ * delimited `paths: "a,ssh://h/x"` into separate entries *after* approval, so an
+ * anchored check would let an embedded `ssh://` slip through at the read tier.
+ * Matching the literal `ssh://` substring also tracks exactly what routes to the
+ * SSH handler; over-matching only over-prompts (fail-closed).
+ */
+export function pathTargetsSsh(path: string): boolean {
+	return /ssh:\/\//i.test(path);
 }
 
 /**
