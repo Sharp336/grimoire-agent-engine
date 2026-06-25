@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ssh://host/path` support to `read`, `search`, and `write` for single text files on pre-configured SSH hosts (or `~/.ssh/config` aliases); UTF-8 text only, up to 1 MiB.
+
 ## [16.1.19] - 2026-06-25
 
 ### Fixed
