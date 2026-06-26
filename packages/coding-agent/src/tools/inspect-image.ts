@@ -16,8 +16,10 @@ import {
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
+import { InternalUrlRouter } from "../internal-urls/router";
 import type { ToolSession } from "./index";
 import { ToolError } from "./tool-errors";
+import { isInternalUrlPath } from "./path-utils";
 
 const inspectImageSchema = type({
 	path: type("string").describe("image file path, Image #N label, or attachment://N URI"),
@@ -182,6 +184,19 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		const autoResize = this.session.settings.get("images.autoResize");
 		const excludeWebP = webpExclusionForModel(model);
 		const attachmentReference = parseImageAttachmentReference(params.path);
+		let resolvedPathOverride: string | undefined;
+		if (isInternalUrlPath(params.path)) {
+			const router = InternalUrlRouter.instance();
+			if (router.canHandle(params.path)) {
+				const resource = await router.resolve(params.path, {
+					cwd: this.session.cwd,
+					signal,
+					localProtocolOptions: this.session.localProtocolOptions,
+				});
+				resolvedPathOverride = resource.sourcePath;
+			}
+		}
+
 		try {
 			if (attachmentReference) {
 				imageInput = await loadAttachmentReferenceInput({
@@ -198,6 +213,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 					autoResize,
 					maxBytes: MAX_IMAGE_INPUT_BYTES,
 					excludeWebP,
+					resolvedPath: resolvedPathOverride,
 				});
 			}
 		} catch (error) {
