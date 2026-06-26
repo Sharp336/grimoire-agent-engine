@@ -3624,6 +3624,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleFreshCommand();
 	}
 
+	handleClearContextCommand(): Promise<void> {
+		return this.#commandController.handleClearContextCommand();
+	}
+
 	handleDropCommand(): Promise<void> {
 		this.#prepareSessionSwitch();
 		return this.#commandController.handleDropCommand();

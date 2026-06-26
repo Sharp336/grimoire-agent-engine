@@ -15,6 +15,10 @@
 - Changed the `inlineToolDescriptors` setting ("Inline Tool Descriptors") from a boolean to a three-way enum (`auto` | `on` | `off`), defaulting to `auto`. `auto` inlines tool descriptors into the system prompt (and strips them from provider tool schemas) only for Gemini models, leaving them in the schemas otherwise; `on`/`off` force the behavior regardless of model. Existing `true`/`false` configs migrate to `on`/`off`.
 - Replaced `as string | undefined` inline casts with `typeof` guards in the TUI usage renderer's account identity resolution (`formatAccountLabel`, `formatUnlimitedReportLabel`, reset-credits label, and unlimited-plan tier), so empty-string metadata values fall through to the next fallback instead of being displayed
 
+### Added
+
+- Added `/clear` to reset the conversation context in place: it drops the current conversation (messages, queued turns, pending tool calls) and rotates provider stream state while keeping the session itself — id, title, cwd, model, and the on-disk transcript all survive, so the next turn starts from just the base system prompt + rules. Distinct from `/new` (mints a new session id and transcript), `/fresh` (provider stream state only), and `/compact`/`/shake` (carry context forward). ([#3580](https://github.com/can1357/oh-my-pi/issues/3580))
+
 ### Fixed
 
 - Fixed `snapcompact` compaction silently falling back to an LLM summary when local preflight rejects the archive; manual and auto snapcompact now fail locally with the blocker instead of making provider calls. ([#3599](https://github.com/can1357/oh-my-pi/issues/3599))
