@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GitLab tool renderer registration for shared collab-web transcripts.
+
 ## [16.1.16] - 2026-06-23
 
 ### Added
