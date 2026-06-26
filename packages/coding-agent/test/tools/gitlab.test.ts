@@ -67,7 +67,7 @@ describe("gitlab tool", () => {
 			query: "bug",
 			state: "closed",
 			label: ["bug"],
-			assignee: ["alice", "bob"],
+			assignee: ["alice"],
 			limit: 2,
 		});
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -170,6 +170,16 @@ describe("gitlab tool", () => {
 
 		await expect(tool.execute("issue-list", { op: "issue_list", state: "merged" })).rejects.toThrow(
 			"issue_list does not support state 'merged'",
+		);
+		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects multiple assignees for issue_list", async () => {
+		const jsonSpy = vi.spyOn(git.gitlab, "json");
+		const tool = new GitlabTool(createSession());
+
+		await expect(tool.execute("issue-list", { op: "issue_list", assignee: ["alice", "bob"] })).rejects.toThrow(
+			"issue_list assignee accepts only one value",
 		);
 		expect(jsonSpy).not.toHaveBeenCalled();
 	});

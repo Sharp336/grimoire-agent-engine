@@ -321,9 +321,11 @@ function appendCsvFlag(args: string[], flag: string, values: string[] | undefine
 	if (normalized.length > 0) args.push(flag, normalized.join(","));
 }
 
-function appendFirstStringFlag(args: string[], flag: string, values: string[] | undefined): void {
-	const [first] = normalizeStringList(values);
-	if (first) args.push(flag, first);
+function appendSingleStringFlag(args: string[], flag: string, values: string[] | undefined, label: string): void {
+	const normalized = normalizeStringList(values);
+	if (normalized.length > 1) throw new ToolError(`${label} accepts only one value`);
+	const [value] = normalized;
+	if (value) args.push(flag, value);
 }
 
 function appendScalarFlag(args: string[], flag: string, value: string | undefined): void {
@@ -468,7 +470,7 @@ async function executeIssueList(
 	appendIssueState(args, params.state);
 	appendScalarFlag(args, "--search", normalizeOptionalString(params.query));
 	appendScalarFlag(args, "--author", normalizeOptionalString(params.author));
-	appendFirstStringFlag(args, "--assignee", params.assignee);
+	appendSingleStringFlag(args, "--assignee", params.assignee, "issue_list assignee");
 	appendCsvFlag(args, "--label", params.label);
 	appendLimit(args, params.limit);
 	const data = await git.gitlab.json<unknown>(session.cwd, args, signal, { repoProvided: Boolean(repo) });
