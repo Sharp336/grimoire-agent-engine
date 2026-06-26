@@ -2,6 +2,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import type { TuiMessageKey } from "../i18n";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
@@ -75,7 +76,7 @@ export type SettingTab =
 	| "providers";
 
 /** Tab display metadata - icon is resolved via theme.symbol() */
-export type TabMetadata = { label: string; icon: `tab.${string}` };
+export type TabMetadata = { labelKey: TuiMessageKey; icon: `tab.${string}` };
 
 /** Ordered list of tabs for UI rendering */
 export const SETTING_TABS: SettingTab[] = [
@@ -92,17 +93,17 @@ export const SETTING_TABS: SettingTab[] = [
 ];
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${string}` }> = {
-	appearance: { label: "Appearance", icon: "tab.appearance" },
-	model: { label: "Model", icon: "tab.model" },
-	interaction: { label: "Interaction", icon: "tab.interaction" },
-	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
-	files: { label: "Files", icon: "tab.files" },
-	shell: { label: "Shell", icon: "tab.shell" },
-	tools: { label: "Tools", icon: "tab.tools" },
-	tasks: { label: "Tasks", icon: "tab.tasks" },
-	providers: { label: "Providers", icon: "tab.providers" },
+export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
+	appearance: { labelKey: "settings.tabs.appearance", icon: "tab.appearance" },
+	model: { labelKey: "settings.tabs.model", icon: "tab.model" },
+	interaction: { labelKey: "settings.tabs.interaction", icon: "tab.interaction" },
+	context: { labelKey: "settings.tabs.context", icon: "tab.context" },
+	memory: { labelKey: "settings.tabs.memory", icon: "tab.memory" },
+	files: { labelKey: "settings.tabs.files", icon: "tab.files" },
+	shell: { labelKey: "settings.tabs.shell", icon: "tab.shell" },
+	tools: { labelKey: "settings.tabs.tools", icon: "tab.tools" },
+	tasks: { labelKey: "settings.tabs.tasks", icon: "tab.tasks" },
+	providers: { labelKey: "settings.tabs.providers", icon: "tab.providers" },
 };
 
 /**

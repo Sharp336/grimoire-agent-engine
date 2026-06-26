@@ -32,6 +32,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
+import { tuiMessage } from "../../i18n";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
@@ -235,15 +236,22 @@ function settingsSidebarWidth(): number {
 	}
 	return cachedSidebarWidth;
 }
+function settingTabLabel(id: SettingTab): string {
+	return tuiMessage(TAB_METADATA[id].labelKey);
+}
 
 function getSettingsTabs(): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
+			return { id, label: `${icon} ${settingTabLabel(id)}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{
+			id: "plugins",
+			label: `${theme.icon.package} ${tuiMessage("settings.tabs.plugins")}`,
+			short: theme.icon.package,
+		},
 	];
 }
 
@@ -582,9 +590,10 @@ export class SettingsSelectorComponent implements Component {
 		tabResults.sort((a, b) => a.bestScore - b.bestScore || a.order - b.order);
 		for (const result of tabResults) {
 			const meta = TAB_METADATA[result.tab];
+			const label = settingTabLabel(result.tab);
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
+				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${label}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -634,17 +643,22 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
-				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
+				const label = tuiMessage("settings.tabs.searchMatchLabel", { label: settingTabLabel(id), count });
+				matched.push({ id, label: `${icon} ${label}`, short: `${icon} ${count}` });
 			}
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
+			empty.push({ id, label: `${icon} ${settingTabLabel(id)}`, short: icon, muted: true });
 		}
-		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
+		empty.push({
+			id: "plugins",
+			label: `${theme.icon.package} ${tuiMessage("settings.tabs.plugins")}`,
+			short: theme.icon.package,
+			muted: true,
+		});
 		return [...matched, ...empty];
 	}
 

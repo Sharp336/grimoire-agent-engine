@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { tuiMessage } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import {
 	matchesAppInterrupt,
@@ -66,7 +67,7 @@ function highlightTokens(text: string, tokens: string[]): string {
 /** Compact "time since" label (e.g. `now`, `5m`, `2h`, `3d`, `2w`, `6mo`, `1y`) from epoch seconds. */
 function relativeTime(epochSeconds: number): string {
 	const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epochSeconds);
-	if (seconds < 60) return "now";
+	if (seconds < 60) return tuiMessage("historySearch.time.now");
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m`;
 	const hours = Math.floor(minutes / 60);
@@ -102,7 +103,8 @@ class HistoryResultsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#results.length === 0) {
-			const message = this.#tokens.length > 0 ? "No matching history" : "No history yet";
+			const message =
+				this.#tokens.length > 0 ? tuiMessage("historySearch.noMatches") : tuiMessage("historySearch.empty");
 			lines.push(theme.fg("muted", `  ${theme.status.info} ${message}`));
 			return lines;
 		}
@@ -177,9 +179,13 @@ export class HistorySearchComponent extends Container {
 
 		this.#resultsList = new HistoryResultsList();
 
-		const title = theme.bold(theme.fg("accent", `${theme.icon.rewind} Search History`));
+		const title = theme.bold(theme.fg("accent", `${theme.icon.rewind} ${tuiMessage("historySearch.title")}`));
 		const dot = theme.fg("dim", theme.sep.dot);
-		const hint = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select"), rawKeyHint("esc", "cancel")].join(dot);
+		const hint = [
+			rawKeyHint("↑↓", tuiMessage("historySearch.hint.navigate")),
+			rawKeyHint("enter", tuiMessage("historySearch.hint.select")),
+			rawKeyHint("esc", tuiMessage("historySearch.hint.cancel")),
+		].join(dot);
 
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(title, 1, 0));
