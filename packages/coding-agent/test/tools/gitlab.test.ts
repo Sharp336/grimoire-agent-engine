@@ -154,6 +154,32 @@ describe("gitlab tool", () => {
 		expect(text).toContain("Adds a widget.");
 	});
 
+	it("creates merge requests with fill without title or description flags", async () => {
+		const textCalls: string[][] = [];
+		vi.spyOn(git.gitlab, "text").mockImplementation(async (_cwd, args) => {
+			textCalls.push([...args]);
+			return "https://gitlab.com/group/project/-/merge_requests/8";
+		});
+		vi.spyOn(git.gitlab, "json").mockResolvedValue({
+			iid: 8,
+			title: "Commit derived title",
+			description: "Commit derived body",
+			web_url: "https://gitlab.com/group/project/-/merge_requests/8",
+		});
+
+		const tool = new GitlabTool(createSession());
+		const result = await tool.execute("mr-create", { op: "mr_create", repo: "group/project", fill: true });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		const createArgs = textCalls[0];
+		expect(createArgs.slice(0, 3)).toEqual(["mr", "create", "--yes"]);
+		expect(createArgs).toEqual(expect.arrayContaining(["--repo", "group/project", "--fill"]));
+		expect(createArgs).not.toContain("--title");
+		expect(createArgs).not.toContain("--description");
+		expect(text).toContain("# Created GitLab merge request !8: Commit derived title");
+		expect(text).toContain("Commit derived body");
+	});
+
 	it("rejects mr_create when neither title nor fill is supplied", async () => {
 		const textSpy = vi.spyOn(git.gitlab, "text");
 		const tool = new GitlabTool(createSession());
@@ -161,6 +187,22 @@ describe("gitlab tool", () => {
 		await expect(tool.execute("mr-create", { op: "mr_create", repo: "group/project" })).rejects.toThrow(
 			"title is required unless fill is true",
 		);
+		expect(textSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects mr_create fill when title or body is supplied", async () => {
+		const textSpy = vi.spyOn(git.gitlab, "text");
+		const tool = new GitlabTool(createSession());
+
+		await expect(
+			tool.execute("mr-create", { op: "mr_create", repo: "group/project", fill: true, title: "Explicit" }),
+		).rejects.toThrow("fill is mutually exclusive with title and body");
+		await expect(
+			tool.execute("mr-create", { op: "mr_create", repo: "group/project", fill: true, body: "Explicit" }),
+		).rejects.toThrow("fill is mutually exclusive with title and body");
+		await expect(
+			tool.execute("mr-create", { op: "mr_create", repo: "group/project", fill: true, body: "" }),
+		).rejects.toThrow("fill is mutually exclusive with title and body");
 		expect(textSpy).not.toHaveBeenCalled();
 	});
 

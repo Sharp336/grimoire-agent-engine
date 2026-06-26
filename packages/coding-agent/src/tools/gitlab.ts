@@ -508,11 +508,15 @@ async function executeMrCreate(
 	const repo = normalizeOptionalString(params.repo);
 	const title = normalizeOptionalString(params.title);
 	const body = params.body ?? "";
-	if (!params.fill && !title) throw new ToolError("title is required unless fill is true");
+	const fill = params.fill ?? false;
+	if (!fill && !title) throw new ToolError("title is required unless fill is true");
+	if (fill && (title || params.body !== undefined)) {
+		throw new ToolError("fill is mutually exclusive with title and body");
+	}
 
 	const args = ["mr", "create", "--yes"];
 	appendRepoFlag(args, repo);
-	if (params.fill) {
+	if (fill) {
 		args.push("--fill");
 	} else {
 		args.push("--title", title ?? "", "--description", body);
