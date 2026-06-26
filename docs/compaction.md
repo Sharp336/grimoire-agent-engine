@@ -55,13 +55,14 @@ while `custom` messages pass through as developer messages with their raw conten
 
 ### Triggers
 
-Compaction/context maintenance can run in five ways:
+Compaction/context maintenance can run in six ways:
 
 1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
 3. **Automatic incomplete-output recovery**: after a same-model assistant message ends with `stopReason === "length"` (OpenAI/Codex `response.incomplete`).
 4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
-5. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
+5. **Mid-turn threshold maintenance**: at safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled` is true.
+6. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
 
 ### Compaction shape (visual)
 
@@ -121,8 +122,9 @@ The automatic paths are intentionally different:
   - Tool-output pruning can reduce the measured token count before threshold comparison.
   - Context promotion is tried before compaction.
   - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
-  - With `compaction.strategy: "handoff"`, threshold maintenance normally schedules a post-prompt auto-handoff task instead of writing a compaction entry; pre-prompt checks run it inline to avoid racing the next turn. If handoff returns no document without aborting, it falls back to context-full compaction.
+  - With `compaction.strategy: "handoff"`, threshold maintenance normally schedules a post-prompt auto-handoff task instead of writing a compaction entry; pre-prompt and mid-turn checks run it inline to avoid racing the next provider request. If handoff returns no document without aborting, it falls back to context-full compaction.
   - On success, if `compaction.autoContinue !== false`, schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`.
+  - Mid-turn threshold maintenance runs from `AgentSession.#maintainContextMidRun` after tool results are paired and before the loop can send another provider request. It splices the rebuilt compacted context back into the live message array and suppresses separate auto-continue scheduling because the current loop already owns continuation.
 
 - **Idle maintenance**
   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
@@ -405,6 +407,7 @@ From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
 - `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"shake"`, and `"off"` are also supported)
+- `compaction.midTurnEnabled` = `true`
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`

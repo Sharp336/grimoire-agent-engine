@@ -150,6 +150,7 @@ export interface CompactionSettings {
 	thresholdTokens?: number;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	midTurnEnabled?: boolean;
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
@@ -162,6 +163,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	thresholdTokens: -1,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	midTurnEnabled: true,
 	autoContinue: true,
 	remoteEnabled: true,
 };

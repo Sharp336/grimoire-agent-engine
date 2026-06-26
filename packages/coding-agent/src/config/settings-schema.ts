@@ -1699,6 +1699,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically compact context when it gets too large",
 		},
 	},
+	"compaction.midTurnEnabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Mid-Turn Auto-Compact",
+			description: "Check compaction thresholds at safe tool-loop boundaries before the next model request",
+		},
+	},
 
 	"compaction.strategy": {
 		type: "enum",
@@ -4732,6 +4742,7 @@ export interface CompactionSettings {
 	reserveTokens: number;
 	keepRecentTokens: number;
 	handoffSaveToDisk: boolean;
+	midTurnEnabled: boolean;
 	autoContinue: boolean;
 	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;

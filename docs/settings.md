@@ -503,6 +503,7 @@ contextPromotion:
 compaction:
   enabled: true
   strategy: snapcompact     # context-full, handoff, shake, snapcompact, off
+  midTurnEnabled: true        # check thresholds between tool-loop provider requests
   thresholdPercent: -1       # -1 = default reserve-based behavior
   thresholdTokens: -1        # fixed token limit when > 0
   remoteEnabled: true
@@ -516,6 +517,7 @@ memory:
 | `contextPromotion.enabled` | boolean | `true` | Promote relevant earlier context. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
+| `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
 | `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |
 | `compaction.thresholdTokens` | number | `-1` | Fixed token trigger when `> 0`. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for the next turn. |

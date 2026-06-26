@@ -8393,20 +8393,31 @@ export class AgentSession {
 		});
 	}
 
+	#assistantMayContinueMidRun(assistantMessage: AssistantMessage): boolean {
+		const hasToolCalls = assistantMessage.content.some((content): content is ToolCall => content.type === "toolCall");
+		if (hasToolCalls) {
+			return (
+				assistantMessage.stopReason === "toolUse" ||
+				assistantMessage.stopReason === "stop" ||
+				assistantMessage.stopReason === "length"
+			);
+		}
+		return assistantMessage.stopReason === "stop" && assistantMessage.stopDetails?.type === "pause_turn";
+	}
+
 	/**
-	 * Compact active `/goal` runs that never settle to `agent_end`.
+	 * Compact runs that have reached a safe boundary but have not settled to `agent_end`.
 	 *
-	 * Long autonomous goals can keep producing tool calls inside one agent run.
-	 * The post-turn `agent_end` threshold check never fires in that shape, so
-	 * context can grow until provider overflow. `onTurnEnd` is the safe boundary:
-	 * tool results for the just-finished turn are already paired in
-	 * `activeMessages`, the live array the agent loop reads before its next
-	 * model call. Run maintenance here and splice the compacted state back into
-	 * that array, mirroring [`AgentSession.#applyRewind`].
+	 * Long tool loops can keep producing provider calls inside one agent run. The
+	 * post-turn `agent_end` threshold check never fires in that shape, so context can
+	 * grow until provider overflow. `onTurnEnd` is the safe boundary: tool results for
+	 * the just-finished turn are already paired in `activeMessages`, and the live
+	 * array is what the agent loop reads before its next model call. Run maintenance
+	 * here and splice the compacted state back into that array, mirroring
+	 * [`AgentSession.#applyRewind`].
 	 */
 	async #maintainContextMidRun(activeMessages: AgentMessage[], signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) return;
-		if (!(this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active")) return;
 
 		const model = this.model;
 		const contextWindow = model?.contextWindow ?? 0;
@@ -8415,10 +8426,14 @@ export class AgentSession {
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 
+		const goalActive = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+		if (!goalActive && compactionSettings.midTurnEnabled === false) return;
+
 		const lastAssistant = [...activeMessages]
 			.reverse()
 			.find((message): message is AssistantMessage => message.role === "assistant");
 		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
+		if (!goalActive && !this.#assistantMayContinueMidRun(lastAssistant)) return;
 
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
@@ -8437,10 +8452,11 @@ export class AgentSession {
 		if (compactedMessages !== activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
 		}
-		logger.debug("Mid-run goal compaction ran between tool-call turns", {
+		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,
 			contextWindow,
 			strategy: compactionSettings.strategy,
+			goalActive,
 			messagesBefore,
 			messagesAfter: activeMessages.length,
 		});

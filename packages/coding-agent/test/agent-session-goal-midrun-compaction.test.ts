@@ -164,8 +164,25 @@ describe("AgentSession mid-run goal compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED");
 	});
 
-	it("does not compact mid-run when no goal is active", async () => {
-		const { session } = await createHarness();
+	it("compacts in place between tool-call turns outside goal mode", async () => {
+		const { session, observedContexts } = await createHarness();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "MID-RUN-COMPACTED",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
+		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED");
+	});
+
+	it("does not compact mid-run outside goal mode when disabled", async () => {
+		const { session } = await createHarness({ "compaction.midTurnEnabled": false });
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "SHOULD-NOT-RUN",
 			shortSummary: undefined,
