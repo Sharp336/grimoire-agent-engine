@@ -14,6 +14,7 @@
 - Fixed stray or unmatched HTML tags leaking into rendered output
 - Improved layout consistency by correctly handling HTML block-level tags in various contexts
 - Markdown renderer now handles inline `<code>…</code>` (rendered as themed inline code, identical to a backtick codespan, with HTML entities like `&amp;` decoded), block `<hr>` (rendered as a horizontal rule), and balanced single-line `<blockquote>…</blockquote>` (rendered with the quote border) instead of leaking the raw tags as literal text. Applies to the transcript renderer, table cells, list items, and the inline `renderInlineMarkdown` helper used for option labels; fenced code blocks keep such markup verbatim.
+- Fixed desktop notifications being silently lost under Zellij: `TerminalInfo.sendNotification` now appends a bare `BEL` for OSC-9/99 terminals inside Zellij (which drops OSC 9/99 and has no DCS passthrough), so a backgrounded pane raises Zellij's `[!]` bell flag — matching the existing tmux behavior. ([#3583](https://github.com/can1357/oh-my-pi/issues/3583))
 
 ## [16.1.20] - 2026-06-25
 
