@@ -1,0 +1,46 @@
+# OMP loop spec. Source inspiration: https://github.com/cobusgreyling/loop-engineering
+loop:
+  name: {{name}}
+  goal: {{goal}}
+  level: {{level}}
+  non_goals:
+    - Do not deploy, push, merge, or comment publicly without explicit approval.
+  scope:
+    paths:
+      - .
+    branches:
+      - main
+  trigger:
+    type: manual
+    cadence: daily
+    fire_immediately: false
+  runner:
+    prompt: |
+      Follow LOOP.md and STATE.md. Complete one {{title}} iteration, then stop with a concise report.
+  verifier:
+    separate: true
+    commands:{{#if verifier_command}}
+      - ["bun", "run", "check"]{{else}} []{{/if}}
+  guardrails:
+    max_iterations: {{max_iterations}}
+    max_files_changed: {{max_files_changed}}
+    max_auto_prs_per_day: 0
+    require_human_approval:
+      - protected_paths
+      - push
+      - deploy
+      - external_comments
+    denylist_paths:
+      - .env
+      - .env.*
+      - "**/secrets/**"
+      - "**/credentials/**"
+      - "**/*_key*"
+      - "**/*_secret*"
+      - ".terraform/**"
+      - "k8s/production/**"
+      - "**/migrations/**"
+  state:
+    file: STATE.md
+    run_log: loop-run-log.md
+    budget: loop-budget.md

@@ -482,6 +482,8 @@ export interface CreateAgentSessionOptions {
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
+	/** Honor toolNames exactly without auto-activating MCP, extension, or custom tools. */
+	strictToolNames?: boolean;
 
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
@@ -1813,8 +1815,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// re-bind under their own `CustomToolAPI` while skipping the FS scan.
 		toolSession.customToolPaths = customToolPaths;
 
+		if (options.strictToolNames && options.toolNames) {
+			const strictToolNameSet = new Set(options.toolNames.map(name => name.toLowerCase()));
+			for (let index = customTools.length - 1; index >= 0; index--) {
+				if (!strictToolNameSet.has(customTools[index]?.name.toLowerCase() ?? "")) customTools.splice(index, 1);
+			}
+		}
+
 		const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
-		inlineExtensions.push((await import("./autoresearch")).createAutoresearchExtension);
+		if (!options.strictToolNames) inlineExtensions.push((await import("./autoresearch")).createAutoresearchExtension);
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}
@@ -2319,7 +2328,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// exactly the builtins createTools built (`builtInToolNames` — provenance, so a
 		// same-named custom/extension tool is never force-activated when auto-learn is
 		// off) to keep guidance, controller, and the active set consistent.
-		if (explicitlyRequestedToolNames) {
+		if (!options.strictToolNames && explicitlyRequestedToolNames) {
 			for (const name of ["manage_skill", "learn"]) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
 					explicitlyRequestedToolNames.push(name);
@@ -2371,18 +2380,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			];
 		}
 
-		// Custom tools and extension-registered tools are always included regardless of toolNames filter
-		const alwaysInclude: string[] = [
-			...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
-			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-		];
-		for (const name of alwaysInclude) {
-			if (mcpDiscoveryEnabled && name.startsWith("mcp__")) {
-				continue;
+		if (!options.strictToolNames) {
+			// Custom tools and extension-registered tools are always included regardless of toolNames filter.
+			const alwaysInclude: string[] = [
+				...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
+				...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+			];
+			for (const name of alwaysInclude) {
+				if (mcpDiscoveryEnabled && name.startsWith("mcp__")) {
+					continue;
+				}
+				if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
+					initialToolNames.push(name);
+				}
 			}
-			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
-				initialToolNames.push(name);
-			}
+		} else if (options.toolNames) {
+			initialToolNames = initialToolNames.filter(name => requestedToolNameSet.has(name));
+			initialSelectedMCPToolNames = initialSelectedMCPToolNames.filter(name => requestedToolNameSet.has(name));
+			defaultSelectedMCPToolNames = defaultSelectedMCPToolNames.filter(name => requestedToolNameSet.has(name));
 		}
 
 		// When tools.discoveryMode === "all", hide non-essential built-in discoverable tools
