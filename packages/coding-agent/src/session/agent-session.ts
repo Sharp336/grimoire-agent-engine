@@ -139,6 +139,7 @@ import {
 	isInterruptingSeverity,
 	resolveAdvisorDeliveryChannel,
 } from "../advisor";
+import { EvidenceBroker, type EvidenceBrokerOptions, RequestInvestigationTool } from "../evidence";
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
@@ -1161,6 +1162,8 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorRuntime?: AdvisorRuntime;
+	#evidenceBroker?: EvidenceBroker;
+	#evidenceBrokerArtifactsDir?: string;
 	#advisorEnabled = false;
 	/** The advisor's own agent, retained so `/dump advisor` can serialize its transcript. Undefined when no advisor is active. */
 	#advisorAgent?: Agent;
@@ -1792,13 +1795,12 @@ export class AgentSession {
 	 * so none of them inject into the new conversation.
 	 */
 	#resetAdvisorSessionState(): void {
-		// Mute the recorder across the re-prime: AdvisorRuntime.reset() aborts the advisor
-		// loop, and that abort can emit an `aborted` message_end we must not attribute to
-		// either session's transcript. Detach, reset, then re-attach the live agent's feed.
-		this.#advisorAgentUnsubscribe?.();
-		this.#advisorAgentUnsubscribe = undefined;
-		this.#advisorRuntime?.reset();
-		this.#attachAdvisorRecorderFeed();
+		// Rebuild advisor tooling across session/artifact boundaries so advisor-only tools
+		// (notably request_investigation) cannot keep writing to the prior session's
+		// evidence store or artifact manager after /new, resume, or branch rewrites.
+		const shouldRebuildAdvisor = this.#advisorRuntime !== undefined;
+		this.#stopAdvisorRuntime();
+		if (shouldRebuildAdvisor) this.#buildAdvisorRuntime(false);
 		this.#advisorPrimaryTurnsCompleted = 0;
 		this.#advisorInterruptImmuneTurnStart = undefined;
 		this.#advisorAutoResumeSuppressed = false;
@@ -1879,6 +1881,37 @@ export class AgentSession {
 
 		const adviseTool = new AdviseTool(enqueueAdvice);
 		const advisorReadOnlyTools = this.#advisorReadOnlyTools ?? [];
+		let evidenceBroker: EvidenceBroker | null = null;
+		if (this.settings.get("advisor.investigations.enabled")) {
+			const evidenceArtifactsDir = this.sessionManager.getArtifactsDir();
+			if (evidenceArtifactsDir && this.#evidenceBroker && this.#evidenceBrokerArtifactsDir === evidenceArtifactsDir) {
+				evidenceBroker = this.#evidenceBroker;
+			} else if (evidenceArtifactsDir) {
+				const evidenceSessionId = this.sessionId ?? null;
+				const brokerOptions: EvidenceBrokerOptions = {
+					cwd: () => this.sessionManager.getCwd(),
+					settings: this.settings,
+					artifactManager: this.sessionManager.getArtifactManager(),
+					artifactsDir: () => evidenceArtifactsDir,
+					sessionId: () => evidenceSessionId,
+					modelRegistry: this.#modelRegistry,
+					authStorage: this.#modelRegistry.authStorage,
+					localProtocolOptions: this.#localProtocolOptions(),
+					onUpdateReady: () => this.#advisorRuntime?.onTurnEnd(this.agent.state.messages),
+				};
+				if (this.agent.telemetry) brokerOptions.parentTelemetry = this.agent.telemetry;
+				evidenceBroker = EvidenceBroker.create(brokerOptions);
+				this.#evidenceBroker = evidenceBroker ?? undefined;
+				this.#evidenceBrokerArtifactsDir = evidenceBroker ? evidenceArtifactsDir : undefined;
+			} else {
+				this.#evidenceBroker = undefined;
+				this.#evidenceBrokerArtifactsDir = undefined;
+			}
+		}
+		const requestInvestigationTool = evidenceBroker ? new RequestInvestigationTool(evidenceBroker) : null;
+		const advisorTools: AgentState["tools"] = requestInvestigationTool
+			? [adviseTool, requestInvestigationTool, ...advisorReadOnlyTools]
+			: [adviseTool, ...advisorReadOnlyTools];
 
 		const appendOnlyContext = new AppendOnlyContextManager();
 		const advisorThinkingLevel = advisorSel.thinkingLevel ?? ThinkingLevel.Medium;
@@ -1920,7 +1953,7 @@ export class AgentSession {
 				systemPrompt,
 				model: advisorSel.model,
 				thinkingLevel: toReasoningEffort(advisorThinkingLevel),
-				tools: [adviseTool, ...advisorReadOnlyTools],
+				tools: advisorTools,
 			},
 			appendOnlyContext,
 			sessionId: advisorSessionId,
@@ -1938,6 +1971,9 @@ export class AgentSession {
 			reset: () => {
 				advisorAgent.reset();
 				appendOnlyContext.log.clear();
+				void this.#evidenceBroker
+					?.reconcile()
+					.catch(err => logger.debug("advisor evidence reconcile failed", { err: String(err) }));
 			},
 			state: advisorAgent.state,
 		};
@@ -1960,9 +1996,16 @@ export class AgentSession {
 			enqueueAdvice,
 			maintainContext: incomingTokens => this.#maintainAdvisorContext(incomingTokens),
 			obfuscator: this.#obfuscator,
+			claimInvestigationUpdates: () => this.#evidenceBroker?.claimAdvisorUpdates() ?? Promise.resolve(null),
+			releaseInvestigationUpdates: ids => this.#evidenceBroker?.releaseAdvisorUpdates(ids) ?? Promise.resolve(),
+			markInvestigationUpdatesDelivered: ids =>
+				this.#evidenceBroker?.markAdvisorUpdatesDelivered(ids) ?? Promise.resolve(),
 		});
 		if (seedToCurrent) {
 			this.#advisorRuntime.seedTo(this.agent.state.messages.length);
+		}
+		if (evidenceBroker) {
+			void evidenceBroker.reconcile().catch(err => logger.debug("advisor evidence reconcile failed", { err: String(err) }));
 		}
 
 		// Batch non-blocking advisor notes into one injected custom message.

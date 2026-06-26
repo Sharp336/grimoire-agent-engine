@@ -404,6 +404,28 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.investigations.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Investigations",
+			description: "Allow the advisor to request out-of-band evidence artifacts from a separate investigation sidecar.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.investigations.exec": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Code Investigations",
+			description: "Allow advisor investigations that execute code in an isolated disposable repo snapshot.",
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.syncBacklog": {
 		type: "enum",
 		values: ["off", "1", "3", "5"] as const,

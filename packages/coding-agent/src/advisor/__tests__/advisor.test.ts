@@ -960,6 +960,154 @@ describe("advisor", () => {
 			expect(promptInputs[1]).toContain("new-conversation");
 			expect(promptInputs[1]).not.toContain("old-conversation");
 		});
+
+		it("prompts investigation updates even without a new primary delta", async () => {
+			const promptInputs: string[] = [];
+			const markDelivered = vi.fn(async (_ids: readonly string[]) => {});
+			let claimed = false;
+			const agent = makeAgent(promptInputs);
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [],
+				enqueueAdvice: () => {},
+				claimInvestigationUpdates: async () => {
+					if (claimed) return null;
+					claimed = true;
+					return {
+						ids: ["ev-ready", "ev-failed"],
+						text: "- ev-ready: artifact://1\n- ev-failed: worker failed",
+					};
+				},
+				markInvestigationUpdatesDelivered: markDelivered,
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd([]);
+			await Bun.sleep(0);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).toContain("### Investigation updates");
+			expect(promptInputs[0]).toContain("artifact://1");
+			expect(promptInputs[0]).toContain("worker failed");
+			expect(markDelivered).toHaveBeenCalledWith(["ev-ready", "ev-failed"]);
+		});
+
+		it("marks investigation ids delivered only after the advisor prompt resolves", async () => {
+			const promptInputs: string[] = [];
+			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
+			const { promise: finishPrompt, resolve: resolvePrompt } = Promise.withResolvers<void>();
+			const markDelivered = vi.fn(async (_ids: readonly string[]) => {});
+			let claimed = false;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					startPrompt();
+					await finishPrompt;
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [],
+				enqueueAdvice: () => {},
+				claimInvestigationUpdates: async () => {
+					if (claimed) return null;
+					claimed = true;
+					return { ids: ["ev-deliver"], text: "- ev-deliver: artifact://2" };
+				},
+				markInvestigationUpdatesDelivered: markDelivered,
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd([]);
+			await promptStarted;
+			expect(promptInputs).toHaveLength(1);
+			expect(markDelivered).not.toHaveBeenCalled();
+
+			resolvePrompt();
+			await Bun.sleep(0);
+			expect(markDelivered).toHaveBeenCalledWith(["ev-deliver"]);
+		});
+
+		it("releases claimed investigation ids when reset aborts the advisor prompt", async () => {
+			const promptInputs: string[] = [];
+			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
+			const releaseClaims = vi.fn(async (_ids: readonly string[]) => {});
+			const markDelivered = vi.fn(async (_ids: readonly string[]) => {});
+			let rejectInFlight: ((err: unknown) => void) | undefined;
+			let claimed = false;
+			const agent: AdvisorAgent = {
+				prompt: input => {
+					promptInputs.push(input);
+					const { promise, reject } = Promise.withResolvers<void>();
+					rejectInFlight = reject;
+					startPrompt();
+					return promise;
+				},
+				abort: () => rejectInFlight?.(new Error("advisor reset")),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [],
+				enqueueAdvice: () => {},
+				claimInvestigationUpdates: async () => {
+					if (claimed) return null;
+					claimed = true;
+					return { ids: ["ev-reset"], text: "- ev-reset: artifact://3" };
+				},
+				releaseInvestigationUpdates: releaseClaims,
+				markInvestigationUpdatesDelivered: markDelivered,
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd([]);
+			await promptStarted;
+			runtime.reset();
+			await Bun.sleep(0);
+			await Bun.sleep(0);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(releaseClaims).toHaveBeenCalledWith(["ev-reset"]);
+			expect(markDelivered).not.toHaveBeenCalled();
+		});
+
+		it("releases claimed investigation ids when failed advisor prompts are dropped", async () => {
+			const promptInputs: string[] = [];
+			const releaseClaims = vi.fn(async (_ids: readonly string[]) => {});
+			const markDelivered = vi.fn(async (_ids: readonly string[]) => {});
+			let claimed = false;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					throw new Error("fail");
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [],
+				enqueueAdvice: () => {},
+				claimInvestigationUpdates: async () => {
+					if (claimed) return null;
+					claimed = true;
+					return { ids: ["ev-drop"], text: "- ev-drop: artifact://4" };
+				},
+				releaseInvestigationUpdates: releaseClaims,
+				markInvestigationUpdatesDelivered: markDelivered,
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd([]);
+			await Bun.sleep(0);
+			await Bun.sleep(0);
+			await Bun.sleep(0);
+
+			expect(promptInputs).toHaveLength(3);
+			expect(releaseClaims).toHaveBeenCalledWith(["ev-drop"]);
+			expect(markDelivered).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("read-only tool allowlist", () => {
