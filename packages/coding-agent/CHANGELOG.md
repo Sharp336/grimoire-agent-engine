@@ -2,10 +2,11 @@
 
 ## [Unreleased]
 
-## [16.1.20] - 2026-06-25
 ### Added
 
 - Added a GitLab CLI tool for `glab`-backed project, issue, merge request, and pipeline operations, including TUI rendering and discovery support.
+
+## [16.1.20] - 2026-06-25
 
 ### Fixed
 
