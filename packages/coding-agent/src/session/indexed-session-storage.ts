@@ -17,6 +17,7 @@ export interface SessionStorageBackend {
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
 	move(src: string, dst: string, mtimeMs: number): Promise<void>;
+	moveIfAbsent(src: string, dst: string, mtimeMs: number): Promise<boolean>;
 }
 
 interface IndexEntry {
@@ -195,6 +196,32 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
+	async renameIfAbsent(src: string, dst: string): Promise<boolean> {
+		await this.#awaitPath(src);
+		await this.#awaitPath(dst);
+		const entry = this.#index.get(src);
+		if (!entry) throw enoent(src);
+		const dstPrevious = this.#index.get(dst);
+		if (dstPrevious) return false;
+		this.#index.delete(src);
+		this.#index.set(dst, { ...entry });
+		try {
+			const moved = await this.#enqueuePaths([src, dst], () => this.#backend.moveIfAbsent(src, dst, entry.mtimeMs), {
+				trackDrain: false,
+			});
+			if (!moved) {
+				this.#index.delete(dst);
+				this.#index.set(src, entry);
+			}
+			return moved;
+		} catch (err) {
+			this.#index.delete(dst);
+			this.#restoreIndex(dst, dstPrevious);
+			this.#index.set(src, entry);
+			throw toError(err);
+		}
+	}
+
 	async unlink(path: string): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
@@ -305,11 +332,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		return next;
 	}
 
-	#enqueuePath(path: string, task: () => Promise<void>, options: EnqueueOptions): Promise<void> {
+	#enqueuePath<T>(path: string, task: () => Promise<T>, options: EnqueueOptions): Promise<T> {
 		return this.#enqueuePaths([path], task, options);
 	}
 
-	#enqueuePaths(paths: readonly string[], task: () => Promise<void>, options: EnqueueOptions): Promise<void> {
+	#enqueuePaths<T>(paths: readonly string[], task: () => Promise<T>, options: EnqueueOptions): Promise<T> {
 		const unique = uniquePaths(paths);
 		const previous = unique.map(path => this.#pathTails.get(path) ?? RESOLVED);
 		const operation = Promise.all(previous).then(task);
@@ -318,29 +345,30 @@ export class IndexedSessionStorage implements SessionStorage {
 			if (options.trackDrain && !this.#firstDrainError) this.#firstDrainError = error;
 			throw error;
 		});
-		const tail = tracked.catch(() => {});
+		const trackedVoid = tracked.then(() => undefined);
+		const tail = trackedVoid.catch(() => {});
 		for (const path of unique) {
 			this.#pathTails.set(path, tail);
-			this.#pathPending.set(path, tracked);
+			this.#pathPending.set(path, trackedVoid);
 		}
 		tail.finally(() => {
 			for (const path of unique) {
 				if (this.#pathTails.get(path) === tail) this.#pathTails.delete(path);
 			}
 		});
-		tracked
+		trackedVoid
 			.finally(() => {
 				for (const path of unique) {
-					if (this.#pathPending.get(path) === tracked) this.#pathPending.delete(path);
+					if (this.#pathPending.get(path) === trackedVoid) this.#pathPending.delete(path);
 				}
 			})
 			.catch(() => {});
 		tracked.catch(() => {});
 		if (options.trackDrain) {
-			this.#drainPending.add(tracked);
-			tracked
+			this.#drainPending.add(trackedVoid);
+			trackedVoid
 				.finally(() => {
-					this.#drainPending.delete(tracked);
+					this.#drainPending.delete(trackedVoid);
 				})
 				.catch(() => {});
 		}

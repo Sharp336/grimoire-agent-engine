@@ -11,6 +11,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
+import type { SessionStatus } from "../../session/session-listing";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type {
 	AgentProgress,
@@ -71,6 +72,9 @@ export type RpcCommand =
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
+	| { id?: string; type: "list_sessions"; cwd?: string }
+	| { id?: string; type: "list_all_sessions" }
+	| { id?: string; type: "resolve_session"; session: string; cwd?: string }
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "branch"; entryId: string }
@@ -160,6 +164,36 @@ export interface RpcSubagentMessagesResult {
 	reset: boolean;
 	entries: FileEntry[];
 	messages: AgentMessage[];
+}
+
+export interface RpcSessionInfo {
+	path: string;
+	id: string;
+	/** Working directory where the session was started. Empty string for old sessions. */
+	cwd: string;
+	title?: string;
+	/** Path to the parent session (if this session was forked). */
+	parentSessionPath?: string;
+	/** ISO 8601 timestamp. */
+	created: string;
+	/** ISO 8601 timestamp. */
+	modified: string;
+	messageCount: number;
+	/** File size in bytes on disk; used for compact list rendering. */
+	size: number;
+	firstMessage: string;
+	allMessagesText: string;
+	status?: SessionStatus;
+}
+
+export interface RpcListSessionsResult {
+	cwd: string;
+	sessionDir: string;
+	sessions: RpcSessionInfo[];
+}
+
+export interface RpcResolveSessionResult {
+	match: { session: RpcSessionInfo; scope: "local" | "global" } | null;
 }
 
 // ============================================================================
@@ -263,6 +297,15 @@ export type RpcResponse =
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
+	| { id?: string; type: "response"; command: "list_sessions"; success: true; data: RpcListSessionsResult }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_all_sessions";
+			success: true;
+			data: { sessions: RpcSessionInfo[] };
+	  }
+	| { id?: string; type: "response"; command: "resolve_session"; success: true; data: RpcResolveSessionResult }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
 	| {

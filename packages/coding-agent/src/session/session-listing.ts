@@ -464,9 +464,9 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 		}
 	}
 	for (const [primaryPath, { backup }] of candidates) {
-		if (storage.existsSync(primaryPath)) continue;
 		try {
-			await storage.rename(backup, primaryPath);
+			const recovered = await storage.renameIfAbsent(backup, primaryPath);
+			if (!recovered) continue;
 			logger.warn("Recovered orphaned session backup", {
 				sessionFile: primaryPath,
 				backupPath: backup,
@@ -507,6 +507,12 @@ export function listSessions(sessionDir: string, storage: SessionStorage): Promi
 export async function listAllSessions(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
 	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
 	try {
+		const backupDirs = new Set<string>();
+		for await (const name of new Bun.Glob("*/*.bak").scan(sessionsRoot)) {
+			backupDirs.add(path.dirname(path.join(sessionsRoot, name)));
+		}
+		await Promise.all(Array.from(backupDirs, dir => recoverOrphanedBackups(dir, storage)));
+
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
 		);

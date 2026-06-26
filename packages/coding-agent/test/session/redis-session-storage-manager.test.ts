@@ -74,6 +74,13 @@ function createFakeRedis(): FakeRedis {
 			strings.delete(src);
 			return "OK";
 		},
+		async renamenx(src, dst) {
+			if (!strings.has(src)) throw new Error("ERR no such key");
+			if (strings.has(dst)) return 0;
+			strings.set(dst, strings.get(src) as string);
+			strings.delete(src);
+			return 1;
+		},
 		async scan(_cursor, ...rest) {
 			let pattern = "*";
 			for (let i = 0; i < rest.length; i++) {

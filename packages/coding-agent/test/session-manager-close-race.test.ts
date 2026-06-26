@@ -106,6 +106,9 @@ class CloseHoldingStorage implements SessionStorage {
 	rename(p: string, nextPath: string): Promise<void> {
 		return this.#inner.rename(p, nextPath);
 	}
+	renameIfAbsent(p: string, nextPath: string): Promise<boolean> {
+		return this.#inner.renameIfAbsent(p, nextPath);
+	}
 	unlink(p: string): Promise<void> {
 		return this.#inner.unlink(p);
 	}

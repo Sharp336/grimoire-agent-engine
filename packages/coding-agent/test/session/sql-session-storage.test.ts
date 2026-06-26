@@ -189,6 +189,21 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	it("renameIfAbsent keeps an existing destination without clobbering content", async () => {
+		const { client, storage } = await createSqlite();
+		await storage.writeText("/sessions/p/a.jsonl", "from-a\n");
+		await storage.writeText("/sessions/p/b.jsonl", "from-b\n");
+
+		expect(await storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/b.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/a.jsonl")).toBe("from-a\n");
+		expect(await storage.readText("/sessions/p/b.jsonl")).toBe("from-b\n");
+
+		expect(await storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/c.jsonl")).toBe(true);
+		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/c.jsonl")).toBe("from-a\n");
+		await client.end();
+	});
+
 	it("refresh() reloads the mirror from SQL after out-of-band writes", async () => {
 		const { client, storage } = await createSqlite();
 		// Simulate a peer process inserting directly.
@@ -317,6 +332,14 @@ function capturingClient(adapter: "postgres" | "mysql"): {
 		options: { adapter },
 		async unsafe(sql, values) {
 			queries.push({ sql, values });
+			if (
+				values?.length === 1 &&
+				sql.startsWith("SELECT path FROM") &&
+				!sql.includes("byte_len") &&
+				!sql.includes("content")
+			) {
+				return [{ path: values[0] }];
+			}
 			return [];
 		},
 	};
@@ -370,6 +393,96 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(append?.sql).not.toContain("$1");
 
 		expect(storage.adapter).toBe("mysql");
+	});
+
+	it("renders no-clobber rename statements with dialect-specific bind order", async () => {
+		const pg = capturingClient("postgres");
+		const pgStorage = await SqlSessionStorage.create({ client: pg.client });
+		await pgStorage.writeText("/s/a.jsonl", "a");
+		await pgStorage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl");
+		const pgRename = pg.queries.find(q => q.sql.includes("RETURNING path"));
+		expect(pgRename?.sql).toContain("$1");
+		expect(pgRename?.values).toEqual(["/s/b.jsonl", expect.any(Number), "/s/a.jsonl"]);
+
+		const mysql = capturingClient("mysql");
+		const mysqlStorage = await SqlSessionStorage.create({ client: mysql.client });
+		await mysqlStorage.writeText("/s/a.jsonl", "a");
+		await mysqlStorage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl");
+		const mysqlRename = mysql.queries.find(q => q.sql.includes("LEFT JOIN"));
+		expect(mysqlRename?.sql).toContain("dst.path = ?");
+		expect(mysqlRename?.values).toEqual(["/s/b.jsonl", "/s/b.jsonl", expect.any(Number), "/s/a.jsonl"]);
+	});
+
+	it("normalizes duplicate-key races during renameIfAbsent to false", async () => {
+		const client: SqlSessionStorageClient = {
+			options: { adapter: "postgres" },
+			async unsafe(sql) {
+				if (sql.includes("RETURNING path")) {
+					const err = new Error("duplicate key value violates unique constraint") as Error & { code: string };
+					err.code = "23505";
+					throw err;
+				}
+				return [];
+			},
+		};
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText("/s/a.jsonl", "a");
+
+		expect(await storage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl")).toBe(false);
+		expect(storage.existsSync("/s/a.jsonl")).toBe(true);
+		expect(storage.existsSync("/s/b.jsonl")).toBe(false);
+	});
+
+	it("rethrows message-only primary-key errors during renameIfAbsent", async () => {
+		const client: SqlSessionStorageClient = {
+			options: { adapter: "postgres" },
+			async unsafe(sql) {
+				if (sql.includes("RETURNING path")) {
+					throw new Error("primary key lookup failed while moving session");
+				}
+				return [];
+			},
+		};
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText("/s/a.jsonl", "a");
+
+		await expect(storage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl")).rejects.toThrow(
+			"primary key lookup failed while moving session",
+		);
+		expect(storage.existsSync("/s/a.jsonl")).toBe(true);
+		expect(storage.existsSync("/s/b.jsonl")).toBe(false);
+	});
+
+	it("rethrows null duplicate-key probes during renameIfAbsent", async () => {
+		const client: SqlSessionStorageClient = {
+			options: { adapter: "postgres" },
+			async unsafe(sql) {
+				if (sql.includes("RETURNING path")) throw null;
+				return [];
+			},
+		};
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText("/s/a.jsonl", "a");
+
+		await expect(storage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl")).rejects.toThrow("null");
+		expect(storage.existsSync("/s/a.jsonl")).toBe(true);
+		expect(storage.existsSync("/s/b.jsonl")).toBe(false);
+	});
+
+	it("throws ENOENT when a no-op conditional rename lost the source row", async () => {
+		const client: SqlSessionStorageClient = {
+			options: { adapter: "postgres" },
+			async unsafe() {
+				return [];
+			},
+		};
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText("/s/a.jsonl", "a");
+
+		await expect(storage.renameIfAbsent("/s/a.jsonl", "/s/b.jsonl")).rejects.toMatchObject({
+			code: "ENOENT",
+			path: "/s/a.jsonl",
+		});
 	});
 
 	it("rejects clients reporting an unknown adapter without an override", async () => {

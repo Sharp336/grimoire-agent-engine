@@ -130,6 +130,9 @@ Important edge behavior from runtime:
 ### Session
 
 - `{ id?, type: "get_session_stats" }`
+- `{ id?, type: "list_sessions", cwd?: string }`
+- `{ id?, type: "list_all_sessions" }`
+- `{ id?, type: "resolve_session", session: string, cwd?: string }`
 - `{ id?, type: "export_html", outputPath?: string }`
 - `{ id?, type: "switch_session", sessionPath: string }`
 - `{ id?, type: "branch", entryId: string }`
@@ -225,6 +228,79 @@ Local-only slash commands may emit `command_output` frames before completing via
   }
 }
 ```
+
+### Session listing and resolution payloads
+
+`list_sessions` lists sessions for the current or specified workspace:
+
+```json
+{
+  "id": "req_sessions",
+  "type": "response",
+  "command": "list_sessions",
+  "success": true,
+  "data": {
+    "cwd": "/repo",
+    "sessionDir": "/home/user/.omp/agent/sessions/-repo",
+    "sessions": [
+      {
+        "path": "/home/user/.omp/agent/sessions/-repo/session.jsonl",
+        "id": "session",
+        "cwd": "/repo",
+        "title": "Fix tests",
+        "parentSessionPath": "/home/user/.omp/agent/sessions/-repo/parent.jsonl",
+        "created": "2026-06-25T12:00:00.000Z",
+        "modified": "2026-06-25T12:05:00.000Z",
+        "messageCount": 4,
+        "size": 1234,
+        "firstMessage": "Run tests",
+        "allMessagesText": "Run tests\nFix the failure",
+        "status": "complete"
+      }
+    ]
+  }
+}
+```
+
+If `cwd` is omitted, the current session workspace is used. The response
+`sessionDir` is derived from that workspace or the active RPC session; callers
+cannot provide arbitrary session directories.
+
+`list_all_sessions` lists every configured agent session directory and returns
+`data.sessions` with newest sessions first.
+
+`resolve_session` resolves a session id/prefix/path against the safe local scope
+first, then the configured global session directories:
+
+```json
+{
+  "id": "req_resolve",
+  "type": "response",
+  "command": "resolve_session",
+  "success": true,
+  "data": {
+    "match": {
+      "scope": "local",
+      "session": {
+        "path": "/home/user/.omp/agent/sessions/-repo/session.jsonl",
+        "id": "session",
+        "cwd": "/repo",
+        "created": "2026-06-25T12:00:00.000Z",
+        "modified": "2026-06-25T12:05:00.000Z",
+        "messageCount": 4,
+        "size": 1234,
+        "firstMessage": "Run tests",
+        "allMessagesText": "Run tests\nFix the failure",
+        "status": "complete"
+      }
+    }
+  }
+}
+```
+
+If no session matches, `match` is `null`. `scope` is `"local"` for the current
+workspace/default session directory and `"global"` for all configured session
+directories.
 
 ### `set_todos` payload
 

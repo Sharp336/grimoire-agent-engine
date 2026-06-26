@@ -63,6 +63,10 @@ interface DialectQueries {
 	delete: string;
 	/** Move a row from one path to another (caller deletes any conflicting destination first). */
 	rename: string;
+	/** Move a row only when the destination path is absent. Returns zero affected rows on conflict. */
+	renameIfAbsent: string;
+	/** Lightweight source existence check after a no-op conditional move. */
+	exists: string;
 	/** Warm the synchronous index without transferring full content. */
 	loadIndex: string;
 	/** Read the full content for the async `readText` surface. */
@@ -129,6 +133,10 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
 			delete: `DELETE FROM ${table} WHERE path = ?`,
 			rename: `UPDATE ${table} SET path = ?, mtime_ms = ? WHERE path = ?`,
+			renameIfAbsent:
+				`UPDATE ${table} AS src LEFT JOIN ${table} AS dst ON dst.path = ? ` +
+				`SET src.path = ?, src.mtime_ms = ? WHERE src.path = ? AND dst.path IS NULL`,
+			exists: `SELECT path FROM ${table} WHERE path = ?`,
 			loadIndex: `SELECT path, mtime_ms, length(content) AS byte_len FROM ${table}`,
 			readFull: `SELECT content AS content FROM ${table} WHERE path = ?`,
 			readSlices:
@@ -169,6 +177,11 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`ON CONFLICT (path) DO UPDATE SET content = ${tableQualifier} || excluded.content, mtime_ms = excluded.mtime_ms`,
 		delete: `DELETE FROM ${table} WHERE path = ${placeholder(1)}`,
 		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)}`,
+		renameIfAbsent:
+			`UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} ` +
+			`WHERE path = ${placeholder(3)} AND NOT EXISTS (SELECT 1 FROM ${table} WHERE path = ${placeholder(1)}) ` +
+			`RETURNING path`,
+		exists: `SELECT path FROM ${table} WHERE path = ${placeholder(1)}`,
 		loadIndex: `SELECT path, mtime_ms, ${byteLengthExpr} AS byte_len FROM ${table}`,
 		readFull: `SELECT content AS content FROM ${table} WHERE path = ${placeholder(1)}`,
 		readSlices,
@@ -187,6 +200,35 @@ function decodeSqlBytes(value: unknown): string {
 	if (value instanceof Uint8Array) return utf8Decoder.decode(value);
 	if (value instanceof ArrayBuffer) return utf8Decoder.decode(new Uint8Array(value));
 	return String(value);
+}
+
+function affectedRowCount(rows: unknown[]): number {
+	const metadata = rows as unknown as { affectedRows?: unknown; count?: unknown };
+	const count = Number(metadata.affectedRows ?? metadata.count ?? rows.length);
+	return Number.isFinite(count) ? count : rows.length;
+}
+
+function isDuplicateKeyError(err: unknown): boolean {
+	if (err == null) return false;
+	const value = err as {
+		code?: unknown;
+		errno?: unknown;
+		sqlState?: unknown;
+		message?: unknown;
+	};
+	const candidates = [value.code, value.errno, value.sqlState].map(item => String(item ?? ""));
+	const duplicateCodes = new Set([
+		"23505",
+		"1062",
+		"ER_DUP_ENTRY",
+		"SQLITE_CONSTRAINT_PRIMARYKEY",
+		"SQLITE_CONSTRAINT_UNIQUE",
+	]);
+	if (candidates.some(code => duplicateCodes.has(code))) return true;
+	const message = String(value.message ?? "").toLowerCase();
+	const hasDuplicateMessage = message.includes("duplicate entry") || message.includes("unique constraint");
+	if (candidates.includes("SQLITE_CONSTRAINT")) return hasDuplicateMessage;
+	return hasDuplicateMessage;
 }
 
 /**
@@ -310,5 +352,24 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
 		await this.#client.unsafe(this.#q.delete, [dst]);
 		await this.#client.unsafe(this.#q.rename, [dst, mtimeMs, src]);
+	}
+
+	async moveIfAbsent(src: string, dst: string, mtimeMs: number): Promise<boolean> {
+		const values =
+			this.#adapter === "mysql"
+				? [dst, dst, mtimeMs, src]
+				: this.#adapter === "postgres"
+					? [dst, mtimeMs, src]
+					: [dst, mtimeMs, src, dst];
+		try {
+			const rows = await this.#client.unsafe(this.#q.renameIfAbsent, values);
+			if (this.#adapter === "mysql" ? affectedRowCount(rows) > 0 : rows.length > 0) return true;
+			const sourceRows = await this.#client.unsafe(this.#q.exists, [src]);
+			if (sourceRows.length === 0) throw enoent(src);
+			return false;
+		} catch (err) {
+			if (isDuplicateKeyError(err)) return false;
+			throw err;
+		}
 	}
 }
