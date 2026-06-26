@@ -2028,6 +2028,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 		);
 
+		// Programmatic extension rules (ExtensionAPI.registerRule/replaceRules) →
+		// live TtsrManager. Extensions whose rules are only known after their
+		// factory runs (e.g. a governance daemon that projects rules on bind)
+		// miss the filesystem rule-discovery window; drain them here and re-sync
+		// whenever an extension mutates its set at runtime. Mirrors how
+		// file-discovered rules reach the TtsrManager via bucketRules.
+		let syncedExtensionRuleNames = new Set<string>();
+		const syncExtensionRules = () => {
+			for (const name of syncedExtensionRuleNames) {
+				ttsrManager.removeRule(name);
+			}
+			syncedExtensionRuleNames = new Set<string>();
+			for (const rule of extensionRunner.getAllRegisteredRules()) {
+				const hasTtsrCondition = (rule.condition?.length ?? 0) > 0 || (rule.astCondition?.length ?? 0) > 0;
+				if (hasTtsrCondition && ttsrManager.addRule(rule)) {
+					syncedExtensionRuleNames.add(rule.name);
+				}
+			}
+			setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
+		};
+		syncExtensionRules();
+		extensionsResult.runtime.onRulesChanged = syncExtensionRules;
+
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
 			// Discard return: any handler error is routed through runner.onError listeners.

@@ -12,6 +12,7 @@ import { Type } from "arktype";
 import * as zodModule from "zod/v4";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
+import type { Rule } from "../../capability/rule";
 import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
@@ -62,6 +63,8 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	/** Set by the session host after loading; re-syncs the live TtsrManager on runtime rule changes. */
+	onRulesChanged?: () => void;
 
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -152,6 +155,19 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			definition: tool,
 			extensionPath: this.extension.path,
 		});
+	}
+
+	registerRule(rule: Rule): void {
+		this.extension.rules.set(rule.name, rule);
+		this.runtime.onRulesChanged?.();
+	}
+
+	replaceRules(rules: Rule[]): void {
+		this.extension.rules.clear();
+		for (const rule of rules) {
+			this.extension.rules.set(rule.name, rule);
+		}
+		this.runtime.onRulesChanged?.();
 	}
 
 	registerCommand(
@@ -274,6 +290,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		handlers: new Map(),
 		tools: new Map(),
+		rules: new Map(),
 		assistantThinkingRenderers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),

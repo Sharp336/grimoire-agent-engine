@@ -342,6 +342,16 @@ export class TtsrManager {
 	}
 
 	/**
+	 * Remove a previously-added rule by name. Returns true if a rule was removed.
+	 * Lets callers update a rule's content (remove + re-add, since `addRule`
+	 * no-ops on an existing name) or drop rules whose source set shrank — needed
+	 * for runtime rule re-projection via `ExtensionAPI.replaceRules`.
+	 */
+	removeRule(name: string): boolean {
+		return this.#rules.delete(name);
+	}
+
+	/**
 	 * Add a stream chunk to its scoped buffer and return matching rules.
 	 *
 	 * Buffers are isolated by source/tool key so matches don't bleed across

@@ -237,6 +237,49 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("rule collection", () => {
+		it("collects final programmatic rule sets from extensions", async () => {
+			const ruleCode = (name: string) => `
+				const source = { provider: "test", providerName: "Test", path: "/tmp/${name}.md", level: "project" };
+
+				export default function(pi) {
+					pi.registerRule({
+						name: "${name}_stale",
+						path: "/tmp/${name}-stale.md",
+						content: "stale",
+						condition: ["stale"],
+						_source: source,
+					});
+					pi.replaceRules([
+						{
+							name: "${name}",
+							path: "/tmp/${name}.md",
+							content: "active",
+							condition: ["active"],
+							_source: source,
+						},
+					]);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "rules-a.ts"), ruleCode("rule_a"));
+			fs.writeFileSync(path.join(extensionsDir, "rules-b.ts"), ruleCode("rule_b"));
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const rules = runner.getAllRegisteredRules();
+
+			expect(rules.map(rule => rule.name).sort()).toEqual(["rule_a", "rule_b"]);
+			expect(rules.map(rule => rule.content)).toEqual(["active", "active"]);
+			expect(rules.some(rule => rule.name.endsWith("_stale"))).toBe(false);
+		});
+	});
+
 	describe("command collection", () => {
 		it("collects commands from multiple extensions", async () => {
 			const cmdCode = (name: string) => `

@@ -34,6 +34,7 @@ import type { AutocompleteItem, Component, EditorTheme, KeyId, TUI } from "@oh-m
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Type as arktype } from "arktype";
 import type * as zod from "zod/v4";
+import type { Rule } from "../../capability/rule";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
@@ -1031,6 +1032,27 @@ export interface ExtensionAPI {
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
 
 	// =========================================================================
+	// Rule Registration (programmatic TTSR / advisory rules)
+	// =========================================================================
+
+	/**
+	 * Register a TTSR/advisory rule programmatically. Rules with a `condition`
+	 * or `astCondition` flow into the TtsrManager and abort the stream on match,
+	 * exactly like file-discovered `.omp/rules/*.md`. Lets an external governance
+	 * system inject rules from its extension factory (which runs after the
+	 * filesystem rule-discovery window). Mirrors `registerTool`.
+	 */
+	registerRule(rule: Rule): void;
+
+	/**
+	 * Replace the full set of rules previously registered by THIS extension.
+	 * Use for runtime re-projection (e.g. a governance daemon whose rule set
+	 * changes mid-session): removes this extension's stale rules from the live
+	 * TtsrManager and (re)adds the new set. Idempotent on unchanged content.
+	 */
+	replaceRules(rules: Rule[]): void;
+
+	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
 
@@ -1312,6 +1334,13 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	/**
+	 * Set by the session host. Invoked when an extension mutates its rule set at
+	 * runtime (registerRule/replaceRules) so the host can re-sync the live
+	 * TtsrManager. Undefined during factory execution (initial rules are drained
+	 * by the host after loading).
+	 */
+	onRulesChanged?: () => void;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -1368,6 +1397,8 @@ export interface Extension {
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
+	/** Rules registered programmatically by this extension (keyed by rule name). */
+	rules: Map<string, Rule>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;
