@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Windows ARM64 (`win32-arm64`) platform support. The self-updater now recognizes `win32-arm64` as a supported native tag, and the `ffmpegAssetName` helper falls back to the `win32-x64` binary under emulation (ffmpeg-static has no native ARM64 build).
+
 
 ### Fixed
 
