@@ -229,6 +229,31 @@ describe("generated model policies", () => {
 		expect(models[1]?.omitMaxOutputTokens).toBeUndefined();
 	});
 
+	it("pins Cursor Composer 2.5 family to the documented 200K window", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "composer-2.5",
+				api: "cursor-agent",
+				provider: "cursor",
+				contextWindow: 64_000,
+				maxTokens: 64_000,
+			}),
+			createSpec({
+				id: "composer-2.5-fast",
+				api: "cursor-agent",
+				provider: "cursor",
+				contextWindow: 64_000,
+				maxTokens: 64_000,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.contextWindow).toBe(200_000);
+		expect(models[0]?.maxTokens).toBe(200_000);
+		expect(models[1]?.contextWindow).toBe(200_000);
+		expect(models[1]?.maxTokens).toBe(200_000);
+	});
 	it("marks OpenCode Go MiMo models as not supporting tool_choice", () => {
 		const models: ModelSpec<"openai-completions">[] = [
 			createSpec({

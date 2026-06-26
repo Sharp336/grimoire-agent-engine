@@ -337,6 +337,8 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
+	/** Generate a native handoff document and continue in a new session. */
+	handoff(customInstructions?: string): Promise<{ cancelled: boolean; savedPath?: string }>;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
 	/** Current working directory */
@@ -1340,6 +1342,7 @@ export interface ExtensionContextActions {
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
+	handoff: (customInstructions?: string) => Promise<{ cancelled: boolean; savedPath?: string }>;
 	getSystemPrompt: () => string[];
 }
 

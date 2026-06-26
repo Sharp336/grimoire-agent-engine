@@ -202,6 +202,9 @@ export class ExtensionRunner {
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
+	#handoffFn: (customInstructions?: string) => Promise<{ cancelled: boolean; savedPath?: string }> = async () => ({
+		cancelled: true,
+	});
 	#getSystemPromptFn: () => string[] = () => [];
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
@@ -261,6 +264,7 @@ export class ExtensionRunner {
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
+		this.#handoffFn = contextActions.handoff;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -498,6 +502,7 @@ export class ExtensionRunner {
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
+			handoff: customInstructions => this.#handoffFn(customInstructions),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,

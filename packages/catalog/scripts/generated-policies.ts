@@ -61,6 +61,11 @@ const COPILOT_GENERATED_LIMITS: Record<string, { contextWindow: number; maxToken
 	"grok-code-fast-1": { contextWindow: 192000, maxTokens: 64000 },
 };
 
+const CURSOR_GENERATED_LIMITS: Record<string, { contextWindow: number; maxTokens: number }> = {
+	"composer-2.5": { contextWindow: 200_000, maxTokens: 200_000 },
+	"composer-2.5-fast": { contextWindow: 200_000, maxTokens: 200_000 },
+};
+
 /**
  * Apply upstream metadata corrections to a mutable array of models, then
  * re-bake canonical thinking metadata so generated catalogs always carry the
@@ -210,6 +215,12 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 
 	if (model.provider === "ollama-cloud") {
 		model.omitMaxOutputTokens = true;
+	}
+
+	const cursorLimits = model.provider === "cursor" ? CURSOR_GENERATED_LIMITS[model.id] : undefined;
+	if (cursorLimits) {
+		model.contextWindow = cursorLimits.contextWindow;
+		model.maxTokens = cursorLimits.maxTokens;
 	}
 
 	// GLM Coding Plan: GLM-5.2 is the selectable 1M served id; pin it so

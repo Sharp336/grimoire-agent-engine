@@ -577,6 +577,47 @@ const UMANS_MAX_REASONING_EFFORT_MAP = { [Effort.XHigh]: "max" } as const;
 const UMANS_DEFAULT_REASONING_EFFORTS = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
 const UMANS_VIA_HANDOFF_MODEL_IDS = ["umans-glm-5.1", "umans-glm-5.2"] as const;
 
+export function buildUmansViaHandoffStaticSeed(baseUrl?: string): ModelSpec<"anthropic-messages">[] {
+	const resolvedBaseUrl = normalizeUmansBaseUrl(baseUrl);
+	return [
+		{
+			id: "umans-glm-5.1",
+			name: "Umans GLM 5.1",
+			api: "anthropic-messages",
+			provider: "umans",
+			baseUrl: resolvedBaseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 202_752,
+			maxTokens: 131_071,
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			compat: { escapeBuiltinToolNames: true },
+		},
+		{
+			id: "umans-glm-5.2",
+			name: "Umans GLM 5.2",
+			api: "anthropic-messages",
+			provider: "umans",
+			baseUrl: resolvedBaseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 405_504,
+			maxTokens: 131_071,
+			thinking: {
+				mode: "anthropic-budget-effort",
+				efforts: [Effort.High, Effort.XHigh],
+				effortMap: UMANS_MAX_REASONING_EFFORT_MAP,
+			},
+			compat: { escapeBuiltinToolNames: true },
+		},
+	];
+}
+
 export interface UmansModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -729,10 +770,12 @@ export function umansModelManagerOptions(config?: UmansModelManagerConfig): Mode
 	const apiKey = config?.apiKey;
 	const baseUrl = normalizeUmansBaseUrl(config?.baseUrl);
 	const references = createBundledReferenceMap<"anthropic-messages">("umans");
+	const staticModels = buildUmansViaHandoffStaticSeed(baseUrl);
 	return {
 		providerId: "umans",
 		dynamicModelsAuthoritative: true,
 		dropCachedModelIdsOnStaticMismatch: UMANS_VIA_HANDOFF_MODEL_IDS,
+		staticModels,
 		fetchDynamicModels: () => fetchUmansModelsInfo({ baseUrl, apiKey, fetch: config?.fetch, references }),
 	};
 }

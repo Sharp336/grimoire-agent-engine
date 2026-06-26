@@ -105,6 +105,14 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
+			handoff: async customInstructions => {
+				try {
+					const result = await session.handoff(customInstructions);
+					return result ? { cancelled: false, savedPath: result.savedPath } : { cancelled: true };
+				} catch {
+					return { cancelled: true };
+				}
+			},
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")
 		{

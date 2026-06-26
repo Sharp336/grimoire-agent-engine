@@ -2168,6 +2168,14 @@ export class AcpAgent implements Agent {
 				getContextUsage: () => record.session.getContextUsage(),
 				getSystemPrompt: () => record.session.systemPrompt,
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
+				handoff: async customInstructions => {
+					try {
+						const result = await record.session.handoff(customInstructions);
+						return result ? { cancelled: false, savedPath: result.savedPath } : { cancelled: true };
+					} catch {
+						return { cancelled: true };
+					}
+				},
 			},
 			{
 				getContextUsage: () => record.session.getContextUsage(),

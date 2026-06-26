@@ -1,5 +1,5 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -21,7 +21,14 @@ import { createExtensionModelQuery } from "../../extensibility/extensions/model-
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
-import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
+import {
+	getAvailableThemesWithPaths,
+	getSymbolTheme,
+	getThemeByName,
+	setTheme,
+	type Theme,
+	theme,
+} from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
@@ -134,6 +141,7 @@ export class ExtensionUiController {
 			},
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			handoff: customInstructions => this.#handleExtensionHandoff(customInstructions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 		};
 		const commandActions: ExtensionCommandContextActions = {
@@ -370,6 +378,7 @@ export class ExtensionUiController {
 			},
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
+			handoff: customInstructions => this.#handleExtensionHandoff(customInstructions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 		};
 		const commandActions: ExtensionCommandContextActions = {
@@ -893,5 +902,61 @@ export class ExtensionUiController {
 
 	#advanceDialogQueue(): void {
 		this.#dialogQueue.shift()?.();
+	}
+
+	async #handleExtensionHandoff(customInstructions?: string): Promise<{ cancelled: boolean; savedPath?: string }> {
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		this.ctx.statusContainer.clear();
+
+		const handoffLoader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			"Generating handoff… (esc to cancel)",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(handoffLoader);
+		this.ctx.ui.requestRender();
+
+		try {
+			const result = await this.ctx.session.handoff(customInstructions);
+
+			if (!result) {
+				this.ctx.showError("Handoff cancelled");
+				return { cancelled: true };
+			}
+
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorTopBorder();
+			this.ctx.updateEditorBorderColor();
+			await this.ctx.reloadTodos();
+
+			this.ctx.present([
+				new Spacer(1),
+				new Text(`${theme.fg("accent", `${theme.status.success} New session started with handoff context`)}`, 1, 1),
+			]);
+			if (result.savedPath) {
+				this.ctx.showStatus(`Handoff document saved to: ${result.savedPath}`);
+			}
+
+			return { cancelled: false, savedPath: result.savedPath };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message === "Handoff cancelled" || (error instanceof Error && error.name === "AbortError")) {
+				this.ctx.showError("Handoff cancelled");
+				return { cancelled: true };
+			}
+
+			this.ctx.showError(`Handoff failed: ${message}`);
+			return { cancelled: true };
+		} finally {
+			handoffLoader.stop();
+			this.ctx.statusContainer.clear();
+			this.ctx.ui.requestRender();
+		}
 	}
 }

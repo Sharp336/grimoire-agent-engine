@@ -6337,6 +6337,14 @@ export class AgentSession {
 					instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
 				await this.compact(instructions, options);
 			},
+			handoff: async customInstructions => {
+				try {
+					const result = await this.handoff(customInstructions);
+					return result ? { cancelled: false, savedPath: result.savedPath } : { cancelled: true };
+				} catch {
+					return { cancelled: true };
+				}
+			},
 			switchSession: async sessionPath => {
 				const success = await this.switchSession(sessionPath);
 				return { cancelled: !success };

@@ -325,6 +325,71 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("context actions", () => {
+		it("delegates handoff through context and command contexts", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const handoff = vi.fn().mockResolvedValue({ cancelled: false, savedPath: "/tmp/handoff.md" });
+
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: async () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => "medium",
+					setThinkingLevel: () => false,
+					getSessionName: () => undefined,
+					setSessionName: () => false,
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					handoff,
+					getSystemPrompt: () => [],
+				},
+				{
+					getContextUsage: () => undefined,
+					waitForIdle: async () => {},
+					newSession: async () => ({ cancelled: false }),
+					branch: async () => ({ cancelled: false }),
+					navigateTree: async () => ({ cancelled: false }),
+					compact: async () => {},
+					switchSession: async () => ({ cancelled: false }),
+					reload: async () => {},
+				},
+			);
+
+			expect(await runner.createContext().handoff("focus")).toEqual({
+				cancelled: false,
+				savedPath: "/tmp/handoff.md",
+			});
+			expect(handoff).toHaveBeenNthCalledWith(1, "focus");
+
+			expect(await runner.createCommandContext().handoff("command focus")).toEqual({
+				cancelled: false,
+				savedPath: "/tmp/handoff.md",
+			});
+			expect(handoff).toHaveBeenNthCalledWith(2, "command focus");
+		});
+	});
+
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `

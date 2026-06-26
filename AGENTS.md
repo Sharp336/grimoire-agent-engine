@@ -28,6 +28,20 @@ Unless user tells you exactly what to write:
 - **Never comment on GitHub** (issues, PRs, discussions).
 - **Never create issues on GitHub**.
 
+
+## Downstream Fork Maintenance
+
+This repo is maintained as a thin downstream variant that should stay as close to upstream as possible.
+
+- Treat the upstream-tracking branch as a **sacred mirror**: fast-forward only, no local customization commits mixed into upstream sync.
+- Keep downstream changes as a **small patch stack** on top of current upstream, ideally on a dedicated downstream branch or integration worktree.
+- **Never mix** "sync from upstream" and "our customization" in the same commit.
+- Prefer source-level seams (config, seeds, descriptors, extension hooks, documented overrides) over patching generated artifacts or broad local monkey-patches.
+- If a generated file changes, commit it **with** the source-of-truth edit that produced it.
+- Upstream generally useful fixes quickly; the goal is to keep the downstream delta small and legible.
+- Every downstream-only maintenance trap or runtime quirk should get a durable retrieval surface: `docs/solutions/` for repo behavior, `AGENTS.md` when it changes how future agents should debug or maintain the fork.
+- For upstream refreshes, preferred flow: fresh worktree from current upstream -> replay/rebase the downstream patch stack -> run focused proofs on touched areas -> only then advance the downstream branch.
+- **Never** treat uncommitted local state as the customization layer. Preserve WIP separately, then re-apply it onto a fresh upstream-based worktree.
 ## Code Quality
 
 - No `any` unless absolutely necessary.
