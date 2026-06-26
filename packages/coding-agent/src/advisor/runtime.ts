@@ -4,6 +4,7 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { logger } from "@oh-my-pi/pi-utils";
 import { obfuscateToolArguments, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatSessionHistoryMarkdown, PRIMARY_CONTEXT_CUSTOM_TYPES } from "../session/session-history-format";
+import type { AdvisorInvestigationUpdateBatch } from "../evidence/types";
 
 /** Minimal slice of `Agent` the runtime drives — satisfied by pi-agent-core `Agent`. */
 export interface AdvisorAgent {
@@ -30,11 +31,15 @@ export interface AdvisorRuntimeHost {
 	 * the primary's next compaction triggers {@link AdvisorRuntime.reset}).
 	 */
 	maintainContext?(incomingTokens: number): Promise<boolean>;
+	claimInvestigationUpdates?(): Promise<AdvisorInvestigationUpdateBatch | null>;
+	releaseInvestigationUpdates?(ids: readonly string[]): Promise<void>;
+	markInvestigationUpdatesDelivered?(ids: readonly string[]): Promise<void>;
 }
 
 interface PendingDelta {
 	text: string;
 	turns: number;
+	investigationIds: string[];
 }
 
 interface CatchupWaiter {
@@ -54,6 +59,7 @@ export class AdvisorRuntime {
 	#seenContext = new Map<string, string>();
 	#pending: PendingDelta[] = [];
 	#busy = false;
+	#drainRequested = false;
 	#backlog = 0;
 	#consecutiveFailures = 0;
 	#latestMessages?: AgentMessage[];
@@ -81,11 +87,11 @@ export class AdvisorRuntime {
 		this.#latestMessages = all;
 		const render = this.#renderDelta(all);
 		if (render) {
-			this.#pending.push({ text: render, turns: 1 });
+			this.#pending.push({ text: render.text, turns: 1, investigationIds: render.investigationIds });
 			this.#backlog++;
 			this.#notifyWaiters();
-			void this.#drain();
 		}
+		void this.#drain();
 	}
 
 	waitForCatchup(maxMs: number, threshold: number, signal?: AbortSignal): Promise<void> {
@@ -111,6 +117,7 @@ export class AdvisorRuntime {
 	dispose(): void {
 		this.disposed = true;
 		this.#epoch++;
+		this.#releaseInvestigationIds(this.#takePendingInvestigationIds());
 		this.#pending = [];
 		this.#backlog = 0;
 		this.#consecutiveFailures = 0;
@@ -122,6 +129,7 @@ export class AdvisorRuntime {
 
 	#resetAdvisorContext(clearBacklog: boolean, wakeWaiters: boolean): void {
 		this.#lastCount = 0;
+		this.#releaseInvestigationIds(this.#takePendingInvestigationIds());
 		this.#pending = [];
 		this.#consecutiveFailures = 0;
 		this.#seenContext.clear();
@@ -158,6 +166,7 @@ export class AdvisorRuntime {
 	 */
 	seedTo(count: number): void {
 		this.#lastCount = count;
+		this.#releaseInvestigationIds(this.#takePendingInvestigationIds());
 		this.#pending = [];
 		this.#backlog = 0;
 		this.#consecutiveFailures = 0;
@@ -165,7 +174,7 @@ export class AdvisorRuntime {
 		this.#wakeAllWaiters();
 	}
 
-	#renderDelta(messages?: AgentMessage[]): string | null {
+	#renderDelta(messages?: AgentMessage[]): { text: string; investigationIds: string[] } | null {
 		const all = messages ?? this.#latestMessages ?? this.host.snapshotMessages();
 		if (all.length < this.#lastCount) {
 			this.#lastCount = all.length;
@@ -174,7 +183,7 @@ export class AdvisorRuntime {
 		}
 		const delta = all
 			.slice(this.#lastCount)
-			.filter(m => !(m.role === "custom" && (m as { customType?: string }).customType === "advisor"))
+			.filter(m => !(customMessageType(m) === "advisor"))
 			.map(m => this.#dedupContextMessage(m));
 		this.#lastCount = all.length;
 		if (delta.length === 0) return null;
@@ -187,7 +196,7 @@ export class AdvisorRuntime {
 			expandPrimaryContext: true,
 		});
 		if (!md.trim()) return null;
-		return `### Session update\n\n${md}`;
+		return { text: `### Session update\n\n${md}`, investigationIds: [] };
 	}
 
 	/**
@@ -199,10 +208,9 @@ export class AdvisorRuntime {
 	 * input shares the live primary transcript and must never be mutated.
 	 */
 	#dedupContextMessage(msg: AgentMessage): AgentMessage {
-		if (msg.role !== "custom") return msg;
-		const type = (msg as { customType?: string }).customType;
+		const type = customMessageType(msg);
 		if (!type || !PRIMARY_CONTEXT_CUSTOM_TYPES.has(type)) return msg;
-		const content = (msg as { content?: unknown }).content;
+		const content = customMessageStringContent(msg);
 		if (typeof content !== "string") return msg;
 		if (this.#seenContext.get(type) === content) {
 			return { ...(msg as object), content: "(unchanged — still in effect)" } as AgentMessage;
@@ -226,17 +234,69 @@ export class AdvisorRuntime {
 		}
 	}
 
+
+	#takePendingInvestigationIds(): string[] {
+		const ids: string[] = [];
+		for (const delta of this.#pending) {
+			ids.push(...delta.investigationIds);
+		}
+		return [...new Set(ids)];
+	}
+
+	#releaseInvestigationIds(ids: readonly string[]): void {
+		if (ids.length === 0) return;
+		void this.host.releaseInvestigationUpdates?.(ids).catch(err => {
+			logger.debug("advisor investigation release failed", { err: String(err) });
+		});
+	}
+
+	async #markInvestigationIdsDelivered(ids: readonly string[]): Promise<void> {
+		if (ids.length === 0) return;
+		try {
+			await this.host.markInvestigationUpdatesDelivered?.(ids);
+		} catch (err) {
+			logger.debug("advisor investigation delivery mark failed", { err: String(err) });
+			this.#releaseInvestigationIds(ids);
+		}
+	}
+
+	#combineBatchText(primaryText: string, investigationText: string | null): string | null {
+		if (primaryText && investigationText) return `${primaryText}\n\n### Investigation updates\n\n${investigationText}`;
+		if (primaryText) return primaryText;
+		if (investigationText) return `### Investigation updates\n\n${investigationText}`;
+		return null;
+	}
 	async #drain(): Promise<void> {
-		if (this.#busy) return;
+		if (this.#busy) {
+			this.#drainRequested = true;
+			return;
+		}
 		this.#busy = true;
 		try {
-			while (!this.disposed && this.#pending.length) {
+			while (!this.disposed) {
+				this.#drainRequested = false;
 				const popped = this.#pending.splice(0);
+				let update: AdvisorInvestigationUpdateBatch | null = null;
+				if (this.host.claimInvestigationUpdates) {
+					try {
+						update = await this.host.claimInvestigationUpdates();
+					} catch (err) {
+						logger.debug("advisor investigation claim failed", { err: String(err) });
+					}
+				}
+				if (popped.length === 0 && update === null) break;
 				const epoch = this.#epoch;
 				// Each delta already opens with a `### Session update` heading, so
 				// join with a blank line rather than a `---` rule.
-				const candidateBatch = popped.map(b => b.text).join("\n\n");
+				const candidatePrimaryText = popped.map(b => b.text).join("\n\n");
+				const investigationText = update?.text ?? null;
+				const combinedIds = [...popped.flatMap(b => b.investigationIds), ...(update?.ids ?? [])];
 				const turnsCovered = popped.reduce((sum, b) => sum + b.turns, 0);
+				const candidateBatch = this.#combineBatchText(candidatePrimaryText, investigationText);
+				if (candidateBatch === null) {
+					this.#releaseInvestigationIds(combinedIds);
+					continue;
+				}
 				const incomingTokens = estimateTokens({
 					role: "user",
 					content: candidateBatch,
@@ -252,7 +312,10 @@ export class AdvisorRuntime {
 					}
 				}
 				// A reset/dispose during context maintenance invalidates this batch.
-				if (this.#epoch !== epoch) continue;
+				if (this.#epoch !== epoch) {
+					this.#releaseInvestigationIds(combinedIds);
+					continue;
+				}
 
 				let batch: string | null;
 				let finalTurns: number;
@@ -260,7 +323,8 @@ export class AdvisorRuntime {
 					// Promotion could not fit the advisor's context — re-prime.
 					const newTurns = this.#pending.reduce((sum, b) => sum + b.turns, 0);
 					this.#resetAdvisorContext(false, false);
-					batch = this.#renderDelta(this.#latestMessages);
+					const rerendered = this.#renderDelta(this.#latestMessages);
+					batch = this.#combineBatchText(rerendered?.text ?? "", investigationText);
 					finalTurns = turnsCovered + newTurns;
 				} else {
 					batch = candidateBatch;
@@ -268,6 +332,7 @@ export class AdvisorRuntime {
 				}
 
 				if (this.disposed || batch === null) {
+					this.#releaseInvestigationIds(combinedIds);
 					this.#backlog = Math.max(0, this.#backlog - finalTurns);
 					this.#notifyWaiters();
 					continue;
@@ -276,6 +341,7 @@ export class AdvisorRuntime {
 				let success = false;
 				try {
 					await this.agent.prompt(batch);
+					if (combinedIds.length > 0) await this.#markInvestigationIdsDelivered(combinedIds);
 					success = true;
 					this.#consecutiveFailures = 0;
 				} catch (err) {
@@ -283,19 +349,23 @@ export class AdvisorRuntime {
 					// reset itself, not a transient advisor failure. Drop the stale batch
 					// (reset already cleared #pending and rewound the cursor) instead of
 					// requeuing it into the post-reset conversation.
-					if (this.#epoch !== epoch) continue;
+					if (this.#epoch !== epoch) {
+						this.#releaseInvestigationIds(combinedIds);
+						continue;
+					}
 					logger.debug("advisor turn failed", { err: String(err) });
 					this.#consecutiveFailures++;
 					if (this.#consecutiveFailures >= 3) {
 						logger.warn("advisor failed consecutively 3 times; dropping backlog to prevent stall");
 						this.#consecutiveFailures = 0;
+						this.#releaseInvestigationIds(combinedIds);
 						// The dropped batch may carry primary-context we never delivered; drop
 						// the seen-state too so the next turn re-expands it instead of marking
 						// it "unchanged" against content the advisor never received.
 						this.#seenContext.clear();
 						success = true;
 					} else {
-						this.#pending.unshift({ text: batch, turns: finalTurns });
+						this.#pending.unshift({ text: batch, turns: finalTurns, investigationIds: combinedIds });
 						await Bun.sleep(this.retryDelayMs);
 					}
 				}
@@ -307,6 +377,9 @@ export class AdvisorRuntime {
 			}
 		} finally {
 			this.#busy = false;
+			if (this.#drainRequested && !this.disposed) {
+				void this.#drain();
+			}
 		}
 	}
 }
@@ -421,6 +494,18 @@ function obfuscateAdvisorMessage(obfuscator: SecretObfuscator, message: AgentMes
 		default:
 			return message;
 	}
+}
+
+function customMessageType(message: AgentMessage): string | undefined {
+	if (message.role !== "custom") return undefined;
+	if (!("customType" in message) || typeof message.customType !== "string") return undefined;
+	return message.customType;
+}
+
+function customMessageStringContent(message: AgentMessage): string | undefined {
+	if (message.role !== "custom") return undefined;
+	if (!("content" in message) || typeof message.content !== "string") return undefined;
+	return message.content;
 }
 
 function obfuscateAdvisorDelta(obfuscator: SecretObfuscator, messages: AgentMessage[]): AgentMessage[] {

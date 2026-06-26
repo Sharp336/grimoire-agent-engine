@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a GitLab CLI tool for `glab`-backed project, issue, merge request, and pipeline operations, including TUI rendering and discovery support.
+- Added advisor investigations as an out-of-band evidence sidecar that writes durable artifacts without giving the advisor execution tools.
+
 ## [16.1.20] - 2026-06-25
 
 ### Fixed

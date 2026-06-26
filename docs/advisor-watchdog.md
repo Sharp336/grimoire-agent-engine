@@ -80,6 +80,12 @@ The advisor receives a hard-isolated read-only tool set:
 
 The read/search/find tools are built against a distinct `ToolSession` whose session id is suffixed with `-advisor`. The advisor therefore does not share the primary agent's file snapshots, seen-lines tracking, conflict state, summary cache, or edit/yield capabilities.
 
+### Out-of-band investigations
+
+When `advisor.investigations.enabled` is on, the advisor also gets `request_investigation`. This tool does not give the advisor execution powers. It queues a durable evidence request and returns immediately; a separate sidecar worker performs docs/web/source research or, when `advisor.investigations.exec` is enabled, empirical probes in an isolated disposable repo snapshot.
+
+Investigation results are written as `artifact://...` evidence files under the owning session. Later advisor turns see only a concise investigation update and can advise the main agent with the artifact pointer if the evidence changes guidance. The advisor itself still cannot run commands, edit files, approve actions, or mutate session state.
+
 The `advise` tool accepts one note and an optional severity:
 
 | Severity | Delivery | Intended use |
