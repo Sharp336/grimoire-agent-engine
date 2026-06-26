@@ -10,7 +10,20 @@ import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
 import * as git from "../../utils/git";
 import { sanitizeStatusText } from "../shared";
-import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
+import { getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
+
+/** Render a visual context-usage progress bar. */
+function renderContextBar(
+	contextPercent: number | null | undefined,
+	contextWindow: number,
+	barWidth: number = 10,
+): string {
+	const pct = contextPercent ?? 0;
+	const filled = Math.round((pct / 100) * barWidth);
+	const empty = barWidth - filled;
+	const bar = `${"█".repeat(filled)}${"░".repeat(empty)}`;
+	return `${bar} ${pct.toFixed(0)}%`;
+}
 
 /**
  * Footer component that shows pwd, token stats, and context usage
@@ -142,7 +155,6 @@ export class FooterComponent implements Component {
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
-		const contextTokens = contextUsage?.tokens ?? 0;
 		const contextPercentValue = contextWindow > 0 ? (contextUsage?.percent ?? 0) : null;
 
 		// Replace home directory with ~
@@ -184,16 +196,15 @@ export class FooterComponent implements Component {
 			if (billingParts.length > 0) statsParts.push(billingParts.join(" "));
 		}
 
-		// Colorize context percentage based on usage
+		// Render context usage as a visual progress bar
 		let contextPercentStr: string;
 		const autoIndicator = this.#autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens)}${autoIndicator}`;
+		const barDisplay = `${renderContextBar(contextPercentValue, contextWindow)}${autoIndicator}`;
 		if (contextUsage && contextPercentValue !== null) {
 			const color = getContextUsageThemeColor(getContextUsageLevel(contextPercentValue, contextWindow));
-			contextPercentStr =
-				color === "statusLineContext" ? contextPercentDisplay : theme.fg(color, contextPercentDisplay);
+			contextPercentStr = color === "statusLineContext" ? barDisplay : theme.fg(color, barDisplay);
 		} else {
-			contextPercentStr = contextPercentDisplay;
+			contextPercentStr = barDisplay;
 		}
 		statsParts.push(contextPercentStr);
 
