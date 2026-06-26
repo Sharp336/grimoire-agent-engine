@@ -78,7 +78,7 @@ loop:
     budget: loop-budget.md
 ```
 
-Verifier commands must be argv arrays (or objects with an `argv` array) and, by default, must use package-script forms such as `["bun", "run", "check"]`, `["pnpm", "run", "test"]`, or `["npm", "test"]`. Shell strings, shell executables, custom binaries, and arbitrary absolute paths are intentionally not accepted. Treat loop specs as trusted executable configuration: do not run specs modified by untrusted PRs or branches.
+Verifier commands must be argv arrays (or objects with an `argv` array) and, by default, must use package-script forms such as `["bun", "run", "check"]`, `["pnpm", "run", "test"]`, or `["npm", "test"]`. Shell strings, shell executables, custom binaries, and arbitrary absolute paths are intentionally not accepted. OMP reads the selected package script, validates it fail-closed, snapshots verifier inputs, then executes the parsed local runtime command directly with a minimal verifier environment and sanitized `PATH` instead of delegating to package-manager script `PATH` lookup. The selected package script must execute a local verifier entrypoint through an approved runtime such as `node verify.js` or `bun ./verify.ts`; selected `pre<name>`/`post<name>` lifecycle hooks, nested package-manager invocations, runner subcommands, pre-entrypoint flags, shell metacharacters, bare package imports, dynamic import/require forms, dangerous builtins, dynamic-code APIs, process-execution APIs, URL operands, directories, symlinks, unsafe `PATH` values, and verifier references that escape the project are rejected before the agent runs. Treat loop specs and their package scripts as trusted executable configuration: do not run specs modified by untrusted PRs or branches.
 
 ## Exit codes and guardrails
 
