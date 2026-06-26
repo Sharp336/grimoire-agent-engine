@@ -23,29 +23,21 @@ const EN_US_TUI_MESSAGES = {
 } as const;
 
 export type TuiMessageKey = keyof typeof EN_US_TUI_MESSAGES;
-const EN_US_TUI_MESSAGE_FALLBACK: Record<TuiMessageKey, string> = EN_US_TUI_MESSAGES;
-type TuiMessageCatalog = Record<typeof DEFAULT_TUI_LOCALE, Record<TuiMessageKey, string>> &
-	Record<string, Partial<Record<TuiMessageKey, string>>>;
+export type TuiMessageValues = Record<string, boolean | number | string>;
+export type TuiMessageBundle = Partial<Record<TuiMessageKey, string>>;
+export type TuiMessageCatalog = Record<typeof DEFAULT_TUI_LOCALE, Record<TuiMessageKey, string>> &
+	Record<string, TuiMessageBundle>;
+export type TuiMessageOptions = { locale?: string };
+export type TuiMessageResolver = (key: TuiMessageKey, values?: TuiMessageValues, options?: TuiMessageOptions) => string;
 
 const TUI_MESSAGES = {
 	[DEFAULT_TUI_LOCALE]: EN_US_TUI_MESSAGES,
 } satisfies TuiMessageCatalog;
 
 export type TuiLocale = keyof typeof TUI_MESSAGES;
-export type TuiMessageValues = Record<string, boolean | number | string>;
-
-let currentTuiLocale: string = DEFAULT_TUI_LOCALE;
 
 export function isSupportedTuiLocale(locale: string): locale is TuiLocale {
 	return locale in TUI_MESSAGES;
-}
-
-export function setTuiLocale(locale: string): void {
-	currentTuiLocale = locale;
-}
-
-export function getTuiLocale(): string {
-	return currentTuiLocale;
 }
 
 function interpolate(template: string, values: TuiMessageValues | undefined): string {
@@ -56,10 +48,14 @@ function interpolate(template: string, values: TuiMessageValues | undefined): st
 	});
 }
 
-export function tuiMessage(key: TuiMessageKey, values?: TuiMessageValues, options?: { locale?: string }): string {
-	const locale = options?.locale ?? currentTuiLocale;
-	const fallback = EN_US_TUI_MESSAGE_FALLBACK[key];
-	const messages = isSupportedTuiLocale(locale) ? TUI_MESSAGES[locale] : EN_US_TUI_MESSAGE_FALLBACK;
-	const template = messages[key] ?? fallback;
-	return interpolate(template, values);
+export function createTuiMessageResolver(catalog: TuiMessageCatalog): TuiMessageResolver {
+	const fallbackMessages = catalog[DEFAULT_TUI_LOCALE];
+	return (key, values, options) => {
+		const locale = options?.locale ?? DEFAULT_TUI_LOCALE;
+		const messages = catalog[locale] ?? fallbackMessages;
+		const template = messages[key] ?? fallbackMessages[key];
+		return interpolate(template, values);
+	};
 }
+
+export const tuiMessage = createTuiMessageResolver(TUI_MESSAGES);

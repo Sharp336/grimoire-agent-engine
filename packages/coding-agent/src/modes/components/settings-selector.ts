@@ -653,6 +653,7 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			empty.push({ id, label: `${icon} ${settingTabLabel(id)}`, short: icon, muted: true });
 		}
+		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({
 			id: "plugins",
 			label: `${theme.icon.package} ${tuiMessage("settings.tabs.plugins")}`,

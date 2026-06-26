@@ -1,29 +1,38 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
+	createTuiMessageResolver,
 	DEFAULT_TUI_LOCALE,
-	getTuiLocale,
 	isSupportedTuiLocale,
-	setTuiLocale,
+	type TuiMessageCatalog,
+	type TuiMessageKey,
 	tuiMessage,
 } from "@oh-my-pi/pi-coding-agent/i18n";
 
+const TEST_EN_US_MESSAGES = {
+	"settings.tabs.appearance": "Appearance",
+	"settings.tabs.model": "Model",
+	"settings.tabs.interaction": "Interaction",
+	"settings.tabs.context": "Context",
+	"settings.tabs.memory": "Memory",
+	"settings.tabs.files": "Files",
+	"settings.tabs.shell": "Shell",
+	"settings.tabs.tools": "Tools",
+	"settings.tabs.tasks": "Tasks",
+	"settings.tabs.providers": "Providers",
+	"settings.tabs.plugins": "Plugins",
+	"settings.tabs.searchMatchLabel": "{label} ({count})",
+	"historySearch.title": "Search History",
+	"historySearch.empty": "No history yet",
+	"historySearch.noMatches": "No matching history",
+	"historySearch.hint.navigate": "navigate",
+	"historySearch.hint.select": "select",
+	"historySearch.hint.cancel": "cancel",
+	"historySearch.time.now": "now",
+} satisfies Record<TuiMessageKey, string>;
+
 describe("i18n localization foundation", () => {
-	let originalLocale: string;
-
-	beforeEach(() => {
-		originalLocale = getTuiLocale();
-	});
-
-	afterEach(() => {
-		setTuiLocale(originalLocale);
-	});
-
 	it("should have DEFAULT_TUI_LOCALE as en-US", () => {
 		expect(DEFAULT_TUI_LOCALE).toBe("en-US");
-	});
-
-	it("should default to en-US locale", () => {
-		expect(getTuiLocale()).toBe("en-US");
 	});
 
 	it("should correctly detect supported and unsupported locales", () => {
@@ -35,10 +44,19 @@ describe("i18n localization foundation", () => {
 	it("should fall back to English when an explicit unsupported locale is requested", () => {
 		const msgWithOptions = tuiMessage("settings.tabs.appearance", undefined, { locale: "fr-FR" });
 		expect(msgWithOptions).toBe("Appearance");
+	});
 
-		setTuiLocale("fr-FR");
-		const msgWithGlobal = tuiMessage("settings.tabs.appearance");
-		expect(msgWithGlobal).toBe("Appearance");
+	it("should fall back per key when a supported locale omits a message", () => {
+		const testMessages = {
+			[DEFAULT_TUI_LOCALE]: TEST_EN_US_MESSAGES,
+			"x-test": {
+				"historySearch.title": "Localized History",
+			},
+		} satisfies TuiMessageCatalog;
+		const testMessage = createTuiMessageResolver(testMessages);
+
+		expect(testMessage("historySearch.title", undefined, { locale: "x-test" })).toBe("Localized History");
+		expect(testMessage("historySearch.empty", undefined, { locale: "x-test" })).toBe("No history yet");
 	});
 
 	it("should interpolate placeholders correctly", () => {
