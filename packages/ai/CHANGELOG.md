@@ -579,6 +579,7 @@
 
 - Fixed the platform OpenAI Responses and Codex websocket stale-chain classifiers missing the "Unsupported parameter: previous_response_id" rejection phrasing (FastAPI-style `detail` body with no `error.code`), so a chained turn now falls back to a full-transcript replay instead of surfacing the 400
 - Fixed the HTTP-400 raw-request dump for Codex SSE to record the body actually sent on the wire instead of the pre-transport request body, which made chained-request failures look like the rejected parameter was never sent
+- Added `atomic-chat` built-in provider registration for keyless local OpenAI-compatible discovery.
 
 ## [15.11.7] - 2026-06-12
 

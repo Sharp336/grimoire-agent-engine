@@ -11,18 +11,26 @@ describe("ModelRegistry Atomic Chat provider", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
 	let authStorage: AuthStorage;
+	let originalBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-atomic-chat-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
 		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		originalBaseUrl = Bun.env.ATOMIC_CHAT_BASE_URL;
+		delete Bun.env.ATOMIC_CHAT_BASE_URL;
 	});
 
 	afterEach(() => {
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
+		}
+		if (originalBaseUrl === undefined) {
+			delete Bun.env.ATOMIC_CHAT_BASE_URL;
+		} else {
+			Bun.env.ATOMIC_CHAT_BASE_URL = originalBaseUrl;
 		}
 	});
 

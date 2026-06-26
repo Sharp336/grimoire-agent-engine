@@ -1215,6 +1215,9 @@
 ### Security
 
 - Rejected non-local `ws://` relay URLs and invalid room keys when parsing collab links to prevent insecure or malformed session joins
+### Added
+
+- Added implicit `atomic-chat` provider discovery from `http://127.0.0.1:1337/v1` when Atomic Chat's Local API Server is running.
 
 ## [15.11.7] - 2026-06-12
 

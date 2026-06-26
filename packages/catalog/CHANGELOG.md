@@ -297,6 +297,7 @@
 ### Fixed
 
 - Fixed Antigravity `gemini-3.1-pro --thinking high` failing with `Cloud Code Assist API error (400): Request contains an invalid argument.` — the upstream `gemini-3.1-pro-high` deployment rejects every `streamGenerateContent` request on both CCA endpoints while discovery still advertises it. High effort now routes to `gemini-pro-agent` (the same "Gemini 3.1 Pro (High)" model, verified accepting the identical request body), and the model-cache fingerprint version was bumped (`merge-v2` → `merge-v3`) so existing fresh caches refetch discovery and pick up the corrected routing immediately.
+- Added `atomic-chat` provider descriptor and OpenAI-compatible model manager options for local `/v1/models` discovery.
 
 ## [15.11.7] - 2026-06-12
 
