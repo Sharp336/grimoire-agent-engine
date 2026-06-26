@@ -33,6 +33,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { listAllRpcSessions, listRpcSessions, resolveRpcSession } from "./rpc-session-listing";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -801,6 +802,18 @@ export async function runRpcMode(
 					contextUsage: session.getContextUsage(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "list_sessions": {
+				return success(id, "list_sessions", await listRpcSessions(session, command));
+			}
+
+			case "list_all_sessions": {
+				return success(id, "list_all_sessions", await listAllRpcSessions());
+			}
+
+			case "resolve_session": {
+				return success(id, "resolve_session", await resolveRpcSession(session, command));
 			}
 
 			case "get_available_commands": {

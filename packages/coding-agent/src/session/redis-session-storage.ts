@@ -19,10 +19,24 @@ export interface RedisSessionStorageClient {
 	append(key: string, value: string): Promise<number>;
 	del(...keys: string[]): Promise<number>;
 	rename(src: string, dst: string): Promise<unknown>;
+	renamenx(src: string, dst: string): Promise<number>;
 	scan(cursor: string, ...args: string[]): Promise<[string, string[]]>;
 	hset(key: string, field: string, value: string): Promise<unknown>;
 	hgetall(key: string): Promise<Record<string, string>>;
 	hdel(key: string, ...fields: string[]): Promise<unknown>;
+}
+
+function enoent(path: string): NodeJS.ErrnoException {
+	const err = new Error(`ENOENT: no such file, '${path}'`) as NodeJS.ErrnoException;
+	err.code = "ENOENT";
+	err.errno = -2;
+	err.path = path;
+	err.syscall = "rename";
+	return err;
+}
+
+function isRedisMissingKeyError(err: unknown): boolean {
+	return /\bno such key\b/i.test(toError(err).message);
 }
 
 export interface RedisSessionStorageOptions {
@@ -158,6 +172,28 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 				error: toError(err).message,
 			});
 		}
+	}
+
+	async moveIfAbsent(src: string, dst: string, mtimeMs: number): Promise<boolean> {
+		let moved: number;
+		try {
+			moved = await this.#client.renamenx(this.#fileKey(src), this.#fileKey(dst));
+		} catch (err) {
+			if (isRedisMissingKeyError(err)) throw enoent(src);
+			throw err;
+		}
+		if (moved === 0) return false;
+		try {
+			await this.#client.hdel(this.#metaKey(), src);
+			await this.#client.hset(this.#metaKey(), dst, String(mtimeMs));
+		} catch (err) {
+			logger.warn("Redis session storage meta rename failed", {
+				src,
+				dst,
+				error: toError(err).message,
+			});
+		}
+		return true;
 	}
 
 	#fileKey(path: string): string {

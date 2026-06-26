@@ -120,6 +120,17 @@ function createFakeRedis(): FakeRedis {
 			strings.delete(src);
 			return "OK";
 		},
+		async renamenx(src, dst) {
+			record("renamenx", [src, dst]);
+			checkFailure("renamenx");
+			if (!strings.has(src)) {
+				throw new Error("ERR no such key");
+			}
+			if (strings.has(dst)) return 0;
+			strings.set(dst, strings.get(src) as string);
+			strings.delete(src);
+			return 1;
+		},
 		async scan(cursor, ...rest) {
 			record("scan", [cursor, ...rest]);
 			checkFailure("scan");
@@ -292,6 +303,22 @@ describe("RedisSessionStorage", () => {
 		expect(redis.strings.has("omp:sessions:file:/sessions/p/orig.jsonl")).toBe(false);
 	});
 
+	it("renameIfAbsent keeps the existing destination and uses RENAMENX", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "from-a\n");
+		await storage.writeText("/sessions/p/b.jsonl", "from-b\n");
+
+		expect(await storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/b.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/a.jsonl")).toBe("from-a\n");
+		expect(await storage.readText("/sessions/p/b.jsonl")).toBe("from-b\n");
+		expect(redis.calls.some(call => call.method === "renamenx")).toBe(false);
+
+		expect(await storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/c.jsonl")).toBe(true);
+		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/c.jsonl")).toBe("from-a\n");
+		expect(redis.calls.some(call => call.method === "renamenx")).toBe(true);
+	});
+
 	it("rename rolls back the index when Redis RENAME fails", async () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		await storage.writeText("/sessions/p/a.jsonl", "keep\n");
@@ -303,6 +330,35 @@ describe("RedisSessionStorage", () => {
 
 		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(true);
 		expect(storage.existsSync("/sessions/p/b.jsonl")).toBe(false);
+	});
+
+	it("renameIfAbsent keeps the moved content when Redis metadata update fails", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "from-a\n");
+		redis.failNext("hdel", new Error("ERR redis rejected metadata update"));
+
+		await expect(storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/b.jsonl")).resolves.toBe(true);
+
+		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(false);
+		expect(storage.existsSync("/sessions/p/b.jsonl")).toBe(true);
+		expect(redis.strings.has("omp:sessions:file:/sessions/p/a.jsonl")).toBe(false);
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/b.jsonl")).toBe("from-a\n");
+	});
+
+	it("renameIfAbsent rejects ENOENT before no-clobber when the indexed source key is missing", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "from-a\n");
+		await storage.writeText("/sessions/p/b.jsonl", "from-b\n");
+		redis.strings.delete("omp:sessions:file:/sessions/p/a.jsonl");
+
+		await expect(storage.renameIfAbsent("/sessions/p/a.jsonl", "/sessions/p/b.jsonl")).rejects.toMatchObject({
+			code: "ENOENT",
+			path: "/sessions/p/a.jsonl",
+		});
+
+		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(true);
+		expect(storage.existsSync("/sessions/p/b.jsonl")).toBe(true);
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/b.jsonl")).toBe("from-b\n");
 	});
 
 	it("refresh() reloads the metadata index from Redis after out-of-band writes", async () => {

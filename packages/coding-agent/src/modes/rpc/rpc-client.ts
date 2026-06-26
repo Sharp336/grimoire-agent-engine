@@ -23,7 +23,10 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcListSessionsResult,
+	RpcResolveSessionResult,
 	RpcResponse,
+	RpcSessionInfo,
 	RpcSessionState,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
@@ -464,6 +467,34 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
 		return this.#getData(response);
+	}
+
+	/**
+	 * List sessions for the current or specified workspace.
+	 */
+	async listSessions(options?: { cwd?: string }): Promise<RpcListSessionsResult> {
+		const response = await this.#send({ type: "list_sessions", cwd: options?.cwd });
+		return this.#getData(response);
+	}
+
+	/**
+	 * List all sessions across workspaces.
+	 */
+	async listAllSessions(): Promise<RpcSessionInfo[]> {
+		const response = await this.#send({ type: "list_all_sessions" });
+		return this.#getData<{ sessions: RpcSessionInfo[] }>(response).sessions;
+	}
+
+	/**
+	 * Resolve a session id/prefix/path against the current or specified workspace.
+	 */
+	async resolveSession(session: string, options?: { cwd?: string }): Promise<RpcResolveSessionResult["match"]> {
+		const response = await this.#send({
+			type: "resolve_session",
+			session,
+			cwd: options?.cwd,
+		});
+		return this.#getData<RpcResolveSessionResult>(response).match;
 	}
 
 	/**

@@ -5,6 +5,15 @@ import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@
 
 const utf8Decoder = new TextDecoder("utf-8");
 
+function enoent(p: string): NodeJS.ErrnoException {
+	const err = new Error(`ENOENT: no such file, '${p}'`) as NodeJS.ErrnoException;
+	err.code = "ENOENT";
+	err.errno = -2;
+	err.path = p;
+	err.syscall = "open";
+	return err;
+}
+
 export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
@@ -41,6 +50,8 @@ export interface SessionStorage {
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
+	/** Move `path` to `nextPath` only when `nextPath` is absent. Returns false without overwriting. */
+	renameIfAbsent(path: string, nextPath: string): Promise<boolean>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
@@ -280,6 +291,54 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
+	async renameIfAbsent(path: string, nextPath: string): Promise<boolean> {
+		const verifySourceExists = async (): Promise<void> => {
+			try {
+				await fs.promises.access(path, fs.constants.F_OK);
+			} catch (err) {
+				throw toError(err);
+			}
+		};
+
+		try {
+			await fs.promises.link(path, nextPath);
+		} catch (err) {
+			if (hasFsCode(err, "EEXIST")) {
+				await verifySourceExists();
+				return false;
+			}
+			if (!hasFsCode(err, "EXDEV") && !hasFsCode(err, "EPERM") && !hasFsCode(err, "ENOTSUP")) {
+				throw toError(err);
+			}
+			try {
+				await fs.promises.copyFile(path, nextPath, fs.constants.COPYFILE_EXCL);
+			} catch (copyErr) {
+				if (hasFsCode(copyErr, "EEXIST")) {
+					await verifySourceExists();
+					return false;
+				}
+				throw toError(copyErr);
+			}
+		}
+		try {
+			await fs.promises.unlink(path);
+		} catch (err) {
+			try {
+				await fs.promises.unlink(nextPath);
+			} catch (rollbackErr) {
+				if (!isEnoent(rollbackErr)) {
+					logger.warn("Failed to roll back no-clobber rename target", {
+						sourcePath: path,
+						targetPath: nextPath,
+						error: toError(rollbackErr).message,
+					});
+				}
+			}
+			throw toError(err);
+		}
+		return true;
+	}
+
 	unlink(path: string): Promise<void> {
 		return fs.promises.unlink(path);
 	}
@@ -510,7 +569,7 @@ export class MemorySessionStorage implements SessionStorage {
 
 	#requireEntry(path: string): MemoryFileEntry {
 		const entry = this.#files.get(path);
-		if (!entry) throw new Error(`File not found: ${path}`);
+		if (!entry) throw enoent(path);
 		return entry;
 	}
 
@@ -569,15 +628,20 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	readText(path: string): Promise<string> {
-		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
-		return Promise.resolve(materializeMemoryEntry(entry));
+		try {
+			return Promise.resolve(materializeMemoryEntry(this.#requireEntry(path)));
+		} catch (err) {
+			return Promise.reject(err);
+		}
 	}
 
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
-		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
-		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
+		try {
+			const entry = this.#requireEntry(path);
+			return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
+		} catch (err) {
+			return Promise.reject(err);
+		}
 	}
 
 	writeText(path: string, content: string): Promise<void> {
@@ -592,10 +656,19 @@ export class MemorySessionStorage implements SessionStorage {
 
 	rename(path: string, nextPath: string): Promise<void> {
 		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
+		if (!entry) return Promise.reject(enoent(path));
 		this.#files.set(nextPath, entry);
 		this.#files.delete(path);
 		return Promise.resolve();
+	}
+
+	renameIfAbsent(path: string, nextPath: string): Promise<boolean> {
+		const entry = this.#files.get(path);
+		if (!entry) return Promise.reject(enoent(path));
+		if (this.#files.has(nextPath)) return Promise.resolve(false);
+		this.#files.set(nextPath, entry);
+		this.#files.delete(path);
+		return Promise.resolve(true);
 	}
 
 	unlink(path: string): Promise<void> {
