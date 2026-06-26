@@ -14,6 +14,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/sessio
 import { sanitizeStatusText } from "../../shared";
 import { theme } from "../../theme/theme";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { findJjRoot, JJ_BRANCH_TTL_MS, queryJjBranch } from "./jj-info";
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
@@ -200,6 +201,11 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlight = false;
+	#jjRoot: string | null | undefined = undefined;
+	#jjRootCwd: string | undefined = undefined;
+	#cachedJjBranch: string | null = null;
+	#jjBranchLastFetch = 0;
+	#jjBranchInFlight = false;
 
 	// PR lookup caching (invalidated on branch/repo context changes)
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
@@ -382,6 +388,7 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
 		this.#cachedPrContext = undefined;
+		this.#jjBranchLastFetch = 0;
 	}
 	#getCurrentBranch(): string | null {
 		if (!this.#gitEnabled()) return null;
@@ -403,6 +410,37 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = head.kind === "ref" ? (head.branchName ?? head.ref) : "detached";
 
 		return this.#cachedBranch ?? null;
+	}
+
+	/**
+	 * Colocated-jj label for the `git` segment: the working-copy bookmarks +
+	 * change-id, used in place of git's detached-HEAD label. Throttled and
+	 * cached like {@link #getGitStatus} — returns the cached value immediately
+	 * and refreshes in the background; the jj root is detected once per cwd.
+	 */
+	#getJjBranch(): string | null {
+		const cwd = getProjectDir();
+		if (this.#jjRoot === undefined || this.#jjRootCwd !== cwd) {
+			this.#jjRootCwd = cwd;
+			this.#jjRoot = findJjRoot(cwd);
+			this.#cachedJjBranch = null;
+			this.#jjBranchLastFetch = 0;
+		}
+		const root = this.#jjRoot;
+		if (!root) return null;
+		if (this.#jjBranchInFlight || Date.now() - this.#jjBranchLastFetch < JJ_BRANCH_TTL_MS) {
+			return this.#cachedJjBranch;
+		}
+		this.#jjBranchInFlight = true;
+		(async () => {
+			try {
+				this.#cachedJjBranch = await queryJjBranch(root);
+			} finally {
+				this.#jjBranchLastFetch = Date.now();
+				this.#jjBranchInFlight = false;
+			}
+		})();
+		return this.#cachedJjBranch;
 	}
 
 	#isDefaultBranch(branch: string): boolean {
@@ -788,7 +826,13 @@ export class StatusLineComponent implements Component {
 			contextPercent = collabState.contextUsage.percent ?? contextPercent;
 		}
 
-		const gitBranch = includeGit || includePr ? this.#getCurrentBranch() : null;
+		// Under jj the git `branch` is unhelpful: a colocated repo parks git HEAD
+		// detached, and a secondary jj workspace has no git at all. In both cases
+		// surface the jj working-copy label (bookmarks + change-id) in the `git` slot.
+		let gitBranch = includeGit || includePr ? this.#getCurrentBranch() : null;
+		if (includeGit && (gitBranch === "detached" || gitBranch === null)) {
+			gitBranch = this.#getJjBranch() ?? gitBranch;
+		}
 		const gitStatus = includeGit ? this.#getGitStatus() : null;
 		const gitPr = includePr ? this.#lookupPr() : null;
 
