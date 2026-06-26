@@ -509,6 +509,21 @@ describe("session lifecycle commands", () => {
 		expect(notified).toBe(true);
 	});
 
+	it("/move: expands home-relative paths before moving", async () => {
+		const home = os.tmpdir();
+		const homedir = spyOn(os, "homedir").mockReturnValue(home);
+		try {
+			const { fakeSessionManager, runtime } = createRuntime();
+
+			const result = await executeAcpBuiltinSlashCommand("/move ~", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(fakeSessionManager._movedTo).toBe(home);
+		} finally {
+			homedir.mockRestore();
+		}
+	});
+
 	it("/move: refuses while streaming", async () => {
 		const { output, session, runtime } = createRuntime();
 		session.isStreaming = true;

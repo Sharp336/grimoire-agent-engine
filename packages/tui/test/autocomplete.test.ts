@@ -70,6 +70,81 @@ describe("CombinedAutocompleteProvider", () => {
 
 			expect(result).toBeNull();
 		});
+
+		it("uses slash argument completions before generic forced file completion", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-slash-force-"));
+			try {
+				fs.mkdirSync(path.join(baseDir, "src"));
+				fs.writeFileSync(path.join(baseDir, "src-file.txt"), "not a directory");
+				const provider = new CombinedAutocompleteProvider(
+					[
+						{
+							name: "move",
+							getArgumentCompletions: async prefix =>
+								prefix === "s" ? [{ value: "src/", label: "src/" }] : null,
+						},
+					],
+					baseDir,
+				);
+
+				const line = "/move s";
+				const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+				expect(result?.items.map(item => item.value)).toEqual(["src/"]);
+				expect(result?.prefix).toBe("s");
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+
+		it("suppresses generic forced file completion when slash arguments have no matches", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-slash-no-fallback-"));
+			try {
+				fs.writeFileSync(path.join(baseDir, "src-file.txt"), "not a directory");
+				const provider = new CombinedAutocompleteProvider(
+					[
+						{
+							name: "move",
+							getArgumentCompletions: async () => null,
+							exclusiveArgumentCompletions: true,
+						},
+					],
+					baseDir,
+				);
+
+				const line = "/move s";
+				const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+				expect(result).toBeNull();
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+
+		it("keeps generic forced file completion after subcommand arguments", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-subcommand-file-fallback-"));
+			try {
+				fs.writeFileSync(path.join(baseDir, "src-file.txt"), "path payload");
+				const provider = new CombinedAutocompleteProvider(
+					[
+						{
+							name: "todo",
+							getArgumentCompletions: async prefix =>
+								prefix.includes(" ") ? null : [{ value: "import ", label: "import" }],
+						},
+					],
+					baseDir,
+				);
+
+				const line = "/todo import s";
+				const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+				expect(result?.items.map(item => item.value)).toContain("src-file.txt");
+				expect(result?.prefix).toBe("s");
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
 	});
 	describe("applyCompletion", () => {
 		it("replaces the live slash command prefix when rendered suggestions are stale", () => {

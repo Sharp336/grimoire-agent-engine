@@ -1,3 +1,5 @@
+import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+
 import type { Settings } from "../config/settings";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -20,6 +22,10 @@ export interface BuiltinSlashCommand {
 	subcommands?: SubcommandDef[];
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
+	/** Optional TUI argument completion provider for slash-command arguments. */
+	getArgumentCompletions?: SlashCommandArgumentCompletions;
+	/** Suppress generic forced file completion when this completer has no matches. */
+	exclusiveArgumentCompletions?: boolean;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
 	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
 }
@@ -44,6 +50,9 @@ export interface ParsedSlashCommand {
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
  */
 export type SlashCommandResult = undefined | { consumed: true } | { prompt: string };
+export type SlashCommandArgumentCompletions = (
+	argumentPrefix: string,
+) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 
 /**
  * Runtime visible to slash-command handlers that run in text/ACP mode.

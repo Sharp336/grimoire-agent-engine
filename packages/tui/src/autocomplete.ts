@@ -180,6 +180,8 @@ export interface SlashCommand {
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
+	/** If true, an empty argument-completion result suppresses generic forced file completion. */
+	exclusiveArgumentCompletions?: boolean;
 	/** Return inline hint text for the current argument state (shown as dim ghost text after cursor) */
 	getInlineHint?(argumentText: string): string | null;
 }
@@ -402,24 +404,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					prefix: textBeforeCursor,
 				};
 			} else {
-				// Space found - complete command arguments
-				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
-				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
-
-				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
-				if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
-					return null; // No argument completion for this command
-				}
-
-				const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-				if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
-					return null;
-				}
-
-				return {
-					items: argumentSuggestions,
-					prefix: argumentText,
-				};
+				const slashArgumentSuggestions = await this.#getSlashArgumentSuggestions(commandText, spaceIndex);
+				if (!slashArgumentSuggestions) return null;
+				return slashArgumentSuggestions;
 			}
 		}
 
@@ -449,6 +436,39 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 
 		return null;
+	}
+
+	async #getSlashArgumentSuggestions(
+		commandText: string,
+		spaceIndex: number,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		const commandName = commandText.slice(1, spaceIndex);
+		const argumentText = commandText.slice(spaceIndex + 1);
+		const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+		if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
+			return null;
+		}
+
+		const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+		if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
+			return null;
+		}
+
+		return {
+			items: argumentSuggestions,
+			prefix: argumentText,
+		};
+	}
+	#shouldSuppressFileFallbackOnArgumentMiss(commandText: string, spaceIndex: number): boolean {
+		const commandName = commandText.slice(1, spaceIndex);
+		const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+		return Boolean(
+			command &&
+				"getArgumentCompletions" in command &&
+				command.getArgumentCompletions &&
+				"exclusiveArgumentCompletions" in command &&
+				command.exclusiveArgumentCompletions,
+		);
 	}
 
 	applyCompletion(
@@ -875,6 +895,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// Don't trigger if we're typing a slash command at the start of the line
 		if (textBeforeCursor.trim().startsWith("/") && !textBeforeCursor.trim().includes(" ")) {
 			return null;
+		}
+		const slashStart = findLeadingSlashCommandStart(textBeforeCursor);
+		if (slashStart !== null) {
+			const commandText = textBeforeCursor.slice(slashStart);
+			const spaceIndex = commandText.indexOf(" ");
+			if (spaceIndex !== -1) {
+				const slashArgumentSuggestions = await this.#getSlashArgumentSuggestions(commandText, spaceIndex);
+				if (slashArgumentSuggestions) return slashArgumentSuggestions;
+				if (this.#shouldSuppressFileFallbackOnArgumentMiss(commandText, spaceIndex)) return null;
+			}
 		}
 
 		// Force extract path prefix - this will always return something

@@ -29,10 +29,12 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { expandPath, normalizeWindowsDriveAliasPath } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
+import { getMoveDirectoryArgumentCompletions } from "./helpers/directory-completion";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -46,6 +48,7 @@ import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
+	SlashCommandArgumentCompletions,
 	SlashCommandResult,
 	SlashCommandRuntime,
 	SlashCommandSpec,
@@ -59,7 +62,7 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
 
 export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
-	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null;
+	getArgumentCompletions?: SlashCommandArgumentCompletions;
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
 }
@@ -1594,10 +1597,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Move the current session file",
 		inlineHint: "<path>",
 		allowArgs: true,
+		getArgumentCompletions: getMoveDirectoryArgumentCompletions,
+		exclusiveArgumentCompletions: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
-			const resolvedPath = path.resolve(runtime.cwd, command.args);
+			const expandedPath = normalizeWindowsDriveAliasPath(expandPath(command.args));
+			const resolvedPath = path.isAbsolute(expandedPath) ? expandedPath : path.resolve(runtime.cwd, expandedPath);
 			let isDirectory: boolean;
 			try {
 				isDirectory = (await fs.stat(resolvedPath)).isDirectory();
@@ -2303,6 +2309,8 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+		getArgumentCompletions: command.getArgumentCompletions,
+		exclusiveArgumentCompletions: command.exclusiveArgumentCompletions,
 	}),
 );
 
@@ -2314,8 +2322,13 @@ function materializeTuiBuiltinSlashCommand(
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
-	} else if (cmd.inlineHint) {
-		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else {
+		if (cmd.getArgumentCompletions) {
+			materialized.getArgumentCompletions = cmd.getArgumentCompletions;
+		}
+		if (cmd.inlineHint) {
+			materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+		}
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
 		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
