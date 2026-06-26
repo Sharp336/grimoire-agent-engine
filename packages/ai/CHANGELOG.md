@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `atomic-chat` built-in provider registration for keyless local OpenAI-compatible discovery.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

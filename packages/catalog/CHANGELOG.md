@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `atomic-chat` provider descriptor and OpenAI-compatible model manager options for local `/v1/models` discovery.
+
 ## [17.0.6] - 2026-07-20
 
 ### Added
