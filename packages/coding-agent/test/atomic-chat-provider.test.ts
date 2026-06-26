@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -89,5 +89,12 @@ describe("ModelRegistry Atomic Chat provider", () => {
 				Bun.env.ATOMIC_CHAT_BASE_URL = originalBaseUrl;
 			}
 		}
+	});
+
+	test("empty Atomic Chat login stays keyless for API requests", async () => {
+		await authStorage.login("atomic-chat", { onAuth: () => {}, onPrompt: async () => "" });
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		await expect(registry.getApiKeyForProvider("atomic-chat")).resolves.toBe(kNoAuth);
 	});
 });

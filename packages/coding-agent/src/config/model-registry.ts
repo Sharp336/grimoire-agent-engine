@@ -37,8 +37,13 @@ const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
 // provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
-// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
-const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
+// packages/ai/src/registry/lm-studio.ts, packages/ai/src/registry/vllm.ts, and packages/ai/src/registry/atomic-chat.ts.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>([
+	"llama-cpp-local",
+	"lm-studio-local",
+	"vllm-local",
+	"atomic-chat-local",
+]);
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -86,6 +91,12 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
 	return isAuthenticated(apiKey) && !LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey);
+}
+
+function normalizeStoredApiKey(apiKey: string | undefined | null): string | undefined {
+	if (!apiKey) return undefined;
+	if (LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey)) return kNoAuth;
+	return apiKey;
 }
 
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
@@ -1984,12 +1995,14 @@ export class ModelRegistry {
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.getApiKey(provider, sessionId, {
-			baseUrl: options?.baseUrl,
-			modelId: options?.modelId,
-			forceRefresh: options?.forceRefresh,
-			signal: options?.signal,
-		});
+		return normalizeStoredApiKey(
+			await this.authStorage.getApiKey(provider, sessionId, {
+				baseUrl: options?.baseUrl,
+				modelId: options?.modelId,
+				forceRefresh: options?.forceRefresh,
+				signal: options?.signal,
+			}),
+		);
 	}
 
 	/**
@@ -2019,7 +2032,7 @@ export class ModelRegistry {
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.peekApiKey(provider);
+		return normalizeStoredApiKey(await this.authStorage.peekApiKey(provider));
 	}
 
 	/**
