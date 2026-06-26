@@ -2,7 +2,7 @@
 
 - Spawning is non-blocking: the call returns immediately with the agent id{{#if batchEnabled}}s{{/if}} and job id{{#if batchEnabled}}s{{/if}}; each result is delivered automatically when that agent yields.
 - Parallelism = {{#if batchEnabled}}multiple `tasks[]` items in ONE call. MUST batch into one `tasks[]` (share `context` once). Separate `task` calls ONLY for a different `agent` type or unrelated `context`{{else}}multiple `task` calls in one assistant message{{/if}}.
-- If genuinely blocked on a result, wait with `job poll`; otherwise keep working. `job cancel` terminates a task and **cannot carry a message** — only for stalled/abandoned work.
+- After spawning, keep doing independent work. Results arrive automatically; use `job` only when no useful work remains. `job cancel` terminates a task and **cannot carry a message** — only for stalled/abandoned work.
 {{else}}{{#if batchEnabled}}Runs subagents synchronously — one per `tasks[]` item; a single spawn is a one-item batch.{{else}}Runs ONE subagent synchronously per call.{{/if}}
 
 - Spawning is blocking: the call returns only after the agent{{#if batchEnabled}}s{{/if}} finish; results arrive inline.
