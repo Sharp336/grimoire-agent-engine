@@ -336,10 +336,6 @@ providers:
     discovery:
       type: openai-models-list
 ```
-<<<<<<< HEAD
-
-=======
->>>>>>> aeba1c4 (fix: address Atomic Chat provider review feedback)
 
 ### Explicit provider discovery
 

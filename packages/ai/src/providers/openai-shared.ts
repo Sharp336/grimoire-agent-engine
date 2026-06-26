@@ -141,6 +141,20 @@ function resolveSakanaRequestBaseUrl(): string | undefined {
 	return normalizeSakanaRequestBaseUrl($env.SAKANA_BASE_URL) ?? normalizeSakanaRequestBaseUrl($env.FUGU_BASE_URL);
 }
 
+/** Registry sentinels for keyless local OpenAI-compatible providers — must not become Bearer tokens. */
+const OPENAI_KEYLESS_API_KEYS = new Set([
+	"N/A",
+	"llama-cpp-local",
+	"lm-studio-local",
+	"vllm-local",
+	"atomic-chat-local",
+]);
+
+export function resolveOpenAIBearerToken(apiKey: string | undefined): string | undefined {
+	if (!apiKey || OPENAI_KEYLESS_API_KEYS.has(apiKey)) return undefined;
+	return apiKey;
+}
+
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -230,7 +244,10 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
 	}
 	const requestHeaders = { ...headers };
-	headers.Authorization ??= `Bearer ${apiKey}`;
+	const bearerToken = resolveOpenAIBearerToken(apiKey);
+	if (bearerToken) {
+		headers.Authorization ??= `Bearer ${bearerToken}`;
+	}
 	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
 }
 
