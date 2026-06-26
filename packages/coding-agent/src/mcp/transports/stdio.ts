@@ -240,7 +240,7 @@ export async function resolveStdioSpawnCommand(
 	// is not a batch script. Everything else (resolved .cmd/.bat, or an
 	// unresolved extensionless command) goes through cmd.exe so PATHEXT runs.
 	const needsCmdExe = resolved === null || isWindowsBatchCommand(resolvedCommand);
-	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args] };
+	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args], windowsHide: true };
 
 	return {
 		cmd: [resolveComSpec(options.env), "/d", "/s", "/c", buildCmdExeCommand(resolvedCommand, args)],

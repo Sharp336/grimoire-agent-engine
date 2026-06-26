@@ -319,6 +319,37 @@ describe("resolveStdioSpawnCommand", () => {
 		expect(result.windowsHide).toBe(true);
 	});
 
+	it("hides the console window when direct-spawning a resolved .exe on Windows", async () => {
+		// Regression: aa862b8 made resolveWindowsCommandPath return a concrete
+		// .exe path for bare commands (e.g. `uvx` -> `uvx.EXE`), so the direct
+		// spawn branch is taken instead of the cmd.exe wrapper. That branch
+		// omitted windowsHide, so every Console-subsystem child (uvx, uv,
+		// python, etc.) flashed a cmd window on screen at startup.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-exe-"));
+		try {
+			const exe = path.join(tempDir, "uvx.EXE");
+			await Bun.write(exe, "");
+
+			const result = await resolveStdioSpawnCommand(
+				{ type: "stdio", command: "uvx", args: ["code-review-graph", "serve"] },
+				{
+					cwd: tempDir,
+					env: {
+						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+						PATH: tempDir,
+						PATHEXT: ".COM;.EXE;.BAT;.CMD",
+					},
+					platform: "win32",
+				},
+			);
+
+			expect(result.cmd).toEqual([exe, "code-review-graph", "serve"]);
+			expect(result.windowsHide).toBe(true);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("leaves non-Windows commands untouched", async () => {
 		const result = await resolveStdioSpawnCommand(
 			{ type: "stdio", command: "codegraph", args: ["serve", "--mcp"] },
