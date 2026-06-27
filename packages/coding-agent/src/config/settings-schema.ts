@@ -802,6 +802,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"terminal.dynamicTitle": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Dynamic Terminal Title",
+			description:
+				"Reflect agent run state (working, waiting, needs attention) in the terminal tab title via OSC 0",
+		},
+	},
+
 	"tui.textSizing": {
 		type: "boolean",
 		default: false,
