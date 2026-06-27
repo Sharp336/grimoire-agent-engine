@@ -249,13 +249,13 @@ describe("GrepTool internal URL resolution", () => {
 		const tool = new GrepTool(session);
 
 		const result = await tool.execute("test-call", {
-			pattern: "Greps files using regex.",
+			pattern: "Grep file contents with a regex",
 			paths: ["omp://"],
 		});
 
 		const text = getResultText(result);
 		expect(text).toContain("# omp://tools/grep.md");
-		expect(text).toContain("Greps files using regex.");
+		expect(text).toContain("Grep file contents with a regex");
 	});
 
 	it("expands omp://docs to grep embedded documentation files", async () => {

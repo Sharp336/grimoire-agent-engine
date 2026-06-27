@@ -112,10 +112,10 @@ describe("formatSessionHistoryMarkdown", () => {
 				timestamp: 1,
 			},
 		]);
-		expect(output).toContain("→ search() ⇒ ok · 1 line");
+		expect(output).toContain("→ grep() ⇒ ok · 1 line");
 	});
 
-	it("renders find paths without falling back to JSON arguments", () => {
+	it("renders glob paths without falling back to JSON arguments", () => {
 		const output = formatSessionHistoryMarkdown([
 			{
 				role: "assistant",
@@ -139,11 +139,11 @@ describe("formatSessionHistoryMarkdown", () => {
 			},
 		]);
 
-		expect(output).toContain("→ find(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
+		expect(output).toContain("→ glob(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
 		expect(output).not.toContain('{"paths"');
 	});
 
-	it("renders search path scope alongside the pattern", () => {
+	it("renders grep path scope alongside the pattern", () => {
 		const output = formatSessionHistoryMarkdown([
 			{
 				role: "assistant",
@@ -168,7 +168,7 @@ describe("formatSessionHistoryMarkdown", () => {
 		]);
 
 		expect(output).toContain(
-			"→ search(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
+			"→ grep(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
 		);
 	});
 
