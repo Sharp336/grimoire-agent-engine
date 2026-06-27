@@ -26,6 +26,11 @@ import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { interruptHint } from "../shared";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
+import {
+	markSessionTerminalTitleTurnEnded,
+	markSessionTerminalTitleTurnStarted,
+	refreshSessionTerminalTitle,
+} from "../../utils/session-terminal-title";
 import { StreamingRevealController } from "./streaming-reveal";
 import { ToolArgsRevealController } from "./tool-args-reveal";
 
@@ -266,6 +271,7 @@ export class EventController {
 
 		this.ctx.statusLine.invalidate();
 		this.ctx.updateEditorTopBorder();
+		this.refreshSessionTerminalTitle();
 
 		const run = this.#handlers[event.type] as (e: AgentSessionEvent) => Promise<void>;
 		await run(event);
@@ -302,6 +308,7 @@ export class EventController {
 		}
 		this.#cancelIdleCompaction();
 		this.#setTerminalProgress(true);
+		markSessionTerminalTitleTurnStarted();
 		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
@@ -1011,6 +1018,7 @@ export class EventController {
 		this.#lastAssistantComponent = undefined;
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
+		markSessionTerminalTitleTurnEnded();
 		this.sendCompletionNotification();
 	}
 
@@ -1272,6 +1280,10 @@ export class EventController {
 
 	#currentContextTokens(): number {
 		return this.ctx.viewSession.getContextUsage()?.tokens ?? 0;
+	}
+
+	refreshSessionTerminalTitle(): void {
+		refreshSessionTerminalTitle();
 	}
 
 	sendCompletionNotification(): void {

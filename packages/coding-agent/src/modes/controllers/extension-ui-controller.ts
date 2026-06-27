@@ -24,7 +24,12 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
+import {
+	refreshSessionTerminalTitle,
+	setExtensionTerminalTitleOverride,
+	setSessionTerminalTitleFromSession,
+	setSessionTerminalTitleSignals,
+} from "../../utils/session-terminal-title";
 
 const MAX_WIDGET_LINES = 10;
 
@@ -53,7 +58,7 @@ export class ExtensionUiController {
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
-			setTitle: title => setTerminalTitle(title),
+			setTitle: title => setExtensionTerminalTitleOverride(title),
 			custom: (factory, options) => this.showHookCustom(factory, options),
 			setEditorText: text => this.ctx.editor.setText(text),
 			pasteToEditor: text => {
@@ -161,7 +166,11 @@ export class ExtensionUiController {
 				if (!success) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitleFromSession(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.settings,
+				);
 
 				// Call setup callback if provided
 				if (options?.setup) {
@@ -230,7 +239,11 @@ export class ExtensionUiController {
 				if (!result) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitleFromSession(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.settings,
+				);
 				this.ctx.chatContainer.clear();
 				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
@@ -782,6 +795,14 @@ export class ExtensionUiController {
 		this.#extensionTerminalInputUnsubscribers.clear();
 	}
 
+	isExtensionDialogActive(): boolean {
+		return this.#dialogActive;
+	}
+
+	refreshSessionTerminalTitle(): void {
+		refreshSessionTerminalTitle();
+	}
+
 	showExtensionError(extensionPath: string, error: string): void {
 		const errorText = new Text(theme.fg("error", `Extension "${extensionPath}" error: ${error}`), 1, 0);
 		this.ctx.present(errorText);
@@ -799,7 +820,11 @@ export class ExtensionUiController {
 
 	async #updateSessionName(name: string): Promise<void> {
 		await this.ctx.sessionManager.setSessionName(name, "user");
-		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+		setSessionTerminalTitleFromSession(
+			this.ctx.sessionManager.getSessionName(),
+			this.ctx.sessionManager.getCwd(),
+			this.ctx.settings,
+		);
 	}
 
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
@@ -853,6 +878,7 @@ export class ExtensionUiController {
 			if (started) {
 				hide?.();
 				this.#dialogActive = false;
+				setSessionTerminalTitleSignals({ dialogActive: false });
 				this.#advanceDialogQueue();
 			}
 			resolve(value);
@@ -866,6 +892,7 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
+			setSessionTerminalTitleSignals({ dialogActive: true });
 			try {
 				hide = present(settle);
 			} catch (error) {

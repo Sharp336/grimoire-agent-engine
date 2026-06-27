@@ -23,6 +23,14 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
+/** Agent run state encoded in the session terminal title when `terminal.showRunStateInTitle` is on. */
+export type TitleRunState = "running" | "waiting_for_input" | "needs_attention" | "idle";
+
+export type FormatSessionTerminalTitleOptions = {
+	/** Optional leading glyph from the active symbol preset (working, waiting, attention). */
+	runStateGlyph?: string;
+};
+
 const TITLE_MAX_TOKENS = 30;
 const REASONING_SAFE_MAX_TOKENS = 1024;
 const SET_TITLE_TOOL_NAME = "set_title";
@@ -314,9 +322,16 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	return sanitizeTerminalTitlePart(baseName);
 }
 
-export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
+export function formatSessionTerminalTitle(
+	sessionName: string | undefined,
+	cwd?: string,
+	options?: FormatSessionTerminalTitleOptions,
+): string {
 	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
-	return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	const glyph = sanitizeTerminalTitlePart(options?.runStateGlyph);
+	const core = label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	if (!glyph) return core;
+	return `${glyph} ${core}`;
 }
 
 /**
@@ -327,8 +342,12 @@ export function setTerminalTitle(title: string): void {
 	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
 }
 
-export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
-	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd));
+export function setSessionTerminalTitle(
+	sessionName: string | undefined,
+	cwd?: string,
+	options?: FormatSessionTerminalTitleOptions,
+): void {
+	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd, options));
 }
 
 /**

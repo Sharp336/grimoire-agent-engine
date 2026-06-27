@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { generateSessionTitle, formatSessionTerminalTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { logger } from "@oh-my-pi/pi-utils";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -455,5 +455,25 @@ describe("title generator", () => {
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
+	});
+});
+
+describe("formatSessionTerminalTitle", () => {
+	it("formats static session title without run-state glyph", () => {
+		expect(formatSessionTerminalTitle("my-session", "/foo/bar")).toBe("π: my-session");
+	});
+
+	it("prefixes run-state glyph when provided", () => {
+		expect(formatSessionTerminalTitle("my-session", "/foo/bar", { runStateGlyph: "[~]" })).toBe(
+			"[~] π: my-session",
+		);
+	});
+
+	it("uses cwd basename when session name is missing", () => {
+		expect(formatSessionTerminalTitle(undefined, "/home/user/proj")).toBe("π: proj");
+	});
+
+	it("omits glyph prefix when run-state glyph is empty (idle)", () => {
+		expect(formatSessionTerminalTitle("idle-session", "/tmp", { runStateGlyph: "" })).toBe("π: idle-session");
 	});
 });

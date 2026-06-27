@@ -112,7 +112,12 @@ import { renderTreeList } from "../tui/tree-list";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
-import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import { popTerminalTitle, pushTerminalTitle } from "../utils/title-generator";
+import {
+	bindSessionTerminalTitleContext,
+	setSessionTerminalTitleFromSession,
+	setSessionTerminalTitleSignals,
+} from "../utils/session-terminal-title";
 import {
 	isSearchProviderId,
 	isSearchProviderPreference,
@@ -884,7 +889,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// the initial welcome frame does not append over the previous run's scrollback.
 		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
 		pushTerminalTitle();
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		bindSessionTerminalTitleContext(this);
+		setSessionTerminalTitleFromSession(
+			this.sessionManager.getSessionName(),
+			this.sessionManager.getCwd(),
+			this.settings,
+		);
 		this.updateEditorBorderColor();
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -1062,7 +1072,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		resetCapabilities();
 		await this.refreshSlashCommandState(newCwd);
 		await this.session.refreshSshTool({ activateIfAvailable: true });
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setSessionTerminalTitleFromSession(
+			this.sessionManager.getSessionName(),
+			this.sessionManager.getCwd(),
+			this.settings,
+		);
 		this.statusLine.invalidate();
 		this.updateEditorTopBorder();
 	}
@@ -2325,6 +2339,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		);
 		this.#planReviewOverlay = overlay;
+		setSessionTerminalTitleSignals({ planReviewActive: true });
 		this.#planReviewOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",
@@ -2341,6 +2356,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOverlayHandle?.hide();
 		this.#planReviewOverlayHandle = undefined;
 		this.#planReviewOverlay = undefined;
+		setSessionTerminalTitleSignals({ planReviewActive: false });
 	}
 
 	#getEditorTerminalPath(): string | null {
@@ -2590,7 +2606,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (seededName && !this.sessionManager.getSessionName()) {
 			const applied = await this.sessionManager.setSessionName(seededName, "auto");
 			if (applied) {
-				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				setSessionTerminalTitleFromSession(
+					this.sessionManager.getSessionName(),
+					this.sessionManager.getCwd(),
+					this.settings,
+				);
 				this.updateEditorBorderColor();
 			}
 		}
@@ -3272,6 +3292,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		await this.ui.terminal.drainInput(1000);
 		popTerminalTitle();
+		bindSessionTerminalTitleContext(undefined);
 		this.stop();
 
 		// Print resumption hint if this is a persisted session
