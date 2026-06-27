@@ -5,6 +5,7 @@
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, readSseJson } from "@oh-my-pi/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
 import { ProviderHttpError } from "../errors";
 import type {
 	Api,
@@ -24,6 +25,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import { stripVariant } from "../utils/strip";
 import type {
 	Content,
 	FinishReason,
@@ -234,18 +236,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				} else if (block.type === "thinking") {
 					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					if (thoughtSignature) {
 						parts.push({
 							thought: true,
 							text: block.thinking.toWellFormed(),
-							...(thoughtSignature && { thoughtSignature }),
+							thoughtSignature,
 						});
 					} else {
 						parts.push({
-							text: block.thinking.toWellFormed(),
+							text: renderDemotedThinking(model.id, block.thinking),
 						});
 					}
 				} else if (block.type === "toolCall") {
@@ -864,7 +864,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -944,7 +944,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					options,
 					retainTextSignature,
 					onFirstToken: () => {
-						firstTokenTime = Date.now();
+						firstTokenTime = performance.now();
 					},
 				});
 
@@ -963,20 +963,20 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				body = await openStream();
 			}
 
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				if ("index" in block) {
-					delete (block as { index?: number }).index;
+					stripVariant<{ index?: number }>(block, "index");
 				}
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorStatus = extractHttpStatusFromError(error);
 			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
