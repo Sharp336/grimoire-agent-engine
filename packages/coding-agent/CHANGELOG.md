@@ -2,13 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added session-scoped `local://` scratchpad support for eval helpers, subagents, and the `/scratchpad` command.
+
 ## [16.2.1] - 2026-06-27
 
 ### Added
 
 - Added Loop Guard "Tool-Call Reminder" to automatically interrupt Gemini reasoning loops that generate excessive planning headers without acting
 - Added support for file deletion and moving within file editing operations
-- Added session-scoped `local://` scratchpad support for eval helpers, subagents, and the `/scratchpad` command.
 
 ### Changed
 

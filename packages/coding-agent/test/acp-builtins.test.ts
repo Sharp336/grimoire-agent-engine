@@ -72,8 +72,10 @@ interface FakeAcpBuiltinSessionManager {
 	_flushed: boolean;
 	_droppedSessions: string[];
 	_sessionName: string | undefined;
+	_artifactsDir: string | undefined;
 	getSessionId(): string;
 	getSessionFile(): string | undefined;
+	getArtifactsDir(): string | null;
 	getEntries(): { type: string }[];
 	getBranch(): { type: string }[];
 	appendCustomEntry(customType: string, data?: unknown): string;
@@ -88,7 +90,7 @@ interface FakeAcpBuiltinSessionManager {
 function createRuntime() {
 	const settings = Settings.isolated();
 	const output: string[] = [];
-	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
+	let fakeSessionManager: FakeAcpBuiltinSessionManager;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
 		forcedToolChoice: undefined as string | undefined,
