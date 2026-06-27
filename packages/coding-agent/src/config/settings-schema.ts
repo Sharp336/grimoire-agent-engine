@@ -133,7 +133,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	tools: [
 		"Available Tools",
 		"Todos",
-		"Search & Browser",
+		"Grep & Browser",
 		"GitHub",
 		"Output Limits",
 		"Execution",
@@ -279,6 +279,7 @@ export interface ModelTagsSettings {
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
@@ -455,6 +456,18 @@ export const SETTINGS_SCHEMA = {
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+
+	"providers.maxInFlightRequests": {
+		type: "record",
+		default: EMPTY_NUMBER_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Max In-Flight Requests",
+			description:
+				'Maximum concurrent LLM requests per provider id (for example "openai" or "anthropic"), shared across local OMP processes with this config root. Omitted providers are unlimited.',
+		},
+	},
 
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
@@ -777,6 +790,17 @@ export const SETTINGS_SCHEMA = {
 		default: 8,
 		description:
 			"Maximum number of inline images kept as live terminal graphics (default 8). Older images fall back to a text placeholder via a full redraw once the limit is exceeded. Set to 0 to keep every image (no limit).",
+	},
+
+	"terminal.showProgress": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Native Terminal Progress",
+			description: "Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running",
+		},
 	},
 
 	"tui.textSizing": {
@@ -3477,7 +3501,7 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: {
 			tab: "tools",
-			group: "Search & Browser",
+			group: "Grep & Browser",
 			label: "Headless Browser",
 			description: "Launch browser in headless mode (disable to show browser UI)",
 		},
@@ -3488,7 +3512,7 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: {
 			tab: "tools",
-			group: "Search & Browser",
+			group: "Grep & Browser",
 			label: "cmux Browser",
 			description:
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
@@ -3499,7 +3523,7 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 		ui: {
 			tab: "tools",
-			group: "Search & Browser",
+			group: "Grep & Browser",
 			label: "Screenshot Directory",
 			description:
 				"Directory to save screenshots. If unset, screenshots go to a temp file. Supports ~. Examples: ~/Downloads, ~/Desktop, /sdcard/Download (Android)",
