@@ -537,6 +537,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
 	errorStatus?: number;
+	/** Provider-specific stable error identifier surfaced by upstream APIs when available. */
+	errorId?: string;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
