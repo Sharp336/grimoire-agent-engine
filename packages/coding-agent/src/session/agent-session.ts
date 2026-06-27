@@ -162,15 +162,15 @@ import {
 	getModelMatchPreferences,
 	parseModelString,
 	type ResolvedModelRoleValue,
+	resolveAdvisorRoleSelection,
 	resolveModelOverride,
 	resolveModelRoleValue,
-	resolveRoleSelection,
 } from "../config/model-resolver";
 import { MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { resolveServiceTierSetting } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import { getDefault, onAppendOnlyModeChanged } from "../config/settings";
+import { getDefault, onAppendOnlyModeChanged, validateProviderMaxInFlightRequests } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -321,7 +321,7 @@ import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions } from "./session-entries";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
-import type { SessionManager } from "./session-manager";
+import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -1235,6 +1235,8 @@ export class AgentSession {
 	#allowAcpAgentInitiatedTurns = false;
 	/** Per-session memory of allow_always / reject_always decisions for gated tools. */
 	#acpPermissionDecisions: Map<string, "allow_always" | "reject_always"> = new Map();
+	/** Session file created by this session's `/move`; removed on dispose if it stayed empty. */
+	#movedFromEmptySessionFile?: string;
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
@@ -1880,8 +1882,7 @@ export class AgentSession {
 		if (!this.#advisorEnabled) return false;
 		if (this.#agentKind !== "main" && !this.settings.get("advisor.subagents")) return false;
 
-		const advisorSel = resolveRoleSelection(
-			["advisor"],
+		const advisorSel = resolveAdvisorRoleSelection(
 			this.settings,
 			this.#modelRegistry.getAvailable(),
 			this.#modelRegistry,
@@ -2106,8 +2107,7 @@ export class AgentSession {
 		const targetModel = await this.#resolveContextPromotionTarget(currentModel, contextWindow);
 		if (!targetModel) return false;
 
-		const advisorSel = resolveRoleSelection(
-			["advisor"],
+		const advisorSel = resolveAdvisorRoleSelection(
 			this.settings,
 			this.#modelRegistry.getAvailable(),
 			this.#modelRegistry,
@@ -4641,6 +4641,10 @@ export class AgentSession {
 		return this.#isDisposed;
 	}
 
+	markMovedFromEmptySessionFile(sessionFile: string): void {
+		this.#movedFromEmptySessionFile = path.resolve(sessionFile);
+	}
+
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
 	 * immediately: eval starts throw, queued asides are dropped, and the
@@ -4714,6 +4718,9 @@ export class AgentSession {
 		await disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId);
 		await shutdownTinyTitleClient();
 		this.#releasePowerAssertion();
+		// Clean up an empty session created by this session's /move so it doesn't accumulate.
+		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		this.#movedFromEmptySessionFile = undefined;
 		await this.sessionManager.close();
 		// beginDispose() stopped the advisor and captured its recorder close; await
 		// it so the final advisor turn is flushed before the process may exit.
@@ -5804,6 +5811,9 @@ export class AgentSession {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
+			maxInFlightRequests: validateProviderMaxInFlightRequests(
+				options.maxInFlightRequests ?? this.settings.get("providers.maxInFlightRequests"),
+			),
 			loopGuard: {
 				enabled: this.settings.get("model.loopGuard.enabled"),
 				checkAssistantContent: this.settings.get("model.loopGuard.checkAssistantContent"),
@@ -8260,16 +8270,25 @@ export class AgentSession {
 			const effectiveSettings = compactMode
 				? { ...compactionSettings, ...compactMode.overrides }
 				: compactionSettings;
-			if (compactMode?.requiresRemote) {
-				const remoteReady =
-					Boolean(effectiveSettings.remoteEndpoint) || shouldUseOpenAiRemoteCompaction(this.model);
-				if (!remoteReady) {
-					this.emitNotice(
-						"warning",
-						`remote compaction is unavailable for ${this.model.id} (no remote endpoint configured) — using a local summary instead`,
-						"compaction",
-					);
-				}
+			// /compact remote demands provider-native compaction. When no remote
+			// endpoint is configured (one would override per-model gating in
+			// compact()), drop fallback candidates that aren't remote-capable so the
+			// engine never silently runs a local summary on a configured-but-non-
+			// remote compactionModel. If filtering empties the chain, warn and fall
+			// back to the full chain so the operation still completes.
+			const availableModels = this.#modelRegistry.getAvailable();
+			const requireProviderRemote = Boolean(compactMode?.requiresRemote && !effectiveSettings.remoteEndpoint);
+			let compactionCandidates = this.#getCompactionModelCandidates(
+				availableModels,
+				requireProviderRemote ? shouldUseOpenAiRemoteCompaction : undefined,
+			);
+			if (requireProviderRemote && compactionCandidates.length === 0) {
+				this.emitNotice(
+					"warning",
+					`remote compaction is unavailable for ${this.model.id} (no remote endpoint configured and no provider-native remote-capable model in the fallback chain) — using a local summary instead`,
+					"compaction",
+				);
+				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.sessionManager.getBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings);
@@ -8423,6 +8442,7 @@ export class AgentSession {
 							remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
 							convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						},
+						compactionCandidates,
 					);
 					summary = result.summary;
 					shortSummary = result.shortSummary;
@@ -9990,11 +10010,15 @@ export class AgentSession {
 		});
 		return formatModelSelectorValue(modelKey, thinkingLevel);
 	}
-	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
-		const configuredTarget = currentModel.contextPromotionTarget?.trim();
-		if (!configuredTarget) return undefined;
+	#resolveConfiguredModelTarget(
+		configuredTarget: string | undefined,
+		currentModel: Model,
+		availableModels: Model[],
+	): Model | undefined {
+		const trimmedTarget = configuredTarget?.trim();
+		if (!trimmedTarget) return undefined;
 
-		const parsed = parseModelString(configuredTarget, {
+		const parsed = parseModelString(trimmedTarget, {
 			allowMaxAlias: true,
 			isLiteralModelId: (provider, id) =>
 				availableModels.some(model => model.provider === provider && model.id === id),
@@ -10004,7 +10028,15 @@ export class AgentSession {
 			if (explicitModel) return explicitModel;
 		}
 
-		return availableModels.find(m => m.provider === currentModel.provider && m.id === configuredTarget);
+		return availableModels.find(m => m.provider === currentModel.provider && m.id === trimmedTarget);
+	}
+
+	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
+		return this.#resolveConfiguredModelTarget(currentModel.contextPromotionTarget, currentModel, availableModels);
+	}
+
+	#resolveCompactionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
+		return this.#resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
 	}
 
 	#resolveRoleModelFull(
@@ -10029,11 +10061,15 @@ export class AgentSession {
 		});
 	}
 
-	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
-		return this.#resolveCompactionModelCandidates(this.model, availableModels);
+	#getCompactionModelCandidates(availableModels: Model[], filter?: (model: Model) => boolean): Model[] {
+		return this.#resolveCompactionModelCandidates(this.model, availableModels, filter);
 	}
 
-	#resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): Model[] {
+	#resolveCompactionModelCandidates(
+		preferredModel: Model | null | undefined,
+		availableModels: Model[],
+		filter?: (model: Model) => boolean,
+	): Model[] {
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
 
@@ -10042,9 +10078,16 @@ export class AgentSession {
 			const key = this.#getModelKey(model);
 			if (seen.has(key)) return;
 			seen.add(key);
+			// `seen` still tracks rejected models so the largest-context fallback
+			// scan below doesn't reintroduce them; the filter just suppresses
+			// inclusion in this caller's candidate chain.
+			if (filter && !filter(model)) return;
 			candidates.push(model);
 		};
 
+		if (preferredModel) {
+			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels));
+		}
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined).model);
@@ -10091,8 +10134,10 @@ export class AgentSession {
 		customInstructions: string | undefined,
 		signal: AbortSignal,
 		options?: SummaryOptions,
+		precomputedCandidates?: Model[],
 	): Promise<CompactionResult> {
-		const candidates = this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
+		const candidates =
+			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
