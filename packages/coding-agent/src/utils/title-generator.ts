@@ -12,9 +12,19 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import titleMarkerSystemPrompt from "../prompts/system/title-system-marker.md" with { type: "text" };
+import type { SymbolKey, SymbolPreset } from "../modes/theme/theme";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { formatTitleUserMessage, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+
+export type TerminalTitleState = "running" | "waiting_for_input" | "needs_attention" | "idle";
+
+export type TerminalTitleFormatOptions = {
+	state?: TerminalTitleState;
+	dynamicTitle?: boolean;
+	symbolPreset?: SymbolPreset;
+	getSymbol?: (key: SymbolKey) => string;
+};
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_SYSTEM_PROMPT = prompt.render(titleMarkerSystemPrompt);
@@ -314,9 +324,69 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	return sanitizeTerminalTitlePart(baseName);
 }
 
-export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
+const TERMINAL_TITLE_STATE_STATUS_KEYS: Record<Exclude<TerminalTitleState, "idle">, SymbolKey> = {
+	running: "status.running",
+	waiting_for_input: "status.shadowed",
+	needs_attention: "status.enabled",
+};
+
+/** Built-in glyphs per preset when getSymbol is unavailable (mirrors theme UNICODE/NERD/ASCII). */
+const TERMINAL_TITLE_STATE_FALLBACKS: Record<
+	SymbolPreset,
+	Record<Exclude<TerminalTitleState, "idle">, string>
+> = {
+	unicode: {
+		running: "⟳",
+		waiting_for_input: "◌",
+		needs_attention: "●",
+	},
+	nerd: {
+		running: "\uf110",
+		waiting_for_input: "◐",
+		needs_attention: "\uf111",
+	},
+	ascii: {
+		running: "[~]",
+		waiting_for_input: "[/]",
+		needs_attention: "[x]",
+	},
+};
+
+function resolveStatusGlyphForState(
+	state: Exclude<TerminalTitleState, "idle">,
+	getSymbol?: (key: SymbolKey) => string,
+): string | undefined {
+	const statusKey = TERMINAL_TITLE_STATE_STATUS_KEYS[state];
+	if (getSymbol) {
+		const fromStatus = getSymbol(statusKey);
+		if (fromStatus) return fromStatus;
+	}
+	return undefined;
+}
+
+export function resolveTerminalTitleStateGlyph(
+	state: TerminalTitleState,
+	preset: SymbolPreset,
+	getSymbol?: (key: SymbolKey) => string,
+): string {
+	if (state === "idle") return "";
+	const fromSymbol = resolveStatusGlyphForState(state, getSymbol);
+	if (fromSymbol) return fromSymbol;
+	return TERMINAL_TITLE_STATE_FALLBACKS[preset][state];
+}
+
+export function formatSessionTerminalTitle(
+	sessionName: string | undefined,
+	cwd?: string,
+	options?: TerminalTitleFormatOptions,
+): string {
 	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
-	return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	const labelPart = label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	if (!options?.dynamicTitle) return labelPart;
+	const preset = options.symbolPreset ?? "unicode";
+	const state = options.state ?? "idle";
+	const glyph = resolveTerminalTitleStateGlyph(state, preset, options.getSymbol);
+	return `${glyph}${glyph ? " " : ""}${labelPart}`;
 }
 
 /**
@@ -327,8 +397,12 @@ export function setTerminalTitle(title: string): void {
 	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
 }
 
-export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
-	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd));
+export function setSessionTerminalTitle(
+	sessionName: string | undefined,
+	cwd?: string,
+	options?: TerminalTitleFormatOptions,
+): void {
+	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd, options));
 }
 
 /**
