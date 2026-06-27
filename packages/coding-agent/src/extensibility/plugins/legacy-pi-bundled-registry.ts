@@ -116,6 +116,7 @@ import * as bundledPiAiUsageGithubCopilot from "@oh-my-pi/pi-ai/usage/github-cop
 import * as bundledPiAiUsageGoogleAntigravity from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import * as bundledPiAiUsageKimi from "@oh-my-pi/pi-ai/usage/kimi";
 import * as bundledPiAiUsageMinimaxCode from "@oh-my-pi/pi-ai/usage/minimax-code";
+import * as bundledPiAiUsageOllama from "@oh-my-pi/pi-ai/usage/ollama";
 import * as bundledPiAiUsageOpenaiCodex from "@oh-my-pi/pi-ai/usage/openai-codex";
 import * as bundledPiAiUsageOpenaiCodexReset from "@oh-my-pi/pi-ai/usage/openai-codex-reset";
 import * as bundledPiAiUsageOpencodeGo from "@oh-my-pi/pi-ai/usage/opencode-go";
@@ -131,7 +132,6 @@ import * as bundledPiAiUtilsGoogleValidation from "@oh-my-pi/pi-ai/utils/google-
 import * as bundledPiAiUtilsHarmonyLeak from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import * as bundledPiAiUtilsHttpInspector from "@oh-my-pi/pi-ai/utils/http-inspector";
 import * as bundledPiAiUtilsIdleIterator from "@oh-my-pi/pi-ai/utils/idle-iterator";
-import * as bundledPiAiUtilsJsonParse from "@oh-my-pi/pi-ai/utils/json-parse";
 import * as bundledPiAiUtilsOpenaiHttp from "@oh-my-pi/pi-ai/utils/openai-http";
 import * as bundledPiAiUtilsOpenrouterHeaders from "@oh-my-pi/pi-ai/utils/openrouter-headers";
 import * as bundledPiAiUtilsOverflow from "@oh-my-pi/pi-ai/utils/overflow";
@@ -321,6 +321,7 @@ import * as bundledPiCodingAgentConfigApiKeyResolver from "@oh-my-pi/pi-coding-a
 import * as bundledPiCodingAgentConfigAppendOnlyContextMode from "@oh-my-pi/pi-coding-agent/config/append-only-context-mode";
 import * as bundledPiCodingAgentConfigConfigFile from "@oh-my-pi/pi-coding-agent/config/config-file";
 import * as bundledPiCodingAgentConfigFileLock from "@oh-my-pi/pi-coding-agent/config/file-lock";
+import * as bundledPiCodingAgentConfigInlineToolDescriptorsMode from "@oh-my-pi/pi-coding-agent/config/inline-tool-descriptors-mode";
 import * as bundledPiCodingAgentConfigKeybindings from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import * as bundledPiCodingAgentConfigModelDiscovery from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import * as bundledPiCodingAgentConfigModelRegistry from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -783,13 +784,14 @@ import * as bundledPiCodingAgentToolsEvalBackends from "@oh-my-pi/pi-coding-agen
 import * as bundledPiCodingAgentToolsEvalRender from "@oh-my-pi/pi-coding-agent/tools/eval-render";
 import * as bundledPiCodingAgentToolsFetch from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import * as bundledPiCodingAgentToolsFileRecorder from "@oh-my-pi/pi-coding-agent/tools/file-recorder";
-import * as bundledPiCodingAgentToolsFind from "@oh-my-pi/pi-coding-agent/tools/find";
 import * as bundledPiCodingAgentToolsFsCacheInvalidation from "@oh-my-pi/pi-coding-agent/tools/fs-cache-invalidation";
 import * as bundledPiCodingAgentToolsGh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as bundledPiCodingAgentToolsGhCacheInvalidation from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
 import * as bundledPiCodingAgentToolsGhFormat from "@oh-my-pi/pi-coding-agent/tools/gh-format";
 import * as bundledPiCodingAgentToolsGhRenderer from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
 import * as bundledPiCodingAgentToolsGithubCache from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import * as bundledPiCodingAgentToolsGlob from "@oh-my-pi/pi-coding-agent/tools/glob";
+import * as bundledPiCodingAgentToolsGrep from "@oh-my-pi/pi-coding-agent/tools/grep";
 import * as bundledPiCodingAgentToolsGroupedFileOutput from "@oh-my-pi/pi-coding-agent/tools/grouped-file-output";
 import * as bundledPiCodingAgentToolsImageGen from "@oh-my-pi/pi-coding-agent/tools/image-gen";
 import * as bundledPiCodingAgentToolsInspectImage from "@oh-my-pi/pi-coding-agent/tools/inspect-image";
@@ -819,7 +821,6 @@ import * as bundledPiCodingAgentToolsRenderers from "@oh-my-pi/pi-coding-agent/t
 import * as bundledPiCodingAgentToolsReportToolIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as bundledPiCodingAgentToolsResolve from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import * as bundledPiCodingAgentToolsReview from "@oh-my-pi/pi-coding-agent/tools/review";
-import * as bundledPiCodingAgentToolsSearch from "@oh-my-pi/pi-coding-agent/tools/search";
 import * as bundledPiCodingAgentToolsSearchToolBm25 from "@oh-my-pi/pi-coding-agent/tools/search-tool-bm25";
 import * as bundledPiCodingAgentToolsSqliteReader from "@oh-my-pi/pi-coding-agent/tools/sqlite-reader";
 import * as bundledPiCodingAgentToolsSsh from "@oh-my-pi/pi-coding-agent/tools/ssh";
@@ -1181,6 +1182,7 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@oh-my-pi/pi-ai/usage/kimi": bundledPiAiUsageKimi as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-ai/usage/minimax-code": bundledPiAiUsageMinimaxCode as unknown as Readonly<Record<string, unknown>>,
+	"@oh-my-pi/pi-ai/usage/ollama": bundledPiAiUsageOllama as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-ai/usage/openai-codex-reset": bundledPiAiUsageOpenaiCodexReset as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1207,7 +1209,6 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-ai/utils/idle-iterator": bundledPiAiUtilsIdleIterator as unknown as Readonly<Record<string, unknown>>,
-	"@oh-my-pi/pi-ai/utils/json-parse": bundledPiAiUtilsJsonParse as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-ai/utils/openai-http": bundledPiAiUtilsOpenaiHttp as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-ai/utils/openrouter-headers": bundledPiAiUtilsOpenrouterHeaders as unknown as Readonly<
 		Record<string, unknown>
@@ -1784,6 +1785,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@oh-my-pi/pi-coding-agent/config/file-lock": bundledPiCodingAgentConfigFileLock as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@oh-my-pi/pi-coding-agent/config/inline-tool-descriptors-mode":
+		bundledPiCodingAgentConfigInlineToolDescriptorsMode as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/config/keybindings": bundledPiCodingAgentConfigKeybindings as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2830,9 +2833,6 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@oh-my-pi/pi-coding-agent/tools/file-recorder": bundledPiCodingAgentToolsFileRecorder as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@oh-my-pi/pi-coding-agent/tools/find": bundledPiCodingAgentToolsFind as unknown as Readonly<
-		Record<string, unknown>
-	>,
 	"@oh-my-pi/pi-coding-agent/tools/fs-cache-invalidation":
 		bundledPiCodingAgentToolsFsCacheInvalidation as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation":
@@ -2845,6 +2845,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/gh": bundledPiCodingAgentToolsGh as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/tools/github-cache": bundledPiCodingAgentToolsGithubCache as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@oh-my-pi/pi-coding-agent/tools/glob": bundledPiCodingAgentToolsGlob as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@oh-my-pi/pi-coding-agent/tools/grep": bundledPiCodingAgentToolsGrep as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/grouped-file-output":
@@ -2927,9 +2933,6 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/search-tool-bm25": bundledPiCodingAgentToolsSearchToolBm25 as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@oh-my-pi/pi-coding-agent/tools/search": bundledPiCodingAgentToolsSearch as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/sqlite-reader": bundledPiCodingAgentToolsSqliteReader as unknown as Readonly<

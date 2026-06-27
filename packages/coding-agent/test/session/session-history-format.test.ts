@@ -106,24 +106,24 @@ describe("formatSessionHistoryMarkdown", () => {
 			{
 				role: "toolResult",
 				toolCallId: "tc-orphan",
-				toolName: "search",
+				toolName: "grep",
 				content: [{ type: "text", text: "one match" }],
 				isError: false,
 				timestamp: 1,
 			},
 		]);
-		expect(output).toContain("→ search() ⇒ ok · 1 line");
+		expect(output).toContain("→ grep() ⇒ ok · 1 line");
 	});
 
-	it("renders find paths without falling back to JSON arguments", () => {
+	it("renders glob paths without falling back to JSON arguments", () => {
 		const output = formatSessionHistoryMarkdown([
 			{
 				role: "assistant",
 				content: [
 					{
 						type: "toolCall",
-						id: "tc-find",
-						name: "find",
+						id: "tc-glob",
+						name: "glob",
 						arguments: { paths: ["packages/coding-agent/src/**/*.ts"] },
 					},
 				],
@@ -131,27 +131,27 @@ describe("formatSessionHistoryMarkdown", () => {
 			},
 			{
 				role: "toolResult",
-				toolCallId: "tc-find",
-				toolName: "find",
+				toolCallId: "tc-glob",
+				toolName: "glob",
 				content: [{ type: "text", text: "session-history-format.ts" }],
 				isError: false,
 				timestamp: 2,
 			},
 		]);
 
-		expect(output).toContain("→ find(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
+		expect(output).toContain("→ glob(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
 		expect(output).not.toContain('{"paths"');
 	});
 
-	it("renders search path scope alongside the pattern", () => {
+	it("renders grep path scope alongside the pattern", () => {
 		const output = formatSessionHistoryMarkdown([
 			{
 				role: "assistant",
 				content: [
 					{
 						type: "toolCall",
-						id: "tc-search",
-						name: "search",
+						id: "tc-grep",
+						name: "grep",
 						arguments: { pattern: "PRIMARY_ARG_KEYS", paths: ["packages/coding-agent/src/session"] },
 					},
 				],
@@ -159,8 +159,8 @@ describe("formatSessionHistoryMarkdown", () => {
 			},
 			{
 				role: "toolResult",
-				toolCallId: "tc-search",
-				toolName: "search",
+				toolCallId: "tc-grep",
+				toolName: "grep",
 				content: [{ type: "text", text: "timed out" }],
 				isError: true,
 				timestamp: 2,
@@ -168,7 +168,7 @@ describe("formatSessionHistoryMarkdown", () => {
 		]);
 
 		expect(output).toContain(
-			"→ search(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
+			"→ grep(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
 		);
 	});
 

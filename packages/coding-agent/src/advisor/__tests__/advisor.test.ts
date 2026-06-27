@@ -3,6 +3,7 @@ import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core
 import { type } from "arktype";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { getThemeByName } from "../../modes/theme/theme";
+import advisorSystemPrompt from "../../prompts/advisor/system.md" with { type: "text" };
 import { SecretObfuscator } from "../../secrets/obfuscator";
 import { formatSessionHistoryMarkdown } from "../../session/session-history-format";
 import { YieldQueue } from "../../session/yield-queue";
@@ -21,6 +22,41 @@ import {
 } from "..";
 
 describe("advisor", () => {
+	describe("advisor system prompt", () => {
+		it("forbids concrete claims about tool arguments hidden from the advisor transcript", () => {
+			const messages = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "search-timeout",
+							name: "grep",
+							arguments: { pattern: "needle", paths: ["packages/coding-agent/src"] },
+						},
+					],
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "search-timeout",
+					toolName: "grep",
+					content: [{ type: "text", text: "timed out after 30s" }],
+					isError: true,
+					timestamp: 2,
+				},
+			] as unknown as AgentMessage[];
+
+			const rendered = formatSessionHistoryMarkdown(messages);
+
+			expect(rendered).toContain("→ grep(needle @ packages/coding-agent/src) ⇒ error");
+			expect(rendered).not.toContain("paths[0]");
+			expect(advisorSystemPrompt).toContain("Arguments absent from the rendered transcript are UNKNOWN");
+			expect(advisorSystemPrompt).toContain("NEVER assert concrete values, array indexes");
+			expect(advisorSystemPrompt).toContain("NEVER claim `paths[0]`, array flattening, or malformed `paths`");
+		});
+	});
+
 	describe("formatSessionHistoryMarkdown includeThinking", () => {
 		it("includes thinking text when includeThinking is true", () => {
 			const thinking = "I should check the edge case first.";
@@ -675,13 +711,13 @@ describe("advisor", () => {
 				} as AgentMessage,
 				{
 					role: "assistant",
-					content: [{ type: "toolCall", id: "b", name: "search", arguments: { pattern: "y" } }],
+					content: [{ type: "toolCall", id: "b", name: "grep", arguments: { pattern: "y" } }],
 					timestamp: 4,
 				} as unknown as AgentMessage,
 				{
 					role: "toolResult",
 					toolCallId: "b",
-					toolName: "search",
+					toolName: "grep",
 					content: [{ type: "text", text: "ok" }],
 					isError: false,
 					timestamp: 5,
@@ -1008,9 +1044,9 @@ describe("advisor", () => {
 
 	describe("read-only tool allowlist", () => {
 		it("selects only the investigation tools from a mixed toolset", () => {
-			const toolset = ["read", "edit", "search", "bash", "find", "write", "advise"];
+			const toolset = ["read", "edit", "grep", "bash", "glob", "write", "advise"];
 			const selected = toolset.filter(name => ADVISOR_READONLY_TOOL_NAMES.has(name));
-			expect(selected).toEqual(["read", "search", "find"]);
+			expect(selected).toEqual(["read", "grep", "glob"]);
 			expect(ADVISOR_READONLY_TOOL_NAMES.has("edit")).toBe(false);
 			expect(ADVISOR_READONLY_TOOL_NAMES.has("bash")).toBe(false);
 			expect(ADVISOR_READONLY_TOOL_NAMES.has("write")).toBe(false);

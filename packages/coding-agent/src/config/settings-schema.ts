@@ -289,13 +289,13 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern: "^\\s*(grep|rg|ripgrep|ag|ack)\\s+",
-		tool: "search",
-		message: "Use the `search` tool instead of grep/rg. It respects .gitignore and provides structured output.",
+		tool: "grep",
+		message: "Use the `grep` tool instead of grep/rg. It respects .gitignore and provides structured output.",
 	},
 	{
 		pattern: "^\\s*(find|fd|locate)\\s+.*(-name|-iname|-type|--type|-glob)",
-		tool: "find",
-		message: "Use the `find` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
+		tool: "glob",
+		message: "Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
 	},
 	{
 		pattern: "^\\s*sed\\s+(-i|--in-place)",
@@ -961,15 +961,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	inlineToolDescriptors: {
+	"model.loopGuard.toolCallReminder": {
 		type: "boolean",
-		default: false,
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Loop Guard Tool-Call Reminder",
+			description:
+				"When a Gemini reasoning stream emits many consecutive planning headers without calling a tool, interrupt it and inject a reminder to issue a tool call (requires Loop Guard)",
+		},
+	},
+
+	inlineToolDescriptors: {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
 		ui: {
 			tab: "model",
 			group: "Prompt",
 			label: "Inline Tool Descriptors",
 			description:
-				"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once",
+				"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once. Auto enables this for Gemini models and disables it otherwise",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Inline descriptors for Gemini models; keep them in tool schemas otherwise",
+				},
+				{ value: "on", label: "On", description: "Always inline descriptors in the system prompt" },
+				{ value: "off", label: "Off", description: "Keep descriptors in provider tool schemas only" },
+			],
 		},
 	},
 
@@ -3228,37 +3250,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Search and AST tools
-	"find.enabled": {
+	// Grep, glob, and AST tools
+	"glob.enabled": {
 		type: "boolean",
 		default: true,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Find",
-			description: "Enable the find tool for glob-based file lookup",
+			label: "Glob",
+			description: "Enable the glob tool for glob-based file lookup",
 		},
 	},
 
-	"search.enabled": {
+	"grep.enabled": {
 		type: "boolean",
 		default: true,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Search",
-			description: "Enable the search tool for regex content search",
+			label: "Grep",
+			description: "Enable the grep tool for regex content search",
 		},
 	},
 
-	"search.contextBefore": {
+	"grep.contextBefore": {
 		type: "number",
 		default: 1,
 		ui: {
 			tab: "tools",
 			group: "Search & Browser",
-			label: "Search Context Before",
-			description: "Lines of context before each search match",
+			label: "Grep Context Before",
+			description: "Lines of context before each grep match",
 			options: [
 				{ value: "0", label: "0 lines" },
 				{ value: "1", label: "1 line" },
@@ -3269,14 +3291,14 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"search.contextAfter": {
+	"grep.contextAfter": {
 		type: "number",
 		default: 3,
 		ui: {
 			tab: "tools",
 			group: "Search & Browser",
-			label: "Search Context After",
-			description: "Lines of context after each search match",
+			label: "Grep Context After",
+			description: "Lines of context after each grep match",
 			options: [
 				{ value: "0", label: "0 lines" },
 				{ value: "1", label: "1 line" },
@@ -3608,7 +3630,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Essential Tools Override",
 			description:
-				"Override the always-loaded built-in tools (default: read, bash, edit, write, find, eval). Leave empty to use defaults.",
+				"Override the always-loaded built-in tools (default: read, bash, edit, write, glob, eval). Leave empty to use defaults.",
 		},
 	},
 
@@ -3808,6 +3830,18 @@ export const SETTINGS_SCHEMA = {
 				{ value: "generic", label: "Generic", description: "Static commit message" },
 				{ value: "ai", label: "AI", description: "AI-generated commit message from diff" },
 			],
+		},
+	},
+
+	"worktree.base": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Worktree Base Directory",
+			description:
+				"Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `omp worktree` cleanup all live here. Unset uses ~/.omp/wt. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_WORKTREE_DIR env var overrides this.",
 		},
 	},
 

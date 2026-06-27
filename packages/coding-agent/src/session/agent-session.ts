@@ -20,6 +20,7 @@ import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
 
 import type { InMemorySnapshotStore } from "@oh-my-pi/hashline";
+import { Patch } from "@oh-my-pi/hashline";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
@@ -78,6 +79,7 @@ import {
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -107,7 +109,11 @@ import {
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { THINKING_LOOP_ERROR_MARKER } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import {
+	GeminiHeaderRunDetector,
+	isGeminiThinkingModel,
+	THINKING_LOOP_ERROR_MARKER,
+} from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -130,6 +136,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	AdviseTool,
 	type AdvisorAgent,
+	AdvisorEmissionGuard,
 	type AdvisorMessageDetails,
 	type AdvisorNote,
 	AdvisorRuntime,
@@ -228,6 +235,7 @@ import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type:
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
@@ -269,6 +277,7 @@ import {
 	selectDiscoverableToolNamesByServer,
 } from "../tool-discovery/tool-index";
 import { assertEditableFile } from "../tools/auto-generated-guard";
+import { normalizeToolNames } from "../tools/builtin-names";
 import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -319,6 +328,12 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 import { YieldQueue } from "./yield-queue";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
+
+/** Abort reason for the Gemini reasoning-header runaway interrupt. Surfaced on the
+ *  discarded assistant turn only; never reaches the model. */
+const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
+/** `customType` for the hidden tool-call reminder injected after the interrupt. */
+const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
 
 // A side-channel assistant response is signed for the hidden prompt/history that
 // produced it. If we persist that response under a different user turn, native
@@ -383,6 +398,7 @@ const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
 	continuationScheduled: boolean;
+	automaticContinuationBlocked?: boolean;
 }>;
 
 const COMPACTION_CHECK_NONE: CompactionCheckResult = {
@@ -396,6 +412,11 @@ const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: true,
+};
+const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+	automaticContinuationBlocked: true,
 };
 
 /**
@@ -419,14 +440,17 @@ export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "la
 
 const RETRY_BACKOFF_JITTER_RATIO = 0.25;
 /**
- * Hysteresis band for the post-shake "did we actually create headroom?" check.
- * Shake counts as having resolved threshold pressure only when residual context
- * lands at or below `SHAKE_RECOVERY_BAND × threshold`. Re-checking against the
- * raw threshold lets shake keep reclaiming a trickle of the previous turn's
- * output and land just under the line every turn, sustaining the auto-continue
- * dead loop reported in #2275.
+ * Hysteresis band for the post-maintenance "did we actually create headroom?"
+ * check shared by the shake tail and the context-full / snapcompact tail. A
+ * pass counts as having resolved threshold pressure only when residual context
+ * lands at or below `COMPACTION_RECOVERY_BAND × threshold`. Re-checking against
+ * the raw threshold lets a pass keep reclaiming a trickle of the previous
+ * turn's output and land just under the line every turn, sustaining the
+ * auto-continue dead loop reported in #2275; the same band stops the
+ * context-full / snapcompact tail from re-firing on a history whose single
+ * most-recent kept turn already exceeds the threshold (the snapcompact thrash).
  */
-const SHAKE_RECOVERY_BAND = 0.8;
+const COMPACTION_RECOVERY_BAND = 0.8;
 
 function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
 	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
@@ -930,6 +954,15 @@ function getEditDestructiveIntent(args: unknown): { kind: "delete" | "move"; pat
 	const input = getStringProperty(a, "input");
 	if (input) {
 		try {
+			const patch = Patch.parse(input);
+			for (const section of patch.sections) {
+				if (section.fileOp?.kind === "rem") return { kind: "delete", paths: [section.path] };
+				if (section.fileOp?.kind === "move") return { kind: "move", paths: [section.path, section.fileOp.dest] };
+			}
+		} catch {
+			// Not a hashline patch — fall through to apply_patch parsing.
+		}
+		try {
 			const entries = expandApplyPatchToEntries({ input });
 			const deleteEntry = entries.find(entry => entry.op === "delete");
 			if (deleteEntry) return { kind: "delete", paths: [deleteEntry.path] };
@@ -1172,6 +1205,11 @@ export class AgentSession {
 	#advisorAutoResumeSuppressed = false;
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorInterruptImmuneTurnStart: number | undefined;
+	/** Dedupe + per-update rate-limit + content-free-phrase filter applied to
+	 *  every accepted advisor `advise()` call. Owned by the session because the
+	 *  session is what routes accepted notes back to the primary transcript.
+	 *  Reset on advisor reset (compaction, session switch, `/new`). */
+	readonly #advisorEmissionGuard = new AdvisorEmissionGuard();
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -1352,6 +1390,12 @@ export class AgentSession {
 	#streamingEditPrecheckedToolCallIds = new Set<string>();
 
 	#streamingEditFileCache = new Map<string, string>();
+
+	/** Active Gemini reasoning-header runaway detector for the current block.
+	 *  (Re)created on each `thinking_start` when the guard applies (see
+	 *  `#geminiHeaderGuardActive`); undefined for non-Gemini models or when the
+	 *  guard is off. Fed thinking deltas in the assistant-message interceptor. */
+	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
 	#promptInFlightCount = 0;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
@@ -1716,6 +1760,7 @@ export class AgentSession {
 			};
 			this.#preCacheStreamingEditFile(event);
 			this.#maybeAbortStreamingEdit(event);
+			this.#maybeInterruptGeminiHeaderRunaway(message, assistantMessageEvent);
 		});
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
 		this.agent.afterToolCall = ctx => this.#ttsrAfterToolCall(ctx);
@@ -1817,6 +1862,7 @@ export class AgentSession {
 		this.#advisorAgentUnsubscribe = undefined;
 		this.#advisorRuntime?.reset();
 		this.#advisorAdviseTool?.resetDeliveredNotes();
+		this.#advisorEmissionGuard.reset();
 		this.#attachAdvisorRecorderFeed();
 		this.#advisorPrimaryTurnsCompleted = 0;
 		this.#advisorInterruptImmuneTurnStart = undefined;
@@ -1856,7 +1902,17 @@ export class AgentSession {
 		// since steering an active run auto-resumes nothing; parking it there would
 		// strand the advice and dump the backlog as one burst at the next prompt. A
 		// plain nit always rides the non-interrupting YieldQueue aside.
+		// Apply the per-session emission policy (one-advise-per-update gate,
+		// exact-text dedupe, content-free phrase filter) before any routing.
+		// Suppression here means the advisor model called `advise()` but the call
+		// is dropped silently — the model still sees `Recorded.` from the tool, so
+		// telling it "suppressed" doesn't tempt it into rephrasing the same useless
+		// note to bypass the dedupe.
 		const enqueueAdvice = (note: string, severity?: AdvisorSeverity) => {
+			if (!this.#advisorEmissionGuard.accept(note)) {
+				logger.debug("advisor advice suppressed by emission guard", { severity });
+				return;
+			}
 			const interrupting = isInterruptingSeverity(severity);
 			const channel = resolveAdvisorDeliveryChannel({
 				severity,
@@ -1980,6 +2036,7 @@ export class AgentSession {
 			enqueueAdvice,
 			maintainContext: incomingTokens => this.#maintainAdvisorContext(incomingTokens),
 			obfuscator: this.#obfuscator,
+			beginAdvisorUpdate: () => this.#advisorEmissionGuard.beginUpdate(),
 		});
 		if (seedToCurrent) {
 			this.#advisorRuntime.seedTo(this.agent.state.messages.length);
@@ -2665,6 +2722,7 @@ export class AgentSession {
 		if (this.#sessionMessageAlreadyPersisted(message)) return;
 		if (message.role === "assistant") {
 			const assistantMsg = message as AssistantMessage;
+			if (this.#isClassifierRefusal(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
@@ -3095,10 +3153,15 @@ export class AgentSession {
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 				checkedCompaction = true;
-				if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
-					maintenanceRoute("active-goal-pre-empt-continuation-scheduled", {
+				if (
+					compactionResult.deferredHandoff ||
+					compactionResult.continuationScheduled ||
+					compactionResult.automaticContinuationBlocked
+				) {
+					maintenanceRoute("active-goal-pre-empt-compaction-handled", {
 						deferredHandoff: compactionResult.deferredHandoff,
 						continuationScheduled: compactionResult.continuationScheduled,
+						automaticContinuationBlocked: compactionResult.automaticContinuationBlocked === true,
 					});
 					this.#resolveRetry();
 					await emitAgentEndNotification();
@@ -3137,13 +3200,20 @@ export class AgentSession {
 					return;
 				}
 			}
-			// Check for retryable errors first (overloaded, rate limit, server errors)
 			if (this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(msg);
 				if (didRetry) {
 					await emitAgentEndNotification();
 					return;
 				}
+			}
+			// Classifier refusals are persisted-skipped above; also prune the trailing
+			// stub from active context so the next turn's prompt does not replay it.
+			// Fall through to the standard error tail so `session_stop` hooks (block,
+			// continue, telemetry) still fire — matching the pre-fix flow for
+			// `stopReason === "error"`.
+			if (this.#isClassifierRefusal(msg)) {
+				this.#removeAssistantMessageFromActiveContext(msg);
 			}
 			this.#resolveRetry();
 
@@ -3159,11 +3229,15 @@ export class AgentSession {
 				await emitAgentEndNotification();
 				return;
 			}
-			// When compaction queued recovery, skip the rewind/todo/session_stop passes:
-			// any reminder or hook continuation we append here would race the handoff,
-			// retry, auto-continue prompt, or queued-message drain that already owns the
-			// next turn.
-			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
+			// When compaction queued recovery or hit a deliberate dead-end, skip the
+			// rewind/todo/session_stop passes: any reminder or hook continuation we append
+			// here would race the handoff, retry, auto-continue prompt, queued-message
+			// drain, or the explicit pause that is preventing a compaction loop.
+			if (
+				compactionResult.deferredHandoff ||
+				compactionResult.continuationScheduled ||
+				compactionResult.automaticContinuationBlocked
+			) {
 				await emitAgentEndNotification();
 				return;
 			}
@@ -3178,7 +3252,7 @@ export class AgentSession {
 					return;
 				}
 			}
-			await this.#emitSessionStopEvent(settledMessages);
+			await this.#emitSessionStopEvent(settledMessages, msg);
 			await emitAgentEndNotification();
 		}
 	};
@@ -3849,6 +3923,100 @@ export class AgentSession {
 		this.#streamingEditFileCache.clear();
 	}
 
+	/**
+	 * Whether the Gemini header-runaway guard applies to the current model: the loop
+	 * guard is on (settings + `PI_NO_THINKING_LOOP_GUARD`), the tool-call reminder is
+	 * enabled, and the active model is a Gemini thinking model.
+	 */
+	#geminiHeaderGuardActive(): boolean {
+		const model = this.model;
+		return (
+			process.env.PI_NO_THINKING_LOOP_GUARD !== "1" &&
+			this.settings.get("model.loopGuard.enabled") === true &&
+			this.settings.get("model.loopGuard.toolCallReminder") === true &&
+			model !== undefined &&
+			isGeminiThinkingModel(model)
+		);
+	}
+
+	/**
+	 * Feed streamed assistant events to the Gemini header-runaway detector. Each
+	 * reasoning block (`thinking_start`) re-arms a fresh detector when the guard
+	 * applies; thinking deltas accumulate thought-summary headers; assistant prose
+	 * or a tool call ends the run. On the threshold hit, interrupts the stream (see
+	 * {@link #interruptGeminiHeaderRunaway}). Runs synchronously inside the
+	 * assistant-message interceptor so the abort lands before more budget burns.
+	 * Armed on `thinking_start` (not `turn_start`, which the agent loop skips for the
+	 * first turn) so the very first reasoning block is guarded too.
+	 */
+	#maybeInterruptGeminiHeaderRunaway(message: AssistantMessage, event: AssistantMessageEvent): void {
+		if (event.type === "thinking_start") {
+			this.#geminiHeaderDetector = this.#geminiHeaderGuardActive() ? new GeminiHeaderRunDetector() : undefined;
+			return;
+		}
+		const detector = this.#geminiHeaderDetector;
+		if (!detector) return;
+		if (event.type === "thinking_delta") {
+			if (detector.push(event.delta)) this.#interruptGeminiHeaderRunaway(detector.count, message.timestamp);
+			return;
+		}
+		// Leaving the reasoning channel ends the run: the consecutive-header count
+		// only matters within one uninterrupted stretch of reasoning.
+		if (event.type === "text_start" || event.type === "toolcall_start") {
+			detector.reset();
+		}
+	}
+
+	/**
+	 * Interrupt a Gemini reasoning stream that has emitted too many consecutive
+	 * planning headers without calling a tool. Aborts the live turn, discards the
+	 * stalled reasoning-only turn (so its partial, loop-fueling thinking is neither
+	 * replayed nor reloaded), injects a hidden tool-call reminder, and continues.
+	 * `targetTimestamp` identifies the turn being aborted so the post-prompt task
+	 * can drop exactly it.
+	 */
+	#interruptGeminiHeaderRunaway(headerCount: number, targetTimestamp: number): void {
+		logger.warn("Gemini reasoning-header runaway; interrupting to require a tool call", {
+			model: this.model?.id,
+			provider: this.model?.provider,
+			headers: headerCount,
+		});
+		this.emitNotice(
+			"warning",
+			`Interrupted ${headerCount} planning headers with no tool call; reminded the model to issue one.`,
+			"loop-guard",
+		);
+		this.agent.abort(GEMINI_HEADER_INTERRUPT_REASON);
+		const generation = this.#promptGeneration;
+		this.#schedulePostPromptTask(async signal => {
+			if (signal.aborted || this.#isDisposed || this.#promptGeneration !== generation) return;
+			// Let the aborted stream finish unwinding so continue() doesn't race it.
+			await this.agent.waitForIdle();
+			if (signal.aborted || this.#isDisposed || this.#promptGeneration !== generation) return;
+			const aborted = this.agent.state.messages.findLast(
+				(m): m is AssistantMessage => m.role === "assistant" && m.timestamp === targetTimestamp,
+			);
+			if (aborted) this.#discardAssistantTurn(aborted);
+			const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
+			const details = { headers: headerCount };
+			this.agent.appendMessage({
+				role: "custom",
+				customType: GEMINI_TOOL_REMINDER_TYPE,
+				content,
+				display: false,
+				details,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+			this.sessionManager.appendCustomMessageEntry(GEMINI_TOOL_REMINDER_TYPE, content, false, details, "agent");
+			try {
+				await this.agent.continue();
+			} catch (err) {
+				logger.warn("gemini tool-call reminder continue failed", { error: String(err) });
+			}
+		});
+	}
+
 	#getStreamingEditToolCall(event: AgentEvent):
 		| {
 				toolCall: ToolCall;
@@ -4169,13 +4337,16 @@ export class AgentSession {
 		await this.#extensionRunner?.emit({ type: "agent_end", messages });
 	}
 
-	async #emitSessionStopEvent(messages: AgentMessage[]): Promise<void> {
+	async #emitSessionStopEvent(
+		messages: AgentMessage[],
+		lastAssistantMessage = this.getLastAssistantMessage(),
+	): Promise<void> {
 		if (this.#agentKind === "sub" || !this.#extensionRunner?.hasHandlers("session_stop")) return;
 		const generation = this.#promptGeneration;
 		const result = await this.#extensionRunner.emitSessionStop({
 			messages,
 			turn_id: Math.max(0, this.#turnIndex - 1),
-			last_assistant_message: this.getLastAssistantMessage(),
+			last_assistant_message: lastAssistantMessage,
 			session_id: this.sessionId,
 			session_file: this.sessionFile,
 			stop_hook_active: this.#sessionStopHookActive,
@@ -5106,7 +5277,7 @@ export class AgentSession {
 		toolNames: string[],
 		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
 	): Promise<void> {
-		toolNames = [...new Set(toolNames.map(name => name.toLowerCase()))];
+		toolNames = normalizeToolNames(toolNames);
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -8137,27 +8308,32 @@ export class AgentSession {
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
 			// Strategy honored on manual /compact too. Custom instructions imply a
-			// directed LLM summary; a text-only model cannot read the frames back —
-			// both take the summarizer path (the latter loudly).
+			// directed LLM summary; a text-only model cannot read snapcompact frames.
+			// When snapcompact itself was requested, fail locally instead of silently
+			// converting the "no LLM call" path into a provider-backed summary.
 			const wantsSnapcompact =
 				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
-			let snapcompactReady = wantsSnapcompact && this.model.input.includes("image");
-			if (wantsSnapcompact && !snapcompactReady) {
+			const snapcompactReady = wantsSnapcompact;
+			if (wantsSnapcompact && !this.model.input.includes("image")) {
 				this.emitNotice(
 					"warning",
-					`snapcompact needs a vision-capable model (${this.model.id} is text-only) — using an LLM summary instead`,
+					`snapcompact needs a vision-capable model (${this.model.id} is text-only)`,
 					"compaction",
 				);
+				throw new Error(`snapcompact cannot run locally: ${this.model.id} is text-only.`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
 				const renderScan = snapcompact.scanRenderability(text);
 				if (!renderScan.isSafe) {
+					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 					this.emitNotice(
 						"warning",
-						`snapcompact disabled: high non-ASCII rate detected (${(renderScan.unrenderableRatio * 100).toFixed(1)}%). Falling back to an LLM summary to prevent data loss.`,
+						`snapcompact disabled: high non-ASCII rate detected (${percent}%). No LLM fallback was attempted.`,
 						"compaction",
 					);
-					snapcompactReady = false;
+					throw new Error(
+						`snapcompact cannot render this conversation locally: high non-ASCII rate detected (${percent}%).`,
+					);
 				}
 			}
 
@@ -8169,8 +8345,8 @@ export class AgentSession {
 
 			// Snapcompact runs locally first. The frame cap is sized from the live
 			// model window via #computeSnapcompactMaxFrames so the post-render context
-			// fits without the warning loop (issue #3247). Zero-frame budget → skip
-			// snapcompact and take the summarizer path immediately.
+			// fits without the warning loop (issue #3247). Zero-frame budget now fails
+			// the snapcompact request locally rather than falling back to an LLM call.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
 				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
@@ -8180,9 +8356,10 @@ export class AgentSession {
 					});
 					this.emitNotice(
 						"warning",
-						"snapcompact: kept history alone exceeds the context budget — using an LLM summary instead",
+						"snapcompact: kept history alone exceeds the context budget. No LLM fallback was attempted.",
 						"compaction",
 					);
+					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
 				} else {
 					snapcompactResult = await snapcompact.compact(preparation, {
 						convertToLlm,
@@ -8196,15 +8373,15 @@ export class AgentSession {
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
 					if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
-						logger.warn("Snapcompact still overflows the window after frame-budget sizing; falling back", {
+						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.model?.id,
 						});
 						this.emitNotice(
 							"warning",
-							"snapcompact could not bring the context under the limit — using an LLM summary instead",
+							"snapcompact could not bring the context under the limit. No LLM fallback was attempted.",
 							"compaction",
 						);
-						snapcompactResult = undefined;
+						throw new Error("snapcompact could not bring the context under the limit locally.");
 					}
 				}
 			}
@@ -8679,6 +8856,21 @@ export class AgentSession {
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
+		// Promote to a larger-context sibling before compacting, mirroring the
+		// pre-prompt (#runPrePromptCompactionIfNeeded) and post-turn threshold
+		// (#checkCompaction) paths. Without this, a long mid-turn tool loop that
+		// crosses the threshold compacts the history (and can hit the no-progress
+		// dead-end on a single oversized turn) on a model that should have just
+		// been promoted to a larger window instead.
+		if (await this.#promoteContextModel()) {
+			logger.debug("Mid-run context promotion avoided compaction", {
+				contextTokens,
+				contextWindow,
+				from: `${model?.provider}/${model?.id}`,
+			});
+			return;
+		}
+
 		const messagesBefore = activeMessages.length;
 		await this.#runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
@@ -8827,7 +9019,20 @@ export class AgentSession {
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = await this.#pruneToolOutputs();
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
-		const assistantUsageContextTokens = calculateContextTokens(assistantMessage.usage);
+		// `errorIsFromBeforeCompaction` (computed above) is the general
+		// "this assistant message predates the latest compaction" predicate here,
+		// not just an error-specific one; alias it locally so the threshold intent
+		// reads clearly (#3412 review).
+		const assistantPredatesCompaction = errorIsFromBeforeCompaction;
+		// An assistant that predates the latest compaction carries stale, pre-rewrite
+		// `usage`: the scheduled auto-continue re-enters this check with the kept
+		// assistant (#promptWithMessage → #checkCompaction), and its old high prompt
+		// count would re-trip the threshold on a freshly compacted history. Drop the
+		// stale provider number for those messages and let the live stored estimate
+		// (the floor applied below) drive the decision instead.
+		const assistantUsageContextTokens = assistantPredatesCompaction
+			? 0
+			: calculateContextTokens(assistantMessage.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		// Pruning frees bytes for the NEXT prompt; it does not change the size of
 		// the prompt the LLM just billed for. Earlier revisions subtracted the
@@ -8931,11 +9136,11 @@ export class AgentSession {
 			// Tool-use orphans corrupt Anthropic message history (tool_result without
 			// matching tool_use). Always remove them even when the retry cap is hit.
 			if (assistantMessage.stopReason === "toolUse") {
-				this.#removeEmptyStopFromActiveContext(assistantMessage);
+				this.#discardAssistantTurn(assistantMessage);
 			}
 			return false;
 		}
-		this.#removeEmptyStopFromActiveContext(assistantMessage);
+		this.#discardAssistantTurn(assistantMessage);
 		this.agent.appendMessage({
 			role: "developer",
 			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
@@ -9042,7 +9247,7 @@ export class AgentSession {
 		});
 	}
 
-	#removeEmptyStopFromActiveContext(assistantMessage: AssistantMessage): void {
+	#removeAssistantMessageFromActiveContext(assistantMessage: AssistantMessage): void {
 		const messages = this.agent.state.messages;
 		const lastMessage = messages[messages.length - 1];
 		if (
@@ -9051,8 +9256,19 @@ export class AgentSession {
 		) {
 			this.agent.replaceMessages(messages.slice(0, -1));
 		}
+	}
 
-		const emptyStopEntry = this.sessionManager
+	/**
+	 * Drop an assistant turn from BOTH the live agent context and the persisted
+	 * session branch (reparenting the leaf to the turn's parent), so a discarded
+	 * turn does not resurface on reload. Used for empty/reasoning-only stops and
+	 * the Gemini header-runaway interrupt, which must not replay a partial,
+	 * loop-fueling thinking block.
+	 */
+	#discardAssistantTurn(assistantMessage: AssistantMessage): void {
+		this.#removeAssistantMessageFromActiveContext(assistantMessage);
+
+		const branchEntry = this.sessionManager
 			.getBranch()
 			.slice()
 			.reverse()
@@ -9062,13 +9278,13 @@ export class AgentSession {
 					entry.message.role === "assistant" &&
 					this.#isSameAssistantMessage(entry.message as AssistantMessage, assistantMessage),
 			);
-		if (!emptyStopEntry) {
+		if (!branchEntry) {
 			return;
 		}
-		if (emptyStopEntry.parentId === null) {
+		if (branchEntry.parentId === null) {
 			this.sessionManager.resetLeaf();
 		} else {
-			this.sessionManager.branch(emptyStopEntry.parentId);
+			this.sessionManager.branch(branchEntry.parentId);
 		}
 	}
 
@@ -10074,6 +10290,80 @@ export class AgentSession {
 	}
 
 	/**
+	 * Post-maintenance progress check for the context-full / snapcompact tail.
+	 *
+	 * After `appendCompaction` rewrote history and `replaceMessages` swapped in the
+	 * compacted context, measure the residual context off the live message set and
+	 * decide whether maintenance actually created headroom. Mirrors the shake
+	 * recovery-band logic (#2275): a session whose single most-recent turn already
+	 * blows the threshold cannot be reduced by compaction (findCutPoint keeps that
+	 * turn verbatim), so re-firing on the next agent_end just thrashes. We only
+	 * report progress when residual context lands at or below
+	 * `COMPACTION_RECOVERY_BAND × threshold` — a band that sits strictly under the
+	 * compaction threshold, so reaching it guarantees the next turn cannot
+	 * re-trip threshold compaction.
+	 *
+	 * When the model/window is unknown we cannot evaluate the band, so we
+	 * optimistically allow the continuation (preserving prior behavior).
+	 */
+	#compactionCreatedHeadroom(): boolean {
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return true;
+		const compactionSettings = this.settings.getGroup("compaction");
+		const residualTokens = compactionContextTokens(
+			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.#estimateStoredContextTokens(),
+		);
+		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+		const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
+		// Residual at/below the band is authoritative headroom: the band sits
+		// strictly under the compaction threshold, so the next turn cannot
+		// re-trip threshold compaction regardless of how little this pass shaved.
+		// Don't add a secondary "smaller than the trigger" guard — when stale/
+		// tool-output pruning already dropped context under the band before this
+		// pass, the trigger is itself sub-band, and requiring a strict reduction
+		// would suppress a valid continuation and emit a false no-progress warning
+		// even though compaction left the session safe.
+		return residualTokens <= recoveryBand;
+	}
+
+	/**
+	 * Retry-side counterpart to {@link #compactionCreatedHeadroom}. An
+	 * overflow/incomplete recovery only needs the rebuilt prompt to *fit* the
+	 * window again — it does not have to land under the compaction threshold, let
+	 * alone the stricter `COMPACTION_RECOVERY_BAND × threshold` hysteresis the
+	 * auto-continue thrash guard uses. Reusing the band here turned recoverable
+	 * overflows into manual dead-ends: a 200k-window prompt compacted from
+	 * overflow down to ~150k is comfortably retryable, but sits above
+	 * `0.8 × 170k = 136k` and was wrongly refused (PR #3412 review).
+	 *
+	 * Measures residual context against the usable budget (`contextWindow - reserve`).
+	 * The default absolute reserve can exceed bundled small-context windows, so
+	 * the retry path clamps that reserve back to the proportional 15% default
+	 * before comparing; otherwise a prompt that fits the model window would still
+	 * see a negative budget and dead-end. Callers MUST invoke this AFTER dropping
+	 * the failed assistant from `this.messages`, so the just-failed turn (which
+	 * the retry prompt will not include) is excluded from the estimate.
+	 *
+	 * When the model/window is unknown we cannot evaluate the budget, so we
+	 * optimistically allow the retry (preserving prior behavior).
+	 */
+	#compactionCreatedRetryFit(): boolean {
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return true;
+		const compactionSettings = this.settings.getGroup("compaction");
+		const residualTokens = compactionContextTokens(
+			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.#estimateStoredContextTokens(),
+		);
+		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
+		const defaultReserveTokens = Math.floor(contextWindow * 0.15);
+		const fitReserveTokens = Math.min(reserveTokens, defaultReserveTokens);
+		const fitBudget = Math.max(0, contextWindow - fitReserveTokens);
+		return residualTokens <= fitBudget;
+	}
+
+	/**
 	 * Internal: Run auto-compaction with events.
 	 *
 	 * @param allowDefer If true (default), threshold-driven handoff strategy is allowed to
@@ -10146,26 +10436,14 @@ export class AgentSession {
 		// "overflow" forces context-full because the input itself is broken — a handoff
 		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
 		// so a handoff request on the existing context is still viable. Snapcompact is
-		// safe for every reason (it makes no LLM call at all) but requires a vision
-		// model to be worth anything — fall back to context-full otherwise.
+		// a local-only strategy: if it cannot run, report the local blocker instead of
+		// silently swapping in a provider-backed summary.
 		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
-				? "handoff"
-				: "context-full";
-		if (compactionSettings.strategy === "snapcompact") {
-			if (this.model?.input.includes("image")) {
-				action = "snapcompact";
-			} else {
-				logger.warn("Snapcompact compaction requires a vision-capable model; falling back to context-full", {
-					model: this.model?.id,
-				});
-				this.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.model?.id ?? "unknown"} is text-only) — using an LLM summary instead`,
-					"compaction",
-				);
-			}
-		}
+			compactionSettings.strategy === "snapcompact"
+				? "snapcompact"
+				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
+					? "handoff"
+					: "context-full";
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
@@ -10306,48 +10584,59 @@ export class AgentSession {
 			// Snapcompact runs locally first. The post-compaction context = kept-recent
 			// + a summary message carrying the imaged archive at FRAME_TOKEN_ESTIMATE
 			// per frame; #computeSnapcompactMaxFrames sizes the frame cap from the
-			// live window so we don't run snapcompact just to overflow and fall back
-			// every threshold tick. Kept-recent already over budget → skip snapcompact
-			// outright (a single frame won't fit). Otherwise the projection below is
-			// only a defensive guard for summary-text drift.
+			// live window so we don't run snapcompact just to overflow every threshold
+			// tick. Any local blocker fails the snapcompact maintenance pass rather
+			// than falling back to a provider-backed LLM summary.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
+				if (!this.model?.input.includes("image")) {
+					logger.warn("Snapcompact compaction requires a vision-capable model", {
+						model: this.model?.id,
+					});
+					this.emitNotice(
+						"warning",
+						`snapcompact needs a vision-capable model (${this.model?.id ?? "unknown"} is text-only). No LLM fallback was attempted.`,
+						"compaction",
+					);
+					throw new Error(`snapcompact cannot run locally: ${this.model?.id ?? "unknown"} is text-only.`);
+				}
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
 				);
 				const renderScan = snapcompact.scanRenderability(text);
 				if (!renderScan.isSafe) {
-					logger.warn("Snapcompact disabled: high non-ASCII rate detected; falling back to an LLM summary", {
+					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
+					logger.warn("Snapcompact disabled: high non-ASCII rate detected", {
 						model: this.model?.id,
 						unrenderableRatio: renderScan.unrenderableRatio,
 					});
 					this.emitNotice(
 						"warning",
-						`snapcompact disabled: high non-ASCII rate detected (${(renderScan.unrenderableRatio * 100).toFixed(1)}%). Falling back to an LLM summary to prevent data loss.`,
+						`snapcompact disabled: high non-ASCII rate detected (${percent}%). No LLM fallback was attempted.`,
 						"compaction",
 					);
-					action = "context-full";
-				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
-					if (maxFrames < 1) {
-						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
-							model: this.model?.id,
-						});
-						this.emitNotice(
-							"warning",
-							"snapcompact: kept history alone exceeds the context budget — using an LLM summary instead",
-							"compaction",
-						);
-						action = "context-full";
-					} else {
-						snapcompactResult = await snapcompact.compact(preparation, {
-							convertToLlm,
-							model: this.model,
-							shape: snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape")),
-							maxFrames,
-						});
-					}
+					throw new Error(
+						`snapcompact cannot render this conversation locally: high non-ASCII rate detected (${percent}%).`,
+					);
 				}
+				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
+				if (maxFrames < 1) {
+					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
+						model: this.model?.id,
+					});
+					this.emitNotice(
+						"warning",
+						"snapcompact: kept history alone exceeds the context budget. No LLM fallback was attempted.",
+						"compaction",
+					);
+					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
+				}
+				snapcompactResult = await snapcompact.compact(preparation, {
+					convertToLlm,
+					model: this.model,
+					shape: snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape")),
+					maxFrames,
+				});
 
 				if (snapcompactResult) {
 					const ctxWindow = this.model?.contextWindow ?? 0;
@@ -10357,18 +10646,17 @@ export class AgentSession {
 							: Number.POSITIVE_INFINITY;
 					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
 					if (projected > budget) {
-						logger.warn("Snapcompact still overflows the window after frame-budget sizing; falling back", {
+						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.model?.id,
 							projected,
 							budget,
 						});
 						this.emitNotice(
 							"warning",
-							"snapcompact could not bring the context under the limit — using an LLM summary instead",
+							"snapcompact could not bring the context under the limit. No LLM fallback was attempted.",
 							"compaction",
 						);
-						action = "context-full";
-						snapcompactResult = undefined;
+						throw new Error("snapcompact could not bring the context under the limit locally.");
 					}
 				}
 			}
@@ -10564,11 +10852,21 @@ export class AgentSession {
 			};
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
+			// Post-maintenance progress guard. Snapcompact can project over budget and
+			// fall back to a context-full summary; the summarizer keeps `keepRecentTokens`
+			// of recent history verbatim and findCutPoint can only cut at turn
+			// boundaries (never tool results), so a single oversized recent turn (e.g. a
+			// huge tool result) leaves the rewritten context still above threshold.
+			// Scheduling the continuation regardless means the next agent_end re-enters
+			// #checkCompaction over the same oversized tail and re-fires forever. The
+			// retry and the threshold auto-continue use different progress tests (a
+			// recoverable overflow only has to fit; the auto-continue thrash needs the
+			// stricter recovery band), so each branch evaluates its own below.
 			let continuationScheduled = false;
-			if (!willRetry && reason !== "idle" && shouldAutoContinue) {
-				this.#scheduleAutoContinuePrompt(generation);
-				continuationScheduled = true;
-			}
+			// A non-idle pass that wanted to continue (retry or auto-continue) but freed
+			// too little for that path to proceed is a dead-end: warn once so the user
+			// understands why maintenance paused instead of silently looping.
+			let noProgressDeadEnd = false;
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -10587,11 +10885,38 @@ export class AgentSession {
 					}
 				}
 
-				this.#scheduleAgentContinue({ delayMs: 100, generation });
-				continuationScheduled = true;
-			} else if (!suppressContinuation && this.agent.hasQueuedMessages()) {
+				// Retry only needs the rebuilt prompt to fit the window again — measured
+				// AFTER the drop above so the just-failed turn (which the retry prompt
+				// won't include) is excluded. Reusing the auto-continue recovery band
+				// here turned recoverable overflows into manual dead-ends (#3412 review),
+				// so use the looser fit budget.
+				if (this.#compactionCreatedRetryFit()) {
+					this.#scheduleAgentContinue({ delayMs: 100, generation });
+					continuationScheduled = true;
+				} else {
+					noProgressDeadEnd = true;
+				}
+			} else if (reason !== "idle") {
+				// Mirror the shake recovery-band check: only auto-continue when compaction
+				// landed residual context under `COMPACTION_RECOVERY_BAND × threshold`.
+				// Re-firing on a history that still sits just over the line is the
+				// snapcompact thrash, so require genuine headroom, not a bare fit. Even
+				// when auto-continue is disabled, a no-headroom threshold pass must still
+				// block later automatic continuations (todo reminders/session_stop hooks)
+				// from re-entering the same oversized context.
+				if (this.#compactionCreatedHeadroom()) {
+					if (shouldAutoContinue) {
+						this.#scheduleAutoContinuePrompt(generation);
+						continuationScheduled = true;
+					}
+				} else {
+					noProgressDeadEnd = true;
+				}
+			}
+			if (!continuationScheduled && !suppressContinuation && this.agent.hasQueuedMessages()) {
 				// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
-				// Kick the loop so queued messages are actually delivered.
+				// Kick the loop so queued messages are actually delivered. This remains separate
+				// from the no-progress warning: pausing maintenance must not strand user input.
 				this.#scheduleAgentContinue({
 					delayMs: 100,
 					generation,
@@ -10599,7 +10924,16 @@ export class AgentSession {
 				});
 				continuationScheduled = true;
 			}
-			return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+
+			if (noProgressDeadEnd) {
+				this.emitNotice(
+					"warning",
+					"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. The most recent turn alone is too large to reduce further; shrink it (e.g. clear large tool output) or switch to a larger-context model.",
+					"compaction",
+				);
+			}
+			if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
+			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
 				await this.#emitSessionEvent({
@@ -10697,7 +11031,7 @@ export class AgentSession {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
 					const correctedTokens = Math.max(0, triggerContextTokens - result.tokensFreed);
 					const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-					const recoveryBand = Math.floor(thresholdTokens * SHAKE_RECOVERY_BAND);
+					const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 					stillOverThreshold = correctedTokens > recoveryBand;
 				} else {
 					const postShakeTokens = this.getContextUsage({ contextWindow })?.tokens ?? 0;
@@ -11464,11 +11798,8 @@ export class AgentSession {
 			errorMessage,
 		});
 
-		// Remove error message from agent state (keep in session for history)
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.replaceMessages(messages.slice(0, -1));
-		}
+		// Remove the failed assistant message from active context before retrying.
+		this.#removeAssistantMessageFromActiveContext(message);
 
 		// Wait with exponential backoff (abortable).
 		const retryAbortController = new AbortController();
