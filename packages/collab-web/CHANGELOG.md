@@ -5,6 +5,17 @@
 ### Added
 
 - Added GitLab tool renderer registration for shared collab-web transcripts.
+## [16.2.0] - 2026-06-27
+
+### Added
+
+- Added dedicated renderers for glob, grep, and legacy find and search tools to improve the readability of search and file discovery results.
+
+## [16.1.23] - 2026-06-26
+
+### Fixed
+
+- Hid advisory wrapper tags in collab transcript Markdown while preserving their content. ([#3559](https://github.com/can1357/oh-my-pi/issues/3559))
 
 ## [16.1.16] - 2026-06-23
 

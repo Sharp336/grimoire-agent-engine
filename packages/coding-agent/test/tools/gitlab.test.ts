@@ -20,35 +20,6 @@ describe("gitlab tool", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("formats repository metadata and calls glab repo view with JSON output", async () => {
-		const jsonSpy = vi.spyOn(git.gitlab, "json").mockResolvedValue({
-			path_with_namespace: "group/project",
-			description: "Project description",
-			web_url: "https://gitlab.com/group/project",
-			default_branch: "main",
-			visibility: "public",
-			star_count: 42,
-			forks_count: 7,
-			open_issues_count: 3,
-			last_activity_at: "2026-06-01T12:00:00Z",
-		});
-
-		const tool = new GitlabTool(createSession());
-		const result = await tool.execute("repo-view", { op: "repo_view", repo: "group/project", branch: "main" });
-		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-
-		expect(jsonSpy).toHaveBeenCalledWith(
-			"/tmp/test",
-			["repo", "view", "group/project", "--branch", "main", "--output", "json"],
-			undefined,
-			{ repoProvided: true },
-		);
-		expect(text).toContain("# group/project");
-		expect(text).toContain("Project description");
-		expect(text).toContain("Default branch: main");
-		expect(text).toContain("Stars: 42");
-	});
-
 	it("creates merge requests non-interactively and re-reads the created MR", async () => {
 		const textCalls: string[][] = [];
 		vi.spyOn(git.gitlab, "text").mockImplementation(async (_cwd, args) => {
@@ -155,6 +126,16 @@ describe("gitlab tool", () => {
 		expect(textSpy).not.toHaveBeenCalled();
 	});
 
+	it("rejects mr_create body that would make glab interactive", async () => {
+		const textSpy = vi.spyOn(git.gitlab, "text");
+		const tool = new GitlabTool(createSession());
+
+		await expect(
+			tool.execute("mr-create", { op: "mr_create", repo: "group/project", title: "Explicit", body: "-" }),
+		).rejects.toThrow("body must not be '-'");
+		expect(textSpy).not.toHaveBeenCalled();
+	});
+
 	it("checks out merge requests with force and rejects flag-shaped MR ids", async () => {
 		const textSpy = vi.spyOn(git.gitlab, "text").mockResolvedValue("Checked out branch feature");
 		const tool = new GitlabTool(createSession());
@@ -181,55 +162,6 @@ describe("gitlab tool", () => {
 		expect(textSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("reads pipeline status and lists pipelines", async () => {
-		const jsonCalls: string[][] = [];
-		vi.spyOn(git.gitlab, "json").mockImplementation(async <T>(_cwd: string, args: string[]): Promise<T> => {
-			jsonCalls.push([...args]);
-			if (args[1] === "status") {
-				return { status: "success", ref: "main", sha: "abcdef1234567890" } as T;
-			}
-			return [{ id: 1001, status: "failed", ref: "main", sha: "1234567890abcdef" }] as T;
-		});
-
-		const tool = new GitlabTool(createSession());
-		const status = await tool.execute("pipeline-status", {
-			op: "pipeline_status",
-			repo: "group/project",
-			branch: "main",
-		});
-		const list = await tool.execute("pipeline-list", {
-			op: "pipeline_list",
-			repo: "group/project",
-			branch: "main",
-			status: "failed",
-			sha: "1234567890abcdef",
-			limit: 3,
-		});
-		const statusText = status.content[0]?.type === "text" ? status.content[0].text : "";
-		const listText = list.content[0]?.type === "text" ? list.content[0].text : "";
-
-		expect(jsonCalls[0]).toEqual(["ci", "status", "--output", "json", "--branch", "main", "--repo", "group/project"]);
-		expect(jsonCalls[1]).toEqual([
-			"ci",
-			"list",
-			"--output",
-			"json",
-			"--repo",
-			"group/project",
-			"--ref",
-			"main",
-			"--status",
-			"failed",
-			"--sha",
-			"1234567890abcdef",
-			"--per-page",
-			"3",
-		]);
-		expect(statusText).toContain("Status: success");
-		expect(listText).toContain("# GitLab pipelines");
-		expect(listText).toContain("- #1001 failed");
-	});
-
 	it("exposes only supported public ops and classifies approval", () => {
 		const tool = new GitlabTool(createSession());
 		const properties = toolWireSchema(tool).properties;
@@ -241,16 +173,20 @@ describe("gitlab tool", () => {
 			? opEnumValue.filter((value): value is string => typeof value === "string").sort()
 			: [];
 
-		expect(opEnum).toEqual(["mr_checkout", "mr_create", "pipeline_list", "pipeline_status", "repo_view"]);
+		expect(opEnum).toEqual(["mr_checkout", "mr_create"]);
+		const propertyNames = properties && typeof properties === "object" ? Object.keys(properties) : [];
+		expect(propertyNames).not.toContain("limit");
+		expect(propertyNames).not.toContain("status");
+		expect(propertyNames).not.toContain("sha");
 		expect(tool.description).toContain("issue://");
 		expect(tool.description).toContain("pr://");
+		expect(tool.description).not.toContain("repo_view");
+		expect(tool.description).not.toContain("pipeline_status");
+		expect(tool.description).not.toContain("pipeline_list");
 		expect(tool.description).not.toContain("issue_view");
 		expect(tool.description).not.toContain("mr_view");
 		expect(tool.description).not.toContain("issue_list");
 		expect(tool.description).not.toContain("mr_list");
-		expect(tool.approval({ op: "repo_view" })).toBe("read");
-		expect(tool.approval({ op: "pipeline_list" })).toBe("read");
-		expect(tool.approval({ op: "mr_create" })).toBe("exec");
-		expect(tool.approval({ op: "mr_checkout" })).toBe("exec");
+		expect(tool.approval).toBe("exec");
 	});
 });

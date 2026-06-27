@@ -29,7 +29,12 @@ import {
 	parsePositiveDecimalInt,
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
-import { type CacheStatus, formatFreshnessNote, normalizeGitlabHost } from "../tools/github-cache";
+import {
+	type CacheStatus,
+	formatFreshnessNote,
+	normalizeGitlabHost,
+	resolveConfiguredGitlabHosts,
+} from "../tools/github-cache";
 import { getOrFetchGitlabIssue, getOrFetchGitlabMr, getOrFetchGitlabMrDiff } from "../tools/gitlab";
 import * as git from "../utils/git";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
@@ -274,7 +279,7 @@ function cleanGitlabRepoPath(value: string): string | undefined {
 	return repo;
 }
 
-function parseGitLabRemoteUrl(remoteUrl: string): ParsedGitRemote | undefined {
+function parseGitLabRemoteUrl(remoteUrl: string, knownGitlabHosts: ReadonlySet<string>): ParsedGitRemote | undefined {
 	const trimmed = remoteUrl.trim();
 	if (!trimmed) return undefined;
 	let host = "";
@@ -294,8 +299,7 @@ function parseGitLabRemoteUrl(remoteUrl: string): ParsedGitRemote | undefined {
 		repo = cleanGitlabRepoPath(scpMatch[2] ?? "");
 	}
 	if (!host || !repo) return undefined;
-	const configuredHost = normalizeGitlabHost(process.env.GITLAB_HOST || process.env.GITLAB_URI || "");
-	const isGitlabHost = host.includes("gitlab") || (configuredHost !== "" && host === configuredHost);
+	const isGitlabHost = host.includes("gitlab") || knownGitlabHosts.has(host);
 	if (!isGitlabHost) return undefined;
 	return { backend: "gitlab", host, repo };
 }
@@ -312,14 +316,16 @@ async function resolveGitLabRemote(
 			"upstream",
 			...remoteNames.filter(name => name !== "origin" && name !== "upstream"),
 		].filter((name, index, names) => remoteNames.includes(name) && names.indexOf(name) === index);
-		for (const remoteName of orderedNames) {
+		const namesToCheck = parsedRepo ? orderedNames : orderedNames.slice(0, 1);
+		const knownGitlabHosts = resolveConfiguredGitlabHosts();
+		for (const remoteName of namesToCheck) {
 			let remoteUrl: string | undefined;
 			try {
 				remoteUrl = await git.remote.url(cwd, remoteName, signal);
 			} catch {
 				continue;
 			}
-			const remote = remoteUrl ? parseGitLabRemoteUrl(remoteUrl) : undefined;
+			const remote = remoteUrl ? parseGitLabRemoteUrl(remoteUrl, knownGitlabHosts) : undefined;
 			if (!remote) continue;
 			if (parsedRepo && remote.repo.toLowerCase() !== parsedRepo.toLowerCase()) continue;
 			return { host: remote.host, repo: remote.repo };

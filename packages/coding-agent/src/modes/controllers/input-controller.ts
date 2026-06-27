@@ -1,11 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import { extractImagePathFromText } from "../../modes/components/custom-editor";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
@@ -20,7 +22,12 @@ import { isLowSignalTitleInput } from "../../tiny/text";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
-import { copyToClipboard, readImageFromClipboard, readTextFromClipboard } from "../../utils/clipboard";
+import {
+	copyToClipboard,
+	readImageFromClipboard,
+	readMacFileUrlsFromClipboard,
+	readTextFromClipboard,
+} from "../../utils/clipboard";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
@@ -118,6 +125,7 @@ const TINY_TITLE_PROGRESS_REVEAL_DELAY_MS = 1_000;
 // deliberate human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
+const STREAMING_ESCAPE_CANCEL_WINDOW_MS = 2_000;
 
 export class InputController {
 	constructor(
@@ -126,7 +134,12 @@ export class InputController {
 		private clipboard: {
 			readImage: typeof readImageFromClipboard;
 			readText: typeof readTextFromClipboard;
-		} = { readImage: readImageFromClipboard, readText: readTextFromClipboard },
+			readMacFileUrls?: typeof readMacFileUrlsFromClipboard;
+		} = {
+			readImage: readImageFromClipboard,
+			readText: readTextFromClipboard,
+			readMacFileUrls: readMacFileUrlsFromClipboard,
+		},
 	) {}
 
 	#enhancedPaste?: EnhancedPasteController;
@@ -137,6 +150,16 @@ export class InputController {
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
+	// Streaming turns use a two-step Esc: first press arms this token, second press
+	// within the window aborts the same live assistant turn. The token is a per-turn
+	// sentinel minted lazily on demand and reset on every `agent_start`/`agent_end`
+	// (see setupKeyHandlers), so it survives `message_start`/`message_update`
+	// transitions inside a single turn but cannot leak across turn boundaries.
+	#streamingEscapeTurnSentinel: object | undefined;
+	#streamingEscapeArmedToken: object | undefined;
+	#streamingEscapeArmedUntil = 0;
+	#streamingEscapeTimer: NodeJS.Timeout | undefined;
+	#streamingEscapeSessionSubscribed = false;
 	// Sequential index for `local://attachment-N` references created by large-paste and
 	// pasted-file attachments. Seeded from 0 and bumped past existing attachment files.
 	#attachmentCounter = 0;
@@ -186,8 +209,50 @@ export class InputController {
 		const unsubscribe = tinyTitleClient.onProgress(update);
 	}
 
+	#clearStreamingEscapeArm(): void {
+		this.#streamingEscapeArmedToken = undefined;
+		this.#streamingEscapeArmedUntil = 0;
+		if (this.#streamingEscapeTimer) {
+			clearTimeout(this.#streamingEscapeTimer);
+			this.#streamingEscapeTimer = undefined;
+		}
+	}
+
+	#handleStreamingEscape(): void {
+		if (!this.#streamingEscapeTurnSentinel) {
+			this.#streamingEscapeTurnSentinel = {};
+		}
+		const token = this.#streamingEscapeTurnSentinel;
+		const now = Date.now();
+		if (this.#streamingEscapeArmedToken === token && now <= this.#streamingEscapeArmedUntil) {
+			this.#clearStreamingEscapeArm();
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			return;
+		}
+
+		this.#clearStreamingEscapeArm();
+		this.#streamingEscapeArmedToken = token;
+		this.#streamingEscapeArmedUntil = now + STREAMING_ESCAPE_CANCEL_WINDOW_MS;
+		this.#streamingEscapeTimer = setTimeout(() => {
+			if (this.#streamingEscapeArmedToken === token && Date.now() >= this.#streamingEscapeArmedUntil) {
+				this.#clearStreamingEscapeArm();
+			}
+		}, STREAMING_ESCAPE_CANCEL_WINDOW_MS);
+		this.#streamingEscapeTimer.unref?.();
+		this.ctx.showStatus("Press Esc again within 2s to cancel streaming.");
+	}
+
 	setupKeyHandlers(): void {
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#streamingEscapeSessionSubscribed && typeof this.ctx.session.subscribe === "function") {
+			this.#streamingEscapeSessionSubscribed = true;
+			this.ctx.session.subscribe(event => {
+				if (event.type === "agent_start" || event.type === "agent_end") {
+					this.#streamingEscapeTurnSentinel = undefined;
+					this.#clearStreamingEscapeArm();
+				}
+			});
+		}
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
@@ -263,7 +328,7 @@ export class InputController {
 			if (this.ctx.loopModeEnabled) {
 				this.ctx.pauseLoop();
 				if (this.ctx.session.isStreaming) {
-					void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+					this.#handleStreamingEscape();
 				} else {
 					this.ctx.cancelPendingSubmission();
 				}
@@ -314,12 +379,13 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (this.ctx.session.isStreaming) {
-				void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+				this.#handleStreamingEscape();
 			} else if (this.ctx.editor.getText().trim()) {
 				// Esc with typed text clears the draft instead of (or before) any double-Esc action
 				this.ctx.editor.setText("");
 				this.ctx.ui.requestRender();
 				this.ctx.lastEscapeTime = 0;
+				this.#clearStreamingEscapeArm();
 			} else {
 				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
 				const action = settings.get("doubleEscapeAction");
@@ -958,7 +1024,7 @@ export class InputController {
 			//
 			// SIGTSTP: brush-core (the embedded shell behind every bash tool call)
 			// installs a tokio SIGTSTP listener on `Process::wait` to detect when
-			// its children have been stopped (`crates/brush-core-vendored/src/sys/
+			// its children have been stopped (`crates/vendor/brush-core/src/sys/
 			// unix/signal.rs::tstp_signal_listener` → `tokio::signal::unix::
 			// signal(SIGTSTP)`). Per tokio's documented contract, the first call
 			// for a given SignalKind permanently replaces the kernel-default
@@ -982,7 +1048,7 @@ export class InputController {
 			// children that must survive the suspend (MCP stdio servers via
 			// the `detached: true` spawn in `mcp/transports/stdio.ts`, every
 			// brush external command via brush's per-child `setsid` in
-			// `crates/brush-core-vendored/src/commands.rs`) are already in
+			// `crates/vendor/brush-core/src/commands.rs`) are already in
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {
@@ -1386,33 +1452,65 @@ export class InputController {
 	async handleImagePaste(): Promise<boolean> {
 		try {
 			const image = await this.clipboard.readImage();
-			if (!image) {
-				// Smart paste (#1628): no image on the clipboard — fall back to
-				// pasting its text so the same chord covers both payload kinds.
-				// Hosts that pre-empt the terminal's own paste (VS Code's
-				// integrated terminal, Win+V clipboard history) deliver only
-				// this keypress, so a miss here must not dead-end.
-				const text = await this.clipboard.readText();
-				if (!text) {
-					this.ctx.showStatus("Clipboard is empty");
-					return false;
-				}
-				// Route to the focused component when it accepts pastes (modal
-				// Input prompts), matching the enhanced-paste text path (#2127).
-				const focused = this.ctx.ui.getFocused();
-				const target = focused && focused !== this.ctx.editor && hasPasteText(focused) ? focused : this.ctx.editor;
-				target.pasteText(text);
-				this.ctx.ui.requestRender();
+			if (image) {
+				return await this.#normalizeAndInsertPastedImage(
+					{
+						type: "image",
+						data: image.data.toBase64(),
+						mimeType: image.mimeType,
+					},
+					`Unsupported clipboard image format: ${image.mimeType}`,
+				);
+			}
+			// #3506: macOS Finder `Cmd+C` puts only a `public.file-url`
+			// representation on the pasteboard. `pbpaste` (the backing call
+			// for `readText` on Darwin) only surfaces plain text / RTF / EPS,
+			// so it returns empty for file-url-only pasteboards — the smart
+			// text fallback below would dead-end with "Clipboard is empty".
+			// Reach the file URL directly via AppleScript and route every
+			// image-shaped path through {@link handleImagePathPaste}, matching
+			// the bracketed-paste handler in `CustomEditor.handleInput` which
+			// iterates every extracted image path. Multi-image Finder
+			// selections must not silently drop after the first attach.
+			// `readMacFileUrls` returns an empty list off Darwin, so the
+			// check is free on every other platform.
+			const fileUrls = (await this.clipboard.readMacFileUrls?.()) ?? [];
+			let attachedFromFileUrls = false;
+			for (const url of fileUrls) {
+				const candidate = extractImagePathFromText(url);
+				if (!candidate) continue;
+				await this.handleImagePathPaste(candidate);
+				attachedFromFileUrls = true;
+			}
+			if (attachedFromFileUrls) return true;
+			// Smart paste (#1628): no image on the clipboard — fall back to
+			// pasting its text so the same chord covers both payload kinds.
+			// Hosts that pre-empt the terminal's own paste (VS Code's
+			// integrated terminal, Win+V clipboard history) deliver only
+			// this keypress, so a miss here must not dead-end.
+			const text = await this.clipboard.readText();
+			if (!text) {
+				this.ctx.showStatus("Clipboard is empty");
+				return false;
+			}
+			// #3506: when the clipboard text is an explicit image file path,
+			// route through {@link handleImagePathPaste} so the image is
+			// loaded and attached instead of pasting the path as literal
+			// text. Covers terminals that paste the Finder file path as
+			// plain text rather than as a `public.file-url` (most macOS
+			// terminals do this for image clipboards).
+			const imagePath = extractImagePathFromText(text);
+			if (imagePath) {
+				await this.handleImagePathPaste(imagePath);
 				return true;
 			}
-			return await this.#normalizeAndInsertPastedImage(
-				{
-					type: "image",
-					data: image.data.toBase64(),
-					mimeType: image.mimeType,
-				},
-				`Unsupported clipboard image format: ${image.mimeType}`,
-			);
+			// Route to the focused component when it accepts pastes (modal
+			// Input prompts), matching the enhanced-paste text path (#2127).
+			const focused = this.ctx.ui.getFocused();
+			const target = focused && focused !== this.ctx.editor && hasPasteText(focused) ? focused : this.ctx.editor;
+			target.pasteText(text);
+			this.ctx.ui.requestRender();
+			return true;
 		} catch {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
@@ -1641,6 +1739,17 @@ export class InputController {
 	}
 
 	toggleThinkingBlockVisibility(): void {
+		// When thinking is "off", thinking blocks are always hidden (some
+		// providers return them regardless). The toggle is meaningless in
+		// that state — inform the user instead of silently flipping the
+		// persisted value. When thinking is on, the toggle works normally
+		// even if blocks are already hidden (user may want to show them).
+		const thinkingOff =
+			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
+		if (thinkingOff) {
+			this.ctx.showStatus("Thinking is off — enable thinking to show blocks");
+			return;
+		}
 		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
 		this.ctx.settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
 

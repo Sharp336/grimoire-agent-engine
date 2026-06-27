@@ -1,10 +1,4 @@
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolApprovalDecision,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
@@ -18,13 +12,10 @@ import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 const gitlabSchema = type({
-	op: type("'repo_view' | 'mr_create' | 'mr_checkout' | 'pipeline_status' | 'pipeline_list'").describe(
-		"gitlab operation",
-	),
+	op: type("'mr_create' | 'mr_checkout'").describe("gitlab operation"),
 	"repo?": type("string").describe("group/project, full URL, or Git URL"),
 	"branch?": type("string").describe("branch or ref"),
 	"mr?": type("string").describe("merge request id, URL, or branch"),
-	"limit?": type("number").describe("max first-page results, capped at 100"),
 	"label?": type("string[]").describe("labels"),
 	"assignee?": type("string[]").describe("assignees"),
 	"reviewer?": type("string[]").describe("reviewers"),
@@ -37,17 +28,9 @@ const gitlabSchema = type({
 	"draft?": type("boolean").describe("create draft merge request"),
 	"fill?": type("boolean").describe("auto-fill merge request from commits"),
 	"force?": type("boolean").describe("force checkout reset"),
-	"status?": type("string").describe("pipeline status filter"),
-	"sha?": type("string").describe("commit SHA filter"),
 });
 
 type GitlabInput = typeof gitlabSchema.infer;
-
-const GITLAB_READONLY_OPS = {
-	repo_view: true,
-	pipeline_status: true,
-	pipeline_list: true,
-} as const satisfies Partial<Record<GitlabInput["op"], true>>;
 
 export interface GitlabToolDetails {
 	meta?: OutputMeta;
@@ -55,7 +38,6 @@ export interface GitlabToolDetails {
 	repo?: string;
 	branch?: string;
 	mrId?: string;
-	status?: string;
 	url?: string;
 }
 
@@ -122,20 +104,6 @@ function readString(value: unknown, keys: readonly string[]): string | undefined
 	return undefined;
 }
 
-function readNumber(value: unknown, keys: readonly string[]): number | undefined {
-	const record = asRecord(value);
-	if (!record) return undefined;
-	for (const key of keys) {
-		const raw = record[key];
-		if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-		if (typeof raw === "string") {
-			const parsed = Number(raw);
-			if (Number.isFinite(parsed)) return parsed;
-		}
-	}
-	return undefined;
-}
-
 function formatUser(value: unknown): string | undefined {
 	if (typeof value === "string") return normalizeOptionalString(value);
 	return readString(value, ["username", "login", "name"]);
@@ -169,33 +137,6 @@ function appendBody(lines: string[], value: string | undefined): void {
 
 function sourceUrlOf(data: unknown): string | undefined {
 	return readString(data, ["web_url", "webUrl", "url", "http_url_to_repo", "httpUrlToRepo"]);
-}
-
-function formatRepoView(data: unknown): string {
-	const title = readString(data, [
-		"path_with_namespace",
-		"pathWithNamespace",
-		"full_path",
-		"fullPath",
-		"name_with_owner",
-		"name",
-		"path",
-	]);
-	const lines = [`# ${title ?? "GitLab project"}`];
-	pushLine(lines, "Description", readString(data, ["description"]));
-	pushLine(lines, "URL", sourceUrlOf(data));
-	pushLine(lines, "Default branch", readString(data, ["default_branch", "defaultBranch"]));
-	pushLine(lines, "Visibility", readString(data, ["visibility"]));
-	pushLine(lines, "Stars", readNumber(data, ["star_count", "starCount", "stars"]));
-	pushLine(lines, "Forks", readNumber(data, ["forks_count", "forksCount", "forks"]));
-	pushLine(lines, "Open issues", readNumber(data, ["open_issues_count", "openIssuesCount"]));
-	pushLine(lines, "Archived", readString(data, ["archived"]));
-	pushLine(
-		lines,
-		"Last activity",
-		readString(data, ["last_activity_at", "lastActivityAt", "updated_at", "updatedAt"]),
-	);
-	return lines.join("\n");
 }
 
 function appendGitlabComments(lines: string[], comments: unknown[]): void {
@@ -263,56 +204,6 @@ export function formatGitlabMergeRequestView(data: unknown, heading = "GitLab me
 	pushLine(lines, "URL", sourceUrlOf(data));
 	appendBody(lines, readString(data, ["description", "body"]));
 	appendGitlabComments(lines, extractGitlabMrComments(data));
-	return lines.join("\n");
-}
-
-function extractItems(value: unknown): unknown[] {
-	if (Array.isArray(value)) return value;
-	const record = asRecord(value);
-	if (!record) return [];
-	for (const key of ["items", "data", "issues", "merge_requests", "mergeRequests", "pipelines"]) {
-		const raw = record[key];
-		if (Array.isArray(raw)) return raw;
-	}
-	return [];
-}
-
-function formatPipelineListResults(params: GitlabInput, data: unknown): string {
-	const items = extractItems(data);
-	const lines = ["# GitLab pipelines"];
-	pushLine(lines, "Repository", normalizeOptionalString(params.repo));
-	if (items.length === 0) {
-		lines.push("", "No results.");
-		return lines.join("\n");
-	}
-	lines.push("");
-	for (const item of items) {
-		lines.push(...formatPipelineItem(item));
-	}
-	return lines.join("\n");
-}
-
-function formatPipelineItem(item: unknown): string[] {
-	const id = readString(item, ["id", "iid"]);
-	const status = readString(item, ["status"]);
-	const ref = readString(item, ["ref", "branch"]);
-	const sha = readString(item, ["sha"]);
-	const lines = [`- ${id ? `#${id}` : "Pipeline"}${status ? ` ${status}` : ""}`];
-	pushLine(lines, "  Ref", ref);
-	pushLine(lines, "  SHA", sha ? sha.slice(0, 12) : undefined);
-	pushLine(lines, "  Updated", readString(item, ["updated_at", "updatedAt"]));
-	pushLine(lines, "  URL", sourceUrlOf(item));
-	return lines;
-}
-
-function formatPipelineStatus(data: unknown, params: GitlabInput): string {
-	const items = extractItems(data);
-	if (items.length > 0) return formatPipelineListResults(params, items);
-	const lines = ["# GitLab pipeline status"];
-	pushLine(lines, "Status", readString(data, ["status"]));
-	pushLine(lines, "Ref", readString(data, ["ref", "branch"]));
-	pushLine(lines, "SHA", readString(data, ["sha"]));
-	pushLine(lines, "URL", sourceUrlOf(data));
 	return lines.join("\n");
 }
 
@@ -463,24 +354,14 @@ function appendScalarFlag(args: string[], flag: string, value: string | undefine
 	if (value) args.push(flag, value);
 }
 
-function appendLimit(args: string[], limit: number | undefined): void {
-	if (limit === undefined) return;
-	if (!Number.isFinite(limit) || limit <= 0) throw new ToolError("limit must be a positive number");
-	args.push("--per-page", String(Math.floor(Math.min(limit, 100))));
-}
-
 function extractMrIdFromCreateOutput(output: string): string | undefined {
 	return output.match(/\/-\/merge_requests\/(\d+)/)?.[1] ?? output.match(/!(\d+)\b/)?.[1];
 }
 
 export class GitlabTool implements AgentTool<typeof gitlabSchema, GitlabToolDetails> {
 	readonly name = "gitlab";
-	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const rawOp = (args as Partial<GitlabInput>).op;
-		if (typeof rawOp !== "string") return "exec";
-		return rawOp in GITLAB_READONLY_OPS ? "read" : "exec";
-	};
-	readonly summary = "Interact with GitLab projects, merge request workflows, and CI/CD";
+	readonly approval = "exec" as const;
+	readonly summary = "Create and checkout GitLab merge requests";
 	readonly loadMode = "discoverable";
 	readonly label = "GitLab";
 	readonly description = prompt.render(gitlabDescription);
@@ -503,35 +384,13 @@ export class GitlabTool implements AgentTool<typeof gitlabSchema, GitlabToolDeta
 	): Promise<AgentToolResult<GitlabToolDetails>> {
 		return untilAborted(signal, async () => {
 			switch (params.op) {
-				case "repo_view":
-					return executeRepoView(this.session, params, signal);
 				case "mr_create":
 					return executeMrCreate(this.session, params, signal);
 				case "mr_checkout":
 					return executeMrCheckout(this.session, params, signal);
-				case "pipeline_status":
-					return executePipelineStatus(this.session, params, signal);
-				case "pipeline_list":
-					return executePipelineList(this.session, params, signal);
 			}
 		});
 	}
-}
-
-async function executeRepoView(
-	session: ToolSession,
-	params: GitlabInput,
-	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GitlabToolDetails>> {
-	const repo = normalizeOptionalString(params.repo);
-	const branch = normalizeOptionalString(params.branch);
-	const args = ["repo", "view"];
-	if (repo) args.push(requireSafePositional(repo, "repo"));
-	appendScalarFlag(args, "--branch", branch);
-	args.push("--output", "json");
-	const data = await git.gitlab.json<unknown>(session.cwd, args, signal, { repoProvided: Boolean(repo) });
-	const sourceUrl = sourceUrlOf(data);
-	return buildTextResult(formatRepoView(data), sourceUrl, { repo, branch, url: sourceUrl });
 }
 
 async function executeMrCreate(
@@ -547,6 +406,7 @@ async function executeMrCreate(
 	if (fill && (title || params.body !== undefined)) {
 		throw new ToolError("fill is mutually exclusive with title and body");
 	}
+	if (!fill && body === "-") throw new ToolError("body must not be '-'");
 
 	const args = ["mr", "create", "--yes"];
 	appendRepoFlag(args, repo);
@@ -599,44 +459,4 @@ async function executeMrCheckout(
 	appendRepoFlag(args, repo);
 	const output = await git.gitlab.text(session.cwd, args, signal, { repoProvided: Boolean(repo) });
 	return buildTextResult(`# GitLab merge request checkout\n${output}`, undefined, { repo, branch, mrId: mr });
-}
-
-async function executePipelineStatus(
-	session: ToolSession,
-	params: GitlabInput,
-	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GitlabToolDetails>> {
-	const repo = normalizeOptionalString(params.repo);
-	const branch = normalizeOptionalString(params.branch);
-	const args = ["ci", "status", "--output", "json"];
-	appendScalarFlag(args, "--branch", branch);
-	appendRepoFlag(args, repo);
-	const data = await git.gitlab.json<unknown>(session.cwd, args, signal, { repoProvided: Boolean(repo) });
-	return buildTextResult(formatPipelineStatus(data, params), sourceUrlOf(data), {
-		repo,
-		branch,
-		status: readString(data, ["status"]),
-		url: sourceUrlOf(data),
-	});
-}
-
-async function executePipelineList(
-	session: ToolSession,
-	params: GitlabInput,
-	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GitlabToolDetails>> {
-	const repo = normalizeOptionalString(params.repo);
-	const branch = normalizeOptionalString(params.branch);
-	const args = ["ci", "list", "--output", "json"];
-	appendRepoFlag(args, repo);
-	appendScalarFlag(args, "--ref", branch);
-	appendScalarFlag(args, "--status", normalizeOptionalString(params.status));
-	appendScalarFlag(args, "--sha", normalizeOptionalString(params.sha));
-	appendLimit(args, params.limit);
-	const data = await git.gitlab.json<unknown>(session.cwd, args, signal, { repoProvided: Boolean(repo) });
-	return buildTextResult(formatPipelineListResults(params, data), undefined, {
-		repo,
-		branch,
-		status: normalizeOptionalString(params.status),
-	});
 }

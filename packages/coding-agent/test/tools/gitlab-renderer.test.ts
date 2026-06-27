@@ -3,7 +3,7 @@ import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { gitlabToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gitlab-renderer";
 
 describe("gitlabToolRenderer", () => {
-	it("sanitizes tabs in status header metadata", async () => {
+	it("sanitizes tabs in header metadata", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 
@@ -14,7 +14,6 @@ describe("gitlabToolRenderer", () => {
 					repo: "group\tproject",
 					branch: "feature\tbranch",
 					mr: "56\t78",
-					status: "run\tning",
 					title: "title\ttext",
 				},
 				{ expanded: false, isPartial: true },

@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import type { Settings } from "../config/settings";
 import { ToolAbortError } from "./tool-errors";
 
@@ -195,6 +196,56 @@ export function normalizeGitlabHost(value: string): string {
 		if (portStart >= 0) host = host.slice(0, portStart);
 	}
 	return host.toLowerCase();
+}
+
+function asGlabConfigRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function parseConfiguredGitlabHosts(configPath: string, content: string): string[] {
+	let parsed: unknown;
+	try {
+		parsed = YAML.parse(content);
+	} catch (err) {
+		logger.debug("github cache: failed to parse glab config for host detection", {
+			err: String(err),
+			path: configPath,
+		});
+		return [];
+	}
+	const root = asGlabConfigRecord(parsed);
+	const hosts = asGlabConfigRecord(root?.hosts);
+	if (!hosts) return [];
+	const configuredHosts: string[] = [];
+	for (const rawHost of Object.keys(hosts)) {
+		const host = normalizeGitlabHost(rawHost);
+		if (host) configuredHosts.push(host);
+	}
+	return configuredHosts;
+}
+
+export function resolveConfiguredGitlabHosts(): Set<string> {
+	const hosts = new Set<string>();
+	const add = (value: string | undefined): void => {
+		const host = normalizeGitlabHost(value ?? "");
+		if (host) hosts.add(host);
+	};
+	add(process.env.GITLAB_HOST);
+	add(process.env.GITLAB_URI);
+	for (const configPath of getGlabConfigCandidates()) {
+		try {
+			const glabConfig = fs.readFileSync(configPath, "utf8");
+			for (const host of parseConfiguredGitlabHosts(configPath, glabConfig)) hosts.add(host);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+				logger.debug("github cache: failed to read glab config for host detection", {
+					err: String(err),
+					path: configPath,
+				});
+			}
+		}
+	}
+	return hosts;
 }
 
 function getPlatformGlabConfigPath(): string {

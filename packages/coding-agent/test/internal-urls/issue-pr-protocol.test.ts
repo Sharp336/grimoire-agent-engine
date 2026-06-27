@@ -13,35 +13,32 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let tempDir: string;
 let originalEnv: string | undefined;
 
 let originalGhToken: string | undefined;
 let originalGitlabToken: string | undefined;
+let originalGitlabHost: string | undefined;
+let originalGitlabUri: string | undefined;
+let originalGlabConfigDir: string | undefined;
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-pr-protocol-"));
 	originalEnv = process.env.OMP_GITHUB_CACHE_DB;
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
 	originalGhToken = process.env.GH_TOKEN;
 	originalGitlabToken = process.env.GITLAB_TOKEN;
+	originalGitlabHost = process.env.GITLAB_HOST;
+	originalGitlabUri = process.env.GITLAB_URI;
+	originalGlabConfigDir = process.env.GLAB_CONFIG_DIR;
 	process.env.GH_TOKEN = "test-token";
+	delete process.env.GITLAB_HOST;
+	delete process.env.GITLAB_URI;
+	delete process.env.GLAB_CONFIG_DIR;
 	resetCacheForTests();
 	InternalUrlRouter.resetForTests();
 });
-
-async function removeTempDirWithRetry(dir: string): Promise<void> {
-	for (let attempt = 0; attempt < 10; attempt += 1) {
-		try {
-			await fs.rm(dir, { recursive: true, force: true });
-			return;
-		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code;
-			if (code !== "EBUSY" || attempt === 9) throw err;
-			await Bun.sleep(50);
-		}
-	}
-}
 
 afterEach(async () => {
 	resetCacheForTests();
@@ -61,8 +58,23 @@ afterEach(async () => {
 	} else {
 		process.env.GITLAB_TOKEN = originalGitlabToken;
 	}
+	if (originalGitlabHost === undefined) {
+		delete process.env.GITLAB_HOST;
+	} else {
+		process.env.GITLAB_HOST = originalGitlabHost;
+	}
+	if (originalGitlabUri === undefined) {
+		delete process.env.GITLAB_URI;
+	} else {
+		process.env.GITLAB_URI = originalGitlabUri;
+	}
+	if (originalGlabConfigDir === undefined) {
+		delete process.env.GLAB_CONFIG_DIR;
+	} else {
+		process.env.GLAB_CONFIG_DIR = originalGlabConfigDir;
+	}
 	vi.restoreAllMocks();
-	await removeTempDirWithRetry(tempDir);
+	await removeWithRetries(tempDir);
 });
 
 function issuePayload(number: number, body: string, commentBodies: string[] = []) {
@@ -181,6 +193,20 @@ function mockGitlabRemote(cwd = "/tmp/gitlab-project", url = "https://gitlab.com
 	vi.spyOn(git.remote, "url").mockImplementation(async (remoteCwd, remoteName) => {
 		expect(remoteCwd).toBe(cwd);
 		expect(remoteName).toBe("origin");
+		return url;
+	});
+}
+
+function mockRemotes(cwd: string, remotes: ReadonlyArray<readonly [string, string]>): void {
+	const urls = new Map(remotes);
+	vi.spyOn(git.remote, "list").mockImplementation(async remoteCwd => {
+		expect(remoteCwd).toBe(cwd);
+		return remotes.map(([name]) => name);
+	});
+	vi.spyOn(git.remote, "url").mockImplementation(async (remoteCwd, remoteName) => {
+		expect(remoteCwd).toBe(cwd);
+		const url = urls.get(remoteName);
+		if (url === undefined) throw new Error(`unexpected remote ${remoteName}`);
 		return url;
 	});
 }
@@ -567,6 +593,67 @@ describe("issue:// / pr:// listing", () => {
 });
 
 describe("GitLab-backed issue:// / pr:// routing", () => {
+	it("prefers the GitHub default repo for short URLs when origin is GitHub and a GitLab mirror exists", async () => {
+		mockRemotes("/tmp/mixed-project", [
+			["origin", "https://github.com/owner/example.git"],
+			["gitlab", "https://gitlab.com/group/project.git"],
+		]);
+		const defaultRepoSpy = vi.spyOn(git.github, "text").mockResolvedValue("owner/example");
+		const githubSpy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(12, "github body") as never);
+		const glabSpy = vi.spyOn(git.gitlab, "json").mockRejectedValue(new Error("unexpected GitLab call"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://12", { cwd: "/tmp/mixed-project" });
+
+		expect(defaultRepoSpy).toHaveBeenCalled();
+		expect(githubSpy).toHaveBeenCalled();
+		expect(githubSpy.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--repo", "owner/example"]));
+		expect(glabSpy).not.toHaveBeenCalled();
+		expect(resource.content).toContain("# Issue #12: Issue #12");
+	});
+
+	it("still selects a matching GitLab mirror for explicit repo URLs", async () => {
+		mockRemotes("/tmp/mixed-explicit-project", [
+			["origin", "https://github.com/owner/example.git"],
+			["gitlab", "https://gitlab.com/group/project.git"],
+		]);
+		const glabSpy = mockGitlabJson(gitlabIssuePayload(12, "gitlab issue body"));
+		const githubSpy = vi.spyOn(git.github, "json").mockRejectedValue(new Error("unexpected GitHub call"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://group/project/12", { cwd: "/tmp/mixed-explicit-project" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/mixed-explicit-project",
+			["issue", "view", "12", "--output", "json", "--comments", "--per-page", "100", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(githubSpy).not.toHaveBeenCalled();
+		expect(resource.content).toContain("# GitLab issue #12: GitLab issue #12");
+	});
+
+	it("recognizes self-managed GitLab hosts from glab auth config", async () => {
+		const glabConfigDir = path.join(tempDir, "glab-config");
+		await Bun.write(path.join(glabConfigDir, "config.yml"), "hosts:\n  code.example.test:\n    token: test-token\n");
+		process.env.GLAB_CONFIG_DIR = glabConfigDir;
+		mockGitlabRemote("/tmp/self-managed-gitlab", "git@code.example.test:group/project.git");
+		const glabSpy = mockGitlabJson(gitlabIssuePayload(12, "self-managed body"));
+		const githubSpy = vi.spyOn(git.github, "json").mockRejectedValue(new Error("unexpected GitHub call"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://12", { cwd: "/tmp/self-managed-gitlab" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/self-managed-gitlab",
+			["issue", "view", "12", "--output", "json", "--comments", "--per-page", "100", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(githubSpy).not.toHaveBeenCalled();
+		expect(resource.content).toContain("# GitLab issue #12: GitLab issue #12");
+	});
+
 	it("issue://<n> in a GitLab checkout resolves through glab issue view with comments", async () => {
 		mockGitlabRemote();
 		const glabSpy = mockGitlabJson(
