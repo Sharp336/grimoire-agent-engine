@@ -230,7 +230,14 @@ export type SymbolKey =
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
-	| "tool.move";
+	| "tool.move"
+	// Terminal title run-state prefixes (OSC title decoration)
+	| "title.working"
+	| "title.running"
+	| "title.waiting"
+	| "title.needs-attention"
+	| "title.idle"
+	| "title.none";
 
 type SymbolMap = Record<SymbolKey, string>;
 
@@ -434,6 +441,13 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
 	"tool.move": "➜",
+	// Terminal title run states
+	"title.working": "⟳",
+	"title.running": "⟳",
+	"title.waiting": "⏸",
+	"title.needs-attention": "❗",
+	"title.idle": "",
+	"title.none": "",
 };
 
 const NERD_SYMBOLS: SymbolMap = {
@@ -741,6 +755,13 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
 	"tool.move": "\uf061",
+	// Terminal title run states
+	"title.working": "\uf110",
+	"title.running": "\uf110",
+	"title.waiting": "\uf04c",
+	"title.needs-attention": "\uf071",
+	"title.idle": "",
+	"title.none": "",
 };
 
 const ASCII_SYMBOLS: SymbolMap = {
@@ -941,6 +962,13 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.irc": "irc",
 	"tool.delete": "rm",
 	"tool.move": "mv",
+	// Terminal title run states (degrade: nerd → unicode glyphs where ASCII is wider)
+	"title.working": "[~]",
+	"title.running": "[~]",
+	"title.waiting": "||",
+	"title.needs-attention": "[!]",
+	"title.idle": "",
+	"title.none": "",
 };
 
 const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {
@@ -1875,6 +1903,17 @@ export class Theme {
 			hrChar: this.#symbols["md.hrChar"],
 			bullet: this.#symbols["md.bullet"],
 			colorSwatch: this.#symbols["md.colorSwatch"],
+		};
+	}
+
+	get title() {
+		return {
+			working: this.#symbols["title.working"],
+			running: this.#symbols["title.running"],
+			waiting: this.#symbols["title.waiting"],
+			needsAttention: this.#symbols["title.needs-attention"],
+			idle: this.#symbols["title.idle"],
+			none: this.#symbols["title.none"],
 		};
 	}
 
