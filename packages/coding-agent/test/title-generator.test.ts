@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import type { TerminalTitleState } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import {
+	formatSessionTerminalTitle,
+	generateSessionTitle,
+	resolveTerminalTitleStateGlyph,
+} from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { logger } from "@oh-my-pi/pi-utils";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -455,5 +460,60 @@ describe("title generator", () => {
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
+	});
+});
+
+describe("formatSessionTerminalTitle", () => {
+	const session = "My Session";
+
+	it("keeps legacy shape when dynamic title is off", () => {
+		expect(formatSessionTerminalTitle(session)).toBe("π: My Session");
+		expect(formatSessionTerminalTitle(session, "/tmp", { dynamicTitle: false })).toBe("π: My Session");
+	});
+
+	it("prefixes running state when dynamic title is on", () => {
+		expect(
+			formatSessionTerminalTitle(session, undefined, {
+				dynamicTitle: true,
+				state: "running",
+				symbolPreset: "unicode",
+			}),
+		).toBe("⟳ π: My Session");
+	});
+
+	it("uses waiting and needs_attention glyphs", () => {
+		expect(
+			formatSessionTerminalTitle(session, undefined, {
+				dynamicTitle: true,
+				state: "waiting_for_input",
+				symbolPreset: "unicode",
+			}),
+		).toBe("◌ π: My Session");
+		expect(
+			formatSessionTerminalTitle(session, undefined, {
+				dynamicTitle: true,
+				state: "needs_attention",
+				symbolPreset: "unicode",
+			}),
+		).toBe("● π: My Session");
+	});
+
+	it("omits prefix for idle dynamic title", () => {
+		expect(
+			formatSessionTerminalTitle(session, undefined, {
+				dynamicTitle: true,
+				state: "idle",
+				symbolPreset: "unicode",
+			}),
+		).toBe("π: My Session");
+	});
+
+	it("degrades glyphs for ascii preset", () => {
+		const states: TerminalTitleState[] = ["running", "waiting_for_input", "needs_attention"];
+		for (const state of states) {
+			const glyph = resolveTerminalTitleStateGlyph(state, "ascii");
+			expect(glyph.length).toBeGreaterThan(0);
+		}
+		expect(resolveTerminalTitleStateGlyph("idle", "ascii")).toBe("");
 	});
 });

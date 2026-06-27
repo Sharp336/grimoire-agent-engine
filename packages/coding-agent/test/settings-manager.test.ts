@@ -82,6 +82,12 @@ describe("Settings", () => {
 			expect(getDefault("terminal.showProgress")).toBe(false);
 		});
 
+		it("enables dynamic terminal title by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("terminal.dynamicTitle")).toBe(true);
+			expect(getDefault("terminal.dynamicTitle")).toBe(true);
+		});
+
 		it("keeps the normal startup splash disabled by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("startup.showSplash")).toBe(false);

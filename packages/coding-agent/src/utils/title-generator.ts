@@ -324,6 +324,12 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	return sanitizeTerminalTitlePart(baseName);
 }
 
+const TERMINAL_TITLE_STATE_THEME_KEYS: Record<Exclude<TerminalTitleState, "idle">, SymbolKey> = {
+	running: "terminal.title.running",
+	waiting_for_input: "terminal.title.waiting",
+	needs_attention: "terminal.title.needsAttention",
+};
+
 const TERMINAL_TITLE_STATE_STATUS_KEYS: Record<Exclude<TerminalTitleState, "idle">, SymbolKey> = {
 	running: "status.running",
 	waiting_for_input: "status.shadowed",
@@ -356,11 +362,12 @@ function resolveStatusGlyphForState(
 	state: Exclude<TerminalTitleState, "idle">,
 	getSymbol?: (key: SymbolKey) => string,
 ): string | undefined {
-	const statusKey = TERMINAL_TITLE_STATE_STATUS_KEYS[state];
-	if (getSymbol) {
-		const fromStatus = getSymbol(statusKey);
-		if (fromStatus) return fromStatus;
-	}
+	if (!getSymbol) return undefined;
+	const themeKey = TERMINAL_TITLE_STATE_THEME_KEYS[state];
+	const fromTheme = getSymbol(themeKey);
+	if (fromTheme) return fromTheme;
+	const fromStatus = getSymbol(TERMINAL_TITLE_STATE_STATUS_KEYS[state]);
+	if (fromStatus) return fromStatus;
 	return undefined;
 }
 

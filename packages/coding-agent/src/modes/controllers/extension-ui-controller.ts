@@ -24,7 +24,15 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
+import {
+	resolveTerminalTitleStateGlyph,
+	setTerminalTitle,
+} from "../../utils/title-generator";
+import {
+	buildSessionTerminalTitleFormatOptions,
+	getSessionTerminalTitleContext,
+	refreshSessionTerminalTitle,
+} from "../../utils/session-terminal-title";
 
 const MAX_WIDGET_LINES = 10;
 
@@ -37,6 +45,7 @@ export class ExtensionUiController {
 	// the rest queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
+	#terminalTitleStateBeforeDialog: import("../../utils/title-generator").TerminalTitleState | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
 
 	/**
@@ -53,7 +62,19 @@ export class ExtensionUiController {
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
-			setTitle: title => setTerminalTitle(title),
+			setTitle: title => {
+				const titleCtx = getSessionTerminalTitleContext();
+				if (!titleCtx || titleCtx.settings.get("terminal.dynamicTitle") !== true) {
+					setTerminalTitle(title);
+					return;
+				}
+				const opts = buildSessionTerminalTitleFormatOptions(titleCtx);
+				const state = opts.state ?? "idle";
+				const preset = opts.symbolPreset ?? "unicode";
+				const glyph = resolveTerminalTitleStateGlyph(state, preset, opts.getSymbol);
+				const composed = glyph ? `${glyph} ${title}` : title;
+				setTerminalTitle(composed);
+			},
 			custom: (factory, options) => this.showHookCustom(factory, options),
 			setEditorText: text => this.ctx.editor.setText(text),
 			pasteToEditor: text => {
@@ -161,7 +182,7 @@ export class ExtensionUiController {
 				if (!success) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				refreshSessionTerminalTitle();
 
 				// Call setup callback if provided
 				if (options?.setup) {
@@ -230,7 +251,7 @@ export class ExtensionUiController {
 				if (!result) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				refreshSessionTerminalTitle();
 				this.ctx.chatContainer.clear();
 				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
@@ -799,7 +820,7 @@ export class ExtensionUiController {
 
 	async #updateSessionName(name: string): Promise<void> {
 		await this.ctx.sessionManager.setSessionName(name, "user");
-		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+		refreshSessionTerminalTitle();
 	}
 
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
@@ -854,6 +875,12 @@ export class ExtensionUiController {
 				hide?.();
 				this.#dialogActive = false;
 				this.#advanceDialogQueue();
+				if (!this.#dialogActive && this.#dialogQueue.length === 0) {
+					if (this.#terminalTitleStateBeforeDialog !== undefined) {
+						this.ctx.setTerminalTitleRunState(this.#terminalTitleStateBeforeDialog);
+						this.#terminalTitleStateBeforeDialog = undefined;
+					}
+				}
 			}
 			resolve(value);
 		};
@@ -866,6 +893,10 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
+			if (this.#terminalTitleStateBeforeDialog === undefined) {
+				this.#terminalTitleStateBeforeDialog = this.ctx.getTerminalTitleRunState();
+				this.ctx.setTerminalTitleRunState("needs_attention");
+			}
 			try {
 				hide = present(settle);
 			} catch (error) {

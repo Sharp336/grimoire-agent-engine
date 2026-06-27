@@ -296,6 +296,11 @@ export interface InteractiveModeContext {
 	updateEditorTopBorder(): void;
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
+	/** Refresh OSC 0 session title from settings and current run state. */
+	refreshSessionTerminalTitle(stateOverride?: import("../utils/title-generator").TerminalTitleState): void;
+	/** Track run state and refresh the terminal tab title. */
+	setTerminalTitleRunState(state: import("../utils/title-generator").TerminalTitleState): void;
+	getTerminalTitleRunState(): import("../utils/title-generator").TerminalTitleState;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;

@@ -32,7 +32,8 @@ import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
 import { resizeImage } from "../../utils/image-resize";
-import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import { generateSessionTitle } from "../../utils/title-generator";
+import { refreshSessionTerminalTitle } from "../../utils/session-terminal-title";
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -836,10 +837,7 @@ export class InputController {
 						if (title && !this.ctx.sessionManager.getSessionName()) {
 							const applied = await this.ctx.sessionManager.setSessionName(title, "auto");
 							if (applied) {
-								setSessionTerminalTitle(
-									this.ctx.sessionManager.getSessionName()!,
-									this.ctx.sessionManager.getCwd(),
-								);
+								refreshSessionTerminalTitle();
 								this.ctx.updateEditorBorderColor();
 							}
 						}

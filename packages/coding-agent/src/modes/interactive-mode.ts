@@ -112,7 +112,13 @@ import { renderTreeList } from "../tui/tree-list";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
-import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import { popTerminalTitle, pushTerminalTitle } from "../utils/title-generator";
+import {
+	refreshSessionTerminalTitle as refreshSessionTerminalTitleImpl,
+	setSessionTerminalTitleContext,
+	type SessionTerminalTitleContext,
+} from "../utils/session-terminal-title";
+import type { TerminalTitleState } from "../utils/title-generator";
 import {
 	isSearchProviderId,
 	isSearchProviderPreference,
@@ -440,6 +446,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	#workingMessageAccentCacheKey?: WorkingMessageAccentCacheKey;
 	#workingMessageAccentCacheValue?: WorkingMessageAccent;
 	#workingMessageAccentCacheHasValue = false;
+	#terminalTitleState: TerminalTitleState = "idle";
+	get #sessionTerminalTitleContext(): SessionTerminalTitleContext {
+		return {
+			settings: this.settings,
+			sessionManager: this.sessionManager,
+			isStreaming: () => this.viewSession.isStreaming,
+			getTerminalTitleState: () => this.#terminalTitleState,
+		};
+	}
 	get #defaultWorkingMessage(): string {
 		return `Working…${interruptHint()}`;
 	}
@@ -884,7 +899,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// the initial welcome frame does not append over the previous run's scrollback.
 		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
 		pushTerminalTitle();
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setSessionTerminalTitleContext(this.#sessionTerminalTitleContext);
+		this.refreshSessionTerminalTitle("idle");
 		this.updateEditorBorderColor();
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -1062,7 +1078,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		resetCapabilities();
 		await this.refreshSlashCommandState(newCwd);
 		await this.session.refreshSshTool({ activateIfAvailable: true });
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.refreshSessionTerminalTitle();
 		this.statusLine.invalidate();
 		this.updateEditorTopBorder();
 	}
@@ -1458,6 +1474,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.updateEditorTopBorder();
 		this.ui.requestRender();
+	}
+
+	refreshSessionTerminalTitle(stateOverride?: TerminalTitleState): void {
+		refreshSessionTerminalTitleImpl(stateOverride);
+	}
+
+	setTerminalTitleRunState(state: TerminalTitleState): void {
+		this.#terminalTitleState = state;
+		this.refreshSessionTerminalTitle(state);
+	}
+
+	getTerminalTitleRunState(): TerminalTitleState {
+		return this.#terminalTitleState;
 	}
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
@@ -2590,7 +2619,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (seededName && !this.sessionManager.getSessionName()) {
 			const applied = await this.sessionManager.setSessionName(seededName, "auto");
 			if (applied) {
-				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				this.refreshSessionTerminalTitle();
 				this.updateEditorBorderColor();
 			}
 		}
@@ -3271,6 +3300,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		await this.ui.terminal.drainInput(1000);
+		setSessionTerminalTitleContext(undefined);
 		popTerminalTitle();
 		this.stop();
 

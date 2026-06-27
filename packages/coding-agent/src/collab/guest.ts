@@ -22,7 +22,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
-import { setSessionTerminalTitle } from "../utils/title-generator";
+import { refreshSessionTerminalTitle } from "../utils/session-terminal-title";
 import { importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -360,7 +360,7 @@ export class CollabGuestLink {
 		this.#applyAgentSnapshots(pending.agents);
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
-		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
+		refreshSessionTerminalTitle();
 		this.#ctx.chatContainer.clear();
 		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
@@ -423,7 +423,7 @@ export class CollabGuestLink {
 			case "state": {
 				this.state = frame.state;
 				this.#applyHostState(frame.state);
-				setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd);
+				refreshSessionTerminalTitle();
 				this.#updateStatusSegment();
 				// Reconciler: events normally drive the loader; clear a stale one if
 				// the host reports idle (e.g. events lost across a reconnect).
@@ -586,7 +586,7 @@ export class CollabGuestLink {
 			return;
 		}
 		await this.#ctx.session.newSession();
-		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
+		refreshSessionTerminalTitle();
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.statusLine.setSessionStartTime(Date.now());
 		this.#ctx.updateEditorTopBorder();

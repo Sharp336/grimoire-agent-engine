@@ -49,7 +49,7 @@ import {
 } from "../../tools";
 import { shortenPath } from "../../tools/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { refreshSessionTerminalTitle } from "../../utils/session-terminal-title";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
@@ -916,7 +916,7 @@ export class SelectorController {
 			getCwd: () => string;
 			titleSource?: "auto" | "user" | undefined;
 		};
-		setSessionTerminalTitle(sessionManager.getSessionName?.(), sessionManager.getCwd());
+		refreshSessionTerminalTitle();
 	}
 
 	async #detachActiveSessionBeforeDeletion(sessionPath: string): Promise<boolean> {

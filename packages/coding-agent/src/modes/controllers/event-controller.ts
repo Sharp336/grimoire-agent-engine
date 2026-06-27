@@ -302,6 +302,7 @@ export class EventController {
 		}
 		this.#cancelIdleCompaction();
 		this.#setTerminalProgress(true);
+		this.ctx.setTerminalTitleRunState("running");
 		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
@@ -1012,6 +1013,7 @@ export class EventController {
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.sendCompletionNotification();
+		this.ctx.setTerminalTitleRunState("waiting_for_input");
 	}
 
 	/**
