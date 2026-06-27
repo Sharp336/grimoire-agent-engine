@@ -27,8 +27,11 @@ import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type
 
 export const GITLAB_DUO_WORKFLOW_PROVIDER_ID = "gitlab-duo-agent";
 export const GITLAB_DUO_WORKFLOW_API = "gitlab-duo-agent";
-export const GITLAB_DUO_WORKFLOW_DEFINITION = "ambient";
-export type GitLabDuoWorkflowDefinition = "ambient" | (string & {});
+// GitLab.com binds inline `flowConfig` MCP tools reliably on the `chat` workflow
+// route. The flow payload below still defines an isolated `ambient` AgentComponent;
+// `chat` here is routing/entitlement metadata, not the server-side chat registry prompt.
+export const GITLAB_DUO_WORKFLOW_DEFINITION = "chat";
+export type GitLabDuoWorkflowDefinition = "chat" | "ambient" | (string & {});
 
 const DEFAULT_GITLAB_BASE_URL = "https://gitlab.com";
 const GITLAB_DUO_WORKFLOW_TRACE_ENV = "GITLAB_DUO_WORKFLOW_TRACE";
@@ -471,6 +474,8 @@ export function buildGitLabDuoWorkflowWebSocketUrl(
 		rootNamespaceId?: string;
 		selectedModelIdentifier?: string;
 		workflowDefinition?: GitLabDuoWorkflowDefinition;
+		workflowId?: string;
+		clientType?: string;
 		serviceEndpoint?: boolean;
 	} = {},
 ): string {
@@ -488,6 +493,8 @@ export function buildGitLabDuoWorkflowWebSocketUrl(
 	if (options.selectedModelIdentifier)
 		wsUrl.searchParams.set("user_selected_model_identifier", options.selectedModelIdentifier);
 	if (options.workflowDefinition) wsUrl.searchParams.set("workflow_definition", options.workflowDefinition);
+	if (options.workflowId && !options.serviceEndpoint) wsUrl.searchParams.set("workflow_id", options.workflowId);
+	if (options.clientType && !options.serviceEndpoint) wsUrl.searchParams.set("client_type", options.clientType);
 	return wsUrl.toString();
 }
 
@@ -539,13 +546,15 @@ export function buildGitLabDuoWorkflowStartRequest(
 	};
 }
 
-// Build the inline ambient flow sent over the wire (Path B / `flowConfig`). The
-// server constructs the whole flow from this struct: a single agent component
-// whose system slot carries OMP's own authoritative system prompt (no GitLab jinja
-// wrapper / project metadata) and `on_agent_reasoning` so pre-tool-call commentary
-// streams back as reasoning. `toolset: []` because MCP tools auto-attach from
-// `startRequest.mcpTools` when the workflow's `mcp_enabled` is true. The user slot
-// is `{{goal}}`, which the provider fills with the flat conversation transcript.
+// Build the isolated inline ambient flow sent over the wire (Path B / `flowConfig`).
+// The surrounding workflow route is `chat` because GitLab.com binds MCP tools on that
+// route, but flow resolution uses this inline struct instead of the server-side chat
+// registry prompt. The server constructs a single AgentComponent whose system slot
+// carries OMP's own authoritative system prompt (no GitLab role / project metadata)
+// and `on_agent_reasoning` so pre-tool-call commentary streams back as reasoning.
+// `toolset: []` because MCP tools auto-attach from `startRequest.mcpTools` when the
+// workflow's `mcp_enabled` is true. The user slot is `{{goal}}`, which the provider
+// fills with the flat conversation transcript.
 export function buildGitLabDuoWorkflowInlineFlowConfig(systemPrompt: string): GitLabDuoWorkflowInlineFlowConfig {
 	return {
 		version: "v1",
@@ -1275,6 +1284,8 @@ async function runGitLabDuoWorkflow(
 				rootNamespaceId: restNamespaceId,
 				selectedModelIdentifier,
 				workflowDefinition,
+				workflowId,
+				clientType: "ide",
 				serviceEndpoint: workflowConnection.serviceEndpoint,
 				extraHeaders: workflowConnection.headers,
 				originBaseUrl: baseUrl,
@@ -1754,6 +1765,8 @@ function openGitLabDuoWorkflowSocket(
 		selectedModelIdentifier?: string;
 		originBaseUrl?: string;
 		workflowDefinition?: GitLabDuoWorkflowDefinition;
+		workflowId?: string;
+		clientType?: string;
 		serviceEndpoint?: boolean;
 		extraHeaders?: Record<string, string>;
 		webSocketFactory?: GitLabDuoWorkflowWebSocketFactory;
@@ -2033,6 +2046,14 @@ async function handleGitLabDuoWorkflowSocketMessage(
 	}
 	if (isGitLabWorkflowCompletionStatus(status)) {
 		traceGitLabDuoWorkflow("websocket.terminal", { status, checkpointLength: checkpoint?.contentLength ?? 0 });
+		if (!hasGitLabDuoWorkflowVisibleOutput(state.output)) {
+			traceGitLabDuoWorkflow("websocket.empty_terminal", {
+				status,
+				checkpointLength: checkpoint?.contentLength ?? 0,
+			});
+			state.stalledRequested = true;
+			return "stalled";
+		}
 		finishGitLabDuoWorkflowStream(state, "stop");
 		return "terminal";
 	}
@@ -2147,13 +2168,13 @@ function gitLabToolResultToText(toolResult: ToolResultMessage): string {
 
 function buildGitLabMcpToolDefinition(tool: Tool): GitLabMcpToolDefinition {
 	const schema = toolWireSchema(tool);
-	// Register the tool under its BARE name (no `mcp__omp__` prefix). The server does
-	// not strip prefixes — it registers `_executable_tools` and binds the model schema
-	// under exactly the wire `name` (sanitize_llm_name only replaces illegal chars), so
-	// the name the model sees, the toolset key it is matched against, and OMP's own
-	// tool docs must all be the same bare name. A prefixed wire name only forced the
-	// model to learn `mcp__omp__read` while OMP docs say `read`, with no upside.
-	// `originalToolName`/`serverName` stay as MCP metadata; they are not the match key.
+	// Register the tool under its BARE name (no `mcp__omp__` prefix). Live GitLab.com
+	// probes confirm `mcpTools[].name = "read"` binds and executes as
+	// `runMCPTool.name = "read"`; prefixed names are unnecessary and make the model
+	// learn names that differ from OMP's own tool docs. `sanitize_llm_name` preserves
+	// legal bare names, so the model-visible schema key, DWS toolset key, returned
+	// action name, and OMP tool name all stay aligned. `originalToolName`/`serverName`
+	// remain MCP metadata; they are not the match key.
 	return {
 		name: tool.name,
 		originalToolName: tool.name,
@@ -2184,6 +2205,21 @@ function createAssistantMessage(model: Model<Api>): AssistantMessage {
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};
+}
+
+function hasGitLabDuoWorkflowVisibleOutput(message: AssistantMessage): boolean {
+	return message.content.some(block => {
+		switch (block.type) {
+			case "text":
+				return block.text.trim().length > 0;
+			case "thinking":
+				return block.thinking.trim().length > 0;
+			case "toolCall":
+				return true;
+			default:
+				return false;
+		}
+	});
 }
 
 function hydrateGitLabDuoWorkflowCheckpointState(
@@ -2824,7 +2860,7 @@ function resolveGitLabDuoWorkflowDefinition(
 	return configured;
 }
 
-// Every workflow definition OMP ships is the inline ambient flow (Path B /
+// Every workflow route OMP ships is backed by the inline ambient flow (Path B /
 // `flowConfig`); the predicate is kept as a seam for future server-side flows.
 function isGitLabDuoWorkflowInlineFlow(workflowDefinition: GitLabDuoWorkflowDefinition): boolean {
 	void workflowDefinition;

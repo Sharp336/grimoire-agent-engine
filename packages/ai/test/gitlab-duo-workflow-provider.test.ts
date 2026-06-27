@@ -80,11 +80,26 @@ function restoreOptionalEnv(name: string, value: string | undefined): void {
 	Bun.env[name] = value;
 }
 
+function terminalGitLabDuoWorkflowMessage(content = "Done"): MessageEvent {
+	return new MessageEvent("message", {
+		data: JSON.stringify({
+			newCheckpoint: {
+				status: "INPUT_REQUIRED",
+				checkpoint: JSON.stringify({
+					channel_values: {
+						ui_chat_log: [{ message_type: "agent", content }],
+					},
+				}),
+			},
+		}),
+	});
+}
+
 describe("GitLab Duo Workflow provider protocol", () => {
-	it("creates inline ambient workflows with MCP-only privileges by default", () => {
+	it("creates chat-route workflows with MCP-only privileges by default", () => {
 		const body = buildGitLabDuoWorkflowCreateBody("group");
 		expect(body).toMatchObject({
-			workflow_definition: "ambient",
+			workflow_definition: "chat",
 			environment: "ide",
 			namespace_id: "group",
 			allow_agent_to_request_user: false,
@@ -106,9 +121,9 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		expect(body).not.toHaveProperty("namespace_id");
 	});
 
-	it("uses GraphQL root namespace ids for direct_access", () => {
+	it("uses GraphQL root namespace ids for chat direct_access", () => {
 		expect(buildGitLabDuoWorkflowDirectAccessBody("1")).toMatchObject({
-			workflow_definition: "ambient",
+			workflow_definition: "chat",
 			root_namespace_id: "gid://gitlab/Group/1",
 		});
 		expect(buildGitLabDuoWorkflowDirectAccessBody("gid://gitlab/Group/1")).toMatchObject({
@@ -126,25 +141,23 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		).toBe("rails-token");
 	});
 
-	it("defaults to the inline ambient definition and allows overrides", () => {
-		expect(buildGitLabDuoWorkflowCreateBody("group")).toMatchObject({ workflow_definition: "ambient" });
+	it("defaults to the chat route while keeping inline flow overrides available", () => {
+		expect(buildGitLabDuoWorkflowCreateBody("group")).toMatchObject({ workflow_definition: "chat" });
 		expect(buildGitLabDuoWorkflowCreateBody("group", { workflowDefinition: "custom_flow/v1" })).toMatchObject({
 			workflow_definition: "custom_flow/v1",
 		});
-		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context, undefined, undefined, {
-			workflowDefinition: "custom_flow/v1",
-		});
-		expect(payload.workflowDefinition).toBe("custom_flow/v1");
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
+		expect(payload.workflowDefinition).toBe("chat");
 	});
 
 	it("forwards workflow create goals verbatim without redaction", () => {
 		const credentialLike = `${"glpat"}-abcdefgh12345678ijkl`;
 		const goal = `Implement feature. token ${credentialLike}`;
 		const body = buildGitLabDuoWorkflowCreateBody("group", {
-			workflowDefinition: "ambient",
+			workflowDefinition: "chat",
 			goal,
 		});
-		expect(body.workflow_definition).toBe("ambient");
+		expect(body.workflow_definition).toBe("chat");
 		expect(body.goal).toBe(goal);
 		expect(body.goal).toContain(credentialLike);
 		expect(typeof body.goal === "string" && body.goal.includes("[REDACTED]")).toBe(false);
@@ -160,10 +173,12 @@ describe("GitLab Duo Workflow provider protocol", () => {
 			namespaceId: "gid://gitlab/Group/2",
 			rootNamespaceId: "gid://gitlab/Group/1",
 			selectedModelIdentifier: "claude_haiku_4_5_20251001",
-			workflowDefinition: "ambient",
+			workflowDefinition: "chat",
+			workflowId: "workflow-1",
+			clientType: "ide",
 		});
 		expect(url).toBe(
-			"wss://gitlab.example.com/api/v4/ai/duo_workflows/ws?project_id=123&namespace_id=2&root_namespace_id=1&user_selected_model_identifier=claude_haiku_4_5_20251001&workflow_definition=ambient",
+			"wss://gitlab.example.com/api/v4/ai/duo_workflows/ws?project_id=123&namespace_id=2&root_namespace_id=1&user_selected_model_identifier=claude_haiku_4_5_20251001&workflow_definition=chat&workflow_id=workflow-1&client_type=ide",
 		);
 
 		const metadata = buildGitLabDuoWorkflowWebSocketHeaders({
@@ -183,10 +198,10 @@ describe("GitLab Duo Workflow provider protocol", () => {
 	it("preserves a relative GitLab install base path in the WebSocket URL", () => {
 		const url = buildGitLabDuoWorkflowWebSocketUrl("https://host.example.com/gitlab", {
 			projectId: "123",
-			workflowDefinition: "ambient",
+			workflowDefinition: "chat",
 		});
 		expect(url).toBe(
-			"wss://host.example.com/gitlab/api/v4/ai/duo_workflows/ws?project_id=123&workflow_definition=ambient",
+			"wss://host.example.com/gitlab/api/v4/ai/duo_workflows/ws?project_id=123&workflow_definition=chat",
 		);
 		// serviceEndpoint targets the DWS runway host (root path), not the GitLab instance.
 		const serviceUrl = buildGitLabDuoWorkflowWebSocketUrl("https://duo-workflow-svc.runway.gitlab.net:443", {
@@ -230,7 +245,7 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		});
 		const metadata = JSON.parse(payload.workflowMetadata) as Record<string, unknown>;
 		expect(payload.workflowID).toBe("workflow-1");
-		expect(payload.workflowDefinition).toBe("ambient");
+		expect(payload.workflowDefinition).toBe("chat");
 		expect(payload.goal).toBe("Help me update the code.");
 		expect(payload.additional_context).toEqual([]);
 		expect(metadata).toHaveProperty("client_type", "node-websocket");
@@ -256,10 +271,7 @@ describe("GitLab Duo Workflow provider protocol", () => {
 			systemPrompt: ["OMP authoritative operating rules. Bridge the local tools."],
 			messages: context.messages,
 		};
-		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, systemContext, undefined, undefined, {
-			workflowDefinition: "ambient",
-			inlineFlow: true,
-		});
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, systemContext);
 		expect(payload.flowConfigSchemaVersion).toBe("v1");
 		expect(payload).not.toHaveProperty("flowConfigId");
 		const flow = payload.flowConfig;
@@ -279,10 +291,9 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		expect(prompt?.prompt_template.system).not.toContain("written as a plain-text log");
 	});
 
-	it("always emits the inline flowConfig (no server-side registry path)", () => {
-		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context, undefined, undefined, {
-			workflowDefinition: "ambient",
-		});
+	it("always emits the inline ambient flowConfig (no server-side registry path)", () => {
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, context);
+		expect(payload.workflowDefinition).toBe("chat");
 		expect(payload.flowConfigSchemaVersion).toBe("v1");
 		expect(payload.flowConfig).toBeDefined();
 		expect(payload).not.toHaveProperty("flowConfigId");
@@ -636,7 +647,7 @@ describe("GitLab Duo Workflow per-account namespace cache", () => {
 		}
 		if (!socket) throw new Error("GitLab Duo Workflow socket was never opened");
 		socket?.onopen?.(new Event("open"));
-		socket?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket?.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await stream.result();
 	}
 
@@ -906,7 +917,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(capturedHeaders?.origin).toBe("https://gitlab.example.com");
 		expect(capturedHeaders).not.toHaveProperty("x-gitlab-workflow-token");
 		socket.onopen?.(new Event("open"));
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 		await stream.result();
 	});
@@ -976,7 +987,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			queueMicrotask(() => {
 				socket.onopen?.(new Event("open"));
 				if (index >= 1) {
-					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+					socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 				}
 			});
 			return socket;
@@ -1065,7 +1076,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 						}),
 					);
 				} else {
-					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+					socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 				}
 			});
 			return socket;
@@ -1146,7 +1157,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 						}),
 					);
 				} else {
-					socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+					socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 				}
 			});
 			return socket;
@@ -1560,7 +1571,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			};
 			queueMicrotask(() => {
 				socket.onopen?.(new Event("open"));
-				socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+				socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 			});
 			return socket;
 		};
@@ -1650,7 +1661,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			};
 			queueMicrotask(() => {
 				socket.onopen?.(new Event("open"));
-				socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+				socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 			});
 			return socket;
 		};
@@ -1886,7 +1897,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			expect(wsUrl.searchParams.get("project_id")).toBe("4242");
 			expect(wsUrl.searchParams.get("namespace_id")).toBe("134945106");
 			socket.onopen?.(new Event("open"));
-			socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+			socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 			await stream.result();
 		} finally {
@@ -1982,7 +1993,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			rootNamespaceId: "1",
 			selectedModelIdentifier: "claude_sonnet_4_6_vertex",
 		});
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 		await stream.result();
 	});
@@ -2062,7 +2073,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			selectedModelIdentifier: "claude_sonnet_4_6_vertex",
 		});
 		expect(startRequest?.additional_context).toEqual([]);
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 		await stream.result();
 	});
@@ -2131,7 +2142,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(wsUrl.searchParams.get("namespace_id")).toBe("1");
 		expect(wsUrl.searchParams.get("root_namespace_id")).toBe("1");
 		socket.onopen?.(new Event("open"));
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await stream.result();
 	});
 
@@ -2197,7 +2208,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(wsUrl.searchParams.get("namespace_id")).toBe("1");
 		expect(wsUrl.searchParams.get("root_namespace_id")).toBe("1");
 		socket.onopen?.(new Event("open"));
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await stream.result();
 	});
 
@@ -2265,7 +2276,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		socket.onopen?.(new Event("open"));
 		const metadata = JSON.parse(startRequest?.workflowMetadata ?? "{}") as Record<string, unknown>;
 		expect(metadata.selectedModelIdentifier).toBe("pinned_model");
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 		await stream.result();
 	});
@@ -3289,7 +3300,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 				}),
 			}),
 		);
-		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket.onmessage?.(terminalGitLabDuoWorkflowMessage());
 
 		await streamPromise;
 		expect(output.usage.input).toBe(54000);
@@ -4044,6 +4055,104 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		expect(createdWorkflowIds).toEqual(["workflow-1", "workflow-2"]);
 	});
 
+	it("re-seeds a fresh workflow when a workflow terminates without visible output", async () => {
+		const createdWorkflowIds: string[] = [];
+		let createCount = 0;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("/api/graphql")) {
+				return new Response(
+					JSON.stringify({
+						data: {
+							aiChatAvailableModels: {
+								defaultModel: { name: "Default", ref: "claude_sonnet_4_6_vertex" },
+								selectableModels: [],
+								pinnedModel: null,
+							},
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url.includes("/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "workflow-token" } }), { status: 201 });
+			}
+			if (/\/workflows\/[^/]+$/.test(url.split("?")[0] ?? url)) {
+				return new Response("{}", { status: 200 });
+			}
+			if (url.includes("/workflows") && init?.method === "POST") {
+				createCount += 1;
+				const id = `workflow-${createCount}`;
+				createdWorkflowIds.push(id);
+				return new Response(JSON.stringify({ id }), { status: 201 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+		const sockets: GitLabDuoWorkflowWebSocketLike[] = [];
+		const webSocketFactory: GitLabDuoWorkflowWebSocketFactory = () => {
+			const socket: GitLabDuoWorkflowWebSocketLike = {
+				onopen: null,
+				onmessage: null,
+				onerror: null,
+				onclose: null,
+				send() {},
+				close() {},
+			};
+			sockets.push(socket);
+			return socket;
+		};
+
+		const stream = streamGitLabDuoWorkflow(model, context, {
+			apiKey: "[REDACTED]",
+			fetch: fetchImpl,
+			rootNamespaceId: "gid://gitlab/Group/root",
+			providerSessionState,
+			webSocketFactory,
+		});
+
+		for (let attempt = 0; attempt < 20 && sockets.length < 1; attempt++) {
+			await Bun.sleep(0);
+		}
+		expect(sockets).toHaveLength(1);
+		sockets[0]?.onopen?.(new Event("open"));
+		sockets[0]?.onmessage?.(
+			new MessageEvent("message", {
+				data: JSON.stringify({
+					newCheckpoint: {
+						status: "INPUT_REQUIRED",
+						checkpoint: JSON.stringify({ channel_values: { ui_chat_log: [] } }),
+					},
+				}),
+			}),
+		);
+
+		for (let attempt = 0; attempt < 50 && sockets.length < 2; attempt++) {
+			await Bun.sleep(0);
+		}
+		expect(sockets).toHaveLength(2);
+		sockets[1]?.onopen?.(new Event("open"));
+		sockets[1]?.onmessage?.(
+			new MessageEvent("message", {
+				data: JSON.stringify({
+					newCheckpoint: {
+						status: "INPUT_REQUIRED",
+						checkpoint: JSON.stringify({
+							channel_values: {
+								ui_chat_log: [{ message_type: "agent", message_id: "final", content: "Recovered." }],
+							},
+						}),
+					},
+				}),
+			}),
+		);
+
+		const message = await stream.result();
+		expect(message.role).toBe("assistant");
+		expect(message.content).toContainEqual({ type: "text", text: "Recovered." });
+		expect(createdWorkflowIds).toEqual(["workflow-1", "workflow-2"]);
+	});
+
 	it("re-seeds a fresh workflow when the user steers after a pending tool result", async () => {
 		const patchedWorkflows: string[] = [];
 		let createCount = 0;
@@ -4148,7 +4257,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			await Bun.sleep(0);
 		}
 		sockets[1]?.onopen?.(new Event("open"));
-		sockets[1]?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		sockets[1]?.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await secondStream.result();
 
 		// A fresh workflow was created (not resumed on the old socket).
@@ -4273,7 +4382,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			await Bun.sleep(0);
 		}
 		sockets[1]?.onopen?.(new Event("open"));
-		sockets[1]?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		sockets[1]?.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await secondStream.result();
 
 		// With the fix, an unresolvable pending batch is treated like a steer: the
@@ -4412,7 +4521,7 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			await Bun.sleep(0);
 		}
 		socket?.onopen?.(new Event("open"));
-		socket?.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		socket?.onmessage?.(terminalGitLabDuoWorkflowMessage());
 		await stream.result();
 
 		const startFrame = sent.find(data => data.includes("startRequest"));
