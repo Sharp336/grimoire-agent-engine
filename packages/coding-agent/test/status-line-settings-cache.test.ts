@@ -160,6 +160,7 @@ describe("StatusLineComponent effective settings cache", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
 		component.setSubagentCount(2);
+
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(content).toContain("2 agents");
 		expect(content).not.toContain("running");
