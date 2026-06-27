@@ -24,26 +24,31 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     str.gsub(/%([0-9A-Fa-f]{2})/) { [Regexp.last_match(1)].pack("H2") }.force_encoding(Encoding::UTF_8)
   end
 
+  def __omp_local_roots
+    raw = ENV["PI_EVAL_LOCAL_ROOTS"]
+    roots = raw && !raw.empty? ? JSON.parse(raw) : {}
+    roots.is_a?(Hash) ? roots : {}
+  rescue StandardError
+    {}
+  end
+
+  def __omp_within_root?(target_path, real_root)
+    target_path == real_root || target_path.start_with?(real_root + File::SEPARATOR)
+  end
+
   # Map a helper path to a real filesystem path. A `scheme://…` whose scheme has
   # an injected on-disk root (PI_EVAL_LOCAL_ROOTS, e.g. `local://`) is rewritten
   # under that root; plain paths pass through; any other `scheme://` is rejected.
-  def __omp_resolve_path(path)
-    return path unless path.is_a?(String)
+  def __omp_resolve_path_info(path)
+    return [path, nil, nil] unless path.is_a?(String)
     m = path.match(%r{\A([a-z][a-z0-9+.\-]*)://(.*)\z}i)
-    return path unless m
+    return [path, nil, nil] unless m
     scheme = m[1].downcase
-    roots =
-      begin
-        raw = ENV["PI_EVAL_LOCAL_ROOTS"]
-        raw && !raw.empty? ? JSON.parse(raw) : {}
-      rescue StandardError
-        {}
-      end
-    root = roots.is_a?(Hash) ? roots[scheme] : nil
+    root = __omp_local_roots[scheme]
     raise "Protocol paths are not supported by this helper: #{path}" if root.nil? || root.to_s.empty?
     relative = __omp_url_decode(m[2].tr("\\", "/"))
     root_path = File.absolute_path(root.to_s)
-    return root_path if relative.empty?
+    return [root_path, scheme, root_path] if relative.empty?
     if relative.start_with?("/") || relative.split("/").include?("..")
       raise "Unsafe #{scheme}:// path (absolute or traversal): #{path}"
     end
@@ -51,7 +56,84 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     unless resolved == root_path || resolved.start_with?(root_path + File::SEPARATOR)
       raise "#{scheme}:// path escapes its root: #{path}"
     end
-    resolved
+    [resolved, scheme, root_path]
+  end
+
+  def __omp_resolve_path(path)
+    __omp_resolve_path_info(path).first
+  end
+
+  def __omp_ensure_safe_protocol_directory(path_name, real_root, scheme, create_missing)
+    stat =
+      begin
+        File.lstat(path_name)
+      rescue Errno::ENOENT
+        raise unless create_missing
+        begin
+          Dir.mkdir(path_name)
+        rescue Errno::EEXIST
+          nil
+        end
+        File.lstat(path_name)
+      end
+
+    raise "#{scheme}:// parent must be a directory" unless stat.directory? || stat.symlink?
+    real_path = File.realpath(path_name)
+    raise "#{scheme}:// path escapes its root: #{path_name}" unless __omp_within_root?(real_path, real_root)
+    raise "#{scheme}:// parent must be a directory" unless File.stat(real_path).directory?
+  end
+
+  def __omp_ensure_safe_protocol_target(root_path, target_path, scheme, create_parents)
+    root_stat =
+      begin
+        File.lstat(root_path)
+      rescue Errno::ENOENT
+        raise unless create_parents
+        FileUtils.mkdir_p(root_path)
+        File.lstat(root_path)
+      end
+    raise "#{scheme}:// root cannot be a symlink" if root_stat.symlink?
+    raise "#{scheme}:// root must be a directory" unless root_stat.directory?
+
+    root_abs = File.absolute_path(root_path)
+    real_root = File.realpath(root_abs)
+    absolute_target = File.absolute_path(target_path.to_s)
+    unless absolute_target == root_abs || absolute_target.start_with?(root_abs + File::SEPARATOR)
+      raise "#{scheme}:// path escapes its root: #{target_path}"
+    end
+
+    relative_target = absolute_target == root_abs ? "" : absolute_target[(root_abs.length + 1)..]
+    parent_relative = File.dirname(relative_target)
+    current = real_root
+    if parent_relative && parent_relative != "."
+      parent_relative.split(File::SEPARATOR).each do |part|
+        next if part.nil? || part.empty? || part == "."
+        next_path = File.join(current, part)
+        __omp_ensure_safe_protocol_directory(next_path, real_root, scheme, create_parents)
+        current = File.realpath(next_path)
+      end
+    end
+    relative_target.empty? ? current : File.join(current, File.basename(relative_target))
+  end
+
+  def __omp_open_text_no_follow(path, flags)
+    no_follow =
+      if defined?(File::Constants::NOFOLLOW)
+        File::Constants::NOFOLLOW
+      elsif defined?(File::NOFOLLOW)
+        File::NOFOLLOW
+      else
+        0
+      end
+    File.open(path, flags | no_follow, 0o666, encoding: Encoding::UTF_8) { |file| yield file }
+  end
+
+  def __omp_reject_protocol_leaf_escape(path, scheme, op)
+    stat = File.lstat(path)
+    raise "#{scheme}:// #{op} target cannot be a symlink" if stat.symlink?
+    raise "#{scheme}:// #{op} target must be a file" unless stat.file?
+  rescue Errno::ENOENT
+    raise if op == "read"
   end
 
   # -------------------------------------------------------------------------
@@ -91,8 +173,14 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
   # -------------------------------------------------------------------------
 
   def read(path, offset = 1, limit = nil)
-    resolved = __omp_resolve_path(path)
-    data = File.read(resolved.to_s, encoding: Encoding::UTF_8)
+    resolved, scheme, root_path = __omp_resolve_path_info(path)
+    if scheme && root_path
+      resolved = __omp_ensure_safe_protocol_target(root_path, resolved, scheme, false)
+      __omp_reject_protocol_leaf_escape(resolved, scheme, "read")
+      data = __omp_open_text_no_follow(resolved, File::RDONLY) { |file| file.read }
+    else
+      data = File.read(resolved.to_s, encoding: Encoding::UTF_8)
+    end
     if offset > 1 || !limit.nil?
       lines = data.lines
       start = [offset - 1, 0].max
@@ -104,10 +192,16 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
   end
 
   def write(path, content)
-    resolved = __omp_resolve_path(path)
-    require "fileutils"
-    FileUtils.mkdir_p(File.dirname(resolved.to_s))
-    File.write(resolved.to_s, content.to_s)
+    resolved, scheme, root_path = __omp_resolve_path_info(path)
+    if scheme && root_path
+      resolved = __omp_ensure_safe_protocol_target(root_path, resolved, scheme, true)
+      __omp_reject_protocol_leaf_escape(resolved, scheme, "write")
+      __omp_open_text_no_follow(resolved, File::WRONLY | File::CREAT | File::TRUNC) { |file| file.write(content.to_s) }
+    else
+      require "fileutils"
+      FileUtils.mkdir_p(File.dirname(resolved.to_s))
+      File.write(resolved.to_s, content.to_s)
+    end
     __omp_emit_status("write", "path" => resolved.to_s, "chars" => content.to_s.length)
     resolved.to_s
   end

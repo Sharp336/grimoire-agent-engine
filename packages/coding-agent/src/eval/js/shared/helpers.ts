@@ -1,3 +1,5 @@
+import * as fsConstants from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { ToolError } from "../../../tools/tool-errors";
@@ -41,8 +43,8 @@ const utf8Encoder = new TextEncoder();
 export function createHelpers(ctx: HelperContext): HelperBundle {
 	return {
 		read: async (rawPath, options = {}) => {
-			const { filePath, file, size } = await resolveRegularFile(ctx, rawPath);
-			let text = await file.text();
+			const { filePath, text: rawText, size } = await readHelperFile(ctx, rawPath);
+			let text = rawText;
 			const offset = typeof options.offset === "number" ? options.offset : 1;
 			const limit = typeof options.limit === "number" ? options.limit : undefined;
 			if (offset > 1 || limit !== undefined) {
@@ -58,12 +60,10 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			if (!isWriteData(data)) {
 				throw new ToolError("write() expects string, Blob, ArrayBuffer, or TypedArray data");
 			}
-			const filePath = resolveHelperPath(ctx, rawPath, "write");
-			if (typeof data === "string" || data instanceof Blob || data instanceof ArrayBuffer) {
-				await Bun.write(filePath, data);
-			} else {
-				await Bun.write(filePath, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-			}
+			const target = resolveHelperTarget(ctx, rawPath, "write");
+			const filePath = target.root
+				? await writeProtocolFile(target, data)
+				: await writePlainFile(target.filePath, data);
 			ctx.emitStatus({ op: "write", path: filePath, bytes: getDataSize(data) });
 			return filePath;
 		},
@@ -101,21 +101,27 @@ function resolvePath(ctx: HelperContext, value: string): string {
 	return path.resolve(ctx.cwd(), value);
 }
 
+interface ResolvedHelperPath {
+	filePath: string;
+	scheme?: string;
+	root?: string;
+}
+
 /**
  * Map a raw helper path to an absolute filesystem path. Plain paths resolve
  * against the cwd; an internal-URL whose scheme has an injected root (e.g.
  * `local://`) is rewritten under that root; any other `scheme://` is rejected
  * so we never silently create a literal `scheme:/` directory.
  */
-function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "write"): string {
+function resolveHelperTarget(ctx: HelperContext, rawPath: string, op: "read" | "write"): ResolvedHelperPath {
 	const match = INTERNAL_URL_RE.exec(rawPath);
-	if (!match) return resolvePath(ctx, rawPath);
+	if (!match) return { filePath: resolvePath(ctx, rawPath) };
 	const scheme = match[1].toLowerCase();
 	const root = ctx.localRoots()[scheme];
 	if (!root) {
 		throw new ToolError(`Protocol paths are not supported by ${op}(): ${rawPath}`);
 	}
-	return resolveUnderRoot(scheme, root, match[2], rawPath);
+	return { filePath: resolveUnderRoot(scheme, root, match[2], rawPath), scheme, root };
 }
 
 /** Resolve an internal-URL relative path under its root, mirroring the host
@@ -132,7 +138,7 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
 	if (path.isAbsolute(relative)) {
 		throw new ToolError(`Absolute paths are not allowed in ${scheme}:// URLs: ${rawPath}`);
 	}
-	const normalized = path.normalize(relative);
+	const normalized = path.posix.normalize(relative);
 	if (normalized.startsWith("..") || normalized.includes("/../") || normalized.includes("/..")) {
 		throw new ToolError(`Path traversal (..) is not allowed in ${scheme}:// URLs: ${rawPath}`);
 	}
@@ -143,17 +149,169 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
 	return resolved;
 }
 
-async function resolveRegularFile(
+async function readHelperFile(
 	ctx: HelperContext,
 	rawPath: string,
-): Promise<{ filePath: string; file: Bun.BunFile; size: number }> {
-	const filePath = resolveHelperPath(ctx, rawPath, "read");
-	const file = Bun.file(filePath);
+): Promise<{ filePath: string; text: string; size: number }> {
+	const target = resolveHelperTarget(ctx, rawPath, "read");
+	if (target.root) return readProtocolFile(target);
+	const file = Bun.file(target.filePath);
 	const stat = await file.stat();
 	if (stat.isDirectory()) {
-		throw new ToolError(`Directory paths are not supported by read(): ${filePath}`);
+		throw new ToolError(`Directory paths are not supported by read(): ${target.filePath}`);
 	}
-	return { filePath, file, size: stat.size };
+	return { filePath: target.filePath, text: await file.text(), size: stat.size };
+}
+
+async function readProtocolFile(target: ResolvedHelperPath): Promise<{ filePath: string; text: string; size: number }> {
+	if (!target.root) throw new ToolError(`Protocol root unavailable for read(): ${target.filePath}`);
+	const filePath = await ensureSafeTarget(target.root, target.filePath, target.scheme ?? "local", false);
+	await rejectProtocolLeafEscape(filePath, target.scheme ?? "local", "read");
+	const flags = fsConstants.constants.O_RDONLY | (fsConstants.constants.O_NOFOLLOW ?? 0);
+	const handle = await fs.open(filePath, flags);
+	try {
+		const stat = await handle.stat();
+		if (stat.isDirectory()) {
+			throw new ToolError(`Directory paths are not supported by read(): ${filePath}`);
+		}
+		return { filePath, text: await handle.readFile("utf8"), size: stat.size };
+	} finally {
+		await handle.close();
+	}
+}
+
+async function writePlainFile(filePath: string, data: string | Blob | ArrayBuffer | ArrayBufferView): Promise<string> {
+	if (typeof data === "string" || data instanceof Blob || data instanceof ArrayBuffer) {
+		await Bun.write(filePath, data);
+	} else {
+		await Bun.write(filePath, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+	}
+	return filePath;
+}
+
+async function writeProtocolFile(
+	target: ResolvedHelperPath,
+	data: string | Blob | ArrayBuffer | ArrayBufferView,
+): Promise<string> {
+	if (!target.root) throw new ToolError(`Protocol root unavailable for write(): ${target.filePath}`);
+	const filePath = await ensureSafeTarget(target.root, target.filePath, target.scheme ?? "local", true);
+	await rejectProtocolLeafEscape(filePath, target.scheme ?? "local", "write");
+	const flags =
+		fsConstants.constants.O_WRONLY |
+		fsConstants.constants.O_CREAT |
+		fsConstants.constants.O_TRUNC |
+		(fsConstants.constants.O_NOFOLLOW ?? 0);
+	const handle = await fs.open(filePath, flags, 0o666);
+	try {
+		await handle.writeFile(await toFsWriteData(data));
+	} finally {
+		await handle.close();
+	}
+	return filePath;
+}
+
+async function ensureSafeTarget(
+	root: string,
+	targetPath: string,
+	scheme: string,
+	createParents: boolean,
+): Promise<string> {
+	const rootPath = path.resolve(root);
+	let rootStat: fsConstants.Stats;
+	try {
+		rootStat = await fs.lstat(rootPath);
+	} catch (error) {
+		if (!createParents || !isNodeError(error, "ENOENT")) throw error;
+		await fs.mkdir(rootPath, { recursive: true });
+		rootStat = await fs.lstat(rootPath);
+	}
+	if (rootStat.isSymbolicLink()) {
+		throw new ToolError(`${scheme}:// root cannot be a symlink`);
+	}
+	if (!rootStat.isDirectory()) {
+		throw new ToolError(`${scheme}:// root must be a directory`);
+	}
+
+	const realRoot = await fs.realpath(rootPath);
+	const absoluteTarget = path.resolve(targetPath);
+	const relativeTarget = path.relative(rootPath, absoluteTarget);
+	if (relativeTarget.startsWith("..") || path.isAbsolute(relativeTarget)) {
+		throw new ToolError(`${scheme}:// path escapes its root: ${targetPath}`);
+	}
+
+	const parentRelative = path.dirname(relativeTarget);
+	let current = realRoot;
+	if (parentRelative !== ".") {
+		for (const part of parentRelative.split(path.sep)) {
+			if (!part || part === ".") continue;
+			const nextPath = path.join(current, part);
+			await ensureSafeDirectory(nextPath, realRoot, scheme, createParents);
+			current = await fs.realpath(nextPath);
+		}
+	}
+	return path.join(current, path.basename(relativeTarget));
+}
+
+async function ensureSafeDirectory(
+	pathName: string,
+	realRoot: string,
+	scheme: string,
+	createMissing: boolean,
+): Promise<void> {
+	let stat: fsConstants.Stats;
+	try {
+		stat = await fs.lstat(pathName);
+	} catch (error) {
+		if (!isNodeError(error, "ENOENT") || !createMissing) throw error;
+		try {
+			await fs.mkdir(pathName);
+		} catch (mkdirError) {
+			if (!isNodeError(mkdirError, "EEXIST")) throw mkdirError;
+		}
+		stat = await fs.lstat(pathName);
+	}
+
+	if (!stat.isDirectory() && !stat.isSymbolicLink()) {
+		throw new ToolError(`${scheme}:// parent must be a directory`);
+	}
+	const realPath = await fs.realpath(pathName);
+	assertWithinRoot(realPath, realRoot, scheme);
+	const realStat = await fs.stat(realPath);
+	if (!realStat.isDirectory()) {
+		throw new ToolError(`${scheme}:// parent must be a directory`);
+	}
+}
+
+async function rejectProtocolLeafEscape(filePath: string, scheme: string, op: "read" | "write"): Promise<void> {
+	try {
+		const stat = await fs.lstat(filePath);
+		if (stat.isSymbolicLink()) {
+			throw new ToolError(`${scheme}:// ${op} target cannot be a symlink`);
+		}
+		if (!stat.isFile()) {
+			throw new ToolError(`${scheme}:// ${op} target must be a file`);
+		}
+	} catch (error) {
+		if (op === "write" && isNodeError(error, "ENOENT")) return;
+		throw error;
+	}
+}
+
+function assertWithinRoot(targetPath: string, realRoot: string, scheme: string): void {
+	const relative = path.relative(realRoot, targetPath);
+	if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return;
+	throw new ToolError(`${scheme}:// path escapes its root: ${targetPath}`);
+}
+
+async function toFsWriteData(data: string | Blob | ArrayBuffer | ArrayBufferView): Promise<string | Uint8Array> {
+	if (typeof data === "string") return data;
+	if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+	if (data instanceof ArrayBuffer) return new Uint8Array(data);
+	return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error && error.code === code;
 }
 
 function getDataSize(data: string | Blob | ArrayBuffer | ArrayBufferView): number {

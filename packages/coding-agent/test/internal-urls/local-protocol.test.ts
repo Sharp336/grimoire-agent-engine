@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	InternalUrlRouter,
 	LocalProtocolHandler,
+	parseInternalUrl,
 	resolveLocalRoot,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -45,6 +46,42 @@ describe("LocalProtocolHandler", () => {
 
 			expect(resource.contentType).toBe("text/markdown");
 			expect(resource.content).toContain("handoff.json");
+		});
+	});
+
+	it("lists only existing standard scratchpad directories at local://", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			await fs.mkdir(path.join(artifactsDir, "local", "reports"), { recursive: true });
+			await Bun.write(path.join(artifactsDir, "local", "plans"), "legacy file");
+			LocalProtocolHandler.setOverride({
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-standard-dirs",
+			});
+
+			const router = InternalUrlRouter.instance();
+			const resource = await router.resolve("local://");
+
+			expect(resource.content).toContain("local://reports");
+			expect(resource.content).not.toContain("local://plans -");
+			expect(resource.content).toContain("[plans](local://plans)");
+			await expect(fs.stat(path.join(artifactsDir, "local", "results"))).rejects.toThrow();
+		});
+	});
+
+	it("writes local files through the protocol handler", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const handler = new LocalProtocolHandler();
+			await handler.write(parseInternalUrl("local://reports/summary.md"), "ready", {
+				localProtocolOptions: {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-write",
+				},
+			});
+
+			const written = await Bun.file(path.join(artifactsDir, "local", "reports", "summary.md")).text();
+			expect(written).toBe("ready");
 		});
 	});
 
@@ -132,6 +169,179 @@ describe("LocalProtocolHandler", () => {
 			});
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("local://linked/secret.txt")).rejects.toThrow("local:// URL escapes local root");
+		});
+	});
+
+	it("rejects symlinked local roots before writing standard directories", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(artifactsDir, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, localRoot);
+
+			const handler = new LocalProtocolHandler();
+
+			await expect(
+				handler.write(parseInternalUrl("local://reports/secret.txt"), "secret", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-symlink-root",
+					},
+				}),
+			).rejects.toThrow("local:// root cannot be a symlink");
+			await expect(fs.stat(path.join(outsideDir, "reports"))).rejects.toThrow();
+		});
+	});
+
+	it("rejects symlinked standard scratchpad directories when writing under them", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(localRoot, "plans"));
+
+			const handler = new LocalProtocolHandler();
+			await expect(
+				handler.write(parseInternalUrl("local://plans/secret.txt"), "secret", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-standard-dir-symlink",
+					},
+				}),
+			).rejects.toThrow("local:// scratchpad directory plans cannot be a symlink");
+		});
+	});
+
+	it("blocks writes through symlinked parents without creating outside directories", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(localRoot, "linked"));
+
+			const handler = new LocalProtocolHandler();
+
+			await expect(
+				handler.write(parseInternalUrl("local://linked/new/secret.txt"), "secret", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-symlink-write",
+					},
+				}),
+			).rejects.toThrow("local:// URL escapes local root");
+			await expect(fs.stat(path.join(outsideDir, "new"))).rejects.toThrow();
+		});
+	});
+
+	it("writes through symlink targets that resolve inside local root", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const realTarget = path.join(localRoot, "real.txt");
+			await fs.mkdir(localRoot, { recursive: true });
+			await Bun.write(realTarget, "old");
+			await fs.symlink(realTarget, path.join(localRoot, "link.txt"));
+
+			const handler = new LocalProtocolHandler();
+
+			await handler.write(parseInternalUrl("local://link.txt"), "new", {
+				localProtocolOptions: {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-internal-symlink-write",
+				},
+			});
+
+			await expect(Bun.file(realTarget).text()).resolves.toBe("new");
+		});
+	});
+
+	it("blocks writes through symlink targets that resolve to directories inside local root", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const realTarget = path.join(localRoot, "real-dir");
+			await fs.mkdir(realTarget, { recursive: true });
+			await fs.symlink(realTarget, path.join(localRoot, "dir-link.txt"));
+
+			const handler = new LocalProtocolHandler();
+
+			await expect(
+				handler.write(parseInternalUrl("local://dir-link.txt"), "new", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-directory-symlink-write",
+					},
+				}),
+			).rejects.toThrow("local:// write target must be a file");
+		});
+	});
+
+	it("blocks writes through symlink targets that resolve outside local root", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			const outsideTarget = path.join(outsideDir, "secret.txt");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await Bun.write(outsideTarget, "old");
+			await fs.symlink(outsideTarget, path.join(localRoot, "secret-link.txt"));
+
+			const handler = new LocalProtocolHandler();
+
+			await expect(
+				handler.write(parseInternalUrl("local://secret-link.txt"), "new", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-external-symlink-write",
+					},
+				}),
+			).rejects.toThrow("local:// URL escapes local root");
+			await expect(Bun.file(outsideTarget).text()).resolves.toBe("old");
+		});
+	});
+
+	it("blocks writes through broken symlink targets that point outside local root", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			const missingOutsideTarget = path.join(outsideDir, "missing.txt");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(missingOutsideTarget, path.join(localRoot, "broken-secret-link.txt"));
+
+			const handler = new LocalProtocolHandler();
+
+			await expect(
+				handler.write(parseInternalUrl("local://broken-secret-link.txt"), "new", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-broken-external-symlink-write",
+					},
+				}),
+			).rejects.toThrow("local:// URL escapes local root");
+			await expect(fs.stat(missingOutsideTarget)).rejects.toThrow();
 		});
 	});
 

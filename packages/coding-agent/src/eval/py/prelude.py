@@ -3,7 +3,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import os, json, math, re
+    import errno, os, json, math, re
     from urllib.parse import unquote
     INTENT_FIELD = "i"
 
@@ -57,8 +57,19 @@ if "__omp_prelude_loaded__" not in globals():
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
 
-    def _resolve_omp_path(path: str | Path) -> Path:
-        """Map a helper path to a real filesystem Path.
+    def _load_omp_local_roots() -> dict:
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            return {}
+        return roots if isinstance(roots, dict) else {}
+
+    def _is_within_root(target: str, root: str) -> bool:
+        relative = os.path.relpath(target, root)
+        return relative == "." or (not relative.startswith("..") and not os.path.isabs(relative))
+
+    def _resolve_omp_path_info(path: str | Path) -> tuple[Path, str | None, str | None]:
+        """Map a helper path to a filesystem Path plus protocol-root metadata.
 
         A `scheme://…` whose scheme has an injected on-disk root (e.g.
         `local://`, via PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it
@@ -66,16 +77,12 @@ if "__omp_prelude_loaded__" not in globals():
         directory under the cwd (which `Path("local://x")` collapses to). Plain
         paths pass through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
-            return Path(path)
+            return Path(path), None, None
         match = _OMP_INTERNAL_URL_RE.match(path)
         if not match:
-            return Path(path)
+            return Path(path), None, None
         scheme = match.group(1).lower()
-        try:
-            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
-        except (ValueError, TypeError):
-            roots = {}
-        root = roots.get(scheme) if isinstance(roots, dict) else None
+        root = _load_omp_local_roots().get(scheme)
         if not root:
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
@@ -84,19 +91,100 @@ if "__omp_prelude_loaded__" not in globals():
         # /tmp into /private/tmp and diverge from the read-side resolution).
         root_path = os.path.abspath(root)
         if relative == "":
-            return Path(root_path)
+            return Path(root_path), scheme, root_path
         rel_path = Path(relative)
         if rel_path.is_absolute() or ".." in rel_path.parts:
             raise ValueError(f"Unsafe {scheme}:// path (absolute or traversal): {path}")
         resolved = os.path.abspath(os.path.join(root_path, relative))
         if resolved != root_path and not resolved.startswith(root_path + os.sep):
             raise ValueError(f"{scheme}:// path escapes its root: {path}")
-        return Path(resolved)
+        return Path(resolved), scheme, root_path
+
+    def _resolve_omp_path(path: str | Path) -> Path:
+        return _resolve_omp_path_info(path)[0]
+
+    def _ensure_safe_protocol_directory(path_name: str, real_root: str, scheme: str, create_missing: bool) -> None:
+        try:
+            dir_stat = os.lstat(path_name)
+        except OSError as error:
+            if error.errno != errno.ENOENT or not create_missing:
+                raise
+            try:
+                os.mkdir(path_name)
+            except OSError as mkdir_error:
+                if mkdir_error.errno != errno.EEXIST:
+                    raise
+            dir_stat = os.lstat(path_name)
+
+        if not os.path.isdir(path_name) and not os.path.islink(path_name):
+            raise ValueError(f"{scheme}:// parent must be a directory")
+        real_path = os.path.realpath(path_name)
+        if not _is_within_root(real_path, real_root):
+            raise ValueError(f"{scheme}:// path escapes its root: {path_name}")
+        if not os.path.isdir(real_path):
+            raise ValueError(f"{scheme}:// parent must be a directory")
+
+    def _ensure_safe_protocol_target(root_path: str, target_path: Path, scheme: str, create_parents: bool) -> Path:
+        try:
+            root_stat = os.lstat(root_path)
+        except OSError as error:
+            if not create_parents or error.errno != errno.ENOENT:
+                raise
+            os.makedirs(root_path, exist_ok=True)
+            root_stat = os.lstat(root_path)
+        if os.path.islink(root_path):
+            raise ValueError(f"{scheme}:// root cannot be a symlink")
+        if not os.path.isdir(root_path):
+            raise ValueError(f"{scheme}:// root must be a directory")
+
+        real_root = os.path.realpath(root_path)
+        absolute_target = os.path.abspath(str(target_path))
+        relative_target = os.path.relpath(absolute_target, root_path)
+        if relative_target.startswith("..") or os.path.isabs(relative_target):
+            raise ValueError(f"{scheme}:// path escapes its root: {target_path}")
+        parent_relative = os.path.dirname(relative_target)
+        current = real_root
+        if parent_relative and parent_relative != ".":
+            for part in parent_relative.split(os.sep):
+                if not part or part == ".":
+                    continue
+                next_path = os.path.join(current, part)
+                _ensure_safe_protocol_directory(next_path, real_root, scheme, create_parents)
+                current = os.path.realpath(next_path)
+        return Path(os.path.join(current, os.path.basename(relative_target)))
+
+    def _open_text_no_follow(path: Path, flags: int):
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags | no_follow, 0o666)
+        try:
+            return os.fdopen(fd, "r" if (flags & os.O_ACCMODE) == os.O_RDONLY else "w", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _reject_protocol_leaf_escape(path: Path, scheme: str, op: str) -> None:
+        try:
+            stat = os.lstat(path)
+        except OSError as error:
+            if op == "write" and error.errno == errno.ENOENT:
+                return
+            raise
+        if os.path.islink(path):
+            raise ValueError(f"{scheme}:// {op} target cannot be a symlink")
+        if not os.path.isfile(path):
+            raise ValueError(f"{scheme}:// {op} target must be a file")
+
 
     def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file contents. offset/limit are 1-indexed line numbers."""
-        p = _resolve_omp_path(path)
-        data = p.read_text(encoding="utf-8")
+        p, scheme, root_path = _resolve_omp_path_info(path)
+        if root_path and scheme:
+            p = _ensure_safe_protocol_target(root_path, p, scheme, False)
+            _reject_protocol_leaf_escape(p, scheme, "read")
+            with _open_text_no_follow(p, os.O_RDONLY) as fh:
+                data = fh.read()
+        else:
+            data = p.read_text(encoding="utf-8")
         lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
             start = max(0, offset - 1)
@@ -109,9 +197,15 @@ if "__omp_prelude_loaded__" not in globals():
 
     def write(path: str | Path, content: str) -> Path:
         """Write file contents (create parents)."""
-        p = _resolve_omp_path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        p, scheme, root_path = _resolve_omp_path_info(path)
+        if root_path and scheme:
+            p = _ensure_safe_protocol_target(root_path, p, scheme, True)
+            _reject_protocol_leaf_escape(p, scheme, "write")
+            with _open_text_no_follow(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as fh:
+                fh.write(content)
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
         _emit_status("write", path=str(p), chars=len(content))
         return p
 

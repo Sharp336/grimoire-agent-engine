@@ -36,6 +36,9 @@ You are working in an isolated working tree at `{{worktree}}` for this sub-task.
 You NEVER modify files outside this tree or in the original repository.
 {{/if}}
 
+# Shared Scratchpad
+Use `local://` for large shared artifacts instead of pasting blobs into chat. Standard directories: `local://plans/`, `local://reports/`, `local://results/`, `local://thoughts/`. The main agent and all subagents share the same session root.
+
 {{#if ircPeers}}
 # IRC Peers
 You can reach other live agents via the `irc` tool. Your id is `{{ircSelfId}}`. Currently visible peers:

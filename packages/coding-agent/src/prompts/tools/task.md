@@ -43,9 +43,9 @@
 - NEVER slow down or serialize because tasks might overlap on some files. Agents resolve collisions among themselves in real time.
 - Subagents have no conversation history. Every fact, file path, and direction they need MUST be explicit in {{#if batchEnabled}}`context` or the item's `assignment`{{else}}the `assignment`{{/if}}.
 {{#if batchEnabled}}
-- **Shared background** lives in `context` once — never duplicated across assignments. Pass large payloads via `local://<path>` URIs, not inline.
+- **Shared background** lives in `context` once — never duplicated across assignments. Pass large payloads via `local://<path>` URIs, preferably under `local://plans/`, `local://reports/`, `local://results/`, or `local://thoughts/`, not inline.
 {{else}}
-- **Shared background**: write it ONCE to a `local://` file (e.g. `local://ctx.md`) and reference that path in each assignment. Pass large payloads via `local://<path>` URIs, not inline.
+- **Shared background**: write it ONCE to a `local://` file (e.g. `local://reports/context.md`) and reference that path in each assignment. Pass large payloads via `local://<path>` URIs, not inline.
 {{/if}}
 - Prefer agents that investigate **and** edit in one pass; only spin a read-only discovery step when affected files are genuinely unknown.
 - **Read-only agents**: Agents tagged READ-ONLY (e.g. `explore`) have no edit/write/command tools. NEVER hand them an assignment that requires changing files or running commands. Use them to investigate and report back; do the edits yourself or delegate to a writing agent (`task`, `oracle`, `designer`).

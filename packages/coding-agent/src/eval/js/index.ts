@@ -33,7 +33,7 @@ export default {
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			session: opts.session,
-			localRoots: resolveEvalUrlRoots(opts.session),
+			localRoots: await resolveEvalUrlRoots(opts.session),
 		});
 		return toExecutorBackendResult(result);
 	},

@@ -1,7 +1,9 @@
+import type { Stats } from "node:fs";
+import * as fsConstants from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -28,6 +30,15 @@ function toLocalValidationError(error: unknown): Error {
 	return new Error(message.replace("skill://", "local://"));
 }
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
+export const LOCAL_SCRATCHPAD_DIRECTORIES = ["plans", "reports", "results", "thoughts"] as const;
+export type LocalScratchpadDirectory = (typeof LOCAL_SCRATCHPAD_DIRECTORIES)[number];
+
+const LOCAL_SCRATCHPAD_DIRECTORY_DESCRIPTIONS: Record<LocalScratchpadDirectory, string> = {
+	plans: "drafts, approved plans, and implementation notes",
+	reports: "subagent reports, audit summaries, and handoff briefs",
+	results: "tool outputs, generated data, and verification evidence",
+	thoughts: "scratch reasoning too large or volatile for chat",
+};
 
 function safeSessionId(options: LocalProtocolOptions): string {
 	const raw = options.getSessionId?.() ?? "session";
@@ -191,13 +202,19 @@ async function listFilesRecursively(rootPath: string): Promise<string[]> {
 
 async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
 	const files = await listFilesRecursively(localRoot);
-	const listing = files.length === 0 ? "(empty)" : files.map(file => `- [${file}](local://${file})`).join("\n");
+	const directories = await listStandardScratchpadDirectories(localRoot);
+	const directoryListing = directories
+		.map(dir => `- [${dir}/](local://${dir}) — ${LOCAL_SCRATCHPAD_DIRECTORY_DESCRIPTIONS[dir]}`)
+		.join("\n");
+	const fileListing =
+		files.length === 0 ? "(no files yet)" : files.map(file => `- [${file}](local://${file})`).join("\n");
 	const content =
-		`# Local\n\n` +
-		`Session-scoped scratch space for large intermediate data, subagent handoffs, and reusable planning artifacts.\n\n` +
+		`# Session scratchpad\n\n` +
+		`Session-scoped scratch space shared by the main agent, eval helpers, and subagents for large intermediate data, handoffs, and reusable planning artifacts.\n\n` +
 		`Root: ${localRoot}\n\n` +
+		`Standard directories:\n\n${directoryListing || "(none available)"}\n\n` +
 		`${files.length} file${files.length === 1 ? "" : "s"} available:\n\n` +
-		`${listing}\n`;
+		`${fileListing}\n`;
 
 	return {
 		url: url.href,
@@ -252,6 +269,72 @@ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS
 	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
 }
 
+async function ensureLocalDirectory(
+	pathName: string,
+	options: { symlinkMessage: string; notDirectoryMessage: string; recursive?: boolean },
+): Promise<void> {
+	try {
+		const stat = await fs.lstat(pathName);
+		if (stat.isSymbolicLink()) {
+			throw new Error(options.symlinkMessage);
+		}
+		if (!stat.isDirectory()) {
+			throw new Error(options.notDirectoryMessage);
+		}
+		return;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		try {
+			await fs.mkdir(pathName, { recursive: options.recursive ?? false });
+		} catch (mkdirError) {
+			if (!isEexist(mkdirError)) throw mkdirError;
+		}
+	}
+
+	const stat = await fs.lstat(pathName);
+	if (stat.isSymbolicLink()) {
+		throw new Error(options.symlinkMessage);
+	}
+	if (!stat.isDirectory()) {
+		throw new Error(options.notDirectoryMessage);
+	}
+}
+
+export async function ensureLocalScratchpad(
+	options: LocalProtocolOptions,
+	platform: NodeJS.Platform = process.platform,
+): Promise<string> {
+	const localRoot = path.resolve(resolveLocalRoot(options, platform));
+	await ensureLocalDirectory(localRoot, {
+		symlinkMessage: "local:// root cannot be a symlink",
+		notDirectoryMessage: "local:// root must be a directory",
+		recursive: true,
+	});
+	return localRoot;
+}
+
+async function listStandardScratchpadDirectories(localRoot: string): Promise<LocalScratchpadDirectory[]> {
+	const directories: LocalScratchpadDirectory[] = [];
+	for (const dir of LOCAL_SCRATCHPAD_DIRECTORIES) {
+		try {
+			const stat = await fs.lstat(path.join(localRoot, dir));
+			if (stat.isDirectory()) directories.push(dir);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	return directories;
+}
+
+async function ensureLocalStandardDirectory(localRoot: string, relativePath: string): Promise<void> {
+	const [dir] = relativePath.split(/[\\/]/, 1);
+	if (!LOCAL_SCRATCHPAD_DIRECTORIES.includes(dir as LocalScratchpadDirectory)) return;
+	await ensureLocalDirectory(path.join(localRoot, dir), {
+		symlinkMessage: `local:// scratchpad directory ${dir} cannot be a symlink`,
+		notDirectoryMessage: `local:// scratchpad directory ${dir} must be a directory`,
+	});
+}
+
 /** Resolve a local:// URL to an on-disk path under the active session's local root. */
 export function resolveLocalUrlToPath(
 	input: string | InternalUrl,
@@ -284,7 +367,7 @@ export function buildEvalUrlRoots(options: LocalProtocolOptions): Record<string,
 	return { local: resolveLocalRoot(options) };
 }
 
-const LOCAL_WRITE_NOTE = "Use write path local://<file> to persist large intermediate artifacts across turns.";
+const LOCAL_WRITE_NOTE = "Use write path local://<file> to persist scratchpad artifacts across turns and subagents.";
 
 type ResolvedLocalTarget =
 	| { kind: "listing"; root: string }
@@ -299,8 +382,7 @@ type ResolvedLocalTarget =
  * {@link resolveLocalUrlToFile}.
  */
 async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions): Promise<ResolvedLocalTarget> {
-	const localRoot = path.resolve(resolveLocalRoot(opts));
-	await fs.mkdir(localRoot, { recursive: true });
+	const localRoot = await ensureLocalScratchpad(opts);
 
 	let resolvedRoot: string;
 	try {
@@ -313,6 +395,7 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 	}
 
 	const relativePath = extractRelativePath(url);
+	await ensureLocalStandardDirectory(resolvedRoot, relativePath);
 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
 	ensureWithinRoot(targetPath, resolvedRoot);
 
@@ -372,6 +455,53 @@ export async function resolveLocalUrlToFile(
 	const url = typeof input === "string" ? parseLocalUrl(input) : input;
 	const resolved = await resolveLocalTarget(url, opts);
 	return resolved.kind === "file" ? { path: resolved.path, size: resolved.size } : null;
+}
+
+async function ensureWritableLocalParent(resolvedRoot: string, relativePath: string): Promise<string> {
+	const parentRelative = path.dirname(relativePath);
+	if (!parentRelative || parentRelative === ".") return resolvedRoot;
+
+	let currentDir = resolvedRoot;
+	for (const part of parentRelative.split(/[\\/]+/).filter(Boolean)) {
+		const nextDir = path.join(currentDir, part);
+		ensureWithinRoot(nextDir, resolvedRoot);
+
+		try {
+			const linkStat = await fs.lstat(nextDir);
+			if (!linkStat.isDirectory() && !linkStat.isSymbolicLink()) {
+				throw new Error("local:// write parent must be a directory");
+			}
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			try {
+				await fs.mkdir(nextDir);
+			} catch (mkdirError) {
+				if (!isEexist(mkdirError)) throw mkdirError;
+			}
+		}
+
+		const realNextDir = await fs.realpath(nextDir);
+		ensureWithinRoot(realNextDir, resolvedRoot);
+		const realNextStat = await fs.stat(realNextDir);
+		if (!realNextStat.isDirectory()) {
+			throw new Error("local:// write parent must be a directory");
+		}
+		currentDir = realNextDir;
+	}
+	return currentDir;
+}
+
+async function writeLocalFile(filePath: string, content: string): Promise<void> {
+	const noFollowFlag = fsConstants.constants.O_NOFOLLOW ?? 0;
+	const handle = await fs.open(
+		filePath,
+		fsConstants.constants.O_WRONLY | fsConstants.constants.O_CREAT | fsConstants.constants.O_TRUNC | noFollowFlag,
+	);
+	try {
+		await handle.writeFile(content);
+	} finally {
+		await handle.close();
+	}
 }
 
 /**
@@ -454,15 +584,69 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		return buildFileResource(url, resolved);
 	}
 
+	async write(url: InternalUrl, content: string, context?: ResolveContext): Promise<{ sourcePath: string }> {
+		const opts = LocalProtocolHandler.resolveOptions(context);
+		if (!opts) {
+			throw new Error("No session - local:// unavailable");
+		}
+
+		const localRoot = await ensureLocalScratchpad(opts);
+		const resolvedRoot = await fs.realpath(localRoot);
+		const relativePath = extractRelativePath(url);
+		if (!relativePath) {
+			throw new Error("local:// write requires a file path");
+		}
+
+		await ensureLocalStandardDirectory(resolvedRoot, relativePath);
+		const parentDir = await ensureWritableLocalParent(resolvedRoot, relativePath);
+		const targetPath = path.join(parentDir, path.basename(relativePath));
+		ensureWithinRoot(targetPath, resolvedRoot);
+
+		let targetStat: Stats;
+		try {
+			targetStat = await fs.lstat(targetPath);
+		} catch (error) {
+			if (isEnoent(error)) {
+				await writeLocalFile(targetPath, content);
+				return { sourcePath: targetPath };
+			}
+			throw error;
+		}
+
+		let writePath = targetPath;
+		if (targetStat.isSymbolicLink()) {
+			const linkTarget = await fs.readlink(targetPath);
+			const prospectiveTargetPath = path.resolve(path.dirname(targetPath), linkTarget);
+			ensureWithinRoot(prospectiveTargetPath, resolvedRoot);
+			const realTargetPath = await fs.realpath(targetPath);
+			ensureWithinRoot(realTargetPath, resolvedRoot);
+			const realTargetStat = await fs.stat(realTargetPath);
+			if (!realTargetStat.isFile()) {
+				throw new Error("local:// write target must be a file");
+			}
+			writePath = realTargetPath;
+		} else if (!targetStat.isFile()) {
+			throw new Error("local:// write target must be a file");
+		}
+
+		await writeLocalFile(writePath, content);
+		return { sourcePath: writePath };
+	}
+
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const opts = LocalProtocolHandler.resolveOptions(context);
 		if (!opts) return [];
 		const localRoot = path.resolve(resolveLocalRoot(opts));
+		const directoryCompletions = LOCAL_SCRATCHPAD_DIRECTORIES.map(dir => ({
+			value: dir,
+			label: `${dir}/`,
+			description: LOCAL_SCRATCHPAD_DIRECTORY_DESCRIPTIONS[dir],
+		}));
 		try {
 			const files = await listFilesRecursively(localRoot);
-			return files.map(value => ({ value }));
+			return [...directoryCompletions, ...files.map(value => ({ value }))];
 		} catch (err) {
-			if (isEnoent(err)) return [];
+			if (isEnoent(err)) return directoryCompletions;
 			throw err;
 		}
 	}

@@ -129,7 +129,7 @@ Implemented in `packages/coding-agent/src/eval/js/worker-core.ts`, `packages/cod
 - Module cache is busted for **local** imports between cells so edits to source files are picked up without restarting the runtime. `__omp_import__` deletes `require.cache[absPath]` before re-importing whenever the original specifier is a filesystem path: relative (`./x`, `../x`, `.`, `..`), POSIX-absolute (`/...`), home-prefixed (`~/...`), or Windows drive-letter (`C:\...` / `C:/...`). Bare specifiers (`react`, `lodash/x`) and URL/scheme specifiers (`node:fs`, `file://...`, `https://...`) are left in cache so package identity stays stable across cells. The cache-bust only fires when the resolved target is an absolute path — unresolved bare-package fallbacks (`resolveImportSpecifier()` returning the original specifier) skip it.
 - The prelude installs globals:
   - `display`, `print`, and a `console` bridge
-  - `read`, `write`, `env`, `output`
+  - `read`, `write`, `env`, `output`; `read("local://...")` and `write("local://...", ...)` use the same session scratchpad root as the tools and subagents
   - `tool.<name>(args)` proxy for arbitrary session tool calls
   - `completion(prompt, opts?)` for oneshot, stateless model calls (see _Oneshot completion helper_ below)
   - `agent(prompt, opts?)` for a single subagent call, plus `parallel()` / `pipeline()` bounded-pool helpers (see _Subagent helper_ below)

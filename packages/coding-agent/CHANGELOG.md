@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added session-scoped `local://` scratchpad support for eval helpers, subagents, and the `/scratchpad` command.
 - Added new `tiny` model role for consolidated online task handling
 
 ### Changed

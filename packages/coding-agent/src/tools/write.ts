@@ -807,8 +807,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// Handler-owned writes (vault:// notes, host URIs) mutate user
 					// data outside the local sandbox — plan mode must reject them.
 					enforcePlanModeWrite(this.session, path, { op: "update" });
-					await handler.write(parsed, cleanContent, { cwd: this.session.cwd, signal });
-					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
+					const writeResult = await handler.write(parsed, cleanContent, {
+						cwd: this.session.cwd,
+						signal,
+						localProtocolOptions: this.session.localProtocolOptions ?? {
+							getArtifactsDir: () => this.session.getArtifactsDir?.() ?? null,
+							getSessionId: () => this.session.getSessionId?.() ?? null,
+						},
+					});
+					const displayPath =
+						writeResult?.displayPath ??
+						(writeResult?.sourcePath ? formatPathRelativeToCwd(writeResult.sourcePath, this.session.cwd) : path);
+					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 					}

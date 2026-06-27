@@ -28,8 +28,8 @@
 
 The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ id?, description?, role?, assignment, isolated? }` (`isolated` only when `task.isolation.mode` is not `none`):
 
-- **Batch shape** (`task.batch` on): `{ agent, context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `isolated` is per item.
-- **Flat shape** (`task.batch` off): `{ agent, ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each assignment references; subagents share the parent's `local://` root.
+- **Batch shape** (`task.batch` on): `{ agent, context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `isolated` is per item. Put large handoffs in `local://plans/`, `local://reports/`, `local://results/`, or `local://thoughts/` and reference the URL.
+- **Flat shape** (`task.batch` off): `{ agent, ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://reports/context.md`) that each assignment references; subagents share the parent's `local://` root.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -71,6 +71,7 @@ Artifacts and side channels:
 - If the output file is JSON, `agent://<id>/<path>` and `agent://<id>?q=<query>` perform JSON extraction.
 - Each subagent gets `<id>.jsonl` session history when the parent persists artifacts; `history://<id>` renders it as a concise transcript (works for live and parked agents).
 - Isolated patch mode writes `<id>.patch` before merge.
+- The parent `local://` scratchpad is shared with all subagents. Standard directories are created on first use: `plans/`, `reports/`, `results/`, and `thoughts/`.
 
 ## Flow
 1. `TaskTool.create(...)` discovers agents once per cwd through a process-level memo (`discoverAgentsForCreate`) to render the dynamic prompt description.
@@ -124,7 +125,7 @@ Artifacts and side channels:
   - Arms idle-TTL timers in `AgentLifecycleManager` (unref'd; they never hold the process open).
   - Emits `task:subagent:event`, `task:subagent:progress`, and `task:subagent:lifecycle` on the parent event bus.
   - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
-  - Shares the parent `local://` root and `ArtifactManager` with subagents.
+  - Shares the parent `local://` scratchpad root and `ArtifactManager` with subagents.
 - Background work / cancellation
   - `job cancel` (or parent tool-call abort) cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A hard-aborted run lands `aborted` and is torn down.
   - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
