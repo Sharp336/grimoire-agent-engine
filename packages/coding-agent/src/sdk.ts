@@ -25,7 +25,12 @@ import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identit
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { ADVISOR_READONLY_TOOL_NAMES, discoverWatchdogFiles } from "./advisor";
+import {
+	ADVISOR_READONLY_TOOL_NAMES,
+	discoverWatchdogFiles,
+	formatActiveRepoWatchdogPrompt,
+	formatAdvisorContextPrompt,
+} from "./advisor";
 import { type AsyncJob, AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { loadCapability } from "./capability";
@@ -44,7 +49,7 @@ import {
 	resolveModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { Settings, type SkillsSettings } from "./config/settings";
+import { Settings, type SkillsSettings, validateProviderMaxInFlightRequests } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -189,6 +194,7 @@ import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
+import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -1146,6 +1152,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		? Promise.resolve(options.contextFiles)
 		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
 	contextFilesPromise.catch(() => {});
+	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", async () => {
+		try {
+			return await resolveActiveRepoContext(cwd);
+		} catch (err) {
+			logger.debug("Failed to resolve active repo context", { err: String(err) });
+			return null;
+		}
+	});
+	activeRepoContextPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
 	watchdogFilesPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
@@ -1393,10 +1408,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		return result;
 	};
-	const [contextFiles, resolvedWorkspaceTree, watchdogFiles] = await Promise.all([
+	const [contextFiles, resolvedWorkspaceTree, watchdogFiles, activeRepoContext] = await Promise.all([
 		contextFilesPromise,
 		raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
 		watchdogFilesPromise,
+		activeRepoContextPromise,
 	]);
 
 	let agent: Agent;
@@ -2268,6 +2284,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
+				activeRepoContext,
 			});
 
 			if (options.systemPrompt === undefined) {
@@ -2527,6 +2544,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
 				tools: initialTools,
 			},
+			cwd,
+			// Live cwd: `/move` updates SessionManager (and process cwd) without
+			// reconstructing the Agent, so a static cwd would strand GitLab Duo Agent
+			// namespace/project discovery on the original repo's git remote. Re-read it
+			// per turn from the SessionManager.
+			cwdResolver: () => sessionManager.getCwd(),
 			convertToLlm: convertToLlmFinal,
 			onPayload,
 			onResponse,
@@ -2571,6 +2594,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					...streamOptions,
 					openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 					antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
+					maxInFlightRequests: validateProviderMaxInFlightRequests(
+						streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),
+					),
 					loopGuard: {
 						enabled: settings.get("model.loopGuard.enabled"),
 						checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
@@ -2652,15 +2678,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			.filter((tool): tool is Tool => tool != null)
 			.map(wrapToolWithMetaNotice);
 
-		let advisorWatchdogPrompt: string | undefined;
-		if (watchdogFiles && watchdogFiles.length > 0) {
-			advisorWatchdogPrompt = watchdogFiles.join("\n\n");
+		const advisorWatchdogPrompts = [...watchdogFiles];
+		if (activeRepoContext) {
+			advisorWatchdogPrompts.push(formatActiveRepoWatchdogPrompt(activeRepoContext));
 		}
+		const advisorWatchdogPrompt = advisorWatchdogPrompts.length > 0 ? advisorWatchdogPrompts.join("\n\n") : undefined;
+		// Hand the advisor the same project context files (AGENTS.md, etc.) the
+		// primary agent gets in its system prompt, so the read-only reviewer judges
+		// against the user's standing project rules instead of advising blind.
+		const advisorContextPrompt = formatAdvisorContextPrompt(contextFiles);
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
 		session = new AgentSession({
 			advisorWatchdogPrompt,
+			advisorContextPrompt,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,

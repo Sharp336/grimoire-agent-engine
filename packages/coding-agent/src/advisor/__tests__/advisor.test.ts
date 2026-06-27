@@ -16,6 +16,7 @@ import {
 	type AdvisorRuntimeHost,
 	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
+	formatAdvisorContextPrompt,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
 	resolveAdvisorDeliveryChannel,
@@ -49,11 +50,31 @@ describe("advisor", () => {
 
 			const rendered = formatSessionHistoryMarkdown(messages);
 
-			expect(rendered).toContain("→ search(needle @ packages/coding-agent/src) ⇒ error");
+			expect(rendered).toContain("→ grep(needle @ packages/coding-agent/src) ⇒ error");
 			expect(rendered).not.toContain("paths[0]");
 			expect(advisorSystemPrompt).toContain("Arguments absent from the rendered transcript are UNKNOWN");
 			expect(advisorSystemPrompt).toContain("NEVER assert concrete values, array indexes");
 			expect(advisorSystemPrompt).toContain("NEVER claim `paths[0]`, array flattening, or malformed `paths`");
+		});
+	});
+
+	describe("formatAdvisorContextPrompt", () => {
+		it("renders project context files into a block with path and verbatim content", () => {
+			const rendered = formatAdvisorContextPrompt([
+				{
+					path: "/repo/AGENTS.md",
+					content: "Use `bun check`, never `tsc`.\nNo `any` unless absolutely necessary.",
+				},
+			]);
+			expect(rendered).toBeDefined();
+			expect(rendered).toContain('<file path="/repo/AGENTS.md">');
+			// Content is injected verbatim (noEscape) so backticks/markup survive for the model.
+			expect(rendered).toContain("Use `bun check`, never `tsc`.");
+			expect(rendered).toContain("No `any` unless absolutely necessary.");
+		});
+
+		it("returns undefined when there are no context files", () => {
+			expect(formatAdvisorContextPrompt([])).toBeUndefined();
 		});
 	});
 

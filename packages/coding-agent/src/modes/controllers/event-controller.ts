@@ -88,6 +88,7 @@ export class EventController {
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
+	#terminalProgressActive = false;
 
 	constructor(private ctx: InteractiveModeContext) {
 		this.#streamingReveal = new StreamingRevealController({
@@ -155,6 +156,7 @@ export class EventController {
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.#cancelIdleCompaction();
+		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -269,6 +271,18 @@ export class EventController {
 		await run(event);
 	}
 
+	#setTerminalProgress(active: boolean): void {
+		if (active) {
+			if (this.#terminalProgressActive || this.ctx.settings?.get("terminal.showProgress") !== true) return;
+			this.ctx.ui.terminal.setProgress(true);
+			this.#terminalProgressActive = true;
+			return;
+		}
+		if (!this.#terminalProgressActive) return;
+		this.ctx.ui.terminal.setProgress(false);
+		this.#terminalProgressActive = false;
+	}
+
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
 		this.#lastIntent = undefined;
 		this.#readToolCallArgs.clear();
@@ -287,11 +301,13 @@ export class EventController {
 			this.ctx.statusContainer.clear();
 		}
 		this.#cancelIdleCompaction();
+		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
+		this.#ensureWorkingLoaderWhileStreaming();
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
 			const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 			if (this.#renderedCustomMessages.has(signature)) {
@@ -534,6 +550,7 @@ export class EventController {
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
+		this.#ensureWorkingLoaderWhileStreaming();
 		this.#vocalizeDelta(event);
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
 			this.ctx.streamingMessage = event.message;
@@ -758,6 +775,7 @@ export class EventController {
 	}
 
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
+		this.#ensureWorkingLoaderWhileStreaming();
 		this.#updateWorkingMessageFromIntent(event.intent);
 		this.#resolveDisplaceablePoll(event.toolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -822,6 +840,7 @@ export class EventController {
 	async #handleToolExecutionUpdate(
 		event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
 	): Promise<void> {
+		this.#ensureWorkingLoaderWhileStreaming();
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
 			const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
@@ -950,6 +969,7 @@ export class EventController {
 	}
 
 	async #finishAgentEnd(): Promise<void> {
+		this.#setTerminalProgress(false);
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
 		if (this.ctx.loadingAnimation) {
@@ -1011,6 +1031,17 @@ export class EventController {
 	}
 
 	/**
+	 * Restore the live "Working…" loader when a streaming event lands after a
+	 * transient status overlay cleared the container. Focus mode dispatches events
+	 * for `viewSession`, so key the reconciler on that session, not the main one.
+	 */
+	#ensureWorkingLoaderWhileStreaming(): void {
+		if (!this.ctx.viewSession.isStreaming) return;
+		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
+		this.ctx.ensureLoadingAnimation();
+	}
+
+	/**
 	 * Trailing Esc hint for live maintenance loaders. While a subagent is
 	 * focused, Esc returns to main instead of cancelling its maintenance
 	 * (#2819), so the loader drops the hint entirely rather than advertise a
@@ -1025,6 +1056,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
 		this.#cancelIdleCompaction();
+		this.#setTerminalProgress(true);
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.clear();
 		const reasonText =
@@ -1056,6 +1088,7 @@ export class EventController {
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
 		this.#cancelIdleCompaction();
+		this.#setTerminalProgress(false);
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;
@@ -1117,6 +1150,7 @@ export class EventController {
 			this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
 		}
 		await this.ctx.flushCompactionQueue({ willRetry: event.willRetry });
+		this.#ensureWorkingLoaderWhileStreaming();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1151,6 +1185,7 @@ export class EventController {
 		if (!event.success) {
 			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}
+		this.#ensureWorkingLoaderWhileStreaming();
 		this.ctx.ui.requestRender();
 	}
 
