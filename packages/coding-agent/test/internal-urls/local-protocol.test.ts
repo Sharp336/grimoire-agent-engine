@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	InternalUrlRouter,
-	LOCAL_SCRATCHPAD_DIRECTORIES,
 	LocalProtocolHandler,
 	parseInternalUrl,
 	resolveLocalRoot,
@@ -50,9 +49,11 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
-	it("creates standard scratchpad directories when listing local://", async () => {
+	it("lists only existing standard scratchpad directories at local://", async () => {
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");
+			await fs.mkdir(path.join(artifactsDir, "local", "reports"), { recursive: true });
+			await Bun.write(path.join(artifactsDir, "local", "plans"), "legacy file");
 			LocalProtocolHandler.setOverride({
 				getArtifactsDir: () => artifactsDir,
 				getSessionId: () => "session-standard-dirs",
@@ -61,11 +62,10 @@ describe("LocalProtocolHandler", () => {
 			const router = InternalUrlRouter.instance();
 			const resource = await router.resolve("local://");
 
-			for (const dir of LOCAL_SCRATCHPAD_DIRECTORIES) {
-				const stats = await fs.stat(path.join(artifactsDir, "local", dir));
-				expect(stats.isDirectory()).toBe(true);
-				expect(resource.content).toContain(`local://${dir}`);
-			}
+			expect(resource.content).toContain("local://reports");
+			expect(resource.content).not.toContain("local://plans -");
+			expect(resource.content).toContain("[plans](local://plans)");
+			await expect(fs.stat(path.join(artifactsDir, "local", "results"))).rejects.toThrow();
 		});
 	});
 
@@ -197,7 +197,7 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
-	it("rejects symlinked standard scratchpad directories", async () => {
+	it("rejects symlinked standard scratchpad directories when writing under them", async () => {
 		if (process.platform === "win32") return;
 
 		await withTempDir(async tempDir => {
@@ -208,14 +208,15 @@ describe("LocalProtocolHandler", () => {
 			await fs.mkdir(outsideDir, { recursive: true });
 			await fs.symlink(outsideDir, path.join(localRoot, "plans"));
 
-			LocalProtocolHandler.setOverride({
-				getArtifactsDir: () => artifactsDir,
-				getSessionId: () => "session-standard-dir-symlink",
-			});
-			const router = InternalUrlRouter.instance();
-			await expect(router.resolve("local://")).rejects.toThrow(
-				"local:// scratchpad directory plans cannot be a symlink",
-			);
+			const handler = new LocalProtocolHandler();
+			await expect(
+				handler.write(parseInternalUrl("local://plans/secret.txt"), "secret", {
+					localProtocolOptions: {
+						getArtifactsDir: () => artifactsDir,
+						getSessionId: () => "session-standard-dir-symlink",
+					},
+				}),
+			).rejects.toThrow("local:// scratchpad directory plans cannot be a symlink");
 		});
 	});
 

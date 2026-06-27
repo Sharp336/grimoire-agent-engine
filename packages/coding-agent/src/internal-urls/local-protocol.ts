@@ -202,16 +202,17 @@ async function listFilesRecursively(rootPath: string): Promise<string[]> {
 
 async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
 	const files = await listFilesRecursively(localRoot);
-	const directoryListing = LOCAL_SCRATCHPAD_DIRECTORIES.map(
-		dir => `- [${dir}/](local://${dir}) — ${LOCAL_SCRATCHPAD_DIRECTORY_DESCRIPTIONS[dir]}`,
-	).join("\n");
+	const directories = await listStandardScratchpadDirectories(localRoot);
+	const directoryListing = directories
+		.map(dir => `- [${dir}/](local://${dir}) — ${LOCAL_SCRATCHPAD_DIRECTORY_DESCRIPTIONS[dir]}`)
+		.join("\n");
 	const fileListing =
 		files.length === 0 ? "(no files yet)" : files.map(file => `- [${file}](local://${file})`).join("\n");
 	const content =
 		`# Session scratchpad\n\n` +
 		`Session-scoped scratch space shared by the main agent, eval helpers, and subagents for large intermediate data, handoffs, and reusable planning artifacts.\n\n` +
 		`Root: ${localRoot}\n\n` +
-		`Standard directories:\n\n${directoryListing}\n\n` +
+		`Standard directories:\n\n${directoryListing || "(none available)"}\n\n` +
 		`${files.length} file${files.length === 1 ? "" : "s"} available:\n\n` +
 		`${fileListing}\n`;
 
@@ -309,15 +310,29 @@ export async function ensureLocalScratchpad(
 		notDirectoryMessage: "local:// root must be a directory",
 		recursive: true,
 	});
-	await Promise.all(
-		LOCAL_SCRATCHPAD_DIRECTORIES.map(dir =>
-			ensureLocalDirectory(path.join(localRoot, dir), {
-				symlinkMessage: `local:// scratchpad directory ${dir} cannot be a symlink`,
-				notDirectoryMessage: `local:// scratchpad directory ${dir} must be a directory`,
-			}),
-		),
-	);
 	return localRoot;
+}
+
+async function listStandardScratchpadDirectories(localRoot: string): Promise<LocalScratchpadDirectory[]> {
+	const directories: LocalScratchpadDirectory[] = [];
+	for (const dir of LOCAL_SCRATCHPAD_DIRECTORIES) {
+		try {
+			const stat = await fs.lstat(path.join(localRoot, dir));
+			if (stat.isDirectory()) directories.push(dir);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	return directories;
+}
+
+async function ensureLocalStandardDirectory(localRoot: string, relativePath: string): Promise<void> {
+	const [dir] = relativePath.split(/[\\/]/, 1);
+	if (!LOCAL_SCRATCHPAD_DIRECTORIES.includes(dir as LocalScratchpadDirectory)) return;
+	await ensureLocalDirectory(path.join(localRoot, dir), {
+		symlinkMessage: `local:// scratchpad directory ${dir} cannot be a symlink`,
+		notDirectoryMessage: `local:// scratchpad directory ${dir} must be a directory`,
+	});
 }
 
 /** Resolve a local:// URL to an on-disk path under the active session's local root. */
@@ -380,6 +395,7 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 	}
 
 	const relativePath = extractRelativePath(url);
+	await ensureLocalStandardDirectory(resolvedRoot, relativePath);
 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
 	ensureWithinRoot(targetPath, resolvedRoot);
 
@@ -581,6 +597,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 			throw new Error("local:// write requires a file path");
 		}
 
+		await ensureLocalStandardDirectory(resolvedRoot, relativePath);
 		const parentDir = await ensureWritableLocalParent(resolvedRoot, relativePath);
 		const targetPath = path.join(parentDir, path.basename(relativePath));
 		ensureWithinRoot(targetPath, resolvedRoot);
