@@ -38,6 +38,7 @@ import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
+import { handleScratchpadAcp } from "./helpers/scratchpad";
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
@@ -1108,6 +1109,20 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.handleContextCommand();
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "scratchpad",
+		aliases: ["scratch"],
+		description: "Show or write session scratchpad artifacts",
+		acpDescription: "Show or write session scratchpad artifacts",
+		acpInputHint: "[list|path|save <local-path> <content>]",
+		allowArgs: true,
+		subcommands: [
+			{ name: "list", description: "List scratchpad files" },
+			{ name: "path", description: "Show scratchpad filesystem path" },
+			{ name: "save", description: "Write a scratchpad file", usage: "<local-path> <content>" },
+		],
+		handle: handleScratchpadAcp,
 	},
 	{
 		name: "extensions",

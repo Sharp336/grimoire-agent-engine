@@ -13,6 +13,14 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 
+async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-builtins-"));
+	try {
+		return await fn(dir);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+}
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
 	forcedToolChoice: string | undefined;
@@ -122,11 +130,15 @@ function createRuntime() {
 		_movedTo: undefined as string | undefined,
 		_flushed: false,
 		_sessionName: undefined as string | undefined,
+		_artifactsDir: undefined as string | undefined,
 		getSessionId(): string {
 			return "fake-session-id";
 		},
 		getSessionFile(): string | undefined {
 			return this._sessionFile;
+		},
+		getArtifactsDir(): string | null {
+			return this._artifactsDir ?? null;
 		},
 		getEntries(): { type: string }[] {
 			return this._entries;
@@ -287,6 +299,46 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toBe(false);
 		expect(output).toEqual([]);
+	});
+
+	it("scratchpad: lists the shared local scratchpad", async () => {
+		const { output, fakeSessionManager, runtime } = createRuntime();
+		await withTempDir(async tempDir => {
+			fakeSessionManager._artifactsDir = path.join(tempDir, "artifacts");
+
+			const result = await executeAcpBuiltinSlashCommand("/scratchpad", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Scratchpad: local://");
+			expect(output[0]).toContain("local://plans/");
+		});
+	});
+
+	it("scratchpad: prints the on-disk local root path", async () => {
+		const { output, fakeSessionManager, runtime } = createRuntime();
+		await withTempDir(async tempDir => {
+			fakeSessionManager._artifactsDir = path.join(tempDir, "artifacts");
+
+			const result = await executeAcpBuiltinSlashCommand("/scratchpad path", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output).toEqual([path.join(tempDir, "artifacts", "local")]);
+		});
+	});
+
+	it("scratchpad: saves files under the session local root", async () => {
+		const { output, fakeSessionManager, runtime } = createRuntime();
+		await withTempDir(async tempDir => {
+			fakeSessionManager._artifactsDir = path.join(tempDir, "artifacts");
+
+			const result = await executeAcpBuiltinSlashCommand("/scratchpad save reports/status.md ship it", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toBe("Saved scratchpad note: local://reports/status.md");
+			await expect(Bun.file(path.join(tempDir, "artifacts", "local", "reports", "status.md")).text()).resolves.toBe(
+				"ship it",
+			);
+		});
 	});
 
 	it("returns false for unknown commands", async () => {

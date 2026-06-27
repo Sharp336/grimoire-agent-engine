@@ -17,7 +17,7 @@
 ## Inputs
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | Yes | Target path. Plain file path writes a filesystem file. Writable internal URLs are delegated to their handler. `archive.ext:inner/path` writes an archive entry for `.tar`, `.tar.gz`, `.tgz`, or `.zip`. `db.sqlite:table` inserts a row. `db.sqlite:table:key` updates or deletes a row. `conflict://<id>` resolves a recorded merge conflict; `conflict://*` bulk-resolves every registered conflict. |
+| `path` | `string` | Yes | Target path. Plain file path writes a filesystem file. Writable internal URLs are delegated to their handler; `local://<path>` writes to the session scratchpad shared with subagents. `archive.ext:inner/path` writes an archive entry for `.tar`, `.tar.gz`, `.tgz`, or `.zip`. `db.sqlite:table` inserts a row. `db.sqlite:table:key` updates or deletes a row. `conflict://<id>` resolves a recorded merge conflict; `conflict://*` bulk-resolves every registered conflict. |
 | `content` | `string` | Yes | Full replacement file content, archive entry content, internal-resource content, conflict replacement, or SQLite row payload. SQLite non-delete writes must parse as a JSON5 object. Empty or whitespace-only content deletes a SQLite row when `path` includes a row key. |
 
 Worked examples:
@@ -25,6 +25,11 @@ Worked examples:
 ```text
 path: "src/generated/config.json"
 content: "{\n  \"enabled\": true\n}\n"
+```
+
+```text
+path: "local://reports/findings.md"
+content: "# Findings\n\nShared with subagents.\n"
 ```
 
 ```text
@@ -42,7 +47,7 @@ Single-shot result.
 
 - Success always returns a text block.
   - Plain file write: `Successfully wrote <chars> bytes to <relative-path>` (the count is `cleanContent.length`, not encoded byte length).
-  - Internal URL write: `Successfully wrote <chars> bytes to <url>`.
+  - Internal URL write: `Successfully wrote <chars> bytes to <url>`; for `local://`, the file lands under the session scratchpad root.
   - Archive write: `Successfully wrote <chars> bytes to <relative-archive-path>:<entry-path>`.
   - SQLite write: one of `Inserted row into <table>`, `Updated row '<key>' in <table>`, `No row updated ...`, `Deleted row ...`, `No row deleted ...`.
   - Conflict resolution: conflict-specific success text, with fresh hashline snapshot headers when applicable.
@@ -54,7 +59,7 @@ Single-shot result.
 
 ## Flow
 1. `WriteTool.execute()` in `packages/coding-agent/src/tools/write.ts` strips pasted `[PATH#HASH]` headers and `LINE:` hashline prefixes from `content` when the session is in hashline display mode.
-2. If `path` is an internal URL whose handler exposes `write`, the tool delegates directly to `handler.write(...)` and returns.
+2. If `path` is an internal URL whose handler exposes `write`, the tool delegates directly to `handler.write(...)` with the session `local://` root and returns.
 3. `conflict://...` paths are handled next by the merge-conflict resolver. Scope reads such as `conflict://<id>/ours` are rejected as read-only; writable conflict URIs must omit the scope.
 4. It calls `#resolveArchiveWritePath()` next. That uses `parseArchivePathCandidates()` from `packages/coding-agent/src/utils/zip.ts`, checks candidate archive files on disk (longest match first), and falls back to the shortest candidate archive path even when the archive file does not exist yet.
 5. Archive writes call `enforcePlanModeWrite(..., { op: exists ? "update" : "create" })`, then `#writeArchiveEntry()`.
@@ -140,8 +145,8 @@ content: ""
 ## Side Effects
 - Filesystem
   - Creates or overwrites plain files.
+  - Creates or overwrites `local://` scratchpad files, creating scratchpad parent directories as needed and rejecting symlink escape targets.
   - Rewrites entire archive files when writing an archive entry.
-  - Explicitly creates parent directories (via `fs.mkdir`) for archive files only; plain file writes get parent directories from `Bun.write()`.
   - Mutates existing SQLite databases; never creates a new SQLite DB.
   - Resolves conflict markers in files for `conflict://...` writes.
   - May chmod a shebang file executable after a successful plain-file write.

@@ -71,7 +71,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
 3. If not a web URL, it checks `InternalUrlRouter.instance().canHandle(...)`.
    - Internal URLs are resolved with `internalRouter.resolve()`.
    - `agent://` query extraction (`/path` or `?q=`) bypasses pagination and returns the extracted content directly.
-   - Other internal resources are paginated in-memory by `#buildInMemoryTextResult()`.
+   - Other internal resources are paginated in-memory by `#buildInMemoryTextResult()`. `local://` root reads render a session scratchpad index with standard `plans/`, `reports/`, `results/`, and `thoughts/` directories.
 4. It tries archive resolution next with `#resolveArchiveReadPath()`.
    - `parseArchivePathCandidates()` scans for `.tar`, `.tar.gz`, `.tgz`, or `.zip` anywhere before `:sub/path`.
    - On success, `#readArchive()` either lists a directory or decodes an entry as UTF-8 text.
