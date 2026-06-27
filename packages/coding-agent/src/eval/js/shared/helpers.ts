@@ -217,7 +217,14 @@ async function ensureSafeTarget(
 	createParents: boolean,
 ): Promise<string> {
 	const rootPath = path.resolve(root);
-	const rootStat = await fs.lstat(rootPath);
+	let rootStat: fsConstants.Stats;
+	try {
+		rootStat = await fs.lstat(rootPath);
+	} catch (error) {
+		if (!createParents || !isNodeError(error, "ENOENT")) throw error;
+		await fs.mkdir(rootPath, { recursive: true });
+		rootStat = await fs.lstat(rootPath);
+	}
 	if (rootStat.isSymbolicLink()) {
 		throw new ToolError(`${scheme}:// root cannot be a symlink`);
 	}

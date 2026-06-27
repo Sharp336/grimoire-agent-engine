@@ -84,7 +84,14 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
   end
 
   def __omp_ensure_safe_protocol_target(root_path, target_path, scheme, create_parents)
-    root_stat = File.lstat(root_path)
+    root_stat =
+      begin
+        File.lstat(root_path)
+      rescue Errno::ENOENT
+        raise unless create_parents
+        FileUtils.mkdir_p(root_path)
+        File.lstat(root_path)
+      end
     raise "#{scheme}:// root cannot be a symlink" if root_stat.symlink?
     raise "#{scheme}:// root must be a directory" unless root_stat.directory?
 

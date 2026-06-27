@@ -125,7 +125,13 @@ if "__omp_prelude_loaded__" not in globals():
             raise ValueError(f"{scheme}:// parent must be a directory")
 
     def _ensure_safe_protocol_target(root_path: str, target_path: Path, scheme: str, create_parents: bool) -> Path:
-        root_stat = os.lstat(root_path)
+        try:
+            root_stat = os.lstat(root_path)
+        except OSError as error:
+            if not create_parents or error.errno != errno.ENOENT:
+                raise
+            os.makedirs(root_path, exist_ok=True)
+            root_stat = os.lstat(root_path)
         if os.path.islink(root_path):
             raise ValueError(f"{scheme}:// root cannot be a symlink")
         if not os.path.isdir(root_path):
