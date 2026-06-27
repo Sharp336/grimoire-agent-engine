@@ -11267,11 +11267,33 @@ export class AgentSession {
 		return (
 			message.stopReason === "aborted" &&
 			message.content.length === 0 &&
-			AIError.is(message.errorId, AIError.Flag.Abort) &&
+			(this.#isProviderAbort(message.errorMessage) || AIError.is(message.errorId, AIError.Flag.Abort)) &&
 			!this.#abortInProgress &&
 			!this.#isDisposed &&
 			!this.#streamingEditAbortTriggered
 		);
+	}
+
+	#isProviderAbort(errorMessage: string | undefined): boolean {
+		return errorMessage?.trim().toLowerCase() === "request was aborted";
+	}
+
+	/**
+	 * Retryable error classification historically used API hints from the
+	 * transport response. Synthetic assistant errors and some provider failures
+	 * can omit that field, so reclassify with the active model API before
+	 * deciding stale Responses replay recovery does not apply.
+	 */
+	#classifyRetryError(message: AssistantMessage): number {
+		const classified = AIError.classifyMessage(message);
+		if (AIError.is(classified, AIError.Flag.StaleResponsesItem)) return classified;
+		const currentModel = this.model;
+		if (!currentModel) return classified;
+		if (currentModel.api === "openai-responses" || currentModel.api === "openai-codex-responses") {
+			return AIError.classifyMessage({ ...message, api: currentModel.api });
+		}
+		if (currentModel.provider !== "openai") return classified;
+		return AIError.classifyMessage({ ...message, api: "openai-responses" });
 	}
 
 	/**
@@ -11282,13 +11304,29 @@ export class AgentSession {
 	#isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 
-		const id = AIError.classifyMessage(message);
+		const id = this.#classifyRetryError(message);
 		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
 		if (this.#isClassifierRefusal(message)) return true;
 		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeToolOutput(message) });
+	}
+	#closeOpenAIResponsesSessionForFallback(reason: string, provider: string): void {
+		const state = this.#providerSessionState.get(`openai-responses:${provider}`);
+		if (!state) return;
+
+		try {
+			state.close();
+		} catch (error) {
+			logger.warn("Failed to close openai responses provider session during stale error recovery", {
+				provider,
+				error: String(error),
+				reason,
+			});
+		}
+		this.#providerSessionState.delete(`openai-responses:${provider}`);
+		this.agent.appendOnlyContext?.invalidateForModelChange();
 	}
 	/**
 	 * Retried turns remove the failed assistant message from active context.
@@ -11712,20 +11750,27 @@ export class AgentSession {
 		}
 
 		const errorMessage = message.errorMessage || "Unknown error";
-		const id = AIError.classifyMessage(message);
+		const id = this.#classifyRetryError(message);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
-		let switchedCredential = false;
 		let switchedModel = false;
+		let switchedCredential = false;
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
-
 		if (staleOpenAIResponsesReplayError) {
 			this.#resetCurrentResponsesProviderSession("stale replay error");
+			const currentModel = this.model;
+			if (
+				currentModel?.api !== "openai-responses" &&
+				currentModel?.api !== "openai-codex-responses" &&
+				currentModel?.provider === "openai"
+			) {
+				this.#closeOpenAIResponsesSessionForFallback("stale replay error", currentModel.provider);
+			}
 		}
 
 		if (this.model && !staleOpenAIResponsesReplayError && AIError.is(id, AIError.Flag.UsageLimit)) {
