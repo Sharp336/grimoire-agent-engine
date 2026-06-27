@@ -19,6 +19,7 @@ import {
 	parseStreamingJsonThrottled,
 	readSseEvents,
 } from "@oh-my-pi/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
 import { isUsageLimitError } from "../rate-limit-utils";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
@@ -59,6 +60,7 @@ import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { stripVariant } from "../utils/strip";
 import {
 	AnthropicApiError,
 	AnthropicConnectionTimeoutError,
@@ -1609,7 +1611,7 @@ const streamAnthropicOnce = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -1780,7 +1782,7 @@ const streamAnthropicOnce = (
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const blocks = output.content as Block[];
 			const finalizeStreamBlock = (block: Block, contentIndex: number): void => {
-				delete (block as { index?: number }).index;
+				stripVariant<{ index?: number }>(block, "index");
 				if (block.type === "text") {
 					stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
 				} else if (block.type === "thinking") {
@@ -1814,8 +1816,8 @@ const streamAnthropicOnce = (
 							};
 						}
 					}
-					delete (block as { partialJson?: string }).partialJson;
-					delete (block as { lastParseLen?: number }).lastParseLen;
+					stripVariant<{ partialJson?: string }>(block, "partialJson");
+					stripVariant<{ lastParseLen?: number }>(block, "lastParseLen");
 					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 				}
 			};
@@ -1971,7 +1973,7 @@ const streamAnthropicOnce = (
 								reportAnthropicEnvelopeAnomaly("content_block_start missing content_block payload");
 								continue;
 							}
-							if (!firstTokenTime) firstTokenTime = Date.now();
+							if (!firstTokenTime) firstTokenTime = performance.now();
 							if (event.content_block.type === "text") {
 								streamedReplayUnsafeContent = true;
 								const block: Block = {
@@ -2316,7 +2318,7 @@ const streamAnthropicOnce = (
 					firstTokenTime = undefined;
 				}
 			}
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (dropFastMode && resolveServiceTier(options?.serviceTier, model.provider) === "priority") {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "priority"];
@@ -2325,9 +2327,9 @@ const streamAnthropicOnce = (
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				delete (block as { partialJson?: string }).partialJson;
-				delete (block as { lastParseLen?: number }).lastParseLen;
+				stripVariant<{ index?: number }>(block, "index");
+				stripVariant<{ partialJson?: string }>(block, "partialJson");
+				stripVariant<{ lastParseLen?: number }>(block, "lastParseLen");
 			}
 			const firstEventTimeoutError = activeAbortTracker.getLocalAbortReason();
 			output.stopReason = activeAbortTracker.wasCallerAbort() ? "aborted" : "error";
@@ -2341,7 +2343,7 @@ const streamAnthropicOnce = (
 				// throw here would skip stream.end() and hang result() forever.
 				output.errorMessage = error instanceof Error ? error.message : String(error);
 			}
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -3238,7 +3240,7 @@ export function convertAnthropicMessages(
 							if (block.thinking.trim().length === 0) continue;
 							blocks.push({
 								type: "text",
-								text: block.thinking.toWellFormed(),
+								text: renderDemotedThinking(model.id, block.thinking),
 							});
 							continue;
 						}
@@ -3260,7 +3262,7 @@ export function convertAnthropicMessages(
 						} else {
 							blocks.push({
 								type: "text",
-								text: block.thinking.toWellFormed(),
+								text: renderDemotedThinking(model.id, block.thinking),
 							});
 						}
 					} else {
