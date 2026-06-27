@@ -111,10 +111,10 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
 
   def __omp_open_text_no_follow(path, flags)
     no_follow =
-      if defined?(File::Constants::O_NOFOLLOW)
-        File::Constants::O_NOFOLLOW
-      elsif defined?(File::O_NOFOLLOW)
-        File::O_NOFOLLOW
+      if defined?(File::Constants::NOFOLLOW)
+        File::Constants::NOFOLLOW
+      elsif defined?(File::NOFOLLOW)
+        File::NOFOLLOW
       else
         0
       end

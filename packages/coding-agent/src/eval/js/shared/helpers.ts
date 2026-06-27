@@ -166,6 +166,7 @@ async function readHelperFile(
 async function readProtocolFile(target: ResolvedHelperPath): Promise<{ filePath: string; text: string; size: number }> {
 	if (!target.root) throw new ToolError(`Protocol root unavailable for read(): ${target.filePath}`);
 	const filePath = await ensureSafeTarget(target.root, target.filePath, target.scheme ?? "local", false);
+	await rejectProtocolLeafEscape(filePath, target.scheme ?? "local", "read");
 	const flags = fsConstants.constants.O_RDONLY | (fsConstants.constants.O_NOFOLLOW ?? 0);
 	const handle = await fs.open(filePath, flags);
 	try {
@@ -194,6 +195,7 @@ async function writeProtocolFile(
 ): Promise<string> {
 	if (!target.root) throw new ToolError(`Protocol root unavailable for write(): ${target.filePath}`);
 	const filePath = await ensureSafeTarget(target.root, target.filePath, target.scheme ?? "local", true);
+	await rejectProtocolLeafEscape(filePath, target.scheme ?? "local", "write");
 	const flags =
 		fsConstants.constants.O_WRONLY |
 		fsConstants.constants.O_CREAT |
@@ -270,6 +272,21 @@ async function ensureSafeDirectory(
 	const realStat = await fs.stat(realPath);
 	if (!realStat.isDirectory()) {
 		throw new ToolError(`${scheme}:// parent must be a directory`);
+	}
+}
+
+async function rejectProtocolLeafEscape(filePath: string, scheme: string, op: "read" | "write"): Promise<void> {
+	try {
+		const stat = await fs.lstat(filePath);
+		if (stat.isSymbolicLink()) {
+			throw new ToolError(`${scheme}:// ${op} target cannot be a symlink`);
+		}
+		if (!stat.isFile()) {
+			throw new ToolError(`${scheme}:// ${op} target must be a file`);
+		}
+	} catch (error) {
+		if (op === "write" && isNodeError(error, "ENOENT")) return;
+		throw error;
 	}
 }
 

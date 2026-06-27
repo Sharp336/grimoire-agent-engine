@@ -151,16 +151,30 @@ if "__omp_prelude_loaded__" not in globals():
         no_follow = getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(path), flags | no_follow, 0o666)
         try:
-            return os.fdopen(fd, "r" if flags == os.O_RDONLY else "w", encoding="utf-8")
+            return os.fdopen(fd, "r" if (flags & os.O_ACCMODE) == os.O_RDONLY else "w", encoding="utf-8")
         except Exception:
             os.close(fd)
             raise
+
+    def _reject_protocol_leaf_escape(path: Path, scheme: str, op: str) -> None:
+        try:
+            stat = os.lstat(path)
+        except OSError as error:
+            if op == "write" and error.errno == errno.ENOENT:
+                return
+            raise
+        if os.path.islink(path):
+            raise ValueError(f"{scheme}:// {op} target cannot be a symlink")
+        if not os.path.isfile(path):
+            raise ValueError(f"{scheme}:// {op} target must be a file")
+
 
     def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file contents. offset/limit are 1-indexed line numbers."""
         p, scheme, root_path = _resolve_omp_path_info(path)
         if root_path and scheme:
             p = _ensure_safe_protocol_target(root_path, p, scheme, False)
+            _reject_protocol_leaf_escape(p, scheme, "read")
             with _open_text_no_follow(p, os.O_RDONLY) as fh:
                 data = fh.read()
         else:
@@ -180,6 +194,7 @@ if "__omp_prelude_loaded__" not in globals():
         p, scheme, root_path = _resolve_omp_path_info(path)
         if root_path and scheme:
             p = _ensure_safe_protocol_target(root_path, p, scheme, True)
+            _reject_protocol_leaf_escape(p, scheme, "write")
             with _open_text_no_follow(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as fh:
                 fh.write(content)
         else:
