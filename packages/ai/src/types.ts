@@ -433,6 +433,8 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string; // e.g., for OpenAI responses, the reasoning item ID
 	itemId?: string; // item.id from output_item.added, used to match output_item.done
+	/** Replay this recovered reasoning as plain text; used for native blocks that wrapped visible inline thinking tags. */
+	replayAsText?: true;
 }
 
 export interface RedactedThinkingContent {
