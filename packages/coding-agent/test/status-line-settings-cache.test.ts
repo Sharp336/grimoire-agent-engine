@@ -160,11 +160,9 @@ describe("StatusLineComponent effective settings cache", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
 		component.setSubagentCount(2);
-		component.setSubagentHubHint("Alt+A");
-
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain("2 agents running");
-		expect(content).toContain("Alt+A hub");
+		expect(content).toContain("2 agents");
+		expect(content).not.toContain("running");
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
