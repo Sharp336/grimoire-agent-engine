@@ -5,12 +5,17 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { obfuscateToolArguments, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatSessionHistoryMarkdown, PRIMARY_CONTEXT_CUSTOM_TYPES } from "../session/session-history-format";
 
-/** Minimal slice of `Agent` the runtime drives — satisfied by pi-agent-core `Agent`. */
+/**
+ * Minimal slice of `Agent` the runtime drives — satisfied by pi-agent-core
+ * `Agent`. `state.error` mirrors `Agent.state.error`: provider/stream failures
+ * the loop catches internally never reject `prompt()`, so the runtime reads
+ * this field after every prompt to detect a failed turn.
+ */
 export interface AdvisorAgent {
 	prompt(input: string): Promise<void>;
 	abort(reason?: unknown): void;
 	reset(): void;
-	readonly state: { messages: AgentMessage[] };
+	readonly state: { messages: AgentMessage[]; error?: string };
 }
 
 export interface AdvisorRuntimeHost {
@@ -37,6 +42,8 @@ export interface AdvisorRuntimeHost {
 	 * one that routes `advise()` results back to the primary.
 	 */
 	beginAdvisorUpdate?(): void;
+	/** Surface a non-recovering advisor failure to the host UI without adding model-visible context. */
+	notifyFailure?(error: unknown): void;
 }
 
 interface PendingDelta {
@@ -63,6 +70,7 @@ export class AdvisorRuntime {
 	#busy = false;
 	#backlog = 0;
 	#consecutiveFailures = 0;
+	#failureNotified = false;
 	#latestMessages?: AgentMessage[];
 	#waiters: CatchupWaiter[] = [];
 	/** Bumped by every external {@link reset}/{@link dispose}. A drain iteration
@@ -121,6 +129,7 @@ export class AdvisorRuntime {
 		this.#pending = [];
 		this.#backlog = 0;
 		this.#consecutiveFailures = 0;
+		this.#failureNotified = false;
 		this.#wakeAllWaiters();
 		try {
 			this.agent.abort("advisor disposed");
@@ -131,6 +140,7 @@ export class AdvisorRuntime {
 		this.#lastCount = 0;
 		this.#pending = [];
 		this.#consecutiveFailures = 0;
+		this.#failureNotified = false;
 		this.#seenContext.clear();
 		if (clearBacklog) {
 			this.#backlog = 0;
@@ -168,6 +178,7 @@ export class AdvisorRuntime {
 		this.#pending = [];
 		this.#backlog = 0;
 		this.#consecutiveFailures = 0;
+		this.#failureNotified = false;
 		this.#seenContext.clear();
 		this.#wakeAllWaiters();
 	}
@@ -287,8 +298,17 @@ export class AdvisorRuntime {
 					// fresh budget. Dedupe history persists across cycles.
 					this.host.beginAdvisorUpdate?.();
 					await this.agent.prompt(batch);
+					// `Agent.#runLoop` catches provider/stream failures internally and
+					// resolves `prompt()` cleanly with the assistant turn ending in
+					// `stopReason: "error"` and the message recorded on `state.error`.
+					// Treat that as a failed turn so OpenRouter ZDR-style endpoint
+					// rejections trip the retry/notify path instead of looking like a
+					// successful empty cycle.
+					const promptError = this.agent.state.error;
+					if (promptError) throw new Error(promptError);
 					success = true;
 					this.#consecutiveFailures = 0;
+					this.#failureNotified = false;
 				} catch (err) {
 					// reset()/dispose() aborts the in-flight prompt; the rejection is the
 					// reset itself, not a transient advisor failure. Drop the stale batch
@@ -299,6 +319,14 @@ export class AdvisorRuntime {
 					this.#consecutiveFailures++;
 					if (this.#consecutiveFailures >= 3) {
 						logger.warn("advisor failed consecutively 3 times; dropping backlog to prevent stall");
+						if (!this.#failureNotified) {
+							this.#failureNotified = true;
+							try {
+								this.host.notifyFailure?.(err);
+							} catch (notifyErr) {
+								logger.warn("advisor failure notification failed", { err: String(notifyErr) });
+							}
+						}
 						this.#consecutiveFailures = 0;
 						// The dropped batch may carry primary-context we never delivered; drop
 						// the seen-state too so the next turn re-expands it instead of marking
