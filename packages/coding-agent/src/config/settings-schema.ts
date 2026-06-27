@@ -1456,6 +1456,24 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"paste.pathPaste": {
+		type: "enum",
+		values: ["ask", "attach", "literal"] as const,
+		default: "ask",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Path Paste",
+			description:
+				"When you paste an explicit filesystem path (or the terminal forwards one), choose whether to attach the file (images as draft images; other files as local:// references), keep the path as plain text, or ask each time. Use the raw text paste shortcut (app.clipboard.pasteTextRaw) to always insert clipboard text without attaching.",
+			options: [
+				{ value: "ask", label: "Ask" },
+				{ value: "attach", label: "Always attach" },
+				{ value: "literal", label: "Always keep path as text" },
+			],
+		},
+	},
+
 	"startup.quiet": {
 		type: "boolean",
 		default: false,

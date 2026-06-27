@@ -65,7 +65,7 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		imgPath = path.join(tmpDir, "screenshot.png");
 		await fs.writeFile(imgPath, ONE_PX_PNG);
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false } });
+		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false, "paste.pathPaste": "attach" } });
 	});
 
 	afterEach(async () => {

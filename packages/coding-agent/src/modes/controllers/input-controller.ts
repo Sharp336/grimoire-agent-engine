@@ -34,6 +34,12 @@ import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } fr
 import { resizeImage } from "../../utils/image-resize";
 import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
+/** Menu labels for {@link InputController.presentPathPasteMenu} (exported for tests). */
+export const PATH_PASTE_MENU_ATTACH = "Attach file";
+export const PATH_PASTE_MENU_LITERAL = "Keep path as text";
+
+export type PathPasteMenuAction = "attach" | "literal" | "cancel";
+
 /**
  * Slash commands that may carry secrets in their arguments should never be
  * persisted to history.
@@ -1387,18 +1393,96 @@ export class InputController {
 		}
 	}
 
-	async handleImagePathPaste(path: string): Promise<void> {
+	async #resolvePathPasteAction(path: string): Promise<PathPasteMenuAction> {
+		const mode = this.ctx.settings.get("paste.pathPaste");
+		if (mode === "attach") return "attach";
+		if (mode === "literal") return "literal";
+		return this.presentPathPasteMenu(path);
+	}
+
+	/**
+	 * When the user chooses to attach a non-image file path, copy it into the session
+	 * `local://` store and insert a `local://attachment-N.ext` reference.
+	 */
+	async #attachPathAsLocalFile(sourcePath: string): Promise<void> {
+		try {
+			const bytes = await fs.readFile(sourcePath);
+			const ext = path.extname(sourcePath);
+			const localRoot = resolveLocalRoot({
+				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
+				getSessionId: () => this.ctx.sessionManager.getSessionId(),
+			});
+			let name: string;
+			let filePath: string;
+			do {
+				this.#attachmentCounter++;
+				name = `attachment-${this.#attachmentCounter}${ext}`;
+				filePath = path.join(localRoot, name);
+			} while (await Bun.file(filePath).exists());
+			await Bun.write(filePath, bytes);
+			this.ctx.editor.insertText(`local://${name} `);
+			this.ctx.showStatus(`Attached file as local://${name}`);
+			this.ctx.ui.requestRender();
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("failed to attach pasted path as local file", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			this.ctx.editor.pasteText(sourcePath);
+			this.ctx.ui.requestRender();
+		}
+	}
+
+	/**
+	 * Offer attach vs literal path when `paste.pathPaste` is `ask`. Esc cancels without pasting.
+	 */
+	async presentPathPasteMenu(path: string): Promise<PathPasteMenuAction> {
+		let choice: string | undefined;
+		try {
+			choice = await this.ctx.showHookSelector(
+				"Pasted file path",
+				[
+					{ label: PATH_PASTE_MENU_ATTACH, description: "Load image or copy file to local://" },
+					{ label: PATH_PASTE_MENU_LITERAL, description: "Insert the path as plain text" },
+				],
+				{
+					helpText:
+						"Esc to cancel · Use the raw text paste shortcut (app.clipboard.pasteTextRaw) to always paste clipboard text literally",
+				},
+			);
+		} catch (error) {
+			logger.warn("path-paste menu failed", { error: error instanceof Error ? error.message : String(error) });
+			return "cancel";
+		}
+		if (choice === PATH_PASTE_MENU_ATTACH) return "attach";
+		if (choice === PATH_PASTE_MENU_LITERAL) return "literal";
+		return "cancel";
+	}
+
+	async handleImagePathPaste(path: string, resolvedAction?: PathPasteMenuAction): Promise<void> {
+		const trimmed = path.trim();
+		const action = resolvedAction ?? (await this.#resolvePathPasteAction(trimmed));
+		if (action === "cancel") return;
+		if (action === "literal") {
+			this.ctx.editor.pasteText(trimmed);
+			this.ctx.ui.requestRender();
+			return;
+		}
+
 		try {
 			const image = await loadImageInput({
-				path,
+				path: trimmed,
 				cwd: this.ctx.sessionManager.getCwd(),
 				autoResize: false,
 			});
 			if (!image) {
-				// Path resolved but is not a readable image (e.g. a zero-byte or
-				// locked transient screenshot file). Prefer the clipboard bytes.
 				if (await this.#tryPasteClipboardImage()) return;
-				this.ctx.editor.pasteText(path);
+				if (await Bun.file(trimmed).exists()) {
+					await this.#attachPathAsLocalFile(trimmed);
+					return;
+				}
+				this.ctx.editor.pasteText(trimmed);
 				this.ctx.ui.requestRender();
 				this.ctx.showStatus("Pasted path is not a supported image");
 				return;
@@ -1409,7 +1493,7 @@ export class InputController {
 			);
 		} catch (error) {
 			if (error instanceof ImageInputTooLargeError) {
-				this.ctx.editor.pasteText(path);
+				this.ctx.editor.pasteText(trimmed);
 				this.ctx.ui.requestRender();
 				this.ctx.showStatus(error.message);
 				return;
@@ -1429,7 +1513,7 @@ export class InputController {
 				const overSsh = Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 				const displayPath = truncateToWidth(
 					shortenPath(
-						sanitizeText(path)
+						sanitizeText(trimmed)
 							.replace(/[\r\n\t]+/g, " ")
 							.trim(),
 					),
@@ -1443,7 +1527,7 @@ export class InputController {
 				return;
 			}
 			if (await this.#tryPasteClipboardImage()) return;
-			this.ctx.editor.pasteText(path);
+			this.ctx.editor.pasteText(trimmed);
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus("Failed to read pasted image path");
 		}
@@ -1501,7 +1585,14 @@ export class InputController {
 			// terminals do this for image clipboards).
 			const imagePath = extractImagePathFromText(text);
 			if (imagePath) {
-				await this.handleImagePathPaste(imagePath);
+				const pathAction = await this.#resolvePathPasteAction(imagePath);
+				if (pathAction === "literal") {
+					this.ctx.editor.insertText(text);
+					this.ctx.ui.requestRender();
+					return true;
+				}
+				if (pathAction === "cancel") return true;
+				await this.handleImagePathPaste(imagePath, "attach");
 				return true;
 			}
 			// Route to the focused component when it accepts pastes (modal

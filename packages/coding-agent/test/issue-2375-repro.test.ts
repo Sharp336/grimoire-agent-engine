@@ -69,7 +69,7 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		delete process.env.SSH_TTY;
 		delete process.env.SSH_CLIENT;
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false } });
+		await Settings.init({ inMemory: true, overrides: { "images.autoResize": false, "paste.pathPaste": "attach" } });
 	});
 
 	afterEach(() => {
