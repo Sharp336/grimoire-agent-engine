@@ -802,6 +802,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"terminal.showRunStateInTitle": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Run State in Terminal Title",
+			description:
+				"Annotate the OSC 0 session title with run-state glyphs (working, waiting, needs attention, idle) so the tab/window title reflects agent activity",
+		},
+	},
+
 	"tui.textSizing": {
 		type: "boolean",
 		default: false,

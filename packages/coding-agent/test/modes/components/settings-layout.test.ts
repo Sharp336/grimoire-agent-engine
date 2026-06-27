@@ -70,6 +70,16 @@ describe("settings layout", () => {
 		});
 	});
 
+	it("exposes run state in terminal title in the appearance settings menu", () => {
+		const def = getSettingsForTab("appearance").find(def => def.path === "terminal.showRunStateInTitle");
+
+		expect(def).toMatchObject({
+			type: "boolean",
+			label: "Run State in Terminal Title",
+			group: "Display",
+		});
+	});
+
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths: SettingPath[] = ["advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);

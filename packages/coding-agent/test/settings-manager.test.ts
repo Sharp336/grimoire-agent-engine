@@ -82,6 +82,12 @@ describe("Settings", () => {
 			expect(getDefault("terminal.showProgress")).toBe(false);
 		});
 
+		it("keeps run state in terminal title disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("terminal.showRunStateInTitle")).toBe(false);
+			expect(getDefault("terminal.showRunStateInTitle")).toBe(false);
+		});
+
 		it("keeps the normal startup splash disabled by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("startup.showSplash")).toBe(false);
