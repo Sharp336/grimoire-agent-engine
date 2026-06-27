@@ -548,7 +548,6 @@ describe("session lifecycle commands", () => {
 		expect(notified).toBe(false);
 	});
 
-
 	it("/move: refuses while streaming", async () => {
 		const { output, session, runtime } = createRuntime();
 		session.isStreaming = true;
