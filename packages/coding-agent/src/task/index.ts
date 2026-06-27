@@ -712,8 +712,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (single) {
 			const { agentId, jobId, description } = started[0];
 			const coordinationHint = ircEnabled
-				? `DM \`${agentId}\` via \`irc\` to coordinate while it runs; use \`job\` only to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task.`
-				: `Use \`job\` to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task.`;
+				? `DM \`${agentId}\` via \`irc\` to coordinate while it runs; use \`job\` only to inspect (\`list\`), wait (\`poll\`) when no useful work remains, or cancel a stuck task.`
+				: `Use \`job\` to inspect (\`list\`), wait (\`poll\`) when no useful work remains, or cancel a stuck task.`;
 			const descriptionSuffix = description ? ` — ${description}` : "";
 			onUpdate?.({
 				content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
@@ -731,8 +731,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		const coordinationHint = ircEnabled
-			? `DM these ids via \`irc\` to coordinate while they run; use \`job\` only to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task.`
-			: `Use \`job\` to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task by id.`;
+			? `DM these ids via \`irc\` to coordinate while they run; use \`job\` only to inspect (\`list\`), wait (\`poll\`) when no useful work remains, or cancel a stuck task.`
+			: `Use \`job\` to inspect (\`list\`), wait (\`poll\`) when no useful work remains, or cancel a stuck task by id.`;
 		const scheduleFailureSummary =
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
