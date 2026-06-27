@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GitlabTool } from "@oh-my-pi/pi-coding-agent/tools/gitlab";
@@ -46,58 +47,6 @@ describe("gitlab tool", () => {
 		expect(text).toContain("Project description");
 		expect(text).toContain("Default branch: main");
 		expect(text).toContain("Stars: 42");
-	});
-
-	it("lists issues with repo, search, state, labels, and limit flags", async () => {
-		const jsonSpy = vi.spyOn(git.gitlab, "json").mockResolvedValue([
-			{
-				iid: 12,
-				title: "Fix bug",
-				state: "closed",
-				author: { username: "dev1" },
-				labels: ["bug", "backend"],
-				web_url: "https://gitlab.com/group/project/-/issues/12",
-			},
-		]);
-
-		const tool = new GitlabTool(createSession());
-		const result = await tool.execute("issue-list", {
-			op: "issue_list",
-			repo: "group/project",
-			query: "bug",
-			state: "closed",
-			label: ["bug"],
-			assignee: ["alice"],
-			limit: 2,
-		});
-		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-
-		expect(jsonSpy).toHaveBeenCalledWith(
-			"/tmp/test",
-			[
-				"issue",
-				"list",
-				"--output",
-				"json",
-				"--repo",
-				"group/project",
-				"--closed",
-				"--search",
-				"bug",
-				"--assignee",
-				"alice",
-				"--label",
-				"bug",
-				"--per-page",
-				"2",
-			],
-			undefined,
-			{ repoProvided: true },
-		);
-		expect(text).toContain("# GitLab issues");
-		expect(text).toContain("Query: bug");
-		expect(text).toContain("- #12 Fix bug");
-		expect(text).toContain("  Labels: bug, backend");
 	});
 
 	it("creates merge requests non-interactively and re-reads the created MR", async () => {
@@ -206,78 +155,6 @@ describe("gitlab tool", () => {
 		expect(textSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects unsupported merged state for issue_list", async () => {
-		const jsonSpy = vi.spyOn(git.gitlab, "json");
-		const tool = new GitlabTool(createSession());
-
-		await expect(tool.execute("issue-list", { op: "issue_list", state: "merged" })).rejects.toThrow(
-			"issue_list does not support state 'merged'",
-		);
-		expect(jsonSpy).not.toHaveBeenCalled();
-	});
-
-	it("rejects multiple assignees for issue_list", async () => {
-		const jsonSpy = vi.spyOn(git.gitlab, "json");
-		const tool = new GitlabTool(createSession());
-
-		await expect(tool.execute("issue-list", { op: "issue_list", assignee: ["alice", "bob"] })).rejects.toThrow(
-			"issue_list assignee accepts only one value",
-		);
-		expect(jsonSpy).not.toHaveBeenCalled();
-	});
-
-	it("lists merged merge requests with reviewers and branch filters", async () => {
-		const jsonSpy = vi.spyOn(git.gitlab, "json").mockResolvedValue([
-			{
-				iid: 31,
-				title: "Ship feature",
-				state: "merged",
-				source_branch: "feature",
-				target_branch: "main",
-				reviewers: [{ username: "reviewer1" }],
-				web_url: "https://gitlab.com/group/project/-/merge_requests/31",
-			},
-		]);
-
-		const tool = new GitlabTool(createSession());
-		const result = await tool.execute("mr-list", {
-			op: "mr_list",
-			repo: "group/project",
-			state: "merged",
-			reviewer: ["reviewer1"],
-			sourceBranch: "feature",
-			targetBranch: "main",
-			limit: 5,
-		});
-		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-
-		expect(jsonSpy).toHaveBeenCalledWith(
-			"/tmp/test",
-			[
-				"mr",
-				"list",
-				"--output",
-				"json",
-				"--repo",
-				"group/project",
-				"--merged",
-				"--reviewer",
-				"reviewer1",
-				"--source-branch",
-				"feature",
-				"--target-branch",
-				"main",
-				"--per-page",
-				"5",
-			],
-			undefined,
-			{ repoProvided: true },
-		);
-		expect(text).toContain("# GitLab merge requests");
-		expect(text).toContain("- !31 Ship feature");
-		expect(text).toContain("  Reviewers: reviewer1");
-	});
-
 	it("checks out merge requests with force and rejects flag-shaped MR ids", async () => {
 		const textSpy = vi.spyOn(git.gitlab, "text").mockResolvedValue("Checked out branch feature");
 		const tool = new GitlabTool(createSession());
@@ -353,9 +230,24 @@ describe("gitlab tool", () => {
 		expect(listText).toContain("- #1001 failed");
 	});
 
-	it("classifies read-only and mutating operations for approval", () => {
+	it("exposes only supported public ops and classifies approval", () => {
 		const tool = new GitlabTool(createSession());
+		const properties = toolWireSchema(tool).properties;
+		const opProperty = properties && typeof properties === "object" && "op" in properties ? properties.op : undefined;
+		const opEnumValue =
+			opProperty && typeof opProperty === "object" && "enum" in opProperty ? opProperty.enum : undefined;
+		expect(Array.isArray(opEnumValue)).toBe(true);
+		const opEnum = Array.isArray(opEnumValue)
+			? opEnumValue.filter((value): value is string => typeof value === "string").sort()
+			: [];
 
+		expect(opEnum).toEqual(["mr_checkout", "mr_create", "pipeline_list", "pipeline_status", "repo_view"]);
+		expect(tool.description).toContain("issue://");
+		expect(tool.description).toContain("pr://");
+		expect(tool.description).not.toContain("issue_view");
+		expect(tool.description).not.toContain("mr_view");
+		expect(tool.description).not.toContain("issue_list");
+		expect(tool.description).not.toContain("mr_list");
 		expect(tool.approval({ op: "repo_view" })).toBe("read");
 		expect(tool.approval({ op: "pipeline_list" })).toBe("read");
 		expect(tool.approval({ op: "mr_create" })).toBe("exec");

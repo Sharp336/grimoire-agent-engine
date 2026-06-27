@@ -3378,7 +3378,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "GitLab CLI",
 			description:
-				"Enable the gitlab tool (op-based dispatch for project, issue, merge request, and CI/CD workflows through glab)",
+				"Enable the gitlab tool (glab-backed project view, merge request create/checkout, and CI/CD pipeline status/list workflows)",
 		},
 	},
 

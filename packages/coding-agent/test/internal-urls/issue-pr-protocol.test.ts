@@ -2,7 +2,7 @@
  * `issue://` / `pr://` protocol handler tests.
  *
  * Every test isolates `OMP_GITHUB_CACHE_DB` to a temp file and resets the
- * cache + router singletons. `git.github.json` / `git.github.text` are spied
+ * cache + router singletons. `git.github.*` / `git.gitlab.*` are spied
  * per-test and restored in `afterEach`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -18,15 +18,30 @@ let tempDir: string;
 let originalEnv: string | undefined;
 
 let originalGhToken: string | undefined;
+let originalGitlabToken: string | undefined;
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-pr-protocol-"));
 	originalEnv = process.env.OMP_GITHUB_CACHE_DB;
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
 	originalGhToken = process.env.GH_TOKEN;
+	originalGitlabToken = process.env.GITLAB_TOKEN;
 	process.env.GH_TOKEN = "test-token";
 	resetCacheForTests();
 	InternalUrlRouter.resetForTests();
 });
+
+async function removeTempDirWithRetry(dir: string): Promise<void> {
+	for (let attempt = 0; attempt < 10; attempt += 1) {
+		try {
+			await fs.rm(dir, { recursive: true, force: true });
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EBUSY" || attempt === 9) throw err;
+			await Bun.sleep(50);
+		}
+	}
+}
 
 afterEach(async () => {
 	resetCacheForTests();
@@ -41,8 +56,13 @@ afterEach(async () => {
 	} else {
 		process.env.GH_TOKEN = originalGhToken;
 	}
+	if (originalGitlabToken === undefined) {
+		delete process.env.GITLAB_TOKEN;
+	} else {
+		process.env.GITLAB_TOKEN = originalGitlabToken;
+	}
 	vi.restoreAllMocks();
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeTempDirWithRetry(tempDir);
 });
 
 function issuePayload(number: number, body: string, commentBodies: string[] = []) {
@@ -151,6 +171,59 @@ function makePrDiff(files: DiffFileSpec[]): string {
 			return lines.join("\n");
 		})
 		.join("\n");
+}
+
+function mockGitlabRemote(cwd = "/tmp/gitlab-project", url = "https://gitlab.com/group/project.git"): void {
+	vi.spyOn(git.remote, "list").mockImplementation(async remoteCwd => {
+		expect(remoteCwd).toBe(cwd);
+		return ["origin"];
+	});
+	vi.spyOn(git.remote, "url").mockImplementation(async (remoteCwd, remoteName) => {
+		expect(remoteCwd).toBe(cwd);
+		expect(remoteName).toBe("origin");
+		return url;
+	});
+}
+
+function mockGitlabJson(payload: unknown) {
+	return vi.spyOn(git.gitlab, "json").mockImplementation(async <T>(): Promise<T> => payload as T);
+}
+
+function gitlabIssuePayload(iid: number, body: string, notes: unknown[] = []) {
+	const payload: Record<string, unknown> = {
+		iid,
+		title: `GitLab issue #${iid}`,
+		state: "opened",
+		author: { username: "gitlab-author" },
+		assignees: [],
+		labels: ["bug"],
+		description: body,
+		created_at: "2026-04-01T09:00:00Z",
+		updated_at: "2026-04-01T10:00:00Z",
+		web_url: `https://gitlab.com/group/project/-/issues/${iid}`,
+	};
+	if (notes.length > 0) payload.Notes = notes;
+	return payload;
+}
+
+function gitlabMrPayload(iid: number, body: string, discussions: unknown[] = []) {
+	const payload: Record<string, unknown> = {
+		iid,
+		title: `GitLab MR !${iid}`,
+		state: "opened",
+		draft: false,
+		author: { username: "gitlab-author" },
+		reviewers: [{ username: "reviewer1" }],
+		labels: ["feature"],
+		source_branch: "feature/x",
+		target_branch: "main",
+		description: body,
+		created_at: "2026-04-01T09:00:00Z",
+		updated_at: "2026-04-01T10:00:00Z",
+		web_url: `https://gitlab.com/group/project/-/merge_requests/${iid}`,
+	};
+	if (discussions.length > 0) payload.Discussions = discussions;
+	return payload;
 }
 
 describe("issue:// protocol handler", () => {
@@ -490,6 +563,247 @@ describe("issue:// / pr:// listing", () => {
 		vi.spyOn(git.github, "text").mockRejectedValue(new Error("not a git repository"));
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("issue://")).rejects.toThrow(/could not resolve a default repo/);
+	});
+});
+
+describe("GitLab-backed issue:// / pr:// routing", () => {
+	it("issue://<n> in a GitLab checkout resolves through glab issue view with comments", async () => {
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson(
+			gitlabIssuePayload(12, "gitlab issue body", [
+				{ author: { username: "commenter" }, created_at: "2026-04-01T11:00:00Z", body: "note body" },
+			]),
+		);
+		const githubSpy = vi.spyOn(git.github, "json").mockRejectedValue(new Error("unexpected GitHub call"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://12", { cwd: "/tmp/gitlab-project" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			["issue", "view", "12", "--output", "json", "--comments", "--per-page", "100", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(resource.content).toContain("# GitLab issue #12: GitLab issue #12");
+		expect(resource.content).toContain("## Comments (1)");
+		expect(resource.content).toContain("### @commenter - 2026-04-01T11:00:00Z");
+		expect(resource.content).toContain("note body");
+		expect(githubSpy).not.toHaveBeenCalled();
+	});
+
+	it("issue://<n>?comments=0 omits GitLab comments flags and notes the toggle", async () => {
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson(gitlabIssuePayload(12, "gitlab body"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://12?comments=0", { cwd: "/tmp/gitlab-project" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			["issue", "view", "12", "--output", "json", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(resource.notes).toContain("Comments disabled");
+	});
+
+	it("caches GitLab issue reads by glab credential identity", async () => {
+		process.env.GITLAB_TOKEN = "test-gitlab-token";
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson(gitlabIssuePayload(12, "gitlab body"));
+
+		const router = InternalUrlRouter.instance();
+		const first = await router.resolve("issue://12", { cwd: "/tmp/gitlab-project" });
+		const second = await router.resolve("issue://12", { cwd: "/tmp/gitlab-project" });
+
+		expect(first.content).toBe(second.content);
+		expect(second.notes?.[0]).toMatch(/^Cached:/);
+		expect(glabSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("pr://<n> in a GitLab checkout resolves through glab mr view with flattened discussions", async () => {
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson(
+			gitlabMrPayload(7, "gitlab mr body", [
+				{
+					notes: [
+						{ author: { username: "reviewer1" }, created_at: "2026-04-01T12:00:00Z", body: "discussion note" },
+					],
+				},
+			]),
+		);
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://7", { cwd: "/tmp/gitlab-project" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			["mr", "view", "7", "--output", "json", "--comments", "--per-page", "100", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(resource.content).toContain("# GitLab merge request !7: GitLab MR !7");
+		expect(resource.content).toContain("Reviewers: reviewer1");
+		expect(resource.content).toContain("Source: feature/x");
+		expect(resource.content).toContain("Target: main");
+		expect(resource.content).toContain("gitlab mr body");
+		expect(resource.content).toContain("## Comments (1)");
+		expect(resource.content).toContain("discussion note");
+		expect(resource.notes).toContain("Diff: pr://group/project/7/diff");
+	});
+
+	it("issue:// list in a GitLab checkout uses glab issue list flags and internal links", async () => {
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson([gitlabIssuePayload(12, "body")]);
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://?state=closed&limit=2&label=bug", { cwd: "/tmp/gitlab-project" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			[
+				"issue",
+				"list",
+				"--output",
+				"json",
+				"--repo",
+				"group/project",
+				"--closed",
+				"--label",
+				"bug",
+				"--per-page",
+				"2",
+			],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(resource.content).toContain("# GitLab Issues in group/project (closed, up to 2)");
+		expect(resource.content).toContain("issue://group/project/12");
+	});
+
+	it("pr:// list in a GitLab checkout uses glab mr list flags and internal links", async () => {
+		mockGitlabRemote();
+		const glabSpy = mockGitlabJson([gitlabMrPayload(31, "body")]);
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://?state=merged&limit=5&author=alice&label=feature", {
+			cwd: "/tmp/gitlab-project",
+		});
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			[
+				"mr",
+				"list",
+				"--output",
+				"json",
+				"--repo",
+				"group/project",
+				"--merged",
+				"--author",
+				"alice",
+				"--label",
+				"feature",
+				"--per-page",
+				"5",
+			],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(resource.content).toContain("# GitLab Merge Requests in group/project (merged, up to 5)");
+		expect(resource.content).toContain("pr://group/project/31");
+	});
+
+	it("renders short follow-up links for nested GitLab namespaces", async () => {
+		mockGitlabRemote("/tmp/gitlab-nested", "https://gitlab.com/group/sub/project.git");
+		const glabSpy = mockGitlabJson([gitlabIssuePayload(12, "body")]);
+		const textSpy = vi.spyOn(git.gitlab, "text").mockResolvedValue(makePrDiff([{ name: "src/one.ts", adds: 1 }]));
+
+		const router = InternalUrlRouter.instance();
+		const issues = await router.resolve("issue://?limit=1", { cwd: "/tmp/gitlab-nested" });
+		const diff = await router.resolve("pr://7/diff", { cwd: "/tmp/gitlab-nested" });
+
+		expect(glabSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-nested",
+			["issue", "list", "--output", "json", "--repo", "group/sub/project", "--per-page", "1"],
+			undefined,
+			{ repoProvided: true },
+		);
+		expect(textSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-nested",
+			["mr", "diff", "7", "--color=never", "--raw", "--repo", "group/sub/project"],
+			undefined,
+			{ repoProvided: true, trimOutput: false },
+		);
+		expect(issues.content).toContain("issue://12");
+		expect(issues.content).not.toContain("issue://group/sub/project/12");
+		expect(diff.content).toContain("pr://7/diff/1");
+		expect(diff.content).not.toContain("pr://group/sub/project/7/diff/1");
+	});
+
+	it("GitLab pr:// diff variants share one glab mr diff call", async () => {
+		process.env.GITLAB_TOKEN = "test-gitlab-token";
+		mockGitlabRemote();
+		const diffText = makePrDiff([
+			{ name: "src/one.ts", adds: 3, dels: 1 },
+			{ name: "src/two.ts", adds: 2, dels: 0, mode: "added" },
+		]);
+		const textSpy = vi.spyOn(git.gitlab, "text").mockResolvedValue(diffText);
+
+		const router = InternalUrlRouter.instance();
+		const list = await router.resolve("pr://7/diff", { cwd: "/tmp/gitlab-project" });
+		const full = await router.resolve("pr://7/diff/all", { cwd: "/tmp/gitlab-project" });
+		const slice = await router.resolve("pr://7/diff/1", { cwd: "/tmp/gitlab-project" });
+
+		expect(textSpy).toHaveBeenCalledWith(
+			"/tmp/gitlab-project",
+			["mr", "diff", "7", "--color=never", "--raw", "--repo", "group/project"],
+			undefined,
+			{ repoProvided: true, trimOutput: false },
+		);
+		expect(textSpy).toHaveBeenCalledTimes(1);
+		expect(list.content).toContain("# Pull Request Diff: group/project#7 (2 files)");
+		expect(list.content).toContain("pr://group/project/7/diff/1");
+		expect(full.contentType).toBe("text/plain");
+		expect(full.content).toBe(diffText);
+		expect(slice.contentType).toBe("text/plain");
+		expect(slice.content.startsWith("diff --git a/src/one.ts b/src/one.ts")).toBe(true);
+	});
+
+	it("fully qualified GitHub issue URLs stay on GitHub without a matching GitLab remote", async () => {
+		mockGitlabRemote("/tmp/gitlab-project", "https://gitlab.com/group/project.git");
+		const githubSpy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(42, "github body") as never);
+		const glabSpy = vi.spyOn(git.gitlab, "json").mockRejectedValue(new Error("unexpected GitLab call"));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://owner/example/42", { cwd: "/tmp/gitlab-project" });
+
+		expect(resource.content).toContain("# Issue #42: Issue #42");
+		expect(githubSpy).toHaveBeenCalled();
+		expect(glabSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps GitHub and GitLab cache rows distinct for the same repo path and number", async () => {
+		process.env.GITLAB_TOKEN = "test-gitlab-token";
+		vi.spyOn(git.remote, "list").mockResolvedValue(["origin"]);
+		vi.spyOn(git.remote, "url")
+			.mockResolvedValueOnce("https://github.com/group/project.git")
+			.mockResolvedValue("https://gitlab.com/group/project.git");
+		const githubSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+			...issuePayload(12, "github body"),
+			title: "GitHub title",
+		} as never);
+		const glabSpy = mockGitlabJson(gitlabIssuePayload(12, "gitlab body"));
+
+		const router = InternalUrlRouter.instance();
+		const githubResource = await router.resolve("issue://group/project/12", { cwd: "/tmp/gitlab-project" });
+		const gitlabResource = await router.resolve("issue://12", { cwd: "/tmp/gitlab-project" });
+
+		expect(githubSpy).toHaveBeenCalledTimes(1);
+		expect(glabSpy).toHaveBeenCalledTimes(1);
+		expect(githubResource.content).toContain("GitHub title");
+		expect(gitlabResource.content).toContain("GitLab issue #12");
 	});
 });
 

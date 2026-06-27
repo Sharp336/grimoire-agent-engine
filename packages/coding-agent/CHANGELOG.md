@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a GitLab CLI tool for `glab`-backed project, issue, merge request, and pipeline operations, including TUI rendering and discovery support.
+- Added a GitLab CLI tool for `glab`-backed project view, merge request create/checkout, and pipeline operations; GitLab issue/MR reads are available through `issue://` and `pr://`.
 
 ## [16.1.20] - 2026-06-25
 

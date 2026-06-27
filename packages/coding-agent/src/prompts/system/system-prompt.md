@@ -62,8 +62,8 @@ Special URLs for internal resources; with most FS/bash tools they auto-resolve t
 - `vault://<vault>/<path>`: Obsidian vault (read/edit). `vault://` lists vaults; `vault://_/…` targets the active vault. File ops `?op=outline|backlinks|links|tags|properties|tasks|base|…`; vault ops `?op=search&q=…|daily|tasks|orphans|unresolved|bases|…`.
 {{/if}}
 - `mcp://<uri>`: MCP resource
-- `issue://<N>` (or `issue://<owner>/<repo>/<N>`): GitHub issue, disk-cached. Bare lists recent issues; `?state=open|closed|all&limit=&author=&label=`.
-- `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR, same cache; `?comments=0` drops comments. Bare lists recent PRs; `?state=open|closed|merged|all&limit=&author=&label=`.
+- `issue://<N>` (or `issue://<owner>/<repo>/<N>`): GitHub/GitLab issue for the current checkout; backend inferred from Git remotes. Fully qualified `issue://<owner>/<repo>/<N>` remains GitHub unless the current checkout has a matching GitLab remote. Bare lists recent issues; `?state=open|closed|all&limit=&author=&label=`.
+- `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR or GitLab MR for the current checkout; same backend rule. `pr://.../diff` works for GitHub PRs and GitLab MRs. `?comments=0` drops comments. Bare lists recent PRs/MRs; `?state=open|closed|merged|all&limit=&author=&label=`.
 - `omp://`: harness docs; AVOID unless the user asks about the harness itself.
 
 {{#if toolInfo.length}}

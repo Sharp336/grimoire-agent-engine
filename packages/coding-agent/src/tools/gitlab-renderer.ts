@@ -8,19 +8,13 @@ type GitlabToolRenderArgs = {
 	op?: string;
 	repo?: string;
 	branch?: string;
-	issue?: string;
 	mr?: string;
-	query?: string;
 	title?: string;
 	status?: string;
 };
 
 const OP_TITLES: Record<string, string> = {
 	repo_view: "GitLab Repo",
-	issue_view: "GitLab Issue",
-	mr_view: "GitLab MR",
-	issue_list: "GitLab Issues",
-	mr_list: "GitLab MRs",
 	mr_create: "GitLab MR Create",
 	mr_checkout: "GitLab MR Checkout",
 	pipeline_status: "GitLab Pipeline Status",
@@ -39,10 +33,9 @@ function formatMetaValue(value: string, length: number): string {
 function buildMeta(args: GitlabToolRenderArgs | undefined): string[] {
 	const meta: string[] = [];
 	if (!args) return meta;
-	for (const value of [args.repo, args.branch, args.issue, args.mr, args.status]) {
+	for (const value of [args.repo, args.branch, args.mr, args.status]) {
 		if (value) meta.push(formatMetaValue(value, TRUNCATE_LENGTHS.SHORT));
 	}
-	if (args.query) meta.push(formatMetaValue(args.query, TRUNCATE_LENGTHS.CONTENT));
 	if (args.title) meta.push(formatMetaValue(args.title, TRUNCATE_LENGTHS.CONTENT));
 	return meta;
 }

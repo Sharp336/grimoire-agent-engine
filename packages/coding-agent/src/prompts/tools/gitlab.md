@@ -1,10 +1,8 @@
-Op-based `glab` wrapper: repositories, issues, merge requests, and CI/CD pipeline status/listing.
+Op-based `glab` wrapper: repositories, merge request creation/checkout, and CI/CD pipeline status/listing. Read GitLab issues and merge requests via `issue://` and `pr://`; backend is inferred from the checkout remote.
 
 <instruction>
 Pick op via `op`. Beyond the field descriptions, per op:
 - `repo_view` — omit `repo` to view the current GitLab checkout; `repo` accepts `GROUP/PROJECT`, nested namespaces, full URL, or Git URL.
-- `issue_view` / `mr_view` — require `issue` or `mr`.
-- `issue_list` / `mr_list` — `query` maps to `glab --search`; `limit` maps to the first page via `--per-page` and is capped at 100; `state: "all"` includes all states.
 - `mr_create` — `head`/`sourceBranch` selects the source branch; `base`/`targetBranch` selects the target branch; `fill: true` uses commit history and pushes through glab.
 - `mr_checkout` — checks out an open merge request in the current worktree; use `branch` to override the local branch name.
 - `pipeline_status` — reads current/latest pipeline status; `branch` selects the ref.

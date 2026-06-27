@@ -173,6 +173,85 @@ function getGhConfigDir(): string {
 	return path.join(os.homedir(), ".config", "gh");
 }
 
+export function normalizeGitlabHost(value: string): string {
+	const trimmed = value.trim().replace(/\/+$/, "");
+	if (!trimmed) return "";
+	try {
+		if (/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)) {
+			return new URL(trimmed).hostname.toLowerCase();
+		}
+	} catch {
+		// Fall through to the conservative string parser below.
+	}
+	let host = trimmed;
+	const pathStart = host.search(/[/?#]/);
+	if (pathStart >= 0) host = host.slice(0, pathStart);
+	const credentialEnd = host.lastIndexOf("@");
+	if (credentialEnd >= 0) host = host.slice(credentialEnd + 1);
+	if (host.startsWith("[") && host.includes("]")) {
+		host = host.slice(1, host.indexOf("]"));
+	} else {
+		const portStart = host.indexOf(":");
+		if (portStart >= 0) host = host.slice(0, portStart);
+	}
+	return host.toLowerCase();
+}
+
+function getPlatformGlabConfigPath(): string {
+	if (process.platform === "darwin") {
+		return path.join(os.homedir(), "Library", "Application Support", "glab-cli", "config.yml");
+	}
+	if (process.platform === "win32") {
+		const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+		return path.join(appData, "glab-cli", "config.yml");
+	}
+	return path.join(os.homedir(), ".config", "glab-cli", "config.yml");
+}
+
+function getGlabConfigCandidates(): string[] {
+	const candidates: string[] = [];
+	const add = (candidate: string | undefined): void => {
+		if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+	};
+	const glabConfigDir = process.env.GLAB_CONFIG_DIR?.trim();
+	if (glabConfigDir) add(path.join(glabConfigDir, "config.yml"));
+	add(path.join(os.homedir(), ".config", "glab-cli", "config.yml"));
+	const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim();
+	add(xdgConfigHome ? path.join(xdgConfigHome, "glab-cli", "config.yml") : getPlatformGlabConfigPath());
+	const xdgConfigDirs = process.env.XDG_CONFIG_DIRS?.trim();
+	if (xdgConfigDirs) {
+		for (const dir of xdgConfigDirs.split(path.delimiter)) {
+			const trimmed = dir.trim();
+			if (trimmed) add(path.join(trimmed, "glab-cli", "config.yml"));
+		}
+	}
+	return candidates;
+}
+
+interface GlabConfigIdentity {
+	configPath: string;
+	mtimeMs: number;
+}
+
+function resolveFirstReadableGlabConfig(): GlabConfigIdentity | undefined {
+	for (const configPath of getGlabConfigCandidates()) {
+		try {
+			const stat = fs.statSync(configPath, { throwIfNoEntry: false });
+			if (!stat?.isFile()) continue;
+			fs.accessSync(configPath, fs.constants.R_OK);
+			return { configPath, mtimeMs: stat.mtimeMs };
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+				logger.debug("github cache: failed to inspect glab config for cache identity", {
+					err: String(err),
+					path: configPath,
+				});
+			}
+		}
+	}
+	return undefined;
+}
+
 function hashCacheIdentity(parts: string[]): string {
 	return Bun.hash(parts.map(part => `${part.length}:${part}`).join("|")).toString(36);
 }
@@ -239,6 +318,82 @@ export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || 
 	}
 	const value = hasCredentialMaterial ? `${host}:${hashCacheIdentity(parts)}` : undefined;
 	authKeyMemo.set(host, { envSig, hostsPath, hostsMtimeMs, value });
+	return value;
+}
+
+interface GitlabAuthKeyMemoEntry {
+	envSig: string;
+	configPath: string | undefined;
+	configMtimeMs: number;
+	value: string | undefined;
+}
+
+const GITLAB_AUTH_KEY_ENV_VARS = [
+	"GITLAB_TOKEN",
+	"GITLAB_ACCESS_TOKEN",
+	"OAUTH_TOKEN",
+	"CI_JOB_TOKEN",
+	"GLAB_ENABLE_CI_AUTOLOGIN",
+	"CI_SERVER_FQDN",
+	"CI_SERVER_PROTOCOL",
+	"CI_SERVER_SHELL_SSH_HOST",
+];
+const GITLAB_AUTH_KEY_CONFIG_ENV_VARS = ["GLAB_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "APPDATA"];
+const gitlabAuthKeyMemo = new Map<string, GitlabAuthKeyMemoEntry>();
+
+/**
+ * Best-effort local fingerprint for the active GitLab CLI credentials.
+ *
+ * The DB stores only a hash of local credential material. If no token/env
+ * discriminator or readable glab config is visible, callers should pass `null`
+ * to bypass caching so unknown GitLab identities never share rows.
+ */
+export function resolveGitlabCacheAuthKey(
+	host: string = normalizeGitlabHost(process.env.GITLAB_HOST || process.env.GITLAB_URI || "gitlab.com"),
+): string | undefined {
+	const normalizedHost = normalizeGitlabHost(host || "gitlab.com");
+	let envSig = "";
+	for (const name of [...GITLAB_AUTH_KEY_ENV_VARS, ...GITLAB_AUTH_KEY_CONFIG_ENV_VARS]) {
+		const value = process.env[name];
+		if (value) envSig += `${name}=${value.length}:${value}\0`;
+	}
+	const config = resolveFirstReadableGlabConfig();
+	const memo = gitlabAuthKeyMemo.get(normalizedHost);
+	if (
+		memo &&
+		memo.envSig === envSig &&
+		memo.configPath === config?.configPath &&
+		memo.configMtimeMs === (config?.mtimeMs ?? -1)
+	) {
+		return memo.value;
+	}
+
+	const parts: string[] = [`host:${normalizedHost}`];
+	let hasCredentialMaterial = false;
+	for (const name of GITLAB_AUTH_KEY_ENV_VARS) {
+		const value = process.env[name];
+		if (!value) continue;
+		hasCredentialMaterial = true;
+		parts.push(`${name}:${value}`);
+	}
+	if (config) {
+		try {
+			const glabConfig = fs.readFileSync(config.configPath, "utf8");
+			hasCredentialMaterial = true;
+			parts.push(`config:${config.configPath}:${glabConfig}`);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+				logger.debug("github cache: failed to read glab config for cache identity", { err: String(err) });
+			}
+		}
+	}
+	const value = hasCredentialMaterial ? `gitlab:${normalizedHost}:${hashCacheIdentity(parts)}` : undefined;
+	gitlabAuthKeyMemo.set(normalizedHost, {
+		envSig,
+		configPath: config?.configPath,
+		configMtimeMs: config?.mtimeMs ?? -1,
+		value,
+	});
 	return value;
 }
 
@@ -423,6 +578,7 @@ export function resetForTests(): void {
 	openAttempted = false;
 	lastSweepAt = 0;
 	authKeyMemo.clear();
+	gitlabAuthKeyMemo.clear();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
