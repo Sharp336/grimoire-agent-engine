@@ -44,6 +44,10 @@ export type SymbolKey =
 	| "status.shadowed"
 	| "status.aborted"
 	| "status.done"
+	// Terminal title prefixes (idle has no prefix — no key)
+	| "terminal.title.running"
+	| "terminal.title.waiting"
+	| "terminal.title.needsAttention"
 	// Navigation
 	| "nav.cursor"
 	| "nav.selected"
@@ -247,6 +251,10 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.shadowed": "◌",
 	"status.aborted": "⏹",
 	"status.done": "•",
+	// Terminal title
+	"terminal.title.running": "⟳",
+	"terminal.title.waiting": "◌",
+	"terminal.title.needsAttention": "●",
 	// Navigation
 	"nav.cursor": "❯",
 	"nav.selected": "➤",
@@ -460,6 +468,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.aborted": "\uf04d",
 	// pick: • | alt: ● ·
 	"status.done": "•",
+	// Terminal title (aligned with status.running / status.shadowed / status.enabled)
+	"terminal.title.running": "\uf110",
+	"terminal.title.waiting": "◐",
+	"terminal.title.needsAttention": "\uf111",
 	// Navigation
 	// pick:  | alt:  
 	"nav.cursor": "\uf054",
@@ -756,6 +768,10 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"status.shadowed": "[/]",
 	"status.aborted": "[-]",
 	"status.done": "*",
+	// Terminal title
+	"terminal.title.running": "[~]",
+	"terminal.title.waiting": "[/]",
+	"terminal.title.needsAttention": "!",
 	// Navigation
 	"nav.cursor": ">",
 	"nav.selected": "->",
