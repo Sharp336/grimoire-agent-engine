@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { clampWaitMs, parseWaitDurationMs } from "../job";
+
 describe("parseWaitDurationMs", () => {
 	test("parses known durations", () => {
 		expect(parseWaitDurationMs("5s")).toBe(5_000);
