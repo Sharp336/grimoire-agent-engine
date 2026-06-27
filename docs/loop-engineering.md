@@ -41,7 +41,7 @@ Schedulers stay outside OMP. Use cron, launchd, GitHub Actions, PM2, or another 
 
 ## Safety levels
 
-- `report` — report-only loops. OMP disables MCP, extension discovery, and project custom-tool discovery, restricts active tools to read/search/find/web search, and does not run verifier commands.
+- `report` — report-only loops. OMP disables MCP, extension discovery, and project custom-tool discovery, restricts active tools to read/grep/glob/web search, and does not run verifier commands.
 - `assisted` — may make bounded local changes, but verifier commands and approval gates are required.
 - `autonomous` — requires verifier results, explicit human-approval guardrails for protected actions, and a clean observable git worktree.
 

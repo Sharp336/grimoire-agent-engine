@@ -258,8 +258,24 @@ describe("loop-engineering iteration runner", () => {
 			const verifier = path.join(dir.path(), "verify.js");
 			await Bun.write(
 				verifier,
-				"const expected = ['ok'];\nrequire('fs').writeFileSync('verified.txt', expected[0]);\n",
+				[
+					"const data = require('./fixture.json');",
+					"const fs = require('fs');",
+					"const path = require('path');",
+					"const expected = ['ok'];",
+					"const label = 'binding';",
+					"const config = { binding: true };",
+					"const { process: proc } = globalThis;",
+					"proc.cwd();",
+					"function binding() { return label; }",
+					"binding();",
+					"if (true) { ['o', 'k'].join(''); }",
+					"const outputPath = path.join(process.cwd(), 'verified.txt');",
+					"fs.writeFileSync(outputPath, data.expected || ['o', 'k'].join('') || expected[0] || config.binding);",
+					"",
+				].join("\n"),
 			);
+			await Bun.write(path.join(dir.path(), "fixture.json"), JSON.stringify({ expected: "ok" }));
 			await Bun.write(
 				path.join(dir.path(), "package.json"),
 				JSON.stringify({ scripts: { verify: "node verify.js" } }),
@@ -419,6 +435,169 @@ loop:
 		} finally {
 			if (originalPath === undefined) delete process.env.PATH;
 			else process.env.PATH = originalPath;
+			await dir.remove();
+		}
+	});
+
+	it("freezes verifier runtime path before agents can add external PATH shims", async () => {
+		const dir = await makeTempDir();
+		const external = await makeTempDir();
+		const originalPath = process.env.PATH;
+		try {
+			await Bun.write(path.join(dir.path(), "verify.js"), "require('fs').writeFileSync('verified.txt', 'ok');\n");
+			await Bun.write(
+				path.join(dir.path(), "package.json"),
+				JSON.stringify({ scripts: { verify: "node verify.js" } }),
+			);
+			await initCleanGitRepo(dir.path());
+			const spec = parseLoopSpec(`
+loop:
+  name: external-path-runtime-shim
+  goal: Do not trust external runtime shims created by an agent.
+  level: assisted
+  non_goals: ["Do not edit verifier files."]
+  scope:
+    paths: ["."]
+  runner:
+    prompt: Try nothing.
+  verifier:
+    separate: true
+    commands:
+      - ["bun", "run", "verify"]
+  guardrails:
+    max_iterations: 1
+    max_files_changed: 5
+  state:
+    run_log: loop-run-log.md
+`);
+			const nonExecutableShim = path.join(external.path(), "node");
+			await Bun.write(nonExecutableShim, "#!/bin/sh\necho should-not-run > hijacked.txt\n");
+			await fs.chmod(nonExecutableShim, 0o644);
+			process.env.PATH = [external.path(), originalPath ?? ""].join(path.delimiter);
+			const result = await executeLoopIteration(spec, {
+				cwd: dir.path(),
+				runAgent: async () => {
+					const shim = path.join(external.path(), "node");
+					await Bun.write(shim, "#!/bin/sh\necho hijacked > hijacked.txt\n");
+					await fs.chmod(shim, 0o755);
+					return { exitCode: 0, output: "agent completed" };
+				},
+			});
+
+			expect(result.status).toBe("passed");
+			expect(await Bun.file(path.join(dir.path(), "verified.txt")).text()).toBe("ok");
+			await expect(fs.stat(path.join(dir.path(), "hijacked.txt"))).rejects.toThrow();
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+			await external.remove();
+			await dir.remove();
+		}
+	});
+
+	it("skips external runtime symlinks that resolve back into the project", async () => {
+		const dir = await makeTempDir();
+		const external = await makeTempDir();
+		const originalPath = process.env.PATH;
+		try {
+			const localRuntime = path.join(dir.path(), "node");
+			await Bun.write(localRuntime, "#!/bin/sh\necho hijacked > hijacked.txt\n");
+			await fs.chmod(localRuntime, 0o755);
+			await fs.symlink(localRuntime, path.join(external.path(), "node"));
+			await Bun.write(path.join(dir.path(), "verify.js"), "require('fs').writeFileSync('verified.txt', 'ok');\n");
+			await Bun.write(
+				path.join(dir.path(), "package.json"),
+				JSON.stringify({ scripts: { verify: "node verify.js" } }),
+			);
+			await initCleanGitRepo(dir.path());
+			const spec = parseLoopSpec(`
+loop:
+  name: project-runtime-symlink
+  goal: Ignore PATH runtimes that resolve back into the project.
+  level: assisted
+  non_goals: ["Do not edit verifier files."]
+  scope:
+    paths: ["."]
+  runner:
+    prompt: Try nothing.
+  verifier:
+    separate: true
+    commands:
+      - ["bun", "run", "verify"]
+  guardrails:
+    max_iterations: 1
+    max_files_changed: 5
+  state:
+    run_log: loop-run-log.md
+`);
+			process.env.PATH = [external.path(), originalPath ?? ""].join(path.delimiter);
+			const result = await executeLoopIteration(spec, {
+				cwd: dir.path(),
+				runAgent: async () => ({ exitCode: 0, output: "agent completed" }),
+			});
+
+			expect(result.status).toBe("passed");
+			expect(await Bun.file(path.join(dir.path(), "verified.txt")).text()).toBe("ok");
+			await expect(fs.stat(path.join(dir.path(), "hijacked.txt"))).rejects.toThrow();
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+			await external.remove();
+			await dir.remove();
+		}
+	});
+
+	it("rejects verifier runtime paths replaced after preflight", async () => {
+		const dir = await makeTempDir();
+		const external = await makeTempDir();
+		const originalPath = process.env.PATH;
+		try {
+			const runtimeShim = path.join(external.path(), "bun");
+			await Bun.write(runtimeShim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+			await fs.chmod(runtimeShim, 0o755);
+			await Bun.write(path.join(dir.path(), "verify.js"), "require('fs').writeFileSync('verified.txt', 'ok');\n");
+			await Bun.write(
+				path.join(dir.path(), "package.json"),
+				JSON.stringify({ scripts: { verify: "bun verify.js" } }),
+			);
+			await initCleanGitRepo(dir.path());
+			const spec = parseLoopSpec(`
+loop:
+  name: replaced-runtime-shim
+  goal: Fail if an agent mutates the resolved verifier runtime.
+  level: assisted
+  non_goals: ["Do not edit verifier files."]
+  scope:
+    paths: ["."]
+  runner:
+    prompt: Try nothing.
+  verifier:
+    separate: true
+    commands:
+      - ["bun", "run", "verify"]
+  guardrails:
+    max_iterations: 1
+    max_files_changed: 5
+  state:
+    run_log: loop-run-log.md
+`);
+			process.env.PATH = [external.path(), originalPath ?? ""].join(path.delimiter);
+			const result = await executeLoopIteration(spec, {
+				cwd: dir.path(),
+				runAgent: async () => {
+					await Bun.write(runtimeShim, "#!/bin/sh\necho hijacked > hijacked.txt\n");
+					await fs.chmod(runtimeShim, 0o755);
+					return { exitCode: 0, output: "agent completed" };
+				},
+			});
+
+			expect(result.status).toBe("needs_approval");
+			expect(result.approvalReasons).toContain("verifier runtime changed before verifier execution");
+			await expect(fs.stat(path.join(dir.path(), "verified.txt"))).rejects.toThrow();
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+			await external.remove();
 			await dir.remove();
 		}
 	});
@@ -759,7 +938,7 @@ loop:
 		try {
 			await Bun.write(
 				path.join(dir.path(), "verify.js"),
-				"require('./helper');\nrequire('fs').writeFileSync('verified.txt', 'ok');\n",
+				"require('./helper.js');\nrequire('fs').writeFileSync('verified.txt', 'ok');\n",
 			);
 			await Bun.write(path.join(dir.path(), "helper.js"), "module.exports = true;\n");
 			await Bun.write(
@@ -1126,6 +1305,18 @@ loop:
 				error: "verifier dependencies must not import dangerous builtins",
 			},
 			{
+				name: "process-builtin-require-binding-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "const p = require('process');\np.binding('spawn_sync');\n" },
+				error: "verifier dependencies must not import dangerous builtins",
+			},
+			{
+				name: "node-process-builtin-require-binding-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "const p = require('node:process');\np.binding('spawn_sync');\n" },
+				error: "verifier dependencies must not import dangerous builtins",
+			},
+			{
 				name: "dynamic-code-api",
 				scripts: { verify: "node verify.js" },
 				files: { "verify.js": "Function('return 1')();\n" },
@@ -1174,9 +1365,25 @@ loop:
 				error: "verifier dependencies must not use dynamic property access",
 			},
 			{
+				name: "dynamic-property-unicode-receiver",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const π = process;\nπ["bind" + "ing"]("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
 				name: "dynamic-code-worker",
 				scripts: { verify: "bun verify.js" },
 				files: { "verify.js": "new Worker('./helper.js');\n" },
+				error: "verifier dependencies must not use dynamic code APIs",
+			},
+			{
+				name: "dynamic-code-webassembly",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						"const fs = require('fs');\n(async () => WebAssembly.instantiate(await fs.promises.readFile('./addon.wasm')))();\n",
+					"addon.wasm": "",
+				},
 				error: "verifier dependencies must not use dynamic code APIs",
 			},
 			{
@@ -1192,6 +1399,713 @@ loop:
 				error: "verifier dependencies must not use process execution APIs",
 			},
 			{
+				name: "process-binding-reflect-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'Reflect.get(process, "binding")("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-descriptor-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'Object.getOwnPropertyDescriptor(process, "binding")?.value("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const p = process;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-logical-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const p = process || {};\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-conditional-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const p = true ? globalThis.process : {};\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const p = Reflect.get(globalThis, "process");\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((p) => p.binding("spawn_sync"))(process);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-named-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'function f(p) { p.binding("spawn_sync"); }\nf(process);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-parameter-destructure-call-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'function f({ binding }) { binding("spawn_sync"); }\nf(process);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-spread-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((p) => p.binding("spawn_sync"))(...[process]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-array-alias-spread-call-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const a = [process];\nfunction f(p) { p.binding("spawn_sync"); }\nf(...a);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-wrapped-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((o) => o.p.binding("spawn_sync"))({ p: process });\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-function-return-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((get) => get().binding("spawn_sync"))(() => process);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-function-local-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'function f() { const p = process; p.binding("spawn_sync"); }\nf();\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-shadow-reassigned-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'function f(process) { process = globalThis.process; process.binding("spawn_sync"); }\nf({});\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-shadow-closure-reassigned-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'function f(process) { const assign = () => { process = globalThis.process; }; assign(); process.binding("spawn_sync"); }\nf({});\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-shadow-closure-local-reassigned-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'function f(process) { let p = {}; const assign = () => { p = globalThis.process; }; assign(); p.binding("spawn_sync"); }\nf({});\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-shadow-closure-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'function f() { let p; const assign = () => { ({ process: p } = globalThis); }; assign(); p.binding("spawn_sync"); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-closure-reassigned-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'function f(g) { const assign = () => { g = globalThis; }; assign(); g.process.binding("spawn_sync"); }\nf({});\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-method-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((o) => o.get().binding("spawn_sync"))({ get() { return process; } });\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-parameter-default-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '((fn) => fn().binding("spawn_sync"))((x = process) => x);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const g = globalThis;\ng.process.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-object-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { globalThis: { process: p } } = globalThis;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-self-property-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'globalThis.globalThis.process.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-bun-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'globalThis.Bun.spawnSync(["true"]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-deno-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'globalThis.Deno.Command("true").outputSync();\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: { "verify.js": 'const g = globalThis;\nReflect.get(g, "Bun").spawnSync(["true"]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-reflect-global-bun-api",
+				scripts: { verify: "bun verify.js" },
+				files: { "verify.js": 'const g = globalThis;\nglobalThis.Reflect.get(g, "Bun").spawnSync(["true"]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-apply-global-process-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'Reflect.apply(Reflect.get, Reflect, [globalThis, "process"]).binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-get-sequence-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": '(0, Reflect.get)(globalThis, "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-get-sequence-target-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'Reflect.get((0, globalThis), "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "dynamic-constructor-chain-computed-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": '({})["con" + "structor"]["con" + "structor"]("return 1")();\n',
+				},
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-global-object-container-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'const holder = { g: globalThis };\nholder.g.process.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-return-function-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const getGlobal = () => globalThis;\ngetGlobal().Bun.spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-call-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": '((g) => g.process.binding("spawn_sync"))(globalThis);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-throw-global-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'try { throw globalThis; } catch (g) { g.Bun.spawnSync(["true"]); }\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-global-wrapper-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'Object(globalThis).process.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-global-bun-wrapper-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'Object(globalThis).Bun.spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-create-global-wrapper-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'Object.create(globalThis).process.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-parameter-default-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": '((g = globalThis) => g.process.binding("spawn_sync"))();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-tagged-template-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": ['((_, g) => g.Bun.spawnSync(["true"]))`', "$", "{globalThis}", "`;\n"].join(""),
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-bun-literal-destructure-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const { "Bun": b } = globalThis;\nb.spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-deno-assignment-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'let d;\n({ Deno: d } = globalThis);\nd.Command("true").outputSync();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-member-assignment-container-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'const holder = {};\nholder.g = globalThis;\nholder.g.process.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-array-assignment-container-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const holder = [];\nholder[0] = globalThis;\nholder[0].Bun.spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-method-member-assignment-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'const holder = {};\nholder.get = Reflect.get;\nholder.get(globalThis, "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-method-container-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'const holder = { get: Reflect.get };\nholder.get(globalThis, "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-object-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'const R = Reflect;\nR.get(globalThis, "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-object-container-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const holder = { R: Reflect };\nholder.R.get(globalThis, "Bun").spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-object-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'const O = Object;\nO.getOwnPropertyDescriptor(globalThis, "process").value.getBuiltinModule("child_process").execSync("true");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-tagged-template-process-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": [
+						'((_, p) => p.getBuiltinModule("child_process").execSync("true"))`',
+						"$",
+						"{process}",
+						"`;\n",
+					].join(""),
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-throw-process-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'try { throw process; } catch (p) { p.getBuiltinModule("child_process").execSync("true"); }\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-yield-process-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'function* leak(){ yield process; }\nleak().next().value.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-class-field-process-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'class Leak { static p = process; }\nLeak.p.binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-exported-process-dependency-api",
+				scripts: { verify: "node verify.mjs" },
+				files: {
+					"verify.mjs": 'import p from "./proc.mjs";\np.binding("spawn_sync");\n',
+					"proc.mjs": "export default process;\n",
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-get-sequence-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'const get = (0, Reflect.get);\nget(globalThis, "process").binding("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-dynamic-key-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const g = globalThis;\nconst key = "Bun";\nReflect.get(g, key).spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-method-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const g = globalThis;\nconst get = Reflect.get;\nget(g, "Bun").spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptor-global-bun-method-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; const desc = Object.getOwnPropertyDescriptor; desc(g, "Bun").value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-method-destructure-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js": 'const g = globalThis;\nconst { get } = Reflect;\nget(g, "Bun").spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-reflect-method-destructure-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'const g = globalThis;\nconst { get } = globalThis.Reflect;\nget(g, "Bun").spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptor-global-bun-method-destructure-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; const { getOwnPropertyDescriptor: desc } = Object; desc(g, "Bun").value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-call-api",
+				scripts: { verify: "bun verify.js" },
+				files: { "verify.js": 'const g = globalThis;\nReflect.get.call(Reflect, g, "Bun").spawnSync(["true"]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-bind-api",
+				scripts: { verify: "bun verify.js" },
+				files: { "verify.js": 'const g = globalThis;\nReflect.get.bind(Reflect)(g, "Bun").spawnSync(["true"]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptor-global-bun-bind-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.getOwnPropertyDescriptor.bind(Object)(g, "Bun").value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-global-bun-apply-args-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'const g = globalThis;\nconst args = [g, "Bun"];\nReflect.get.apply(Reflect, args).spawnSync(["true"]);\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptor-global-bun-apply-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.getOwnPropertyDescriptor.apply(Object, [g, "Bun"]).value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-descriptor-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Reflect.getOwnPropertyDescriptor(g, "Bun").value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptor-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.getOwnPropertyDescriptor(g, "Bun").value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptors-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.getOwnPropertyDescriptors(g).Bun.value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-descriptors-map-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; const d = Object.getOwnPropertyDescriptors(g); d.Bun.value.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-values-global-bun-alias-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.values(g).find(v => v?.spawnSync)?.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-assign-global-bun-source-api",
+				scripts: { verify: "bun verify.js" },
+				files: {
+					"verify.js":
+						'function f() { const g = globalThis; Object.assign({}, g).Bun.spawnSync(["true"]); }\nf();\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-alias-process-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const g = globalThis;\nconst p = g.process;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-member-assignment-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const o = {};\no.p = process;\no.p.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-named-supplier-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const get = () => process;\nget().binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-function-declaration-supplier-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'function get() { return process; }\nget().binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-reflect-apply-argument-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const fn = (p) => p.binding("spawn_sync");\nReflect.apply(fn, null, [process]);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-object-call-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'Object(process).binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { binding } = process;\nbinding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-computed-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { ["bind" + "ing"]: b } = process;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-computed-global-this-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { ["bind" + "ing"]: b } = globalThis.process;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-computed-global-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { ["bind" + "ing"]: b } = global.process;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-computed-nested-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: { ["bind" + "ing"]: b } } = globalThis;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-global-destructure-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: p } = globalThis;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-global-destructure-default-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: p = null } = globalThis;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-assignment-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'let p;\np = globalThis.process;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-destructure-assignment-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'let p;\n({ process: p } = globalThis);\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-direct-destructure-assignment-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'let binding;\n({ binding } = process);\nbinding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-nested-global-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: { binding } } = globalThis;\nbinding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-nested-global-default-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: { binding } = {} } = globalThis;\nbinding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-rest-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { ...p } = process;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-nested-global-rest-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { process: { ...p } } = globalThis;\np.binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-computed-after-nested-object-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const { env: {}, ["bind" + "ing"]: b } = process;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-binding-computed-parameter-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'function f({ ["bind" + "ing"]: b }) { b("spawn_sync"); }\nf(process);\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-computed-bracket-string-destructure-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js": 'const { ["bind]".replace("]", "") + "ing"]: b } = process;\nb("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use dynamic property access",
+			},
+			{
+				name: "process-get-builtin-module-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "process.getBuiltinModule('child_process').execSync('true');\n" },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
 				name: "process-execution-api",
 				scripts: { verify: "bun verify.js" },
 				files: { "verify.js": "Bun?.spawnSync(['node', './helper.js']);\n" },
@@ -1202,6 +2116,63 @@ loop:
 				scripts: { verify: "node verify.js" },
 				files: { "verify.js": "process?.binding('spawn_sync');\n" },
 				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-member-alias-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'const b = process.binding;\nb("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-sequence-call-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": '(0, process.binding)("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-call-method-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'process.binding.call(process, "spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-with-api",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": 'with (process) binding("spawn_sync");\n' },
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "process-binding-enumeration-api",
+				scripts: { verify: "node verify.js" },
+				files: {
+					"verify.js":
+						'const fn = Object.values(process).find(value => value?.name === "bind" + "ing");\nfn("spawn_sync");\n',
+				},
+				error: "verifier dependencies must not use process execution APIs",
+			},
+			{
+				name: "native-verifier-dependency",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "require('./addon.node');\n", "addon.node": "" },
+				error: "verifier dependencies must not use native or WebAssembly files",
+			},
+			{
+				name: "wasm-verifier-dependency",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "require('./addon.wasm');\n", "addon.wasm": "" },
+				error: "verifier dependencies must not use native or WebAssembly files",
+			},
+			{
+				name: "native-verifier-entrypoint",
+				scripts: { verify: "node ./addon.node" },
+				files: { "addon.node": "" },
+				error: "verifier package scripts must execute a local verifier file through an approved runtime",
+			},
+			{
+				name: "wasm-verifier-entrypoint",
+				scripts: { verify: "bun ./addon.wasm" },
+				files: { "addon.wasm": "" },
+				error: "verifier package scripts must not invoke nested package scripts",
 			},
 			{
 				name: "nested-package-runner",
@@ -1255,6 +2226,12 @@ loop:
 				name: "extensionless-entrypoint",
 				scripts: { verify: "node check" },
 				error: "verifier package scripts must execute a local verifier file through an approved runtime",
+			},
+			{
+				name: "extensionless-verifier-dependency",
+				scripts: { verify: "node verify.js" },
+				files: { "verify.js": "require('./pkg');\n", "pkg/index.js": "module.exports = true;\n" },
+				error: "verifier dependencies must use explicit file extensions",
 			},
 			{
 				name: "bare-package-import",
@@ -1316,7 +2293,60 @@ loop:
 				await dir.remove();
 			}
 		}
-	});
+	}, 60_000);
+
+	it("allows verifier scripts to shadow process and global aliases in local parameters", async () => {
+		const dir = await makeTempDir();
+		try {
+			await Bun.write(
+				path.join(dir.path(), "verify.js"),
+				[
+					"function local(process) { return process.binding('spawn_sync'); }",
+					"const p = process;",
+					"function localAlias(p) { const q = p; return q.binding('spawn_sync'); }",
+					"const g = globalThis;",
+					"function localGlobal(g) { return g.process.binding('spawn_sync'); }",
+					"function outer() { function nested(process) { return process.binding('spawn_sync'); } return 'ok'; }",
+					"Object.getOwnPropertyDescriptor(globalThis, 'fetch');",
+					"const result = local({ binding: () => 'ok' }) + localAlias({ binding: () => 'ok' }) + localGlobal({ process: { binding: () => 'ok' } }) + outer();",
+					"require('fs').writeFileSync('verified.txt', result);",
+					"",
+				].join("\n"),
+			);
+			await Bun.write(
+				path.join(dir.path(), "package.json"),
+				JSON.stringify({ scripts: { verify: "node verify.js" } }),
+			);
+			await initCleanGitRepo(dir.path());
+			const spec = parseLoopSpec(`
+loop:
+  name: process-shadow-local-param
+  goal: Allow local parameter names without exposing global process.
+  level: assisted
+  non_goals: ["Do not edit verifier scripts."]
+  runner:
+    prompt: Try nothing.
+  verifier:
+    separate: true
+    commands:
+      - ["bun", "run", "verify"]
+  guardrails:
+    max_iterations: 1
+  state:
+    run_log: loop-run-log.md
+`);
+			const result = await executeLoopIteration(spec, {
+				cwd: dir.path(),
+				runAgent: async () => ({ exitCode: 0, output: "agent completed" }),
+			});
+
+			expect(result.error).toBeNull();
+			expect(result.status).toBe("passed");
+			await expect(Bun.file(path.join(dir.path(), "verified.txt")).text()).resolves.toBe("okokokok");
+		} finally {
+			await dir.remove();
+		}
+	}, 15000);
 
 	it("requires approval if a subpackage verifier root config changes before verification", async () => {
 		const dir = await makeTempDir();
