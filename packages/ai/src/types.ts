@@ -433,6 +433,8 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string; // e.g., for OpenAI responses, the reasoning item ID
 	itemId?: string; // item.id from output_item.added, used to match output_item.done
+	/** Replay this recovered reasoning as plain text; used for native blocks that wrapped visible inline thinking tags. */
+	replayAsText?: true;
 }
 
 export interface RedactedThinkingContent {
@@ -537,6 +539,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
 	errorStatus?: number;
+	/** Provider-specific stable error identifier surfaced by upstream APIs when available. */
+	errorId?: string;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
