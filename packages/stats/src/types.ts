@@ -1,5 +1,5 @@
 import type { AssistantMessage, ServiceTier, StopReason, Usage } from "@oh-my-pi/pi-ai";
-import type { AgentType } from "./shared-types";
+import type { AgentType, HealthEventKind } from "./shared-types";
 
 export * from "./shared-types";
 
@@ -59,12 +59,45 @@ export interface SessionHeader {
 	title?: string;
 }
 
+export interface SessionModelChangeEntry {
+	type: "model_change";
+	id: string;
+	parentId?: string | null;
+	timestamp: string;
+	model: string;
+	role?: string;
+}
+
+export interface SessionCompactionEntry {
+	type: "compaction";
+	id: string;
+	parentId?: string | null;
+	timestamp: string;
+	tokensBefore: number;
+}
+
+export interface SessionInitEntry {
+	type: "session_init";
+	id: string;
+	parentId?: string | null;
+	timestamp: string;
+}
+
+export interface ToolResultMessage {
+	role: "toolResult";
+	toolCallId: string;
+	toolName: string;
+	content: unknown;
+	details?: unknown;
+	isError?: boolean;
+}
+
 export interface SessionMessageEntry {
 	type: "message";
 	id: string;
 	parentId: string | null;
 	timestamp: string;
-	message: AssistantMessage | { role: "user" | "toolResult" };
+	message: AssistantMessage | { role: "user"; content?: unknown; synthetic?: boolean } | ToolResultMessage;
 }
 
 export interface SessionServiceTierChangeEntry {
@@ -75,7 +108,14 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export type SessionEntry =
+	| SessionHeader
+	| SessionModelChangeEntry
+	| SessionCompactionEntry
+	| SessionInitEntry
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.
@@ -125,4 +165,40 @@ export interface UserMessageLink {
 	entryId: string;
 	model: string;
 	provider: string;
+}
+
+export interface SessionHealthStats {
+	/** Database ID */
+	id?: number;
+	/** Session file path */
+	sessionFile: string;
+	/** Entry ID within the session */
+	entryId: string;
+	/** Folder/project path */
+	folder: string;
+	/** Unix timestamp in ms */
+	timestamp: number;
+	/** Which agent transcript produced this event */
+	agentType: AgentType;
+	/** Health event category */
+	kind: HealthEventKind;
+	/** Tool dimension for tool-scoped events */
+	toolName: string | null;
+	/** Model dimension for model-scoped events */
+	model: string | null;
+	/** Provider dimension for model-scoped events */
+	provider: string | null;
+	retryCount: number;
+	toolLoopCount: number;
+	cancellationCount: number;
+	editFilesChanged: number;
+	editLinesAdded: number;
+	editLinesRemoved: number;
+	compactionCount: number;
+	compactionTokensBefore: number;
+	modelSwitchCount: number;
+	subagentSpawnCount: number;
+	largeResultCount: number;
+	largeResultBytes: number;
+	largeResultLines: number;
 }

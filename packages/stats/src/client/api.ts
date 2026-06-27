@@ -3,6 +3,7 @@ import type {
 	CostDashboardStats,
 	FolderStats,
 	GainDashboardStats,
+	HealthDashboardStats,
 	MessageStats,
 	ModelDashboardStats,
 	OverviewStats,
@@ -75,6 +76,15 @@ export async function getBehaviorDashboardStats(
 	signal?: AbortSignal,
 ): Promise<BehaviorDashboardStats> {
 	return fetchJson<BehaviorDashboardStats>(`${API_BASE}/stats/behavior?range=${encodeURIComponent(range)}`, {
+		signal,
+	});
+}
+
+export async function getSessionHealthDashboardStats(
+	range: TimeRange = "24h",
+	signal?: AbortSignal,
+): Promise<HealthDashboardStats> {
+	return fetchJson<HealthDashboardStats>(`${API_BASE}/stats/health?range=${encodeURIComponent(range)}`, {
 		signal,
 	});
 }

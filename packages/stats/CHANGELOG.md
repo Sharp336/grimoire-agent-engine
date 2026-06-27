@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Health dashboard to `omp stats` with session-level retry, cancellation, tool-loop, edit-churn, compaction, model-switch, subagent fanout, and large-result analytics. The next sync reparses existing sessions once to backfill the new health table.
+
 ## [16.2.0] - 2026-06-27
 
 ### Added

@@ -13,12 +13,17 @@ import {
 	getModelPerformanceSeries,
 	getModelTimeSeries,
 	getOverallStats,
+	getSessionHealthByKind,
+	getSessionHealthByTool,
+	getSessionHealthOverall,
+	getSessionHealthTimeSeries,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
 	getTimeSeries,
 	initDb,
 	insertMessageStats,
+	insertSessionHealthStats,
 	insertUserMessageStats,
 	setFileOffset,
 	updateUserMessageLinks,
@@ -29,7 +34,13 @@ import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // hidden argv mode, so the compiled binary and npm bundle only need one
 // JavaScript entry. Standalone source `omp-stats` keeps using this package's
 // own sync-worker source file.
-import type { BehaviorDashboardStats, DashboardStats, MessageStats, RequestDetails } from "./types";
+import type {
+	BehaviorDashboardStats,
+	DashboardStats,
+	HealthDashboardStats,
+	MessageStats,
+	RequestDetails,
+} from "./types";
 
 /**
  * Apply a freshly parsed result to the database. Runs entirely on the
@@ -38,6 +49,7 @@ import type { BehaviorDashboardStats, DashboardStats, MessageStats, RequestDetai
 function applyParseResult(sessionFile: string, lastModified: number, result: ParseSessionResult): number {
 	if (result.stats.length > 0) insertMessageStats(result.stats);
 	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
+	if (result.healthStats.length > 0) insertSessionHealthStats(result.healthStats);
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
 	setFileOffset(sessionFile, result.newOffset, lastModified);
 	return result.stats.length + result.userStats.length;
@@ -452,5 +464,16 @@ export async function getBehaviorDashboardStats(range?: string | null): Promise<
 		overall: getBehaviorOverall(cutoff),
 		byModel: getBehaviorByModel(cutoff),
 		behaviorSeries: getBehaviorTimeSeries(cutoff),
+	};
+}
+
+export async function getSessionHealthDashboardStats(range?: string | null): Promise<HealthDashboardStats> {
+	await initDb();
+	const { cutoff } = getTimeRangeConfig(range);
+	return {
+		overall: getSessionHealthOverall(cutoff),
+		byKind: getSessionHealthByKind(cutoff),
+		byTool: getSessionHealthByTool(cutoff),
+		healthSeries: getSessionHealthTimeSeries(cutoff),
 	};
 }
