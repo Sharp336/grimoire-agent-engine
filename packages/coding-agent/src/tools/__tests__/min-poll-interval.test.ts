@@ -1,16 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseWaitDurationMs } from "../job";
-
-/**
- * Mirrors the clamping logic in job.ts so tests stay independent of full session setup.
- */
-function clampWaitMs(waitMs: number, rawSetting: unknown): number {
-	const parsed = rawSetting != null && rawSetting !== "" ? Number(rawSetting) : NaN;
-	const minSeconds = Number.isFinite(parsed) && parsed >= 0 ? parsed : 300;
-	const minPollIntervalMs = minSeconds * 1000;
-	return Math.max(waitMs, minPollIntervalMs);
-}
-
+import { clampWaitMs, parseWaitDurationMs } from "../job";
 describe("parseWaitDurationMs", () => {
 	test("parses known durations", () => {
 		expect(parseWaitDurationMs("5s")).toBe(5_000);
@@ -34,9 +23,9 @@ describe("parseWaitDurationMs", () => {
 });
 
 describe("min poll interval floor", () => {
-	test("applies default 300s when no setting is provided", () => {
+	test("applies no clamping when no setting is provided (default 0)", () => {
 		const result = clampWaitMs(5_000, undefined);
-		expect(result).toBe(300_000);
+		expect(result).toBe(5_000);
 	});
 
 	test("allows 5s poll when min is lower (no-clamp scenario)", () => {
@@ -66,10 +55,10 @@ describe("min poll interval floor", () => {
 		expect(result).toBe(5_000);
 	});
 
-	test("ignores non-numeric setting and falls back to 300s default", () => {
-		expect(clampWaitMs(5_000, "invalid")).toBe(300_000);
-		expect(clampWaitMs(5_000, null)).toBe(300_000);
-		expect(clampWaitMs(5_000, "")).toBe(300_000);
+	test("ignores non-numeric setting and falls back to 0 (no clamping)", () => {
+		expect(clampWaitMs(5_000, "invalid")).toBe(5_000);
+		expect(clampWaitMs(5_000, null)).toBe(5_000);
+		expect(clampWaitMs(5_000, "")).toBe(5_000);
 	});
 
 	test("combined path: fixed duration + min floor", () => {

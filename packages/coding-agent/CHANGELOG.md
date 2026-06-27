@@ -40,6 +40,7 @@
 - Fixed `/shake` and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
 - Fixed the `time_spent` status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
 - Added `async.minPollIntervalSeconds` setting to floor the poll wait time, preventing excessive subagent polling in tight loops. Default 300s (5 minutes). Set higher than `async.pollWaitDuration` for expensive models to reduce advisor token spend.
+- Added `async.minPollIntervalSeconds` setting to floor the poll wait time, preventing excessive subagent polling in tight loops. Default 0 (opt-in; set your desired floor to activate). Set higher than `async.pollWaitDuration` for expensive models to reduce advisor token spend.
 
 ### Changed
 

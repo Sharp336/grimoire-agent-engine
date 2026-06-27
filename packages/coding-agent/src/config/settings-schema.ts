@@ -3684,13 +3684,21 @@ export const SETTINGS_SCHEMA = {
 
 	"async.minPollIntervalSeconds": {
 		type: "number",
-		default: 300,
+		default: 0,
 		ui: {
 			tab: "tools",
 			group: "Execution",
 			label: "Min Poll Interval (seconds)",
 			description:
-				"Minimum seconds the poll tool waits between checks, even with shorter poll durations or a cold smart-poll ladder. Prevents the advisor from polling subagents too aggressively. Default 300 (5 minutes). If set higher than async.pollWaitDuration, the minimum wins.",
+				"Minimum seconds the poll tool waits between checks, even with shorter poll durations or a cold smart-poll ladder. Prevents the advisor from polling subagents too aggressively. Default 0 (no minimum — opt-in; set to your desired floor to activate). If set higher than async.pollWaitDuration, the minimum wins.",
+			options: [
+				{ value: "0", label: "No minimum (opt-in)" },
+				{ value: "30", label: "30 seconds" },
+				{ value: "60", label: "1 minute" },
+				{ value: "120", label: "2 minutes" },
+				{ value: "300", label: "5 minutes" },
+				{ value: "600", label: "10 minutes" },
+			],
 		},
 	},
 
