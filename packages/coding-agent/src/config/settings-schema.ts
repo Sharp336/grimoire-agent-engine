@@ -3458,6 +3458,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"gitlab.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "GitLab CLI",
+			description:
+				"Enable the gitlab tool (glab-backed project view, merge request create/checkout, and CI/CD pipeline status/list workflows)",
+		},
+	},
+
 	"github.cache.enabled": {
 		type: "boolean",
 		default: true,

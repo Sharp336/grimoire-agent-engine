@@ -9,6 +9,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"eval",
 	"ssh",
 	"github",
+	"gitlab",
 	"glob",
 	"grep",
 	"lsp",

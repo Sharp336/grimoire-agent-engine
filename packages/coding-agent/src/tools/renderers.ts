@@ -19,6 +19,7 @@ import { browserToolRenderer } from "./browser/render";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
+import { gitlabToolRenderer } from "./gitlab-renderer";
 import { globToolRenderer } from "./glob";
 import { grepToolRenderer } from "./grep";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
@@ -91,6 +92,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	task: taskToolRenderer as ToolRenderer,
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
+	gitlab: gitlabToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,

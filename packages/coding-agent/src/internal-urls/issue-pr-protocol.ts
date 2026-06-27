@@ -1,21 +1,22 @@
 /**
  * Protocol handlers for `issue://` and `pr://`.
  *
- * Both single-item reads route through the SQLite-backed `github-cache`,
- * sharing rendered markdown across sessions. Root and repo-scoped reads
- * (`issue://`, `pr://owner/repo`) issue a live `gh issue list` / `gh pr list`
- * for browsing.
+ * Single GitHub issue/PR reads and GitLab issue/MR reads route through the
+ * SQLite-backed cache. GitLab cache rows are enabled only when a local glab
+ * credential identity is visible. Root and repo-scoped reads
+ * (`issue://`, `pr://owner/repo`) issue a live list call for browsing.
  *
  * URL shapes:
  * - `issue://` / `pr://` — list recent items in the caller's default repo.
  * - `issue://owner/repo` / `pr://owner/repo` — list recent items for that repo.
- * - `issue://123` / `pr://123` — single item; repo derived from the caller's
+ * - `issue://123` / `pr://123` — single item; repo/backend derived from the
  *   session cwd (passed through `ResolveContext`).
  * - `issue://owner/repo/123` / `pr://owner/repo/123` — fully qualified single
- *   item.
+ *   item. GitHub by default; GitLab only when the checkout has a matching
+ *   GitLab remote.
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
- *   `gh`.
+ *   the selected backend.
  */
 import type { Settings } from "../config/settings";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -28,11 +29,25 @@ import {
 	parsePositiveDecimalInt,
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
-import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
+import {
+	type CacheStatus,
+	formatFreshnessNote,
+	normalizeGitlabHost,
+	resolveConfiguredGitlabHosts,
+} from "../tools/github-cache";
+import { getOrFetchGitlabIssue, getOrFetchGitlabMr, getOrFetchGitlabMrDiff } from "../tools/gitlab";
 import * as git from "../utils/git";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
 
 type Scheme = "issue" | "pr";
+
+type IssuePrBackend = { kind: "github"; repo: string } | { kind: "gitlab"; host: string; repo: string };
+
+interface ParsedGitRemote {
+	backend: "gitlab";
+	host: string;
+	repo: string;
+}
 
 interface ParsedSingle {
 	kind: "single";
@@ -68,17 +83,29 @@ type Parsed = ParsedSingle | ParsedList | ParsedPrDiff;
 const LIST_LIMIT_DEFAULT = 30;
 const LIST_LIMIT_MAX = 100;
 
+function allowedListStates(scheme: Scheme): readonly ParsedList["state"][] {
+	return scheme === "pr" ? ["open", "closed", "merged", "all"] : ["open", "closed", "all"];
+}
+
+function isAllowedListState(scheme: Scheme, value: string): value is ParsedList["state"] {
+	return value === "open" || value === "closed" || value === "all" || (scheme === "pr" && value === "merged");
+}
+
 function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undefined): ParsedList {
 	const stateRaw = url.searchParams.get("state");
-	const allowedStates: ParsedList["state"][] =
-		scheme === "pr" ? ["open", "closed", "merged", "all"] : ["open", "closed", "all"];
-	if (stateRaw !== null && !(allowedStates as string[]).includes(stateRaw)) {
-		// Reject instead of silently falling back to "open": a typo'd state
-		// would otherwise return the open list, indistinguishable from "no
-		// matches for the requested state".
-		throw new Error(`Invalid ${scheme}:// list state '${stateRaw}'. Expected one of: ${allowedStates.join(", ")}.`);
+	const allowedStates = allowedListStates(scheme);
+	let state: ParsedList["state"] = "open";
+	if (stateRaw !== null) {
+		if (!isAllowedListState(scheme, stateRaw)) {
+			// Reject instead of silently falling back to "open": a typo'd state
+			// would otherwise return the open list, indistinguishable from "no
+			// matches for the requested state".
+			throw new Error(
+				`Invalid ${scheme}:// list state '${stateRaw}'. Expected one of: ${allowedStates.join(", ")}.`,
+			);
+		}
+		state = stateRaw;
 	}
-	const state = (stateRaw ?? "open") as ParsedList["state"];
 
 	const limitRaw = url.searchParams.get("limit");
 	let limit = LIST_LIMIT_DEFAULT;
@@ -234,19 +261,97 @@ function settingsFromContext(context: ResolveContext | undefined): Settings | un
 	return raw as Settings;
 }
 
-async function resolveListRepo(
+function cleanGitlabRepoPath(value: string): string | undefined {
+	let repo = value.trim();
+	const queryStart = repo.search(/[?#]/);
+	if (queryStart >= 0) repo = repo.slice(0, queryStart);
+	repo = repo.replace(/^\/+/, "").replace(/\/+$/, "");
+	if (repo.endsWith(".git")) repo = repo.slice(0, -4);
+	if (!repo?.includes("/")) return undefined;
+	try {
+		repo = repo
+			.split("/")
+			.map(segment => decodeURIComponent(segment))
+			.join("/");
+	} catch {
+		return undefined;
+	}
+	return repo;
+}
+
+function parseGitLabRemoteUrl(remoteUrl: string, knownGitlabHosts: ReadonlySet<string>): ParsedGitRemote | undefined {
+	const trimmed = remoteUrl.trim();
+	if (!trimmed) return undefined;
+	let host = "";
+	let repo: string | undefined;
+	if (/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)) {
+		try {
+			const parsed = new URL(trimmed);
+			host = normalizeGitlabHost(parsed.hostname);
+			repo = cleanGitlabRepoPath(parsed.pathname);
+		} catch {
+			return undefined;
+		}
+	} else {
+		const scpMatch = trimmed.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
+		if (!scpMatch) return undefined;
+		host = normalizeGitlabHost(scpMatch[1] ?? "");
+		repo = cleanGitlabRepoPath(scpMatch[2] ?? "");
+	}
+	if (!host || !repo) return undefined;
+	const isGitlabHost = host.includes("gitlab") || knownGitlabHosts.has(host);
+	if (!isGitlabHost) return undefined;
+	return { backend: "gitlab", host, repo };
+}
+
+async function resolveGitLabRemote(
+	cwd: string,
+	parsedRepo: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<{ host: string; repo: string } | undefined> {
+	try {
+		const remoteNames = await git.remote.list(cwd, signal);
+		const orderedNames = [
+			"origin",
+			"upstream",
+			...remoteNames.filter(name => name !== "origin" && name !== "upstream"),
+		].filter((name, index, names) => remoteNames.includes(name) && names.indexOf(name) === index);
+		const namesToCheck = parsedRepo ? orderedNames : orderedNames.slice(0, 1);
+		const knownGitlabHosts = resolveConfiguredGitlabHosts();
+		for (const remoteName of namesToCheck) {
+			let remoteUrl: string | undefined;
+			try {
+				remoteUrl = await git.remote.url(cwd, remoteName, signal);
+			} catch {
+				continue;
+			}
+			const remote = remoteUrl ? parseGitLabRemoteUrl(remoteUrl, knownGitlabHosts) : undefined;
+			if (!remote) continue;
+			if (parsedRepo && remote.repo.toLowerCase() !== parsedRepo.toLowerCase()) continue;
+			return { host: remote.host, repo: remote.repo };
+		}
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
+async function resolveBackend(
 	scheme: Scheme,
 	parsedRepo: string | undefined,
 	context: ResolveContext | undefined,
-): Promise<string> {
-	if (parsedRepo) return parsedRepo;
+	usageHint: string = `${scheme}://<owner>/<repo>`,
+): Promise<IssuePrBackend> {
 	const cwd = resolveCwd(context);
+	const gitlabRemote = await resolveGitLabRemote(cwd, parsedRepo, context?.signal);
+	if (gitlabRemote) return { kind: "gitlab", host: gitlabRemote.host, repo: gitlabRemote.repo };
+	if (parsedRepo) return { kind: "github", repo: parsedRepo };
 	try {
-		return await resolveDefaultRepoMemoized(cwd, context?.signal);
+		return { kind: "github", repo: await resolveDefaultRepoMemoized(cwd, context?.signal) };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(
-			`${scheme}:// could not resolve a default repo from the current session: ${message}\nUse ${scheme}://<owner>/<repo> instead.`,
+			`${scheme}:// could not resolve a default repo from the current session: ${message}\nUse ${usageHint} instead.`,
 		);
 	}
 }
@@ -269,6 +374,41 @@ interface PrListItem extends IssueListItem {
 	headRefName?: string;
 }
 
+function supportsExplicitInternalRepo(repo: string): boolean {
+	return repo.split("/").filter(Boolean).length === 2;
+}
+
+function formatItemUrl(scheme: Scheme, repo: string, number: string | number): string {
+	if (supportsExplicitInternalRepo(repo)) return `${scheme}://${repo}/${number}`;
+	return `${scheme}://${number}`;
+}
+
+function formatListRootUrl(scheme: Scheme, repo: string): string {
+	return supportsExplicitInternalRepo(repo) ? `${scheme}://${repo}` : `${scheme}://`;
+}
+
+function formatListItemUrl(scheme: Scheme, repo: string, number: string): string {
+	return number === "?" ? formatListRootUrl(scheme, repo) : formatItemUrl(scheme, repo, number);
+}
+
+function formatSpecificItemFooter(scheme: Scheme, repo: string): string {
+	if (supportsExplicitInternalRepo(repo)) {
+		return `\n\n---\nRead a specific item: \`${scheme}://${repo}/<N>\` (or \`${scheme}://<N>\` for the current repo).`;
+	}
+	return `\n\n---\nRead a specific item in the current GitLab checkout: \`${scheme}://<N>\`.`;
+}
+
+function formatPrDiffUrl(repo: string | undefined, prNumber: number): string {
+	const itemUrl = repo ? formatItemUrl("pr", repo, prNumber) : `pr://${prNumber}`;
+	return `${itemUrl}/diff`;
+}
+
+function formatPrDiffUsageHint(parsed: ParsedPrDiff): string {
+	if (parsed.mode === "all") return `pr://<owner>/<repo>/${parsed.number}/diff/all`;
+	if (parsed.mode === "slice") return `pr://<owner>/<repo>/${parsed.number}/diff/${parsed.index ?? "<i>"}`;
+	return `pr://<owner>/<repo>/${parsed.number}/diff`;
+}
+
 function formatListItem(scheme: Scheme, repo: string, item: IssueListItem | PrListItem): string {
 	const number = item.number ?? "?";
 	const title = item.title ?? "(no title)";
@@ -281,8 +421,83 @@ function formatListItem(scheme: Scheme, repo: string, item: IssueListItem | PrLi
 		.filter(Boolean)
 		.join(", ");
 	const labelSuffix = labels ? `  labels: ${labels}` : "";
-	const itemUrl = number === "?" ? `${scheme}://${repo}` : `${scheme}://${repo}/${number}`;
+	const itemUrl = formatListItemUrl(scheme, repo, String(number));
 	return `- [${state}${draftSuffix}] #${number}  @${author}  ${updated}\n    ${title}${labelSuffix}\n    ${itemUrl}`;
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function asJsonRecord(value: unknown): JsonRecord | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : undefined;
+}
+
+function readGitlabListString(value: unknown, keys: readonly string[]): string | undefined {
+	const record = asJsonRecord(value);
+	if (!record) return undefined;
+	for (const key of keys) {
+		const raw = record[key];
+		if (typeof raw === "string") {
+			const trimmed = raw.trim();
+			if (trimmed) return trimmed;
+		}
+		if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+		if (typeof raw === "boolean") return String(raw);
+	}
+	return undefined;
+}
+
+function formatGitlabListUser(value: unknown): string | undefined {
+	if (typeof value === "string") return value.trim() || undefined;
+	return readGitlabListString(value, ["username", "login", "name"]);
+}
+
+function formatGitlabListLabels(value: unknown): string | undefined {
+	if (typeof value === "string") return value.trim() || undefined;
+	if (!Array.isArray(value)) return undefined;
+	const labels = value
+		.map(label => (typeof label === "string" ? label : readGitlabListString(label, ["name", "title"])))
+		.filter((label): label is string => Boolean(label));
+	return labels.length > 0 ? labels.join(", ") : undefined;
+}
+
+function extractGitlabListItems(data: unknown): unknown[] {
+	if (Array.isArray(data)) return data;
+	const record = asJsonRecord(data);
+	if (!record) return [];
+	for (const key of ["items", "data", "issues", "merge_requests", "mergeRequests"]) {
+		const raw = record[key];
+		if (Array.isArray(raw)) return raw;
+	}
+	return [];
+}
+
+function formatGitlabListItem(scheme: Scheme, repo: string, item: unknown): string {
+	const record = asJsonRecord(item);
+	const number = readGitlabListString(item, ["iid", "number", "id"]) ?? "?";
+	const title = readGitlabListString(item, ["title"]) ?? "(no title)";
+	const state = readGitlabListString(item, ["state"])?.toLowerCase() ?? "?";
+	const author = formatGitlabListUser(record?.author) ?? "?";
+	const labels = formatGitlabListLabels(record?.labels);
+	const updated = readGitlabListString(item, ["updated_at", "updatedAt", "created_at", "createdAt"]) ?? "";
+	const sourceUrl = readGitlabListString(item, ["web_url", "webUrl", "url"]);
+	const labelSuffix = labels ? `  labels: ${labels}` : "";
+	const itemUrl = formatListItemUrl(scheme, repo, number);
+	const sourceLine = sourceUrl ? `\n    ${sourceUrl}` : "";
+	const numberPrefix = scheme === "pr" ? "!" : "#";
+	return `- [${state}] ${numberPrefix}${number}  @${author}  ${updated}\n    ${title}${labelSuffix}\n    ${itemUrl}${sourceLine}`;
+}
+
+function appendGitlabListState(args: string[], scheme: Scheme, state: ParsedList["state"]): void {
+	if (state === "open") return;
+	if (state === "all") {
+		args.push("--all");
+		return;
+	}
+	if (state === "closed") {
+		args.push("--closed");
+		return;
+	}
+	if (scheme === "pr" && state === "merged") args.push("--merged");
 }
 
 async function fetchAndRenderList(
@@ -291,8 +506,39 @@ async function fetchAndRenderList(
 	url: InternalUrl,
 	context: ResolveContext | undefined,
 ): Promise<InternalResource> {
-	const repo = await resolveListRepo(scheme, options.repo, context);
+	const backend = await resolveBackend(scheme, options.repo, context);
 	const cwd = resolveCwd(context);
+	if (backend.kind === "gitlab") {
+		const args =
+			scheme === "issue"
+				? ["issue", "list", "--output", "json", "--repo", backend.repo]
+				: ["mr", "list", "--output", "json", "--repo", backend.repo];
+		appendGitlabListState(args, scheme, options.state);
+		if (options.author) args.push("--author", options.author);
+		if (options.label) args.push("--label", options.label);
+		args.push("--per-page", String(options.limit));
+		const data = await git.gitlab.json<unknown>(cwd, args, context?.signal, { repoProvided: true });
+		const items = extractGitlabListItems(data);
+		const header =
+			scheme === "issue"
+				? `# GitLab Issues in ${backend.repo} (${options.state}, up to ${options.limit})`
+				: `# GitLab Merge Requests in ${backend.repo} (${options.state}, up to ${options.limit})`;
+		const body =
+			items.length === 0
+				? "_No matches._"
+				: items.map(item => formatGitlabListItem(scheme, backend.repo, item)).join("\n\n");
+		const footer = formatSpecificItemFooter(scheme, backend.repo);
+		const rendered = `${header}\n\n${body}${footer}`;
+		return {
+			url: url.href,
+			content: rendered,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(rendered, "utf-8"),
+			notes: [`Live listing for ${backend.repo}`],
+		};
+	}
+
+	const repo = backend.repo;
 	const fields =
 		scheme === "issue"
 			? ["number", "title", "state", "author", "labels", "createdAt", "updatedAt", "url"]
@@ -338,7 +584,7 @@ async function fetchAndRenderList(
 			: `# Pull Requests in ${repo} (${options.state}, up to ${options.limit})`;
 	const body =
 		items.length === 0 ? "_No matches._" : items.map(item => formatListItem(scheme, repo, item)).join("\n\n");
-	const footer = `\n\n---\nRead a specific item: \`${scheme}://${repo}/<N>\` (or \`${scheme}://<N>\` for the current repo).`;
+	const footer = formatSpecificItemFooter(scheme, repo);
 	const rendered = `${header}\n\n${body}${footer}`;
 
 	return {
@@ -357,6 +603,7 @@ interface BuildSingleArgs {
 	rendered: string;
 	status: CacheStatus;
 	fetchedAt: number;
+	backendLabel: "GitHub" | "GitLab";
 	/** Resolved repo (post short-form expansion) — used for the PR-only diff hint. */
 	repo?: string;
 }
@@ -368,18 +615,18 @@ function buildSingleResource({
 	rendered,
 	status,
 	fetchedAt,
+	backendLabel,
 	repo,
 }: BuildSingleArgs): InternalResource {
 	const notes: string[] = [formatFreshnessNote(status, fetchedAt)];
 	if (!parsed.comments) notes.push("Comments disabled");
 	if (scheme === "pr") {
-		const repoSegment = repo ?? parsed.repo;
-		const diffUrl = repoSegment ? `pr://${repoSegment}/${parsed.number}/diff` : `pr://${parsed.number}/diff`;
+		const diffUrl = formatPrDiffUrl(repo ?? parsed.repo, parsed.number);
 		notes.push(`Diff: ${diffUrl}`);
 	}
 	const content =
 		status === "stale"
-			? `> WARNING: Live GitHub refresh failed; this ${scheme} content is cached and may be stale.\n\n${rendered}`
+			? `> WARNING: Live ${backendLabel} refresh failed; this ${scheme} content is cached and may be stale.\n\n${rendered}`
 			: rendered;
 	return {
 		url: url.href,
@@ -393,7 +640,7 @@ function buildSingleResource({
 function formatFileLine(idx: number, file: PrDiffFile, repo: string, prNumber: number): string {
 	const stats = file.changeType === "binary" ? "(binary)" : `+${file.additions} -${file.deletions}`;
 	const rename = file.oldPath ? `  (renamed from ${file.oldPath})` : "";
-	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   pr://${repo}/${prNumber}/diff/${idx}`;
+	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   ${formatPrDiffUrl(repo, prNumber)}/${idx}`;
 }
 
 async function fetchAndRenderPrDiff(
@@ -402,24 +649,25 @@ async function fetchAndRenderPrDiff(
 	context: ResolveContext | undefined,
 ): Promise<InternalResource> {
 	const cwd = resolveCwd(context);
-	let repo = parsed.repo;
-	if (!repo) {
-		try {
-			repo = await resolveDefaultRepoMemoized(cwd, context?.signal);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			throw new Error(
-				`pr://${parsed.number}/diff could not resolve a default repo from the current session: ${message}\nUse pr://<owner>/<repo>/${parsed.number}/diff.`,
-			);
-		}
-	}
-	const lookup = await getOrFetchPrDiff({
-		cwd,
-		repo,
-		number: parsed.number,
-		signal: context?.signal,
-		settings: settingsFromContext(context),
-	});
+	const backend = await resolveBackend("pr", parsed.repo, context, formatPrDiffUsageHint(parsed));
+	const repo = backend.repo;
+	const lookup =
+		backend.kind === "gitlab"
+			? await getOrFetchGitlabMrDiff({
+					cwd,
+					host: backend.host,
+					repo,
+					number: parsed.number,
+					signal: context?.signal,
+					settings: settingsFromContext(context),
+				})
+			: await getOrFetchPrDiff({
+					cwd,
+					repo,
+					number: parsed.number,
+					signal: context?.signal,
+					settings: settingsFromContext(context),
+				});
 	const files = lookup.payload.files;
 	const freshness = formatFreshnessNote(lookup.status, lookup.fetchedAt);
 
@@ -432,7 +680,7 @@ async function fetchAndRenderPrDiff(
 			size: Buffer.byteLength(content, "utf-8"),
 			notes: [
 				freshness,
-				`Full diff for pr://${repo}/${parsed.number} (${files.length} file${files.length === 1 ? "" : "s"})`,
+				`Full diff for ${formatItemUrl("pr", repo, parsed.number)} (${files.length} file${files.length === 1 ? "" : "s"})`,
 			],
 		};
 	}
@@ -441,12 +689,12 @@ async function fetchAndRenderPrDiff(
 		const index = parsed.index ?? 0;
 		if (index < 1 || index > files.length) {
 			throw new Error(
-				`pr://${repo}/${parsed.number}/diff/${index} is out of range; PR has ${files.length} file${files.length === 1 ? "" : "s"}. Use pr://${repo}/${parsed.number}/diff to list available indices.`,
+				`${formatPrDiffUrl(repo, parsed.number)}/${index} is out of range; PR has ${files.length} file${files.length === 1 ? "" : "s"}. Use ${formatPrDiffUrl(repo, parsed.number)} to list available indices.`,
 			);
 		}
 		const file = files[index - 1];
 		if (!file) {
-			throw new Error(`pr://${repo}/${parsed.number}/diff/${index} resolved to a missing slice (parser bug).`);
+			throw new Error(`${formatPrDiffUrl(repo, parsed.number)}/${index} resolved to a missing slice (parser bug).`);
 		}
 		const content = lookup.payload.unified.slice(file.startOffset, file.endOffset);
 		return {
@@ -457,7 +705,7 @@ async function fetchAndRenderPrDiff(
 			notes: [
 				freshness,
 				`Showing file ${index}/${files.length}: ${file.path}`,
-				`Read all: pr://${repo}/${parsed.number}/diff/all`,
+				`Read all: ${formatPrDiffUrl(repo, parsed.number)}/all`,
 			],
 		};
 	}
@@ -468,14 +716,14 @@ async function fetchAndRenderPrDiff(
 		files.length === 0
 			? "_No file changes._"
 			: files.map((f, i) => formatFileLine(i + 1, f, repo, parsed.number)).join("\n\n");
-	const footer = `\n\n---\nRead all: \`pr://${repo}/${parsed.number}/diff/all\`. Each file is also available as \`pr://${repo}/${parsed.number}/diff/<i>\`.`;
+	const footer = `\n\n---\nRead all: \`${formatPrDiffUrl(repo, parsed.number)}/all\`. Each file is also available as \`${formatPrDiffUrl(repo, parsed.number)}/<i>\`.`;
 	const content = `${header}\n\n${body}${footer}`;
 	return {
 		url: url.href,
 		content,
 		contentType: "text/markdown",
 		size: Buffer.byteLength(content, "utf-8"),
-		notes: [freshness, `File listing for pr://${repo}/${parsed.number}`],
+		notes: [freshness, `File listing for ${formatItemUrl("pr", repo, parsed.number)}`],
 	};
 }
 
@@ -505,14 +753,27 @@ export class IssueProtocolHandler implements ProtocolHandler {
 			throw new Error(`Invalid issue:// URL: unexpected variant '${parsed.kind}'`);
 		}
 		try {
-			const lookup = await getOrFetchIssue({
-				cwd: resolveCwd(context),
-				repo: parsed.repo,
-				issue: String(parsed.number),
-				includeComments: parsed.comments,
-				signal: context?.signal,
-				settings: settingsFromContext(context),
-			});
+			const cwd = resolveCwd(context);
+			const backend = await resolveBackend("issue", parsed.repo, context, `issue://<owner>/<repo>/${parsed.number}`);
+			const lookup =
+				backend.kind === "gitlab"
+					? await getOrFetchGitlabIssue({
+							cwd,
+							host: backend.host,
+							repo: backend.repo,
+							issue: String(parsed.number),
+							includeComments: parsed.comments,
+							signal: context?.signal,
+							settings: settingsFromContext(context),
+						})
+					: await getOrFetchIssue({
+							cwd,
+							repo: backend.repo,
+							issue: String(parsed.number),
+							includeComments: parsed.comments,
+							signal: context?.signal,
+							settings: settingsFromContext(context),
+						});
 			return buildSingleResource({
 				url,
 				scheme: "issue",
@@ -520,6 +781,8 @@ export class IssueProtocolHandler implements ProtocolHandler {
 				rendered: lookup.rendered,
 				status: lookup.status,
 				fetchedAt: lookup.fetchedAt,
+				backendLabel: backend.kind === "gitlab" ? "GitLab" : "GitHub",
+				repo: backend.repo,
 			});
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -557,26 +820,27 @@ export class PrProtocolHandler implements ProtocolHandler {
 			}
 		}
 		const cwd = resolveCwd(context);
-		let repo = parsed.repo;
-		if (!repo) {
-			try {
-				repo = await resolveDefaultRepoMemoized(cwd, context?.signal);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				throw new Error(
-					`pr://${parsed.number} could not resolve a default repo from the current session: ${message}\nUse pr://<owner>/<repo>/${parsed.number}.`,
-				);
-			}
-		}
 		try {
-			const lookup = await getOrFetchPr({
-				cwd,
-				repo,
-				number: parsed.number,
-				includeComments: parsed.comments,
-				signal: context?.signal,
-				settings: settingsFromContext(context),
-			});
+			const backend = await resolveBackend("pr", parsed.repo, context, `pr://<owner>/<repo>/${parsed.number}`);
+			const lookup =
+				backend.kind === "gitlab"
+					? await getOrFetchGitlabMr({
+							cwd,
+							host: backend.host,
+							repo: backend.repo,
+							number: parsed.number,
+							includeComments: parsed.comments,
+							signal: context?.signal,
+							settings: settingsFromContext(context),
+						})
+					: await getOrFetchPr({
+							cwd,
+							repo: backend.repo,
+							number: parsed.number,
+							includeComments: parsed.comments,
+							signal: context?.signal,
+							settings: settingsFromContext(context),
+						});
 			return buildSingleResource({
 				url,
 				scheme: "pr",
@@ -584,7 +848,8 @@ export class PrProtocolHandler implements ProtocolHandler {
 				rendered: lookup.rendered,
 				status: lookup.status,
 				fetchedAt: lookup.fetchedAt,
-				repo,
+				backendLabel: backend.kind === "gitlab" ? "GitLab" : "GitHub",
+				repo: backend.repo,
 			});
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a GitLab CLI tool for `glab`-backed merge request create/checkout; GitLab issue/MR reads are available through `issue://` and `pr://`.
+
 ## [16.2.2] - 2026-06-27
 
 ### Added
