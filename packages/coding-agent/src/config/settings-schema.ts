@@ -3682,6 +3682,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"async.minPollIntervalSeconds": {
+		type: "number",
+		default: 300,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Min Poll Interval (seconds)",
+			description:
+				"Minimum seconds the poll tool waits between checks, even with shorter poll durations or a cold smart-poll ladder. Prevents the advisor from polling subagents too aggressively. Default 300 (5 minutes). If set higher than async.pollWaitDuration, the minimum wins.",
+		},
+	},
+
 	"irc.timeoutMs": {
 		type: "number",
 		default: 120_000,

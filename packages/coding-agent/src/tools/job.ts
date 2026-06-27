@@ -39,7 +39,7 @@ const WAIT_DURATION_MS: Record<string, number> = {
 	"5m": 5 * 60_000,
 };
 
-function parseWaitDurationMs(value: string | undefined): number {
+export function parseWaitDurationMs(value: string | undefined): number {
 	return (value ? WAIT_DURATION_MS[value] : undefined) ?? WAIT_DURATION_MS["30s"];
 }
 
@@ -195,8 +195,17 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 		const pollSetting = this.session.settings.get("async.pollWaitDuration");
 		const smartPoll = pollSetting === "smart";
 		const waitMs = smartPoll ? manager.nextPollWaitMs(ownerId) : parseWaitDurationMs(pollSetting);
+		// Floor: never wait less than async.minPollIntervalSeconds, even with a
+		// cold smart-poll ladder or a short fixed duration. This prevents the
+		// advisor from polling subagents more aggressively than the configured
+		// minimum interval. If the min exceeds the computed / configured wait,
+		// the minimum wins (safest behavior — the operator said "at least X").
+		const rawSetting = this.session.settings.get("async.minPollIntervalSeconds");
+		const minSeconds = Number.isFinite(rawSetting) && rawSetting >= 0 ? rawSetting : 300;
+		const minPollIntervalMs = minSeconds * 1000;
+		const clampedWaitMs = Math.max(waitMs, minPollIntervalMs);
 		const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-		const timeoutHandle = setTimeout(() => timeoutResolve(), waitMs);
+		const timeoutHandle = setTimeout(() => timeoutResolve(), clampedWaitMs);
 		racePromises.push(timeoutPromise);
 
 		const watchedJobIds = runningJobs.map(job => job.id);
