@@ -111,17 +111,18 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/report.csv"))).toBeUndefined();
 	});
 
-	it("inserts non-image path pastes as literal text instead of attaching them", () => {
+	it("routes explicit non-image path bracketed pastes through onPasteImagePath", () => {
 		const { editor } = makeEditor();
 		let imagePathCalls = 0;
-		editor.onPasteImagePath = () => {
+		editor.onPasteImagePath = path => {
 			imagePathCalls++;
+			editor.insertText(path);
 		};
 
 		editor.handleInput(bracketedPaste("/tmp/report.csv"));
 
 		expect(editor.getText()).toBe("/tmp/report.csv");
-		expect(imagePathCalls).toBe(0);
+		expect(imagePathCalls).toBe(1);
 	});
 });
 

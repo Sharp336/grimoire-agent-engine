@@ -5,6 +5,7 @@
 ### Added
 
 - Added `app.clipboard.pasteTextRaw` documentation for pasting clipboard text literally without smart image/path handling ([#3590](https://github.com/can1357/oh-my-pi/issues/3590)).
+- Added `paste.pathPaste` setting (`ask` / always attach / always keep path as text), per-path paste menu, and `local://attachment-N.ext` attach for pasted non-image file paths ([#3590](https://github.com/can1357/oh-my-pi/issues/3590)).
 
 ## [16.2.0] - 2026-06-27
 

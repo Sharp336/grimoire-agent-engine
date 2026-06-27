@@ -669,6 +669,15 @@ export class CustomEditor extends Editor {
 				);
 				return;
 			}
+			const explicitPaths = extractPastePathsFromText(content);
+			if (explicitPaths && this.onPasteImagePath) {
+				this.#trackAsyncPaste(
+					(async () => {
+						for (const p of explicitPaths) await this.onPasteImagePath?.(p);
+					})(),
+				);
+				return;
+			}
 			this.pasteText(content);
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
