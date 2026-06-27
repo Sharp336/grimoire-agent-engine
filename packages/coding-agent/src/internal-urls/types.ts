@@ -123,6 +123,13 @@ export interface WriteContext {
 	localProtocolOptions?: LocalProtocolOptions;
 }
 
+export interface WriteResult {
+	/** Filesystem path mutated by the handler, when one exists. */
+	sourcePath?: string;
+	/** Optional handler-preferred display path for the write target. */
+	displayPath?: string;
+}
+
 /**
  * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, mcp://).
  */
@@ -154,7 +161,7 @@ export interface ProtocolHandler {
 	 * Handlers that omit this method are treated as read-only; the write tool
 	 * surfaces a clear "not writable" error when invoked against them.
 	 */
-	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void>;
+	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void | WriteResult>;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.

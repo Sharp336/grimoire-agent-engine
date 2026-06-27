@@ -568,7 +568,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		return buildFileResource(url, resolved);
 	}
 
-	async write(url: InternalUrl, content: string, context?: ResolveContext): Promise<void> {
+	async write(url: InternalUrl, content: string, context?: ResolveContext): Promise<{ sourcePath: string }> {
 		const opts = LocalProtocolHandler.resolveOptions(context);
 		if (!opts) {
 			throw new Error("No session - local:// unavailable");
@@ -591,7 +591,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		} catch (error) {
 			if (isEnoent(error)) {
 				await writeLocalFile(targetPath, content);
-				return;
+				return { sourcePath: targetPath };
 			}
 			throw error;
 		}
@@ -613,6 +613,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		}
 
 		await writeLocalFile(writePath, content);
+		return { sourcePath: writePath };
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
