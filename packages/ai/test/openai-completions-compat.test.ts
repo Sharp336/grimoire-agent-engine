@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
@@ -168,6 +169,7 @@ describe("openai-completions compatibility", () => {
 			supportsUsageInStreaming: true,
 			supportsToolChoice: true,
 			supportsForcedToolChoice: true,
+			supportsNamedToolChoice: true,
 			disableReasoningOnForcedToolChoice: false,
 			disableReasoningOnToolChoice: false,
 			maxTokensField: "max_completion_tokens",
@@ -184,6 +186,8 @@ describe("openai-completions compatibility", () => {
 			requiresReasoningContentForToolCalls: false,
 			requiresReasoningContentForAllAssistantTurns: false,
 			allowsSyntheticReasoningContentForToolCalls: true,
+			replayReasoningContent: false,
+			qwenPreserveThinking: false,
 			requiresAssistantContentForToolCalls: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
@@ -270,7 +274,7 @@ describe("openai-completions compatibility", () => {
 		// Regression: thinking+text replay used to call `.unshift` on the string
 		// content set above (TypeError). Both blocks must survive as one string.
 		expect(typeof assistant.content).toBe("string");
-		expect(assistant.content).toBe("chain of thought\n\nfinal answer");
+		expect(assistant.content).toBe(`${renderDemotedThinking(model.id, "chain of thought")}final answer`);
 	});
 
 	it("emits thinking-only assistant content as a plain string when requiresThinkingAsText is set", () => {
@@ -306,7 +310,7 @@ describe("openai-completions compatibility", () => {
 		const assistant = messages.find(message => message.role === "assistant");
 		expect(assistant).toBeDefined();
 		if (assistant?.role !== "assistant") throw new Error("assistant message missing");
-		expect(assistant.content).toBe("only thoughts");
+		expect(assistant.content).toBe(renderDemotedThinking(model.id, "only thoughts"));
 	});
 
 	it("preserves multiple system prompts as leading system messages for chat completions", () => {
@@ -1222,6 +1226,75 @@ describe("kimi model detection via detectCompat", () => {
 		// The streamed `reasoning` key must NOT land in the wire body alongside
 		// `reasoning_content`; opencode's strict schema rejects unknown fields.
 		expect(assistant?.reasoning).toBeUndefined();
+	});
+
+	it("demotes cross-api reasoning while keeping thinking-enabled tool-call schema on kimi opencode-go", async () => {
+		const model = kimiOpenCodeModel("kimi-k2.6");
+		expect(model.compat.requiresReasoningContentForToolCalls).toBe(false);
+		const priorAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Need to preserve cross-api reasoning.",
+					thinkingSignature: "sig_from_anthropic",
+				},
+				{
+					type: "toolCall",
+					id: "toolu_cross_api",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			],
+			api: "anthropic-messages",
+			provider: "zai",
+			model: "claude-compatible",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		const fetchMock = createMockFetch(["[DONE]"]);
+		streamOpenAICompletions(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Summarize the README", timestamp: Date.now() },
+					priorAssistant,
+					{
+						role: "toolResult",
+						toolCallId: "toolu_cross_api",
+						toolName: "read",
+						content: [{ type: "text", text: "# Hello\n" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "high",
+				signal: createAbortedSignal(),
+				onPayload: payload => resolve(payload),
+			},
+		);
+
+		const payload = (await promise) as { messages: Array<Record<string, unknown>> };
+		const assistant = payload.messages.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
+		expect(assistant?.reasoning_content).toBe("");
+		expect(assistant?.reasoning).toBeUndefined();
+		expect(assistant?.reasoning_text).toBeUndefined();
 	});
 
 	// #1071 regression guard alongside the #1484 fix: with thinking disabled the

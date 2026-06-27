@@ -6,6 +6,7 @@ import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/agent-dashboard";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const tempDirs: string[] = [];
@@ -36,8 +37,8 @@ function stubStdoutGeometry(cols: number): { setRows(n: number): void; restore()
 	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
 	let rows = 24;
-	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows });
-	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols });
+	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
+	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
 	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
 		if (desc) Object.defineProperty(process.stdout, key, desc);
 		else Object.defineProperty(process.stdout, key, { configurable: true, value: undefined, writable: true });
@@ -55,7 +56,7 @@ function stubStdoutGeometry(cols: number): { setRows(n: number): void; restore()
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
 describe("AgentDashboard create editor", () => {

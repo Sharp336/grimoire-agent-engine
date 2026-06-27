@@ -1,8 +1,9 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
-import { APP_NAME, setProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import type { SettingPath, SettingValue } from "../config/settings";
@@ -27,7 +28,10 @@ import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import { resolveResumableSession } from "../session/session-listing";
+import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
@@ -58,7 +62,7 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
 
 export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
-	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null;
+	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
 }
@@ -239,11 +243,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return "Plan: off";
 		},
 		handleTui: async (command, runtime) => {
-			const hadArgs = !!command.args;
 			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
-			if (hadArgs) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -277,11 +277,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
 		},
 		handleTui: async (command, runtime) => {
-			const hadArgs = !!command.args;
 			await runtime.ctx.handleGoalModeCommand(command.args || undefined);
-			if (hadArgs) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -1270,7 +1266,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: handleMcpAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMCPCommand(command.text);
 		},
@@ -1293,7 +1288,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: handleSshAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleSSHCommand(command.text);
 		},
@@ -1424,9 +1418,26 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "resume",
 		description: "Resume a different session",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showSessionSelector();
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const sessionArg = command.args.trim();
 			runtime.ctx.editor.setText("");
+			if (!sessionArg) {
+				runtime.ctx.showSessionSelector();
+				return;
+			}
+			const match = await resolveResumableSession(
+				sessionArg,
+				runtime.ctx.sessionManager.getCwd(),
+				runtime.ctx.sessionManager.getSessionDir(),
+				{ allowGlobalFallback: true },
+			);
+			if (!match) {
+				runtime.ctx.showError(`Session "${sessionArg}" not found`);
+				return;
+			}
+			await runtime.ctx.handleResumeSession(match.session.path);
 		},
 	},
 	{
@@ -1436,9 +1447,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
-			if (question) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
 		},
@@ -1450,9 +1458,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const work = command.text.slice(`/${command.name}`.length).trim();
-			if (work) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleTanCommand(work);
 		},
@@ -1464,9 +1469,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const complaint = command.text.slice(`/${command.name}`.length).trim();
-			if (complaint) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleOmfgCommand(complaint);
 		},
@@ -1558,7 +1560,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMemoryCommand(command.text);
 		},
@@ -1586,52 +1587,62 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleRenameCommand(title);
 		},
 	},
 	{
 		name: "move",
-		description: "Move session to a different working directory",
-		acpDescription: "Move the current session file",
-		inlineHint: "<path>",
+		description: "Switch to a fresh session in a different directory",
+		acpDescription: "Start a fresh session in a different directory",
+		inlineHint: "[<path>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
-			const resolvedPath = path.resolve(runtime.cwd, command.args);
-			let isDirectory: boolean;
+			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
 			try {
-				isDirectory = (await fs.stat(resolvedPath)).isDirectory();
+				const stat = await fs.stat(resolvedPath);
+				if (!stat.isDirectory()) {
+					return usage(`Not a directory: ${resolvedPath}`, runtime);
+				}
 			} catch {
-				return usage(`Directory does not exist or is not a directory: ${resolvedPath}`, runtime);
+				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
 			}
-			if (!isDirectory) return usage(`Directory does not exist or is not a directory: ${resolvedPath}`, runtime);
+			let newSessionFile: string | undefined;
 			try {
-				await runtime.sessionManager.flush();
-				await runtime.sessionManager.moveTo(resolvedPath);
+				newSessionFile = SessionManager.createEmptySessionFile(resolvedPath);
+				const switched = await runtime.session.switchSession(newSessionFile);
+				if (!switched) {
+					await runtime.sessionManager.dropSession(newSessionFile);
+					return usage("Move cancelled.", runtime);
+				}
 			} catch (err) {
+				if (newSessionFile) {
+					try {
+						await runtime.sessionManager.dropSession(newSessionFile);
+					} catch (dropErr) {
+						return usage(
+							`Move failed: ${errorMessage(err)}; failed to remove empty session: ${errorMessage(dropErr)}`,
+							runtime,
+						);
+					}
+				}
 				return usage(`Move failed: ${errorMessage(err)}`, runtime);
 			}
+			runtime.session.markMovedFromEmptySessionFile(newSessionFile!);
 			setProjectDir(resolvedPath);
 			// Reload plugin/capability caches so the next prompt sees commands and
 			// capabilities scoped to the new cwd.
 			await runtime.reloadPlugins();
 			await runtime.notifyTitleChanged?.();
-			await runtime.output(`Session moved to ${runtime.sessionManager.getCwd()}.`);
+			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const targetPath = command.args;
-			if (!targetPath) {
-				runtime.ctx.showError("Usage: /move <path>");
-				runtime.ctx.editor.setText("");
-				return;
-			}
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleMoveCommand(targetPath);
+			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
 	},
 	{
@@ -2298,6 +2309,106 @@ function buildStaticInlineHint(hint: string): (argumentText: string) => string |
 	return (argumentText: string) => (argumentText.trim().length === 0 ? hint : null);
 }
 
+/**
+ * Build getArgumentCompletions that suggests directories relative to the
+ * current project directory. Used by /move so users can Tab-complete the
+ * destination directory.
+ */
+function buildDirectoryArgumentCompletions(): (prefix: string) => Promise<AutocompleteItem[] | null> {
+	return async (argumentPrefix: string) => {
+		const prefix = argumentPrefix.trim();
+
+		const cwd = getProjectDir();
+		const expandedPrefix = expandTilde(prefix);
+		const isAbsolute = path.isAbsolute(expandedPrefix);
+
+		let searchDir: string;
+		let searchPrefix: string;
+		if (
+			prefix === "" ||
+			prefix === "." ||
+			prefix === "./" ||
+			prefix === ".." ||
+			prefix === "../" ||
+			prefix === "~" ||
+			prefix === "~/" ||
+			prefix === "/"
+		) {
+			searchDir = isAbsolute ? expandedPrefix : path.join(cwd, expandedPrefix);
+			searchPrefix = "";
+		} else if (expandedPrefix.endsWith("/")) {
+			searchDir = isAbsolute ? expandedPrefix : path.join(cwd, expandedPrefix);
+			searchPrefix = "";
+		} else {
+			const dir = path.dirname(expandedPrefix);
+			searchDir = isAbsolute ? dir : path.join(cwd, dir);
+			searchPrefix = path.basename(expandedPrefix);
+		}
+
+		try {
+			const entries = await fs.readdir(searchDir, { withFileTypes: true });
+			const suggestions: AutocompleteItem[] = [];
+			for (const entry of entries) {
+				if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) continue;
+				if (entry.name === ".git") continue;
+
+				let isDirectory = entry.isDirectory();
+				if (!isDirectory && entry.isSymbolicLink()) {
+					try {
+						isDirectory = (await fs.stat(path.join(searchDir, entry.name))).isDirectory();
+					} catch {
+						continue;
+					}
+				}
+				if (!isDirectory) continue;
+
+				const absoluteValue = path.join(searchDir, entry.name);
+				const displayValue = buildDirectoryCompletionDisplayValue(prefix, absoluteValue, cwd);
+				suggestions.push({ value: displayValue, label: `${entry.name}/` });
+			}
+			suggestions.sort((a, b) => a.label.localeCompare(b.label));
+			return suggestions.length > 0 ? suggestions : null;
+		} catch {
+			return null;
+		}
+	};
+}
+function buildDirectoryCompletionDisplayValue(prefix: string, absoluteValue: string, cwd: string): string {
+	// Preserve the user's prefix style where possible, but always return a
+	// value that /move can resolve (absolute or relative) without escaping.
+	const normalized = path.normalize(absoluteValue);
+
+	if (prefix.startsWith("~/")) {
+		const home = os.homedir();
+		const homeRelative = path.relative(home, normalized);
+		return `~/${homeRelative.replaceAll("\\", "/")}/`;
+	}
+	if (prefix === "~") {
+		const home = os.homedir();
+		const homeRelative = path.relative(home, normalized);
+		return `~/${homeRelative.replaceAll("\\", "/")}/`;
+	}
+	if (prefix.startsWith("/")) {
+		return `${normalized.replaceAll("\\", "/")}/`;
+	}
+	if (prefix.startsWith("./")) {
+		const relative = path.relative(cwd, normalized);
+		return `./${relative.replaceAll("\\", "/")}/`;
+	}
+	if (prefix.startsWith("../")) {
+		const relative = path.relative(cwd, normalized);
+		return `${relative.replaceAll("\\", "/")}/`;
+	}
+	if (prefix === "..") {
+		const relative = path.relative(cwd, normalized);
+		return `${relative.replaceAll("\\", "/")}/`;
+	}
+
+	// Default: relative to cwd.
+	const relative = path.relative(cwd, normalized);
+	return `${relative.replaceAll("\\", "/")}/`;
+}
+
 /** Builtin command metadata used for slash-command autocomplete and help text. */
 export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.map(
 	command => ({
@@ -2318,6 +2429,9 @@ function materializeTuiBuiltinSlashCommand(
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+	} else if (cmd.name === "move") {
+		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	}

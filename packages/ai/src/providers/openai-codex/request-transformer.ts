@@ -1,6 +1,7 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Api, Model } from "../../types";
+import { stripVariant } from "../../utils/strip";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -57,6 +58,26 @@ export interface RequestBody {
 	max_completion_tokens?: number;
 	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
 	[key: string]: unknown;
+}
+
+function containsInputImage(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	if ((value as { type?: unknown }).type === "input_image") return true;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (containsInputImage(item)) return true;
+		}
+		return false;
+	}
+	for (const item of Object.values(value)) {
+		if (containsInputImage(item)) return true;
+	}
+	return false;
+}
+
+/** Returns whether a Codex request can use the text-only Responses Lite transport. */
+export function shouldUseCodexResponsesLite(body: RequestBody, requested: boolean | undefined): boolean {
+	return requested === true && !containsInputImage(body.input);
 }
 
 function getReasoningConfig(model: Model<Api>, options: CodexRequestOptions): ReasoningConfig {
@@ -176,7 +197,7 @@ function stripImageDetails(input: InputItem[]): void {
 			if (!Array.isArray(collection)) continue;
 			for (const part of collection) {
 				if (part && typeof part === "object" && (part as { type?: unknown }).type === "input_image") {
-					delete (part as { detail?: unknown }).detail;
+					stripVariant<{ detail?: unknown }>(part, "detail");
 				}
 			}
 		}
@@ -211,7 +232,8 @@ export async function transformRequestBody(
 		body.input = [...developerMessages, ...body.input];
 	}
 
-	if (options.responsesLite) {
+	const responsesLite = shouldUseCodexResponsesLite(body, options.responsesLite);
+	if (responsesLite) {
 		if (Array.isArray(body.input)) {
 			stripImageDetails(body.input);
 		}
@@ -231,7 +253,7 @@ export async function transformRequestBody(
 		// Responses Lite keeps reasoning replay server-side; codex-rs requests
 		// `all_turns` there and otherwise omits context so the server default
 		// (currently `current_turn`) applies.
-		const reasoningContext = options.reasoningContext ?? (options.responsesLite ? "all_turns" : undefined);
+		const reasoningContext = options.reasoningContext ?? (responsesLite ? "all_turns" : undefined);
 		if (reasoningContext !== undefined) {
 			body.reasoning.context = reasoningContext;
 		}
