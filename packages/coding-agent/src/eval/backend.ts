@@ -1,4 +1,5 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import * as fs from "node:fs/promises";
+import { ensureLocalScratchpad, type LocalProtocolOptions } from "../internal-urls";
 import type { ToolSession } from "../tools";
 import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
 
@@ -61,11 +62,14 @@ export interface ExecutorBackend {
  * schemes (currently `local://`). Prefers the session's own
  * {@link LocalProtocolOptions} — the exact mapping `read local://…` uses — so an
  * eval `write("local://x")` and a later `read local://x` agree on the location.
+ *
+ * This eagerly creates and canonicalizes the local scratchpad root, matching the
+ * local protocol's symlink/containment guards before the helper receives a path.
  */
-export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
+export async function resolveEvalUrlRoots(session: ToolSession): Promise<Record<string, string>> {
 	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
 		getSessionId: () => session.getSessionId?.() ?? null,
 	};
-	return buildEvalUrlRoots(options);
+	return { local: await fs.realpath(await ensureLocalScratchpad(options)) };
 }

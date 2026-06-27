@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { createHelpers, type HelperContext } from "../js/shared/helpers";
@@ -23,6 +24,7 @@ describe("eval js helpers internal-url resolution", () => {
 	it("writes and reads local:// under the injected root", async () => {
 		using tmp = TempDir.createSync("@eval-helpers-local-");
 		const root = path.join(tmp.path(), "local");
+		await fs.mkdir(root, { recursive: true });
 		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
 
 		const written = await helpers.writeFile("local://notes/merge-map.md", "hello");
@@ -37,11 +39,51 @@ describe("eval js helpers internal-url resolution", () => {
 
 	it("rejects traversal and schemes without an injected root", async () => {
 		using tmp = TempDir.createSync("@eval-helpers-guard-");
-		const helpers = createHelpers(makeCtx(tmp.path(), { local: path.join(tmp.path(), "local") }));
+		const root = path.join(tmp.path(), "local");
+		await fs.mkdir(root, { recursive: true });
+		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
 
 		await expect(helpers.writeFile("local://../escape.md", "x")).rejects.toThrow(/traversal|escapes/i);
 		await expect(helpers.writeFile("memory://x.md", "x")).rejects.toThrow(/not supported/i);
 		await expect(helpers.read("https://example.com/page")).rejects.toThrow(/not supported/i);
+	});
+
+	it("rejects symlinked protocol roots before writing", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-root-symlink-");
+		const outside = path.join(tmp.path(), "outside");
+		const root = path.join(tmp.path(), "local");
+		await fs.mkdir(outside, { recursive: true });
+		await fs.symlink(outside, root);
+		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
+
+		await expect(helpers.writeFile("local://notes/escape.md", "x")).rejects.toThrow(/root cannot be a symlink/i);
+	});
+
+	it("rejects symlinked protocol parents that escape the root", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-parent-symlink-");
+		const root = path.join(tmp.path(), "local");
+		const outside = path.join(tmp.path(), "outside");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(outside, { recursive: true });
+		await fs.symlink(outside, path.join(root, "linked"));
+		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
+
+		await expect(helpers.writeFile("local://linked/escape.md", "x")).rejects.toThrow(/escapes its root/i);
+		await expect(Bun.file(path.join(outside, "escape.md")).exists()).resolves.toBe(false);
+	});
+
+	it("rejects symlinked protocol write targets", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-target-symlink-");
+		const root = path.join(tmp.path(), "local");
+		const outside = path.join(tmp.path(), "outside");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(outside, { recursive: true });
+		await Bun.write(path.join(outside, "secret.txt"), "old");
+		await fs.symlink(path.join(outside, "secret.txt"), path.join(root, "secret.txt"));
+		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
+
+		await expect(helpers.writeFile("local://secret.txt", "new")).rejects.toThrow();
+		expect(await Bun.file(path.join(outside, "secret.txt")).text()).toBe("old");
 	});
 
 	it("leaves plain relative and absolute paths resolving against the cwd", async () => {

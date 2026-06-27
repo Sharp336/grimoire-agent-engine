@@ -31,38 +31,157 @@ function __omp_url_decode(s::String)
     return String(take!(res))
 end
 
-function __omp_resolve_path(p::AbstractString)
-    m = match(r"^([a-z][a-z0-9+.\-]*)://(.*)$"i, p)
-    if m === nothing
-        return abspath(p)
-    end
-    scheme = lowercase(string(m.captures[1]))
+function __omp_local_roots()
     roots_env = get(ENV, "PI_EVAL_LOCAL_ROOTS", "{}")
     roots = try
          Main.json_parse(roots_env)
     catch
          Dict{String, Any}()
     end
-    root = get(roots, scheme, nothing)
-    if root === nothing || isempty(root)
+    return roots isa AbstractDict ? roots : Dict{String, Any}()
+end
+
+function __omp_within_root(target_path::AbstractString, real_root::AbstractString)
+    relative = relpath(string(target_path), string(real_root))
+    return relative == "." || (!startswith(relative, "..") && !isabspath(relative))
+end
+
+function __omp_resolve_path_info(p::AbstractString)
+    m = match(r"^([a-z][a-z0-9+.\-]*)://(.*)$"i, p)
+    if m === nothing
+        return (abspath(p), nothing, nothing)
+    end
+    scheme = lowercase(string(m.captures[1]))
+    root = get(__omp_local_roots(), scheme, nothing)
+    if root === nothing || isempty(string(root))
         error("Protocol paths are not supported by this helper: $p")
     end
-    
+
     relative = __omp_url_decode(replace(string(m.captures[2]), '\\' => '/'))
     root_path = abspath(string(root))
     if isempty(relative)
-        return root_path
+        return (root_path, scheme, root_path)
     end
-    
+
     if startswith(relative, '/') || ".." in split(relative, '/')
         error("Unsafe $scheme:// path (absolute or traversal): $p")
     end
-    
+
     resolved = abspath(joinpath(root_path, relative))
     if resolved != root_path && !startswith(resolved, root_path * Base.Filesystem.path_separator)
         error("$scheme:// path escapes its root: $p")
     end
-    return resolved
+    return (resolved, scheme, root_path)
+end
+
+function __omp_resolve_path(p::AbstractString)
+    return __omp_resolve_path_info(p)[1]
+end
+
+function __omp_ensure_safe_protocol_directory(path_name::AbstractString, real_root::AbstractString, scheme::AbstractString, create_missing::Bool)
+    try
+        lstat(path_name)
+    catch
+        if !create_missing
+            rethrow()
+        end
+        try
+            mkdir(path_name)
+        catch mkdir_error
+            if !ispath(path_name) && !islink(path_name)
+                rethrow(mkdir_error)
+            end
+        end
+    end
+
+    if !isdir(path_name) && !islink(path_name)
+        error("$scheme:// parent must be a directory")
+    end
+    real_path = realpath(path_name)
+    if !__omp_within_root(real_path, real_root)
+        error("$scheme:// path escapes its root: $path_name")
+    end
+    if !isdir(real_path)
+        error("$scheme:// parent must be a directory")
+    end
+end
+
+function __omp_ensure_safe_protocol_target(root_path::AbstractString, target_path::AbstractString, scheme::AbstractString, create_parents::Bool)
+    if islink(root_path)
+        error("$scheme:// root cannot be a symlink")
+    end
+    if !isdir(root_path)
+        error("$scheme:// root must be a directory")
+    end
+
+    root_abs = abspath(root_path)
+    real_root = realpath(root_abs)
+    absolute_target = abspath(target_path)
+    relative_target = relpath(absolute_target, root_abs)
+    if startswith(relative_target, "..") || isabspath(relative_target)
+        error("$scheme:// path escapes its root: $target_path")
+    end
+
+    parent_relative = dirname(relative_target)
+    current = real_root
+    if !isempty(parent_relative) && parent_relative != "."
+        for part in split(parent_relative, Base.Filesystem.path_separator)
+            if isempty(part) || part == "."
+                continue
+            end
+            next_path = joinpath(current, part)
+            __omp_ensure_safe_protocol_directory(next_path, real_root, scheme, create_parents)
+            current = realpath(next_path)
+        end
+    end
+    return relative_target == "." ? current : joinpath(current, basename(relative_target))
+end
+
+function __omp_fs_const(name::Symbol, fallback::Integer)
+    return isdefined(Base.Filesystem, name) ? getfield(Base.Filesystem, name) : fallback
+end
+
+const __OMP_O_RDONLY = __omp_fs_const(:JL_O_RDONLY, 0)
+const __OMP_O_WRONLY = __omp_fs_const(:JL_O_WRONLY, 1)
+const __OMP_O_CREAT = __omp_fs_const(:JL_O_CREAT, Sys.isapple() ? 0x0200 : 0x0040)
+const __OMP_O_TRUNC = __omp_fs_const(:JL_O_TRUNC, Sys.isapple() ? 0x0400 : 0x0200)
+const __OMP_O_NOFOLLOW = __omp_fs_const(:JL_O_NOFOLLOW, Sys.islinux() ? 0x00020000 : (Sys.isapple() ? 0x0100 : 0))
+
+function __omp_open_text_no_follow(path::AbstractString, flags::Integer)
+    if Sys.iswindows()
+        return open(path, flags == __OMP_O_RDONLY ? "r" : "w")
+    end
+    fd = ccall(:open, Cint, (Cstring, Cint, Cint), path, Cint(flags | __OMP_O_NOFOLLOW), Cint(0o666))
+    if fd < 0
+        throw(SystemError("open($path)", Libc.errno()))
+    end
+    try
+        return Base.fdio(RawFD(fd), true)
+    catch
+        ccall(:close, Cint, (Cint,), fd)
+        rethrow()
+    end
+end
+
+function __omp_open_text_no_follow(f::Function, path::AbstractString, flags::Integer)
+    io = __omp_open_text_no_follow(path, flags)
+    try
+        return f(io)
+    finally
+        close(io)
+    end
+end
+
+function __omp_reject_protocol_leaf_escape(path::AbstractString, scheme::AbstractString, op::AbstractString)
+    if islink(path)
+        error("$scheme:// $op target cannot be a symlink")
+    end
+    if ispath(path) && !isfile(path)
+        error("$scheme:// $op target must be a file")
+    end
+    if op == "read" && !isfile(path)
+        error("$scheme:// read target must be a file")
+    end
 end
 
 # -------------------------------------------------------------------------
@@ -94,9 +213,20 @@ end
 # -------------------------------------------------------------------------
 
 function Base.read(path::AbstractString, offset::Integer=1, limit::Union{Integer, Nothing}=nothing)
-    resolved = __omp_resolve_path(string(path))
-    content = open(resolved, "r") do io
-        Base.read(io, String)
+    resolved, scheme, root_path = __omp_resolve_path_info(string(path))
+    if scheme !== nothing && root_path !== nothing
+        resolved = __omp_ensure_safe_protocol_target(root_path, resolved, scheme, false)
+        __omp_reject_protocol_leaf_escape(resolved, scheme, "read")
+        io = __omp_open_text_no_follow(resolved, __OMP_O_RDONLY)
+        try
+            content = Base.read(io, String)
+        finally
+            close(io)
+        end
+    else
+        content = open(resolved, "r") do io
+            Base.read(io, String)
+        end
     end
     lines = split(content, '\n')
     if offset > 1 || limit !== nothing
@@ -108,7 +238,7 @@ function Base.read(path::AbstractString, offset::Integer=1, limit::Union{Integer
             content = ""
         end
     end
-    
+
     preview = length(content) > 500 ? content[1:500] : content
     Main.emit_frame(Dict(
         "type" => "display",
@@ -126,12 +256,23 @@ function Base.read(path::AbstractString, offset::Integer=1, limit::Union{Integer
 end
 
 function Base.write(path::AbstractString, content::Any)
-    resolved = __omp_resolve_path(string(path))
-    mkpath(dirname(resolved))
-    open(resolved, "w") do io
-        Base.write(io, string(content))
+    resolved, scheme, root_path = __omp_resolve_path_info(string(path))
+    if scheme !== nothing && root_path !== nothing
+        resolved = __omp_ensure_safe_protocol_target(root_path, resolved, scheme, true)
+        __omp_reject_protocol_leaf_escape(resolved, scheme, "write")
+        io = __omp_open_text_no_follow(resolved, __OMP_O_WRONLY | __OMP_O_CREAT | __OMP_O_TRUNC)
+        try
+            Base.write(io, string(content))
+        finally
+            close(io)
+        end
+    else
+        mkpath(dirname(resolved))
+        open(resolved, "w") do io
+            Base.write(io, string(content))
+        end
     end
-    
+
     Main.emit_frame(Dict(
         "type" => "display",
         "id" => Main.current_rid,

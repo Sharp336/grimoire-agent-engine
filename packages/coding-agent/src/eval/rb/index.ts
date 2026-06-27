@@ -42,7 +42,7 @@ export default {
 			interpreter: readInterpreterSetting(opts.session),
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
-			localRoots: resolveEvalUrlRoots(opts.session),
+			localRoots: await resolveEvalUrlRoots(opts.session),
 			kernelOwnerId: opts.kernelOwnerId,
 			reset: opts.reset,
 			onChunk: opts.onChunk,

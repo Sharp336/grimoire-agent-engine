@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import * as fsConstants from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -584,7 +585,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		const targetPath = path.join(parentDir, path.basename(relativePath));
 		ensureWithinRoot(targetPath, resolvedRoot);
 
-		let targetStat: Awaited<ReturnType<typeof fs.lstat>>;
+		let targetStat: Stats;
 		try {
 			targetStat = await fs.lstat(targetPath);
 		} catch (error) {
