@@ -14,10 +14,15 @@ import type {
 	BehaviorTimeSeriesPoint,
 	CostTimeSeriesPoint,
 	FolderStats,
+	HealthDimensionStats,
+	HealthKindStats,
+	HealthOverallStats,
+	HealthTimeSeriesPoint,
 	MessageStats,
 	ModelPerformancePoint,
 	ModelStats,
 	ModelTimeSeriesPoint,
+	SessionHealthStats,
 	TimeSeriesPoint,
 	UserMessageLink,
 	UserMessageStats,
@@ -46,6 +51,7 @@ const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
+const SESSION_HEALTH_BACKFILL_KEY = "session_health_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -135,6 +141,37 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp ON user_messages(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_user_messages_timestamp_model ON user_messages(timestamp, model, provider);
 
+
+		CREATE TABLE IF NOT EXISTS session_health (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			agent_type TEXT NOT NULL DEFAULT 'main',
+			kind TEXT NOT NULL,
+			tool_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			tool_loop_count INTEGER NOT NULL DEFAULT 0,
+			cancellation_count INTEGER NOT NULL DEFAULT 0,
+			edit_files_changed INTEGER NOT NULL DEFAULT 0,
+			edit_lines_added INTEGER NOT NULL DEFAULT 0,
+			edit_lines_removed INTEGER NOT NULL DEFAULT 0,
+			compaction_count INTEGER NOT NULL DEFAULT 0,
+			compaction_tokens_before INTEGER NOT NULL DEFAULT 0,
+			model_switch_count INTEGER NOT NULL DEFAULT 0,
+			subagent_spawn_count INTEGER NOT NULL DEFAULT 0,
+			large_result_count INTEGER NOT NULL DEFAULT 0,
+			large_result_bytes INTEGER NOT NULL DEFAULT 0,
+			large_result_lines INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(session_file, entry_id, kind, tool_name, model, provider, agent_type)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_session_health_timestamp ON session_health(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_session_health_kind_timestamp ON session_health(kind, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_session_health_tool_timestamp ON session_health(tool_name, timestamp);
 		CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -216,6 +253,7 @@ export async function initDb(): Promise<Database> {
 	}
 	backfillUserMessages(db);
 	repairUserMessageLinks(db);
+	backfillSessionHealth(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
 	backfillMissingCatalogCosts(db);
@@ -407,6 +445,83 @@ export function insertMessageStats(stats: MessageStats[]): number {
 		}
 	});
 
+	insert();
+	return inserted;
+}
+
+/**
+ * Insert session-health stats. Idempotent via
+ * UNIQUE(session_file, entry_id, kind, tool_name, model, provider, agent_type).
+ * The fork guard mirrors request/user inserts so branched transcripts copied
+ * from the same parent do not double-count health events for the same agent.
+ */
+export function insertSessionHealthStats(stats: SessionHealthStats[]): number {
+	if (!db || stats.length === 0) return 0;
+
+	const stmt = db.prepare(`
+		INSERT OR IGNORE INTO session_health (
+			session_file, entry_id, folder, timestamp, agent_type, kind,
+			tool_name, model, provider,
+			retry_count, tool_loop_count, cancellation_count,
+			edit_files_changed, edit_lines_added, edit_lines_removed,
+			compaction_count, compaction_tokens_before, model_switch_count,
+			subagent_spawn_count, large_result_count, large_result_bytes, large_result_lines
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM session_health
+			WHERE entry_id = ?
+				AND timestamp = ?
+				AND kind = ?
+				AND tool_name = ?
+				AND model = ?
+				AND provider = ?
+				AND agent_type = ?
+				AND session_file <> ?
+		)
+	`);
+
+	let inserted = 0;
+	const insert = db.transaction(() => {
+		for (const s of stats) {
+			const toolName = s.toolName ?? "";
+			const model = s.model ?? "";
+			const provider = s.provider ?? "";
+			const result = stmt.run(
+				s.sessionFile,
+				s.entryId,
+				s.folder,
+				s.timestamp,
+				s.agentType,
+				s.kind,
+				toolName,
+				model,
+				provider,
+				s.retryCount,
+				s.toolLoopCount,
+				s.cancellationCount,
+				s.editFilesChanged,
+				s.editLinesAdded,
+				s.editLinesRemoved,
+				s.compactionCount,
+				s.compactionTokensBefore,
+				s.modelSwitchCount,
+				s.subagentSpawnCount,
+				s.largeResultCount,
+				s.largeResultBytes,
+				s.largeResultLines,
+				s.entryId,
+				s.timestamp,
+				s.kind,
+				toolName,
+				model,
+				provider,
+				s.agentType,
+				s.sessionFile,
+			);
+			if (result.changes > 0) inserted++;
+		}
+	});
 	insert();
 	return inserted;
 }
@@ -882,6 +997,25 @@ function backfillUserMessages(database: Database): void {
 }
 
 /**
+ * One-shot wipe of `file_offsets` so the next sync re-parses every session and
+ * populates `session_health` from transcript entries that were ignored before
+ * the table existed. Existing health rows are discarded because every event is
+ * append-only and keyed by transcript entry + dimensions.
+ */
+function backfillSessionHealth(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(SESSION_HEALTH_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM session_health");
+	database.run("DELETE FROM file_offsets");
+	database
+		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(SESSION_HEALTH_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
  * Reclassify pre-existing `messages` rows by agent type once, after the
  * `agent_type` column is added to an older database (every prior row defaulted
  * to 'main' on the ALTER). Classification is purely path-based — derived from
@@ -1274,5 +1408,204 @@ export function getBehaviorByModel(cutoff?: number | null): BehaviorModelStats[]
 		totalBlame: row.total_blame ?? 0,
 		totalChars: row.total_chars ?? 0,
 		lastTimestamp: row.last_timestamp ?? 0,
+	}));
+}
+
+interface HealthAggregateRow {
+	total_events: number;
+	retry_count: number | null;
+	tool_loop_count: number | null;
+	cancellation_count: number | null;
+	edit_files_changed: number | null;
+	edit_lines_added: number | null;
+	edit_lines_removed: number | null;
+	compaction_count: number | null;
+	compaction_tokens_before: number | null;
+	model_switch_count: number | null;
+	subagent_spawn_count: number | null;
+	large_result_count: number | null;
+	large_result_bytes: number | null;
+	large_result_lines: number | null;
+	first_timestamp: number | null;
+	last_timestamp: number | null;
+}
+
+interface HealthKindRow extends HealthAggregateRow {
+	kind: HealthKindStats["kind"];
+}
+
+interface HealthDimensionRow extends HealthAggregateRow {
+	kind: HealthDimensionStats["kind"];
+	tool_name: string;
+	model: string;
+	provider: string;
+}
+
+interface HealthSeriesRow {
+	bucket: number;
+	retry_count: number | null;
+	tool_loop_count: number | null;
+	cancellation_count: number | null;
+	edit_files_changed: number | null;
+	edit_lines_added: number | null;
+	edit_lines_removed: number | null;
+	compaction_count: number | null;
+	compaction_tokens_before: number | null;
+	model_switch_count: number | null;
+	subagent_spawn_count: number | null;
+	large_result_count: number | null;
+	large_result_bytes: number | null;
+	large_result_lines: number | null;
+}
+
+const EMPTY_HEALTH_OVERALL: HealthOverallStats = {
+	totalEvents: 0,
+	retryCount: 0,
+	toolLoopCount: 0,
+	cancellationCount: 0,
+	editFilesChanged: 0,
+	editLinesAdded: 0,
+	editLinesRemoved: 0,
+	compactionCount: 0,
+	compactionTokensBefore: 0,
+	modelSwitchCount: 0,
+	subagentSpawnCount: 0,
+	largeResultCount: 0,
+	largeResultBytes: 0,
+	largeResultLines: 0,
+	firstTimestamp: 0,
+	lastTimestamp: 0,
+};
+
+function rowToHealthOverall(row: HealthAggregateRow | undefined): HealthOverallStats {
+	if (!row?.total_events) return EMPTY_HEALTH_OVERALL;
+	return {
+		totalEvents: row.total_events,
+		retryCount: row.retry_count ?? 0,
+		toolLoopCount: row.tool_loop_count ?? 0,
+		cancellationCount: row.cancellation_count ?? 0,
+		editFilesChanged: row.edit_files_changed ?? 0,
+		editLinesAdded: row.edit_lines_added ?? 0,
+		editLinesRemoved: row.edit_lines_removed ?? 0,
+		compactionCount: row.compaction_count ?? 0,
+		compactionTokensBefore: row.compaction_tokens_before ?? 0,
+		modelSwitchCount: row.model_switch_count ?? 0,
+		subagentSpawnCount: row.subagent_spawn_count ?? 0,
+		largeResultCount: row.large_result_count ?? 0,
+		largeResultBytes: row.large_result_bytes ?? 0,
+		largeResultLines: row.large_result_lines ?? 0,
+		firstTimestamp: row.first_timestamp ?? 0,
+		lastTimestamp: row.last_timestamp ?? 0,
+	};
+}
+
+function healthAggregateSelect(): string {
+	return `
+		COUNT(*) as total_events,
+		SUM(retry_count) as retry_count,
+		SUM(tool_loop_count) as tool_loop_count,
+		SUM(cancellation_count) as cancellation_count,
+		SUM(edit_files_changed) as edit_files_changed,
+		SUM(edit_lines_added) as edit_lines_added,
+		SUM(edit_lines_removed) as edit_lines_removed,
+		SUM(compaction_count) as compaction_count,
+		SUM(compaction_tokens_before) as compaction_tokens_before,
+		SUM(model_switch_count) as model_switch_count,
+		SUM(subagent_spawn_count) as subagent_spawn_count,
+		SUM(large_result_count) as large_result_count,
+		SUM(large_result_bytes) as large_result_bytes,
+		SUM(large_result_lines) as large_result_lines,
+		MIN(timestamp) as first_timestamp,
+		MAX(timestamp) as last_timestamp
+	`;
+}
+
+export function getSessionHealthOverall(cutoff?: number | null): HealthOverallStats {
+	if (!db) return EMPTY_HEALTH_OVERALL;
+	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT ${healthAggregateSelect()}
+		FROM session_health
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+	`);
+	const row = (hasCutoff ? stmt.get(cutoff) : stmt.get()) as HealthAggregateRow | undefined;
+	return rowToHealthOverall(row);
+}
+
+export function getSessionHealthByKind(cutoff?: number | null): HealthKindStats[] {
+	if (!db) return [];
+	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT kind, ${healthAggregateSelect()}
+		FROM session_health
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		GROUP BY kind
+		ORDER BY total_events DESC
+	`);
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as HealthKindRow[];
+	return rows.map(row => ({ kind: row.kind, ...rowToHealthOverall(row) }));
+}
+
+export function getSessionHealthByTool(cutoff?: number | null): HealthDimensionStats[] {
+	if (!db) return [];
+	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT kind, tool_name, model, provider, ${healthAggregateSelect()}
+		FROM session_health
+		WHERE (tool_name <> '' OR model <> '' OR provider <> '')
+		${hasCutoff ? "AND timestamp >= ?" : ""}
+		GROUP BY kind, tool_name, model, provider
+		ORDER BY total_events DESC, large_result_bytes DESC
+	`);
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as HealthDimensionRow[];
+	return rows.map(row => ({
+		kind: row.kind,
+		toolName: row.tool_name || null,
+		model: row.model || null,
+		provider: row.provider || null,
+		...rowToHealthOverall(row),
+	}));
+}
+
+export function getSessionHealthTimeSeries(cutoff?: number | null): HealthTimeSeriesPoint[] {
+	if (!db) return [];
+	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT
+			(timestamp / 86400000) * 86400000 as bucket,
+			SUM(retry_count) as retry_count,
+			SUM(tool_loop_count) as tool_loop_count,
+			SUM(cancellation_count) as cancellation_count,
+			SUM(edit_files_changed) as edit_files_changed,
+			SUM(edit_lines_added) as edit_lines_added,
+			SUM(edit_lines_removed) as edit_lines_removed,
+			SUM(compaction_count) as compaction_count,
+			SUM(compaction_tokens_before) as compaction_tokens_before,
+			SUM(model_switch_count) as model_switch_count,
+			SUM(subagent_spawn_count) as subagent_spawn_count,
+			SUM(large_result_count) as large_result_count,
+			SUM(large_result_bytes) as large_result_bytes,
+			SUM(large_result_lines) as large_result_lines
+		FROM session_health
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		GROUP BY bucket
+		ORDER BY bucket ASC
+	`);
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as HealthSeriesRow[];
+	return rows.map(row => ({
+		timestamp: row.bucket,
+		retryCount: row.retry_count ?? 0,
+		toolLoopCount: row.tool_loop_count ?? 0,
+		cancellationCount: row.cancellation_count ?? 0,
+		editFilesChanged: row.edit_files_changed ?? 0,
+		editLinesAdded: row.edit_lines_added ?? 0,
+		editLinesRemoved: row.edit_lines_removed ?? 0,
+		compactionCount: row.compaction_count ?? 0,
+		compactionTokensBefore: row.compaction_tokens_before ?? 0,
+		modelSwitchCount: row.model_switch_count ?? 0,
+		subagentSpawnCount: row.subagent_spawn_count ?? 0,
+		largeResultCount: row.large_result_count ?? 0,
+		largeResultBytes: row.large_result_bytes ?? 0,
+		largeResultLines: row.large_result_lines ?? 0,
 	}));
 }

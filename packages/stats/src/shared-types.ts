@@ -233,6 +233,70 @@ export interface BehaviorDashboardStats {
 	behaviorSeries: BehaviorTimeSeriesPoint[];
 }
 
+export type HealthEventKind =
+	| "retry"
+	| "tool_loop"
+	| "cancellation"
+	| "edit_churn"
+	| "compaction"
+	| "model_switch"
+	| "subagent_spawn"
+	| "large_result";
+
+export interface HealthOverallStats {
+	totalEvents: number;
+	retryCount: number;
+	toolLoopCount: number;
+	cancellationCount: number;
+	editFilesChanged: number;
+	editLinesAdded: number;
+	editLinesRemoved: number;
+	compactionCount: number;
+	compactionTokensBefore: number;
+	modelSwitchCount: number;
+	subagentSpawnCount: number;
+	largeResultCount: number;
+	largeResultBytes: number;
+	largeResultLines: number;
+	firstTimestamp: number;
+	lastTimestamp: number;
+}
+
+export interface HealthKindStats extends HealthOverallStats {
+	kind: HealthEventKind;
+}
+
+export interface HealthDimensionStats extends HealthOverallStats {
+	kind: HealthEventKind;
+	toolName: string | null;
+	model: string | null;
+	provider: string | null;
+}
+
+export interface HealthTimeSeriesPoint {
+	timestamp: number;
+	retryCount: number;
+	toolLoopCount: number;
+	cancellationCount: number;
+	editFilesChanged: number;
+	editLinesAdded: number;
+	editLinesRemoved: number;
+	compactionCount: number;
+	compactionTokensBefore: number;
+	modelSwitchCount: number;
+	subagentSpawnCount: number;
+	largeResultCount: number;
+	largeResultBytes: number;
+	largeResultLines: number;
+}
+
+export interface HealthDashboardStats {
+	overall: HealthOverallStats;
+	byKind: HealthKindStats[];
+	byTool: HealthDimensionStats[];
+	healthSeries: HealthTimeSeriesPoint[];
+}
+
 /** Token savings from a single source type. */
 export interface GainSourceTotals {
 	savedTokens: number;

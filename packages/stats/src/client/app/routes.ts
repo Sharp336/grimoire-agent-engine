@@ -1,4 +1,14 @@
-import { Activity, AlertCircle, Coins, Cpu, Folder, LayoutDashboard, Smile, TrendingUp } from "lucide-react";
+import {
+	Activity,
+	AlertCircle,
+	Coins,
+	Cpu,
+	Folder,
+	HeartPulse,
+	LayoutDashboard,
+	Smile,
+	TrendingUp,
+} from "lucide-react";
 import type React from "react";
 
 export type DashboardSection =
@@ -8,6 +18,7 @@ export type DashboardSection =
 	| "models"
 	| "costs"
 	| "behavior"
+	| "health"
 	| "projects"
 	| "gain";
 
@@ -49,6 +60,11 @@ export const routes: DashboardRoute[] = [
 		label: "Behavior",
 		shortLabel: "Behavior",
 		icon: Smile,
+	},
+	{
+		id: "health",
+		label: "Health",
+		icon: HeartPulse,
 	},
 	{
 		id: "projects",

@@ -13,6 +13,7 @@ import {
 	getRecentErrors,
 	getRecentRequests,
 	getRequestDetails,
+	getSessionHealthDashboardStats,
 	getTotalMessageCount,
 	syncAllSessions,
 } from "./aggregator";
@@ -212,6 +213,11 @@ async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/stats/behavior") {
 		const stats = await getBehaviorDashboardStats(range);
+		return Response.json(stats);
+	}
+
+	if (path === "/api/stats/health") {
+		const stats = await getSessionHealthDashboardStats(range);
 		return Response.json(stats);
 	}
 

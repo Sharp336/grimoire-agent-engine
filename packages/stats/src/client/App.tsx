@@ -7,6 +7,7 @@ import {
 	CostsRoute,
 	ErrorsRoute,
 	GainRoute,
+	HealthRoute,
 	ModelsRoute,
 	OverviewRoute,
 	ProjectsRoute,
@@ -76,6 +77,8 @@ export default function App() {
 				return <CostsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "behavior":
 				return <BehaviorRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+			case "health":
+				return <HealthRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "projects":
 				return <ProjectsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "gain":
