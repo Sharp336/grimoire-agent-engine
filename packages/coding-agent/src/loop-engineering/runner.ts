@@ -1979,7 +1979,7 @@ async function resolveVerifierFilePath(rootReal: string, filePath: string): Prom
 		throw new Error("verifier referenced file must stay inside the project");
 	}
 	await rejectSymlinkPathComponents(rootReal, filePath, "verifier referenced file");
-	let stat: Awaited<ReturnType<typeof fs.lstat>>;
+	let stat: nodeFs.Stats;
 	try {
 		stat = await fs.lstat(filePath);
 	} catch (error) {
