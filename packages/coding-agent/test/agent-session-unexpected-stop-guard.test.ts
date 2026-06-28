@@ -130,11 +130,28 @@ afterEach(async () => {
 });
 
 describe("AgentSession unexpected stop guard", () => {
-	it("does not classify when the feature is disabled", async () => {
-		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+	it("auto-continues clear unexpected stops by default without the model classifier", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
 		const { session, mock } = await createHarness([
 			unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now."),
+			{ content: ["done now"], stopReason: "stop" },
 		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("done now");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("does not classify when the feature is explicitly disabled", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness(
+			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
+			{ "features.unexpectedStopDetection": false },
+		);
 
 		await session.prompt("do the thing");
 		await session.waitForIdle();
@@ -151,10 +168,7 @@ describe("AgentSession unexpected stop guard", () => {
 			return calls === 1;
 		});
 		const { session, mock } = await createHarness(
-			[
-				unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now."),
-				{ content: ["done now"], stopReason: "stop" },
-			],
+			[unexpectedStop("This needs more work before it is done."), { content: ["done now"], stopReason: "stop" }],
 			{
 				"features.unexpectedStopDetection": true,
 				"providers.unexpectedStopModel": "online",
@@ -172,13 +186,10 @@ describe("AgentSession unexpected stop guard", () => {
 
 	it("does not continue when the classifier returns false", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
-		const { session, mock } = await createHarness(
-			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
-			{
-				"features.unexpectedStopDetection": true,
-				"providers.unexpectedStopModel": "online",
-			},
-		);
+		const { session, mock } = await createHarness([unexpectedStop("This needs more work before it is done.")], {
+			"features.unexpectedStopDetection": true,
+			"providers.unexpectedStopModel": "online",
+		});
 
 		await session.prompt("do the thing");
 		await session.waitForIdle();
@@ -193,10 +204,10 @@ describe("AgentSession unexpected stop guard", () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness(
 			[
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
-				unexpectedStop("I should fix this next."),
+				unexpectedStop("This needs more work before it is done."),
+				unexpectedStop("This needs more work before it is done."),
+				unexpectedStop("This needs more work before it is done."),
+				unexpectedStop("This needs more work before it is done."),
 			],
 			{
 				"features.unexpectedStopDetection": true,
