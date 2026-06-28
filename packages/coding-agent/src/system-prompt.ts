@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
+import { readFile } from "./capability/fs";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
@@ -48,15 +49,10 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none" | "custom">, string>
 /** User-level custom personality file: ~/.omp/agent/PERSONALITY.md (overridable via PI_CONFIG_DIR). */
 async function loadCustomPersonality(): Promise<string | null> {
 	const personalityPath = path.join(os.homedir(), getConfigAgentDirName(), "PERSONALITY.md");
-	try {
-		const content = (await Bun.file(personalityPath).text()).trim();
-		return content || null;
-	} catch (error) {
-		if (!isEnoent(error)) {
-			logger.warn("Could not read PERSONALITY.md", { path: personalityPath, error: String(error) });
-		}
-		return null;
-	}
+	// readFile stat-guards non-regular files (FIFO/socket/device) so a bad path
+	// can't hang prompt prep, mirroring how SYSTEM.md/AGENTS.md are loaded.
+	const content = (await readFile(personalityPath))?.trim();
+	return content || null;
 }
 
 /** Resolve the personality block content; "custom" loads PERSONALITY.md, falling back to default when absent. */
