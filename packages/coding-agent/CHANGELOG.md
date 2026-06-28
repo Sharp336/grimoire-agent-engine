@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed user-invoked `/skill:` prompts sent via steer, follow-up, or direct invocation to reach the model as user-initiated messages instead of sharing the developer/system role used by auto-applied skills.
+
 ## [16.2.2] - 2026-06-27
 
 ### Added

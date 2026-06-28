@@ -563,6 +563,12 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			case "developer":
 			case "assistant":
 			case "toolResult": {
+				// User-invoked `/skill:` must reach the model as a user turn; auto-applied/read skills stay developer.
+				if (m.role === "custom" && m.customType === SKILL_PROMPT_MESSAGE_TYPE && m.attribution === "user") {
+					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
+					return [{ role: "user", content, attribution: "user", timestamp: m.timestamp }];
+				}
+
 				// Core roles share one transformer with agent-core —
 				// duplicating them here is how snapcompact frames once
 				// silently fell off the provider request.

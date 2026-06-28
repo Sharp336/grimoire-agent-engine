@@ -240,7 +240,27 @@ describe("convertToLlm custom message mapping", () => {
 		expect(converted[0].content.filter(content => content.type === "image")).toEqual([image]);
 	});
 
-	it("allows custom messages to opt into user attribution", () => {
+	it("keeps non-skill user-attributed custom messages on the developer role", () => {
+		const messages: AgentMessage[] = [
+			{
+				role: "custom",
+				customType: "ultrathink-notice",
+				content: "User requested deeper reasoning",
+				display: true,
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("developer");
+		expectAttribution(converted[0], "user");
+		expect(inferCopilotInitiator(converted)).toBe("user");
+	});
+
+	it("maps user-invoked skill prompts to the user role", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
@@ -255,9 +275,14 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("developer");
+		expect(converted[0]?.role).toBe("user");
 		expectAttribution(converted[0], "user");
 		expect(inferCopilotInitiator(converted)).toBe("user");
+		if (converted[0]?.role !== "user" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected user array content");
+		}
+		const text = converted[0].content.find(content => content.type === "text")?.text ?? "";
+		expect(text).toContain("Run this skill with my arguments");
 	});
 });
 
