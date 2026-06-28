@@ -146,7 +146,7 @@ function advisorNoteDedupeKey(note: string): string {
 /** Rank advisor severities so the dedupe state can detect a real escalation
  *  (nit → concern → blocker) versus a verbatim repeat. `undefined` defers to
  *  `nit` because the schema treats an omitted severity as a plain nit. */
-const ADVISOR_SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 };
+export const ADVISOR_SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 };
 function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
 	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
 }

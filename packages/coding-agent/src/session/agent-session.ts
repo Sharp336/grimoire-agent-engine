@@ -130,6 +130,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
+	ADVISOR_SEVERITY_RANK,
 	AdviseTool,
 	type AdvisorAgent,
 	AdvisorEmissionGuard,
@@ -1943,6 +1944,11 @@ export class AgentSession {
 		const enqueueAdvice = (note: string, severity?: AdvisorSeverity) => {
 			if (!this.#advisorEmissionGuard.accept(note)) {
 				logger.debug("advisor advice suppressed by emission guard", { severity });
+				return;
+			}
+			const minSeverity = (this.settings.get("advisor.minSeverity") as AdvisorSeverity) ?? "nit";
+			if (ADVISOR_SEVERITY_RANK[severity ?? "nit"] < ADVISOR_SEVERITY_RANK[minSeverity]) {
+				logger.debug("advisor advice suppressed by minSeverity filter", { severity, minSeverity });
 				return;
 			}
 			const interrupting = isInterruptingSeverity(severity);

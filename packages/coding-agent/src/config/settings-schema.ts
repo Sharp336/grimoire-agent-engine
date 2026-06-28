@@ -438,6 +438,19 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.minSeverity": {
+		type: "enum",
+		values: ["nit", "concern", "blocker"],
+		default: "nit",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Minimum Severity",
+			description:
+				"Only deliver advisor notes at or above this severity level. Notes below the threshold are dropped before delivery to the main agent.",
+			condition: "advisorEnabled",
+		},
+	},
 	shellPath: { type: "string", default: undefined },
 	"git.enabled": {
 		type: "boolean",

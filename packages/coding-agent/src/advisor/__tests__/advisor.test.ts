@@ -9,6 +9,7 @@ import { formatSessionHistoryMarkdown } from "../../session/session-history-form
 import { YieldQueue } from "../../session/yield-queue";
 import {
 	ADVISOR_READONLY_TOOL_NAMES,
+	ADVISOR_SEVERITY_RANK,
 	AdviseTool,
 	type AdvisorAgent,
 	type AdvisorNote,
@@ -1425,6 +1426,37 @@ describe("advisor", () => {
 					}),
 				).toBe("steer");
 			}
+		});
+	});
+
+	describe("ADVISOR_SEVERITY_RANK", () => {
+		it("ranks nit < concern < blocker", () => {
+			expect(ADVISOR_SEVERITY_RANK.nit).toBeLessThan(ADVISOR_SEVERITY_RANK.concern);
+			expect(ADVISOR_SEVERITY_RANK.concern).toBeLessThan(ADVISOR_SEVERITY_RANK.blocker);
+		});
+
+		it("filters correctly for minSeverity = concern", () => {
+			const minSeverity = "concern";
+			// nit should be filtered (rank below threshold)
+			expect(ADVISOR_SEVERITY_RANK.nit < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(true);
+			// concern should pass (rank at threshold)
+			expect(ADVISOR_SEVERITY_RANK.concern < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
+			// blocker should pass (rank above threshold)
+			expect(ADVISOR_SEVERITY_RANK.blocker < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
+		});
+
+		it("filters correctly for minSeverity = blocker", () => {
+			const minSeverity = "blocker";
+			expect(ADVISOR_SEVERITY_RANK.nit < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(true);
+			expect(ADVISOR_SEVERITY_RANK.concern < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(true);
+			expect(ADVISOR_SEVERITY_RANK.blocker < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
+		});
+
+		it("passes all severities when minSeverity = nit (default)", () => {
+			const minSeverity = "nit";
+			expect(ADVISOR_SEVERITY_RANK.nit < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
+			expect(ADVISOR_SEVERITY_RANK.concern < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
+			expect(ADVISOR_SEVERITY_RANK.blocker < ADVISOR_SEVERITY_RANK[minSeverity]).toBe(false);
 		});
 	});
 });
