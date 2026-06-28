@@ -61,6 +61,7 @@ import type {
 } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { withRequestDebugFetch } from "./utils/request-debug";
+import { withExtraCaFetch } from "./utils/tls-fetch";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -225,7 +226,7 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	const requestOptions = withRequestDebugFetch(options as StreamOptions | undefined) as
+	const requestOptions = withExtraCaFetch(withRequestDebugFetch(options as StreamOptions | undefined)) as
 		| OptionsForApi<TApi>
 		| undefined;
 
@@ -368,7 +369,7 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withRequestDebugFetch(options);
+	const requestOptions = withExtraCaFetch(withRequestDebugFetch(options));
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
