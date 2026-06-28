@@ -262,6 +262,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
+import { HEURISTIC_UNEXPECTED_STOP_MODEL_KEY } from "../tiny/models";
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
@@ -327,7 +328,11 @@ import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager"
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
+import {
+	classifyUnexpectedStop,
+	isObviousUnexpectedStopText,
+	isUnexpectedStopCandidate,
+} from "./unexpected-stop-classifier";
 import { YieldQueue } from "./yield-queue";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
@@ -9623,19 +9628,25 @@ export class AgentSession {
 			return false;
 		}
 
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
 		let classification: boolean | undefined;
-		try {
-			classification = await classifyUnexpectedStop(text, {
-				settings: this.settings,
-				registry: this.#modelRegistry,
-				sessionId: this.sessionId,
-				metadataResolver: (provider: string) => this.agent.metadataForProvider(provider),
-				signal: controller.signal,
-			});
-		} finally {
-			clearTimeout(timeout);
+		if (isObviousUnexpectedStopText(text)) {
+			classification = true;
+		} else if (this.settings.get("providers.unexpectedStopModel") === HEURISTIC_UNEXPECTED_STOP_MODEL_KEY) {
+			classification = false;
+		} else {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
+			try {
+				classification = await classifyUnexpectedStop(text, {
+					settings: this.settings,
+					registry: this.#modelRegistry,
+					sessionId: this.sessionId,
+					metadataResolver: (provider: string) => this.agent.metadataForProvider(provider),
+					signal: controller.signal,
+				});
+			} finally {
+				clearTimeout(timeout);
+			}
 		}
 
 		if (classification !== true) {

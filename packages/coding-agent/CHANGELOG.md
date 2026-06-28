@@ -39,6 +39,9 @@
 - Fixed reasoning streaming being locked off for OpenAI-compatible providers that stream reasoning content without advertising reasoning support in model metadata.
 - Fixed `/shake` and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
 - Fixed the `time_spent` status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
+### Fixed
+
+- Fixed normal `stop` turns that promise more work being allowed to end the session by default; unexpected-stop detection now uses local heuristics by default, while the model classifier remains opt-in for ambiguous stops.
 
 ## [16.2.2] - 2026-06-27
 

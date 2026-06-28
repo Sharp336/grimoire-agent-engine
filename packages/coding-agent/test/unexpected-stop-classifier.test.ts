@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
+	isObviousUnexpectedStopText,
 	isUnexpectedStopCandidate,
 	parseUnexpectedStopClassification,
 } from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
@@ -68,6 +69,24 @@ describe("isUnexpectedStopCandidate", () => {
 			content: [],
 		});
 		expect(isUnexpectedStopCandidate(message)).toBe(false);
+	});
+});
+
+describe("isObviousUnexpectedStopText", () => {
+	it("detects clear continuation promises", () => {
+		expect(isObviousUnexpectedStopText("Doing that now.")).toBe(true);
+		expect(isObviousUnexpectedStopText("I will run the scoped tests next.")).toBe(true);
+	});
+
+	it("rejects negated action statements", () => {
+		expect(isObviousUnexpectedStopText("I am not doing that now.")).toBe(false);
+		expect(isObviousUnexpectedStopText("I will not run tests next.")).toBe(false);
+		expect(isObviousUnexpectedStopText("I don't need to continue now.")).toBe(false);
+	});
+
+	it("rejects conditional action offers", () => {
+		expect(isObviousUnexpectedStopText("Let me know if you want me to run the tests next.")).toBe(false);
+		expect(isObviousUnexpectedStopText("If you'd like me to apply the fix next, say so.")).toBe(false);
 	});
 });
 
