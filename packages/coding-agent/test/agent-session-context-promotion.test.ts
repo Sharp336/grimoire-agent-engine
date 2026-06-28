@@ -36,6 +36,7 @@ describe("AgentSession context promotion", () => {
 		if (session) {
 			await session.dispose();
 		}
+		vi.restoreAllMocks();
 	});
 
 	function createOverflowMessage(
