@@ -72,20 +72,19 @@ export function extractFromOmpEditDetails(details: unknown): Array<OmpPerFileEdi
 	const results: Array<OmpPerFileEditResult & { op: "write" | "edit" }> = [];
 	for (const item of source) {
 		if (!isRecord(item)) continue;
-		const filePath = getString(item, ["filePath", "file_path"]) ?? "";
-		const movePath = getString(item, ["movePath", "move_path"]);
+		const filePath = getString(item, ["path", "filePath", "file_path"]) ?? "";
+		const movePath = getString(item, ["move", "movePath", "move_path"]);
 		const oldText = getString(item, ["oldText", "old_text", "oldString", "old_string"]) ?? "";
 		const newText = getString(item, ["newText", "new_text", "newString", "new_string"]) ?? "";
 		if (typeof filePath !== "string" || filePath.length === 0) continue;
-		const success = item.success;
-		if (success === false) continue;
+		if (item.isError === true) continue;
 		results.push({
 			filePath,
 			movePath: typeof movePath === "string" && movePath.length > 0 ? movePath : undefined,
 			oldText,
 			newText,
 			op: oldText.length === 0 ? "write" : "edit",
-			success: success === true,
+			success: item.isError !== true,
 		});
 	}
 	return results;

@@ -215,21 +215,25 @@ describe("extractCommentCheckRequests", () => {
 		const details = {
 			perFileResults: [
 				{
-					filePath: "src/a.ts",
+					path: "src/a.ts",
 					newText: "const a = 1;\n",
-					success: true,
 				},
 				{
-					filePath: "src/b.ts",
+					path: "src/b.ts",
 					oldText: "const b = 1;\n",
 					newText: "const b = 2;\n",
-					success: true,
 				},
 				{
-					filePath: "src/c.ts",
+					path: "src/c.ts",
 					oldText: "const c = 1;\n",
 					newText: "const c = 2;\n",
-					success: false,
+					isError: true,
+				},
+				{
+					path: "src/d.ts",
+					move: "src/d_renamed.ts",
+					oldText: "const d = 1;\n",
+					newText: "const d = 2;\n",
 				},
 			],
 		};
@@ -237,8 +241,30 @@ describe("extractCommentCheckRequests", () => {
 		const results = extractFromOmpEditDetails(details);
 
 		expect(results).toEqual([
-			{ filePath: "src/a.ts", oldText: "", newText: "const a = 1;\n", success: true, op: "write" },
-			{ filePath: "src/b.ts", oldText: "const b = 1;\n", newText: "const b = 2;\n", success: true, op: "edit" },
+			{
+				filePath: "src/a.ts",
+				movePath: undefined,
+				oldText: "",
+				newText: "const a = 1;\n",
+				success: true,
+				op: "write",
+			},
+			{
+				filePath: "src/b.ts",
+				movePath: undefined,
+				oldText: "const b = 1;\n",
+				newText: "const b = 2;\n",
+				success: true,
+				op: "edit",
+			},
+			{
+				filePath: "src/d.ts",
+				movePath: "src/d_renamed.ts",
+				oldText: "const d = 1;\n",
+				newText: "const d = 2;\n",
+				success: true,
+				op: "edit",
+			},
 		]);
 	});
 });
