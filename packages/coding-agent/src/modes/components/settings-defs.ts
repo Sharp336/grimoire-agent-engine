@@ -127,6 +127,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	commentCheckerActive: () => {
+		try {
+			return Settings.instance.get("commentChecker.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

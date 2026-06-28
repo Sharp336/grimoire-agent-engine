@@ -1815,6 +1815,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
 		inlineExtensions.push((await import("./autoresearch")).createAutoresearchExtension);
+		if (settings.get("commentChecker.enabled")) {
+			inlineExtensions.push((await import("./comment-checker")).createCommentCheckerExtension);
+		}
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}
