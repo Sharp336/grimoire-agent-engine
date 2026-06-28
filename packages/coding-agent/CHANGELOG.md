@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `custom` option to the `personality` setting that loads a user-authored persona from `~/.omp/agent/PERSONALITY.md` (falls back to the default personality when the file is absent), selectable from the personality selector alongside the built-in presets.
+
 ## [16.2.2] - 2026-06-27
 
 ### Added
-
-- Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
-- Added a `custom` option to the `personality` setting that loads a user-authored persona from `~/.omp/agent/PERSONALITY.md` (falls back to the default personality when the file is absent), selectable from the personality selector alongside the built-in presets.
 
 - Added a new `tiny` model role for consolidated online task handling.
 - Added a `textVerbosity` setting to control OpenAI and Codex response detail.
