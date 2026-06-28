@@ -14,8 +14,9 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { invokeSkillCommandFromText } from "@oh-my-pi/pi-coding-agent/modes/skill-command";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -28,6 +29,7 @@ type StubEditor = {
 	setText: (text: string) => void;
 	getText: () => string;
 	addToHistory: Mock<(...args: unknown[]) => unknown>;
+	clearDraft: (submittedText?: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -35,7 +37,13 @@ type StubEditor = {
 
 type PromptCustomMessage = Mock<
 	(
-		message: { details: SkillPromptDetails },
+		message: {
+			customType?: string;
+			content?: string;
+			display?: boolean;
+			attribution?: string;
+			details: SkillPromptDetails;
+		},
 		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string },
 	) => Promise<void>
 >;
@@ -46,7 +54,12 @@ async function writeSkillFile(dir: string, skillName: string, body: string): Pro
 	return skillPath;
 }
 
-function createStubInputControllerContext(opts: { skillCommands: Map<string, string>; isStreaming: boolean }) {
+function createStubInputControllerContext(opts: {
+	skillCommands: Map<string, string>;
+	isStreaming: boolean;
+	isCompacting?: boolean;
+	loopModeEnabled?: boolean;
+}) {
 	let editorText = "";
 	const editor: StubEditor = {
 		setText(text) {
@@ -54,6 +67,14 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 		},
 		getText() {
 			return editorText;
+		},
+		clearDraft(submittedText) {
+			if (submittedText !== undefined) {
+				editor.addToHistory(submittedText);
+			}
+			editorText = "";
+			editor.pendingImages = [];
+			editor.pendingImageLinks = [];
 		},
 		addToHistory: vi.fn(),
 		pendingImages: [] as ImageContent[],
@@ -65,31 +86,33 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
+	const session = {
+		isStreaming: opts.isStreaming,
+		isCompacting: opts.isCompacting ?? false,
+		isBashRunning: false,
+		isEvalRunning: false,
+		extensionRunner: undefined,
+		prompt,
+		promptCustomMessage,
+	};
 
 	const ctx = {
 		editor,
 		ui: { requestRender },
 		skillCommands: opts.skillCommands,
-		session: {
-			isStreaming: opts.isStreaming,
-			isCompacting: false,
-			isBashRunning: false,
-			isEvalRunning: false,
-			extensionRunner: undefined,
-			prompt,
-			promptCustomMessage,
-		},
-		get viewSession() {
-			return (this as typeof ctx).session;
-		},
+		session,
+		viewSession: session,
 		showError,
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
-		loopModeEnabled: false,
+		loopModeEnabled: opts.loopModeEnabled ?? false,
+		loopPrompt: undefined as string | undefined,
 		compactionQueuedMessages: [],
+		queueCompactionMessage,
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 	} as unknown as InteractiveModeContext;
@@ -102,6 +125,7 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 		handleGoalModeCommand,
 		updatePendingMessagesDisplay,
 		requestRender,
+		queueCompactionMessage,
 	};
 }
 
@@ -186,6 +210,297 @@ describe("InputController skill queue chip metadata", () => {
 			queueChipText: "/skill:test-skill arg1 arg2",
 		});
 		expect(promptCustomMessage.mock.calls[0]?.[0].details.__queueChipText).toBeUndefined();
+	});
+});
+
+describe("compaction skill re-invocation", () => {
+	let tempDir: TempDir;
+	let skillCommands: Map<string, string>;
+
+	function firstPromptCustomCall(promptCustomMessage: PromptCustomMessage) {
+		const call = promptCustomMessage.mock.calls[0];
+		if (!call) {
+			throw new Error("expected promptCustomMessage to be called");
+		}
+		return call;
+	}
+
+	function createCompactionDrainContext(
+		queuedMessages: CompactionQueuedMessage[],
+		options?: { promptCustomMessageError?: Error; knownSlashCommands?: readonly string[] },
+	) {
+		const promptCustomMessageCalled = Promise.withResolvers<void>();
+		const order: string[] = [];
+		const promptCustomMessage: PromptCustomMessage = vi.fn(async (_message, callOptions) => {
+			order.push(`skill:${callOptions?.queueChipText ?? ""}`);
+			promptCustomMessageCalled.resolve();
+			if (options?.promptCustomMessageError) {
+				throw options.promptCustomMessageError;
+			}
+		});
+		const prompt = vi.fn(
+			async (text: string, _options?: { streamingBehavior?: "steer" | "followUp"; images?: ImageContent[] }) => {
+				order.push(`prompt:${text}`);
+			},
+		);
+		const steer = vi.fn(async (text: string, _images?: ImageContent[]) => {
+			order.push(`steer:${text}`);
+		});
+		const followUp = vi.fn(async (text: string, _images?: ImageContent[]) => {
+			order.push(`followUp:${text}`);
+		});
+		const clearQueue = vi.fn();
+		const showError = vi.fn();
+		const updatePendingMessagesDisplay = vi.fn();
+		const isKnownSlashCommand = vi.fn((text: string) => options?.knownSlashCommands?.includes(text) ?? false);
+		const recordLocalSubmission = vi.fn((_text: string, _imageCount: number) => vi.fn());
+		const withLocalSubmission = vi.fn(async (_text: string, fn: () => unknown) => Promise.resolve(fn()));
+		const session = {
+			promptCustomMessage,
+			prompt,
+			steer,
+			followUp,
+			clearQueue,
+		};
+		const ctx = {
+			skillCommands,
+			compactionQueuedMessages: queuedMessages,
+			updatePendingMessagesDisplay,
+			showError,
+			isKnownSlashCommand,
+			recordLocalSubmission,
+			withLocalSubmission,
+			session,
+		} as unknown as InteractiveModeContext;
+		return {
+			ctx,
+			promptCustomMessage,
+			promptCustomMessageCalled: promptCustomMessageCalled.promise,
+			prompt,
+			steer,
+			followUp,
+			showError,
+			clearQueue,
+			order,
+			updatePendingMessagesDisplay,
+			recordLocalSubmission,
+			withLocalSubmission,
+		};
+	}
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-skill-compaction-stub-");
+		const skillPath = await writeSkillFile(tempDir.path(), "test-skill", "Do the thing.");
+		skillCommands = new Map<string, string>([["skill:test-skill", skillPath]]);
+	});
+
+	afterEach(() => {
+		tempDir.removeSync();
+		vi.restoreAllMocks();
+	});
+
+	it("invokes known skill commands as user-attributed skill prompts", async () => {
+		const { ctx, promptCustomMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+		});
+		const skillPath = skillCommands.get("skill:test-skill");
+		if (!skillPath) {
+			throw new Error("test skill command was not registered");
+		}
+
+		const handled = await invokeSkillCommandFromText(ctx, "/skill:test-skill arg1 arg2", "steer");
+
+		expect(handled).toBe(true);
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		const [message, options] = firstPromptCustomCall(promptCustomMessage);
+		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+		expect(message.display).toBe(true);
+		expect(message.attribution).toBe("user");
+		expect(message.content).toContain("Do the thing.");
+		expect(message.details).toMatchObject({
+			name: "test-skill",
+			path: skillPath,
+			args: "arg1 arg2",
+			lineCount: 1,
+		});
+		expect(options).toEqual({
+			streamingBehavior: "steer",
+			queueChipText: "/skill:test-skill arg1 arg2",
+		});
+	});
+
+	it("leaves unknown skill and non-skill text for plain prompt handling", async () => {
+		const { ctx, promptCustomMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+		});
+
+		expect(await invokeSkillCommandFromText(ctx, "/skill:nope", "steer")).toBe(false);
+		expect(await invokeSkillCommandFromText(ctx, "hello", "steer")).toBe(false);
+		expect(promptCustomMessage).not.toHaveBeenCalled();
+	});
+
+	it("re-invokes a lone compaction-queued skill instead of prompting literal text", async () => {
+		const { ctx, promptCustomMessage, promptCustomMessageCalled, prompt } = createCompactionDrainContext([
+			{ text: "/skill:test-skill", mode: "steer" },
+		]);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		const [message] = firstPromptCustomCall(promptCustomMessage);
+		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+		expect(message.attribution).toBe("user");
+		expect(prompt.mock.calls.map(call => call[0])).not.toContain("/skill:test-skill");
+	});
+
+	it("submits a skill first prompt before draining later queued text", async () => {
+		const { ctx, promptCustomMessageCalled, order } = createCompactionDrainContext([
+			{ text: "/skill:test-skill", mode: "steer" },
+			{ text: "after skill", mode: "steer" },
+		]);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		expect(order).toEqual(["skill:/skill:test-skill", "steer:after skill"]);
+	});
+
+	it("preserves follow-up mode for a non-retry skill first prompt", async () => {
+		const { ctx, promptCustomMessage, promptCustomMessageCalled } = createCompactionDrainContext([
+			{ text: "/skill:test-skill", mode: "followUp" },
+		]);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		const [, options] = firstPromptCustomCall(promptCustomMessage);
+		expect(options).toEqual({
+			streamingBehavior: "followUp",
+			queueChipText: "/skill:test-skill",
+		});
+	});
+
+	it("restores a compaction-queued skill when custom-message dispatch fails", async () => {
+		const queuedMessages: CompactionQueuedMessage[] = [{ text: "/skill:test-skill", mode: "steer" }];
+		const promptError = new Error("model is unavailable");
+		const { ctx, promptCustomMessageCalled, clearQueue, showError } = createCompactionDrainContext(queuedMessages, {
+			promptCustomMessageError: promptError,
+		});
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(clearQueue).toHaveBeenCalledTimes(1);
+		expect(ctx.compactionQueuedMessages).toEqual(queuedMessages);
+		expect(showError.mock.calls[0]?.[0]).toContain("model is unavailable");
+	});
+
+	it("restores willRetry queued skills when custom-message dispatch fails", async () => {
+		const queuedMessages: CompactionQueuedMessage[] = [{ text: "/skill:test-skill", mode: "followUp" }];
+		const { ctx, clearQueue, showError } = createCompactionDrainContext(queuedMessages, {
+			promptCustomMessageError: new Error("follow-up unavailable"),
+		});
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: true });
+
+		expect(clearQueue).toHaveBeenCalledTimes(1);
+		expect(ctx.compactionQueuedMessages).toEqual(queuedMessages);
+		expect(showError.mock.calls[0]?.[0]).toContain("follow-up unavailable");
+	});
+
+	it("restores later queued skills when custom-message dispatch fails", async () => {
+		const queuedMessages: CompactionQueuedMessage[] = [
+			{ text: "hello", mode: "steer" },
+			{ text: "/skill:test-skill", mode: "steer" },
+		];
+		const { ctx, promptCustomMessageCalled, clearQueue, showError } = createCompactionDrainContext(queuedMessages, {
+			promptCustomMessageError: new Error("later skill unavailable"),
+		});
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		expect(clearQueue).toHaveBeenCalledTimes(1);
+		expect(ctx.compactionQueuedMessages).toEqual(queuedMessages);
+		expect(showError.mock.calls[0]?.[0]).toContain("later skill unavailable");
+	});
+
+	it("re-invokes willRetry follow-up skills with follow-up streaming behavior", async () => {
+		const { ctx, promptCustomMessage } = createCompactionDrainContext([
+			{ text: "/skill:test-skill", mode: "followUp" },
+		]);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: true });
+
+		const [message, options] = firstPromptCustomCall(promptCustomMessage);
+		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+		expect(message.attribution).toBe("user");
+		expect(options).toEqual({
+			streamingBehavior: "followUp",
+			queueChipText: "/skill:test-skill",
+		});
+	});
+
+	it("keeps regular first prompts and re-invokes later queued skills", async () => {
+		const { ctx, promptCustomMessage, prompt } = createCompactionDrainContext([
+			{ text: "hello", mode: "steer" },
+			{ text: "/skill:test-skill", mode: "steer" },
+		]);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+
+		expect(prompt.mock.calls[0]?.[0]).toBe("hello");
+		const [message] = firstPromptCustomCall(promptCustomMessage);
+		expect(message.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+		expect(message.attribution).toBe("user");
+		expect(prompt.mock.calls.map(call => call[0])).not.toContain("/skill:test-skill");
+	});
+
+	it("runs known slash precommands before a skill first prompt", async () => {
+		const { ctx, promptCustomMessageCalled, prompt, order } = createCompactionDrainContext(
+			[
+				{ text: "/known", mode: "steer" },
+				{ text: "/skill:test-skill", mode: "steer" },
+			],
+			{ knownSlashCommands: ["/known"] },
+		);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		expect(prompt).toHaveBeenCalledWith("/known");
+		expect(order).toEqual(["prompt:/known", "skill:/skill:test-skill"]);
+	});
+
+	it("queues Enter-submitted skills during compaction before loop mode can consume them", async () => {
+		const { ctx, editor, promptCustomMessage, queueCompactionMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+			isCompacting: true,
+			loopModeEnabled: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill");
+		await editor.onSubmit?.("/skill:test-skill");
+
+		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill", "steer", undefined);
+		expect(promptCustomMessage).not.toHaveBeenCalled();
+		expect(ctx.loopPrompt).toBeUndefined();
 	});
 });
 
@@ -450,6 +765,14 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 		getText() {
 			return editorText;
 		},
+		clearDraft(submittedText) {
+			if (submittedText !== undefined) {
+				editor.addToHistory(submittedText);
+			}
+			editorText = "";
+			editor.pendingImages = [];
+			editor.pendingImageLinks = [];
+		},
 		addToHistory: vi.fn(),
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
@@ -480,8 +803,10 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 
 	beforeEach(async () => {
 		const themeInstance = await getThemeByName("dark");
-		expect(themeInstance).toBeDefined();
-		setThemeInstance(themeInstance!);
+		if (!themeInstance) {
+			throw new Error("dark theme is not registered");
+		}
+		setThemeInstance(themeInstance);
 	});
 
 	afterEach(async () => {
@@ -526,6 +851,7 @@ function createEventControllerFixture() {
 	const updatePendingMessagesDisplay = vi.fn();
 	const addMessageToChat = vi.fn();
 	const requestRender = vi.fn();
+	const session = {};
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -535,10 +861,8 @@ function createEventControllerFixture() {
 		addMessageToChat,
 		updatePendingMessagesDisplay,
 		pendingTools: new Map(),
-		session: {},
-		get viewSession() {
-			return (this as typeof ctx).session;
-		},
+		session,
+		viewSession: session,
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
