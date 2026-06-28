@@ -39,6 +39,9 @@
 - Fixed reasoning streaming being locked off for OpenAI-compatible providers that stream reasoning content without advertising reasoning support in model metadata.
 - Fixed `/shake` and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
 - Fixed the `time_spent` status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
+### Fixed
+
+- Fixed local coding-agent CI checks leaking user agent state into discovery tests and depending on English Git stderr for remote idempotency.
 
 ## [16.2.2] - 2026-06-27
 
