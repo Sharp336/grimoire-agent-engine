@@ -1493,6 +1493,9 @@
 ### Changed
 
 - Status line now collapses a linked git worktree path to the project name with a worktree icon, leaving the git segment to show the branch once instead of repeating it in the path.
+### Added
+
+- Added `/restart` to restart OMP from the TUI and resume the current session in the same terminal.
 
 ### Fixed
 

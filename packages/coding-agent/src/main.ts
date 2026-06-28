@@ -27,6 +27,7 @@ import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import type { RestartToolRestriction } from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -405,6 +406,12 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 	};
 }
 
+function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): RestartToolRestriction | undefined {
+	if (parsed.tools && parsed.tools.length > 0) return { kind: "allowlist", toolNames: parsed.tools };
+	if (parsed.noTools || parsed.tools) return { kind: "none" };
+	return undefined;
+}
+
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
@@ -422,6 +429,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	restartToolRestriction?: RestartToolRestriction,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -431,6 +439,7 @@ async function runInteractiveMode(
 		lspServers,
 		mcpManager,
 		eventBus,
+		restartToolRestriction,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -1590,6 +1599,7 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				buildRestartToolRestriction(parsedArgs),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

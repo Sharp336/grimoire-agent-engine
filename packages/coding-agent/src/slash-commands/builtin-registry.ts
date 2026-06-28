@@ -167,6 +167,20 @@ const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashComma
 	return commandConsumed();
 };
 
+const restartHandler = async (
+	_command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> => {
+	await runtime.output("Restart is only available in the TUI.");
+	return commandConsumed();
+};
+
+const restartHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): SlashCommandResult => {
+	runtime.ctx.editor.setText("");
+	void runtime.ctx.restart();
+	return commandConsumed();
+};
+
 async function handleUsageResetCommand(
 	arg: string,
 	session: AgentSession,
@@ -1873,6 +1887,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "exit",
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
+	},
+	{
+		name: "restart",
+		description: "Restart OMP and resume this session",
+		handle: restartHandler,
+		handleTui: restartHandlerTui,
 	},
 	{
 		name: "marketplace",

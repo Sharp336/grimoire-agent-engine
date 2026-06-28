@@ -51,8 +51,10 @@ import {
 	prompt,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
 import { reset as resetCapabilities } from "../capability";
+import * as restartProcess from "../cli/restart";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
@@ -110,6 +112,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import { errorMessage } from "../slash-commands/helpers/parse";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
@@ -646,6 +649,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
+	readonly #restartToolRestriction: restartProcess.RestartToolRestriction | undefined;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
@@ -666,6 +670,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
+		restartToolRestriction?: restartProcess.RestartToolRestriction,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -681,6 +686,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
 		);
 		this.#eventBus = eventBus;
+		this.#restartToolRestriction = restartToolRestriction;
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -3899,11 +3905,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async shutdown(): Promise<void> {
-		if (this.#isShuttingDown) return;
-		this.#isShuttingDown = true;
-
 		await this.#liveCommandController.stop();
+
+	async #teardownForProcessExit(options: {
+		printResumeHint: boolean;
+	}): Promise<{ sessionId: string; sessionFile: string | undefined }> {
+		// Snapshot the editor before any teardown empties it. Persisting the draft
+		// here covers Ctrl+D shutdown with non-empty text; for /exit the editor is
+		// already cleared so saveDraft("") just removes any stale sidecar.
+		const draftText = this.editor.getText();
 
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
@@ -3952,11 +3962,72 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Print resumption hint if this is a persisted session
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
-		if (sessionId && sessionFile) {
+		if (options.printResumeHint && sessionId && sessionFile) {
 			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
 		}
 
+		return { sessionId, sessionFile };
+	}
+
+	async shutdown(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		this.#isShuttingDown = true;
+		await this.#teardownForProcessExit({ printResumeHint: true });
 		await postmortem.quit(0);
+	}
+
+	async restart(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		if (this.collabHost) {
+			this.showWarning("Stop hosting first (/collab stop)");
+			return;
+		}
+		if (this.collabGuest) {
+			this.showWarning("Leave collab first (/leave)");
+			return;
+		}
+		if (
+			this.session.isStreaming ||
+			this.session.isCompacting ||
+			this.session.hasPostPromptWork ||
+			this.session.isBashRunning ||
+			this.session.isEvalRunning
+		) {
+			this.showWarning("Wait for the current response or tool execution to finish or abort it before restarting.");
+			return;
+		}
+		if (!this.sessionManager.getSessionFile()) {
+			this.showWarning("Cannot restart because this session is not persisted.");
+			return;
+		}
+
+		try {
+			await this.sessionManager.flush();
+			await this.sessionManager.ensureOnDisk();
+		} catch (error) {
+			this.showWarning(`Restart failed: ${errorMessage(error)}`);
+			return;
+		}
+
+		const command = restartProcess.buildRestartCommand({
+			sessionId: this.sessionManager.getSessionId(),
+			cwd: this.sessionManager.getCwd(),
+			sessionDir: this.sessionManager.getSessionDir(),
+			activeProfile: getActiveProfile(),
+			toolRestriction: this.#restartToolRestriction,
+			approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
+		});
+
+		this.#isShuttingDown = true;
+		try {
+			await this.#teardownForProcessExit({ printResumeHint: false });
+			await postmortem.cleanup();
+			const exitCode = await restartProcess.spawnRestartProcess(command);
+			await postmortem.quit(exitCode);
+		} catch (error) {
+			process.stderr.write(`Restart failed: ${errorMessage(error)}\n`);
+			await postmortem.quit(1);
+		}
 	}
 
 	async checkShutdownRequested(): Promise<void> {
