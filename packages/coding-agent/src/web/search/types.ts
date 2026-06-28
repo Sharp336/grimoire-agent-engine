@@ -44,6 +44,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
 	{
+		value: "anysearch",
+		label: "AnySearch",
+		description: "Uses ANYSEARCH_API_KEY when configured; explicit selection falls back to anonymous MCP search",
+	},
+	{
 		value: "duckduckgo",
 		label: "DuckDuckGo",
 		description: "Credential-free best-effort fallback; may be bot-challenged on datacenter/shared-egress IPs",

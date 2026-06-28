@@ -114,6 +114,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.duckduckgo,
 		load: async () => new (await import("./providers/duckduckgo")).DuckDuckGoProvider(),
 	},
+	anysearch: {
+		id: "anysearch",
+		label: SEARCH_PROVIDER_LABELS.anysearch,
+		load: async () => new (await import("./providers/anysearch")).AnySearchProvider(),
+	},
 };
 
 const instanceCache = new Map<SearchProviderId, SearchProvider>();

@@ -8,7 +8,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
-const authStorage = {} as AuthStorage;
+const authStorage = {
+	hasAuth: () => false,
+	hasOAuth: () => false,
+	getCredentialOrigin: () => undefined,
+} as unknown as AuthStorage;
 const originalBraveApiKey = process.env.BRAVE_API_KEY;
 const originalJinaApiKey = process.env.JINA_API_KEY;
 
@@ -68,5 +72,19 @@ describe("resolveProviderChain", () => {
 		const providers = await resolveProviderChain(authStorage, "auto");
 
 		expect(providers.map(provider => provider.id)).toEqual(["jina"]);
+	});
+	it("prioritizes configured anysearch over duckduckgo in auto mode", async () => {
+		enableKeyBackedProviders();
+		process.env.ANYSEARCH_API_KEY = "test-anysearch-key";
+		try {
+			const providers = await resolveProviderChain(authStorage, "auto");
+			const anysearchIndex = providers.findIndex(p => p.id === "anysearch");
+			const duckduckgoIndex = providers.findIndex(p => p.id === "duckduckgo");
+			expect(anysearchIndex).toBeGreaterThanOrEqual(0);
+			expect(duckduckgoIndex).toBeGreaterThanOrEqual(0);
+			expect(anysearchIndex).toBeLessThan(duckduckgoIndex);
+		} finally {
+			delete process.env.ANYSEARCH_API_KEY;
+		}
 	});
 });
