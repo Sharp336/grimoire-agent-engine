@@ -317,8 +317,12 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
 		// followed by a plausible filename — including `$VAR` targets; `>|`
 		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is
-		// not matched.
-		pattern: "^\\s*(echo|printf|cat\\s*<<)\\s+(?:[^\"'>]|\"[^\"]*\"|'[^']*')*(?<!\\|)>{1,2}\\|?\\s*[$\\w./~\"'-]",
+		// not matched. A `/dev/` target (`/dev/null`, `/dev/tty`, `/dev/stdout`,
+		// `/dev/stderr`, `/dev/fd/N`), quoted or bare, is a discard/device sink —
+		// not a file the `write` tool can author — so it is excluded via the
+		// `(?![\"']?/dev/)` lookahead.
+		pattern:
+			"^\\s*(echo|printf|cat\\s*<<)\\s+(?:[^\"'>]|\"[^\"]*\"|'[^']*')*(?<!\\|)>{1,2}\\|?\\s*(?![\"']?/dev/)[$\\w./~\"'-]",
 		tool: "write",
 		message: "Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation.",
 	},

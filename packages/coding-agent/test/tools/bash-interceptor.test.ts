@@ -82,6 +82,30 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("printf 'use 2>&1'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception('echo "err" >&2', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 	});
+
+	it("does not block redirects to /dev sinks (discard/device targets)", () => {
+		for (const cmd of [
+			'echo "$RESULT" > /dev/null',
+			"echo done > /dev/null 2>&1",
+			'echo "" > /dev/tty',
+			"echo x > /dev/stdout",
+			'echo "marker" > /dev/stderr',
+			"printf y >> /dev/fd/3",
+			"echo x > /dev/zero",
+			"echo x > /dev/random",
+			"echo x > /dev/full",
+			'echo x > "/dev/null"',
+			"echo x > '/dev/null'",
+		]) {
+			expect(checkBashInterception(cmd, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		}
+	});
+
+	it("still blocks real files whose path merely resembles /dev", () => {
+		for (const cmd of ["echo data > ./dev/null", "echo data > /devices/x", "echo conf > ~/.bashrc"]) {
+			expect(checkBashInterception(cmd, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		}
+	});
 });
 
 describe("BashTool argument validation", () => {
