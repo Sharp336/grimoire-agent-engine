@@ -11,12 +11,14 @@
 - Added the `edit.citationTags` setting to emit model-facing hashline section headers as OpenAI citation markers with opaque source IDs, along with citation-marker unwrapping for hashline edit parsing, diff previews, and streaming matching.
 - Added mutable session titles backed by a fixed JSONL title slot with append-only title-change audit entries, replan title refresh, and configurable idle recaps.
 - Added incremental `yield` submissions with typed sections and last-turn final results for subagents.
+- Added `async.minPollIntervalSeconds` setting to floor the poll wait time, preventing excessive subagent polling in tight loops. Default 0 (opt-in; set your desired floor to activate). Set higher than `async.pollWaitDuration` for expensive models to reduce advisor token spend.
 
 ### Changed
 
 - Refactored and improved the debug log and raw SSE stream viewers to use a standard, wider, bordered overlay component with clearer status indicators, controls, and dynamic layouts.
 - Updated the idle recap feature to use an LLM-generated summary of where things stand (anchored by the live goal and active todo task) instead of a static status line.
 - Refined interrupted thinking system instructions to encourage smoother continuation.
+- The poll tool now respects `async.minPollIntervalSeconds` as a floor below which it never waits, overriding shorter fixed durations or an aggressive smart-poll ladder while preserving the max-backstop behavior of `async.pollWaitDuration`.
 
 ### Fixed
 
@@ -39,12 +41,7 @@
 - Fixed reasoning streaming being locked off for OpenAI-compatible providers that stream reasoning content without advertising reasoning support in model metadata.
 - Fixed `/shake` and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
 - Fixed the `time_spent` status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
-- Added `async.minPollIntervalSeconds` setting to floor the poll wait time, preventing excessive subagent polling in tight loops. Default 300s (5 minutes). Set higher than `async.pollWaitDuration` for expensive models to reduce advisor token spend.
-- Added `async.minPollIntervalSeconds` setting to floor the poll wait time, preventing excessive subagent polling in tight loops. Default 0 (opt-in; set your desired floor to activate). Set higher than `async.pollWaitDuration` for expensive models to reduce advisor token spend.
 
-### Changed
-
-- The poll tool now respects `async.minPollIntervalSeconds` as a floor below which it never waits, overriding shorter fixed durations or an aggressive smart-poll ladder while preserving the max-backstop behavior of `async.pollWaitDuration`.
 
 ## [16.2.2] - 2026-06-27
 
