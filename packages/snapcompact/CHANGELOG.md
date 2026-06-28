@@ -2,6 +2,90 @@
 
 ## [Unreleased]
 
+## [16.1.23] - 2026-06-26
+
+### Added
+
+- Added `archiveSourceText(archive)` to extract a persisted frame archive's source text as plain text for LLM summarization. ([#3561](https://github.com/can1357/oh-my-pi/pull/3561) by [@serverinspector](https://github.com/serverinspector))
+- Added `stripPreservedArchive(preserveData)` to drop the persisted frame-archive slot (`PRESERVE_KEY`) and collapse to `undefined` when no other state remains — shared by the agent and coding-agent compaction paths instead of duplicating the strip rule.
+
+## [16.1.13] - 2026-06-22
+
+### Fixed
+
+- Fixed the Umans provider image budget to match its 10-image request cap.
+
+## [16.1.8] - 2026-06-20
+
+### Breaking Changes
+
+- Changed core rendering functions `render` and `renderMany` to be asynchronous
+
+## [16.1.0] - 2026-06-19
+
+### Added
+
+- Added `historyBlocks(archive)` to reconstruct ordered history blocks from archive data
+
+### Changed
+
+- Refactored compaction to be text-sourced, re-rendering from unified `Archive.text` source
+- Implemented foveated archive layout (HQ edges, dense LQ middle) for optimized context usage
+- Raised `MAX_FRAMES_DEFAULT` to 80 and consolidated `PROVIDER_IMAGE_BUDGETS`
+- Updated OpenRouter to use standard 90-image budget
+- Updated prompt instructions to clearly distinguish between plain-text and image history regions
+- `Options.maxFrames` is now an upper limit clamped to `MAX_FRAMES_DEFAULT`, not a per-call default
+- Rewrote the resume summary prompt into a structured reading guide (turn headings, grid/two-column layout, ink notes) and render file operations inline as a `FILES` section instead of a spliced `<files>` tag
+
+### Fixed
+
+- Fixed context budget undercounting by raising `FRAME_TOKEN_ESTIMATE` to 5024
+- Improved file list formatting in compaction summaries
+
+## [16.0.11] - 2026-06-19
+
+### Changed
+
+- Refined elision markers for file operations and truncated text for better display consistency
+- Updated summary text for consistent descriptions of archived tool output
+- Folded a much wider range of Unicode to ASCII in `normalize()` before native rendering: added a per-character Unicode NFKD decomposition fallback (fullwidth forms, super/subscripts, ligatures, circled and math-styled alphanumerics, Roman numerals, vulgar fractions) and expanded the `CHAR_FOLD` punctuation table (more quotes/primes, hyphens, the fraction slash, dot leaders, bullets, and arrows) so undrawable glyphs land on close ASCII equivalents instead of `?`
+
+## [16.0.8] - 2026-06-18
+
+### Added
+
+- Added `<out>` block wrapping for tool results to improve document structure
+- Rendered thinking process as italicized blocks above assistant text
+- Displayed tool call intents as `//` comments in tool call headers
+- Changed conversation role markers to standard Markdown headings
+
+### Changed
+
+- Merged tool results into their corresponding tool call blocks
+- Preserved prose formatting around tool calls to maintain conversation flow
+- Hidden `_i` argument from tool call output when an intent is provided
+- Optimized assistant turn output to group thinking and text blocks efficiently
+
+### Fixed
+
+- Fixed improper splitting of assistant messages around useless tool calls
+
+## [16.0.1] - 2026-06-15
+
+### Added
+
+- Added `openai-codex` to first-party provider image budgets so ChatGPT Plus/Pro Codex sessions use the same 200-image request cap as OpenAI API sessions instead of the unknown-provider floor.
+
+## [15.13.1] - 2026-06-15
+
+### Added
+
+- Added two spacing-tuned frame variants to `SHAPE_VARIANTS`: `8on22-bw` (8x13 glyphs on a 22px pitch — extra line spacing) and `11on16-bw` (8x13 glyphs on an 11px advance — extra letter spacing). Both pin the indexed `stretch: false` path, so the native renderer draws natural-size glyphs on the padded cell box (the Rust path already advances by `cellWidth` and the new variants validate horizontal padding)
+
+### Changed
+
+- **Changed the per-provider default shapes to the spacing-tuned cells.** The previous shapes were tuned on the SQuAD *prose* eval, where dense cells won; a new tool-result legibility benchmark (`research/toolbench.py` — real `search`/`read`/`find` output with structure-sensitive QA) showed the prose-era density erases the line numbers and indentation that code/search output depends on. Anthropic moves from `6x12-dim` to `11on16-bw` (opus-4.8 f1 .806 vs .755 for plain `8on16-bw` and .351 for `6x12-dim`, which fell below the OCR ~16px/char floor and abstained); OpenAI and Google move to `8on22-bw` (gemini-3.5-flash f1 .934 vs .807 for `8on16-bw` and .287 for `doc-8on16-sent-dim`; same leading win on gpt-5.5/gpt-5.4-mini). Kimi and GLM keep their measured `8on16-bw`. The bigger cells pack fewer chars per frame, so inline frame-swapping now breaks even at a larger tool-result size
+
 ## [15.12.1] - 2026-06-12
 
 ### Changed

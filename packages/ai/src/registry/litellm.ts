@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
@@ -11,12 +12,13 @@ const AUTH_URL = "https://docs.litellm.ai/docs/proxy/deploy";
  */
 export async function loginLiteLLM(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error("LiteLLM login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("LiteLLM");
 	}
 
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: "Run LiteLLM proxy (default http://localhost:4000/v1), then copy your master key or virtual key",
+		instructions:
+			"Run LiteLLM proxy (default http://localhost:4000/v1; set LITELLM_BASE_URL to customize it), then copy your master key or virtual key",
 	});
 
 	const apiKey = await options.onPrompt({
@@ -25,12 +27,12 @@ export async function loginLiteLLM(options: OAuthController): Promise<string> {
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	return trimmed;

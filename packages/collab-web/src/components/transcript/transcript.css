@@ -3,6 +3,7 @@
 .tr-root {
 	height: 100%;
 	overflow-y: auto;
+	overflow-x: hidden;
 	padding: 12px 16px 24px;
 	font-family: var(--font-ui);
 	font-size: 13px;
@@ -22,7 +23,7 @@
 
 .tr-row {
 	display: grid;
-	grid-template-columns: 72px 1fr;
+	grid-template-columns: 72px minmax(0, 1fr);
 	gap: 0 12px;
 	padding: 5px 0;
 }
@@ -223,9 +224,13 @@
 
 /* ---- markdown ---- */
 
+/* Match the TUI's word-boundary wrapping: keep Korean/CJK words intact when
+ * possible, but still emergency-break long URLs or identifiers before they
+ * overflow the transcript. */
 .tr-md {
 	line-height: 1.55;
-	word-break: break-word;
+	overflow-wrap: break-word;
+	word-break: keep-all;
 }
 
 .tr-md > :first-child {
@@ -238,6 +243,11 @@
 
 .tr-md p {
 	margin: 6px 0;
+}
+
+.tr-md p,
+.tr-md li {
+	white-space: pre-wrap;
 }
 
 .tr-md h1,
@@ -277,6 +287,11 @@
 
 .tr-md li {
 	margin: 2px 0;
+}
+
+.tr-md li > ul,
+.tr-md li > ol {
+	white-space: normal;
 }
 
 .tr-md li > p {
@@ -321,11 +336,15 @@
 	font-size: 12.5px;
 }
 
+/* Table cells need `anywhere` so long URLs/identifiers contribute a shrinkable
+ * intrinsic width instead of expanding under the transcript's clipped overflow. */
 .tr-md th,
 .tr-md td {
 	padding: 3px 8px;
 	border: 1px solid var(--border);
+	overflow-wrap: anywhere;
 	text-align: left;
+	word-break: keep-all;
 }
 
 .tr-md th {
@@ -386,5 +405,24 @@
 	}
 	50% {
 		opacity: 1;
+	}
+}
+
+/* ---- responsive mobile styles ---- */
+@media (max-width: 640px) {
+	.tr-row {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 8px 0;
+	}
+	.tr-gutter {
+		text-align: left;
+		padding-top: 0;
+		font-size: 10px;
+		margin-bottom: 2px;
+	}
+	.tr-gutter:empty {
+		display: none;
 	}
 }

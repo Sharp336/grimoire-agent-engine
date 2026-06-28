@@ -17,6 +17,7 @@ export interface ProviderValidationModel {
 	id: string;
 	api?: Api;
 	contextWindow?: number;
+	supportsTools?: boolean;
 	maxTokens?: number;
 }
 
@@ -29,6 +30,7 @@ export interface ProviderValidationConfig {
 	oauthConfigured?: boolean;
 	discovery?: ProviderDiscovery;
 	compat?: ModelSpec<Api>["compat"];
+	remoteCompaction?: unknown;
 	disableStrictTools?: boolean;
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
@@ -50,12 +52,14 @@ export function validateProviderConfiguration(
 				!config.headers &&
 				!config.compat &&
 				!config.apiKey &&
+				config.auth !== "none" &&
 				!config.disableStrictTools &&
+				!config.remoteCompaction &&
 				!hasModelOverrides &&
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "compat", "disableStrictTools", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -118,6 +122,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", ModelsCon
 					auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 					discovery: providerConfig.discovery as ProviderDiscovery | undefined,
 					compat: providerConfig.compat,
+					remoteCompaction: providerConfig.remoteCompaction,
 					disableStrictTools: providerConfig.disableStrictTools,
 					modelOverrides: providerConfig.modelOverrides,
 					models: (providerConfig.models ?? []) as ProviderValidationModel[],

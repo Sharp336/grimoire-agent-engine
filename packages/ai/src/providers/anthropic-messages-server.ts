@@ -1,5 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 import { captureRequestHeaders, resolvePromptCacheKey } from "../auth-gateway/http";
+import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
@@ -30,7 +32,7 @@ import {
  * omp AssistantMessage[Stream] → Anthropic-shaped JSON / SSE.
  */
 
-import type { AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
 
 export type { ParsedRequest };
 
@@ -203,7 +205,10 @@ function walkAssistantContent(
 					type: "toolCall",
 					id: block.id,
 					name: block.name,
-					arguments: block.input ?? {},
+					arguments:
+						block.input && typeof block.input === "object" && !Array.isArray(block.input)
+							? (block.input as Record<string, unknown>)
+							: {},
 				});
 				break;
 			default: {
@@ -287,11 +292,10 @@ function deriveCacheRetention(data: {
 }
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	const parsed = anthropicMessagesRequestSchema.safeParse(body);
-	if (!parsed.success) {
-		throw new Error(`anthropic-messages: ${parsed.error.message}`);
+	const data = anthropicMessagesRequestSchema(body);
+	if (data instanceof type.errors) {
+		throw new AIError.ValidationError(`anthropic-messages: ${data.summary}`);
 	}
-	const data = parsed.data;
 
 	const now = Date.now();
 	const messages: Message[] = [];
@@ -454,7 +458,13 @@ function encodeUsage(message: AssistantMessage): Record<string, unknown> {
 
 export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
-		throw new Error(message.errorMessage ?? `anthropic-messages: upstream ${message.stopReason}`);
+		throw new AIError.ProviderResponseError(
+			message.errorMessage ?? `anthropic-messages: upstream ${message.stopReason}`,
+			{
+				provider: "anthropic",
+				kind: "output",
+			},
+		);
 	}
 	return {
 		id: message.responseId ?? newMessageId(),
@@ -503,8 +513,15 @@ const ZERO_WIRE_USAGE: Record<string, unknown> = {
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
+	_options?: ParsedRequest["options"],
+	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	let pingTimer: NodeJS.Timeout | undefined;
+	let cancelled = control?.signal?.aborted === true;
+	const markCancelled = () => {
+		cancelled = true;
+	};
+	control?.signal?.addEventListener("abort", markCancelled, { once: true });
 	const stopPings = () => {
 		if (pingTimer !== undefined) {
 			clearInterval(pingTimer);
@@ -548,6 +565,10 @@ export function encodeStream(
 
 			pingTimer = setInterval(() => {
 				try {
+					if (cancelled) {
+						stopPings();
+						return;
+					}
 					controller.enqueue(sseFrame("ping", { type: "ping" }));
 				} catch {
 					// Controller already closed/errored (client gone); stop the timer.
@@ -556,8 +577,12 @@ export function encodeStream(
 			}, STREAM_PING_INTERVAL_MS);
 
 			try {
+				if (cancelled) {
+					controller.close();
+					return;
+				}
 				for await (const ev of events) {
-					if ("partial" in ev) lastPartial = ev.partial;
+					if (cancelled) return;
 					switch (ev.type) {
 						case "start":
 							ensureStart(ev.partial);
@@ -691,18 +716,24 @@ export function encodeStream(
 				controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));
 				controller.close();
 			} catch (err) {
-				controller.enqueue(
-					sseFrame("error", {
-						type: "error",
-						error: { type: "api_error", message: err instanceof Error ? err.message : String(err) },
-					}),
-				);
-				controller.close();
+				if (!cancelled) {
+					controller.enqueue(
+						sseFrame("error", {
+							type: "error",
+							error: { type: "api_error", message: err instanceof Error ? err.message : String(err) },
+						}),
+					);
+					controller.close();
+				}
 			} finally {
+				control?.signal?.removeEventListener("abort", markCancelled);
 				stopPings();
 			}
 		},
-		cancel() {
+		cancel(reason) {
+			cancelled = true;
+			control?.signal?.removeEventListener("abort", markCancelled);
+			control?.onCancel?.(reason);
 			stopPings();
 		},
 	});

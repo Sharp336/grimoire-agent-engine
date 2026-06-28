@@ -10,15 +10,17 @@
  */
 
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration, prompt } from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
+import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
 import type { Theme } from "../modes/theme/theme";
 import ircDescription from "../prompts/tools/irc.md" with { type: "text" };
-import type { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { canSpawnAtDepth } from "../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import {
@@ -41,22 +43,24 @@ const DEFAULT_IRC_TIMEOUT_MS = 120_000;
  */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
+	// Top-level session: peers exist only if it can still spawn subagents — the
+	// same capacity gate the task tool uses, reused here to avoid drift.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	return maxDepth < 0 || taskDepth < maxDepth;
+	return canSpawnAtDepth(maxDepth, taskDepth);
 }
 
-const ircSchema = z.object({
-	op: z.enum(["send", "wait", "inbox", "list"]).describe("irc operation"),
-	to: z.string().optional().describe('send: recipient agent id or "all"'),
-	message: z.string().optional().describe("send: message body"),
-	replyTo: z.string().optional().describe("send: message id being answered"),
-	await: z.boolean().optional().describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
-	from: z.string().optional().describe("wait: only accept a message from this agent id"),
-	timeoutMs: z.number().optional().describe("wait: timeout in milliseconds (0 waits indefinitely)"),
-	peek: z.boolean().optional().describe("inbox: list messages without consuming them"),
+const ircSchema = type({
+	op: type("'send' | 'wait' | 'inbox' | 'list'").describe("irc operation"),
+	"to?": type("string").describe('send: recipient agent id or "all"'),
+	"message?": type("string").describe("send: message body"),
+	"replyTo?": type("string").describe("send: message id being answered"),
+	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"from?": type("string").describe("wait: only accept a message from this agent id"),
+	"timeoutMs?": type("number").describe("wait: timeout in milliseconds (0 waits indefinitely)"),
+	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 });
 
-type IrcParams = z.infer<typeof ircSchema>;
+type IrcParams = typeof ircSchema.infer;
 
 interface IrcPeerInfo {
 	id: string;
@@ -66,6 +70,7 @@ interface IrcPeerInfo {
 	parentId?: string;
 	unread: number;
 	lastActivity: number;
+	activity?: string;
 }
 
 export interface IrcDetails {
@@ -92,6 +97,46 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	readonly description: string;
 	readonly parameters = ircSchema;
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<typeof ircSchema.infer>[] = [
+		{
+			caption: "List peers",
+			call: { op: "list" },
+		},
+		{
+			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
+			call: {
+				op: "send",
+				to: "AuthLoader",
+				message: "Still touching src/server/auth.ts? I need to add a 401 path.",
+			},
+		},
+		{
+			caption: "Round-trip when you cannot proceed without the answer",
+			call: {
+				op: "send",
+				to: "Main",
+				message: "JWT or session cookies for the auth flow?",
+				await: true,
+			},
+		},
+		{
+			caption: "Block until a specific peer answers",
+			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
+		},
+		{
+			caption: "Drain pending messages",
+			call: { op: "inbox" },
+		},
+		{
+			caption: "Broadcast to live peers (no replies expected)",
+			call: {
+				op: "send",
+				to: "all",
+				message: "About to refactor src/server/middleware/*. Anyone already in there?",
+			},
+		},
+	];
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(ircDescription);
@@ -137,7 +182,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		const bus = IrcBus.global();
 		const peers = registry
 			.list()
-			.filter(ref => ref.id !== senderId && ref.status !== "aborted")
+			.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
 			.map(ref => ({
 				id: ref.id,
 				displayName: ref.displayName,
@@ -146,6 +191,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				parentId: ref.parentId,
 				unread: bus.unreadCount(ref.id),
 				lastActivity: ref.lastActivity,
+				activity: ref.activity,
 			}));
 		const lines: string[] = [];
 		if (peers.length === 0) {
@@ -154,6 +200,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			lines.push(`${peers.length} peer(s):`);
 			for (const peer of peers) {
 				const extras = [
+					peer.activity || undefined,
 					peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 					peer.parentId ? `parent ${peer.parentId}` : undefined,
 					`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
@@ -233,6 +280,10 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			// parked agent on a broadcast would be a stampede. Direct sends go
 			// through the bus unfiltered so parked recipients are revived.
 			const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+			// A broadcast that also reaches the main agent delivers the body to it
+			// directly (its own incoming card); relaying the sibling legs to the
+			// main UI would then show the same body once per other recipient.
+			const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 			const receipts = await Promise.all(
 				targets.map(target =>
 					bus.send(
@@ -240,7 +291,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 						// Awaited sends mark the sender as blocked on an answer so a
 						// busy recipient that cannot reach a step boundary (async
 						// disabled) auto-replies instead of stranding the sender.
-						params.await ? { expectsReply: true } : undefined,
+						{ expectsReply: params.await || undefined, suppressRelay: suppressRelay || undefined },
 					),
 				),
 			);
@@ -467,6 +518,18 @@ function callMeta(args: IrcRenderArgs | undefined): string[] {
 	return meta;
 }
 
+function renderErrorResult(
+	result: { content: Array<{ type: string; text?: string }> },
+	args: IrcRenderArgs | undefined,
+	theme: Theme,
+): string[] {
+	const text = textContent(result) || "IRC call failed.";
+	return [
+		renderStatusLine({ icon: "error", title: callTitle(args, theme), meta: callMeta(args) }, theme),
+		formatErrorDetail(text, theme),
+	];
+}
+
 /**
  * Display-only transcript card for live IRC traffic: `irc:incoming` DMs
  * delivered to this session, `irc:autoreply` side-channel replies sent on
@@ -673,7 +736,9 @@ function renderListResult(details: Partial<IrcDetails>, expanded: boolean, theme
 				const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
 				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
 				const age = messageAge(peer.lastActivity);
-				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${theme.fg("dim", kindText)}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
+				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
+				const name = theme.fg("dim", replaceTabs(peer.displayName));
+				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
 			},
 		},
 		theme,
@@ -694,9 +759,11 @@ function buildResultLines(
 		case "wait":
 			return renderWaitResult(result, details, args, expanded, theme);
 		case "inbox":
-			return renderInboxResult(details, args, expanded, theme);
+			return result.isError
+				? renderErrorResult(result, args, theme)
+				: renderInboxResult(details, args, expanded, theme);
 		case "list":
-			return renderListResult(details, expanded, theme);
+			return result.isError ? renderErrorResult(result, args, theme) : renderListResult(details, expanded, theme);
 		default: {
 			const text = textContent(result) || (result.isError ? "IRC call failed." : "Done.");
 			return [

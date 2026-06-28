@@ -278,10 +278,12 @@
       let searchQuery = '';
 
       function hasTextContent(content) {
-        if (typeof content === 'string') return content.trim().length > 0;
+        if (typeof content === 'string') return Boolean(canonicalizeMessage(content));
         if (Array.isArray(content)) {
           for (const c of content) {
-            if (c.type === 'text' && c.text && c.text.trim().length > 0) return true;
+            if (c.type === 'text' && c.text) {
+              if (canonicalizeMessage(c.text)) return true;
+            }
           }
         }
         return false;
@@ -431,10 +433,12 @@
             const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
             return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
           }
+          case 'search':
           case 'grep':
             return `[grep: /${args.pattern || ''}/ in ${shortenPath(String((args.paths || [args.path || '.']).join(', ')))}]`;
           case 'find':
-            return `[find: ${shortenPath(String((args.paths || [args.pattern || '.']).join(', ')))}]`;
+          case 'glob':
+            return `[glob: ${shortenPath(String((args.paths || [args.pattern || '.']).join(', ')))}]`;
           case 'ls':
             return `[ls: ${shortenPath(String(args.path || '.'))}]`;
           default: {
@@ -448,6 +452,18 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+      }
+
+      function canonicalizeMessage(text) {
+        if (!text) return '';
+        const trimmed = text.trim();
+        for (let i = 0; i < trimmed.length; i++) {
+          const code = trimmed.charCodeAt(i);
+          if (code !== 0x2e && code !== 0x2026 && code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
+            return trimmed;
+          }
+        }
+        return '';
       }
 
       /**
@@ -1054,16 +1070,20 @@
             let html = `<div class="assistant-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
 
             for (const block of msg.content) {
-              if (block.type === 'text' && block.text.trim()) {
-                html += `<div class="assistant-text markdown-content">${safeMarkedParse(block.text)}</div>`;
-              } else if (block.type === 'thinking' && block.thinking.trim()) {
+              if (block.type === 'text') {
+                const canon = canonicalizeMessage(block.text);
+                if (canon) {
+                  html += `<div class="assistant-text markdown-content">${safeMarkedParse(block.text)}</div>`;
+                }
+              } else if (block.type === 'thinking') {
+                const thinking = canonicalizeMessage(block.thinking);
+                if (!thinking) continue;
                 html += `<div class="thinking-block">
-                  <div class="thinking-text">${escapeHtml(block.thinking)}</div>
+                  <div class="thinking-text">${escapeHtml(thinking)}</div>
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
               }
             }
-
             for (const block of msg.content) {
               if (block.type === 'toolCall') {
                 html += renderToolCall(block, sctx);

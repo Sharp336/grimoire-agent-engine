@@ -18,6 +18,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	previewLine,
 	replaceTabs,
 	type ToolUIStatus,
 	truncateToWidth,
@@ -46,6 +47,12 @@ interface TaskRenderContext {
 	frozen?: boolean;
 }
 type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
+
+const MAX_NESTED_TASK_RENDER_DEPTH = 8;
+
+function renderNestedCycleLine(theme: Theme): string {
+	return theme.fg("dim", "… nested task progress already shown");
+}
 
 /**
  * Get status icon for agent state.
@@ -535,7 +542,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 	if (idLabel || desc) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (desc) {
-			line += `: ${theme.fg("muted", truncateToWidth(replaceTabs(desc), 64))}`;
+			line += `: ${theme.fg("muted", previewLine(desc, 64))}`;
 		}
 		lines.push(line);
 	}
@@ -568,7 +575,7 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
 		const desc = typeof task?.description === "string" ? task.description.trim() : "";
 		if (desc) {
-			line += `: ${theme.fg("muted", truncateToWidth(replaceTabs(desc), 64))}`;
+			line += `: ${theme.fg("muted", previewLine(desc, 64))}`;
 		}
 		if (task?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
@@ -687,6 +694,8 @@ function renderAgentProgress(
 	theme: Theme,
 	spinnerFrame?: number,
 	frozen = false,
+	seenNestedTasks?: WeakSet<object>,
+	nestedDepth = 0,
 ): string[] {
 	const lines: string[] = [];
 
@@ -699,7 +708,8 @@ function renderAgentProgress(
 				: "accent";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const description = progress.description?.trim();
+	const trimmedDescription = progress.description?.trim();
+	const description = trimmedDescription ? previewLine(trimmedDescription, 64) : undefined;
 	const displayId = formatTaskId(progress.id);
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	const indent = prefix ? `${prefix} ` : "";
@@ -740,7 +750,7 @@ function renderAgentProgress(
 	const showBadge = settings.get("task.showResolvedModelBadge");
 	if (progress.status === "running") {
 		if (!description) {
-			const taskPreview = truncateToWidth(progress.assignment ?? progress.task, 40);
+			const taskPreview = previewLine(progress.assignment ?? progress.task, 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
@@ -758,7 +768,7 @@ function renderAgentProgress(
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", progress.currentTool)}`;
 			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
 			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+				toolLine += `: ${theme.fg("dim", previewLine(toolDetail, 40))}`;
 			}
 			if (progress.currentToolStartMs) {
 				const elapsed = Date.now() - progress.currentToolStartMs;
@@ -773,7 +783,7 @@ function renderAgentProgress(
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", recent.tool)}`;
 			const toolDetail = progress.lastIntent ?? recent.args;
 			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+				toolLine += `: ${theme.fg("dim", previewLine(toolDetail, 40))}`;
 			}
 			lines.push(toolLine);
 		}
@@ -787,12 +797,12 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			truncateToWidth(replaceTabs(progress.retryState.errorMessage), 60);
+			previewLine(progress.retryState.errorMessage, 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${truncateToWidth(replaceTabs(progress.retryFailure.errorMessage), 80)}`;
+		}: ${previewLine(progress.retryFailure.errorMessage, 80)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
@@ -859,7 +869,15 @@ function renderAgentProgress(
 	const inflight = progress.inflightTaskDetails;
 	if (completedTaskCalls.length > 0 || inflight) {
 		const snapshots = inflight ? [...completedTaskCalls, inflight] : completedTaskCalls;
-		const nestedLines = renderNestedTaskTree(snapshots, expanded, theme, spinnerFrame, frozen);
+		const nestedLines = renderNestedTaskTree(
+			snapshots,
+			expanded,
+			theme,
+			spinnerFrame,
+			frozen,
+			seenNestedTasks,
+			nestedDepth,
+		);
 		for (const line of nestedLines) {
 			lines.push(`${continuePrefix}${line}`);
 		}
@@ -984,6 +1002,8 @@ function renderAgentResult(
 	continuePrefix: string,
 	expanded: boolean,
 	theme: Theme,
+	seenNestedTasks?: WeakSet<object>,
+	nestedDepth = 0,
 ): string[] {
 	const lines: string[] = [];
 
@@ -1011,7 +1031,8 @@ function renderAgentResult(
 					: "failed";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const description = result.description?.trim();
+	const trimmedDescription = result.description?.trim();
+	const description = trimmedDescription ? previewLine(trimmedDescription, 64) : undefined;
 	const displayId = formatTaskId(result.id);
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	let statusLine = `${prefix ? `${prefix} ` : ""}${theme.fg(iconColor, icon)} ${theme.fg(
@@ -1044,7 +1065,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
+			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", previewLine(result.abortReason, 80))}`,
 		);
 	}
 	// Check for review result (yield with review schema + report_finding)
@@ -1088,11 +1109,24 @@ function renderAgentResult(
 			// Skip review tools - handled above
 			if (toolName === "yield" || toolName === "report_finding") continue;
 
+			const isTaskTool = toolName === "task";
+			if (isTaskTool && (dataArray as unknown[]).length > 0) {
+				for (const line of renderNestedTaskResults(
+					dataArray as TaskToolDetails[],
+					expanded,
+					theme,
+					seenNestedTasks,
+					nestedDepth,
+				)) {
+					deferredToolLines.push(`${continuePrefix}${line}`);
+				}
+				continue;
+			}
+
 			const handler = subprocessToolRegistry.getHandler(toolName);
 			if (handler?.renderFinal && (dataArray as unknown[]).length > 0) {
-				const isTaskTool = toolName === "task";
 				const component = handler.renderFinal(dataArray as unknown[], theme, expanded);
-				const target = isTaskTool ? deferredToolLines : lines;
+				const target = lines;
 				if (!isTaskTool) {
 					hasCustomRendering = true;
 					target.push(`${continuePrefix}${theme.fg("dim", `Tool: ${toolName}`)}`);
@@ -1143,9 +1177,7 @@ function renderAgentResult(
 
 	// Error message
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
-		lines.push(
-			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", truncateToWidth(replaceTabs(result.error), 70))}`,
-		);
+		lines.push(`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", previewLine(result.error, 70))}`);
 	}
 
 	return lines;
@@ -1417,15 +1449,34 @@ function nestedMarkers(isLast: boolean, theme: Theme): { prefix: string; continu
 	};
 }
 
-function renderNestedTaskResults(detailsList: TaskToolDetails[], expanded: boolean, theme: Theme): string[] {
+function renderNestedTaskResults(
+	detailsList: TaskToolDetails[],
+	expanded: boolean,
+	theme: Theme,
+	seen: WeakSet<object> = new WeakSet<object>(),
+	depth = 0,
+): string[] {
 	const lines: string[] = [];
 	for (const details of detailsList) {
-		if (!details.results || details.results.length === 0) continue;
+		if (seen.has(details)) {
+			lines.push(renderNestedCycleLine(theme));
+			continue;
+		}
+		if (depth >= MAX_NESTED_TASK_RENDER_DEPTH) {
+			lines.push(theme.fg("dim", "… nested task depth limit reached"));
+			continue;
+		}
+		seen.add(details);
+		if (!details.results || details.results.length === 0) {
+			seen.delete(details);
+			continue;
+		}
 		const ordered = orderResultsForDisplay(details.results);
 		ordered.forEach((result, index) => {
 			const { prefix, continuePrefix } = nestedMarkers(index === ordered.length - 1, theme);
-			lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme));
+			lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1));
 		});
+		seen.delete(details);
 	}
 	return lines;
 }
@@ -1441,16 +1492,28 @@ function renderNestedTaskTree(
 	theme: Theme,
 	spinnerFrame?: number,
 	frozen = false,
+	seen: WeakSet<object> = new WeakSet<object>(),
+	depth = 0,
 ): string[] {
 	const lines: string[] = [];
 	for (const details of detailsList) {
+		if (seen.has(details)) {
+			lines.push(renderNestedCycleLine(theme));
+			continue;
+		}
+		if (depth >= MAX_NESTED_TASK_RENDER_DEPTH) {
+			lines.push(theme.fg("dim", "… nested task depth limit reached"));
+			continue;
+		}
+		seen.add(details);
 		const hasResults = Boolean(details.results && details.results.length > 0);
 		if (hasResults) {
 			const ordered = orderResultsForDisplay(details.results);
 			ordered.forEach((result, index) => {
 				const { prefix, continuePrefix } = nestedMarkers(index === ordered.length - 1, theme);
-				lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme));
+				lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1));
 			});
+			seen.delete(details);
 			continue;
 		}
 		const inflight = details.progress;
@@ -1458,9 +1521,22 @@ function renderNestedTaskTree(
 			const ordered = orderProgressForDisplay(inflight);
 			ordered.forEach((prog, index) => {
 				const { prefix, continuePrefix } = nestedMarkers(index === ordered.length - 1, theme);
-				lines.push(...renderAgentProgress(prog, prefix, continuePrefix, expanded, theme, spinnerFrame, frozen));
+				lines.push(
+					...renderAgentProgress(
+						prog,
+						prefix,
+						continuePrefix,
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						seen,
+						depth + 1,
+					),
+				);
 			});
 		}
+		seen.delete(details);
 	}
 	return lines;
 }

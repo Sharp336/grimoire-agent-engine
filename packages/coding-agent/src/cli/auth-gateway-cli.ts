@@ -17,18 +17,15 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type Api,
-	AuthBrokerClient,
 	AuthStorage,
 	type CompletionProbe,
 	type CompletionProbeInput,
 	type CredentialCompletionResult,
 	completeSimple,
-	DEFAULT_AUTH_GATEWAY_BIND,
 	type Model,
-	RemoteAuthCredentialStore,
-	type SnapshotResponse,
-	startAuthGateway,
 } from "@oh-my-pi/pi-ai";
+import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
+import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
@@ -409,7 +406,7 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
 		if (!model.input.includes("text")) return false;
 		const totalCost = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
 		if (!Number.isFinite(totalCost) || totalCost < 0) return false;
-		if (model.maxTokens <= 0) return false;
+		if (model.maxTokens !== null && model.maxTokens <= 0) return false;
 		return true;
 	});
 	candidates.sort((a, b) => a.cost.input + a.cost.output - (b.cost.input + b.cost.output) || a.id.localeCompare(b.id));

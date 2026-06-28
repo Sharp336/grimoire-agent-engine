@@ -12,6 +12,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function createMagicKeywordSession(root: string): Promise<{
 	session: AgentSession;
@@ -55,7 +56,7 @@ describe("AgentSession magic keyword settings", () => {
 		vi.restoreAllMocks();
 		if (session) await session.dispose();
 		authStorage?.close();
-		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => undefined);
+		await removeWithRetries(root).catch(() => undefined);
 		session = undefined;
 		authStorage = undefined;
 	});
@@ -116,5 +117,21 @@ describe("AgentSession magic keyword settings", () => {
 		expect(classifierSpy).toHaveBeenCalledTimes(1);
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+	});
+
+	it("queues the magic-keyword notice before the user message", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("ultrathink do the thing");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ role?: string; customType?: string }>;
+		const noticeIdx = promptMessages.findIndex(m => m.customType === "ultrathink-notice");
+		const userIdx = promptMessages.findIndex(m => m.role === "user");
+		expect(noticeIdx).toBeGreaterThanOrEqual(0);
+		expect(userIdx).toBeGreaterThanOrEqual(0);
+		expect(noticeIdx).toBeLessThan(userIdx);
 	});
 });

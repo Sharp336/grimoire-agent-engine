@@ -14,8 +14,9 @@
  * estimate (`estimateInlineSavings`) so the two can never disagree.
  */
 
+import { countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import { countTokens } from "@oh-my-pi/pi-natives";
+import { isPersonalGitHubCopilotBaseUrl } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
@@ -32,11 +33,22 @@ export interface SnapcompactInlineOptions {
 	shape?: snapcompact.ShapeVariantName | "auto";
 }
 
+/**
+ * Reports the per-tool-result tokens kept off the wire when a swap is applied.
+ * `savedTokens` is `textTokens - frames * shape.frameTokenEstimate` for each
+ * imaged tool result (always > 0; the savings gate guarantees it). Wired to the
+ * append-only savings journal; never throws into the request path.
+ */
+export type SnapcompactSavingsSink = (
+	savings: ReadonlyArray<{ toolCallId: string; savedTokens: number }>,
+	model: Model,
+) => void;
+
 // Per-provider image-count budgets live in @oh-my-pi/snapcompact
 // (`providerImageBudget`): snapcompact frames are 1568px (<2000px) so
 // dimension/size limits never bind; only COUNT does. Once the budget is
-// spent (e.g. OpenRouter's hard 8-image cap, already consumed by archive
-// frames), tool results ship verbatim as text.
+// spent by already-attached archive/system-prompt images, tool results ship
+// verbatim as text.
 const MAX_SYSTEM_PROMPT_FRAMES = 6;
 /** Tool results under this many tokens are never rasterized — the swap can't
  *  save enough to justify trading crisp text for an image. */
@@ -64,6 +76,19 @@ function isTextContent(block: TextContent | ImageContent): block is TextContent 
 /** Image tokens must undercut text tokens by the margin to be worth rendering. */
 function passesSavingsGate(frames: number, shape: snapcompact.Shape, textTokens: number): boolean {
 	return frames * shape.frameTokenEstimate <= textTokens * SAVINGS_MARGIN;
+}
+
+/**
+ * The model is vision-capable for the endpoint we're actually about to hit.
+ * GitHub Copilot business and enterprise hosts respond `400 vision is not
+ * supported` on image inputs (issue #3387), so even if a stale cached spec
+ * still advertises `["text","image"]` we MUST not rasterize transcripts when
+ * the resolved `baseUrl` is non-personal.
+ */
+function canSendImages(model: Model): boolean {
+	if (!model.input.includes("image")) return false;
+	if (model.provider === "github-copilot" && !isPersonalGitHubCopilotBaseUrl(model.baseUrl)) return false;
+	return true;
 }
 
 interface SystemPromptImageTarget {
@@ -266,7 +291,7 @@ export function estimateInlineSavings(input: {
 	messages: readonly InlineMessageView[];
 }): SnapcompactSavingsEstimate {
 	const { options, model } = input;
-	if (!model?.input.includes("image")) {
+	if (!model || !canSendImages(model)) {
 		return { visionCapable: false, savedTokens: 0 };
 	}
 
@@ -398,12 +423,17 @@ export class SnapcompactInlineTransformer {
 	#toolCache = new Map<string, FrameCacheEntry>();
 	#systemCache?: FrameCacheEntry;
 
-	constructor(private readonly options: SnapcompactInlineOptions) {}
+	constructor(
+		private readonly options: SnapcompactInlineOptions,
+		private readonly onToolResultSavings?: SnapcompactSavingsSink,
+	) {}
 
-	transform(context: Context, model: Model): Context {
+	async transform(context: Context, model: Model): Promise<Context> {
 		// Vision gate: providers silently DROP images on text-only models —
-		// rendering would lose the content entirely.
-		if (!model.input.includes("image")) return context;
+		// rendering would lose the content entirely. Also short-circuits when the
+		// resolved endpoint rejects vision regardless of the model's input list
+		// (issue #3387: Copilot business endpoint).
+		if (!canSendImages(model)) return context;
 
 		const shape = snapcompact.resolveShape(model, this.options.shape);
 		const budget = snapcompact.providerImageBudget(model.provider) - countContextImages(context);
@@ -464,13 +494,19 @@ export class SnapcompactInlineTransformer {
 		});
 
 		let changed = false;
+		const savings: Array<{ toolCallId: string; savedTokens: number }> = [];
 		for (const swap of plan.toolResults) {
 			const target = targets.get(swap.id);
 			if (!target) continue;
-			const frames = this.#framesFor(this.#toolCache, swap.id, target.text, shape);
+			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape);
 			messages[target.index] = { ...target.message, content: [{ type: "text", text: toolResultNote }, ...frames] };
 			changed = true;
+			savings.push({
+				toolCallId: swap.id,
+				savedTokens: Math.max(0, swap.textTokens - swap.frames * shape.frameTokenEstimate),
+			});
 		}
+		if (savings.length > 0) this.onToolResultSavings?.(savings, model);
 		if (this.options.renderToolResults) {
 			// Drop cache entries for tool calls no longer in the context
 			// (compacted away) so the cache stays bounded by live history.
@@ -486,7 +522,10 @@ export class SnapcompactInlineTransformer {
 			if (!cached || cached.hash !== hash) {
 				cached = {
 					hash,
-					frames: snapcompact.renderMany(systemPromptTarget.text, { shape, maxFrames: MAX_SYSTEM_PROMPT_FRAMES }),
+					frames: await snapcompact.renderMany(systemPromptTarget.text, {
+						shape,
+						maxFrames: MAX_SYSTEM_PROMPT_FRAMES,
+					}),
 				};
 				this.#systemCache = cached;
 			}
@@ -506,16 +545,16 @@ export class SnapcompactInlineTransformer {
 		return { ...context, systemPrompt, messages };
 	}
 
-	#framesFor(
+	async #framesFor(
 		cache: Map<string, FrameCacheEntry>,
 		key: string,
 		text: string,
 		shape: snapcompact.Shape,
-	): ImageContent[] {
+	): Promise<ImageContent[]> {
 		const hash = Bun.hash(text);
 		const cached = cache.get(key);
 		if (cached && cached.hash === hash) return cached.frames;
-		const frames = snapcompact.renderMany(text, { shape });
+		const frames = await snapcompact.renderMany(text, { shape });
 		cache.set(key, { hash, frames });
 		return frames;
 	}

@@ -8,6 +8,7 @@ import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const FILE_CONTENT = "bridge write content\n";
 
@@ -43,7 +44,7 @@ describe("write tool ACP fs routing", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	it("routes plain text writes through the bridge and does not call Bun.write", async () => {
@@ -99,5 +100,36 @@ describe("write tool ACP fs routing", () => {
 				}),
 			).text(),
 		).toBe(planContent);
+	});
+
+	it("treats bracketed `[local://...#TAG]` headers as local artifacts, not bridge writes", async () => {
+		const planPath = "local://PLAN.md";
+		const scratchPath = "local://scratch.md";
+		// Active plan file is unrelated to the scratch artifact we are writing.
+		const bracketedScratch = `[${scratchPath}#ABCD]`;
+		const scratchContent = "scratch notes\n";
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async () => undefined,
+		};
+		const bridgeSpy = spyOn(bridge, "writeTextFile");
+		const session = createSession(tmpDir, {
+			bridge,
+			planMode: { enabled: true, planFilePath: planPath, workflow: "parallel", reentry: false },
+		});
+
+		await new WriteTool(session).execute("call-bracketed", { path: bracketedScratch, content: scratchContent });
+
+		// Bracketed local headers must not slip past the bridge router — they are
+		// still session-local artifacts and stay on disk under the local sandbox.
+		expect(bridgeSpy).not.toHaveBeenCalled();
+		expect(
+			await Bun.file(
+				resolveLocalUrlToPath(scratchPath, {
+					getArtifactsDir: session.getArtifactsDir,
+					getSessionId: session.getSessionId,
+				}),
+			).text(),
+		).toBe(scratchContent);
 	});
 });

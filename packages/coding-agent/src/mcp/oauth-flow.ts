@@ -9,6 +9,68 @@ import type { OAuthCallbackFlowOptions } from "@oh-my-pi/pi-ai/oauth/callback-se
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/oauth/callback-server";
 import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
+import type { OAuthCredential } from "../session/auth-storage";
+
+/** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
+const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
+
+/** Credential-id prefix for profile-scoped MCP OAuth credentials (`mcp_oauth:profile:<profile>:<serverUrl>`). */
+const MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX = `${MCP_OAUTH_URL_CREDENTIAL_PREFIX}profile:`;
+
+/**
+ * Deterministic credential id for an MCP server URL scoped to an OMP profile.
+ *
+ * Local profile stores are already separate, but auth-broker storage shares one
+ * provider namespace across profiles. Including the profile in the provider key
+ * keeps a shared project `mcp.json` definition from making profile B overwrite
+ * or read profile A's OAuth row for the same server URL. The URL is used
+ * verbatim (query string included) because it can carry tenant selectors such
+ * as `?project_ref=`.
+ */
+export function mcpOAuthCredentialId(serverUrl: string, profile: string | undefined = getActiveProfile()): string {
+	return `${MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX}${profile ?? "default"}:${serverUrl}`;
+}
+
+/** Whether a credential id was minted by OMP's MCP OAuth flows (either era). */
+export function isManagedMCPOAuthCredentialId(credentialId: string | undefined): credentialId is string {
+	return (
+		!!credentialId &&
+		(credentialId.startsWith("mcp_oauth_") || credentialId.startsWith(MCP_OAUTH_URL_CREDENTIAL_PREFIX))
+	);
+}
+
+/**
+ * Profile segment of a profile-scoped `mcp_oauth:profile:<profile>:<serverUrl>`
+ * credential id, or `undefined` for legacy non-profile-scoped managed ids
+ * (`mcp_oauth:<url>`, `mcp_oauth_<rand>`). The server URL itself contains `:`
+ * and `/`, so only the segment between the prefix and the FIRST subsequent `:`
+ * is the profile; everything after it is the URL.
+ */
+export function mcpOAuthCredentialProfile(credentialId: string): string | undefined {
+	if (!credentialId.startsWith(MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX)) return undefined;
+	const separator = credentialId.indexOf(":", MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX.length);
+	return separator === -1 ? undefined : credentialId.slice(MCP_OAUTH_PROFILE_CREDENTIAL_PREFIX.length, separator);
+}
+
+/**
+ * Stored MCP OAuth credential. Refresh material is embedded so token refresh
+ * works without any `auth` block persisted in (possibly shared) config files.
+ */
+export interface MCPStoredOAuthCredential extends OAuthCredential {
+	tokenUrl?: string;
+	clientId?: string;
+	clientSecret?: string;
+	resource?: string;
+	/**
+	 * Authorization-server URL (the issuer the grant was minted against). Used
+	 * to filter same-origin resource indicators on refresh: RFC 8414 lets the
+	 * authorize and token endpoints sit on different origins, so refresh
+	 * cannot infer the original auth-server origin from `tokenUrl` alone.
+	 * Unset on legacy credentials minted before issue #3502's fix.
+	 */
+	authorizationUrl?: string;
+}
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
@@ -115,6 +177,42 @@ function resolveResourceUri(resource: string | undefined): string | undefined {
 	return trimmed;
 }
 
+interface ResourceIndicatorFilterOptions {
+	/** Strip any resource URL on the same origin as the authorization server. */
+	stripSameOriginResource?: boolean;
+}
+
+/**
+ * Drop a redundant fallback resource indicator relative to {@link serverUrl}.
+ *
+ * Provider-advertised resource indicators are authoritative even when they are
+ * origin-only (`https://gateway.example.com`) or path-scoped same-origin
+ * (`https://gateway.example.com/my-service/mcp`): servers can use either form
+ * as the audience they require for the grant.
+ *
+ * Plane is stricter for OMP-synthesized fallback resources (e.g. using the
+ * configured server URL `https://mcp.plane.so/http/mcp` as `resource`), so
+ * fallback callers opt into `stripSameOriginResource`. Provider-advertised
+ * `oauth.resource` values and authorization-URL `?resource=` values keep the
+ * preserving default.
+ */
+function filterResourceIndicator(
+	resource: string | undefined,
+	serverUrl: string,
+	options: ResourceIndicatorFilterOptions = {},
+): string | undefined {
+	if (!resource) return undefined;
+	try {
+		const origin = new URL(serverUrl).origin;
+		const parsedResource = new URL(resource);
+		if (parsedResource.origin !== origin) return resource;
+		if (options.stripSameOriginResource) return undefined;
+	} catch {
+		// Malformed serverUrl will fail elsewhere; fall through.
+	}
+	return resource;
+}
+
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
 	authorizationUrl: string;
@@ -126,6 +224,15 @@ export interface MCPOAuthConfig {
 	clientSecret?: string;
 	/** OAuth scopes (space-separated) */
 	scopes?: string;
+	/**
+	 * `prompt` parameter for the authorization request. Defaults to `"consent"`
+	 * so the provider always shows its authorize screen instead of silently
+	 * re-approving the browser's current session — without it, reauthorizing to
+	 * switch accounts/workspaces is impossible once a session cookie exists
+	 * (RFC 6749 §3.1 requires servers to ignore the param when unsupported).
+	 * Set to `""` to omit the parameter entirely.
+	 */
+	prompt?: string;
 	/** Exact redirect URI to advertise to the provider */
 	redirectUri?: string;
 	/** Custom callback port (default: 3000) */
@@ -134,6 +241,13 @@ export interface MCPOAuthConfig {
 	callbackPath?: string;
 	/** MCP resource URI for RFC 8707 resource indicators */
 	resource?: string;
+	/**
+	 * True when `resource` was synthesized from the server URL fallback rather
+	 * than advertised by OAuth/protected-resource metadata. Fallback resources
+	 * are stripped when same-origin with the authorization server; advertised
+	 * path-scoped resources are preserved.
+	 */
+	stripSameOriginResource?: boolean;
 	/** Fetch implementation for token exchange and discovery requests. */
 	fetch?: FetchImpl;
 }
@@ -156,8 +270,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		super(ctrl, resolveCallbackOptions(config));
 		this.#resolvedClientId = this.#resolveClientId(config);
 		this.#fetch = config.fetch ?? ctrl.fetch ?? fetch;
-		this.#resource = resolveResourceUri(
-			config.resource ?? this.#resourceFromAuthorizationUrl(config.authorizationUrl),
+		this.#resource = this.#filterResourceIndicator(
+			resolveResourceUri(config.resource ?? this.#resourceFromAuthorizationUrl(config.authorizationUrl)),
 		);
 	}
 
@@ -183,6 +297,15 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	get resource(): string | undefined {
 		return this.#resource;
 	}
+	/**
+	 * Authorization-server URL the flow used. Persist alongside the credential
+	 * so refresh can filter same-origin resource indicators against the issuer's
+	 * origin even when `tokenUrl` lives on a different origin (RFC 8414 permits
+	 * the split).
+	 */
+	get authorizationUrl(): string {
+		return this.config.authorizationUrl;
+	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
@@ -202,9 +325,26 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
+		const prompt = this.config.prompt ?? "consent";
+		if (prompt && !params.get("prompt")) {
+			params.set("prompt", prompt);
+		}
 		const existingResource = params.get("resource")?.trim();
 		if (existingResource) {
-			this.#resource = resolveResourceUri(existingResource);
+			// A resource already embedded in the provider's authorization URL is
+			// provider-authored, not OMP's server-URL fallback. Preserve same-host
+			// values here even when the caller marked its separate
+			// `config.resource` as fallback; gateway-hosted MCP servers can use
+			// origin-only or path-scoped values as the token audience.
+			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
+			if (filtered) {
+				this.#resource = filtered;
+			} else {
+				// Defensive path for future policy additions: when filtering says
+				// "omit", drop it from both authorize and token requests.
+				params.delete("resource");
+				this.#resource = undefined;
+			}
 		} else if (this.#resource) {
 			params.set("resource", this.#resource);
 		}
@@ -329,6 +469,17 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	/**
+	 * Drop redundant resource indicators for this authorization server.
+	 * Provider-advertised path-scoped values are preserved; fallback server-URL
+	 * values opt into same-origin stripping via `stripSameOriginResource`.
+	 */
+	#filterResourceIndicator(resource: string | undefined): string | undefined {
+		return filterResourceIndicator(resource, this.config.authorizationUrl, {
+			stripSameOriginResource: this.config.stripSameOriginResource,
+		});
+	}
+
+	/**
 	 * Try OAuth dynamic client registration when provider requires a client_id.
 	 */
 	async #tryRegisterClient(redirectUri: string): Promise<void> {
@@ -441,6 +592,26 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 }
 
 /**
+ * Options for {@link refreshMCPOAuthToken}. Carried via the trailing object
+ * so positional callers keep working.
+ */
+export interface RefreshMCPOAuthTokenOptions {
+	fetch?: FetchImpl;
+	/**
+	 * Authorization-server URL the original grant was minted against. Used to
+	 * filter same-origin resource indicators on refresh. Defaults to `tokenUrl`'s
+	 * origin when omitted for legacy credentials.
+	 */
+	authorizationUrl?: string;
+	/**
+	 * True when the refresh `resource` was synthesized from the server URL
+	 * fallback because the credential/auth material carried no resource.
+	 * Preserved advertised resources leave this false/undefined.
+	 */
+	stripSameOriginResource?: boolean;
+}
+
+/**
  * Refresh an MCP OAuth token using the standard refresh_token grant.
  * Returns updated credentials; preserves the old refresh token if the server doesn't rotate it.
  */
@@ -449,17 +620,27 @@ export async function refreshMCPOAuthToken(
 	refreshToken: string,
 	clientId?: string,
 	clientSecret?: string,
-	resourceOrOpts?: string | { fetch?: FetchImpl },
-	opts?: { fetch?: FetchImpl },
+	resourceOrOpts?: string | RefreshMCPOAuthTokenOptions,
+	opts?: RefreshMCPOAuthTokenOptions,
 ): Promise<OAuthCredentials> {
-	const fetchImpl: FetchImpl = (typeof resourceOrOpts === "string" ? opts?.fetch : resourceOrOpts?.fetch) ?? fetch;
+	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
+	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;
+	// Filter against the authorization-server origin when known (RFC 8414
+	// permits authorize/token endpoints on separate origins). Fall back to
+	// `tokenUrl` for legacy credentials minted before the issuer was persisted
+	// — same-origin servers (the common case) still match correctly.
+	const filterAnchor = optsFromTrailing?.authorizationUrl ?? tokenUrl;
 	const params = new URLSearchParams({
 		grant_type: "refresh_token",
 		refresh_token: refreshToken,
 	});
 	if (clientId) params.set("client_id", clientId);
-	const resolvedResource = resolveResourceUri(resource);
+	// Drop redundant indicators so refresh stays consistent with the initial
+	// grant; see {@link filterResourceIndicator} for context.
+	const resolvedResource = filterResourceIndicator(resolveResourceUri(resource), filterAnchor, {
+		stripSameOriginResource: optsFromTrailing?.stripSameOriginResource,
+	});
 	if (resolvedResource) params.set("resource", resolvedResource);
 	if (clientSecret) params.set("client_secret", clientSecret);
 

@@ -9,10 +9,20 @@
 	margin: 0;
 }
 
-html,
+html {
+	height: 100%;
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+	overscroll-behavior-y: none;
+}
+
 body,
 #root {
 	height: 100%;
+}
+
+body {
+	overscroll-behavior-y: none;
 }
 
 body {
@@ -27,9 +37,12 @@ body {
 button,
 input,
 textarea,
-select {
+select,
+a {
 	font: inherit;
 	color: inherit;
+	-webkit-tap-highlight-color: transparent;
+	touch-action: manipulation;
 }
 
 button {
@@ -67,13 +80,21 @@ textarea {
 }
 
 *::-webkit-scrollbar {
-	width: 8px;
-	height: 8px;
+	width: 10px;
+	height: 10px;
 }
 
 *::-webkit-scrollbar-thumb {
 	background: var(--border-strong);
-	border-radius: var(--radius);
+	border: 2px solid transparent;
+	background-clip: padding-box;
+	border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+	background: var(--fg-faint);
+	border: 2px solid transparent;
+	background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-track {

@@ -2,12 +2,12 @@
  * Root command for the coding agent CLI.
  */
 
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
+import { CLI_THINKING_LEVELS } from "../thinking";
 
 export default class Index extends Command {
 	static description = "AI coding assistant";
@@ -48,6 +48,12 @@ export default class Index extends Command {
 		}),
 		"allow-home": Flags.boolean({
 			description: "Allow starting in ~ without auto-switching to a temp dir",
+		}),
+		profile: Flags.string({
+			description: "Use an isolated profile for auth, sessions, settings, and caches",
+		}),
+		alias: Flags.string({
+			description: "Create a shell shortcut for the selected profile and exit",
 		}),
 		cwd: Flags.string({
 			description: "Directory to start in (overrides the launch cwd)",
@@ -94,11 +100,14 @@ export default class Index extends Command {
 			description: "Comma-separated list of tools to enable (default: all)",
 		}),
 		thinking: Flags.string({
-			description: `Set thinking level: ${THINKING_EFFORTS.join(", ")}`,
-			options: [...THINKING_EFFORTS],
+			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
+			options: [...CLI_THINKING_LEVELS],
 		}),
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
+		}),
+		advisor: Flags.boolean({
+			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
 		hook: Flags.string({
 			description: "Load a hook/extension file (can be used multiple times)",
@@ -124,11 +133,14 @@ export default class Index extends Command {
 		export: Flags.string({
 			description: "Export session file to HTML and exit",
 		}),
-		"list-models": Flags.string({
-			description: "List available models (with optional fuzzy search)",
-		}),
 		"no-title": Flags.boolean({
 			description: "Disable title auto-generation",
+		}),
+		"print-thoughts": Flags.boolean({
+			description: "Include thinking blocks in print mode text output",
+		}),
+		"max-time": Flags.string({
+			description: "Stop the session after this many seconds",
 		}),
 		// `--auto-approve` / `--yolo`: declared here so oclif's auto-generated `--help` lists it.
 		// Runtime parsing happens in `cli/args.ts parseArgs` (line 176 in that file) — `runRootCommand`
@@ -154,6 +166,7 @@ export default class Index extends Command {
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
+		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,

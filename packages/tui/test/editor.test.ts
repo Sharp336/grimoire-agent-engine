@@ -6,7 +6,6 @@ import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
-import { setDefaultTabWidth } from "@oh-my-pi/pi-utils";
 import { defaultEditorTheme } from "./test-themes";
 
 describe("Editor component", () => {
@@ -419,13 +418,14 @@ describe("Editor component", () => {
 			expect(text).toBe("Hello äöü 😀");
 		});
 
-		it("inserts NumLock keypad digits instead of treating them as navigation", () => {
+		it("inserts keypad digits instead of treating them as navigation", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.handleInput("a");
+			editor.handleInput("\x1b[57400u");
 			editor.handleInput("\x1b[57400;129u");
 
-			expect(editor.getText()).toBe("a1");
+			expect(editor.getText()).toBe("a11");
 		});
 
 		it("inserts a newline for Ctrl+Enter variants with NumLock or keypad Enter metadata", () => {
@@ -544,16 +544,10 @@ describe("Editor component", () => {
 			expect(text).toBe("Hällö Wörld! 😀 äöüÄÖÜß");
 		});
 
-		it("uses the configured tab width when loading text programmatically", () => {
+		it("expands tabs to the fixed display width when loading text programmatically", () => {
 			const editor = new Editor(defaultEditorTheme);
-
-			try {
-				setDefaultTabWidth(5);
-				editor.setText("foo\tbar");
-				expect(editor.getText()).toBe("foo     bar");
-			} finally {
-				setDefaultTabWidth(3);
-			}
+			editor.setText("foo\tbar");
+			expect(editor.getText()).toBe("foo   bar");
 		});
 
 		it("strips control characters from programmatically loaded text before render", () => {
@@ -758,6 +752,28 @@ describe("Editor component", () => {
 			expect(contentLine).not.toContain("\x1b[5m");
 			// Line should still be correct width
 			expect(visibleWidth(contentLine)).toBeLessThanOrEqual(width);
+		});
+
+		it("keeps the bordered editor inside `width` when the cursor lands past a wide trailing grapheme (#3431)", () => {
+			// Regression: typing a fullwidth char (e.g. CJK comma `，`, U+FF0C) at the end
+			// of the input used to push the bottom-right `─╯` 1–2 cells past the terminal
+			// edge, wrapping `╯` to its own row. The end-of-line cursor glyph + wide grapheme
+			// extends into the right padding zone; the right chrome must shrink by the exact
+			// overflow cell count.
+			for (const paddingX of [1, 2]) {
+				const theme = { ...defaultEditorTheme, editorPaddingX: paddingX };
+				const minContentWidth = 2 * (paddingX + 1) + 3; // chrome + "，" (2) + cursor (1)
+				for (let width = minContentWidth; width <= minContentWidth + 6; width++) {
+					const editor = new Editor(theme);
+					editor.focused = true;
+					for (const c of "asd，") editor.handleInput(c);
+					const lines = editor.render(width);
+					for (const line of lines) {
+						const stripped = line.replaceAll(CURSOR_MARKER, "");
+						expect(visibleWidth(stripped)).toBeLessThanOrEqual(width);
+					}
+				}
+			}
 		});
 
 		it("shows cursor at end before wrap and wraps on next char", () => {
@@ -1828,6 +1844,22 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("abc\ndef");
 		});
 
+		it("decodes tmux xterm-format re-encoded control bytes in bracketed paste (kitty+tmux)", () => {
+			const editor = new Editor(defaultEditorTheme);
+			// tmux extended-keys-format=xterm (the default under kitty) re-encodes the
+			// newline (Ctrl+J) inside the paste as ESC[27;5;106~. It must land as a real
+			// newline, not leak the literal escape tail "[27;5;106~" into the buffer.
+			editor.handleInput("\x1b[200~line1\x1b[27;5;106~line2\x1b[201~");
+			expect(editor.getText()).toBe("line1\nline2");
+		});
+
+		it("decodes tmux csi-u-format re-encoded control bytes in bracketed paste", () => {
+			const editor = new Editor(defaultEditorTheme);
+			// tmux extended-keys-format=csi-u re-encodes the newline (Ctrl+J) as ESC[106;5u.
+			editor.handleInput("\x1b[200~line1\x1b[106;5uline2\x1b[201~");
+			expect(editor.getText()).toBe("line1\nline2");
+		});
+
 		it("undoes the last paste when a transient #undo trigger is executed", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -2137,6 +2169,66 @@ describe("Editor component", () => {
 			editor.handleInput("\x7f"); // Backspace removes only the closing bracket
 			expect(editor.getText()).toBe("[Paste #1, +12 lines");
 		});
+
+		it("lets onLargePaste intercept a marker-sized paste, suppressing the default marker", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const seen: Array<{ text: string; lineCount: number }> = [];
+			editor.onLargePaste = (text, lineCount) => {
+				seen.push({ text, lineCount });
+				return true;
+			};
+			const pastedText = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
+
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+
+			// Hook intercepted: nothing inserted, no paste marker, hook saw the full text + line count.
+			expect(editor.getText()).toBe("");
+			expect(seen).toHaveLength(1);
+			expect(seen[0].text).toBe(pastedText);
+			expect(seen[0].lineCount).toBe(1200);
+		});
+
+		it("falls back to the default marker when onLargePaste declines", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.onLargePaste = () => false;
+			const pastedText = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
+
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+
+			expect(editor.getText()).toMatch(/^\[Paste #\d+, \+1200 lines\]$/);
+			expect(editor.getExpandedText()).toBe(pastedText);
+		});
+
+		it("does not call onLargePaste for a sub-marker paste", () => {
+			const editor = new Editor(defaultEditorTheme);
+			let calls = 0;
+			editor.onLargePaste = () => {
+				calls++;
+				return true;
+			};
+
+			editor.handleInput("\x1b[200~just a short paste\x1b[201~");
+
+			expect(calls).toBe(0);
+			expect(editor.getText()).toBe("just a short paste");
+		});
+
+		it("insertPaste collapses content to a marker that expands on submit", () => {
+			const editor = new Editor(defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			const wrapped = `\`\`\`\n${Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n")}\n\`\`\``;
+
+			editor.insertPaste(wrapped);
+
+			expect(editor.getText()).toMatch(/^\[Paste #\d+, \+\d+ lines\]$/);
+			expect(editor.getExpandedText()).toBe(wrapped);
+
+			editor.handleInput("\r");
+			expect(submitted).toBe(wrapped);
+		});
 	});
 
 	describe("Korean NFC paste normalization", () => {
@@ -2277,6 +2369,114 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("hi");
 			editor.handleInput("\x1b[45;5u"); // undo → removes "hi"
 			expect(editor.getText()).toBe("");
+		});
+	});
+
+	describe("decorateText around the cursor seam", () => {
+		// Editor.#decorate is the only seam that sees both the user prose AND the
+		// trailing CURSOR_MARKER, so a decorator with a right-boundary lookahead
+		// (like the magic-keyword regex /(?<!\S)ultrathink(?!\S)/g) would reject
+		// matches glued to the marker — ESC is non-whitespace. The editor must
+		// split around the marker so each side decorates as if it were a complete
+		// line. This guards the "ultrathink doesn't glow until you type a trailing
+		// character" regression reported in #2475.
+		const WORD_RE = /(?<!\S)ultrathink(?!\S)/g;
+		const PAINT_PREFIX = "<<";
+		const PAINT_SUFFIX = ">>";
+		const paintKeyword = (text: string): string => text.replace(WORD_RE, m => `${PAINT_PREFIX}${m}${PAINT_SUFFIX}`);
+
+		it("decorates a keyword glued to the trailing cursor marker", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.decorateText = paintKeyword;
+			editor.focused = true;
+			editor.setText("ultrathink");
+
+			const line = editor.render(40).join("\n");
+			// Without the seam fix, the decorator's right-boundary `(?!\S)` would
+			// trip on ESC (the first byte of CURSOR_MARKER) and the keyword would
+			// survive verbatim. With it, the marker bookends the painted region.
+			expect(line).toContain(`${PAINT_PREFIX}ultrathink${PAINT_SUFFIX}`);
+		});
+
+		it("decorates keywords on both sides of the cursor in terminal-cursor mode", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.decorateText = paintKeyword;
+			editor.focused = true;
+			editor.setUseTerminalCursor(true);
+			editor.setText("ultrathink ultrathink");
+			// Position the hardware cursor between the two keywords.
+			editor.handleInput("\x01"); // Ctrl+A → start of line
+			editor.handleInput("\x05"); // Ctrl+E → end of line
+			for (let i = 0; i < "ultrathink".length; i++) editor.handleInput("\x1b[D"); // 10× left
+
+			const line = editor.render(60).join("\n");
+			// Both keywords are painted independently — left side ends just before
+			// the marker, right side begins right after it.
+			const occurrences = line.split(`${PAINT_PREFIX}ultrathink${PAINT_SUFFIX}`).length - 1;
+			expect(occurrences).toBe(2);
+			expect(line).toContain(CURSOR_MARKER);
+		});
+
+		it("preserves the marker as-is — never splits or duplicates it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.decorateText = paintKeyword;
+			editor.focused = true;
+			editor.setText("ultrathink");
+
+			const line = editor.render(40).join("\n");
+			expect(line.split(CURSOR_MARKER).length - 1).toBe(1);
+		});
+	});
+
+	describe("volatile speech-to-text preview", () => {
+		it("replaces the volatile preview in place rather than appending", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVolatileText("hel");
+			expect(editor.getText()).toBe("hel");
+			editor.setVolatileText("hello wor");
+			expect(editor.getText()).toBe("hello wor");
+			editor.setVolatileText("hello world");
+			expect(editor.getText()).toBe("hello world");
+		});
+
+		it("commits the preview as permanent text and previews the next phrase after it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVolatileText("hello wor");
+			editor.commitVolatileText("hello world");
+			expect(editor.getText()).toBe("hello world");
+			editor.setVolatileText(" goodby");
+			expect(editor.getText()).toBe("hello world goodby");
+			editor.commitVolatileText(" goodbye");
+			expect(editor.getText()).toBe("hello world goodbye");
+		});
+
+		it("clears the preview without committing it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.insertText("note: ");
+			editor.setVolatileText("scratch that");
+			expect(editor.getText()).toBe("note: scratch that");
+			editor.clearVolatileText();
+			expect(editor.getText()).toBe("note: ");
+		});
+
+		it("keeps preview churn out of the undo history (one undo drops a committed phrase)", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.insertText("pre ");
+			editor.setVolatileText("u");
+			editor.setVolatileText("um");
+			editor.setVolatileText("um hel");
+			editor.commitVolatileText("hello");
+			expect(editor.getText()).toBe("pre hello");
+			editor.handleInput("\x1b[45;5u"); // undo → removes the committed phrase, not preview fragments
+			expect(editor.getText()).toBe("pre ");
+		});
+
+		it("replaces a multi-line preview across line boundaries", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVolatileText("line one\nline two");
+			expect(editor.getText()).toBe("line one\nline two");
+			editor.setVolatileText("single line");
+			expect(editor.getText()).toBe("single line");
 		});
 	});
 });

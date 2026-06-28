@@ -6,34 +6,29 @@ import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import {
-	clearNextRequestDebugPath,
-	getNextRequestDebugPath,
-	setNextRequestDebugPath,
-	wrapFetchForRequestDebug,
-} from "@oh-my-pi/pi-ai/utils/request-debug";
+import { wrapFetchForRequestDebug } from "@oh-my-pi/pi-ai/utils/request-debug";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const enc = new TextEncoder();
 
-let previousCwd: string;
 let previousDebugFlag: string | undefined;
+let previousCwd: string;
 let tempDir: string | undefined;
 
 beforeEach(async () => {
-	previousCwd = process.cwd();
 	previousDebugFlag = Bun.env.PI_REQ_DEBUG;
+	previousCwd = process.cwd();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-req-debug-"));
 	process.chdir(tempDir);
 });
 
 afterEach(async () => {
 	clearCustomApis();
-	clearNextRequestDebugPath();
 	process.chdir(previousCwd);
 	if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
 	else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
-	if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+	if (tempDir) await removeWithRetries(tempDir);
 	tempDir = undefined;
 });
 
@@ -51,15 +46,6 @@ function chunkedResponse(chunks: Uint8Array[]): Response {
 		}),
 		{ status: 201, statusText: "Created", headers: { "x-request-id": "resp-1", "content-type": "text/plain" } },
 	);
-}
-
-async function debugFiles(): Promise<{ requestPath: string; responsePath: string }> {
-	const files = await fs.readdir(tempDir!);
-	const requestPath = files.find(file => /^rr-session-\d+\.json$/.test(file));
-	expect(requestPath).toBeDefined();
-	const responsePath = requestPath!.replace(/\.json$/, ".res.log");
-	expect(files.includes(responsePath)).toBe(true);
-	return { requestPath: path.join(tempDir!, requestPath!), responsePath: path.join(tempDir!, responsePath) };
 }
 
 function splitResponseLog(bytes: Uint8Array): { headers: string; body: Uint8Array } {
@@ -85,6 +71,25 @@ function splitResponseLog(bytes: Uint8Array): { headers: string; body: Uint8Arra
 	};
 }
 
+/** Find the latest rr-session-*.json written to the temp dir by PI_REQ_DEBUG
+ * and derive its matching .res.log (rr-session-N.res.log, not .json.res.log). */
+async function findDebugFiles(): Promise<{ requestPath: string; responsePath: string }> {
+	const entries = await fs.readdir(tempDir!);
+	const jsonFiles = entries.filter(f => /^rr-session-\d+\.json$/.test(f));
+	expect(jsonFiles.length).toBeGreaterThan(0);
+	jsonFiles.sort((a, b) => {
+		const na = Number(a.match(/\d+/)![0]);
+		const nb = Number(b.match(/\d+/)![0]);
+		return na - nb;
+	});
+	const latest = jsonFiles[jsonFiles.length - 1]!;
+	const id = latest.match(/\d+/)![0];
+	return {
+		requestPath: path.join(tempDir!, latest),
+		responsePath: path.join(tempDir!, `rr-session-${id}.res.log`),
+	};
+}
+
 describe("PI_REQ_DEBUG request/response recording", () => {
 	it("leaves fetch untouched when the flag is disabled", () => {
 		delete Bun.env.PI_REQ_DEBUG;
@@ -92,10 +97,8 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		expect(wrapFetchForRequestDebug(fetchImpl)).toBe(fetchImpl);
 	});
 
-	it("records only the next fetch to an explicit request path", async () => {
-		delete Bun.env.PI_REQ_DEBUG;
-		const requestPath = path.join(tempDir!, "nested", "next-request.json");
-		setNextRequestDebugPath(requestPath);
+	it("records every fetch while the env flag is enabled", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
 		let calls = 0;
 		const fetchImpl: FetchImpl = async () => {
 			calls += 1;
@@ -117,17 +120,17 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		await second.text();
 
 		expect(calls).toBe(2);
-		expect(getNextRequestDebugPath()).toBeUndefined();
+		const { requestPath, responsePath } = await findDebugFiles();
 		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
 		expect(request).toMatchObject({
 			protocol: "http",
 			method: "POST",
-			url: "https://provider.test/first",
-			body: { first: true },
+			url: "https://provider.test/second",
+			body: { second: true },
 		});
-		const log = splitResponseLog(await fs.readFile(`${requestPath}.res.log`));
-		expect(log.headers).toContain("x-call: 1");
-		expect(new TextDecoder().decode(log.body)).toBe("first");
+		const log = splitResponseLog(await fs.readFile(responsePath));
+		expect(log.headers).toContain("x-call: 2");
+		expect(new TextDecoder().decode(log.body)).toBe("second");
 	});
 
 	it("records request JSON before fetch and raw response bytes after headers", async () => {
@@ -143,7 +146,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		});
 		expect(new Uint8Array(await response.arrayBuffer())).toEqual(responseBody);
 
-		const { requestPath, responsePath } = await debugFiles();
+		const { requestPath, responsePath } = await findDebugFiles();
 		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
 		expect(request).toMatchObject({
 			protocol: "http",
@@ -182,7 +185,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		expect(firstRead.value).toEqual(firstChunk);
 		await reader.cancel("turn aborted");
 
-		const { responsePath } = await debugFiles();
+		const { responsePath } = await findDebugFiles();
 		const log = splitResponseLog(await fs.readFile(responsePath));
 		expect(log.headers).toContain("HTTP 201 Created");
 		expect(log.body).toEqual(firstChunk);
@@ -243,7 +246,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		);
 		await events.result();
 
-		const { requestPath, responsePath } = await debugFiles();
+		const { requestPath, responsePath } = await findDebugFiles();
 		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
 		expect(request.url).toBe("https://provider.test/custom");
 		expect(request.body).toEqual({ ok: true });

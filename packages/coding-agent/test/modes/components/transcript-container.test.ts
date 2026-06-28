@@ -329,6 +329,63 @@ describe("TranscriptContainer", () => {
 		// blockStart 2 + (7 rows - TAIL_VOLATILITY_ROWS holdback of 4) = 5.
 		expect(container.getNativeScrollbackCommitSafeEnd()).toBe(5);
 	});
+
+	it("withholds the durable snapshot commit for a streaming mermaid reply, then promotes it on finalize", () => {
+		// A fenced mermaid diagram re-lays-out its whole body every frame as the
+		// reply streams. If its scrolled-off rows were committed to immutable
+		// native scrollback (the durable-snapshot path) the later re-layout would
+		// strand a stale diagram fragment in history that only Ctrl+L clears, so
+		// the live mermaid reply must advertise no durable snapshot end.
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["earlier turn"], true));
+		const assistant = new AssistantMessageComponent();
+		assistant.updateContent(
+			makeAssistantMessage({ content: [{ type: "text", text: "```mermaid\nflowchart TD\n  A-->B\n```" }] }),
+		);
+		container.addChild(assistant);
+
+		for (let frame = 0; frame < 4; frame++) container.render(60);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeUndefined();
+
+		// Finalized: the final layout is permanent and commits like any block.
+		assistant.markTranscriptBlockFinalized();
+		container.render(60);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeGreaterThan(0);
+	});
+
+	it("withholds the durable snapshot commit for a streaming GFM table, then promotes it on finalize", () => {
+		// A streaming table re-aligns its columns as rows arrive; its scrolled-off
+		// rows must not commit an intermediate alignment to immutable scrollback.
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["earlier turn"], true));
+		const assistant = new AssistantMessageComponent();
+		assistant.updateContent(
+			makeAssistantMessage({ content: [{ type: "text", text: "| Name | Score |\n| --- | --- |\n| a | 1 |" }] }),
+		);
+		container.addChild(assistant);
+
+		for (let frame = 0; frame < 4; frame++) container.render(60);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeUndefined();
+
+		assistant.markTranscriptBlockFinalized();
+		container.render(60);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeGreaterThan(0);
+	});
+
+	it("still commits the durable snapshot of a streaming reply without a mermaid fence", () => {
+		// Guard the narrow scope: an ordinary streaming reply stays commit-stable,
+		// so its settled rows still reach native scrollback while it streams.
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["earlier turn"], true));
+		const assistant = new AssistantMessageComponent();
+		assistant.updateContent(
+			makeAssistantMessage({ content: [{ type: "text", text: "A normal streamed answer with **bold** text." }] }),
+		);
+		container.addChild(assistant);
+
+		for (let frame = 0; frame < 4; frame++) container.render(60);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeGreaterThan(0);
+	});
 	it("does not re-render finalized rows already committed to native scrollback", () => {
 		const container = new TranscriptContainer();
 		const committed = new CountingFinalizedBlock(["committed"]);
@@ -610,5 +667,64 @@ describe("TranscriptContainer isBlockInLiveRegion", () => {
 		const container = new TranscriptContainer();
 		container.addChild(new StreamingBlock(["a"], true));
 		expect(container.isBlockInLiveRegion(new StreamingBlock(["x"], false))).toBe(false);
+	});
+});
+
+describe("TranscriptContainer renderViewportTail", () => {
+	const W = 40;
+	// Four two-row blocks. A full render joins them with one blank separator:
+	//   b0a b0b ""  b1a b1b ""  b2a b2b ""  b3a b3b   → 11 rows.
+	function fourBlocks(): { container: TranscriptContainer; blocks: CountingFinalizedBlock[] } {
+		const blocks = [0, 1, 2, 3].map(i => new CountingFinalizedBlock([`b${i}a`, `b${i}b`]));
+		const container = new TranscriptContainer();
+		for (const b of blocks) container.addChild(b);
+		return { container, blocks };
+	}
+
+	it("returns exactly the bottom rows of a full render", () => {
+		const { container } = fourBlocks();
+		const full = [...container.render(W)];
+		expect(full).toEqual(["b0a", "b0b", "", "b1a", "b1b", "", "b2a", "b2b", "", "b3a", "b3b"]);
+		// A clean block boundary (the separator before b2) lands at the fold.
+		expect([...container.renderViewportTail(W, 5)]).toEqual(full.slice(full.length - 5));
+		// A mid-block fold still yields the exact bottom rows.
+		expect([...container.renderViewportTail(W, 4)]).toEqual(full.slice(full.length - 4));
+		expect([...container.renderViewportTail(W, 1)]).toEqual(["b3b"]);
+	});
+
+	it("renders only the blocks needed to fill the request", () => {
+		const { container, blocks } = fourBlocks();
+		container.render(W);
+		for (const b of blocks) b.renderCount = 0;
+		// Bottom 4 rows span b3 (whole) and b2 (its last row visible): blocks
+		// above the fold must never be rendered.
+		container.renderViewportTail(W, 4);
+		expect(blocks.map(b => b.renderCount)).toEqual([0, 0, 1, 1]);
+	});
+
+	it("returns the whole transcript top-aligned when it is shorter than the request", () => {
+		const { container } = fourBlocks();
+		const full = [...container.render(W)];
+		expect([...container.renderViewportTail(W, 100)]).toEqual(full);
+	});
+
+	it("never mutates persistent full-compose state", () => {
+		const { container } = fourBlocks();
+		const before = [...container.render(W)];
+		const liveBefore = container.getNativeScrollbackLiveRegionStart();
+		// Interleave tail renders at other widths and sizes.
+		container.renderViewportTail(80, 3);
+		container.renderViewportTail(20, 7);
+		container.renderViewportTail(W, 2);
+		const after = [...container.render(W)];
+		expect(after).toEqual(before);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(liveBefore);
+	});
+
+	it("handles empty and zero-row requests", () => {
+		const empty = new TranscriptContainer();
+		expect([...empty.renderViewportTail(W, 10)]).toEqual([]);
+		const { container } = fourBlocks();
+		expect([...container.renderViewportTail(W, 0)]).toEqual([]);
 	});
 });

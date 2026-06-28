@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function createSession(cwd: string): ToolSession {
 	return {
@@ -42,7 +43,7 @@ describe("write tool shebang chmod", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	it("marks files starting with #! as executable and flags the result", async () => {
@@ -57,9 +58,9 @@ describe("write tool shebang chmod", () => {
 		const stat = await fs.stat(filePath);
 		// All three execute bits flipped on (chmod a+x semantics).
 		expect(stat.mode & 0o111).toBe(0o111);
-		// Notice surfaces on details, not in the model-facing text.
+		// Notice remains model-facing so callers see that chmod changed the file mode.
 		expect(details(result).madeExecutable).toBe(true);
-		expect(resultText(result)).not.toContain("executable");
+		expect(resultText(result)).toContain("[Notice: Made executable via chmod +x]");
 	});
 
 	it("does not chmod files without a shebang", async () => {

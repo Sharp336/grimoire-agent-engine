@@ -66,6 +66,7 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	cljc: ["clojure", "clojure"],
 	cljs: ["clojure", "clojure"],
 	edn: ["clojure", "clojure"],
+	el: ["emacs-lisp", "emacs-lisp"],
 
 	// .NET
 	cs: ["csharp", "csharp"],
@@ -201,16 +202,17 @@ function lspExtensionKey(filePath: string): string {
  * Language id for syntax highlighting and UI (icons, read tool), or undefined if unknown.
  */
 export function getLanguageFromPath(filePath: string): string | undefined {
-	const pair = EXTENSION_LANG[themeExtensionKey(filePath)];
-	if (pair) return pair[0];
-
 	const baseName = path.basename(filePath).toLowerCase();
 	if (baseName.startsWith(".env.")) return "env";
 	if (baseName === "dockerfile" || baseName.startsWith("dockerfile.") || baseName === "containerfile") {
 		return "dockerfile";
 	}
+	if (baseName === ".emacs") return "emacs-lisp";
 	if (baseName === "justfile") return "just";
 	if (baseName === "cmakelists.txt") return "cmake";
+
+	const pair = EXTENSION_LANG[themeExtensionKey(filePath)];
+	if (pair) return pair[0];
 
 	return undefined;
 }
@@ -222,6 +224,9 @@ export function detectLanguageId(filePath: string): string {
 	const baseName = path.basename(filePath).toLowerCase();
 	if (baseName === "dockerfile" || baseName.startsWith("dockerfile.") || baseName === "containerfile") {
 		return "dockerfile";
+	}
+	if (baseName === ".emacs") {
+		return "emacs-lisp";
 	}
 	if (baseName === "makefile" || baseName === "gnumakefile") {
 		return "makefile";

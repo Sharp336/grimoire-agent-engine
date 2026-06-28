@@ -10,6 +10,7 @@
  */
 
 import type { AgentSession } from "../session/agent-session";
+import { oneLineLabel } from "../task/types";
 
 export const MAIN_AGENT_ID = "Main";
 
@@ -21,7 +22,13 @@ export const MAIN_AGENT_ID = "Main";
  * - `aborted`: hard-killed, terminal.
  */
 export type AgentStatus = "running" | "idle" | "parked" | "aborted";
-export type AgentKind = "main" | "sub";
+/**
+ * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
+ * - `advisor`: a passive review transcript persisted like a subagent for usage
+ *   attribution and Agent Hub observability, but never a peer — hidden from
+ *   agent-facing rosters (`irc`, `history://`) and not messageable/revivable.
+ */
+export type AgentKind = "main" | "sub" | "advisor";
 
 export interface AgentRef {
 	id: string;
@@ -34,6 +41,8 @@ export interface AgentRef {
 	sessionFile: string | null;
 	createdAt: number;
 	lastActivity: number;
+	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
+	activity?: string;
 }
 
 export type RegistryEvent =
@@ -93,8 +102,35 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref || ref.status === status) return;
 		ref.status = status;
+		// Activity describes current work; it is meaningless once the agent
+		// leaves `running`, so drop it to avoid showing stale work in rosters.
+		if (status !== "running") ref.activity = undefined;
 		ref.lastActivity = Date.now();
 		this.#emit({ type: "status_changed", ref });
+	}
+
+	/**
+	 * Record a short activity gist for the work-aware roster. Display-only and
+	 * read on demand (`irc list`, peer roster), so it emits no event — keeping
+	 * the per-tool-call update rate off the registry listener path (same as
+	 * `attachSession`, which also bumps `lastActivity` without emitting). Only a
+	 * `running` agent has current work: a heartbeat for any other status is
+	 * dropped, so a late progress flush can't resurrect activity on a ref that
+	 * `setStatus` just cleared. Every running heartbeat refreshes `lastActivity`
+	 * — even when the gist text is unchanged — so the roster's "active … ago" and
+	 * recency sort track real work, not just the last status change.
+	 * The gist is normalized to one bounded line (`oneLineLabel`) so model-derived
+	 * intent text can neither break the roster nor smuggle terminal escapes —
+	 * every caller is safe without sanitizing at its own call site.
+	 */
+	setActivity(id: string, activity: string): void {
+		const ref = this.#refs.get(id);
+		if (!ref) return;
+		if (ref.status !== "running") return;
+		const gist = oneLineLabel(activity);
+		ref.lastActivity = Date.now();
+		if (ref.activity === gist) return;
+		ref.activity = gist;
 	}
 
 	attachSession(id: string, session: AgentSession, sessionFile?: string | null): void {
@@ -127,11 +163,14 @@ export class AgentRegistry {
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller.
-	 * Flat namespace: every agent can see every other agent.
+	 * Returns every alive agent (running | idle) except the caller. Advisor refs
+	 * are observability-only transcripts, never peers, so they are excluded.
+	 * Flat namespace: every other agent is visible.
 	 */
 	listVisibleTo(id: string): AgentRef[] {
-		return this.list().filter(ref => ref.id !== id && (ref.status === "running" || ref.status === "idle"));
+		return this.list().filter(
+			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+		);
 	}
 
 	onChange(listener: RegistryListener): () => void {

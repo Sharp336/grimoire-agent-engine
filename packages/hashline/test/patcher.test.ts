@@ -25,7 +25,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const tag = snapshots.record(PATH, "before\n");
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nreplace 1..1:\n+after`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 1.=1:\n+after`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(result.sections[0]?.fileHash).toMatch(/^[0-9A-F]{4}$/);
@@ -45,14 +45,14 @@ describe("Patcher snapshot tag integrity", () => {
 		expect(snapshots.byHash(PATH, tag)).toBeNull();
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nreplace 3..3:\n+L3`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 3.=3:\n+L3`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(fs.get(PATH)).toBe("l1\nl2\nL3\nl4\nl5\n");
 	});
 
 	it("normalizes lowercase section tags while parsing", () => {
-		const section = Patch.parseSingle(`[${PATH}#1a2b]\nreplace 1..1:\n+after`);
+		const section = Patch.parseSingle(`[${PATH}#1a2b]\nSWAP 1.=1:\n+after`);
 
 		expect(section.fileHash).toBe("1A2B");
 	});
@@ -65,7 +65,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const patcher = new Patcher({ fs, snapshots });
 
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nreplace 1..1:\n+after`));
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 1.=1:\n+after`));
 			throw new Error("expected MismatchError");
 		} catch (error) {
 			expect(error).toBeInstanceOf(MismatchError);
@@ -89,7 +89,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const bogus = live === "FFFF" ? "0000" : "FFFF";
 
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${bogus}]\nreplace 1..1:\n+after`));
+			await patcher.apply(Patch.parse(`[${PATH}#${bogus}]\nSWAP 1.=1:\n+after`));
 			throw new Error("expected MismatchError");
 		} catch (error) {
 			expect(error).toBeInstanceOf(MismatchError);
@@ -109,7 +109,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[${PATH}]\ninsert tail:\n+c`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[${PATH}]\nINS.TAIL:\n+c`))).rejects.toThrow(
 			/Missing hashline snapshot tag.*use the write tool/s,
 		);
 		expect(fs.get(PATH)).toBe("a\nb\n");
@@ -120,7 +120,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[${PATH}]\nreplace 1..1:\n+X`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[${PATH}]\nSWAP 1.=1:\n+X`))).rejects.toThrow(
 			/Missing hashline snapshot tag/,
 		);
 	});
@@ -130,7 +130,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[ghost.ts#1A2B]\ninsert tail:\n+c`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[ghost.ts#1A2B]\nINS.TAIL:\n+c`))).rejects.toThrow(
 			/File not found.*use the write tool/is,
 		);
 	});
@@ -143,7 +143,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const stale = live === "0000" ? "FFFF" : "0000";
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${stale}]\ninsert tail:\n+c`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${stale}]\nINS.TAIL:\n+c`));
 
 		const section = result.sections[0];
 		expect(section?.op).toBe("update");
@@ -158,10 +158,174 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const tag = snapshots.record(PATH, content);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\ninsert tail:\n+c`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nINS.TAIL:\n+c`));
 
 		const section = result.sections[0];
 		expect(section?.op).toBe("update");
 		expect(section?.warnings ?? []).not.toContain(HEADTAIL_DRIFT_WARNING);
+	});
+});
+
+describe("Patcher seen-line provenance", () => {
+	const CONTENT = "l1\nl2\nl3\nl4\nl5\n";
+
+	it("rejects an edit anchored on a line the read never displayed", async () => {
+		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		// A partial read displayed only lines 1-2 under this tag.
+		const tag = snapshots.record(PATH, CONTENT, [1, 2]);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`))).rejects.toThrow(
+			/never displayed \(it showed/,
+		);
+		expect(fs.get(PATH)).toBe(CONTENT);
+	});
+
+	it("applies an edit anchored on a displayed line", async () => {
+		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, CONTENT, [1, 2]);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=2:\n+L2`));
+
+		expect(result.sections[0]?.op).toBe("update");
+		expect(fs.get(PATH)).toBe("l1\nL2\nl3\nl4\nl5\n");
+	});
+
+	it("widens coverage when more of the same content is re-read (read fusion)", async () => {
+		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, CONTENT, [1, 2]);
+		// Second read of identical content displays lines 4-5: union into the tag.
+		snapshots.record(PATH, CONTENT, [4, 5]);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+
+		expect(result.sections[0]?.op).toBe("update");
+		expect(fs.get(PATH)).toBe("l1\nl2\nl3\nL4\nl5\n");
+	});
+
+	it("skips the check when no seen lines were recorded (absent → allow)", async () => {
+		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+
+		expect(result.sections[0]?.op).toBe("update");
+	});
+});
+
+describe("Patcher tag-based path recovery", () => {
+	const NESTED = "pkg/test/file.ts";
+	const CONTENT = "one\ntwo\nthree\n";
+
+	it("redirects a bare filename to the full path of the file its tag names", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		// The header carries only the basename — the model dropped the directory.
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+
+		const section = result.sections[0];
+		expect(section?.op).toBe("update");
+		// The edit landed on the real nested file; the result reports its full path.
+		expect(section?.path).toBe(NESTED);
+		expect(fs.get(NESTED)).toBe("one\nTWO\nthree\n");
+		expect(section?.warnings.some(warning => warning.includes("does not exist") && warning.includes(NESTED))).toBe(
+			true,
+		);
+	});
+
+	it("declines recovery when the filename does not match the recorded file", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[other.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get(NESTED)).toBe(CONTENT);
+	});
+
+	it("declines recovery when the tag matches no retained snapshot", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const bogus = tag === "FFFF" ? "0000" : "FFFF";
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${bogus}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(
+			/File not found/,
+		);
+	});
+
+	it("declines recovery when two retained files share the filename and tag", async () => {
+		const fs = new InMemoryFilesystem([
+			["a/file.ts", CONTENT],
+			["b/file.ts", CONTENT],
+		]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record("a/file.ts", CONTENT);
+		snapshots.record("b/file.ts", CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get("a/file.ts")).toBe(CONTENT);
+		expect(fs.get("b/file.ts")).toBe(CONTENT);
+	});
+
+	it("respects a filesystem that refuses path recovery", async () => {
+		class NoRecoveryFs extends InMemoryFilesystem {
+			override allowTagPathRecovery(): boolean {
+				return false;
+			}
+		}
+		const fs = new NoRecoveryFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get(NESTED)).toBe(CONTENT);
+	});
+
+	it("runs the write gate on the recovered path, not the authored bare path", async () => {
+		// A gate that refuses the bare authored path but allows the recovered full
+		// path. Mirrors plan mode rejecting a bare cwd path before tag recovery
+		// rebinds it to its real (writable) location; recovery must precede the gate.
+		class GatedFs extends InMemoryFilesystem {
+			override async preflightWrite(p: string): Promise<void> {
+				if (p === "file.ts") throw new Error("write gate: read-only");
+			}
+		}
+		const fs = new GatedFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+		expect(result.sections[0]?.path).toBe(NESTED);
+		expect(fs.get(NESTED)).toBe("one\nTWO\nthree\n");
+	});
+
+	it("runs the write gate on an unrecoverable authored path (gate wins over not-found)", async () => {
+		// No snapshot for the bare name → no recovery; the gate still runs on the
+		// authored path and its rejection wins over the file-not-found error.
+		class GatedFs extends InMemoryFilesystem {
+			override async preflightWrite(): Promise<void> {
+				throw new Error("write gate: read-only");
+			}
+		}
+		const fs = new GatedFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nSWAP 1.=1:\n+X`))).rejects.toThrow(/write gate/);
 	});
 });

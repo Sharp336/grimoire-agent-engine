@@ -179,6 +179,7 @@ describe("ACP lazy startup", () => {
 						messages: [],
 						fileArgs: [],
 						unknownFlags: new Map(),
+						unrecognizedFlags: [],
 						noSkills: true,
 						noRules: true,
 						noTools: true,
@@ -239,6 +240,175 @@ describe("ACP lazy startup", () => {
 			bashAutoBackground: true,
 			bashAutoBackgroundThresholdMs: 1234,
 		});
+	});
+
+	it("honors explicit host-defaulted settings for protocol hosts", async () => {
+		// Regression for #3207: in RPC/ACP startup, runtime overrides applied via
+		// `applyDefaultSettingOverrides` previously clobbered any explicitly
+		// configured value (caller, project, --config overlay, or global) with the
+		// schema default. The fix (re-)added an `isConfigured` guard so explicit
+		// configuration survives, and the schema default only fills holes.
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+
+		const explicit = {
+			"task.isolation.mode": "rcopy",
+			"task.isolation.merge": "branch",
+			"task.isolation.commits": "ai",
+			"task.eager": "always",
+			"task.batch": false,
+			"task.maxConcurrency": 4,
+			"task.maxRecursionDepth": 5,
+			"task.disabledAgents": ["explore"],
+			"task.agentModelOverrides": { task: "claude-sonnet-4-20250514" },
+			"memory.backend": "local",
+			"memories.enabled": true,
+			"advisor.enabled": true,
+			"advisor.subagents": true,
+			"advisor.syncBacklog": "5",
+			"advisor.immuneTurns": 7,
+		} as const;
+		const rpcOnlyExplicit = {
+			"async.enabled": false,
+			"async.maxJobs": 7,
+			"bash.autoBackground.enabled": true,
+			"bash.autoBackground.thresholdMs": 5_000,
+		} as const;
+		const allPaths = [
+			...(Object.keys(explicit) as (keyof typeof explicit)[]),
+			...(Object.keys(rpcOnlyExplicit) as (keyof typeof rpcOnlyExplicit)[]),
+		];
+		type ObservedSettings = Record<string, unknown>;
+
+		const runProtocolStartup = async (mode: "rpc" | "rpc-ui" | "acp"): Promise<ObservedSettings> => {
+			using tempDir = TempDir.createSync("@omp-protocol-host-defaulted-");
+			const cwd = tempDir.path();
+			const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+			const settings = Settings.isolated({ ...explicit, ...rpcOnlyExplicit });
+			let observed: ObservedSettings | undefined;
+			const stopMessage = "stop test host-defaulted settings";
+			const observe = () => {
+				observed = {};
+				for (const key of allPaths) {
+					observed[key] = settings.get(key);
+				}
+				throw new Error(stopMessage);
+			};
+
+			try {
+				await runRootCommand(
+					{
+						mode,
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						noExtensions: true,
+						sessionDir: cwd,
+					},
+					[],
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async () => observe(),
+						runAcpMode: async () => observe(),
+					},
+				);
+			} catch (error) {
+				if (!(error instanceof Error) || error.message !== stopMessage) {
+					throw error;
+				}
+			} finally {
+				authStorage.close();
+			}
+
+			if (!observed) {
+				throw new Error("Expected protocol mode to start");
+			}
+			return observed;
+		};
+
+		for (const mode of ["rpc", "rpc-ui", "acp"] as const) {
+			await expect(runProtocolStartup(mode)).resolves.toEqual({ ...explicit, ...rpcOnlyExplicit });
+		}
+	});
+
+	it("honors explicit todo settings for protocol hosts", async () => {
+		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
+
+		type ObservedTodoSettings = {
+			enabled: boolean;
+			reminders: boolean;
+			eager: "default" | "preferred" | "always";
+		};
+
+		const runProtocolStartup = async (mode: "rpc" | "rpc-ui" | "acp"): Promise<ObservedTodoSettings> => {
+			using tempDir = TempDir.createSync("@omp-protocol-todo-settings-");
+			const cwd = tempDir.path();
+			const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+			const settings = Settings.isolated({
+				"todo.enabled": false,
+				"todo.reminders": false,
+				"todo.eager": "always",
+			});
+			let observed: ObservedTodoSettings | undefined;
+			const stopMessage = "stop test protocol todo settings";
+			const observe = () => {
+				observed = {
+					enabled: settings.get("todo.enabled"),
+					reminders: settings.get("todo.reminders"),
+					eager: settings.get("todo.eager"),
+				};
+				throw new Error(stopMessage);
+			};
+
+			try {
+				await runRootCommand(
+					{
+						mode,
+						messages: [],
+						fileArgs: [],
+						unknownFlags: new Map(),
+						unrecognizedFlags: [],
+						noSkills: true,
+						noRules: true,
+						noTools: true,
+						noLsp: true,
+						noExtensions: true,
+						sessionDir: cwd,
+					},
+					[],
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async () => observe(),
+						runAcpMode: async () => observe(),
+					},
+				);
+			} catch (error) {
+				if (!(error instanceof Error) || error.message !== stopMessage) {
+					throw error;
+				}
+			} finally {
+				authStorage.close();
+			}
+
+			if (!observed) {
+				throw new Error("Expected protocol mode to start");
+			}
+			return observed;
+		};
+
+		for (const mode of ["rpc", "rpc-ui", "acp"] as const) {
+			await expect(runProtocolStartup(mode)).resolves.toEqual({
+				enabled: false,
+				reminders: false,
+				eager: "always",
+			});
+		}
 	});
 	it("answers initialize before creating the first AgentSession", async () => {
 		const clientToAgent = new TransformStream();
@@ -330,6 +500,7 @@ describe("ACP lazy startup", () => {
 					messages: [],
 					fileArgs: [],
 					unknownFlags: new Map(),
+					unrecognizedFlags: [],
 					noSkills: true,
 					noRules: true,
 					noTools: true,

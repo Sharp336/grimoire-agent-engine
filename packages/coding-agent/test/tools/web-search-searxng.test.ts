@@ -5,6 +5,8 @@ import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { searchSearXNG } from "@oh-my-pi/pi-coding-agent/web/search/providers/searxng";
+import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("SearXNG web search provider", () => {
 	afterEach(() => {
@@ -89,7 +91,7 @@ describe("SearXNG web search provider", () => {
 				`Basic ${Buffer.from("alice:s3cret", "utf-8").toString("base64")}`,
 			);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -227,5 +229,28 @@ describe("SearXNG web search provider", () => {
 		await searchSearXNG({ query: "bearer search", fetch: fetchMock });
 
 		expect(captured.headers?.get("Authorization")).toBe("Bearer bearer-token");
+	});
+
+	it("treats empty SearXNG results with upstream failures as a provider error", async () => {
+		process.env.SEARXNG_ENDPOINT = "https://searx.example.org";
+
+		const fetchMock: FetchImpl = () =>
+			Promise.resolve(
+				new Response(
+					JSON.stringify({
+						results: [],
+						unresponsive_engines: [
+							["brave", "Suspended: too many requests"],
+							["duckduckgo", "CAPTCHA"],
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+		await expect(searchSearXNG({ query: "throttled search", fetch: fetchMock })).rejects.toThrow(SearchProviderError);
+		await expect(searchSearXNG({ query: "throttled search", fetch: fetchMock })).rejects.toThrow(
+			"SearXNG returned no usable results; upstream engines failed: brave: Suspended: too many requests; duckduckgo: CAPTCHA",
+		);
 	});
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { isContextOverflow } from "@oh-my-pi/pi-ai/utils/overflow";
+import { isContextOverflow } from "@oh-my-pi/pi-ai/error";
 
 function createErrorMessage(errorMessage: string): AssistantMessage {
 	return {
@@ -31,6 +31,12 @@ describe("isContextOverflow - model_context_window_exceeded", () => {
 
 	it("detects raw model_context_window_exceeded in error message", () => {
 		const message = createErrorMessage("model_context_window_exceeded");
+		expect(isContextOverflow(message)).toBe(true);
+	});
+	it("detects empty Ollama length completion guidance", () => {
+		const message = createErrorMessage(
+			"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.",
+		);
 		expect(isContextOverflow(message)).toBe(true);
 	});
 });

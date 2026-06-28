@@ -8,31 +8,56 @@ import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-o
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import type { Shell } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
 const ARTIFACT_HEAD_BYTES_DEFAULT = 20 * 1024;
 const BACKGROUND_COMPLETION_RACE_MS = 750;
-const KILL_MARKER_DELAY_SECONDS = "0.4";
-const KILL_MARKER_DELAY_MS = 400;
-// We prove a killed process never wrote its marker by observing until the
-// wall-clock instant the marker WOULD have appeared (spawn + delay) plus a
-// margin. Anchoring the deadline to a pre-spawn timestamp — instead of blindly
-// sleeping a fixed amount after executeBash returns — keeps the wait bounded
-// without shrinking the kill-propagation margin: the timeout/abort fires at
-// ~100ms, well before the 400ms marker write, so the margin between kill and
-// write is unchanged; only the redundant observation tail goes away.
-const KILL_MARKER_OBSERVE_MARGIN_MS = 300;
+// Killed-vs-orphaned proof: the command's marker write is gated on a `release`
+// file the test creates only AFTER the cancel has landed. A truly killed process
+// never reaches the write; an orphan still polling reacts within one poll
+// interval. This replaces the old "sleep a fixed marker delay, then look"
+// approach, which paid that delay in wall-clock time on every run.
+const KILL_POLL_SECONDS = "0.01"; // a survivor re-checks `release` every ~10ms
+const KILL_SETTLE_MS = 25; // let the kill signal land before we touch `release`
+const KILL_REACT_MS = 50; // > one poll interval: a survivor would write its marker
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "omp-bash-exec-"));
 }
 
-/** Spin-wait until the wall-clock deadline, polling rather than blind-sleeping. */
-async function waitUntil(deadlineMs: number): Promise<void> {
-	while (Date.now() < deadlineMs) {
-		await Bun.sleep(20);
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** Resolve once `predicate()` holds or `deadlineMs` passes, polling every 2ms. */
+async function pollUntil(predicate: () => boolean, deadlineMs: number): Promise<void> {
+	while (!predicate() && Date.now() < deadlineMs) {
+		await Bun.sleep(2);
 	}
+}
+
+/**
+ * Shell that blocks until `release` exists, then writes `marker`. Optionally
+ * touches `started` first so a test can wait until the command is actually
+ * running before cancelling it.
+ */
+function releaseGuardedWrite(marker: string, release: string, started?: string): string {
+	const touch = started ? `touch ${shellQuote(started)}; ` : "";
+	return `${touch}while [ ! -f ${shellQuote(release)} ]; do sleep ${KILL_POLL_SECONDS}; done; echo done > ${shellQuote(marker)}`;
+}
+
+/**
+ * After a cancel has been observed, prove the command was killed (not orphaned):
+ * settle so the kill lands, unblock a would-be survivor via `release`, then give
+ * it more than one poll interval to write. A killed command never writes `marker`.
+ */
+async function expectMarkerNeverWritten(marker: string, release: string): Promise<void> {
+	await Bun.sleep(KILL_SETTLE_MS);
+	fs.writeFileSync(release, "");
+	await Bun.sleep(KILL_REACT_MS);
+	expect(fs.existsSync(marker)).toBe(false);
 }
 
 describe("executeBash", () => {
@@ -48,7 +73,7 @@ describe("executeBash", () => {
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 		if (fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -177,7 +202,7 @@ exit 64
 			expect(result.output.trim()).toBe("shell-ok");
 			expect(fs.readFileSync(marker, "utf8")).toContain("-l -c");
 		} finally {
-			fs.rmSync(shellDir, { recursive: true, force: true });
+			removeSyncWithRetries(shellDir);
 		}
 	});
 
@@ -238,7 +263,7 @@ exit 64
 			} else {
 				Bun.env.SHELL = originalShell;
 			}
-			fs.rmSync(shellDir, { recursive: true, force: true });
+			removeSyncWithRetries(shellDir);
 		}
 	});
 
@@ -280,7 +305,7 @@ exit 64
 			expect(result.exitCode).toBe(0);
 			expect(result.output.trim()).toBe("zsh-alias-ok");
 		} finally {
-			fs.rmSync(shellDir, { recursive: true, force: true });
+			removeSyncWithRetries(shellDir);
 		}
 	});
 
@@ -323,7 +348,10 @@ exit 64
 			return;
 		}
 
-		const result = await executeBash('python3 -c "import time; time.sleep(10)" & echo $!', {
+		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
+		// output pipe open (which would add the ~250ms background-drain grace);
+		// `$!` still reports the real external PID, which is all this test checks.
+		const result = await executeBash('python3 -c "import time; time.sleep(10)" >/dev/null 2>&1 & echo $!', {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -467,27 +495,32 @@ exit 64
 			return;
 		}
 
+		// Compress the JS-side fallback timer (floored at 1000ms in the source) so
+		// the safety-net fires deterministically without a real 1s wait. Only long
+		// timers are shrunk — fs/subprocess setup keeps real scheduling — and the
+		// reported "1 seconds" derives from the configured timeout, not the timer.
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+
 		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
 			onChunk?.(null, "started\n");
-			return new Promise(() => {});
+			return Promise.withResolvers<never>().promise;
 		});
 		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
 
-		const promise = executeBash("sleep 10", {
+		const result = await executeBash("sleep 10", {
 			cwd: tempDir,
 			timeout: 1000,
 			sessionKey: "hung-native-timeout",
 		});
-		const raced = await Promise.race([
-			promise.then(result => ({ type: "result" as const, result })),
-			Bun.sleep(1500).then(() => ({ type: "timeout" as const })),
-		]);
 
-		expect(raced.type).toBe("result");
-		if (raced.type === "result") {
-			expect(raced.result.cancelled).toBe(true);
-			expect(raced.result.output).toContain("Command timed out after 1 seconds");
-		}
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("Command timed out after 1 seconds");
 		expect(abortSpy).toHaveBeenCalled();
 	});
 
@@ -501,7 +534,7 @@ exit 64
 			timeout: 5000,
 			signal: controller.signal,
 		});
-		await Bun.sleep(100);
+		await Bun.sleep(50);
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
@@ -554,7 +587,7 @@ exit 64
 
 		const sessionKey = "parallel-overlap";
 		const order: string[] = [];
-		const slow = executeBash('sleep 0.6 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
+		const slow = executeBash('sleep 0.15 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
 			result => {
 				order.push("slow");
 				return result;
@@ -571,7 +604,7 @@ exit 64
 		expect(fastResult.exitCode).toBe(0);
 		expect(fastResult.output).toContain("B-done");
 		// If the second call had queued behind the persistent session it could
-		// not finish before the 600ms sleep of the first.
+		// not finish before the 150ms sleep of the first.
 		expect(order).toEqual(["fast", "slow"]);
 	});
 
@@ -579,21 +612,30 @@ exit 64
 		if (process.platform === "win32") return;
 
 		const sessionKey = "parallel-timeout-isolation";
-		const owner = executeBash('sleep 1.3 && echo "owner-done"', {
-			cwd: tempDir,
-			timeout: 5000,
-			sessionKey,
-		});
-		// Overlaps with the owner for its whole lifetime; times out at the 1s floor.
-		const overlapping = await executeBash("sleep 5", { cwd: tempDir, timeout: 1000, sessionKey });
+		const started = path.join(tempDir, "owner.started");
+		const release = path.join(tempDir, "owner.release");
+		// The owner holds the persistent session open (blocked on `release`) so the
+		// overlapping call is guaranteed to find the session busy and degrade to an
+		// isolated one-shot shell — the path whose timeout cleanup must NOT touch
+		// the owner's persistent session.
+		const owner = executeBash(
+			`touch ${shellQuote(started)}; while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; echo "owner-done"`,
+			{ cwd: tempDir, timeout: 5000, sessionKey },
+		);
+		await pollUntil(() => fs.existsSync(started), Date.now() + 4000);
+		expect(fs.existsSync(started)).toBe(true);
+
+		// Overlaps the owner; degrades to an isolated shell and times out there.
+		const overlapping = await executeBash("sleep 5", { cwd: tempDir, timeout: 100, sessionKey });
 		expect(overlapping.cancelled).toBe(true);
 
+		// The overlapping timeout must not quarantine or delete the persistent
+		// session owned by the first call: release it and confirm it completes.
+		fs.writeFileSync(release, "");
 		const ownerResult = await owner;
 		expect(ownerResult.exitCode).toBe(0);
 		expect(ownerResult.output).toContain("owner-done");
 
-		// The overlapping timeout must not quarantine or delete the persistent
-		// session owned by the first call.
 		const after = await executeBash('echo "still-ok"', { cwd: tempDir, timeout: 5000, sessionKey });
 		expect(after.exitCode).toBe(0);
 		expect(after.output).toContain("still-ok");
@@ -635,17 +677,20 @@ exit 64
 		expect(result.output).toContain("a");
 	});
 
-	it("handles multi-million line output without freeze or OOM", async () => {
+	it("handles large output without freeze or OOM", async () => {
 		if (process.platform === "win32") return;
 
-		// 5 million lines ~= 40MB of output. Before the 64KB read buffer and
-		// direct-push fixes, this would freeze or OOM the process.
-		const lineCount = 5_000_000;
+		// Once raw output exceeds the truncation cap, the streaming + middle-elision
+		// path is volume-independent, so a few hundred KB exercises the same
+		// no-freeze / no-OOM contract the original 40MB did without paying several
+		// seconds to generate it. 100k lines of `seq` is ~690KB — an order of
+		// magnitude past the ~71KB head+tail cap asserted below.
+		const lineCount = 100_000;
 		let chunkCount = 0;
 		const start = Date.now();
 		const result = await executeBash(`seq 1 ${lineCount}`, {
 			cwd: tempDir,
-			timeout: 30_000,
+			timeout: 10_000,
 			onChunk: () => {
 				chunkCount++;
 			},
@@ -656,11 +701,12 @@ exit 64
 		expect(result.exitCode).toBe(0);
 		expect(result.cancelled).toBe(false);
 
-		// Output summary should reflect all lines
+		// Output summary reflects every line even though the visible text is capped.
 		expect(result.totalLines).toBeGreaterThanOrEqual(lineCount);
 
-		// Truncated output should be bounded by head + tail + marker overhead
-		// (middle-elision keeps the head budget plus the tail spill window).
+		// Truncated output stays bounded by head + tail + marker overhead
+		// (middle-elision keeps the head budget plus the tail spill window) — proof
+		// the full ~690KB stream was never accumulated in the visible buffer.
 		expect(result.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES + ARTIFACT_HEAD_BYTES_DEFAULT + 1024);
 
 		// The tail should still contain numeric values near the end of the range.
@@ -673,14 +719,14 @@ exit 64
 			.filter(Number.isFinite);
 		expect(tailValues.some(value => value >= lineCount - 500 && value <= lineCount)).toBe(true);
 
-		// With 64KB read buffer, ~40MB should produce ~600 chunks, not 5M.
-		// Allow generous headroom but ensure it's orders of magnitude below lineCount.
+		// Chunks are coalesced by the read buffer, so onChunk fires orders of
+		// magnitude less often than once per line — the proof the stream is neither
+		// delivered line-by-line nor buffered whole.
 		expect(chunkCount).toBeLessThan(lineCount / 100);
 
-		// Should complete in reasonable time (not frozen). On a modern machine
-		// seq 1 5000000 itself takes ~0.5s; with JS overhead allow 20s.
-		expect(elapsed).toBeLessThan(20_000);
-	}, 35_000);
+		// Should complete promptly (not frozen).
+		expect(elapsed).toBeLessThan(10_000);
+	}, 15_000);
 
 	it("sources snapshot env vars across session commands", async () => {
 		if (process.platform === "win32") {
@@ -751,6 +797,53 @@ exit 64
 		expect(result.output.trim()).toBe("snapshot_ok");
 	});
 
+	it("survives compound aliases from the user's shell snapshot (issue #3234)", async () => {
+		if (process.platform === "win32") return;
+		const bashPath = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
+		if (!fs.existsSync(bashPath)) return;
+
+		// Pre-seed a snapshot that mirrors Fedora's default `which` alias.
+		// Without the brush-compat scrub, brush's whitespace-only alias
+		// expander turns `(alias;` into the command name and `which` fails
+		// with `command not found: (alias;`. With the scrub, the broken
+		// alias is dropped and brush falls through to `$PATH`.
+		const snapshotPath = path.join(tempDir, "snapshot.sh");
+		fs.writeFileSync(
+			snapshotPath,
+			[
+				"unalias -a 2>/dev/null || true",
+				"alias -- which='(alias; declare -f) | /usr/bin/which --tty-only --read-alias --show-dot --show-tilde'",
+				"alias -- ll='ls -l'",
+				"",
+			].join("\n"),
+		);
+		const rawSnapshot = fs.readFileSync(snapshotPath, "utf8");
+		const { content: scrubbed, dropped } = shellSnapshot.sanitizeSnapshotForBrush(rawSnapshot);
+		fs.writeFileSync(snapshotPath, scrubbed);
+		expect(dropped).toEqual(["which"]);
+		// Compatible aliases must still be installed in brush.
+		expect(scrubbed).toContain("alias -- ll='ls -l'");
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: bashPath,
+			args: ["-l", "-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: Bun.env.HOME ?? tempDir },
+			prefix: undefined,
+		});
+		vi.spyOn(shellSnapshot, "getOrCreateSnapshot").mockResolvedValue(snapshotPath);
+
+		const result = await executeBash("which sh", {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey: "brush-compound-alias-which",
+		});
+
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).not.toContain("command not found");
+		expect(result.output.trim()).toMatch(/\/sh$/);
+	});
+
 	it("does not allow exec to replace the host", async () => {
 		const result = await executeBash("exec echo hi", { cwd: tempDir, timeout: 5000 });
 		expect(result.cancelled).toBe(false);
@@ -783,42 +876,35 @@ exit 64
 		if (process.platform === "win32") return;
 
 		const marker = path.join(tempDir, "marker.txt");
-		const markerEscaped = marker.replace(/'/g, "'\\''");
+		const release = path.join(tempDir, "marker.release");
 
-		// Command creates marker after a short delay, but we timeout before then.
-		const start = Date.now();
-		const result = await executeBash(`sleep ${KILL_MARKER_DELAY_SECONDS} && echo done > '${markerEscaped}'`, {
+		// The foreground command can only write its marker once `release` exists,
+		// which we never create until after the timeout fires. A killed process
+		// never reaches the write; an un-killed one would the moment we release it.
+		const result = await executeBash(releaseGuardedWrite(marker, release), {
 			cwd: tempDir,
-			timeout: 100,
+			timeout: 50,
 		});
 
 		expect(result.cancelled).toBe(true);
-
-		// Observe past the instant the marker would have been written had the
-		// process survived. If it was killed (not orphaned), it never appears.
-		await waitUntil(start + KILL_MARKER_DELAY_MS + KILL_MARKER_OBSERVE_MARGIN_MS);
-		expect(fs.existsSync(marker)).toBe(false);
+		await expectMarkerNeverWritten(marker, release);
 	});
 
 	it("kills background jobs on timeout", async () => {
 		if (process.platform === "win32") return;
 
 		const marker = path.join(tempDir, "marker-bg.txt");
-		const markerEscaped = marker.replace(/'/g, "'\\''");
+		const release = path.join(tempDir, "marker-bg.release");
 
-		const start = Date.now();
-		const result = await executeBash(
-			`{ sleep ${KILL_MARKER_DELAY_SECONDS}; echo done > '${markerEscaped}'; } & sleep 10`,
-			{
-				cwd: tempDir,
-				timeout: 100,
-			},
-		);
+		// The marker writer is a backgrounded subshell that survives the foreground
+		// `sleep` unless the whole process group is killed on timeout.
+		const result = await executeBash(`{ ${releaseGuardedWrite(marker, release)}; } & sleep 10`, {
+			cwd: tempDir,
+			timeout: 50,
+		});
 
 		expect(result.cancelled).toBe(true);
-
-		await waitUntil(start + KILL_MARKER_DELAY_MS + KILL_MARKER_OBSERVE_MARGIN_MS);
-		expect(fs.existsSync(marker)).toBe(false);
+		await expectMarkerNeverWritten(marker, release);
 	});
 
 	it("kills background jobs on abort", async () => {
@@ -827,67 +913,148 @@ exit 64
 		const marker = path.join(tempDir, "marker-bg-abort.txt");
 		const release = path.join(tempDir, "marker-bg-abort.release");
 		const started = path.join(tempDir, "marker-bg-abort.started");
-		const markerEscaped = marker.replace(/'/g, "'\\''");
-		const releaseEscaped = release.replace(/'/g, "'\\''");
-		const startedEscaped = started.replace(/'/g, "'\\''");
 		const controller = new AbortController();
 
-		const promise = executeBash(
-			`{ touch '${startedEscaped}'; while [ ! -f '${releaseEscaped}' ]; do sleep 0.05; done; echo done > '${markerEscaped}'; } & sleep 10`,
-			{
-				cwd: tempDir,
-				timeout: 10000,
-				signal: controller.signal,
-			},
-		);
+		const promise = executeBash(`{ ${releaseGuardedWrite(marker, release, started)}; } & sleep 10`, {
+			cwd: tempDir,
+			timeout: 10000,
+			signal: controller.signal,
+		});
 
-		const startDeadline = Date.now() + 4000;
-		while (!fs.existsSync(started) && Date.now() < startDeadline) {
-			await Bun.sleep(2);
-		}
+		// Abort only once the backgrounded subshell is actually running.
+		await pollUntil(() => fs.existsSync(started), Date.now() + 4000);
 		expect(fs.existsSync(started)).toBe(true);
 		controller.abort();
 		const result = await promise;
 
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("Command cancelled");
-
-		// The backgrounded subshell only writes its marker once `release` exists.
-		// If abort failed to kill the process group, the orphan is still polling
-		// for `release` every 50ms — touching it makes a survivor react within one
-		// poll. A short settle first lets the kill signal propagate before we probe.
-		await Bun.sleep(100);
-		fs.writeFileSync(release, "");
-		await Bun.sleep(200);
-		expect(fs.existsSync(marker)).toBe(false);
+		await expectMarkerNeverWritten(marker, release);
 	});
 
 	it("kills spawned process on abort (not just orphans it)", async () => {
 		if (process.platform === "win32") return;
 
 		const marker = path.join(tempDir, "marker.txt");
-		const markerEscaped = marker.replace(/'/g, "'\\''");
+		const release = path.join(tempDir, "marker.release");
+		const started = path.join(tempDir, "marker.started");
 		const controller = new AbortController();
 
-		// Command creates marker after a short delay.
-		const start = Date.now();
-		const promise = executeBash(`sleep ${KILL_MARKER_DELAY_SECONDS} && echo done > '${markerEscaped}'`, {
+		const promise = executeBash(releaseGuardedWrite(marker, release, started), {
 			cwd: tempDir,
 			timeout: 10000,
 			signal: controller.signal,
 		});
 
-		// Abort before the command can create the marker.
-		await Bun.sleep(100);
+		// Abort only once the foreground command is actually running.
+		await pollUntil(() => fs.existsSync(started), Date.now() + 4000);
+		expect(fs.existsSync(started)).toBe(true);
 		controller.abort();
 		const result = await promise;
 
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("Command cancelled");
-
-		// Observe past the instant the marker would have been written had the
-		// process survived. If it was killed (not orphaned), it never appears.
-		await waitUntil(start + KILL_MARKER_DELAY_MS + KILL_MARKER_OBSERVE_MARGIN_MS);
-		expect(fs.existsSync(marker)).toBe(false);
+		await expectMarkerNeverWritten(marker, release);
 	});
+});
+
+describe("executeBash :async: background retention", () => {
+	let tmp: string;
+
+	beforeEach(async () => {
+		tmp = makeTempDir();
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: tmp });
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+		vi.restoreAllMocks();
+		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
+		async () => {
+			const pidFile = path.join(tmp, "pid");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			let pid: number | undefined;
+			try {
+				// A per-job `:async:` key: its shell is removed from the reuse map at
+				// teardown, which would SIGKILL the backgrounded child (kill-on-drop).
+				// A plain `&` job stays a child of the shell, so `liveBackgroundJobCount`
+				// sees it and the retain logic keeps the shell alive while the child
+				// runs. `$!` is the external child's own pid (no transparent wrapper to
+				// unwrap), so it is the process we assert on.
+				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
+					sessionKey: "retain-probe:async:job1",
+					cwd: tmp,
+				});
+				expect(res.cancelled).toBe(false);
+				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+				expect(Number.isInteger(pid)).toBe(true);
+
+				// A later turn on a different per-job shell must not have killed it.
+				await executeBash("true", { sessionKey: "retain-probe:async:job2", cwd: tmp });
+
+				let alive = true;
+				try {
+					process.kill(pid, 0);
+				} catch {
+					alive = false;
+				}
+				expect(alive).toBe(true);
+			} finally {
+				if (pid !== undefined) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps a nohup-detached background process alive across turns (reparenting)",
+		async () => {
+			const pidFile = path.join(tmp, "nohup-pid");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			let pid: number | undefined;
+			try {
+				// `nohup cmd &` is a transparent background wrapper: brush unwraps it and
+				// double-forks the operand so it reparents to init and survives teardown
+				// independently of the retain map. The shell only ever tracked the
+				// short-lived intermediate fork, so `$!` is NOT the surviving process —
+				// the operand writes its own pid before `exec`ing the long sleep, and
+				// that pid (unchanged across exec) is the one we assert stays alive.
+				const operand = `echo $$ > ${pidFile}; exec ${sleepBin} 30`;
+				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
+					sessionKey: "reparent-probe:async:job1",
+					cwd: tmp,
+				});
+				expect(res.cancelled).toBe(false);
+
+				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
+				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+				expect(Number.isInteger(pid)).toBe(true);
+
+				// A later turn on a different per-job shell must not have killed it.
+				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });
+
+				let alive = true;
+				try {
+					process.kill(pid, 0);
+				} catch {
+					alive = false;
+				}
+				expect(alive).toBe(true);
+			} finally {
+				if (pid !== undefined) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+			}
+		},
+	);
 });

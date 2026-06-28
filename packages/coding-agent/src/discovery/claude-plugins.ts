@@ -17,6 +17,7 @@ import type { LoadContext, LoadResult } from "../capability/types";
 import {
 	type ClaudePluginRoot,
 	createSourceMeta,
+	expandEnvVarsDeep,
 	listClaudePluginRoots,
 	loadFilesFromDir,
 	scanSkillsFromDir,
@@ -139,7 +140,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const results = await Promise.all(
 		roots.map(async root => {
 			const { dir: commandsDir, warning } = await resolvePluginDir(root, ["commands", "slash-commands"], "commands");
-			const result = await loadFilesFromDir<SlashCommand>(ctx, commandsDir, PROVIDER_ID, root.scope, {
+			const commandResult = await loadFilesFromDir<SlashCommand>(ctx, commandsDir, PROVIDER_ID, root.scope, {
 				extensions: ["md"],
 				transform: (name, content, filePath, source) => {
 					const cmdName = name.replace(/\.md$/, "");
@@ -152,14 +153,14 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 					};
 				},
 			});
-			return { result, warning };
+			return { commandResult, warning };
 		}),
 	);
 
-	for (const { result, warning } of results) {
+	for (const { commandResult, warning } of results) {
 		if (warning) warnings.push(warning);
-		items.push(...result.items);
-		if (result.warnings) warnings.push(...result.warnings);
+		items.push(...commandResult.items);
+		if (commandResult.warnings) warnings.push(...commandResult.warnings);
 	}
 
 	return { items, warnings };
@@ -327,8 +328,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
 				...(raw.env !== undefined && { env: substitutePluginRoot(raw.env, root.path) }),
 				...(raw.cwd !== undefined && { cwd: substitutePluginRoot(raw.cwd, root.path) }),
-				...(raw.url !== undefined && { url: raw.url }),
-				...(raw.headers !== undefined && { headers: raw.headers }),
+				...(raw.url !== undefined && { url: expandEnvVarsDeep(raw.url) }),
+				...(raw.headers !== undefined && { headers: expandEnvVarsDeep(raw.headers) }),
 				...(raw.auth !== undefined && { auth: raw.auth }),
 				...(raw.oauth !== undefined && { oauth: raw.oauth }),
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),

@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
+import { type } from "arktype";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../modes/theme/shimmer";
@@ -23,13 +23,13 @@ import {
 } from "./render-utils";
 import { ToolError } from "./tool-errors";
 
-const jobSchema = z.object({
-	poll: z.array(z.string()).optional().describe("job ids to wait for; omit to wait on all running jobs"),
-	cancel: z.array(z.string()).optional().describe("job ids to cancel"),
-	list: z.boolean().optional().describe("snapshot all jobs"),
+const jobSchema = type({
+	"poll?": type("string[]").describe("job ids to wait for; omit to wait on all running jobs"),
+	"cancel?": type("string[]").describe("job ids to cancel"),
+	"list?": type("boolean").describe("snapshot all jobs"),
 });
 
-type JobParams = z.infer<typeof jobSchema>;
+type JobParams = typeof jobSchema.infer;
 
 const WAIT_DURATION_MS: Record<string, number> = {
 	"5s": 5_000,
@@ -87,6 +87,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 	readonly description: string;
 	readonly parameters = jobSchema;
 	readonly strict = true;
+	readonly interruptible = true;
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(jobDescription);
@@ -184,9 +185,16 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			return this.#buildResult(manager, [...cancelledJobs, ...jobsToWatch], cancelOutcomes);
 		}
 
-		// Wait until at least one running job finishes, the wait duration elapses, or the call is aborted.
+		// Wait until at least one running job finishes, the wait window elapses,
+		// or the call is aborted. With `async.pollWaitDuration` set to `smart`,
+		// the window adapts: it starts at the ladder floor and climbs as the agent
+		// polls in a tight loop, then resets to the floor once the agent steps
+		// away from polling (see AsyncJobManager.nextPollWaitMs). Any fixed value
+		// waits that exact duration every time.
 		const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
-		const waitMs = parseWaitDurationMs(this.session.settings.get("async.pollWaitDuration"));
+		const pollSetting = this.session.settings.get("async.pollWaitDuration");
+		const smartPoll = pollSetting === "smart";
+		const waitMs = smartPoll ? manager.nextPollWaitMs(ownerId) : parseWaitDurationMs(pollSetting);
 		const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
 		const timeoutHandle = setTimeout(() => timeoutResolve(), waitMs);
 		racePromises.push(timeoutPromise);
@@ -232,6 +240,11 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			manager.unwatchJobs(watchedJobIds);
 			clearTimeout(timeoutHandle);
 			if (progressTimer) clearInterval(progressTimer);
+			if (smartPoll) {
+				// Reset the idle-gap clock: escalate if the agent polls again soon,
+				// drop back to the floor once it goes quiet for a while.
+				manager.recordPollWaitEnd(ownerId);
+			}
 		}
 
 		return this.#buildResult(manager, allTrackedJobs, cancelOutcomes);
@@ -359,6 +372,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 interface JobRenderArgs {
 	poll?: string[];
 	cancel?: string[];
+	list?: boolean;
 }
 
 const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
@@ -420,6 +434,7 @@ function flattenStructuredPreview(text: string): string {
 }
 
 function describeTarget(args: JobRenderArgs | undefined): string {
+	if (args?.list) return "background jobs";
 	const poll = args?.poll ?? [];
 	const cancel = args?.cancel ?? [];
 	const parts: string[] = [];
@@ -447,12 +462,23 @@ export const jobToolRenderer = {
 		uiTheme: Theme,
 		args?: JobRenderArgs,
 	): Component {
-		const jobs = result.details?.jobs ?? [];
+		let jobs = result.details?.jobs ?? [];
 
 		if (jobs.length === 0) {
 			const fallback = result.content?.find(c => c.type === "text")?.text || "No jobs to process";
 			const header = renderStatusLine({ icon: "warning", title: describeTarget(args) || "Job" }, uiTheme);
 			return new Text([header, formatEmptyMessage(fallback, uiTheme)].join("\n"), 0, 0);
+		}
+
+		const isPollCall = args
+			? !args.list && (!args.cancel || args.cancel.length === 0 || args.poll !== undefined)
+			: true;
+
+		if (!options.isPartial && isPollCall) {
+			jobs = jobs.filter(job => job.status !== "running");
+			if (jobs.length === 0) {
+				return new Text("", 0, 0);
+			}
 		}
 
 		const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };

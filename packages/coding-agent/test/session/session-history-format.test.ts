@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function buildMessages(): unknown[] {
 	return [
@@ -92,17 +93,221 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output.startsWith("# Spawnling (idle)\n")).toBe(true);
 	});
 
+	it("renders watched roles using bold text rather than level-2 headers when watchedRoles is true", () => {
+		const output = formatSessionHistoryMarkdown(buildMessages(), { watchedRoles: true });
+		expect(output).toContain("**user**:");
+		expect(output).toContain("**agent**:");
+		expect(output).not.toContain("## user");
+		expect(output).not.toContain("## assistant");
+	});
+
 	it("renders an orphan toolResult (truncated history) as its own line", () => {
 		const output = formatSessionHistoryMarkdown([
 			{
 				role: "toolResult",
 				toolCallId: "tc-orphan",
-				toolName: "search",
+				toolName: "grep",
 				content: [{ type: "text", text: "one match" }],
 				isError: false,
 				timestamp: 1,
 			},
 		]);
-		expect(output).toContain("→ search() ⇒ ok · 1 line");
+		expect(output).toContain("→ grep() ⇒ ok · 1 line");
+	});
+
+	it("renders find paths without falling back to JSON arguments", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-glob",
+						name: "glob",
+						arguments: { paths: ["packages/coding-agent/src/**/*.ts"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-glob",
+				toolName: "glob",
+				content: [{ type: "text", text: "session-history-format.ts" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ glob(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
+		expect(output).not.toContain('{"paths"');
+	});
+
+	it("renders search path scope alongside the pattern", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-grep",
+						name: "grep",
+						arguments: { pattern: "PRIMARY_ARG_KEYS", paths: ["packages/coding-agent/src/session"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-grep",
+				toolName: "grep",
+				content: [{ type: "text", text: "timed out" }],
+				isError: true,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain(
+			"→ grep(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
+		);
+	});
+
+	it("keeps the ast_grep pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astgrep",
+						name: "ast_grep",
+						arguments: { pat: "console.log($$$)", paths: ["packages/coding-agent/src/**/*.ts"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astgrep",
+				toolName: "ast_grep",
+				content: [{ type: "text", text: "match" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ ast_grep(console.log($$$)) ⇒ ok · 1 line");
+	});
+
+	it("keeps the ast_edit op pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astedit",
+						name: "ast_edit",
+						arguments: {
+							ops: [{ pat: "oldApi($$$A)", out: "newApi($$$A)" }],
+							paths: ["packages/coding-agent/src/**/*.ts"],
+						},
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astedit",
+				toolName: "ast_edit",
+				content: [{ type: "text", text: "1 change" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("oldApi($$$A)");
+		expect(output).not.toContain("→ ast_edit(packages/coding-agent/src/**/*.ts)");
+	});
+
+	it("renders tool intent comments immediately before tool call lines when includeToolIntent is true", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-intent",
+						name: "read",
+						arguments: { path: "src/config.ts", [INTENT_FIELD]: "reading config file" },
+					},
+					{
+						type: "toolCall",
+						id: "tc-long-intent",
+						name: "read",
+						arguments: {
+							path: "src/config.ts",
+							[INTENT_FIELD]:
+								"reading config file with a very very long and descriptive intent that will exceed the maximum length limit of eighty characters",
+						},
+					},
+				],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-intent",
+				toolName: "read",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-long-intent",
+				toolName: "read",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+		];
+
+		const outputWithIntent = formatSessionHistoryMarkdown(messages, { includeToolIntent: true });
+		expect(outputWithIntent).toContain("// reading config file\n→ read(src/config.ts) ⇒ ok · 1 line");
+		// The long intent should be flattened to one line and truncated to 80 characters (including ellipsis).
+		expect(outputWithIntent).toContain(
+			"// reading config file with a very very long and descriptive intent that will exce…\n→ read(src/config.ts) ⇒ ok · 1 line",
+		);
+
+		const outputWithoutIntent = formatSessionHistoryMarkdown(messages);
+		expect(outputWithoutIntent).not.toContain("// reading config file");
+		expect(outputWithoutIntent).toContain("→ read(src/config.ts) ⇒ ok · 1 line");
+	});
+	it("summarizes advise tool calls by their note and severity", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-advise-1",
+						name: "advise",
+						// Severity is intentionally placed before note so the test proves
+						// PRIMARY_ARG_KEYS / the special-case picks the note, not insertion order.
+						arguments: { severity: "concern", note: "Avoid shadowing the outer variable." },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-advise-1",
+				toolName: "advise",
+				content: [{ type: "text", text: "Recorded." }],
+				isError: false,
+				timestamp: 2,
+			},
+		];
+
+		const output = formatSessionHistoryMarkdown(messages);
+		expect(output).toContain("→ advise(concern: Avoid shadowing the outer variable.) ⇒ ok · 1 line");
+		expect(output).not.toContain("Recorded.");
 	});
 });

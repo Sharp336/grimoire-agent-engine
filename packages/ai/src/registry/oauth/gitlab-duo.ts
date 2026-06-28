@@ -1,3 +1,4 @@
+import * as AIError from "../../error";
 import { clearGitLabDuoDirectAccessCache } from "../../providers/gitlab-duo";
 import type { FetchImpl } from "../../types";
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
@@ -40,9 +41,10 @@ function resolveClientId(): string {
 /**
  * Resolve callback-server options from `GITLAB_REDIRECT_URI`. When set, the
  * exact string is advertised to GitLab (strict matching), random-port fallback
- * is disabled, and the local listener is bound to the URI's loopback host/port
- * so the browser callback lands on us. Non-loopback URIs bind a random local
- * port — only the paste-code path can complete in that case.
+ * is disabled, and HTTP loopback URIs bind the listener to the URI's host/port
+ * so the browser callback lands on us. HTTPS loopback URIs are rejected because
+ * the local callback server is plaintext HTTP. Non-loopback URIs bind a random
+ * local port — only the paste-code path can complete in that case.
  */
 function resolveCallbackOptions(): OAuthCallbackFlowOptions {
 	const raw = process.env.GITLAB_REDIRECT_URI?.trim();
@@ -58,13 +60,26 @@ function resolveCallbackOptions(): OAuthCallbackFlowOptions {
 	try {
 		parsed = new URL(raw);
 	} catch {
-		throw new Error(`Invalid GITLAB_REDIRECT_URI: ${raw}`);
+		throw new AIError.OAuthError(`Invalid GITLAB_REDIRECT_URI: ${raw}`, {
+			kind: "configuration",
+			provider: "gitlab-duo",
+		});
 	}
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new Error(`GITLAB_REDIRECT_URI must use http:// or https://, got: ${raw}`);
+		throw new AIError.OAuthError(`GITLAB_REDIRECT_URI must use http:// or https://, got: ${raw}`, {
+			kind: "configuration",
+			provider: "gitlab-duo",
+		});
 	}
 
 	const isLoopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+	if (isLoopback && parsed.protocol !== "http:") {
+		throw new AIError.OAuthError(`GITLAB_REDIRECT_URI loopback callbacks must use http://, got: ${raw}`, {
+			kind: "configuration",
+			provider: "gitlab-duo",
+		});
+	}
+
 	const port = parsed.port ? Number.parseInt(parsed.port, 10) : parsed.protocol === "https:" ? 443 : 80;
 
 	return {
@@ -82,7 +97,10 @@ function mapTokenResponse(payload: {
 	created_at?: number;
 }): OAuthCredentials {
 	if (!payload.access_token || !payload.refresh_token || typeof payload.expires_in !== "number") {
-		throw new Error("GitLab OAuth token response missing required fields");
+		throw new AIError.OAuthError("GitLab OAuth token response missing required fields", {
+			kind: "validation",
+			provider: "gitlab-duo",
+		});
 	}
 
 	const createdAtMs =
@@ -143,7 +161,14 @@ class GitLabDuoOAuthFlow extends OAuthCallbackFlow {
 		});
 
 		if (!response.ok) {
-			throw new Error(`GitLab OAuth token exchange failed: ${response.status} ${await response.text()}`);
+			throw new AIError.OAuthError(
+				`GitLab OAuth token exchange failed: ${response.status} ${await response.text()}`,
+				{
+					kind: "token-exchange",
+					provider: "gitlab-duo",
+					status: response.status,
+				},
+			);
 		}
 
 		clearGitLabDuoDirectAccessCache();
@@ -178,7 +203,11 @@ export async function refreshGitLabDuoToken(credentials: OAuthCredentials): Prom
 	});
 
 	if (!response.ok) {
-		throw new Error(`GitLab OAuth refresh failed: ${response.status} ${await response.text()}`);
+		throw new AIError.OAuthError(`GitLab OAuth refresh failed: ${response.status} ${await response.text()}`, {
+			kind: "token-refresh",
+			provider: "gitlab-duo",
+			status: response.status,
+		});
 	}
 
 	clearGitLabDuoDirectAccessCache();

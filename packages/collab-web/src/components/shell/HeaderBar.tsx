@@ -2,6 +2,7 @@ import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
+import { ThemeToggle } from "./ThemeToggle";
 
 export interface HeaderBarProps {
 	snapshot: GuestSnapshot;
@@ -19,7 +20,9 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 	if (usage) {
 		pct =
 			usage.percent ??
-			(usage.tokens != null && usage.contextWindow > 0 ? (usage.tokens / usage.contextWindow) * 100 : null);
+			(usage.tokens != null && usage.contextWindow !== null && usage.contextWindow > 0
+				? (usage.tokens / usage.contextWindow) * 100
+				: null);
 	}
 
 	return (
@@ -40,8 +43,8 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 						read-only
 					</span>
 				)}
-				{state?.model && <span className="sh-chip">{state.model.name}</span>}
-				{state?.thinkingLevel && <span className="sh-chip">{state.thinkingLevel}</span>}
+				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
+				{state?.thinkingLevel && <span className="sh-chip sh-chip-meta">{state.thinkingLevel}</span>}
 				{pct != null && (
 					<span
 						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}
@@ -67,6 +70,7 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 					</span>
 				)}
 				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
+				<ThemeToggle />
 				<button
 					type="button"
 					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}

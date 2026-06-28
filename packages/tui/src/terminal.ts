@@ -1,13 +1,39 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import { $env, isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, logger } from "@oh-my-pi/pi-utils";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
-import { NotifyProtocol, setCellDimensions, setOsc99Supported, TERMINAL } from "./terminal-capabilities";
+import {
+	isInsideTmux,
+	NotifyProtocol,
+	setCellDimensions,
+	setOsc99Supported,
+	TERMINAL,
+	wrapTmuxPassthrough,
+} from "./terminal-capabilities";
+import { type HangulCompatibilityJamoWidth, setHangulCompatibilityJamoWidth } from "./utils";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
+// Hangul Compatibility Jamo (U+3131..=U+318E) render width is terminal-dependent:
+// Ghostty follows UAX#11 (2 cells); Terminal.app and iTerm2 render narrow (1),
+// matching the macOS platform default. Override only for terminals known to
+// disagree — the rest keep the platform default (macOS narrow, otherwise UAX#11),
+// so this is a no-op everywhere except Ghostty. A runtime DSR/CPR probe that
+// auto-detects the width on unknown terminals is tracked separately.
+export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
+	env: NodeJS.ProcessEnv = Bun.env,
+): HangulCompatibilityJamoWidth {
+	if (
+		env.GHOSTTY_RESOURCES_DIR ||
+		env.TERM_PROGRAM?.toLowerCase() === "ghostty" ||
+		env.TERM?.toLowerCase().includes("ghostty")
+	) {
+		return 2;
+	}
+	return "platform";
+}
 
 /**
  * Maximum encoded UTF-8 bytes per `process.stdout.write` call on Windows.
@@ -249,7 +275,7 @@ export function emergencyTerminalRestore(): void {
 				altScreenActive = false;
 			}
 			terminal.showCursor();
-		} else if (terminalEverStarted) {
+		} else if (terminalEverStarted && !isTerminalHeadless()) {
 			// Blind restore only if we know a terminal was started but lost track of it
 			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
 			process.stdout.write(
@@ -375,6 +401,20 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 	}
 	return values;
 }
+const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
+
+function isXtermScrollToBottomMode(mode: number): boolean {
+	return mode === 1010 || mode === 1011;
+}
+
+function isPrivateModeSet(status: string): boolean {
+	return status === "1" || status === "3";
+}
+
+function isPrivateModeSupported(status: string): boolean {
+	return status !== "0" && status !== "4";
+}
+
 /**
  * Real terminal using process.stdin/stdout
  */
@@ -390,6 +430,10 @@ export class ProcessTerminal implements Terminal {
 	#stdinBuffer?: StdinBuffer;
 	#stdinDataHandler?: (data: string) => void;
 	#dead = false;
+	// Captured at construction and re-read at start(): when true, every real
+	// terminal side effect (writes, probes, raw mode, SIGWINCH, timers) is
+	// suppressed. Defaults on under `bun test` — see isTerminalHeadless().
+	#headless = isTerminalHeadless();
 	#writeLogPath = $env.PI_TUI_WRITE_LOG || "";
 	#stdoutErrorCleanup?: () => void;
 	#stdoutErrorHandler = (err: Error) => {
@@ -397,6 +441,7 @@ export class ProcessTerminal implements Terminal {
 	};
 
 	#windowsVTInputRestore?: () => void;
+	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
@@ -416,9 +461,8 @@ export class ProcessTerminal implements Terminal {
 	#inBandResizeBuffer = "";
 	#reportedColumns?: number;
 	#reportedRows?: number;
-	#osc11PollTimer?: Timer;
 	#mode2031DebounceTimer?: Timer;
-	#progressTimer?: ReturnType<typeof setInterval>;
+	#progressTimer?: Timer;
 
 	get kittyProtocolActive(): boolean {
 		return this.#kittyProtocolActive;
@@ -443,6 +487,13 @@ export class ProcessTerminal implements Terminal {
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
+
+		// Headless (tests): suppress every real-terminal side effect. Skip raw
+		// mode, stdin listeners, capability probes, SIGWINCH, and emergency-restore
+		// ownership; #safeWrite is also a no-op, so frame paints and teardown
+		// escapes never reach the developer's terminal during `bun test`.
+		this.#headless = isTerminalHeadless();
+		if (this.#headless) return;
 
 		// Register for emergency cleanup
 		activeTerminal = this;
@@ -483,6 +534,7 @@ export class ProcessTerminal implements Terminal {
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.#queryAndEnableKittyProtocol();
+		setHangulCompatibilityJamoWidth(resolveHangulCompatibilityJamoWidthFromTerminalIdentity());
 
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
@@ -501,30 +553,28 @@ export class ProcessTerminal implements Terminal {
 		// actual background color (following Neovim convention) with 100ms debounce.
 		this.#safeWrite("\x1b[?2031h");
 
-		// Start periodic OSC 11 re-query for terminals without Mode 2031
-		// (Warp, Alacritty, older WezTerm). Stops once Mode 2031 support is
-		// confirmed via DECRQM (probed below) or a Mode 2031 change notification
-		// fires — push notifications supersede polling, and the poll's repeated
-		// OSC 11/DA1 writes clear the user's active text selection on some
-		// terminals (copy breaks every 2s).
-		// Windows Terminal under WSL has been observed to close the hosting tab
-		// after repeated OSC 11/DA1 probes. Keep the initial/event-driven probes,
-		// but avoid background polling there.
-		const isWSL = process.platform === "linux" && (!!$env.WSL_DISTRO_NAME || !!$env.WSL_INTEROP);
-		if (!isWSL) {
-			this.#startOsc11Poll();
-		}
+		// Theme detection relies on (1) the startup OSC 11 probe above and
+		// (2) DEC Mode 2031 push notifications. Terminals without Mode 2031
+		// (macOS Terminal.app, Warp, VS Code's built-in, older Alacritty/
+		// WezTerm) detect the appearance once at startup and pick up later OS
+		// theme changes on next launch. Earlier builds polled OSC 11 every 30 s
+		// here for those terminals, but each poll's OSC 11/DA1 write wiped the
+		// user's active text selection on several of them (#3297).
 
 		// Probe DEC private-mode support via DECRQM. 2026 (synchronized output)
 		// gates the renderer's begin/end markers; 2048 (in-band resize) is enabled
 		// only after the terminal confirms support; 2031 (appearance change
-		// notifications) stops the OSC 11 poll once confirmed, since push
-		// notifications make polling redundant. Each probe rides the shared DA1
-		// sentinel FIFO, so a terminal that ignores DECRQM still resolves (as
-		// unsupported) when the DA1 reply arrives.
+		// notifications) drives mid-session theme tracking. Xterm ?1010/?1011
+		// are disabled while OMP owns the TTY so typing in the editor does not
+		// force a reader scrolled into native history back to the tail. Each probe
+		// rides the shared DA1 sentinel, so terminals that ignore DECRQM resolve as
+		// unsupported when the DA1 reply arrives.
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
+			this.#queryPrivateMode(mode);
+		}
 	}
 
 	/**
@@ -709,11 +759,10 @@ export class ProcessTerminal implements Terminal {
 			// DECRPM private-mode report. Resolves the matching probe by mode; the
 			// owner stays in the FIFO and is drained by its DA1 sentinel (a no-op
 			// once resolved). Per DECRPM, status 0 = unrecognized, 1/2 =
-			// set/reset, 3 = permanently set, and 4 = permanently reset. Only
-			// settable or permanently-set modes are useful for features we enable.
+			// set/reset, 3 = permanently set, and 4 = permanently reset.
 			const decrpmMatch = sequence.match(decrpmResponsePattern);
 			if (decrpmMatch) {
-				this.#resolvePrivateMode(parseInt(decrpmMatch[1]!, 10), decrpmMatch[2] !== "0" && decrpmMatch[2] !== "4");
+				this.#handlePrivateModeReport(parseInt(decrpmMatch[1]!, 10), decrpmMatch[2]!);
 				return;
 			}
 
@@ -840,7 +889,6 @@ export class ProcessTerminal implements Terminal {
 			// (Neovim convention — coalesces rapid notifications during transitions)
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
 			if (appearanceMatch) {
-				this.#stopOsc11Poll();
 				if (this.#mode2031DebounceTimer) clearTimeout(this.#mode2031DebounceTimer);
 				this.#mode2031DebounceTimer = setTimeout(() => {
 					this.#mode2031DebounceTimer = undefined;
@@ -907,7 +955,14 @@ export class ProcessTerminal implements Terminal {
 		const id = `omp-probe-${nextOsc99ProbeId++}`;
 		this.#osc99PendingId = id;
 		this.#da1SentinelOwners.push({ kind: "osc99Probe", id });
-		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
+		// Wrap the probe under tmux so terminals behind `allow-passthrough on`
+		// can still respond (mirroring how `TerminalInfo.sendNotification`
+		// wraps notification deliveries). Without it the probe is swallowed
+		// inside tmux even when the outer terminal speaks OSC 99, and rich
+		// notifications stay permanently downgraded to the single-line fallback.
+		const probe = `\x1b]99;i=${id}:p=?;\x1b\\`;
+		const sequence = isInsideTmux() ? wrapTmuxPassthrough(probe) : probe;
+		this.#safeWrite(`${sequence}\x1b[c`);
 	}
 
 	#handleOsc99CapabilityResponse(metaRaw: string, payload: string): boolean {
@@ -956,32 +1011,6 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
-	 * Start periodic OSC 11 re-queries for terminals without Mode 2031 (Warp, Alacritty, WezTerm).
-	 * Self-disables once Mode 2031 fires (push-based is better than polling).
-	 * The interval is deliberately long: each poll's OSC 11 + DA1 write clears
-	 * an active text selection on several terminals, so polling exists only to
-	 * eventually notice a rare OS theme switch, not to track it promptly.
-	 */
-	#startOsc11Poll(): void {
-		this.#stopOsc11Poll();
-		this.#osc11PollTimer = setInterval(() => {
-			if (this.#dead) {
-				this.#stopOsc11Poll();
-				return;
-			}
-			this.#queryBackgroundColor();
-		}, 30_000);
-		this.#osc11PollTimer.unref();
-	}
-
-	#stopOsc11Poll(): void {
-		if (this.#osc11PollTimer) {
-			clearInterval(this.#osc11PollTimer);
-			this.#osc11PollTimer = undefined;
-		}
-	}
-
-	/**
 	 * Query terminal for Kitty keyboard protocol support and enable if available.
 	 *
 	 * Sends CSI ? u to query current flags. If terminal responds with CSI ? <flags> u,
@@ -1021,12 +1050,17 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite(`\x1b[?${mode}$p\x1b[c`);
 	}
 
+	#handlePrivateModeReport(mode: number, status: string): void {
+		this.#resolvePrivateMode(mode, isPrivateModeSupported(status));
+		if (isXtermScrollToBottomMode(mode) && isPrivateModeSet(status)) {
+			this.#disableXtermScrollToBottomMode(mode);
+		}
+	}
+
 	/**
 	 * Record DECRQM support for a private mode (idempotent — first result wins)
 	 * and notify subscribers. Enables DEC 2048 in-band resize when 2048 resolves
-	 * supported, and stops the OSC 11 poll when 2031 resolves supported (Mode 2031
-	 * push notifications make periodic re-querying redundant — and the poll's
-	 * OSC 11/DA1 writes clobber active text selections on some terminals).
+	 * supported.
 	 */
 	#resolvePrivateMode(mode: number, supported: boolean): void {
 		if (this.#privateModeSupport.has(mode)) return;
@@ -1039,7 +1073,12 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
-		if (mode === 2031 && supported) this.#stopOsc11Poll();
+	}
+
+	#disableXtermScrollToBottomMode(mode: number): void {
+		if (this.#xtermScrollToBottomRestoreModes.has(mode) || this.#dead) return;
+		this.#xtermScrollToBottomRestoreModes.add(mode);
+		this.#safeWrite(`\x1b[?${mode}l`);
 	}
 
 	/**
@@ -1103,6 +1142,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
+		if (this.#headless) return;
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
@@ -1145,6 +1185,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		if (this.#headless) return;
 		// Unregister from emergency cleanup
 		if (activeTerminal === this) {
 			activeTerminal = null;
@@ -1170,12 +1211,16 @@ export class ProcessTerminal implements Terminal {
 		// Disable Mode 2031 appearance change notifications
 		this.#safeWrite("\x1b[?2031l");
 
-		// Disable DEC 2048 in-band resize notifications if we enabled them.
+		// Restore xterm scroll-to-bottom modes that were set before startup.
+		for (const mode of this.#xtermScrollToBottomRestoreModes) {
+			this.#safeWrite(`\x1b[?${mode}h`);
+		}
+		this.#xtermScrollToBottomRestoreModes.clear();
+
 		if (this.#inBandResizeActive) {
 			this.#safeWrite("\x1b[?2048l");
 			this.#inBandResizeActive = false;
 		}
-		this.#stopOsc11Poll();
 		if (this.#mode2031DebounceTimer) {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;
@@ -1193,6 +1238,7 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.length = 0;
 		this.#privateModeCallbacks = [];
 		this.#privateModeSupport.clear();
+		this.#xtermScrollToBottomRestoreModes.clear();
 		this.#reportedColumns = undefined;
 		this.#reportedRows = undefined;
 
@@ -1266,6 +1312,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#safeWrite(data: string): void {
+		if (this.#headless) return;
 		if (this.#dead) return;
 		// Skip control sequences when stdout isn't a TTY (piped output, tests, log
 		// files). They serve no purpose there and would surface as visible noise.
@@ -1348,6 +1395,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setProgress(active: boolean): void {
+		if (this.#headless) return;
 		if (active) {
 			this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 			if (!this.#progressTimer) {

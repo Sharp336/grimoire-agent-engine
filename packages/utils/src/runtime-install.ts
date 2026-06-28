@@ -170,6 +170,16 @@ function resolverRegistry(): ResolverRegistration[] {
 	holder[REGISTRY] ??= [];
 	return holder[REGISTRY];
 }
+function pathContains(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function parentFilename(parent: unknown): string | null {
+	if (!isRecord(parent)) return null;
+	const filename = parent.filename;
+	return typeof filename === "string" ? filename : null;
+}
 
 export interface RuntimeResolverOptions {
 	/** Absolute path to the runtime cache's `node_modules`. */
@@ -212,7 +222,17 @@ export function installRuntimeModuleResolver({ runtimeNodeModules, stubs = {} }:
 		}
 		const bare = !request.startsWith(".") && !request.startsWith("node:") && !path.isAbsolute(request);
 		if (bare) {
+			const parentFile = parentFilename(parent);
 			for (const registration of resolverRegistry()) {
+				const parentInRuntime = parentFile !== null && pathContains(registration.runtimeNodeModules, parentFile);
+				if (parentInRuntime) {
+					const stub = registration.stubs[request];
+					if (stub) return stub;
+					if (!stockResolved || !pathContains(registration.runtimeNodeModules, stockResolved)) {
+						const fallback = resolveRuntimeModule(registration.runtimeNodeModules, request);
+						if (fallback) return fallback;
+					}
+				}
 				if (stockResolved) {
 					// Correct a stock hit only inside the top-level package the
 					// request names. A hit in a nested node_modules (e.g. tar's
@@ -242,6 +262,8 @@ export function installRuntimeModuleResolver({ runtimeNodeModules, stubs = {} }:
 /** Pinned dependency set materialized into a runtime cache directory. */
 export interface RuntimeInstallSpec {
 	dependencies: Record<string, string>;
+	/** Version pins forced across the whole runtime tree (bun `overrides`), e.g. dislodging a transitive dep. */
+	overrides?: Record<string, string>;
 	/** Packages whose lifecycle scripts bun may run during the install. */
 	trustedDependencies?: string[];
 }
@@ -281,13 +303,14 @@ async function acquireInstallLock(runtimeDir: string, attempts: number, sleepMs:
 	throw new Error(`Timed out waiting for runtime install lock: ${lockDir}`);
 }
 
-async function writeRuntimeManifest(runtimeDir: string, install: RuntimeInstallSpec): Promise<void> {
+export async function writeRuntimeManifest(runtimeDir: string, install: RuntimeInstallSpec): Promise<void> {
 	await fsp.mkdir(runtimeDir, { recursive: true });
 	const manifest: Record<string, unknown> = {
 		private: true,
 		type: "module",
 		dependencies: install.dependencies,
 	};
+	if (install.overrides && Object.keys(install.overrides).length) manifest.overrides = install.overrides;
 	if (install.trustedDependencies?.length) manifest.trustedDependencies = install.trustedDependencies;
 	await Bun.write(path.join(runtimeDir, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 }

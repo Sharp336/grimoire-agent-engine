@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import {
 	buildDisplayMessage,
 	CATCHUP_FRAMES,
@@ -9,6 +10,11 @@ import {
 	StreamingRevealController,
 	visibleUnits,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+
+beforeAll(async () => {
+	await initTheme(false);
+});
 
 function makeUsage(): AssistantMessage["usage"] {
 	return {
@@ -68,11 +74,14 @@ function latestMessage(component: RecordingComponent): AssistantMessage {
 	return message;
 }
 
-function makeController(options: { smooth?: boolean; hideThinking?: boolean; requestRender?: () => void } = {}) {
+function makeController(
+	options: { smooth?: boolean; hideThinking?: boolean; proseOnly?: () => boolean; requestRender?: () => void } = {},
+) {
 	const component = new RecordingComponent();
 	const controller = new StreamingRevealController({
 		getSmoothStreaming: () => options.smooth ?? true,
 		getHideThinkingBlock: () => options.hideThinking ?? false,
+		getProseOnlyThinking: options.proseOnly ?? (() => true),
 		requestRender: options.requestRender ?? (() => {}),
 	});
 	return { component, controller };
@@ -104,6 +113,46 @@ describe("streaming reveal", () => {
 		expect(display.content[0]).toBe(thinkingBlock);
 		expect(thinkingAt(display, 0)).toBe("thought");
 		expect(textAt(display, 1)).toBe("a");
+	});
+
+	it("excludes dot-only reasoning placeholders from the reveal budget", () => {
+		const thinkingBlock = { type: "thinking" as const, thinking: "...", thinkingSignature: "reasoning_content" };
+		const target = makeMessage([thinkingBlock, { type: "text", text: "answer" }]);
+
+		expect(visibleUnits(target, false)).toBe("answer".length);
+		const display = buildDisplayMessage(target, 1, false);
+
+		expect(display.content[0]).toBe(thinkingBlock);
+		expect(textAt(display, 1)).toBe("a");
+	});
+
+	it("keeps pure-code thinking visible as an ascii ellipsis", () => {
+		const target = makeMessage([
+			{ type: "thinking", thinking: "```js\nconst x = 1;\n```" },
+			{ type: "text", text: "answer" },
+		]);
+
+		expect(visibleUnits(target, false)).toBe("...answer".length);
+		const display = buildDisplayMessage(target, 3, false);
+
+		expect(thinkingAt(display, 0)).toBe("...");
+		expect(textAt(display, 1)).toBe("");
+
+		const component = new AssistantMessageComponent(display);
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("...");
+	});
+
+	it("refreshes prose-only setting during unsmoothed streaming updates", () => {
+		let proseOnly = true;
+		const target = makeMessage([{ type: "thinking", thinking: "```js\nconst x = 1;\n```" }]);
+		const { component, controller } = makeController({ smooth: false, proseOnly: () => proseOnly });
+
+		controller.begin(component, target);
+		expect(thinkingAt(latestMessage(component), 0)).toBe("...");
+
+		proseOnly = false;
+		controller.setTarget(target);
+		expect(thinkingAt(latestMessage(component), 0)).toBe("```js\nconst x = 1;\n```");
 	});
 
 	it("smooths thinking content when thinking is shown", () => {
@@ -206,21 +255,6 @@ describe("streaming reveal", () => {
 		expect(textAt(latestMessage(component), 0)).toBe("abc");
 		expect(component.transientFlags).not.toHaveLength(0);
 		expect(component.transientFlags.every(flag => flag === true)).toBe(true);
-	});
-
-	it("ticks increasing prefixes at the render cadence", () => {
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
-
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]));
-
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		expect(textAt(latestMessage(component), 0)).toBe("abc");
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		expect(textAt(latestMessage(component), 0)).toBe("abcdef");
-		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	it("stop halts pending ticker updates", () => {

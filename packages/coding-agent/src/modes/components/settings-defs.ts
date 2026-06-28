@@ -68,7 +68,16 @@ export interface TextInputSettingDef extends BaseSettingDef {
 	type: "text";
 }
 
-export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef | TextInputSettingDef;
+export interface ProviderLimitsSettingDef extends BaseSettingDef {
+	type: "providerLimits";
+}
+
+export type SettingDef =
+	| BooleanSettingDef
+	| EnumSettingDef
+	| SubmenuSettingDef
+	| TextInputSettingDef
+	| ProviderLimitsSettingDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Condition Functions
@@ -76,6 +85,13 @@ export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef 
 
 const CONDITIONS: Record<string, () => boolean> = {
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
+	advisorEnabled: () => {
+		try {
+			return Settings.instance.get("advisor.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	hindsightActive: () => {
 		try {
 			return Settings.instance.get("memory.backend") === "hindsight";
@@ -90,9 +106,23 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	autolearnActive: () => {
+		try {
+			return Settings.instance.get("autolearn.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";
+		} catch {
+			return false;
+		}
+	},
+	planModeEnabled: () => {
+		try {
+			return Settings.instance.get("plan.enabled");
 		} catch {
 			return false;
 		}
@@ -147,6 +177,10 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 			return { ...base, type: "submenu", options };
 		}
 		return { ...base, type: "text" };
+	}
+
+	if (schemaType === "record") {
+		return path === "providers.maxInFlightRequests" ? { ...base, type: "providerLimits" } : null;
 	}
 
 	return null;

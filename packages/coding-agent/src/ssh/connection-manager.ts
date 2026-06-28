@@ -32,7 +32,7 @@ export interface SSHHostInfo {
 const CONTROL_DIR = getSshControlDir();
 const CONTROL_PATH = path.join(CONTROL_DIR, "%C.sock");
 const HOST_INFO_DIR = getRemoteHostDir();
-const HOST_INFO_VERSION = 2;
+const HOST_INFO_VERSION = 3;
 
 const activeHosts = new Map<string, SSHConnectionTarget>();
 const pendingConnections = new Map<string, Promise<void>>();
@@ -40,6 +40,8 @@ const hostInfoCache = new Map<string, SSHHostInfo>();
 
 interface SSHArgsOptions {
 	platform?: SshPlatform;
+	/** When true, omit `-n` so the remote command can read from our piped stdin. */
+	allowStdin?: boolean;
 }
 
 function ensureControlDir() {
@@ -65,7 +67,7 @@ async function deleteHostInfoFromDisk(hostName: string): Promise<void> {
 	}
 }
 
-async function validateKeyPermissions(keyPath?: string): Promise<void> {
+async function validateKeyPermissions(keyPath?: string, platform: SshPlatform = process.platform): Promise<void> {
 	if (!keyPath) return;
 	let stats: fs.Stats;
 	try {
@@ -79,6 +81,7 @@ async function validateKeyPermissions(keyPath?: string): Promise<void> {
 	if (!stats.isFile()) {
 		throw new Error(`SSH key is not a file: ${keyPath}`);
 	}
+	if (platform === "win32") return;
 	const mode = stats.mode & 0o777;
 	if ((mode & 0o077) !== 0) {
 		throw new Error(`SSH key permissions must be 600 or stricter: ${keyPath}`);
@@ -86,7 +89,7 @@ async function validateKeyPermissions(keyPath?: string): Promise<void> {
 }
 
 function buildCommonArgs(host: SSHConnectionTarget, options?: SSHArgsOptions): string[] {
-	const args = ["-n"];
+	const args = options?.allowStdin ? [] : ["-n"];
 
 	if (supportsSshControlMaster(options?.platform)) {
 		args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${CONTROL_PATH}`, "-o", "ControlPersist=3600");
@@ -150,7 +153,11 @@ function parseShell(value: unknown): SSHHostShell | null {
 	if (normalized.includes("zsh")) return "zsh";
 	if (normalized.includes("pwsh") || normalized.includes("powershell")) return "powershell";
 	if (normalized.includes("cmd.exe") || normalized === "cmd") return "cmd";
-	if (normalized.endsWith("sh") || normalized.includes("/sh")) return "sh";
+	// Only genuine POSIX sh-family by basename — fish/csh/tcsh also end in "sh"
+	// but are non-POSIX (csh/tcsh history-expand `!`), so they fall through to
+	// "unknown" and are refused by the ssh:// transfer guard.
+	const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+	if (base === "sh" || base === "dash" || base === "ash" || base === "ksh" || base === "mksh") return "sh";
 	return "unknown";
 }
 
@@ -292,18 +299,9 @@ async function probeHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 		os = "linux";
 	}
 
-	let shell: SSHHostShell = "unknown";
-	if (shellLower.includes("bash")) {
-		shell = "bash";
-	} else if (shellLower.includes("zsh")) {
-		shell = "zsh";
-	} else if (shellLower.includes("pwsh") || shellLower.includes("powershell")) {
-		shell = "powershell";
-	} else if (shellLower.includes("cmd.exe") || shellLower === "cmd") {
-		shell = "cmd";
-	} else if (shellLower.endsWith("sh") || shellLower.includes("/sh")) {
-		shell = "sh";
-	} else if (os === "windows" && !shellLower) {
+	// Reuse parseShell so probe-time and cached classification stay identical.
+	let shell = parseShell(shellLower) ?? "unknown";
+	if (shell === "unknown" && os === "windows" && !shellLower) {
 		shell = "cmd";
 	}
 
@@ -402,7 +400,7 @@ export async function buildRemoteCommand(
 	command: string,
 	options?: SSHArgsOptions,
 ): Promise<string[]> {
-	await validateKeyPermissions(host.keyPath);
+	await validateKeyPermissions(host.keyPath, options?.platform);
 	return [...buildCommonArgs(host, options), buildSshTarget(host.username, host.host), command];
 }
 

@@ -122,11 +122,24 @@ function rows(prefix: string, count: number): string[] {
 }
 
 async function settle(term: VirtualTerminal): Promise<void> {
-	const nextTick = Promise.withResolvers<void>();
-	process.nextTick(nextTick.resolve);
-	await nextTick.promise;
+	// The render scheduler defers its immediate hop with setImmediate (so queued
+	// stdin such as Esc is read before an ordinary render). Drain that hop so the
+	// throttled setTimeout(0) render is scheduled, let it fire, then flush.
+	const immediate = Promise.withResolvers<void>();
+	setImmediate(immediate.resolve);
+	await immediate.promise;
 	await Bun.sleep(1);
 	await term.flush();
+}
+
+// Outside a multiplexer a resize paints the viewport immediately and defers the
+// authoritative full replay (rewrap + ED3 + history rebuild) until the drag has
+// been quiet for the resize settle window (120 ms). Tests asserting the settled
+// end state wait past that window. These are integration tests against the real
+// render scheduler, so the window is driven with a real delay, not fake timers.
+async function settleResize(term: VirtualTerminal): Promise<void> {
+	await Bun.sleep(160);
+	await settle(term);
 }
 
 function captureWrites(term: VirtualTerminal): string[] {
@@ -178,10 +191,18 @@ async function withEnvPatch<T>(patch: Record<string, string | undefined>, run: (
 
 describe("TUI terminal-state regressions", () => {
 	let monotonicNow = 0;
+	let savedTerminalEnv: Record<string, string | undefined> = {};
 	// Keep TUI's ~33ms render throttle deterministic without sleeping a real frame per render.
 
 	beforeEach(() => {
 		monotonicNow = 0;
+		// Resize classification now depends on TERM_PROGRAM (Warp takes the
+		// in-place path), so neutralize the ambient terminal identity to keep
+		// these direct-terminal assertions deterministic on any dev machine.
+		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"]) {
+			savedTerminalEnv[key] = Bun.env[key];
+			delete Bun.env[key];
+		}
 		vi.spyOn(performance, "now").mockImplementation(() => {
 			monotonicNow += 40;
 			return monotonicNow;
@@ -189,6 +210,12 @@ describe("TUI terminal-state regressions", () => {
 	});
 
 	afterEach(() => {
+		for (const key in savedTerminalEnv) {
+			const value = savedTerminalEnv[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		savedTerminalEnv = {};
 		vi.restoreAllMocks();
 	});
 
@@ -509,7 +536,7 @@ describe("TUI terminal-state regressions", () => {
 				await settle(term);
 
 				term.resize(49, 5);
-				await settle(term);
+				await settleResize(term);
 
 				const buffer = term.getScrollBuffer().join("\n");
 				expect(buffer.includes("shell-")).toBeFalsy();
@@ -589,7 +616,7 @@ describe("TUI terminal-state regressions", () => {
 						expect(narrow).toContain(`L0:${"x".repeat(17)}`);
 
 						term.resize(40, 4);
-						await settle(term);
+						await settleResize(term);
 
 						const wide = term.getScrollBuffer().map(line => line.trimEnd());
 						// The resize rewraps history at the new width; the narrow fragment is gone.
@@ -647,7 +674,7 @@ describe("TUI terminal-state regressions", () => {
 				await settle(term);
 				component.setLines(["A".repeat(20), "B".repeat(20), "C".repeat(20)]);
 				tui.requestRender();
-				await settle(term);
+				await settleResize(term);
 
 				expect(term.getScrollBuffer().map(line => line.trimEnd())).toEqual([
 					"AAAAAAAAAA",
@@ -1169,7 +1196,7 @@ describe("TUI terminal-state regressions", () => {
 				const final = [...lines, "stream-0", "tail-0", "tail-1", "tail-2"];
 				component.setLines(final);
 				tui.requestRender();
-				await settle(term);
+				await settleResize(term);
 
 				// Scrolling back must show exactly the transcript: no phantom blank
 				// row, no offset rows, no duplicates.
@@ -1240,7 +1267,7 @@ describe("TUI terminal-state regressions", () => {
 					const final = [...lines, "row-12"];
 					component.setLines(final);
 					tui.requestRender();
-					await settle(term);
+					await settleResize(term);
 
 					expect(visible(term)).toEqual(final.slice(7));
 					expect(term.getScrollBuffer().map(line => line.trimEnd())).toEqual(final);
@@ -1593,6 +1620,9 @@ describe("TUI terminal-state regressions", () => {
 					tui.requestRender();
 					await settle(term);
 				}
+				// The aggressive drag only ever painted the viewport; let the settle
+				// window elapse so the authoritative rebuild commits the full history.
+				await settleResize(term);
 
 				const scrollback = term.getScrollBuffer();
 				const duplicated: number[] = [];
@@ -1631,7 +1661,7 @@ describe("TUI terminal-state regressions", () => {
 
 				// User sits at the bottom (not scrolled) and narrows the terminal.
 				term.resize(28, 5);
-				await settle(term);
+				await settleResize(term);
 
 				const scrollback = term.getScrollBuffer();
 				for (let i = 0; i < 12; i++) {
@@ -1657,7 +1687,7 @@ describe("TUI terminal-state regressions", () => {
 
 				component.setLines(rows("line-", 8));
 				term.resize(28, 5);
-				await settle(term);
+				await settleResize(term);
 
 				// A resize is a clean reset: history is rebuilt in place at the new
 				// geometry instead of deferring to keep the reader scrolled. Each line
@@ -3069,7 +3099,7 @@ describe("TUI terminal-state regressions", () => {
 
 				// Grow the terminal so it has more rows than the rendered content.
 				term.resize(40, 20);
-				await settle(term);
+				await settleResize(term);
 
 				// Regression: the cursor must follow the marker, not the bottom
 				// of the now-taller viewport.
@@ -4239,6 +4269,22 @@ describe("foreground-tool streaming on ED3-risk terminals", () => {
 				tui.requestRender();
 				await settle(term);
 			}
+			// The drag itself must not have accreted duplicate copies into
+			// scrollback. Assert this BEFORE the settle: the authoritative rebuild
+			// erases scrollback (ED3) and replays once, so it would collapse — and
+			// thereby mask — any drag-time duplication. Checking only the settled
+			// state would make this regression test pass even if the in-flight
+			// viewport repaints duplicated every visible row per step.
+			const draggedScrollback = term.getScrollBuffer();
+			for (let i = 0; i < body.length; i++) {
+				expect(
+					countMatches(draggedScrollback, new RegExp(`\\bline-${i}\\b`)),
+					`line-${i} must not duplicate during the drag`,
+				).toBeLessThanOrEqual(1);
+			}
+			// Then let the settle window elapse so the authoritative rebuild
+			// collapses history to one copy, and confirm the end state holds too.
+			await settleResize(term);
 			const scrollback = term.getScrollBuffer();
 			for (let i = 0; i < body.length; i++) {
 				expect(

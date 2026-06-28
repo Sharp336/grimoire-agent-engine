@@ -22,7 +22,11 @@ import type { Settings } from "../config/settings";
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
 import { clampAutoThinkingEffort } from "../thinking";
-import { isTinyMemoryLocalModelKey, ONLINE_AUTO_THINKING_MODEL_KEY } from "../tiny/models";
+import {
+	isTinyMemoryLocalModelKey,
+	isTinyMemoryReasoningModelKey,
+	ONLINE_AUTO_THINKING_MODEL_KEY,
+} from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
 
 const DIFFICULTY_SYSTEM_PROMPT = prompt.render(difficultySystemPrompt);
@@ -31,8 +35,10 @@ const DIFFICULTY_SYSTEM_PROMPT = prompt.render(difficultySystemPrompt);
 const MAX_INPUT_CHARS = 6000;
 const HEAD_CHARS = 4000;
 const TAIL_CHARS = 2000;
-/** The answer is a single word; keep budgets tiny for non-reasoning backends. */
+/** The online answer is a single word; keep budgets tiny for non-reasoning backends. */
 const ANSWER_MAX_TOKENS = 8;
+/** Local classifiers occasionally need more room for chat-template boilerplate. */
+const LOCAL_ANSWER_MAX_TOKENS = 16;
 /**
  * Reasoning backends ignore `disableReasoning` on some providers, so reserve
  * enough output room for the keyword to still land after unavoidable thinking.
@@ -49,10 +55,15 @@ export interface ClassifyDifficultyDeps {
 }
 
 /**
- * Classify `promptText` and return a concrete effort clamped to `deps.model`.
+ * Classify `promptText` and return a concrete effort clamped to `deps.model`,
+ * or `undefined` when the model has no controllable effort surface (auto has
+ * nothing to pick — the caller leaves the prior reasoning level in place).
  * @throws when the backend cannot produce a usable classification.
  */
-export async function classifyDifficulty(promptText: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
+export async function classifyDifficulty(
+	promptText: string,
+	deps: ClassifyDifficultyDeps,
+): Promise<Effort | undefined> {
 	const backend = deps.settings.get("providers.autoThinkingModel");
 	const input = prepareClassifierInput(promptText);
 	const effort =
@@ -63,10 +74,10 @@ export async function classifyDifficulty(promptText: string, deps: ClassifyDiffi
 }
 
 async function classifyOnline(input: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
-	const resolved = resolveRoleSelection(["smol"], deps.settings, deps.registry.getAvailable(), deps.registry);
+	const resolved = resolveRoleSelection(["tiny", "smol"], deps.settings, deps.registry.getAvailable(), deps.registry);
 	const model = resolved?.model;
 	if (!model) {
-		throw new Error("auto-thinking: no smol model available for classification");
+		throw new Error("auto-thinking: no tiny/smol model available for classification");
 	}
 	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
 	if (!apiKey) {
@@ -107,9 +118,12 @@ async function classifyLocal(input: string, modelKey: string, deps: ClassifyDiff
 	if (!isTinyMemoryLocalModelKey(modelKey)) {
 		throw new Error(`auto-thinking: unsupported local classifier model: ${modelKey}`);
 	}
+	const maxTokens = isTinyMemoryReasoningModelKey(modelKey)
+		? Math.max(LOCAL_ANSWER_MAX_TOKENS, REASONING_SAFE_MAX_TOKENS)
+		: LOCAL_ANSWER_MAX_TOKENS;
 	const builtPrompt = prompt.render(difficultyLocalPrompt, { prompt: input });
 	const text = await tinyModelClient.complete(modelKey, builtPrompt, {
-		maxTokens: ANSWER_MAX_TOKENS,
+		maxTokens,
 		signal: deps.signal,
 	});
 	if (!text) {

@@ -32,6 +32,7 @@ import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const PROVIDER_ID = "omp-plugins";
 
@@ -39,6 +40,9 @@ let tempDir: string;
 let home: string;
 let project: string;
 let ext: string;
+
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 function writeFile(filePath: string, content: string): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -92,12 +96,19 @@ beforeEach(() => {
 	fs.mkdirSync(project, { recursive: true });
 	fs.mkdirSync(path.join(project, ".git"), { recursive: true });
 	buildExtensionPackage(ext);
+	setAgentDir(path.join(home, ".omp", "agent"));
 });
 
 afterEach(() => {
 	clearCache();
 	clearOmpExtensionCliRoots();
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	if (originalAgentDirEnv) {
+		setAgentDir(originalAgentDirEnv);
+	} else {
+		setAgentDir(fallbackAgentDir);
+		delete process.env.PI_CODING_AGENT_DIR;
+	}
+	removeSyncWithRetries(tempDir);
 });
 
 function ctx(): LoadContext {
@@ -196,6 +207,27 @@ test("installed plugins under `<plugins>/node_modules/` are surfaced (e.g. via `
 	const skills = await loadFromPlugin<{ name: string; path: string }>(skillCapability.id, ctx());
 	const found = skills.find(s => s.name === "my-skill" && s.path.includes("my-installed-ext"));
 	expect(found).toBeDefined();
+});
+
+test("project-scoped installed plugins surface project-level sub-discovery", async () => {
+	const pluginsDir = path.join(project, ".omp", "plugins");
+	const installed = path.join(pluginsDir, "node_modules", "my-project-ext");
+	fs.mkdirSync(installed, { recursive: true });
+	fs.cpSync(ext, installed, { recursive: true });
+	writeFile(
+		path.join(pluginsDir, "omp-plugins.lock.json"),
+		JSON.stringify({
+			plugins: { "my-project-ext": { version: "1.0.0", enabled: true, enabledFeatures: null } },
+			settings: {},
+		}),
+	);
+
+	const skills = await loadFromPlugin<{ name: string; path: string; level: "user" | "project" }>(
+		skillCapability.id,
+		ctx(),
+	);
+	const found = skills.find(s => s.name === "my-skill" && s.path.includes("my-project-ext"));
+	expect(found?.level).toBe("project");
 });
 
 test("disabled installed plugins do not contribute sub-discovery", async () => {

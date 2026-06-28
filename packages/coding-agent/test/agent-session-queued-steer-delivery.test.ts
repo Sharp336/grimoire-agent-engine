@@ -16,14 +16,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const COLLAB_PROMPT_TYPE = "collab-prompt";
 
@@ -48,10 +49,10 @@ describe("AgentSession queued steer delivery", () => {
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
 		}
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
-	async function createSession(responses: { content: string[] }[]): Promise<SteerHarness> {
+	async function createSession(responses: MockResponse[]): Promise<SteerHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
@@ -80,6 +81,25 @@ describe("AgentSession queued steer delivery", () => {
 			},
 			{ streamingBehavior: "steer" },
 		);
+	}
+
+	function nextUserMessage(target: AgentSession, expected: string): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const unsubscribe = target.subscribe(event => {
+			if (event.type !== "message_end" || event.message.role !== "user") return;
+			const content = event.message.content;
+			const text =
+				typeof content === "string"
+					? content
+					: content
+							.filter(part => part.type === "text")
+							.map(part => part.text)
+							.join("");
+			if (text !== expected) return;
+			unsubscribe();
+			resolve();
+		});
+		return promise;
 	}
 
 	/** Resolves with the entry text when a collab-prompt entry is persisted. */
@@ -155,5 +175,125 @@ describe("AgentSession queued steer delivery", () => {
 
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("drains steering left after aborting an auto-continued queued turn", async () => {
+		const { session, mock } = await createSession([
+			{ content: ["initial response"] },
+			{ content: ["first queued response"], delayMs: 1_000 },
+			{ content: ["second queued response"] },
+		]);
+		await session.prompt("hello");
+		expect(mock.calls.length).toBe(1);
+
+		const firstDelivered = nextUserMessage(session, "first queued");
+		await session.steer("first queued");
+		await firstDelivered;
+		expect(mock.calls.length).toBe(1);
+
+		await session.steer("second queued");
+		expect(session.getQueuedMessages().steering).toContain("second queued");
+
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+
+		expect(
+			session.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "aborted"),
+		).toBe(true);
+
+		expect(mock.calls.length).toBe(3);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+	});
+
+	it("dequeuing an ultrathink prompt mid-stream restores the text and drops its companion notice", async () => {
+		const { session } = await createSession([{ content: ["host answer"] }]);
+		let queuedShape: string[] | undefined;
+		let clearedSteering: unknown;
+		let hasQueuedAfterClear: boolean | undefined;
+		let injected = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			// Real path: a magic-keyword prompt steered mid-stream enqueues the hidden
+			// notice immediately before the user message.
+			await session.prompt("ultrathink fix it", { streamingBehavior: "steer" });
+			queuedShape = session.agent.peekSteeringQueue().map(m => (m.role === "custom" ? m.customType : m.role));
+			// Alt+Up restore mid-flight: only the user's text returns; the companion
+			// notice must not be left orphaned in the queue.
+			const cleared = session.clearQueue();
+			clearedSteering = cleared.steering;
+			hasQueuedAfterClear = session.agent.hasQueuedMessages();
+		});
+
+		await session.prompt("hello");
+
+		expect(queuedShape).toEqual(["ultrathink-notice", "user"]);
+		expect(clearedSteering).toEqual([{ text: "ultrathink fix it", images: undefined }]);
+		expect(hasQueuedAfterClear).toBe(false);
+	});
+
+	it("a fresh user prompt delivers queued steer and follow-up work", async () => {
+		const { session } = await createSession([{ content: ["one"] }, { content: ["two"] }, { content: ["three"] }]);
+		// Queue real pending work before the user's next send.
+		session.agent.steer({
+			role: "user",
+			content: [{ type: "text", text: "queued steer" }],
+			steering: true,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		session.agent.followUp({
+			role: "user",
+			content: [{ type: "text", text: "queued follow-up" }],
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+
+		await session.prompt("hello");
+		await session.waitForIdle();
+
+		// Sending a fresh prompt is the opportunity to drain everything: the steer folds
+		// into the new turn and the follow-up runs as its continuation — nothing stranded.
+		const userTexts = session.agent.state.messages
+			.filter(message => message.role === "user")
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.filter(part => part.type === "text")
+							.map(part => part.text)
+							.join(""),
+			);
+		expect(userTexts).toContain("hello");
+		expect(userTexts).toContain("queued steer");
+		expect(userTexts).toContain("queued follow-up");
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("resumes a queued steer left behind a non-advisor custom transcript tail", async () => {
+		const { session } = await createSession([{ content: ["first answer"] }, { content: ["resumed"] }]);
+		await session.prompt("first");
+		// A non-advisor custom (e.g. a flushed irc:incoming aside) is the literal transcript tail.
+		// A queued steer must resume regardless of tail role — Agent.continue injects it via the
+		// initial steering poll — so the old advisor-only look-back can no longer strand it.
+		const aside = {
+			role: "custom" as const,
+			customType: "irc:incoming",
+			content: "peer pinged you",
+			display: true,
+			attribution: "agent" as const,
+			timestamp: Date.now(),
+		};
+		session.agent.emitExternalEvent({ type: "message_start", message: aside });
+		session.agent.emitExternalEvent({ type: "message_end", message: aside });
+
+		const delivered = nextUserMessage(session, "resume me");
+		await session.steer("resume me");
+		await delivered;
+		await session.waitForIdle();
+
+		expect(session.agent.peekSteeringQueue()).toEqual([]);
 	});
 });

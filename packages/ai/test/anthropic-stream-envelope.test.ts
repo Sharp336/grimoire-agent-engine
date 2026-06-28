@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { AnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import {
+	AnthropicMessages,
+	type AnthropicMessagesClientLike,
+	type AnthropicRequestOptions,
+} from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -16,6 +20,19 @@ const model: Model<"anthropic-messages"> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 200_000,
 	maxTokens: 8_192,
+});
+
+const umansModel: Model<"anthropic-messages"> = buildModel({
+	id: "umans-kimi-k2.7",
+	name: "Umans Kimi K2.7 Code",
+	api: "anthropic-messages",
+	provider: "umans",
+	baseUrl: "https://api.code.umans.ai",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 262_144,
+	maxTokens: 32_768,
 });
 
 const context: Context = {
@@ -175,6 +192,37 @@ function createTextSuccessEvents(
 	}
 	return events;
 }
+function createThinkingSuccessEvents(thinking: string): MockAnthropicEvent[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_thinking_success",
+				usage: {
+					input_tokens: 12,
+					output_tokens: 0,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } },
+		{ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig_thinking" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "end_turn" },
+			usage: {
+				input_tokens: 12,
+				output_tokens: 4,
+				cache_read_input_tokens: 0,
+				cache_creation_input_tokens: 0,
+			},
+		},
+		{ type: "message_stop" },
+	];
+}
 
 function createTextSuccessEventsWithPreamble(text: string, preambleEvents: MockAnthropicEvent[]): MockAnthropicEvent[] {
 	return [...preambleEvents, ...createTextSuccessEvents(text)];
@@ -207,6 +255,34 @@ function createMalformedToolUseEvents(): MockAnthropicEvent[] {
 			type: "content_block_delta",
 			index: 0,
 			delta: { type: "input_json_delta", partial_json: '{"city":"Par' },
+		},
+		{ type: "content_block_stop", index: 0 },
+	];
+}
+
+function createGenuinelyMalformedToolUseEvents(): MockAnthropicEvent[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_tool_broken",
+				usage: {
+					input_tokens: 12,
+					output_tokens: 0,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		{
+			type: "content_block_start",
+			index: 0,
+			content_block: { type: "tool_use", id: "tool_broken", name: "lookup_weather", input: {} },
+		},
+		{
+			type: "content_block_delta",
+			index: 0,
+			delta: { type: "input_json_delta", partial_json: '{"city": Par' },
 		},
 		{ type: "content_block_stop", index: 0 },
 	];
@@ -276,7 +352,335 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_text_success");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("decodes escaped Anthropic built-in tool names from compatible gateways", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_tool",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tool_1", name: "_web_search", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 0,
+						delta: { type: "input_json_delta", partial_json: '{"query":"5+54"}' },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "tool_use" },
+						usage: {
+							input_tokens: 12,
+							output_tokens: 4,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(umansModel, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "toolcall_start")).toBe(1);
+		expect(result.stopReason).toBe("toolUse");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+			{
+				type: "toolCall",
+				id: "tool_1",
+				name: "web_search",
+				arguments: { query: "5+54" },
+			},
+		]);
+	});
+
+	it("decodes escaped literal-prefixed Umans tool names", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_literal_tool",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tool_1", name: "__web_search", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 0,
+						delta: { type: "input_json_delta", partial_json: '{"query":"literal"}' },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "tool_use" },
+						usage: {
+							input_tokens: 12,
+							output_tokens: 4,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(umansModel, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "toolcall_start")).toBe(1);
+		expect(result.stopReason).toBe("toolUse");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+			{
+				type: "toolCall",
+				id: "tool_1",
+				name: "_web_search",
+				arguments: { query: "literal" },
+			},
+		]);
+	});
+
+	it("ignores Umans gateway web search server blocks and keeps final text", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_server_search",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "server_tool_use", id: "srv_1", name: "web_search", input: { query: "5+54" } },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "content_block_start",
+						index: 1,
+						content_block: { type: "web_search_tool_result", tool_use_id: "srv_1", content: [] },
+					},
+					{ type: "content_block_stop", index: 1 },
+					{ type: "content_block_start", index: 2, content_block: { type: "text", text: "" } },
+					{ type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "59" } },
+					{ type: "content_block_stop", index: 2 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "end_turn" },
+						usage: {
+							input_tokens: 12,
+							output_tokens: 4,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(umansModel, context, {
+			apiKey: "sk-ant-test",
+			headers: { "X-Umans-Websearch-Provider": "exa" },
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "toolcall_start")).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "59" }]);
+	});
+
+	it("passes Umans gateway web search headers to custom clients", async () => {
+		type CapturedPayload = { tools?: Array<{ name?: string }> };
+		let capturedParams: CapturedPayload | undefined;
+		let capturedOptions: AnthropicRequestOptions | undefined;
+		const client: AnthropicMessagesClientLike = {
+			messages: {
+				create(params, options) {
+					capturedParams = params as CapturedPayload;
+					capturedOptions = options;
+					return createMockRequest(createTextSuccessEvents("59"));
+				},
+			},
+		};
+
+		const stream = streamAnthropic(
+			umansModel,
+			{
+				...context,
+				tools: [
+					{
+						name: "web_search",
+						description: "Search the web",
+						parameters: queryObjectSchema,
+					},
+				],
+			},
+			{
+				client,
+				headers: { "X-Umans-Websearch-Provider": "exa" },
+			},
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "59" }]);
+		expect(capturedParams?.tools?.map(tool => tool.name)).toEqual(["web_search"]);
+		expect(capturedOptions?.headers).toEqual({ "X-Umans-Websearch-Provider": "exa" });
+	});
+
+	it("does not send context_management through injected clients", async () => {
+		type CapturedPayload = {
+			thinking?: { type?: string };
+			context_management?: unknown;
+		};
+		let capturedParams: CapturedPayload | undefined;
+		const client: AnthropicMessagesClientLike = {
+			messages: {
+				create(params) {
+					capturedParams = params as CapturedPayload;
+					return createMockRequest(createTextSuccessEvents("done"));
+				},
+			},
+		};
+
+		const stream = streamAnthropic(model, context, {
+			client,
+			thinkingEnabled: true,
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "done" }]);
+		expect(capturedParams?.thinking?.type).toBe("enabled");
+		expect(capturedParams?.context_management).toBeUndefined();
+	});
+	it("unwraps thinking blocks that Anthropic streams with literal thinking tags", async () => {
+		const wrappedThinking =
+			"<thinking>\n<thinking>\nCheck logs before accepting container health.\n</thinking></thinking>";
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() => createMockRequest(createThinkingSuccessEvents(wrappedThinking)) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "thinking_start")).toBe(1);
+		expect(countEvents(events, "thinking_end")).toBe(1);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toHaveLength(1);
+		const block = result.content[0];
+		expect(block?.type).toBe("thinking");
+		if (block?.type !== "thinking") {
+			throw new Error("Expected thinking content after wrapped thinking stream");
+		}
+		expect(block.thinking).toBe("Check logs before accepting container health.");
+		expect(block.thinkingSignature).toBeUndefined();
+
+		const replayParams = convertAnthropicMessages(
+			[
+				{ role: "user", content: "Say hi", timestamp: 1 },
+				result,
+				{ role: "user", content: "follow up", timestamp: 2 },
+			],
+			model,
+			false,
+		);
+		const replayAssistant = replayParams.find(param => param.role === "assistant");
+		expect(replayAssistant?.content).toEqual([
+			{ type: "text", text: "<thinking>\nCheck logs before accepting container health.\n</thinking>\n" },
+		]);
+	});
+	it("preserves signed thinking bytes when no literal thinking envelope is present", async () => {
+		const signedThinking = "\nCheck logs before accepting container health.\n";
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() => createMockRequest(createThinkingSuccessEvents(signedThinking)) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toHaveLength(1);
+		const block = result.content[0];
+		expect(block?.type).toBe("thinking");
+		if (block?.type !== "thinking") {
+			throw new Error("Expected signed thinking content");
+		}
+		expect(block.thinking).toBe(signedThinking);
+		expect(block.thinkingSignature).toBe("sig_thinking");
+
+		const replayParams = convertAnthropicMessages(
+			[
+				{ role: "user", content: "Say hi", timestamp: 1 },
+				result,
+				{ role: "user", content: "follow up", timestamp: 2 },
+			],
+			model,
+			false,
+		);
+		const replayAssistant = replayParams.find(param => param.role === "assistant");
+		expect(replayAssistant?.content).toEqual([
+			{ type: "thinking", thinking: signedThinking, signature: "sig_thinking" },
+		]);
 	});
 
 	it("drops replayed closed blocks after a duplicate message_start instead of duplicating content", async () => {
@@ -315,7 +719,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(collected, "error")).toBe(0);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_first");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("ignores ping before message_start and streams the response once", async () => {
@@ -340,7 +744,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_text_success");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("maps model_context_window_exceeded to a length stop", async () => {
@@ -361,7 +765,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "error")).toBe(0);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("length");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("completes the turn instead of failing when the API sends an unknown stop reason", async () => {
@@ -385,7 +789,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("ignores a spliced second envelope's message_delta after the terminal stop", async () => {
@@ -412,7 +816,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.usage.output).toBe(4);
 		expect(result.responseId).toBe("msg_text_success");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("tolerates envelopes missing usage and delta payloads", async () => {
@@ -441,7 +845,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(collected, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_lenient");
-		expect(result.content).toEqual([{ type: "text", text: "hi" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hi" }]);
 	});
 
 	it("ignores unknown preamble events before message_start and streams the response once", async () => {
@@ -468,7 +872,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_text_success");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("ignores unknown content block envelopes while preserving known blocks", async () => {
@@ -524,7 +928,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(observed, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseId).toBe("msg_unknown_block");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("retries malformed envelopes before content starts without duplicating streamed text events", async () => {
@@ -550,7 +954,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "text_end")).toBe(1);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
 	});
 
 	it("retries without strict tools after Anthropic compiled grammar errors and keeps strict disabled", async () => {
@@ -586,7 +990,7 @@ describe("anthropic stream envelope handling", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
-		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(countEvents(events, "error")).toBe(0);
 		expect(strictFlags).toEqual([[true], [false]]);
@@ -600,7 +1004,7 @@ describe("anthropic stream envelope handling", () => {
 		const nextResult = await nextStream.result();
 
 		expect(nextResult.stopReason).toBe("stop");
-		expect(nextResult.content).toEqual([{ type: "text", text: "later" }]);
+		expect(JSON.parse(JSON.stringify(nextResult.content))).toEqual([{ type: "text", text: "later" }]);
 		expect(countEvents(nextEvents, "done")).toBe(1);
 		expect(countEvents(nextEvents, "error")).toBe(0);
 		expect(strictFlags).toEqual([[true], [false], [false]]);
@@ -672,7 +1076,33 @@ describe("anthropic stream envelope handling", () => {
 		}
 		// Best-effort arguments recovered by the throttled streaming parser are retained.
 		expect(toolCall.arguments).toEqual({ city: "Par" });
-		expect("partialJson" in toolCall).toBe(false);
+		expect((toolCall as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+	});
+
+	it("records __parseError and pre-truncated __rawJson when partialParse fails on malformed JSON", async () => {
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempt += 1;
+			return createMockRequest(createGenuinelyMalformedToolUseEvents()) as never;
+		});
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(attempt).toBe(1);
+
+		const toolCall = result.content[0];
+		expect(toolCall?.type).toBe("toolCall");
+		if (toolCall?.type !== "toolCall") {
+			throw new Error("Expected toolCall content");
+		}
+		expect(toolCall.arguments.__parseError).toBeDefined();
+		expect(toolCall.arguments.__rawJson).toBeDefined();
+		expect(toolCall.arguments.__rawJson).toContain('{"city": Par');
 	});
 
 	it("finalizes a tool call left open by a spliced reconnect instead of erroring", async () => {
@@ -725,7 +1155,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "error")).toBe(0);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
 	});
 
 	it("degrades to best-effort content when a raw SSE stream closes before message_stop", async () => {
@@ -746,7 +1176,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "error")).toBe(0);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "partial" }]);
 	});
 
 	it("skips malformed raw SSE event frames and degrades to best-effort content", async () => {
@@ -775,7 +1205,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "error")).toBe(0);
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "" }]);
 	});
 	it("surfaces a refusal fallback message when stop_details is null", async () => {
 		const refusalEvents: MockAnthropicEvent[] = [

@@ -1,12 +1,14 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { logger } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
+import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { extractFactsSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeFactStrings } from "./consolidate";
-import { scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
+import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
 	BeamMemoryState,
@@ -34,6 +36,7 @@ type StoreRememberOptions = RememberOptions & {
 	author_type?: string | null;
 	extractEntities?: boolean;
 	extract_entities?: boolean;
+	extract_text?: string;
 	channelId?: string | null;
 	channel_id?: string | null;
 };
@@ -185,13 +188,18 @@ function addTemporalAnnotations(beam: BeamMemoryState, memoryId: string, timesta
 	}
 }
 
+function proactiveLinkingAllowed(beam: BeamMemoryState): boolean {
+	const override = process.env.MNEMOPI_PROACTIVE_LINKING;
+	return override === undefined ? beam.config.proactiveLinking === true : override === "1";
+}
+
 function proactiveLinkIfEnabled(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
 	extractEntities: boolean,
 ): void {
-	if (process.env.MNEMOPI_PROACTIVE_LINKING !== "1") return;
+	if (!proactiveLinkingAllowed(beam)) return;
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -246,6 +254,96 @@ function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content
 
 function rowToDict(row: Row): Row {
 	return { ...row };
+}
+
+/** Re-embedding batch size for a model-change rebuild — bounds each background
+ *  embedding request instead of embedding the whole corpus in one call. */
+const EMBED_REBUILD_BATCH = 128;
+
+/**
+ * Reconcile stored embeddings against the active embedding model at store open.
+ *
+ * Every `memory_embeddings` row is stamped with the model that produced it (see
+ * `runEmbedding` in `helpers.ts`). When the configured embedding model changes,
+ * its vector dimension changes too, so the previously-stored vectors are no
+ * longer comparable. On a mismatch we wipe every stored vector — the
+ * `memory_embeddings` table, the `episodic_memory.binary_vector` column, and the
+ * sqlite-vec `vec_episodes` index — then enqueue all live memories for
+ * background re-embedding under the new model via `scheduleEmbedding`.
+ *
+ * Runs once per store open; a fresh store (no embeddings) or an already-current
+ * store is a no-op. The destructive wipe is skipped whenever it could not be
+ * rebuilt — embeddings disabled via the runtime option OR the
+ * `MNEMOPI_NO_EMBEDDINGS` env, or an unresolved (empty) active model — so a
+ * stale-but-valid corpus is never destroyed without a replacement. MUST run
+ * inside the active runtime-options scope so `currentEmbeddingModel()` /
+ * `embeddingsDisabled()` reflect the per-instance configuration.
+ */
+export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
+	if (embeddingsDisabled()) return;
+	const active = currentEmbeddingModel().trim();
+	if (active === "") return;
+
+	// Re-embed in bounded batches so a corpus-wide rebuild never issues one giant
+	// embedding request; each batch is its own tracked background task.
+	const rebuild = (items: readonly EmbedItem[]): void => {
+		for (let offset = 0; offset < items.length; offset += EMBED_REBUILD_BATCH) {
+			scheduleEmbedding(beam, items.slice(offset, offset + EMBED_REBUILD_BATCH));
+		}
+	};
+
+	// Stop at the first row whose stamped model differs from the active one
+	// (NULL/unstamped counts as a mismatch via `IS NOT`).
+	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
+	if (mismatch) {
+		const staleModels = beam.db
+			.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
+			.all(active) as { model: string | null }[];
+		const live = beam.db
+			.query(`
+				SELECT id AS memoryId, content FROM working_memory WHERE superseded_by IS NULL
+				UNION ALL
+				SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
+			`)
+			.all() as EmbedItem[];
+
+		transaction(beam.db, () => {
+			beam.db.prepare("DELETE FROM memory_embeddings").run();
+			beam.db.prepare("UPDATE episodic_memory SET binary_vector = NULL").run();
+			if (vecAvailable(beam.db)) {
+				try {
+					beam.db.prepare("DELETE FROM vec_episodes").run();
+				} catch {
+					// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
+				}
+			}
+		});
+
+		logger.info("mnemopi: embedding model changed, rebuilding", {
+			from: staleModels.map(row => row.model ?? "(unstamped)"),
+			to: active,
+			count: live.length,
+		});
+		rebuild(live);
+		return;
+	}
+
+	// No stale embeddings, but a previously-interrupted rebuild (a failed embed or a process
+	// exit after the wipe) can leave live memories with no active-model embedding. Treating an
+	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
+	// row still missing an active-model embedding.
+	const missing = beam.db
+		.query(`
+			SELECT id AS memoryId, content FROM working_memory
+			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+			UNION ALL
+			SELECT id AS memoryId, content FROM episodic_memory
+			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+		`)
+		.all(active, active) as EmbedItem[];
+	if (missing.length === 0) return;
+	logger.info("mnemopi: resuming interrupted embedding rebuild", { to: active, count: missing.length });
+	rebuild(missing);
 }
 
 export function remember(beam: BeamMemoryState, content: string, options: StoreRememberOptions = {}): string {
@@ -332,7 +430,16 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			trustTier,
 		);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
-	proactiveLinkIfEnabled(beam, memoryId, content, Boolean(options.extractEntities ?? options.extract_entities));
+	// `extractText` lets a caller decouple "what gets stored" from "what facts are
+	// mined". coding-agent retains full multi-author transcripts but wants
+	// fact/entity heuristics to read only the user-authored turns (issue #3372).
+	const extractionSource = options.extractText ?? options.extract_text ?? content;
+	proactiveLinkIfEnabled(
+		beam,
+		memoryId,
+		extractionSource,
+		Boolean(options.extractEntities ?? options.extract_entities),
+	);
 	trimWorkingMemory(beam);
 	emitEvent(beam, "MEMORY_ADDED", {
 		memoryId,
@@ -342,7 +449,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		metadata: metadata ?? undefined,
 	});
 	scheduleEmbedding(beam, [{ memoryId, content }]);
-	if (options.extract === true) scheduleFactExtraction(beam, memoryId, content);
+	if (options.extract === true) scheduleFactExtraction(beam, memoryId, extractionSource);
 	invalidateCaches(beam);
 	return memoryId;
 }

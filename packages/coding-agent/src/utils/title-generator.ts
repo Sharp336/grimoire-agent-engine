@@ -4,22 +4,25 @@
 import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
+import titleMarkerSystemPrompt from "../prompts/system/title-system-marker.md" with { type: "text" };
+import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { formatTitleUserMessage, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
+const TITLE_MARKER_SYSTEM_PROMPT = prompt.render(titleMarkerSystemPrompt);
+const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
-export const TITLE_LOCAL_FALLBACK_DELAY_MS = 10_000;
 const TITLE_MAX_TOKENS = 30;
 const REASONING_SAFE_MAX_TOKENS = 1024;
 const SET_TITLE_TOOL_NAME = "set_title";
@@ -41,88 +44,40 @@ const setTitleTool: Tool = {
 	},
 };
 
+/** Matches the title a tool-choice-less model wraps in `<title>...</title>`. */
+const TITLE_MARKER_RE = /<title>([\s\S]*?)<\/title>/i;
+
+/**
+ * Whether the model honors a forced `tool_choice` so the `set_title` tool can be
+ * required. Providers/models that reject forced tool calls (chat-completions
+ * hosts without `tool_choice` support, Claude Fable/Mythos) can't be made to
+ * emit a structured call, so the caller falls back to marker-wrapped text.
+ */
+function modelSupportsForcedToolChoice(model: Model<Api>): boolean {
+	// `compat` is a union across APIs and `supportsToolChoice` lives only on the
+	// OpenAI-completions variant, so read both flags through a structural view.
+	const compat = model.compat as { supportsToolChoice?: boolean; supportsForcedToolChoice?: boolean } | undefined;
+	if (!compat) return true;
+	// A forced tool call first requires sending `tool_choice` at all. Hosts that
+	// drop the parameter entirely (`supportsToolChoice: false`, e.g. direct
+	// DeepSeek reasoning) can never be forced even when they otherwise accept
+	// forced values, so this veto wins over `supportsForcedToolChoice`.
+	if (compat.supportsToolChoice === false) return false;
+	if (typeof compat.supportsForcedToolChoice === "boolean") return compat.supportsForcedToolChoice;
+	if (typeof compat.supportsToolChoice === "boolean") return compat.supportsToolChoice;
+	return true;
+}
+
 function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["commit", "smol"], settings, availableModels, registry)?.model;
+	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels, registry)?.model;
 	if (titleModel) return titleModel;
 
 	if (currentModel) return currentModel;
 
 	return undefined;
-}
-
-export async function raceFirstNonNull<T>(
-	primary: Promise<T | null>,
-	startFallback: () => Promise<T | null>,
-	delayMs: number = TITLE_LOCAL_FALLBACK_DELAY_MS,
-	onPrimaryWinAfterFallback?: () => void,
-): Promise<T | null> {
-	const { promise, resolve } = Promise.withResolvers<T | null>();
-	let resolved = false;
-	let primarySettled = false;
-	let fallbackStarted = false;
-	let fallbackSettled = false;
-
-	const resolveOnce = (value: T | null): void => {
-		if (resolved) return;
-		resolved = true;
-		resolve(value);
-	};
-	const maybeResolveNull = (): void => {
-		if (primarySettled && fallbackStarted && fallbackSettled) resolveOnce(null);
-	};
-	const startFallbackOnce = (): void => {
-		if (fallbackStarted || resolved) return;
-		fallbackStarted = true;
-		let fallback: Promise<T | null>;
-		try {
-			fallback = startFallback();
-		} catch {
-			fallbackSettled = true;
-			maybeResolveNull();
-			return;
-		}
-		void fallback.then(
-			value => {
-				fallbackSettled = true;
-				if (value !== null) resolveOnce(value);
-				else maybeResolveNull();
-			},
-			() => {
-				fallbackSettled = true;
-				maybeResolveNull();
-			},
-		);
-	};
-
-	const timer = setTimeout(startFallbackOnce, delayMs);
-	void primary.then(
-		value => {
-			primarySettled = true;
-			clearTimeout(timer);
-			if (value !== null) {
-				if (fallbackStarted) onPrimaryWinAfterFallback?.();
-				resolveOnce(value);
-				return;
-			}
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-		() => {
-			primarySettled = true;
-			clearTimeout(timer);
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-	);
-
-	try {
-		return await promise;
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 /**
@@ -172,36 +127,41 @@ export async function generateSessionTitle(
 		);
 	}
 
-	const onlineAbortController = new AbortController();
-	const localTitlePromise = titleSystemPrompt
-		? tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
-		: tinyTitleClient.generate(tinyModel, firstMessage);
-	const localTitle = localTitlePromise.then(
-		title => title || null,
-		err => {
-			logger.warn("title-generator: local model error", {
+	// User explicitly picked a local tiny model. NEVER fall back to the online
+	// smol path (issue #3187): the smol role resolves through priority.json and
+	// silently bills whatever provider holds the resolved API key — OpenRouter
+	// in the reporter's case, leaking real credits without consent. If the
+	// local worker fails (unknown key, download missing, transformers.js
+	// crash, abort), leave the session untitled; the next user turn retries.
+	if (!isTinyTitleLocalModelKey(tinyModel)) {
+		logger.warn("title-generator: unknown local tiny model; skipping title (will not fall back to online)", {
+			sessionId,
+			model: tinyModel,
+			reason: "unknown-local-model",
+		});
+		return null;
+	}
+	try {
+		const localTitle = titleSystemPrompt
+			? await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
+			: await tinyTitleClient.generate(tinyModel, firstMessage);
+		if (!localTitle) {
+			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
 				sessionId,
 				model: tinyModel,
-				error: err instanceof Error ? err.message : String(err),
+				reason: "local-no-output",
 			});
 			return null;
-		},
-	);
-	const startOnline = (): Promise<string | null> =>
-		generateTitleOnline(
-			firstMessage,
-			registry,
-			settings,
+		}
+		return localTitle;
+	} catch (err) {
+		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
 			sessionId,
-			currentModel,
-			metadataResolver,
-			onlineAbortController.signal,
-			titleSystemPrompt,
-		);
-
-	return raceFirstNonNull(localTitle, startOnline, TITLE_LOCAL_FALLBACK_DELAY_MS, () => {
-		onlineAbortController.abort();
-	});
+			model: tinyModel,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return null;
+	}
 }
 
 export async function generateTitleOnline(
@@ -221,7 +181,16 @@ export async function generateTitleOnline(
 	}
 
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
-	const systemPrompt = titleSystemPrompt ?? TITLE_SYSTEM_PROMPT;
+	// Some providers can't be forced to call a tool — chat-completions hosts
+	// without `tool_choice` support, Claude Fable/Mythos — so a required
+	// `set_title` call never arrives. For those, ask the model to wrap the title
+	// in `<title>...</title>` markers and parse it from text instead.
+	const useForcedTool = modelSupportsForcedToolChoice(model);
+	const systemPrompt = useForcedTool
+		? [titleSystemPrompt ?? TITLE_SYSTEM_PROMPT]
+		: titleSystemPrompt
+			? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION]
+			: [TITLE_MARKER_SYSTEM_PROMPT];
 	const userMessage = formatTitleUserMessage(firstMessage);
 	const modelName = `${model.provider}/${model.id}`;
 	const modelContext = {
@@ -253,15 +222,15 @@ export async function generateTitleOnline(
 		const response = await completeSimple(
 			model,
 			{
-				systemPrompt: [systemPrompt],
+				systemPrompt,
 				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-				tools: [setTitleTool],
+				tools: useForcedTool ? [setTitleTool] : undefined,
 			},
 			{
 				apiKey: registry.resolver(model, sessionId),
 				maxTokens,
 				disableReasoning: true,
-				toolChoice: { type: "tool", name: SET_TITLE_TOOL_NAME },
+				toolChoice: useForcedTool ? { type: "tool", name: SET_TITLE_TOOL_NAME } : undefined,
 				metadata,
 				signal,
 			},
@@ -277,7 +246,7 @@ export async function generateTitleOnline(
 			return null;
 		}
 
-		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content));
+		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
 
 		if (!title) {
 			logger.debug("title-generator: no title returned", {
@@ -319,7 +288,13 @@ function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): stri
 			textTitle += content.text;
 		}
 	}
-	return textTitle.trim();
+	// Tool-choice-less models are asked to wrap the title in <title>...</title>,
+	// but stay lenient: prefer the marker when the model closed it, otherwise
+	// accept a plain sentence after stripping any stray/unclosed tag fragment
+	// (e.g. output truncated before the closing tag).
+	const marker = TITLE_MARKER_RE.exec(textTitle);
+	if (marker) return marker[1].trim();
+	return textTitle.replace(/<\/?title>/gi, "").trim();
 }
 
 /**
@@ -348,7 +323,7 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Set the terminal title using OSC 0 (sets both tab and window title). Unsupported terminals ignore it.
  */
 export function setTerminalTitle(title: string): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
 }
 
@@ -360,7 +335,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * Save the current terminal title on terminals that support xterm window ops.
  */
 export function pushTerminalTitle(): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write("\x1b[22;2t");
 }
 
@@ -368,6 +343,6 @@ export function pushTerminalTitle(): void {
  * Restore the previously saved terminal title on terminals that support xterm window ops.
  */
 export function popTerminalTitle(): void {
-	if (!process.stdout.isTTY) return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	process.stdout.write("\x1b[23;2t");
 }

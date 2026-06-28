@@ -4,7 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
-import { shortenPath } from "../../../tools/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
@@ -21,7 +21,7 @@ function withIcon(icon: string, text: string): string {
 }
 
 function stripDisplayRoot(pwd: string): string {
-	for (const root of ["/work", path.join(os.homedir(), "Projects")]) {
+	for (const root of [path.join(os.homedir(), "Projects"), "/work"]) {
 		const relative = relativePathWithinRoot(root, pwd);
 		if (relative) return relative;
 	}
@@ -86,32 +86,45 @@ const modelSegment: StatusLineSegment = {
 			modelName = modelName.slice(7);
 		}
 
-		let content = withIcon(theme.icon.model, modelName);
-
+		// Fast-mode icon and thinking-level suffix trail the model name and are
+		// colored together with it as `statusLineModel`. The advisor "++" badge
+		// sits between the name and that tail in `accent`, so it reads as a
+		// distinct marker. theme.fg resets only the fg, so the spans are
+		// concatenated (not nested) to keep each color intact.
+		let tail = "";
 		if (ctx.session.isFastModeActive() && theme.icon.fast) {
-			content += ` ${theme.icon.fast}`;
+			tail += ` ${theme.icon.fast}`;
 		}
 
-		// Add thinking level with dot separator
 		if (opts.showThinkingLevel !== false && state.model?.thinking) {
 			if (ctx.session.isAutoThinking) {
 				// Pending (no turn classified yet / classifying) shows a symbol-theme
 				// question-box marker; once resolved it shows `<level>`.
 				const resolved = ctx.session.autoResolvedThinkingLevel();
 				const resolvedText = resolved ? (theme.thinking[resolved as keyof typeof theme.thinking] ?? resolved) : "";
-				content += `${theme.sep.dot}${resolved ? resolvedText : `${theme.thinking.autoPending} auto`}`;
+				tail += `${theme.sep.dot}${resolved ? resolvedText : `${theme.thinking.autoPending} auto`}`;
 			} else {
 				const level = state.thinkingLevel ?? ThinkingLevel.Off;
 				if (level !== ThinkingLevel.Off) {
 					const thinkingText = theme.thinking[level as keyof typeof theme.thinking];
 					if (thinkingText) {
-						content += `${theme.sep.dot}${thinkingText}`;
+						tail += `${theme.sep.dot}${thinkingText}`;
 					}
 				}
 			}
 		}
 
-		return { content: theme.fg("statusLineModel", content), visible: true };
+		// `statusLineModel` is aliased to `accent` in many themes, so the badge
+		// uses `success` to stay visibly distinct from the model name color.
+		let content = theme.fg("statusLineModel", withIcon(theme.icon.model, modelName));
+		if (ctx.session.isAdvisorActive()) {
+			content += theme.fg("success", "++");
+		}
+		if (tail) {
+			content += theme.fg("statusLineModel", tail);
+		}
+
+		return { content, visible: true };
 	},
 };
 
@@ -189,7 +202,7 @@ const pathSegment: StatusLineSegment = {
 	render(ctx) {
 		const opts = ctx.options.path ?? {};
 
-		const projectDir = getProjectDir();
+		const projectDir = ctx.activeRepo?.cwd ?? getProjectDir();
 		const { scratch, relative } = classifyProjectDir(projectDir);
 		let pwd = projectDir;
 
@@ -200,6 +213,7 @@ const pathSegment: StatusLineSegment = {
 				pwd = stripDisplayRoot(pwd);
 			}
 		}
+		const repoSuffix = ctx.activeRepo ? ` ↳ ${ctx.activeRepo.relativeRepoRoot}` : "";
 		if (opts.abbreviate !== false) {
 			pwd = shortenPath(pwd);
 		}
@@ -209,6 +223,9 @@ const pathSegment: StatusLineSegment = {
 			const ellipsis = "…";
 			const sliceLen = Math.max(0, maxLen - ellipsis.length);
 			pwd = `${ellipsis}${pwd.slice(-sliceLen)}`;
+		}
+		if (repoSuffix) {
+			pwd = `${pwd}${repoSuffix}`;
 		}
 
 		const showScratchIcon = scratch && opts.stripWorkPrefix !== false;
@@ -362,9 +379,9 @@ const contextPctSegment: StatusLineSegment = {
 		const window = ctx.contextWindow;
 
 		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
-		const text = `${formatContextUsage(pct, window)}${autoIcon}`;
+		const text = `${formatContextUsage(pct, window, ctx.contextTokens)}${autoIcon}`;
 
-		const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
+		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
 		const content = withIcon(theme.icon.context, theme.fg(color, text));
 
 		return { content, visible: true };
@@ -538,6 +555,10 @@ const usageSegment: StatusLineSegment = {
 			return { content: "", visible: false };
 		}
 		const parts: string[] = [];
+		if (u.tier) {
+			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
+			if (tier) parts.push(theme.fg("accent", tier));
+		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);

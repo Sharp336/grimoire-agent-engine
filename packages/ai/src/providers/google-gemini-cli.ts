@@ -8,16 +8,19 @@ import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
+	getAntigravityModelWireProfile,
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
-import { ProviderHttpError } from "../errors";
+import { type } from "arktype";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderSessionState,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -26,7 +29,9 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -34,8 +39,11 @@ import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./googl
 import {
 	convertMessages,
 	convertTools,
+	EMPTY_STREAM_BASE_DELAY_MS,
 	type GoogleThinkingLevel,
+	hasMeaningfulGoogleContent,
 	isThinkingPart,
+	MAX_EMPTY_STREAM_RETRIES,
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
@@ -51,9 +59,179 @@ import {
  */
 export type { GoogleThinkingLevel };
 
-/** Non-2xx response (or in-stream error chunk) from the Cloud Code Assist API. */
-export class GeminiCliApiError extends ProviderHttpError {
-	override readonly name = "GeminiCliApiError";
+function isPlanningLeakPrefix(text: string): boolean {
+	const trimmed = text.trimStart();
+	if (!trimmed.startsWith("{")) {
+		return false;
+	}
+	const afterBrace = trimmed.slice(1).trimStart();
+	if (afterBrace === "") {
+		return trimmed.length <= 100;
+	}
+	if (afterBrace[0] !== '"') {
+		return false;
+	}
+	const nextQuoteIndex = afterBrace.indexOf('"', 1);
+	if (nextQuoteIndex === -1) {
+		const keyPrefix = afterBrace.slice(1);
+		return "thought".startsWith(keyPrefix) && trimmed.length <= 100;
+	}
+	const key = afterBrace.slice(1, nextQuoteIndex);
+	if (key !== "thought") {
+		return false;
+	}
+	const afterKey = afterBrace.slice(nextQuoteIndex + 1).trimStart();
+	if (afterKey === "") {
+		return trimmed.length <= 100;
+	}
+	if (afterKey[0] !== ":") {
+		return false;
+	}
+	return true;
+}
+
+type BufferedPlanningResult =
+	| { kind: "incomplete" }
+	| { kind: "plain"; visibleText: string }
+	| { kind: "leak"; visibleText: string };
+
+function isPlanningLeakObject(parsed: unknown, toolNames: Set<string>): boolean {
+	if (!parsed || typeof parsed !== "object") return false;
+	const record = parsed as Record<string, unknown>;
+	const hasThought = typeof record.thought === "string";
+	const isOmpTool = typeof record.call === "string" && toolNames.has(record.call);
+	const hasToolSignature =
+		"_i" in record || "paths" in record || "command" in record || ("path" in record && "content" in record);
+	return hasThought || isOmpTool || hasToolSignature;
+}
+
+function splitLeadingJsonObject(text: string): { prefixLength: number; jsonText: string; rest: string } | undefined {
+	const prefixLength = text.length - text.trimStart().length;
+	const trimmed = text.slice(prefixLength);
+	if (!trimmed.startsWith("{")) return undefined;
+
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (let index = 0; index < trimmed.length; index += 1) {
+		const ch = trimmed[index];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{") {
+			depth += 1;
+			continue;
+		}
+		if (ch !== "}") continue;
+		depth -= 1;
+		if (depth !== 0) continue;
+
+		const jsonText = trimmed.slice(0, index + 1);
+		return {
+			prefixLength: prefixLength + index + 1,
+			jsonText,
+			rest: trimmed.slice(index + 1),
+		};
+	}
+
+	return undefined;
+}
+
+function splitLeadingJsonObjectIgnoringQuotes(
+	text: string,
+): { prefixLength: number; jsonText: string; rest: string } | undefined {
+	const prefixLength = text.length - text.trimStart().length;
+	const trimmed = text.slice(prefixLength);
+	if (!trimmed.startsWith("{")) return undefined;
+
+	let depth = 0;
+	for (let index = 0; index < trimmed.length; index += 1) {
+		const ch = trimmed[index];
+		if (ch === "{") {
+			depth += 1;
+		} else if (ch === "}") {
+			depth -= 1;
+			if (depth === 0) {
+				return {
+					prefixLength: prefixLength + index + 1,
+					jsonText: trimmed.slice(0, index + 1),
+					rest: trimmed.slice(index + 1),
+				};
+			}
+		}
+	}
+	return undefined;
+}
+
+function consumePlanningBuffer(text: string, toolNames: Set<string>, isFinal = false): BufferedPlanningResult {
+	if (!isPlanningLeakPrefix(text)) {
+		return { kind: "plain", visibleText: text };
+	}
+
+	// Try standard brace-balanced slicing first (respecting quotes and escapes)
+	let leading = splitLeadingJsonObject(text);
+
+	// If standard parsing fails (e.g. due to unescaped quotes), fall back to quote-ignoring brace-balanced slicing
+	if (!leading) {
+		leading = splitLeadingJsonObjectIgnoringQuotes(text);
+	}
+
+	if (!leading) {
+		if (isFinal) {
+			// At EOF, if the buffer has a leak signature but no closing brace at all, discard the whole buffer.
+			const trimmed = text.trim();
+			const hasThoughtKey = trimmed.includes('"thought"');
+			const hasToolKey = Array.from(toolNames).some(name => trimmed.includes(`"${name}"`));
+			const hasToolSignature =
+				trimmed.includes('"_i"') ||
+				trimmed.includes('"paths"') ||
+				trimmed.includes('"command"') ||
+				(trimmed.includes('"path"') && trimmed.includes('"content"'));
+			if (hasThoughtKey || hasToolKey || hasToolSignature) {
+				return { kind: "leak", visibleText: "" };
+			}
+			return { kind: "plain", visibleText: text };
+		}
+		return { kind: "incomplete" };
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(leading.jsonText);
+	} catch {
+		// Fallback to substring matching if JSON parsing fails due to unescaped quotes
+		const hasThoughtKey = leading.jsonText.includes('"thought"');
+		const hasToolKey = Array.from(toolNames).some(name => leading.jsonText.includes(`"${name}"`));
+		const hasToolSignature =
+			leading.jsonText.includes('"_i"') ||
+			leading.jsonText.includes('"paths"') ||
+			leading.jsonText.includes('"command"') ||
+			(leading.jsonText.includes('"path"') && leading.jsonText.includes('"content"'));
+		const isLeak = hasThoughtKey || hasToolKey || hasToolSignature;
+		if (isLeak) {
+			return { kind: "leak", visibleText: leading.rest };
+		}
+		// Unparseable leading object is not safe to strip; release it as normal text.
+		return { kind: "plain", visibleText: text };
+	}
+
+	return isPlanningLeakObject(parsed, toolNames)
+		? { kind: "leak", visibleText: leading.rest }
+		: { kind: "plain", visibleText: text };
 }
 
 export interface GoogleGeminiCliOptions extends StreamOptions {
@@ -90,6 +268,43 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	 */
 	requestModelId?: string;
 	projectId?: string;
+	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
+	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	providerSessionState?: Map<string, ProviderSessionState>;
+}
+
+export interface AntigravityProviderSessionState extends ProviderSessionState {
+	lastGoodEndpoint?: string;
+	/**
+	 * Per-conversation request-envelope identity that mirrors the real
+	 * Antigravity client. `sessionId` is the signed-decimal session id;
+	 * `agentId`/`trajectoryId` are UUIDs; `stepIndex` is the monotonic step
+	 * counter; `lastExecutionId` is the prior response id echoed as
+	 * `labels.last_execution_id`.
+	 */
+	agentId?: string;
+	trajectoryId?: string;
+	sessionId?: string;
+	stepIndex?: number;
+	lastExecutionId?: string;
+}
+
+const ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY = "google-antigravity-session-state";
+
+export function getAntigravityProviderSessionState(
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): AntigravityProviderSessionState | undefined {
+	if (!providerSessionState) return undefined;
+	let existing = providerSessionState.get(ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY) as
+		| AntigravityProviderSessionState
+		| undefined;
+	if (!existing) {
+		existing = {
+			close: () => {},
+		};
+		providerSessionState.set(ANTIGRAVITY_PROVIDER_SESSION_STATE_KEY, existing);
+	}
+	return existing;
 }
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
@@ -107,8 +322,6 @@ export {
 // Retry configuration
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
-const MAX_EMPTY_STREAM_RETRIES = 2;
-const EMPTY_STREAM_BASE_DELAY_MS = 500;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
@@ -127,36 +340,33 @@ function shouldInjectAntigravitySystemInstruction(modelId: string): boolean {
 	return normalized.includes("claude") || normalized.includes("gemini-3");
 }
 
-/**
- * Extract a clean, user-friendly error message from Google API error response.
- * Parses JSON error responses and returns just the message field.
- */
-function extractErrorMessage(errorText: string): string {
-	try {
-		const parsed = JSON.parse(errorText) as { error?: { message?: string } };
-		if (parsed.error?.message) {
-			return parsed.error.message;
-		}
-	} catch {
-		// Not JSON, return as-is
-	}
-	return errorText;
-}
+const optionalCredentialString = type("unknown").pipe(raw => {
+	const out = type("string")(raw);
+	return out instanceof type.errors ? undefined : out;
+});
 
-interface GeminiCliApiKeyPayload {
-	token?: unknown;
-	projectId?: unknown;
-	project_id?: unknown;
-	refreshToken?: unknown;
-	expiresAt?: unknown;
-	refresh?: unknown;
-	expires?: unknown;
-}
+const innerCredentialsSchema = type({
+	"token?": optionalCredentialString,
+	"projectId?": optionalCredentialString,
+	"project_id?": optionalCredentialString,
+	"refreshToken?": optionalCredentialString,
+	"refresh?": optionalCredentialString,
+	"email?": optionalCredentialString,
+	"expiresAt?": "unknown",
+	"expires?": "unknown",
+});
+
+const geminiCliCredentialsSchema = type("unknown").pipe(raw => {
+	const out = innerCredentialsSchema(raw);
+	return out instanceof type.errors ? {} : out;
+});
+
 interface ParsedGeminiCliCredentials {
 	accessToken: string;
 	projectId: string;
 	refreshToken?: string;
 	expiresAt?: number;
+	email?: string;
 }
 
 function normalizeExpiryMs(value: unknown): number | undefined {
@@ -171,37 +381,32 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 	const missingCredentialsMessage =
 		"Missing token or projectId in Google Cloud credentials. Use /login to re-authenticate.";
 
-	let parsed: GeminiCliApiKeyPayload;
+	let rawCredentials: unknown;
 	try {
-		parsed = JSON.parse(apiKeyRaw) as GeminiCliApiKeyPayload;
+		rawCredentials = JSON.parse(apiKeyRaw);
 	} catch {
-		throw new Error(invalidCredentialsMessage);
+		throw new AIError.ValidationError(invalidCredentialsMessage);
+	}
+	const parsed = geminiCliCredentialsSchema(rawCredentials);
+	if (parsed instanceof type.errors) {
+		throw new AIError.ValidationError(invalidCredentialsMessage);
 	}
 
-	const projectId =
-		typeof parsed.projectId === "string"
-			? parsed.projectId
-			: typeof parsed.project_id === "string"
-				? parsed.project_id
-				: undefined;
-
-	if (typeof parsed.token !== "string" || typeof projectId !== "string") {
-		throw new Error(missingCredentialsMessage);
+	const projectId = parsed.projectId ?? parsed.project_id;
+	if (parsed.token === undefined || projectId === undefined) {
+		throw new AIError.ValidationError(missingCredentialsMessage);
 	}
 
-	const refreshToken =
-		typeof parsed.refreshToken === "string"
-			? parsed.refreshToken
-			: typeof parsed.refresh === "string"
-				? parsed.refresh
-				: undefined;
+	const refreshToken = parsed.refreshToken ?? parsed.refresh;
 	const expiresAt = normalizeExpiryMs(parsed.expiresAt ?? parsed.expires);
+	const email = parsed.email && parsed.email.length > 0 ? parsed.email : undefined;
 
 	return {
 		accessToken: parsed.token,
 		projectId,
 		refreshToken,
 		expiresAt,
+		email,
 	};
 }
 
@@ -242,6 +447,7 @@ interface CloudCodeAssistRequest {
 				allowedFunctionNames?: string[];
 			};
 		};
+		labels?: Record<string, string>;
 	};
 	requestType?: string;
 	userAgent?: string;
@@ -290,7 +496,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -315,11 +521,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 		try {
 			const apiKeyRaw = options?.apiKey;
 			if (!apiKeyRaw) {
-				throw new Error("Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.");
+				throw new AIError.ConfigurationError(
+					"Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.",
+				);
 			}
 
 			const isAntigravity = model.provider === "google-antigravity";
 			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
+			const { accessToken, projectId } = parsedCredentials;
 			// AuthStorage already refreshed credentials before threading them
 			// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
 			// expired we bail rather than POSTing a stale token; the next call
@@ -330,14 +539,54 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				parsedCredentials.expiresAt !== undefined &&
 				Date.now() >= parsedCredentials.expiresAt
 			) {
-				throw new Error(
+				throw new AIError.OAuthError(
 					"OAuth token expired before request — please retry; AuthStorage will refresh on the next attempt.",
+					{ kind: "token-refresh", provider: model.provider },
 				);
 			}
-			const { accessToken, projectId } = parsedCredentials;
-
 			const baseUrl = model.baseUrl?.trim();
-			const endpoints = baseUrl ? [baseUrl] : isAntigravity ? ANTIGRAVITY_ENDPOINT_FALLBACKS : [DEFAULT_ENDPOINT];
+			let endpoints: string[];
+			const providerState = isAntigravity
+				? getAntigravityProviderSessionState(options?.providerSessionState)
+				: undefined;
+
+			if (isAntigravity) {
+				const mode = options?.antigravityEndpointMode ?? "auto";
+				if (mode === "sandbox") {
+					endpoints = [ANTIGRAVITY_SANDBOX_ENDPOINT];
+					if (providerState) providerState.lastGoodEndpoint = undefined;
+				} else if (mode === "production") {
+					endpoints = [ANTIGRAVITY_DAILY_ENDPOINT];
+					if (providerState) providerState.lastGoodEndpoint = undefined;
+				} else {
+					// auto mode
+					if (baseUrl) {
+						const cleanUrl = baseUrl.replace(/\/+$/, "");
+						if (cleanUrl !== ANTIGRAVITY_DAILY_ENDPOINT && cleanUrl !== ANTIGRAVITY_SANDBOX_ENDPOINT) {
+							endpoints = [baseUrl];
+							if (providerState) providerState.lastGoodEndpoint = undefined;
+						} else {
+							const defaultFallbacks = [...ANTIGRAVITY_ENDPOINT_FALLBACKS] as string[];
+							const lastGood = providerState?.lastGoodEndpoint;
+							if (lastGood && defaultFallbacks.includes(lastGood)) {
+								endpoints = [lastGood, ...defaultFallbacks.filter(e => e !== lastGood)];
+							} else {
+								endpoints = defaultFallbacks;
+							}
+						}
+					} else {
+						const defaultFallbacks = [...ANTIGRAVITY_ENDPOINT_FALLBACKS] as string[];
+						const lastGood = providerState?.lastGoodEndpoint;
+						if (lastGood && defaultFallbacks.includes(lastGood)) {
+							endpoints = [lastGood, ...defaultFallbacks.filter(e => e !== lastGood)];
+						} else {
+							endpoints = defaultFallbacks;
+						}
+					}
+				}
+			} else {
+				endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT];
+			}
 
 			let requestBody = buildRequest(model, context, projectId, options, isAntigravity);
 			const replacementPayload = await options?.onPayload?.(requestBody, model);
@@ -364,34 +613,22 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				headers: requestHeaders,
 			};
 
-			const response = await fetchWithRetry(
-				attempt => `${endpoints[Math.min(attempt, endpoints.length - 1)]}/v1internal:streamGenerateContent?alt=sse`,
-				{
-					method: "POST",
-					headers: requestHeaders,
-					body: requestBodyJson,
-					signal: options?.signal,
-					maxAttempts: MAX_RETRIES + 1,
-					defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-					maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-					fetch: options?.fetch,
-				},
-			);
-			if (!response.ok) {
-				const errorText = await response.text();
-				throw new GeminiCliApiError(
-					`Cloud Code Assist API error (${response.status}): ${extractErrorMessage(errorText)}`,
-					response.status,
-					{ headers: response.headers },
-				);
-			}
-			const requestUrl = response.url;
+			// Direct callers that skip `register-builtins` (which installs the
+			// iterator-level watchdog) need a pre-response timer alongside
+			// `timeout: false`; otherwise a stalled Cloud Code Assist proxy
+			// would hang forever. Floor matches the lazy wrapper's 5min default.
+			const firstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(undefined, 300_000);
+			const callerSignal = options?.signal;
+			const toolNames = new Set(context.tools?.map(t => t.name) ?? []);
+			const isFlashLeakModel = model.id.includes("flash");
 
 			let started = false;
 			let sawFinishReason = false;
+			let lastResponseId: string | undefined;
 			const ensureStarted = () => {
 				if (!started) {
-					if (!firstTokenTime) firstTokenTime = Date.now();
+					if (!firstTokenTime) firstTokenTime = performance.now();
 					stream.push({ type: "start", partial: output });
 					started = true;
 				}
@@ -410,19 +647,40 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				output.stopReason = "stop";
 				output.errorMessage = undefined;
 				output.timestamp = Date.now();
-				started = false;
 				sawFinishReason = false;
 			};
 
 			const streamResponse = async (activeResponse: Response): Promise<boolean> => {
 				if (!activeResponse.body) {
-					throw new Error("No response body");
+					throw new AIError.ProviderResponseError("No response body", {
+						provider: model.provider,
+						kind: "empty-body",
+					});
 				}
 
-				let hasContent = false;
+				// Scoped per attempt so a failed/empty retry cannot leak its
+				// response id into the next request's last_execution_id.
+				lastResponseId = undefined;
+
 				let currentBlock: TextContent | ThinkingContent | null = null;
 				const blocks = output.content;
 				const blockIndex = () => blocks.length - 1;
+
+				let isBuffering = false;
+				let textBuffer = "";
+				let bufferedTextSignature: string | undefined;
+
+				const emitVisibleText = (delta: string, thoughtSignature?: string) => {
+					if (!delta || !currentBlock || currentBlock.type !== "text") return;
+					currentBlock.text += delta;
+					currentBlock.textSignature = retainThoughtSignature(currentBlock.textSignature, thoughtSignature);
+					stream.push({
+						type: "text_delta",
+						contentIndex: blockIndex(),
+						delta,
+						partial: output,
+					});
+				};
 
 				for await (const chunk of readSseJson<CloudCodeAssistResponseChunk>(
 					activeResponse.body!,
@@ -433,23 +691,24 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						const detail = chunk.error.message || chunk.error.status || "unknown error";
 						const message = `Cloud Code Assist stream error: ${detail}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-							? new GeminiCliApiError(message, chunk.error.code)
-							: new Error(message);
+							? new AIError.GeminiCliApiError(message, chunk.error.code)
+							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
 					}
 					const responseData = chunk.response;
 					if (!responseData) continue;
+					if (responseData.responseId) lastResponseId = responseData.responseId;
 					if (!responseData.candidates?.length && responseData.promptFeedback?.blockReason) {
 						const detail = responseData.promptFeedback.blockReasonMessage;
-						throw new Error(
+						throw new AIError.ProviderResponseError(
 							`Request blocked by Google (${responseData.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+							{ provider: model.provider, kind: "content-blocked" },
 						);
 					}
 
 					const candidate = responseData.candidates?.[0];
 					if (candidate?.content?.parts) {
 						for (const part of candidate.content.parts) {
-							if (part.text !== undefined) {
-								hasContent = true;
+							if (part.text !== undefined && part.text !== "") {
 								const isThinking = isThinkingPart(part);
 								if (
 									!currentBlock ||
@@ -474,26 +733,55 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 										partial: output,
 									});
 								} else {
-									currentBlock.text += part.text;
+									if (isBuffering) {
+										textBuffer += part.text;
+										bufferedTextSignature = retainThoughtSignature(
+											bufferedTextSignature,
+											part.thoughtSignature,
+										);
+									} else if (isFlashLeakModel && part.text.trimStart().startsWith("{")) {
+										isBuffering = true;
+										textBuffer = part.text;
+										bufferedTextSignature = part.thoughtSignature;
+									} else {
+										emitVisibleText(part.text, part.thoughtSignature);
+									}
+
+									if (isBuffering) {
+										const buffered = consumePlanningBuffer(textBuffer, toolNames);
+										if (buffered.kind !== "incomplete") {
+											if (buffered.kind === "leak") {
+												sawLeak = true;
+											}
+											const visibleSignature = bufferedTextSignature;
+											isBuffering = false;
+											textBuffer = "";
+											bufferedTextSignature = undefined;
+											emitVisibleText(buffered.visibleText, visibleSignature);
+										}
+									}
+								}
+							} else if (part.text === "" && part.thoughtSignature && currentBlock && !part.functionCall) {
+								if (currentBlock.type === "thinking") {
+									currentBlock.thinkingSignature = retainThoughtSignature(
+										currentBlock.thinkingSignature,
+										part.thoughtSignature,
+									);
+								} else {
 									currentBlock.textSignature = retainThoughtSignature(
 										currentBlock.textSignature,
 										part.thoughtSignature,
 									);
-									stream.push({
-										type: "text_delta",
-										contentIndex: blockIndex(),
-										delta: part.text,
-										partial: output,
-									});
 								}
 							}
 
 							if (part.functionCall) {
-								hasContent = true;
 								if (currentBlock) {
 									pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
 									currentBlock = null;
 								}
+								isBuffering = false;
+								textBuffer = "";
 
 								const providedId = part.functionCall.id;
 								const needsNewId =
@@ -554,98 +842,188 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 				}
 
+				if (isBuffering && textBuffer !== "") {
+					const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
+					if (buffered.kind === "leak") {
+						sawLeak = true;
+					}
+					if (buffered.kind !== "incomplete") {
+						emitVisibleText(buffered.visibleText, bufferedTextSignature);
+					}
+					bufferedTextSignature = undefined;
+					isBuffering = false;
+					textBuffer = "";
+				}
+
 				if (currentBlock) {
 					pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
 				}
 
-				return hasContent;
+				return hasMeaningfulGoogleContent(output) || sawLeak;
 			};
 
 			let receivedContent = false;
-			let currentResponse = response;
+			let sawLeak = false;
 
-			for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
-				if (options?.signal?.aborted) {
-					throw new Error("Request was aborted");
-				}
+			for (let i = 0; i < endpoints.length; i++) {
+				const endpoint = endpoints[i];
+				const isLastEndpoint = i === endpoints.length - 1;
+				try {
+					started = false;
+					resetOutput();
 
-				if (emptyAttempt > 0) {
-					const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
+					// headers arrive so it never aborts the actively streaming body —
+					// an absolute `AbortSignal.timeout` would (issue #2422).
+					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
+					let response: Response;
 					try {
-						await scheduler.wait(backoffMs, { signal: options?.signal });
-					} catch {
-						// Normalize AbortError to expected message for consistent error handling
-						throw new Error("Request was aborted");
+						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+							method: "POST",
+							headers: requestHeaders,
+							body: requestBodyJson,
+							signal: watchdog.signal,
+							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+							fetch: options?.fetch,
+							timeout: false,
+						});
+					} finally {
+						watchdog.clear();
 					}
 
-					if (!requestUrl) {
-						throw new Error("Missing request URL");
-					}
-
-					currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
-						method: "POST",
-						headers: requestHeaders,
-						body: requestBodyJson,
-						signal: options?.signal,
-					});
-
-					if (!currentResponse.ok) {
-						const retryErrorText = await currentResponse.text();
-						throw new GeminiCliApiError(
-							`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
-							currentResponse.status,
-							{ headers: currentResponse.headers },
+					if (!response.ok) {
+						if (AIError.isTransientStatus(response.status)) {
+							if (!isLastEndpoint) {
+								continue;
+							}
+						}
+						const errorText = await response.text();
+						const validationUrl = extractGoogleValidationUrl(errorText);
+						const errorMessage = validationUrl
+							? formatGoogleValidationRequiredMessage(
+									validationUrl,
+									"retry your request",
+									parsedCredentials.email,
+								)
+							: errorText;
+						throw new AIError.GeminiCliApiError(
+							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+							response.status,
+							{ headers: response.headers },
 						);
 					}
-				}
 
-				const streamed = await streamResponse(currentResponse);
-				if (streamed) {
-					receivedContent = true;
+					const requestUrl = response.url;
+					let currentResponse = response;
+
+					for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
+						if (options?.signal?.aborted) {
+							throw new AIError.AbortError("Request was aborted");
+						}
+
+						if (emptyAttempt > 0) {
+							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+							try {
+								await scheduler.wait(backoffMs, { signal: options?.signal });
+							} catch {
+								throw new AIError.AbortError("Request was aborted");
+							}
+
+							if (!requestUrl) {
+								throw new AIError.ConfigurationError("Missing request URL");
+							}
+
+							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+								method: "POST",
+								headers: requestHeaders,
+								body: requestBodyJson,
+								signal: options?.signal,
+							});
+
+							if (!currentResponse.ok) {
+								const retryErrorText = await currentResponse.text();
+								throw new AIError.GeminiCliApiError(
+									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
+									currentResponse.status,
+									{ headers: currentResponse.headers },
+								);
+							}
+						}
+
+						const streamed = await streamResponse(currentResponse);
+						if (streamed) {
+							receivedContent = true;
+							break;
+						}
+
+						if (emptyAttempt < MAX_EMPTY_STREAM_RETRIES) {
+							resetOutput();
+						}
+					}
+
+					if (!receivedContent) {
+						throw new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+							provider: model.provider,
+							kind: "empty-body",
+						});
+					}
+
+					if (options?.signal?.aborted) {
+						throw new AIError.AbortError("Request was aborted");
+					}
+
+					if (!sawFinishReason) {
+						throw new AIError.ProviderResponseError(
+							"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
+							{ provider: model.provider, kind: "incomplete-stream" },
+						);
+					}
+
+					// Succeeded! Break the endpoints loop.
+					if (
+						providerState &&
+						(options?.antigravityEndpointMode === "auto" || !options?.antigravityEndpointMode)
+					) {
+						providerState.lastGoodEndpoint = endpoint;
+					}
+					// Commit after a fully successful attempt (content + finish reason);
+					// used as the next request's last_execution_id. Overwrite even when
+					// undefined so a response without an id can't leave a stale value.
+					if (providerState) {
+						providerState.lastExecutionId = lastResponseId;
+					}
 					break;
+				} catch (error) {
+					const status = extractHttpStatusFromError(error);
+					if (AIError.isTransientStatus(status)) {
+						if (!isLastEndpoint && !started) {
+							continue;
+						}
+					}
+					throw error;
 				}
-
-				if (emptyAttempt < MAX_EMPTY_STREAM_RETRIES) {
-					resetOutput();
-				}
-			}
-
-			if (!receivedContent) {
-				throw new Error("Cloud Code Assist API returned an empty response");
-			}
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (!sawFinishReason) {
-				throw new Error(
-					"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
-				);
 			}
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error(output.errorMessage ?? "An unknown error occurred");
+				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+					provider: model.provider,
+					kind: "output",
+				});
 			}
 
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				error instanceof Error ? error.message : JSON.stringify(error),
-				error,
-				rawRequestDump,
-			);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -738,6 +1116,48 @@ function normalizeAntigravityTools(
 	}));
 }
 
+interface AntigravityRequestEnvelope {
+	sessionId: string;
+	requestId: string;
+	labels: Record<string, string>;
+}
+
+/**
+ * Build the Antigravity request envelope (sessionId, structured requestId,
+ * labels) advancing the per-conversation session state. Mirrors the real
+ * `antigravity/hub` client: `requestId` is `agent/<agentId>/<ts>/<trajectoryId>/<step>`
+ * and `labels.last_step_index` trails the requestId step by one. Without session
+ * state (direct callers/tests) it falls back to ephemeral ids.
+ */
+function buildAntigravityRequestEnvelope(
+	model: Model<"google-gemini-cli">,
+	context: Context,
+	wireModelId: string,
+	state: AntigravityProviderSessionState | undefined,
+): AntigravityRequestEnvelope {
+	if (state) {
+		state.agentId ??= randomUUID();
+		state.trajectoryId ??= randomUUID();
+		state.sessionId ??= randomSignedDecimalSessionId();
+		state.stepIndex = (state.stepIndex ?? 1) + 1;
+	}
+	const agentId = state?.agentId ?? randomUUID();
+	const trajectoryId = state?.trajectoryId ?? randomUUID();
+	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
+	const step = state?.stepIndex ?? 2;
+	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
+	const isClaude = isClaudeModel(model.id);
+	const profile = getAntigravityModelWireProfile(wireModelId);
+	const labels: Record<string, string> = {};
+	if (state?.lastExecutionId) labels.last_execution_id = state.lastExecutionId;
+	labels.last_step_index = String(step - 1);
+	if (profile?.modelEnum !== undefined) labels.model_enum = profile.modelEnum;
+	labels.trajectory_id = trajectoryId;
+	labels.used_claude = String(isClaude);
+	labels.used_claude_conservative = String(isClaude);
+	return { sessionId, requestId, labels };
+}
+
 export function buildRequest(
 	model: Model<"google-gemini-cli">,
 	context: Context,
@@ -799,19 +1219,21 @@ export function buildRequest(
 		contents,
 	};
 
-	if (isAntigravity) {
-		request.sessionId = deriveAntigravitySessionId(context);
-	}
-
-	// System instruction must be object with parts, not plain string
+	// System instruction is an object with parts, not a plain string. Antigravity
+	// tags it with role "user" to mirror the real client.
 	if (systemPrompts.length > 0) {
 		request.systemInstruction = {
+			...(isAntigravity ? { role: "user" } : {}),
 			parts: systemPrompts.map(text => ({ text })),
 		};
 	}
 
-	if (Object.keys(generationConfig).length > 0) {
-		request.generationConfig = generationConfig;
+	if (isAntigravity && shouldInjectAntigravitySystemInstruction(model.id)) {
+		const existingParts = request.systemInstruction?.parts ?? [];
+		request.systemInstruction = {
+			role: "user",
+			parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, ...existingParts],
+		};
 	}
 
 	if (context.tools && context.tools.length > 0) {
@@ -820,9 +1242,12 @@ export function buildRequest(
 		if (options.toolChoice) {
 			const choice = options.toolChoice;
 			if (typeof choice === "string") {
-				request.toolConfig = {
-					functionCallingConfig: { mode: mapToolChoice(choice) },
-				};
+				const mode = mapToolChoice(choice);
+				if (mode !== "AUTO") {
+					request.toolConfig = {
+						functionCallingConfig: { mode },
+					};
+				}
 			} else {
 				request.toolConfig = {
 					functionCallingConfig: {
@@ -832,15 +1257,16 @@ export function buildRequest(
 				};
 			}
 		}
-	}
-
-	if (isAntigravity && !isClaudeModel(model.id) && request.generationConfig?.maxOutputTokens !== undefined) {
-		delete request.generationConfig.maxOutputTokens;
-		if (Object.keys(request.generationConfig).length === 0) {
-			delete request.generationConfig;
+		// Antigravity's default tool mode is VALIDATED (verified for Gemini and
+		// Claude); an explicit non-auto tool choice above wins.
+		if (isAntigravity && !request.toolConfig) {
+			request.toolConfig = {
+				functionCallingConfig: { mode: "VALIDATED" as FunctionCallingConfigMode },
+			};
 		}
 	}
 
+	// Claude on Antigravity always forces VALIDATED, even with no tools declared.
 	if (isAntigravity && isClaudeModel(model.id)) {
 		request.toolConfig = {
 			functionCallingConfig: {
@@ -849,28 +1275,39 @@ export function buildRequest(
 		};
 	}
 
-	if (isAntigravity && shouldInjectAntigravitySystemInstruction(model.id)) {
-		const existingParts = request.systemInstruction?.parts ?? [];
-		request.systemInstruction = {
-			role: "user",
-			parts: [
-				{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
-				{ text: `Please ignore following [ignore]${ANTIGRAVITY_SYSTEM_INSTRUCTION}[/ignore]` },
-				...existingParts,
-			],
+	const wireModelId = options.requestModelId ?? model.requestModelId ?? model.id;
+
+	if (isAntigravity) {
+		// The real client sends a fixed per-model output cap independent of the
+		// thinking budget; reassign so it keeps its slot ahead of thinkingConfig.
+		const profile = getAntigravityModelWireProfile(wireModelId);
+		if (profile) {
+			generationConfig.maxOutputTokens = profile.maxOutputTokens;
+		}
+		const state = getAntigravityProviderSessionState(options.providerSessionState);
+		const envelope = buildAntigravityRequestEnvelope(model, context, wireModelId, state);
+		request.labels = envelope.labels;
+		if (Object.keys(generationConfig).length > 0) {
+			request.generationConfig = generationConfig;
+		}
+		request.sessionId = envelope.sessionId;
+		return {
+			project: projectId,
+			requestId: envelope.requestId,
+			request,
+			model: wireModelId,
+			userAgent: "antigravity",
+			requestType: "agent",
 		};
+	}
+
+	if (Object.keys(generationConfig).length > 0) {
+		request.generationConfig = generationConfig;
 	}
 
 	return {
 		project: projectId,
-		model: options.requestModelId ?? model.requestModelId ?? model.id,
+		model: wireModelId,
 		request,
-		...(isAntigravity
-			? {
-					requestType: "agent",
-					userAgent: "antigravity",
-					requestId: `agent-${randomUUID()}`,
-				}
-			: {}),
 	};
 }

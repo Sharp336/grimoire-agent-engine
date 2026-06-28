@@ -14,6 +14,7 @@ export type SemVer = {
 export type GeminiKind = "pro" | "flash";
 export type AnthropicKind = "opus" | "sonnet" | "fable" | "mythos";
 export type OpenAIVariant = "base" | "codex" | "codex-max" | "codex-mini" | "codex-spark" | "mini" | "max" | "nano";
+export type GlmVariant = "base" | "air" | "turbo" | "flash" | "flashx" | "preview";
 
 export interface GeminiModel {
 	family: "gemini";
@@ -33,6 +34,15 @@ export interface OpenAIModel {
 	version: SemVer;
 }
 
+export interface GlmModel {
+	family: "glm";
+	/** Suffix variant (`-air`, `-turbo`, `-flash`, `-flashx`, `-preview`); `base` when none. */
+	variant: GlmVariant;
+	/** Vision SKU — the `v` that attaches directly to the version (`glm-4v`, `glm-4.5v`). */
+	vision: boolean;
+	version: SemVer;
+}
+
 export interface UnknownModel {
 	family: "unknown";
 	id: string;
@@ -41,9 +51,15 @@ export interface UnknownModel {
 export type ParsedModel = GeminiModel | AnthropicModel | OpenAIModel | UnknownModel;
 
 /** Strip a provider namespace prefix (`openai/gpt-5.4` → `gpt-5.4`). */
+// Cache keyed by model id (a bounded set of bundled/aggregator ids), so no eviction is needed.
+const bareModelIdCache = new Map<string, string>();
 export function bareModelId(modelId: string): string {
+	const cached = bareModelIdCache.get(modelId);
+	if (cached !== undefined) return cached;
 	const p = modelId.lastIndexOf("/");
-	return p !== -1 ? modelId.slice(p + 1) : modelId;
+	const result = p !== -1 ? modelId.slice(p + 1) : modelId;
+	bareModelIdCache.set(modelId, result);
+	return result;
 }
 
 export function parseKnownModel(modelId: string): ParsedModel {
@@ -55,8 +71,26 @@ export function parseKnownModel(modelId: string): ParsedModel {
 	);
 }
 
+/**
+ * Wrap a parse function in a per-id memo cache. Caches the `null` result too, so
+ * repeated misses (the common case — ids of other families) stay O(1) and never
+ * re-run the regex/semver work.
+ */
+function parser<T>(parse: (modelId: string) => T | null): (modelId: string) => T | null {
+	const cache = new Map<string, T | null>();
+	return modelId => {
+		const hit = cache.get(modelId);
+		if (hit !== undefined || cache.has(modelId)) {
+			return hit ?? null;
+		}
+		const result = parse(modelId);
+		cache.set(modelId, result);
+		return result;
+	};
+}
+
 const GEMINI_SUFFIX = "-preview";
-export function parseGeminiModel(modelId: string): GeminiModel | null {
+export const parseGeminiModel = parser((modelId): GeminiModel | null => {
 	if (modelId.endsWith(GEMINI_SUFFIX)) {
 		modelId = modelId.slice(0, -GEMINI_SUFFIX.length);
 	}
@@ -69,9 +103,9 @@ export function parseGeminiModel(modelId: string): GeminiModel | null {
 		return null;
 	}
 	return { family: "gemini", kind: match[2] as GeminiKind, version };
-}
+});
 
-export function parseAnthropicModel(modelId: string): AnthropicModel | null {
+export const parseAnthropicModel = parser((modelId): AnthropicModel | null => {
 	const match = /claude-(opus|sonnet|fable|mythos)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
 	if (!match) {
 		return null;
@@ -81,9 +115,9 @@ export function parseAnthropicModel(modelId: string): AnthropicModel | null {
 		return null;
 	}
 	return { family: "anthropic", kind: match[1] as AnthropicKind, version };
-}
+});
 
-export function parseOpenAIModel(modelId: string): OpenAIModel | null {
+export const parseOpenAIModel = parser((modelId): OpenAIModel | null => {
 	const match = /gpt-(\d+(?:\.\d+){0,2})(?:-(codex-spark|codex-mini|codex-max|codex|mini|max|nano))?\b/.exec(modelId);
 	if (!match) {
 		return null;
@@ -93,7 +127,32 @@ export function parseOpenAIModel(modelId: string): OpenAIModel | null {
 		return null;
 	}
 	return { family: "openai", variant: (match[2] as OpenAIVariant | undefined) ?? "base", version };
-}
+});
+
+/**
+ * Parse a GLM (Zhipu / Z.AI) model id into family + variant + vision + version.
+ * Shape: `glm-<version>[v][-<variant>]` — e.g. `glm-4.5`, `glm-4.5-air`,
+ * `glm-5-turbo`, `glm-4.5v`, `glm-5-preview`. The `v` (vision) attaches to the
+ * version; other variants are `-` suffixes. Standalone like `parseAnthropicModel`
+ * is used in family.ts — GLM needs no global thinking policy, so it stays out of
+ * `parseKnownModel`.
+ */
+export const parseGlmModel = parser((modelId): GlmModel | null => {
+	const match = /glm-(\d{1,2}(?:\.\d+)?)(v)?(?:-(air|turbo|flashx|flash|preview))?\b/.exec(modelId);
+	if (!match) {
+		return null;
+	}
+	const version = parseSemVer(match[1]);
+	if (!version) {
+		return null;
+	}
+	return {
+		family: "glm",
+		variant: (match[3] as GlmVariant | undefined) ?? "base",
+		vision: match[2] === "v",
+		version,
+	};
+});
 
 export function isFableOrMythos(kind: AnthropicKind): boolean {
 	return kind === "fable" || kind === "mythos";

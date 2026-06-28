@@ -109,10 +109,10 @@
 ## Notes
 - The tool wire name stays `search_tool_bm25` for persisted-session back-compat, even though the source file is `search-tool-bm25.ts`.
 - Corpus composition is session-dependent and excludes already-active tools:
-  - MCP entries come from `#discoverableMCPTools`, filtered to names not currently active, mapped with `summary = description`.
+  - MCP entries come from `#discoverableMCPTools` (built by `#collectDiscoverableMCPToolsFromRegistry()`), filtered to names not currently active; `MCPTool` carries no `summary`, so `getDiscoverableTool()` derives `summary` from the first `200` chars of `description`.
   - Built-in entries appear only in `"all"` mode and only for registry tools whose `loadMode === "discoverable"` and are not currently active.
   - Hidden/internal built-ins are intentionally excluded from the built-in corpus: `resolve`, `yield`, `report_finding`, `report_tool_issue` are called out in the `#collectDiscoverableBuiltinTools()` comment.
 - `DiscoverableToolSource` includes `"extension"` and `"custom"`, but `AgentSession.getDiscoverableTools()` currently assembles only built-in and MCP sources.
-- On startup, `packages/coding-agent/src/sdk.ts` resolves `"auto"` after the full registry exists and injects `search_tool_bm25` when the count exceeds 40. It hides non-essential discoverable built-ins only in `tools.discoveryMode = "all"`; defaults are `read`, `bash`, and `edit` unless `tools.essentialOverride` changes them.
+- On startup, `packages/coding-agent/src/sdk.ts` resolves `"auto"` after the full registry exists and injects `search_tool_bm25` when the count exceeds 40. It hides non-essential discoverable built-ins only in `tools.discoveryMode = "all"`. Tools whose class is marked as `loadMode === "essential"` (defaults are `read`, `bash`, `edit`, `write`, and `glob`) are always active; they survive hiding regardless of configuration. `tools.essentialOverride` can be used to treat additional discoverable tools as essential (active on startup) or to explicitly specify the active essential list.
 - Query tokenization is simple and deterministic: Unicode is NFKD-normalized, combining marks are dropped, acronym/camelCase and digit-to-capital boundaries are split, non-letter/non-number characters become spaces, tokens are lowercased, and only non-empty tokens survive.
 - Scores are rounded differently by surface: `details.tools[].score` keeps 6 decimals; the TUI line renders 3.

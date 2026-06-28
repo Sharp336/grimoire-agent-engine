@@ -1,6 +1,8 @@
+import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
+import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -79,7 +81,7 @@ type SelectItemLayout =
 			spacing: "";
 	  };
 
-export class SelectList implements Component {
+export class SelectList implements Component, MouseRoutable {
 	#filteredItems: ReadonlyArray<SelectItem>;
 	#filterQuery = "";
 	#selectedIndex: number = 0;
@@ -136,6 +138,10 @@ export class SelectList implements Component {
 			this.#notifySelectionChange();
 		}
 		this.onSelect?.(item);
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		routeSelectListMouse(this, event, line);
 	}
 
 	invalidate(): void {
@@ -482,9 +488,18 @@ export class SelectList implements Component {
 
 	#setFilter(filter: string, notify: boolean): void {
 		this.#filterQuery = filter;
-		this.#filteredItems = filter.trim()
-			? fuzzyFilter([...this.items], filter, item => this.#getFilterText(item))
-			: this.items;
+		if (filter.trim()) {
+			// Breadcrumb the fuzzy match so the loop watchdog can attribute a
+			// large-list filter stall instead of logging it as "unknown".
+			pushLoopPhase("ui.select-filter");
+			try {
+				this.#filteredItems = fuzzyFilter([...this.items], filter, item => this.#getFilterText(item));
+			} finally {
+				popLoopPhase();
+			}
+		} else {
+			this.#filteredItems = this.items;
+		}
 		this.#selectedIndex = 0;
 		if (notify) {
 			this.#notifySelectionChange();

@@ -2,9 +2,11 @@
  * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
  */
 
+import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { extractHttpStatusFromError, readSseJson } from "@oh-my-pi/pi-utils";
-import { ProviderHttpError } from "../errors";
+import { readSseJson } from "@oh-my-pi/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
@@ -21,7 +23,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -45,11 +47,6 @@ export type {
 	ThinkingConfig,
 } from "./google-types";
 export { normalizeSchemaForGoogle };
-
-/** Non-2xx response (or in-stream error chunk) from the Google Generative Language / Vertex API. */
-export class GoogleApiError extends ProviderHttpError {
-	override readonly name = "GoogleApiError";
-}
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
@@ -233,18 +230,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				} else if (block.type === "thinking") {
 					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					if (thoughtSignature) {
 						parts.push({
 							thought: true,
 							text: block.thinking.toWellFormed(),
-							...(thoughtSignature && { thoughtSignature }),
+							thoughtSignature,
 						});
 					} else {
 						parts.push({
-							text: block.thinking.toWellFormed(),
+							text: renderDemotedThinking(model.id, block.thinking),
 						});
 					}
 				} else if (block.type === "toolCall") {
@@ -371,7 +366,7 @@ export function convertTools(
 				description: tool.description || "",
 				...(useParameters
 					? { parameters: normalizeSchemaForCCA(toolWireSchema(tool)) }
-					: { parametersJsonSchema: toolWireSchema(tool) }),
+					: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
 			})),
 		},
 	];
@@ -419,7 +414,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "NO_IMAGE":
 			return "error";
 		default: {
-			throw new Error(`Unhandled stop reason: ${reason satisfies never}`);
+			throw new AIError.ConfigurationError(`Unhandled stop reason: ${reason satisfies never}`);
 		}
 	}
 }
@@ -436,6 +431,47 @@ export function mapStopReasonString(reason: string): StopReason {
 		default:
 			return "error";
 	}
+}
+
+/**
+ * Bounded retries for the well-known Gemini "empty response" failure: a benign
+ * `finishReason: STOP` carrying only an empty/whitespace text part and no tool call.
+ * Shared by the public/Vertex `streamGoogleGenAI` path and the Cloud Code Assist
+ * (`google-gemini-cli`/`google-antigravity`) provider so both apply the same policy.
+ */
+export const MAX_EMPTY_STREAM_RETRIES = 2;
+export const EMPTY_STREAM_BASE_DELAY_MS = 500;
+
+/**
+ * Whether a completed Google assistant message carries content worth delivering.
+ *
+ * A tool call or any non-whitespace text counts as meaningful. An empty/whitespace-only
+ * text part — or thinking that never produced an answer — is the "empty response" failure:
+ * delivered as-is the agent loop has nothing to act on and silently halts, so the request
+ * must be retried instead of surfaced.
+ */
+export function hasMeaningfulGoogleContent(output: AssistantMessage): boolean {
+	for (const block of output.content) {
+		if (block.type === "toolCall") return true;
+		if (block.type === "text" && block.text.trim().length > 0) return true;
+	}
+	return false;
+}
+
+/** Wipe a streamed message between empty-response retries so the next attempt starts clean. */
+function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
+	output.content = [];
+	output.usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	output.stopReason = "stop";
+	output.errorMessage = undefined;
+	output.timestamp = Date.now();
 }
 
 /**
@@ -555,19 +591,20 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 			const detail = chunk.error.message || chunk.error.status || "unknown error";
 			const message = `Google API stream error: ${detail}`;
 			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-				? new GoogleApiError(message, chunk.error.code)
-				: new Error(message);
+				? new AIError.GoogleApiError(message, chunk.error.code)
+				: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
 		}
 		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
 			const detail = chunk.promptFeedback.blockReasonMessage;
-			throw new Error(
+			throw new AIError.ProviderResponseError(
 				`Request blocked by Google (${chunk.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+				{ provider: model.provider, kind: "content-blocked" },
 			);
 		}
 		const candidate = chunk.candidates?.[0];
 		if (candidate?.content?.parts) {
 			for (const part of candidate.content.parts) {
-				if (part.text !== undefined) {
+				if (part.text !== undefined && part.text !== "") {
 					if (!firstTokenSeen) {
 						firstTokenSeen = true;
 						onFirstToken?.();
@@ -607,6 +644,18 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 							delta: part.text,
 							partial: output,
 						});
+					}
+				} else if (part.text === "" && part.thoughtSignature && currentBlock && !part.functionCall) {
+					if (currentBlock.type === "thinking") {
+						currentBlock.thinkingSignature = retainThoughtSignature(
+							currentBlock.thinkingSignature,
+							part.thoughtSignature,
+						);
+					} else if (retainTextSignature) {
+						currentBlock.textSignature = retainThoughtSignature(
+							currentBlock.textSignature,
+							part.thoughtSignature,
+						);
 					}
 				}
 
@@ -680,15 +729,21 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	flushCurrent();
 
 	if (options?.signal?.aborted) {
-		throw new Error("Request was aborted");
+		throw new AIError.AbortError();
 	}
 
 	if (!sawFinishReason) {
-		throw new Error("Google API stream ended without a finish reason (connection dropped or response truncated)");
+		throw new AIError.ProviderResponseError(
+			"Google API stream ended without a finish reason (connection dropped or response truncated)",
+			{ provider: model.provider, kind: "incomplete-stream" },
+		);
 	}
 
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
-		throw new Error(output.errorMessage ?? "An unknown error occurred");
+		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+			provider: model.provider,
+			kind: "output",
+		});
 	}
 }
 
@@ -739,9 +794,12 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
 		const choice = options.toolChoice;
 		if (typeof choice === "string") {
-			config.toolConfig = {
-				functionCallingConfig: { mode: mapToolChoice(choice) },
-			};
+			const mode = mapToolChoice(choice);
+			if (mode !== "AUTO") {
+				config.toolConfig = {
+					functionCallingConfig: { mode },
+				};
+			}
 		} else {
 			// Named-tool routing — `mode: "ANY"` plus an explicit allow-list. The
 			// caller is responsible for ensuring the names exist in `context.tools`.
@@ -769,7 +827,7 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 
 	if (options.signal) {
 		if (options.signal.aborted) {
-			throw new Error("Request aborted");
+			throw new AIError.AbortError("Request aborted");
 		}
 		config.abortSignal = options.signal;
 	}
@@ -807,7 +865,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -846,57 +904,81 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				headers: plan.headers,
 			};
 
-			const wireBody = paramsToWireBody(params);
+			const bodyJson = JSON.stringify(paramsToWireBody(params));
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
-			const response = await fetchImpl(plan.url, {
-				method: "POST",
-				headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
-				body: JSON.stringify(wireBody),
-				signal: options?.signal,
-			});
-			if (!response.ok) {
-				const errorText = await response.text().catch(() => "");
-				throw new GoogleApiError(
-					`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText)}`,
-					response.status,
-					{ headers: response.headers },
-				);
-			}
-			if (!response.body) {
-				throw new Error("Google API returned an empty response body");
-			}
+			const openStream = async (): Promise<ReadableStream<Uint8Array>> => {
+				const response = await fetchImpl(plan.url, {
+					method: "POST",
+					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
+					body: bodyJson,
+					signal: options?.signal,
+				});
+				if (!response.ok) {
+					const errorText = await response.text().catch(() => "");
+					throw new AIError.GoogleApiError(
+						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText)}`,
+						response.status,
+						{ headers: response.headers },
+					);
+				}
+				if (!response.body) {
+					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
+						provider: model.provider,
+						kind: "empty-body",
+					});
+				}
+				return response.body as ReadableStream<Uint8Array>;
+			};
 
-			const googleStream = readSseJson<GenerateContentResponse>(response.body, options?.signal, event =>
-				options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
-			);
-
+			let body = await openStream();
 			stream.push({ type: "start", partial: output });
-			await consumeGoogleStream({
-				googleStream,
-				output,
-				stream,
-				model,
-				options,
-				retainTextSignature,
-				onFirstToken: () => {
-					firstTokenTime = Date.now();
-				},
-			});
 
-			output.duration = Date.now() - startTime;
+			// Gemini occasionally finishes with `finishReason: STOP` while emitting only an empty
+			// text part and no tool call. Delivered as-is the agent receives a blank message and
+			// silently halts mid-task, so retry a bounded number of times before giving up.
+			for (let emptyAttempt = 0; ; emptyAttempt++) {
+				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, event =>
+					options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
+				);
+				await consumeGoogleStream({
+					googleStream,
+					output,
+					stream,
+					model,
+					options,
+					retainTextSignature,
+					onFirstToken: () => {
+						firstTokenTime = performance.now();
+					},
+				});
+
+				if (output.stopReason !== "stop" || hasMeaningfulGoogleContent(output)) break;
+				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
+					throw new AIError.ProviderResponseError(
+						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
+						{ provider: model.provider, kind: "empty-body" },
+					);
+				}
+				try {
+					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
+				} catch {
+					throw new AIError.AbortError();
+				}
+				resetGoogleStreamOutputForRetry(output);
+				body = await openStream();
+			}
+
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();

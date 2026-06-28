@@ -1,11 +1,12 @@
 import * as path from "node:path";
 import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
+import { type } from "arktype";
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -34,16 +35,17 @@ import { queueResolveHandler } from "./resolve";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-const astEditOpSchema = z.object({
-	pat: z.string().describe("ast pattern"),
-	out: z.string().describe("replacement template"),
+const astEditOpSchema = type({
+	pat: type("string").describe("ast pattern"),
+	out: type("string").describe("replacement template"),
 });
 
-const astEditSchema = z.object({
-	ops: z.array(astEditOpSchema).min(1).describe("rewrite ops"),
-	paths: z
-		.array(z.string().describe("file, directory, glob, or internal URL to rewrite"))
-		.min(1)
+const astEditSchema = type({
+	ops: astEditOpSchema.array().atLeastLength(1).describe("rewrite ops"),
+	paths: type("string")
+		.describe("file, directory, glob, or internal URL to rewrite")
+		.array()
+		.atLeastLength(1)
 		.describe("files, directories, globs, or internal URLs to rewrite"),
 });
 
@@ -164,16 +166,18 @@ export interface AstEditToolDetails {
 	cwd?: string;
 }
 
+type AstEditSchemaInfer = typeof astEditSchema.infer;
+
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
 	readonly approval = (args: unknown) => {
-		const paths = Array.isArray((args as Partial<z.infer<typeof astEditSchema>>).paths)
-			? ((args as Partial<z.infer<typeof astEditSchema>>).paths as string[])
+		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
+			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
 			: [];
 		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const params = args as Partial<z.infer<typeof astEditSchema>>;
+		const params = args as Partial<AstEditSchemaInfer>;
 		const lines: string[] = [];
 		const ops = Array.isArray(params.ops) ? params.ops : [];
 		const firstOp = ops[0];
@@ -194,6 +198,51 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly description: string;
 	readonly parameters = astEditSchema;
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<AstEditSchemaInfer>[] = [
+		{
+			caption: "Rename a call site across TypeScript files",
+			call: {
+				ops: [{ pat: "oldApi($$$ARGS)", out: "newApi($$$ARGS)" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Delete matching calls",
+			call: {
+				ops: [{ pat: "console.log($$$ARGS)", out: "" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Rewrite import source path",
+			call: {
+				ops: [{ pat: 'import { $$$IMPORTS } from "old-package"', out: 'import { $$$IMPORTS } from "new-package"' }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Modernize to optional chaining (same metavariable enforces identity)",
+			call: {
+				ops: [{ pat: "$A && $A()", out: "$A?.()" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Swap two arguments using captures",
+			call: {
+				ops: [{ pat: "assertEqual($A, $B)", out: "assertEqual($B, $A)" }],
+				paths: ["tests/**/*.ts"],
+			},
+		},
+		{
+			caption: "Python — convert print calls to logging",
+			call: {
+				ops: [{ pat: "print($$$ARGS)", out: "logger.info($$$ARGS)" }],
+				paths: ["src/**/*.py"],
+			},
+		},
+	];
 	readonly deferrable = true;
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
@@ -202,7 +251,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 
 	async execute(
 		_toolCallId: string,
-		params: z.infer<typeof astEditSchema>,
+		params: AstEditSchemaInfer,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AstEditToolDetails>,
 		_context?: AgentToolContext,
@@ -234,6 +283,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				settings: this.session.settings,
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
+				skills: this.session.skills,
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 

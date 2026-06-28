@@ -151,11 +151,30 @@ Handlers and tool `execute` receive `ctx` with:
 - `cwd`
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
+- `models` (read-only model query — see below)
 - `getContextUsage()`
 - `compact(...)`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `getSystemPrompt()`
+- `memory` (optional structured memory runtime — status/search/save across the configured backend)
+
+### Model selection (`ctx.models`)
+
+`ctx.models` is a read-only facade for picking and comparing models the same way core does:
+
+- `list()` — authenticated models available this session.
+- `current()` — the live session model (read lazily, so it reflects `/model` switches).
+- `resolve(spec)` — a model string (`provider/id`, bare id) or role alias (`pi/slow`, a configured role) → `Model`, honoring the same settings-backed aliases and match preferences as `--model`. Returns `undefined` when nothing matches.
+- `family(model)` — an opaque lineage token for "same family?" checks (Claude point releases share a token; Claude and GPT differ). Compare it; don't persist it (the vocabulary tracks new releases).
+
+```ts
+// Pick a model from a different family than the current one (e.g. a cross-family reviewer).
+const current = ctx.models.current();
+const contrasting = ctx.models
+  .list()
+  .find(m => current && ctx.models.family(m) !== ctx.models.family(current));
+```
 
 ## 3) Command context (`ExtensionCommandContext`)
 
@@ -197,7 +216,8 @@ Cancelable pre-events:
 - `before_provider_request` (may replace provider request payload)
 - `after_provider_response`
 - `context`
-- `agent_start` / `agent_end`
+- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
+- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end`
 
@@ -206,6 +226,7 @@ Cancelable pre-events:
 - `tool_call` (pre-exec, may block)
 - `tool_result` (post-exec, may patch content/details/isError)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
+- `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
 

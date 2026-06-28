@@ -177,12 +177,69 @@ export function resolveLoaderCandidates({
 }
 
 // =========================================================================
+
+/**
+ * Remove version-pinned native cache directories older than the loaded package.
+ * Best-effort by design: permission errors and concurrent processes must not
+ * abort startup after the native addon has already loaded successfully.
+ *
+ * @param {{ nativesDir: string; currentVersion: string }} input
+ * @returns {string[]}
+ */
+export function cleanupStaleNativeVersions({ nativesDir, currentVersion }) {
+	const removed = [];
+	let entries;
+	try {
+		entries = fs.readdirSync(nativesDir, { withFileTypes: true });
+	} catch {
+		return removed;
+	}
+
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name === currentVersion) continue;
+		const targetPath = path.join(nativesDir, entry.name);
+		try {
+			fs.rmSync(targetPath, { recursive: true, force: true });
+			removed.push(targetPath);
+		} catch {
+			// Stale caches are opportunistic cleanup only.
+		}
+	}
+	return removed;
+}
+
 // Side-effectful loader. Everything below runs only when `loadNative()` is
 // called from `native/index.js` — tests that only import the pure helpers
 // above pay nothing for variant detection, subprocess spawns, or fs probes.
 // =========================================================================
 
+/**
+ * Hidden env key for the resolved x64 variant. Once any context (main thread,
+ * worker, subprocess) finishes variant detection, the result is written here
+ * so every Bun worker and child process spawned afterwards inherits the same
+ * verdict and skips re-detection. See `selectCpuVariant` for the lookup order.
+ */
+const VARIANT_CACHE_ENV_KEY = "__PI_NATIVE_VARIANT_CACHE";
+
+/**
+ * Spawn `command` with `args` and capture stdout. Prefers `Bun.spawnSync`
+ * because Bun's `child_process.spawnSync` shim has been observed to return
+ * non-zero / null in worker threads on macOS even when the same binary works
+ * fine from the parent — the failure mode behind issue #3238, where the worker
+ * silently falls back to the "baseline" variant. Falls back to the Node shim
+ * for non-Bun embeds.
+ */
 function runCommand(command, args) {
+	if (typeof Bun !== "undefined" && typeof Bun.spawnSync === "function") {
+		try {
+			const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" });
+			if (result.exitCode === 0) {
+				return result.stdout.toString("utf-8").trim();
+			}
+		} catch {
+			// fall through to childProcess
+		}
+	}
 	try {
 		const result = childProcess.spawnSync(command, args, { encoding: "utf-8" });
 		if (result.error) return null;
@@ -215,12 +272,15 @@ function detectAvx2Support() {
 	}
 
 	if (process.platform === "darwin") {
-		const leaf7 = runCommand("sysctl", ["-n", "machdep.cpu.leaf7_features"]);
-		if (leaf7 && /\bAVX2\b/i.test(leaf7)) {
-			return true;
+		// Try the absolute path before bare `sysctl`: PATH may not include
+		// `/usr/sbin` in worker/embedded spawn contexts (issue #3238).
+		for (const sysctlBin of ["/usr/sbin/sysctl", "sysctl"]) {
+			const leaf7 = runCommand(sysctlBin, ["-n", "machdep.cpu.leaf7_features"]);
+			if (leaf7 && /\bAVX2\b/i.test(leaf7)) return true;
+			const features = runCommand(sysctlBin, ["-n", "machdep.cpu.features"]);
+			if (features && /\bAVX2\b/i.test(features)) return true;
 		}
-		const features = runCommand("sysctl", ["-n", "machdep.cpu.features"]);
-		return Boolean(features && /\bAVX2\b/i.test(features));
+		return false;
 	}
 
 	if (process.platform === "win32") {
@@ -236,10 +296,63 @@ function detectAvx2Support() {
 	return false;
 }
 
+/**
+ * Pure variant-selection helper, exposed for unit tests. Resolution order:
+ *
+ *   1. `override` (user-facing `PI_NATIVE_VARIANT` env var). Always wins.
+ *   2. The private `__PI_NATIVE_VARIANT_CACHE` env var, populated by the first
+ *      context that detected at runtime. Lets child workers / subprocesses
+ *      inherit the main thread's verdict instead of re-spawning `sysctl` etc.
+ *      from a worker context where the spawn may fail (issue #3238).
+ *   3. `detectAvx2()` — the slow path, called at most once per process.
+ *
+ * Non-x64 architectures return `{ variant: null }` and never set the cache.
+ * When detection runs, the result is surfaced as `cacheEnvKey`/`cacheEnvValue`
+ * so the caller can write `process.env` (the pure helper itself stays
+ * side-effect-free, which keeps it easy to test).
+ *
+ * @param {{
+ *   arch: string;
+ *   override: "modern" | "baseline" | null | undefined;
+ *   env: Record<string, string | undefined>;
+ *   detectAvx2: () => boolean;
+ * }} input
+ * @returns {{
+ *   variant: "modern" | "baseline" | null;
+ *   source: "non-x64" | "override" | "cache" | "detect";
+ *   cacheEnvKey?: string;
+ *   cacheEnvValue?: string;
+ * }}
+ */
+export function selectCpuVariant({ arch, override, env, detectAvx2 }) {
+	if (arch !== "x64") return { variant: null, source: "non-x64" };
+	if (override === "modern" || override === "baseline") {
+		return { variant: override, source: "override" };
+	}
+	const cached = env[VARIANT_CACHE_ENV_KEY];
+	if (cached === "modern" || cached === "baseline") {
+		return { variant: cached, source: "cache" };
+	}
+	const variant = detectAvx2() ? "modern" : "baseline";
+	return {
+		variant,
+		source: "detect",
+		cacheEnvKey: VARIANT_CACHE_ENV_KEY,
+		cacheEnvValue: variant,
+	};
+}
+
 function resolveCpuVariant(override) {
-	if (process.arch !== "x64") return null;
-	if (override) return override;
-	return detectAvx2Support() ? "modern" : "baseline";
+	const result = selectCpuVariant({
+		arch: process.arch,
+		override,
+		env: process.env,
+		detectAvx2: detectAvx2Support,
+	});
+	if (result.cacheEnvKey) {
+		process.env[result.cacheEnvKey] = result.cacheEnvValue;
+	}
+	return result.variant;
 }
 
 function selectEmbeddedAddonFile(selectedVariant) {
@@ -485,6 +598,26 @@ function validateLoadedBindings(ctx, bindings, candidate) {
 	);
 }
 
+/**
+ * Install the addon's bounded Tokio runtime now that `dlopen` has returned and
+ * the dynamic-loader lock is released. The Rust `#[module_init]` deliberately
+ * does NOT build the runtime — spawning worker threads under the loader lock
+ * deadlocks on some hosts — so it exposes `__ompInstallTokioRuntime` for the
+ * loader to call once, before any async native runs. Best-effort: older addons
+ * predating this export simply fall back to napi-rs's default runtime.
+ */
+function installNativeTokioRuntime(bindings) {
+	const install = bindings.__ompInstallTokioRuntime;
+	if (typeof install !== "function") return;
+	try {
+		install();
+		startupMarker("native:tokioRuntime:installed");
+	} catch (err) {
+		startupMarker(`native:tokioRuntime:failed:${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
 		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
@@ -518,7 +651,8 @@ function initLoaderContext() {
 	const packageVersion = packageJson.version;
 	const nativeDir = path.join(import.meta.dir, "..", "native");
 	const execDir = path.dirname(process.execPath);
-	const versionedDir = path.join(getNativesDir(), packageVersion);
+	const nativesDir = getNativesDir();
+	const versionedDir = path.join(nativesDir, packageVersion);
 	const userDataDir =
 		process.platform === "win32"
 			? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "omp")
@@ -576,6 +710,7 @@ function initLoaderContext() {
 		candidates,
 		versionSentinelExport,
 		isWorkspaceLoad,
+		nativesDir,
 	};
 }
 
@@ -595,6 +730,8 @@ export function loadNative() {
 			startupMarker(`native:require:${path.basename(candidate)}`);
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
+			installNativeTokioRuntime(bindings);
+	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {

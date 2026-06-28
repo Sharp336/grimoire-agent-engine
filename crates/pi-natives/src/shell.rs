@@ -245,6 +245,15 @@ impl Shell {
 		self.inner.abort().await;
 		Ok(())
 	}
+
+	/// Count live background jobs (`&`/`nohup` children still running) on this
+	/// session. Completed jobs are reaped first. The host uses this to retain a
+	/// per-call shell whose background processes are still running instead of
+	/// dropping it (which would SIGKILL them via kill-on-drop).
+	#[napi]
+	pub async fn live_background_job_count(&self) -> u32 {
+		self.inner.live_background_job_count().await
+	}
 }
 
 /// Execute a brush shell command.
@@ -352,7 +361,9 @@ mod tests {
 		ShellRunOptions as CoreShellRunOptions,
 		cancel::{AbortReason, CancelToken},
 	};
-	use tokio::{sync::mpsc, time};
+	#[cfg(unix)]
+	use tokio::sync::mpsc;
+	use tokio::time;
 
 	use super::CoreShell;
 
@@ -424,9 +435,13 @@ mod tests {
 			.parse::<i32>()
 			.expect("child pid parses");
 		// SAFETY: `getsid(0)` only queries the current process session; the
-		// return value is checked below.
+		// return value is checked below. Inside a PID namespace (e.g. the
+		// containerized CI runner) the host's session leader can live outside
+		// the namespace, so `getsid(0)` legitimately reports 0 — only -1 is a
+		// real failure. The meaningful invariant is that the child detached
+		// into its own session (`child_sid == child_pid`, distinct from host).
 		let host_sid = unsafe { libc::getsid(0) };
-		assert!(host_sid > 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
+		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 		// SAFETY: `child_pid` is a live positive PID reported by the child; the
 		// return value is checked below.
 		let child_sid = unsafe { libc::getsid(child_pid) };

@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { renderGalleryState, resolveFixture } from "@oh-my-pi/pi-coding-agent/cli/gallery-cli";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editToolRenderer } from "@oh-my-pi/pi-coding-agent/edit/renderer";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { Text, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -87,7 +89,7 @@ describe("editToolRenderer", () => {
 		const uiTheme = await getUiTheme();
 		const component = editToolRenderer.renderCall(
 			{
-				input: "[packages/coding-agent/src/edit/renderer.ts]\ninsert tail:\n+// preview",
+				input: "[packages/coding-agent/src/edit/renderer.ts]\nINS.TAIL:\n+// preview",
 			},
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "hashline" } },
 			uiTheme,
@@ -108,7 +110,7 @@ describe("editToolRenderer", () => {
 				input: [
 					"*** Begin Patch",
 					"[crates/pi-natives/src/shell.rs]",
-					"insert tail:",
+					"INS.TAIL:",
 					"+pub fn streaming_preview() {",
 				].join("\n"),
 			},
@@ -119,7 +121,7 @@ describe("editToolRenderer", () => {
 
 		const rendered = Bun.stripANSI(component.render(160).join("\n"));
 		expect(rendered).toContain("crates/pi-natives/src/shell.rs");
-		expect(rendered).not.toContain("insert tail:");
+		expect(rendered).not.toContain("INS.TAIL:");
 		expect(rendered).not.toContain("+pub fn streaming_preview() {");
 		expect(rendered).not.toContain("*** Begin Patch");
 	});
@@ -128,7 +130,7 @@ describe("editToolRenderer", () => {
 		const uiTheme = await getUiTheme();
 		const compactComponent = editToolRenderer.renderCall(
 			{
-				input: "[foo bar.ts]\ninsert head:\n+// preview",
+				input: "[foo bar.ts]\nINS.HEAD:\n+// preview",
 			},
 			{ expanded: true, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "hashline" } },
 			uiTheme,
@@ -136,7 +138,7 @@ describe("editToolRenderer", () => {
 
 		const quotedComponent = editToolRenderer.renderCall(
 			{
-				input: "['baz qux.ts']\ninsert head:\n+// preview",
+				input: "['baz qux.ts']\nINS.HEAD:\n+// preview",
 			},
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "hashline" } },
 			uiTheme,
@@ -155,7 +157,7 @@ describe("editToolRenderer", () => {
 		// renderer keeps the title clean.
 		const canonical = editToolRenderer.renderCall(
 			{
-				input: "[packages/coding-agent/src/slash-commands/builtin-registry.ts]\ninsert head:\n+// preview",
+				input: "[packages/coding-agent/src/slash-commands/builtin-registry.ts]\nINS.HEAD:\n+// preview",
 			},
 			{ expanded: true, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "hashline" } },
 			uiTheme,
@@ -163,7 +165,7 @@ describe("editToolRenderer", () => {
 
 		// While streaming, the closing bracket may not have arrived yet.
 		const partial = editToolRenderer.renderCall(
-			{ input: "[a/b/c.ts\ninsert head:\n+// preview" },
+			{ input: "[a/b/c.ts\nINS.HEAD:\n+// preview" },
 			{ expanded: true, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "hashline" } },
 			uiTheme,
 		);
@@ -190,7 +192,7 @@ describe("editToolRenderer", () => {
 			{ expanded: false, isPartial: false, renderContext: { editMode: "hashline" } },
 			uiTheme,
 			{
-				input: "[packages/coding-agent/src/edit/renderer.ts]\ninsert tail:\n+// preview",
+				input: "[packages/coding-agent/src/edit/renderer.ts]\nINS.TAIL:\n+// preview",
 			},
 		);
 
@@ -277,17 +279,18 @@ describe("editToolRenderer", () => {
 			// The trailing payload line carries no newline — the common shape for a
 			// single-line edit. The streaming pass trims that in-flight line, so the
 			// preview only becomes computable once args are marked complete.
-			const input = `[memory.ts#${tag}]\nreplace 2..2:\n+export const b = 22;`;
+			const input = `[memory.ts#${tag}]\nSWAP 2.=2:\n+export const b = 22;`;
 			const component = new ToolExecutionComponent("edit", { input }, { snapshots }, hashlineTool, uiStub, tmpDir);
 
 			component.setArgsComplete();
-			await Bun.sleep(50);
 
-			const rendered = Bun.stripANSI(component.render(160).join("\n"));
+			// The preview diff computes asynchronously after args complete; poll
+			// instead of a fixed sleep so the slower CI VM has time to finish it.
+			const rendered = await waitForRenderedText(component, 160, "export const b = 22;");
 			expect(rendered).toContain("export const b = 22;");
 			expect(rendered).not.toContain("No changes would be made");
 		} finally {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			await removeWithRetries(tmpDir);
 		}
 	});
 
@@ -303,7 +306,7 @@ describe("editToolRenderer", () => {
 
 			const snapshots = new InMemorySnapshotStore();
 			const tag = snapshots.record(filePath, content);
-			const input = `[memory.ts#${tag}]\nreplace 2..2:\n+export const b = 22;\n`;
+			const input = `[memory.ts#${tag}]\nSWAP 2.=2:\n+export const b = 22;\n`;
 			const component = new ToolExecutionComponent(
 				"edit",
 				{ __partialJson: input },
@@ -318,7 +321,7 @@ describe("editToolRenderer", () => {
 			expect(rendered).toContain("export const b = 22;");
 			expect(rendered).not.toContain(" …");
 		} finally {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			await removeWithRetries(tmpDir);
 		}
 	});
 
@@ -411,5 +414,108 @@ describe("editToolRenderer", () => {
 		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
 		expect(lines[1]).toStartWith("│+1│");
 		expect(lines[1]).not.toStartWith("│ +1│");
+	});
+
+	it("does not leak the first file's no-change preview into a multi-file delete result", async () => {
+		const uiTheme = await getUiTheme();
+		const paths = ["scripts/a.ts", "scripts/a.user.md", "scripts/a.system.md"];
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: paths.map(p => `Deleted ${p}`).join("\n") }],
+				details: {
+					diff: "",
+					perFileResults: paths.map(path => ({ path, diff: "", op: "delete" as const, oldText: "x\n" })),
+				},
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					// The streaming preview only ever holds the first file's result; a
+					// delete card must not fall back to it (issue: every card showed
+					// "No changes would be made to <first file>").
+					editDiffPreview: { error: "No changes would be made to scripts/a.ts." },
+				},
+			},
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).not.toContain("No changes would be made");
+		for (const path of paths) expect(rendered).toContain(path);
+	});
+
+	it("renders a move-only result as source → destination with no diff body", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Moved a.ts to b.ts" }],
+				details: { diff: "", op: "update", path: "b.ts", move: "b.ts", sourcePath: "a.ts" },
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					editDiffPreview: { error: "No changes would be made to other.ts." },
+				},
+			},
+			uiTheme,
+			{ input: "[a.ts#1a2b]\nMV b.ts" },
+		);
+
+		const header = Bun.stripANSI(component.render(160)[0]);
+		// Header shows the move as source → destination, not the buggy dest → dest.
+		expect(header).toContain("a.ts");
+		expect(header).toContain("b.ts");
+		expect(header).toContain("→");
+		expect(Bun.stripANSI(component.render(160).join("\n"))).not.toContain("No changes");
+	});
+
+	it("uses the result's own path for a genuine no-op, not the shared preview", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "no change" }],
+				details: { diff: "", op: "update", path: "scripts/real.ts" },
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					editDiffPreview: { error: "No changes would be made to scripts/WRONG.ts." },
+				},
+			},
+			uiTheme,
+			{ file_path: "scripts/real.ts" },
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).toContain("No changes were made");
+		expect(rendered).toContain("scripts/real.ts");
+		expect(rendered).not.toContain("WRONG");
+	});
+
+	it("renders the delete gallery fixture as a Delete card without a no-change body", async () => {
+		await getUiTheme();
+		const text = (await renderGalleryState("edit_delete", resolveFixture("edit_delete"), "success", 160))
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(text).toContain("Delete");
+		expect(text).toContain("scripts/prune-changelogs.ts");
+		expect(text).not.toContain("No changes");
+	});
+
+	it("renders the move gallery fixture as source → destination", async () => {
+		await getUiTheme();
+		const text = (await renderGalleryState("edit_move", resolveFixture("edit_move"), "success", 160))
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(text).toContain("scripts/prune-changelogs.ts");
+		expect(text).toContain("scripts/archived/prune-changelogs.ts");
+		expect(text).toContain("→");
+		expect(text).not.toContain("No changes");
 	});
 });

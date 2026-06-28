@@ -34,11 +34,17 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 	const official = isOfficialAnthropicApiUrl(baseUrl);
 	// Z.AI's Anthropic-compatible proxy lives at `api.z.ai/api/anthropic`.
 	const isZai = modelMatchesHost(spec, "zai");
+	// GitHub Copilot's Anthropic-compatible proxy (api.githubcopilot.com/v1/messages)
+	// rejects the per-tool `eager_input_streaming` field with
+	// `tools.0.custom.eager_input_streaming: Extra inputs are not permitted` and
+	// doesn't whitelist the `fine-grained-tool-streaming-2025-05-14` beta either
+	// (issue #2558), so eager tool-input streaming is unavailable on this host.
+	const isCopilot = modelMatchesHost(spec, "githubCopilot");
 	const compat: ResolvedAnthropicCompat = {
 		officialEndpoint: official,
 		disableStrictTools: false,
 		disableAdaptiveThinking: false,
-		supportsEagerToolInputStreaming: true,
+		supportsEagerToolInputStreaming: !isCopilot,
 		// Long cache retention is only sent to the official API by default;
 		// proxies opt in explicitly via `compat.supportsLongCacheRetention: true`.
 		supportsLongCacheRetention: official,
@@ -60,7 +66,17 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		// loses the reasoning chain and can destabilize the next tool-call
 		// arguments (#2005). Known non-signing hosts (Z.AI, DeepSeek) are also
 		// preserved for compatibility.
-		replayUnsignedThinking: isZai || modelMatchesHost(spec, "deepseekFamily") || (spec.reasoning && !official),
+		//
+		// GitHub Copilot's `anthropic-messages` proxy is excluded: it forwards to
+		// signature-enforcing Anthropic and returns full thinking signatures, so it
+		// is a SIGNING endpoint. Replaying a stripped/unsigned thinking block as
+		// `signature: ""` there 400s the whole request ("Invalid signature") — most
+		// visibly when a checkpoint/branch-return turn's end_turn-bound signature is
+		// stripped on replay (issue #2851). Treating it like official Anthropic
+		// degrades such blocks to text instead, which the API accepts.
+		replayUnsignedThinking:
+			!isCopilot && (isZai || modelMatchesHost(spec, "deepseekFamily") || (spec.reasoning && !official)),
+		escapeBuiltinToolNames: modelMatchesHost(spec, "umans"),
 	};
 	applyCompatOverrides(compat, spec.compat);
 	return compat;

@@ -7,6 +7,7 @@ import type { MemoryInput, Metadata } from "../types";
 import { AnnotationStore } from "./annotations";
 import { BankManager } from "./banks";
 import { BeamMemory, initBeam } from "./beam/index";
+import { reconcileEmbeddingModel } from "./beam/store";
 import type { RecallEnhancedOptions, RecallOptions, RecallResult, SleepResult } from "./beam/types";
 import { EpisodicGraph } from "./episodic-graph";
 import {
@@ -42,14 +43,24 @@ export interface MnemopiOptions {
 	readonly llmApiKey?: ApiKey;
 	readonly llmModel?: string | Model<Api>;
 	readonly llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
+	readonly proactiveLinking?: boolean;
 	/** Escalate best-effort failure logs (embedding pipeline) from debug to warn. */
 	readonly debug?: boolean;
+	/**
+	 * When `false`, skip the embedding-model reconcile (wipe-and-rebuild) on open.
+	 * Read-only / ephemeral consumers (e.g. a stats snapshot) set this so an open
+	 * never triggers a destructive migration whose background rebuild the process
+	 * would exit before completing. Defaults to `true`.
+	 */
+	readonly reconcile?: boolean;
 }
 
 export interface RememberInput extends MemoryInput {
 	readonly extract?: boolean;
 	readonly extractEntities?: boolean;
 	readonly extract_entities?: boolean;
+	readonly extractText?: string | null;
+	readonly extract_text?: string | null;
 	readonly trustTier?: string | null;
 	readonly trust_tier?: string | null;
 	readonly memoryType?: string | null;
@@ -66,6 +77,12 @@ export interface RememberFacadeOptions {
 	readonly extractEntities?: boolean;
 	readonly extract_entities?: boolean;
 	readonly extract?: boolean;
+	/**
+	 * Override the text passed to fact/entity extraction. When unset, the
+	 * stored content is used. See {@link RememberOptions.extractText}.
+	 */
+	readonly extractText?: string | null;
+	readonly extract_text?: string | null;
 	readonly trustTier?: string | null;
 	readonly trust_tier?: string | null;
 	readonly timestamp?: string | Date | null;
@@ -130,6 +147,7 @@ type FacadeRememberOptions = {
 	scope: string;
 	extractEntities: boolean;
 	extract: boolean;
+	extractText: string | undefined;
 	trustTier: string | undefined;
 	veracity: string | undefined;
 	memoryType: string | undefined;
@@ -153,19 +171,22 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 	const embeddingApiUrl = options.embeddingApiUrl ?? nestedEmbeddings?.apiUrl;
 	const embeddingApiKey = options.embeddingApiKey ?? nestedEmbeddings?.apiKey;
 	const embeddingProvider = resolveEmbeddingProvider(nestedEmbeddings?.provider);
+	const embeddingMaxInputChars = nestedEmbeddings?.maxInputChars;
 
 	const embeddings =
 		embeddingDisabled !== undefined ||
 		embeddingModel !== undefined ||
 		embeddingApiUrl !== undefined ||
 		embeddingApiKey !== undefined ||
-		embeddingProvider !== undefined
+		embeddingProvider !== undefined ||
+		embeddingMaxInputChars !== undefined
 			? {
 					disabled: embeddingDisabled,
 					model: embeddingModel,
 					apiUrl: embeddingApiUrl,
 					apiKey: embeddingApiKey,
 					provider: embeddingProvider,
+					maxInputChars: embeddingMaxInputChars,
 				}
 			: undefined;
 
@@ -247,6 +268,8 @@ function resolveDbPath(options: MnemopiOptions, bank: string): string | undefine
 function toRememberOptions(input: string | RememberInput, options: RememberFacadeOptions) {
 	const memory = typeof input === "string" ? null : input;
 	const timestamp = normalizeDate(options.timestamp ?? memory?.timestamp);
+	const extractText =
+		options.extractText ?? options.extract_text ?? memory?.extractText ?? memory?.extract_text ?? null;
 	const rememberOptions: FacadeRememberOptions = {
 		source: options.source ?? memory?.source ?? "conversation",
 		importance: options.importance ?? memory?.importance ?? 0.5,
@@ -260,6 +283,7 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
 			memory?.extract_entities ??
 			false,
 		extract: options.extract ?? memory?.extract ?? false,
+		extractText: extractText ?? undefined,
 		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
 		veracity: options.veracity ?? memory?.veracity ?? undefined,
 		memoryType: options.memoryType ?? options.memory_type ?? memory?.memoryType ?? memory?.memory_type ?? undefined,
@@ -372,6 +396,7 @@ export class Mnemopi {
 			authorId: this.authorId,
 			authorType: this.authorType,
 			channelId: this.channelId,
+			proactiveLinking: options.proactiveLinking,
 		});
 		this.#ownsDb = options.db === undefined;
 		if (options.db !== undefined) {
@@ -388,6 +413,15 @@ export class Mnemopi {
 		}
 		this.conn = this.beam.db;
 		this.db = this.beam.db;
+		// Wipe-and-rebuild stale embeddings when the configured model changed since
+		// the vectors were written. Runs inside the runtime scope so
+		// `currentEmbeddingModel()` reflects this instance's configured model.
+		// Skipped for read-only opens (`reconcile: false`) so an ephemeral stats
+		// reader never triggers a destructive migration whose async rebuild it would
+		// exit before completing — which would otherwise lose the embeddings.
+		if (options.reconcile !== false) {
+			this.#withRuntimeOptions(() => reconcileEmbeddingModel(this.beam));
+		}
 	}
 
 	close(): void {

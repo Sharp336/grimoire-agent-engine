@@ -1,24 +1,28 @@
-import { extractHttpStatusFromError, fetchWithRetry } from "@oh-my-pi/pi-utils";
-import { ProviderHttpError } from "../errors";
+import { fetchWithRetry, parseStreamingJson } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
-	DeveloperMessage,
+	ImageContent,
 	Message,
 	Model,
 	StreamFunction,
 	StreamOptions,
+	TextContent,
 	Tool,
 	ToolChoice,
-	ToolResultMessage,
-	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
+import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { type CapturedHttpErrorResponse, finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
-import { parseStreamingJson } from "../utils/json-parse";
+import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
+import {
+	armPreResponseTimeout,
+	getOpenAIStreamFirstEventTimeoutMs,
+	getOpenAIStreamIdleTimeoutMs,
+} from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
 import {
 	getStreamMarkupHealingPattern,
@@ -27,11 +31,7 @@ import {
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
 import { transformMessages } from "./transform-messages";
-
-/** Non-2xx response from the Ollama `/api/chat` endpoint. */
-export class OllamaApiError extends ProviderHttpError {
-	override readonly name = "OllamaApiError";
-}
+import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
 
 export interface OllamaChatOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -86,7 +86,7 @@ type OllamaChatChunk = {
 
 type InternalToolCallBlock = AssistantMessage["content"][number] & {
 	type: "toolCall";
-	partialJson?: string;
+	[kStreamingPartialJson]?: string;
 };
 
 function normalizeBaseUrl(baseUrl?: string): string {
@@ -98,21 +98,31 @@ function normalizeBaseUrl(baseUrl?: string): string {
 	return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
 }
 
+type OllamaThinkValue = boolean | "low" | "medium" | "high" | "max" | undefined;
+
 function mapReasoning(
+	model: Model<"ollama-chat">,
 	reasoning: OllamaChatOptions["reasoning"],
 	disableReasoning: boolean | undefined,
-	modelReasoning: boolean,
-): boolean | "low" | "medium" | "high" | undefined {
+): OllamaThinkValue {
+	const modelReasoning = model.reasoning;
 	if (disableReasoning && modelReasoning) {
 		return false;
 	}
-	switch (reasoning) {
+	const mappedReasoning =
+		model.provider === "ollama-cloud" && reasoning
+			? (model.thinking?.effortMap?.[reasoning] ?? reasoning)
+			: reasoning;
+	switch (mappedReasoning) {
 		case "minimal":
 		case "low":
 			return "low";
 		case "medium":
 			return "medium";
 		case "high":
+			return "high";
+		case "max":
+			return "max";
 		case "xhigh":
 			return "high";
 		default:
@@ -159,40 +169,39 @@ function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolCho
 	return [];
 }
 
-function toPlainContent(content: string | Array<{ type: "text" | "image"; text?: string; data?: string }>): {
+function toPlainContent(
+	content: string | ReadonlyArray<TextContent | ImageContent>,
+	supportsImages: boolean,
+): {
 	content: string;
 	images?: string[];
 } {
 	if (typeof content === "string") {
 		return { content };
 	}
-	const textParts: string[] = [];
-	const images: string[] = [];
-	for (const block of content) {
-		if (block.type === "text" && typeof block.text === "string") {
-			textParts.push(block.text);
-		}
-		if (block.type === "image" && typeof block.data === "string") {
-			images.push(block.data);
-		}
-	}
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const text = textBlocks.map(block => block.text).join("\n");
 	return {
-		content: textParts.join("\n"),
-		...(images.length > 0 ? { images } : {}),
+		content: joinTextWithImagePlaceholder(text, omittedImages),
+		...(imageBlocks.length > 0 ? { images: imageBlocks.map(block => block.data) } : {}),
 	};
 }
 
-function convertMessage(message: Message): OllamaMessage {
+function convertMessage(
+	message: Message,
+	supportsImages: boolean,
+	developerRole: "system" | "user" = "user",
+): OllamaMessage {
 	if (message.role === "user") {
-		const converted = toPlainContent(message.content as UserMessage["content"]);
+		const converted = toPlainContent(message.content, supportsImages);
 		return { role: "user", ...converted };
 	}
 	if (message.role === "developer") {
-		const converted = toPlainContent(message.content as DeveloperMessage["content"]);
-		return { role: "system", ...converted };
+		const converted = toPlainContent(message.content, supportsImages);
+		return { role: developerRole, ...converted };
 	}
 	if (message.role === "toolResult") {
-		const converted = toPlainContent(message.content as ToolResultMessage["content"]);
+		const converted = toPlainContent(message.content, supportsImages);
 		return {
 			role: "tool",
 			tool_name: message.toolName,
@@ -230,22 +239,27 @@ function convertMessage(message: Message): OllamaMessage {
 }
 
 function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaMessage[] {
-	const messages: Message[] = [];
-	// Emit one developer message per ordered system prompt. The wire role is mapped to "system"
-	// by `convertMessage`, but keeping the prompts separate preserves prefix-cache stability:
-	// if only the trailing prompt changes between calls, the leading system messages keep
-	// their identical token prefix so KV-cache reuse covers them.
-	for (const systemPrompt of normalizeSystemPrompts(context.systemPrompt)) {
-		messages.push({
-			role: "developer",
-			content: systemPrompt,
-			timestamp: Date.now(),
-		});
-	}
-	messages.push(...context.messages);
+	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
+	const systemMessages: Message[] = systemPrompts.map(systemPrompt => ({
+		role: "developer",
+		content: systemPrompt,
+		timestamp: Date.now(),
+	}));
+	const messages: Message[] = [...systemMessages, ...context.messages];
 	const isCloud = model.provider === "ollama-cloud";
-	return transformMessages(messages, model).map(msg => {
-		const converted = convertMessage(msg);
+	const supportsImages = model.input.includes("image");
+	return transformMessages(messages, model).map((msg, index) => {
+		// Real `systemPrompt` entries (always emitted first) stay on Ollama's
+		// `system` role. After the static prefix, a developer turn keeps `system`
+		// when it's an agent-owned control instruction (empty/unexpected-stop
+		// retries, checkpoint rewind warning, todo reminders — all carry
+		// `attribution: "agent"`), but a user-attributed developer turn (auto-learn
+		// capture nudge, advisor cards, file-mention companions) drops to `user`.
+		// That keeps the in-conversation byte prefix stable for prefix caches
+		// (llama.cpp, #3456) without demoting mandatory agent reminders.
+		const developerRole =
+			msg.role === "developer" && (index < systemPrompts.length || msg.attribution !== "user") ? "system" : "user";
+		const converted = convertMessage(msg, supportsImages, developerRole);
 		// Ollama cloud rejects requests when assistant history messages contain the `thinking`
 		// field — it's valid in model responses but not accepted as a history input. Strip it
 		// to prevent HTTP 400 errors. Local Ollama instances are unaffected.
@@ -271,8 +285,28 @@ function convertTools(tools: Tool[] | undefined): OllamaFunctionTool[] | undefin
 	}));
 }
 
+/**
+ * Ollama Cloud rejects `num_predict` above this value with HTTP 400
+ * (`max_tokens (...) exceeds model's maximum output tokens (65536)`).
+ * The cap currently applies uniformly to cloud-served models; the cloud-side
+ * limit was confirmed empirically against `deepseek-v4-pro`/`-flash` and is
+ * the same cap surfaced for every other Ollama Cloud model we've probed.
+ *
+ * Acts as a wire-level safety net so stale `models.db` rows (or custom
+ * `modelOverrides` re-enabling `num_predict`) cannot 400 the request — even
+ * when `model.omitMaxOutputTokens` was never applied. See #3392.
+ */
+const OLLAMA_CLOUD_NUM_PREDICT_CAP = 65_536;
+
+function resolveNumPredict(model: Model<"ollama-chat">, requested: number): number {
+	if (model.provider === "ollama-cloud") {
+		return Math.min(requested, OLLAMA_CLOUD_NUM_PREDICT_CAP);
+	}
+	return requested;
+}
+
 function createChatBody(model: Model<"ollama-chat">, context: Context, options: OllamaChatOptions | undefined) {
-	const think = mapReasoning(options?.reasoning, options?.disableReasoning, model.reasoning);
+	const think = mapReasoning(model, options?.reasoning, options?.disableReasoning);
 	const toolChoice = mapToolChoice(options?.toolChoice);
 	const selectedTools = selectToolsForToolChoice(context.tools, options?.toolChoice);
 	const tools = convertTools(selectedTools);
@@ -283,7 +317,7 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 		...(think !== undefined ? { think } : {}),
 		...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
 		...(options?.maxTokens !== undefined && !model.omitMaxOutputTokens
-			? { options: { num_predict: options.maxTokens } }
+			? { options: { num_predict: resolveNumPredict(model, options.maxTokens) } }
 			: {}),
 		stream: true,
 	};
@@ -378,9 +412,9 @@ function endToolCallBlock(stream: AssistantMessageEventStream, output: Assistant
 		return;
 	}
 	const toolCall = block as InternalToolCallBlock;
-	if (toolCall.partialJson) {
-		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall.partialJson);
-		delete toolCall.partialJson;
+	if (toolCall[kStreamingPartialJson]) {
+		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall[kStreamingPartialJson]);
+		clearStreamingPartialJson(toolCall);
 	}
 	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
 }
@@ -398,6 +432,17 @@ function mapDoneReason(doneReason: string | undefined, output: AssistantMessage)
 	return "stop";
 }
 
+const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
+	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+function hasVisibleAssistantContent(output: AssistantMessage): boolean {
+	return output.content.some(block => {
+		if (block.type === "text") return block.text.trim().length > 0;
+		if (block.type === "thinking") return block.thinking.trim().length > 0;
+		return block.type === "toolCall";
+	});
+}
+
 const OLLAMA_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
 export const streamOllama: StreamFunction<"ollama-chat"> = (
@@ -407,7 +452,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	void (async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 		const output = createEmptyOutput(model);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -448,7 +493,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 					partial: output,
 				});
 			}
-			if (!firstTokenTime) firstTokenTime = Date.now();
+			if (!firstTokenTime) firstTokenTime = performance.now();
 		};
 		const appendVisibleThinking = (thinking: string): void => {
 			if (thinking.length === 0) return;
@@ -468,7 +513,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 					partial: output,
 				});
 			}
-			if (!firstTokenTime) firstTokenTime = Date.now();
+			if (!firstTokenTime) firstTokenTime = performance.now();
 		};
 		const emitHealedToolCall = (call: HealedToolCall): void => {
 			endActiveThinkingBlock();
@@ -478,7 +523,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 				id: call.id,
 				name: call.name,
 				arguments: parseStreamingJson<Record<string, unknown>>(call.arguments),
-				partialJson: call.arguments,
+				[kStreamingPartialJson]: call.arguments,
 			};
 			output.content.push(toolCall);
 			const index = output.content.length - 1;
@@ -491,7 +536,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 			});
 			endToolCallBlock(stream, output, index);
 			healedToolCallEmitted = true;
-			if (!firstTokenTime) firstTokenTime = Date.now();
+			if (!firstTokenTime) firstTokenTime = performance.now();
 		};
 		const emitHealingEvent = (event: StreamMarkupHealingEvent): void => {
 			if (event.type === "text") {
@@ -509,7 +554,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 		try {
 			const apiKey = options.apiKey || getEnvApiKey(model.provider);
 			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
+				throw new AIError.MissingApiKeyError(model.provider);
 			}
 			const baseUrl = normalizeBaseUrl(model.baseUrl);
 			let body = createChatBody(model, context, options);
@@ -525,27 +570,46 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 				url: `${baseUrl}/api/chat`,
 				body,
 			};
-			const response = await fetchWithRetry(`${baseUrl}/api/chat`, {
-				method: "POST",
-				headers: {
-					...model.headers,
-					...options.headers,
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(body),
-				signal: options.signal,
-				defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
-				fetch: options.fetch,
-			});
+			// Direct callers that bypass `register-builtins` (which installs
+			// the iterator-level watchdog) need a pre-response timer alongside
+			// `timeout: false`; otherwise an Ollama server that accepts the
+			// POST and never streams headers would hang forever (issue #2422).
+			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+			const firstEventTimeoutMs =
+				options.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
+			// Cleared the instant headers arrive (below) so the pre-response timer
+			// never aborts the actively streaming body — an absolute
+			// `AbortSignal.timeout` would (issue #2422).
+			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+			let response: Response;
+			try {
+				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
+					method: "POST",
+					headers: {
+						...model.headers,
+						...options.headers,
+						Authorization: `Bearer ${apiKey}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify(body),
+					signal: watchdog.signal,
+					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					fetch: options.fetch,
+					timeout: false,
+				});
+			} finally {
+				watchdog.clear();
+			}
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
-				throw new OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
+				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
 					headers: response.headers,
 				});
 			}
 			if (!response.body) {
-				throw new Error("Ollama returned an empty response body");
+				throw new AIError.OllamaApiError("Ollama returned an empty response body", response.status, {
+					headers: response.headers,
+				});
 			}
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of iterateNdjson(response.body)) {
@@ -567,19 +631,18 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 						});
 					}
 					if (!firstTokenTime) {
-						firstTokenTime = Date.now();
+						firstTokenTime = performance.now();
 					}
 				}
 				const chunkContent = chunk.message?.content;
 				const structuredCalls = chunk.message?.tool_calls?.length ? chunk.message.tool_calls : undefined;
 				if (chunkContent) {
 					if (streamMarkupHealing) {
-						if (structuredCalls) {
-							appendVisibleText(streamMarkupHealing.consumeWithoutCalls(chunkContent));
-						} else {
-							for (const event of streamMarkupHealing.feedEvents(chunkContent)) {
-								emitHealingEvent(event);
-							}
+						const healingEvents = structuredCalls
+							? streamMarkupHealing.feedEventsWithoutCalls(chunkContent)
+							: streamMarkupHealing.feedEvents(chunkContent);
+						for (const event of healingEvents) {
+							emitHealingEvent(event);
 						}
 					} else {
 						appendVisibleText(chunkContent);
@@ -597,7 +660,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 							id: `ollama:${output.content.length}:${name}`,
 							name,
 							arguments: parseStreamingJson<Record<string, unknown>>(partialJson),
-							partialJson,
+							[kStreamingPartialJson]: partialJson,
 						};
 						output.content.push(toolCall);
 						const index = output.content.length - 1;
@@ -610,7 +673,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 							partial: output,
 						});
 						if (!firstTokenTime) {
-							firstTokenTime = Date.now();
+							firstTokenTime = performance.now();
 						}
 					}
 				}
@@ -647,6 +710,10 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 			}
 			endActiveThinkingBlock();
 			endActiveTextBlock();
+			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
+				output.stopReason = "error";
+				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
+			}
 			// Tool calls always mean "execute and continue" in the OpenAI/Ollama contract.
 			// If the turn produced tool-call blocks but reported a natural `stop`, promote
 			// to `toolUse` so the agent loop runs them (it gates execution on the stop
@@ -654,9 +721,14 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 			if (output.stopReason === "stop" && output.content.some(block => block.type === "toolCall")) {
 				output.stopReason = "toolUse";
 			}
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;
+			}
+			if (output.stopReason === "error") {
+				stream.push({ type: "error", reason: "error", error: output });
+				stream.end();
+				return;
 			}
 			const doneReason =
 				output.stopReason === "length" ? "length" : output.stopReason === "toolUse" ? "toolUse" : "stop";
@@ -665,13 +737,20 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 		} catch (error) {
 			for (const block of output.content) {
 				if (block.type === "toolCall") {
-					delete (block as InternalToolCallBlock).partialJson;
+					clearStreamingPartialJson(block);
 				}
 			}
-			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump, capturedErrorResponse);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options.signal,
+				rawRequestDump,
+				capturedErrorResponse,
+			});
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) {
 				output.ttft = firstTokenTime - startTime;
 			}

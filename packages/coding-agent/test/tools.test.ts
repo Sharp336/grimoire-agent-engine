@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,15 +11,15 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
 import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { DEFAULT_FILE_LIMIT, MULTI_FILE_PER_FILE_MATCHES, SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { $which, Snowflake } from "@oh-my-pi/pi-utils";
-import { unzipSync } from "fflate";
+import { unzip } from "@oh-my-pi/pi-coding-agent/utils/zip";
+import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { GlobTool } from "../src/tools/glob";
+import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -36,6 +36,10 @@ function writeFileWithMtime(filePath: string, content: string, mtimeMs: number):
 	fs.writeFileSync(filePath, content);
 	const mtime = new Date(mtimeMs);
 	fs.utimesSync(filePath, mtime, mtime);
+}
+
+function shellEscape(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function createFifoOrSkip(fifoPath: string): boolean {
@@ -264,9 +268,16 @@ describe("Coding Agent Tools", () => {
 	let writeTool: WriteTool;
 	let editTool: EditTool;
 	let bashTool: BashTool;
-	let searchTool: SearchTool;
-	let findTool: FindTool;
+	let searchTool: GrepTool;
+	let findTool: GlobTool;
 	let originalEditVariant: string | undefined;
+
+	beforeAll(async () => {
+		// Warm the process-global shell snapshot + persistent session once. The
+		// first real bash command otherwise folds ~40ms of one-time shell setup
+		// into its own measured body time; this hoists it out of every test.
+		await new BashTool(createTestToolSession(os.tmpdir())).execute("warm-shell", { command: "true" });
+	});
 
 	beforeEach(() => {
 		// Force replace mode for edit tool tests using old_text/new_text
@@ -283,15 +294,15 @@ describe("Coding Agent Tools", () => {
 		writeTool = wrapToolWithMetaNotice(new WriteTool(session));
 		editTool = wrapToolWithMetaNotice(new EditTool(session));
 		bashTool = wrapToolWithMetaNotice(new BashTool(session));
-		searchTool = wrapToolWithMetaNotice(new SearchTool(session));
-		findTool = wrapToolWithMetaNotice(new FindTool(session));
+		searchTool = wrapToolWithMetaNotice(new GrepTool(session));
+		findTool = wrapToolWithMetaNotice(new GlobTool(session));
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 
 		// Clean up test directory
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 
 		// Restore original edit variant
 		if (originalEditVariant === undefined) {
@@ -792,7 +803,12 @@ describe("Coding Agent Tools", () => {
 			fs.writeFileSync(testFile, pngBuffer);
 
 			const legacyReadTool = wrapToolWithMetaNotice(
-				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false }))),
+				new ReadTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({ "inspect_image.enabled": false, "images.autoResize": false }),
+					),
+				),
 			);
 			const result = await legacyReadTool.execute("test-call-img-1", { path: testFile });
 
@@ -876,6 +892,20 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 		});
+		it.skipIf(process.platform === "win32")(
+			"should tell the model when a shebang write was chmodded executable",
+			async () => {
+				const testFile = path.join(testDir, "script.sh");
+				const content = "#!/usr/bin/env bash\nprintf 'ok\\n'\n";
+
+				const result = await writeTool.execute("test-call-3-shebang", { path: testFile, content });
+
+				expect(getTextOutput(result)).toContain("[Notice: Made executable via chmod +x]");
+				expect(result.details?.madeExecutable).toBe(true);
+				expect(fs.statSync(testFile).mode & 0o111).toBe(0o111);
+			},
+		);
+
 		it("should write to a new local:// path under the session local root", async () => {
 			const localPath = "local://handoffs/new-output.json";
 			const content = '{"ok":true}\n';
@@ -910,7 +940,7 @@ describe("Coding Agent Tools", () => {
 				`Successfully wrote ${content.length} bytes to ${path.basename(archivePath)}:pkg/README.md`,
 			);
 
-			const unzipped = unzipSync(new Uint8Array(fs.readFileSync(archivePath)));
+			const unzipped = unzip(new Uint8Array(fs.readFileSync(archivePath)));
 			expect(new TextDecoder().decode(unzipped["pkg/README.md"])).toBe(content);
 			expect(new TextDecoder().decode(unzipped["pkg/src/index.ts"])).toBe("export const archiveValue = 1;\n");
 		});
@@ -1178,7 +1208,7 @@ function b() {
 
 			const result = await interceptedBashTool.execute(
 				"test-call-8-intercept-empty",
-				{ command: `cat ${allowedFile}` },
+				{ command: `cat ${shellEscape(allowedFile)}` },
 				undefined,
 				undefined,
 				createTestToolContext(["read"]),
@@ -1248,7 +1278,9 @@ function b() {
 			const targetPath = path.join(testDir, "session", "local", "moved-via-bash.json");
 			fs.writeFileSync(sourcePath, '{"move":true}\n');
 
-			await bashTool.execute("test-call-8-local-mv", { command: `mv ${sourcePath} local://moved-via-bash.json` });
+			await bashTool.execute("test-call-8-local-mv", {
+				command: `mv ${shellEscape(sourcePath)} local://moved-via-bash.json`,
+			});
 
 			expect(fs.existsSync(sourcePath)).toBe(false);
 			expect(fs.existsSync(targetPath)).toBe(true);
@@ -1259,7 +1291,7 @@ function b() {
 			const updates: string[] = [];
 			const result = await bashTool.execute(
 				"test-call-8-stream",
-				{ command: "for i in 1 2 3; do echo $i; sleep 0.1; done" },
+				{ command: "printf '1\\n'; sleep 0.03; printf '2\\n3\\n'" },
 				undefined,
 				update => {
 					const text = update.content?.find(c => c.type === "text")?.text ?? "";
@@ -1284,7 +1316,10 @@ function b() {
 
 		it("should write truncated output to artifacts", async () => {
 			const result = await bashTool.execute("test-call-8-artifact", {
-				command: "printf 'a%.0s' {1..60000}",
+				// A single line past the 768-byte column cap is the minimal output
+				// that trips truncation + artifact spill; the old 60K-arg brace
+				// expansion paid ~60ms of shell time to prove the same path.
+				command: "printf 'a%.0s' {1..2000}",
 			});
 
 			const artifactId = result.details?.meta?.truncation?.artifactId;
@@ -1361,7 +1396,7 @@ function b() {
 			);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-running", {
-				command: "printf 'start\\n'; sleep 0.05; printf 'done\\n'",
+				command: "printf 'start\\n'; sleep 0.03; printf 'done\\n'",
 			});
 
 			expect(result.details?.async?.state).toBe("running");
@@ -1406,18 +1441,19 @@ function b() {
 				),
 			);
 			// Drive the effective timeout via the production clamp seam so the
-			// backgrounded job times out in ~0.5s instead of a real wall-clock
-			// second. 0.5s still renders as "1 seconds" in the executor message
-			// (Math.round), so that delivery assertion is unchanged; the
-			// auto-background-on-timeout decision path is identical.
-			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.5);
+			// backgrounded job hits its timeout in ~0.1s instead of a real
+			// wall-clock second. The auto-background-on-timeout decision path is
+			// unchanged; we assert the timeout-notice prefix rather than the
+			// rounded seconds (it reads "0" here only because the seam
+			// deliberately undercuts the 1s production floor).
+			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-timeout-background", {
-				command: "printf 'start\\n'; sleep 1.2; printf 'done\\n'",
+				command: "printf 'start\\n'; sleep 0.5; printf 'done\\n'",
 				timeout: 1,
 			});
 
-			expect(result.details?.timeoutSeconds).toBe(0.5);
+			expect(result.details?.timeoutSeconds).toBe(0.05);
 			expect(result.details?.async?.state).toBe("running");
 			expect(getTextOutput(result)).toContain("Background job");
 			const jobId = result.details?.async?.jobId;
@@ -1430,7 +1466,7 @@ function b() {
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
 			expect(deliveries[0]?.jobId).toBe(jobId);
-			expect(deliveries[0]?.text).toContain("Command timed out after 1 seconds");
+			expect(deliveries[0]?.text).toContain("Command timed out after");
 			await asyncJobManager.dispose();
 		});
 
@@ -1447,7 +1483,7 @@ function b() {
 		it("should respect timeout", async () => {
 			// Reduce the effective timeout through the production clamp seam; the
 			// real subprocess kill-on-timeout path is still exercised, just faster.
-			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.1);
+			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 })).rejects.toThrow(
 				/timed out/i,
 			);
@@ -1655,9 +1691,9 @@ function b() {
 			const content = ["before", "match one", "after", "middle", "match two", "after two"].join("\n");
 			fs.writeFileSync(testFile, content);
 
-			const contextSettings = Settings.isolated({ "search.contextBefore": 1, "search.contextAfter": 1 });
+			const contextSettings = Settings.isolated({ "grep.contextBefore": 1, "grep.contextAfter": 1 });
 			const contextSearchTool = wrapToolWithMetaNotice(
-				new SearchTool(createTestToolSession(testDir, contextSettings)),
+				new GrepTool(createTestToolSession(testDir, contextSettings)),
 			);
 			const result = await contextSearchTool.execute("test-call-12", {
 				pattern: "match",
@@ -1677,9 +1713,9 @@ function b() {
 			const lines = Array.from({ length: 10 }, (_, idx) => (idx === 0 || idx === 5 ? "match" : `filler ${idx}`));
 			fs.writeFileSync(testFile, lines.join("\n"));
 
-			const noContextSettings = Settings.isolated({ "search.contextBefore": 0, "search.contextAfter": 0 });
+			const noContextSettings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
 			const noContextSearchTool = wrapToolWithMetaNotice(
-				new SearchTool(createTestToolSession(testDir, noContextSettings)),
+				new GrepTool(createTestToolSession(testDir, noContextSettings)),
 			);
 			const result = await noContextSearchTool.execute("test-call-12-gap", {
 				pattern: "match",
@@ -1714,6 +1750,34 @@ function b() {
 			expect(secondOutput).not.toContain("# file-2.txt");
 			expect(secondOutput).toContain("# file-3.txt");
 			expect(secondOutput).toContain("# file-4.txt");
+		});
+
+		it("respects the case parameter (case-sensitive by default, case-insensitive if false)", async () => {
+			const caseFile = path.join(testDir, "case.txt");
+			fs.writeFileSync(caseFile, "Hello World\nhello world\n");
+
+			// 1. By default, search is case-sensitive (only matches the lowercase pattern "hello")
+			const defaultResult = await searchTool.execute("test-case-default", {
+				pattern: "hello",
+				paths: [caseFile],
+			});
+			expect(defaultResult.details?.matchCount).toBe(1);
+
+			// 2. With case: true, search is case-sensitive (only matches "hello")
+			const sensitiveResult = await searchTool.execute("test-case-sensitive", {
+				pattern: "hello",
+				paths: [caseFile],
+				case: true,
+			});
+			expect(sensitiveResult.details?.matchCount).toBe(1);
+
+			// 3. With case: false, search is case-insensitive (matches both "Hello World" and "hello world")
+			const insensitiveResult = await searchTool.execute("test-case-insensitive", {
+				pattern: "hello",
+				paths: [caseFile],
+				case: false,
+			});
+			expect(insensitiveResult.details?.matchCount).toBe(2);
 		});
 
 		it("should group multi-file matches", async () => {
@@ -2075,7 +2139,7 @@ describe("edit tool CRLF handling", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 
 		// Restore original edit variant
 		if (originalEditVariant === undefined) {

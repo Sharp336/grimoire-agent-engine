@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as Module from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveRuntimeModule, splitBareSpecifier } from "../src/runtime-install";
+import {
+	installRuntimeModuleResolver,
+	resolveRuntimeModule,
+	splitBareSpecifier,
+	writeRuntimeManifest,
+} from "../src/runtime-install";
 
 // Contract under test: runtime-installed packages (fastembed, Transformers.js
 // graphs) load inside compiled binaries through resolveRuntimeModule, which
@@ -15,6 +21,10 @@ const tempDirs: string[] = [];
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
+
+interface ResolveFilenameModule {
+	_resolveFilename(request: string, parent: unknown, isMain: boolean, options?: unknown): string;
+}
 
 async function makeNodeModules(packages: Record<string, { manifest: Record<string, unknown>; files: string[] }>) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-install-"));
@@ -133,5 +143,60 @@ describe("resolveRuntimeModule", () => {
 			bare: { manifest: {}, files: ["index.js"] },
 		});
 		expect(resolveRuntimeModule(nodeModules, "bare")).toBe(path.join(nodeModules, "bare", "index.js"));
+	});
+});
+
+describe("installRuntimeModuleResolver", () => {
+	test("keeps runtime-parent bare requests inside the runtime cache", async () => {
+		const nodeModules = await makeNodeModules({
+			"@huggingface/transformers": {
+				manifest: { main: "dist/transformers.node.cjs" },
+				files: ["dist/transformers.node.cjs"],
+			},
+			"kokoro-js": {
+				manifest: { main: "dist/kokoro.cjs" },
+				files: ["dist/kokoro.cjs"],
+			},
+		});
+		const runtimeDir = path.dirname(nodeModules);
+		const sharpStub = path.join(runtimeDir, "sharp-stub.cjs");
+		await Bun.write(sharpStub, "module.exports = {};\n");
+
+		installRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub } });
+
+		const moduleWithResolver = Module as unknown as { default?: ResolveFilenameModule } & ResolveFilenameModule;
+		const resolver = moduleWithResolver.default ?? moduleWithResolver;
+		const runtimeParent = { filename: path.join(nodeModules, "kokoro-js", "dist", "kokoro.cjs") };
+		expect(resolver._resolveFilename("@huggingface/transformers", runtimeParent, false)).toBe(
+			path.join(nodeModules, "@huggingface", "transformers", "dist", "transformers.node.cjs"),
+		);
+		expect(resolver._resolveFilename("sharp", runtimeParent, false)).toBe(sharpStub);
+	});
+});
+
+describe("writeRuntimeManifest", () => {
+	async function readManifest(install: Parameters<typeof writeRuntimeManifest>[1]) {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-manifest-"));
+		tempDirs.push(dir);
+		await writeRuntimeManifest(dir, install);
+		return JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8")) as Record<string, unknown>;
+	}
+
+	test("emits overrides so a transitive pin is forced across the runtime tree", async () => {
+		const manifest = await readManifest({
+			dependencies: { "kokoro-js": "1.2.1" },
+			overrides: { "onnxruntime-node": "1.26.0" },
+			trustedDependencies: ["onnxruntime-node"],
+		});
+		expect(manifest.dependencies).toEqual({ "kokoro-js": "1.2.1" });
+		expect(manifest.overrides).toEqual({ "onnxruntime-node": "1.26.0" });
+		expect(manifest.trustedDependencies).toEqual(["onnxruntime-node"]);
+	});
+
+	test("omits overrides when none are provided or the map is empty", async () => {
+		const without = await readManifest({ dependencies: { "kokoro-js": "1.2.1" } });
+		expect("overrides" in without).toBe(false);
+		const empty = await readManifest({ dependencies: { "kokoro-js": "1.2.1" }, overrides: {} });
+		expect("overrides" in empty).toBe(false);
 	});
 });
