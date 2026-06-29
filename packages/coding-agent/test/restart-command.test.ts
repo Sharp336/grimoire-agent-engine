@@ -60,7 +60,7 @@ describe("restart command construction", () => {
 		});
 	});
 
-	test("builds a host-entry restart command from the host directory", () => {
+	test("builds a host-entry restart command without changing session cwd", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => false,
 			workerHostEntry: () => "/repo/packages/coding-agent/src/cli.ts",
@@ -70,11 +70,11 @@ describe("restart command construction", () => {
 
 		const command = buildRestartCommand(baseOptions(), env);
 
-		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "cli.ts"]);
-		expect(command.cwd).toBe("/repo/packages/coding-agent/src");
+		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "/repo/packages/coding-agent/src/cli.ts"]);
+		expect(command.cwd).toBe("/repo/project");
 	});
 
-	test("builds a source fallback restart command from the package root", () => {
+	test("builds a source fallback restart command without changing session cwd", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => false,
 			workerHostEntry: () => null,
@@ -84,8 +84,8 @@ describe("restart command construction", () => {
 
 		const command = buildRestartCommand(baseOptions(), env);
 
-		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "src/cli.ts"]);
-		expect(command.cwd).toBe(packageRoot);
+		expect(command.cmd.slice(0, 2)).toEqual(["/usr/bin/bun", "/repo/packages/coding-agent/src/cli.ts"]);
+		expect(command.cwd).toBe("/repo/project");
 	});
 
 	test("omits profile arguments when no active profile exists", () => {

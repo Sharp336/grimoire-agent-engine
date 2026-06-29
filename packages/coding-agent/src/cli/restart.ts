@@ -199,10 +199,10 @@ export function resolveRestartBaseCommand(
 
 	const hostEntry = env.workerHostEntry();
 	if (hostEntry) {
-		return { cmd: [env.execPath, path.basename(hostEntry)], cwd: path.dirname(hostEntry) };
+		return { cmd: [env.execPath, hostEntry] };
 	}
 
-	return { cmd: [env.execPath, "src/cli.ts"], cwd: env.packageRoot };
+	return { cmd: [env.execPath, path.join(env.packageRoot, "src/cli.ts")] };
 }
 
 /** Build a restart-safe argv that resumes the current persisted session only. */
