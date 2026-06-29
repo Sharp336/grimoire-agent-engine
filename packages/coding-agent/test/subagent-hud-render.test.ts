@@ -1,9 +1,12 @@
 /**
  * Contract: the anchored subagent HUD (rendered above the editor, next to the
  * Todos block) lists exactly the running *detached* subagents as
- * `Id: description` rows and yields no output once nothing qualifies, so the
- * block self-clears. Sync task spawns and eval `agent()` spawns are excluded:
- * their progress is already rendered inline (tool block / eval cell).
+ * `Id: description` rows, and may carry a live-preview sub-row showing the
+ * agent's current (or most recent) tool call with a one-line detail when one
+ * is available, read off the observable-session progress channel. Yields no
+ * output once nothing qualifies, so the block self-clears. Sync task spawns
+ * and eval `agent()` spawns are excluded: their progress is already rendered
+ * inline (tool block / eval cell).
  */
 import { beforeAll, describe, expect, it } from "bun:test";
 import { renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -199,5 +202,81 @@ describe("subagent HUD lines", () => {
 		);
 
 		expect(activeIds()).toEqual(["SelectorSurfaces", "BlastRadius", "VariantsSurvey"]);
+	});
+
+	it("renders a live-preview tool sub-row for a running subagent", () => {
+		const out = render([
+			makeSession({
+				id: "AuthLoader",
+				description: "Refactoring the auth flow",
+				progress: makeProgress({
+					id: "AuthLoader",
+					currentTool: "read",
+					currentToolArgs: "src/auth.ts:50-100",
+				}),
+			}),
+		]);
+		expect(out).toContain("AuthLoader: Refactoring the auth flow");
+		expect(out).toContain("read: src/auth.ts:50-100");
+	});
+
+	it("falls back to the most recent tool when idle between calls", () => {
+		const out = render([
+			makeSession({
+				id: "Worker",
+				progress: makeProgress({
+					id: "Worker",
+					recentTools: [{ tool: "grep", args: "renderSubagentHudLines", endMs: Date.now() }],
+				}),
+			}),
+		]);
+		expect(out).toContain("grep: renderSubagentHudLines");
+	});
+
+	it("shows an elapsed marker for long-running tool calls and stays within the viewport", () => {
+		const columns = 120;
+		const out = render(
+			[
+				makeSession({
+					id: "Builder",
+					progress: makeProgress({
+						id: "Builder",
+						currentTool: "bash",
+						currentToolArgs: "npm test",
+						currentToolStartMs: Date.now() - 10_000,
+					}),
+				}),
+			],
+			columns,
+		);
+		expect(out).toContain("bash: npm test");
+		// Coarse elapsed label (~10s); the row must never exceed the viewport.
+		expect(out).toContain("·");
+		for (const line of out.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(columns);
+			if (line.includes("bash")) expect(line).toMatch(/\d+s$/);
+		}
+	});
+
+	it("truncates long tool args to the viewport", () => {
+		const columns = 60;
+		const out = render(
+			[
+				makeSession({
+					id: "Reader",
+					progress: makeProgress({
+						id: "Reader",
+						currentTool: "read",
+						currentToolArgs: "x".repeat(300),
+						currentToolStartMs: Date.now() - 10_000,
+					}),
+				}),
+			],
+			columns,
+		);
+		expect(out).toContain("read:");
+		for (const line of out.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(columns);
+		}
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Detached background subagents now show a live-preview tool sub-row in the anchored Subagents HUD — the current (or, between calls, most recent) tool call with a one-line detail and an elapsed marker — so running spawns are no longer a black box. ([#3815](https://github.com/can1357/oh-my-pi/issues/3815))
+
 ## [16.2.6] - 2026-06-29
 
 ### Changed
