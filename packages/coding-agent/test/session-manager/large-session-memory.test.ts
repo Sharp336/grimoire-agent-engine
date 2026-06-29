@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -57,6 +62,68 @@ describe("large session memory guards", () => {
 		session.flushSync();
 
 		expect(storage.writeTextSyncCalls).toBe(0);
+	});
+
+	it("does not build the previous display context when switching to another session", async () => {
+		const storage = new CountingMemorySessionStorage();
+		const currentManager = SessionManager.create("/work", "/sessions", storage);
+		currentManager.appendMessage({ role: "user", content: "current", timestamp: 1 });
+		currentManager.appendMessage(makeAssistantMessage("current reply"));
+		const currentFile = currentManager.getSessionFile();
+		if (!currentFile) throw new Error("Expected current session file");
+
+		const targetFile = "/sessions/target.jsonl";
+		storage.writeTextSync(
+			targetFile,
+			[
+				{
+					type: "session",
+					version: 3,
+					id: "target",
+					timestamp: "2026-01-01T00:00:00.000Z",
+					cwd: "/work",
+				},
+				{
+					type: "message",
+					id: "target-user",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: { role: "user", content: "target", timestamp: 1 },
+				},
+			]
+				.map(entry => `${JSON.stringify(entry)}\n`)
+				.join(""),
+		);
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["test"], tools: [] },
+		});
+		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-switch-session-"));
+		tempDirs.push(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const session = new AgentSession({
+			agent,
+			sessionManager: currentManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+		});
+		const originalBuildDisplaySessionContext = session.buildDisplaySessionContext.bind(session);
+		session.buildDisplaySessionContext = () => {
+			if (session.sessionFile === currentFile) {
+				throw new Error("previous display context should not be built for a different-session switch");
+			}
+			return originalBuildDisplaySessionContext();
+		};
+
+		try {
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("elides superseded compactions and rewrites the compacted file", async () => {

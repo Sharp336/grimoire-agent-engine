@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed in-TUI `/resume` switches avoiding the large-session guard by rebuilding the previous session context before loading the selected session.
+
 ## [16.2.6] - 2026-06-29
 
 ### Changed

@@ -13150,7 +13150,7 @@ export class AgentSession {
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
 		const previousSessionState = this.sessionManager.captureState();
-		const previousSessionContext = this.buildDisplaySessionContext();
+		const previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
 		// switchSession replaces these arrays wholesale during load/rollback, so retaining
 		// the existing message objects is sufficient and avoids structured-clone failures for
 		// extension/custom metadata that is valid to persist but not cloneable.
@@ -13189,7 +13189,7 @@ export class AgentSession {
 
 			const sessionContext = this.buildDisplaySessionContext();
 			const didReloadConversationChange =
-				!switchingToDifferentSession &&
+				previousSessionContext !== undefined &&
 				this.#didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
 			const fallbackSelectedMCPToolNames = this.#getSessionDefaultSelectedMCPToolNames(sessionPath);
 			await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
@@ -13304,21 +13304,26 @@ export class AgentSession {
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
 			let restoreMcpError: unknown;
-			try {
-				await this.#restoreMCPSelectionsForSessionContext(previousSessionContext, {
-					fallbackSelectedMCPToolNames: previousFallbackSelectedMCPToolNames,
-				});
-			} catch (mcpError) {
-				restoreMcpError = mcpError;
-				logger.warn("Failed to restore MCP selections after switch error", {
-					previousSessionFile,
-					targetSessionFile: sessionPath,
-					error: String(mcpError),
-				});
+			if (previousSessionContext) {
+				try {
+					await this.#restoreMCPSelectionsForSessionContext(previousSessionContext, {
+						fallbackSelectedMCPToolNames: previousFallbackSelectedMCPToolNames,
+					});
+				} catch (mcpError) {
+					restoreMcpError = mcpError;
+					logger.warn("Failed to restore MCP selections after switch error", {
+						previousSessionFile,
+						targetSessionFile: sessionPath,
+						error: String(mcpError),
+					});
+					this.#selectedMCPToolNames = new Set(previousSelectedMCPToolNames);
+					this.agent.setTools(previousTools);
+					this.#baseSystemPrompt = previousBaseSystemPrompt;
+					this.agent.setSystemPrompt(previousSystemPrompt);
+				}
+			} else {
 				this.#selectedMCPToolNames = new Set(previousSelectedMCPToolNames);
 				this.agent.setTools(previousTools);
-				this.#baseSystemPrompt = previousBaseSystemPrompt;
-				this.agent.setSystemPrompt(previousSystemPrompt);
 			}
 			this.#baseSystemPrompt = previousBaseSystemPrompt;
 			this.#baseSystemPromptBeforeMemoryPromotion = previousBaseSystemPromptBeforeMemoryPromotion;
