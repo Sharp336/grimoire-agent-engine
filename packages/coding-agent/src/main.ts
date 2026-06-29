@@ -44,6 +44,7 @@ import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	getModelMatchPreferences,
+	parseModelString,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -446,7 +447,7 @@ function resolvePathLikeRestartLaunchValues(values: readonly string[] | undefine
 	return values?.map(value => (isExplicitPathLikeLaunchValue(value) ? resolveRestartLaunchPath(value, cwd) : value));
 }
 
-/** Build restart launch state from parsed args, resolving path flags against the original launch cwd. */
+/** Build restart launch state from parsed args and deadline, resolving path flags against the original launch cwd. */
 export function buildRestartLaunchFlags(
 	parsed: Pick<
 		Args,
@@ -472,6 +473,7 @@ export function buildRestartLaunchFlags(
 	>,
 	launchCwd: string,
 	extensionFlagValues?: readonly RestartExtensionFlagValue[],
+	maxTimeDeadline?: number,
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
@@ -489,6 +491,7 @@ export function buildRestartLaunchFlags(
 		planModel: parsed.plan,
 		thinking: parsed.thinking,
 		extensionFlagValues,
+		maxTimeDeadline,
 		skillPatterns: parsed.skills,
 		slowModel: parsed.slow,
 		smolModel: parsed.smol,
@@ -496,6 +499,9 @@ export function buildRestartLaunchFlags(
 		systemPrompt: parsed.systemPrompt,
 	};
 }
+
+type RuntimeApiKeySessionOptions = { model?: { provider: string }; modelPattern?: string };
+type RestorableModelSource = Pick<SessionManager, "getRestorableModelStrings">;
 
 /** Return whether a runtime API key needs an explicit launch model before session restore. */
 export function requiresLaunchModelForRuntimeApiKey(
@@ -507,10 +513,41 @@ export function requiresLaunchModelForRuntimeApiKey(
 	return !sessionOptions.model && !sessionOptions.modelPattern;
 }
 
-/** Apply a CLI runtime API key after createSession restores a session model provider. */
+/** Return the provider for the first persisted model that session restore will try. */
+export function getPersistedSessionModelProvider(
+	sessionManager: RestorableModelSource | undefined,
+): string | undefined {
+	if (!sessionManager) return undefined;
+	for (const modelString of sessionManager.getRestorableModelStrings()) {
+		const parsedModel = parseModelString(modelString, { allowMaxAlias: true });
+		if (parsedModel) return parsedModel.provider;
+	}
+	return undefined;
+}
+
+/** Install a runtime API key before createSession can restore a persisted model. */
+export function applyRuntimeApiKeyBeforeSessionRestore(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: RuntimeApiKeySessionOptions,
+	sessionManager: RestorableModelSource | undefined,
+	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
+): boolean {
+	if (!parsed.apiKey) return false;
+	if (sessionOptions.model) {
+		authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+		return true;
+	}
+	if (sessionOptions.modelPattern || !(parsed.continue || parsed.resume || parsed.fork)) return false;
+	const provider = getPersistedSessionModelProvider(sessionManager);
+	if (!provider) return false;
+	authStorage.setRuntimeApiKey(provider, parsed.apiKey);
+	return true;
+}
+
+/** Apply a runtime API key when the provider was only known after createSession. */
 export function applyRuntimeApiKeyForRestoredSession(
 	parsed: Pick<Args, "apiKey">,
-	sessionOptions: { model?: { provider: string } },
+	sessionOptions: RuntimeApiKeySessionOptions,
 	session: { model?: { provider: string } },
 	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
 ): void {
@@ -1520,6 +1557,7 @@ export async function runRootCommand(
 	}
 
 	// Handle CLI --api-key as runtime override (not persisted)
+	let runtimeApiKeyInstalledBeforeSessionRestore = false;
 	if (parsedArgs.apiKey) {
 		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions)) {
 			process.stderr.write(
@@ -1527,9 +1565,12 @@ export async function runRootCommand(
 			);
 			process.exit(1);
 		}
-		if (sessionOptions.model) {
-			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
-		}
+		runtimeApiKeyInstalledBeforeSessionRestore = applyRuntimeApiKeyBeforeSessionRestore(
+			parsedArgs,
+			sessionOptions,
+			sessionManager,
+			authStorage,
+		);
 	}
 
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
@@ -1651,7 +1692,9 @@ export async function runRootCommand(
 			}),
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);
-		applyRuntimeApiKeyForRestoredSession(parsedArgs, sessionOptions, session, authStorage);
+		if (!runtimeApiKeyInstalledBeforeSessionRestore) {
+			applyRuntimeApiKeyForRestoredSession(parsedArgs, sessionOptions, session, authStorage);
+		}
 
 		if (modelFallbackMessage) {
 			notifs.push({ kind: "warn", message: modelFallbackMessage });
@@ -1724,7 +1767,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(initialArgs),
-				buildRestartLaunchFlags(initialArgs, launchConfigCwd, currentExtensionFlagValues),
+				buildRestartLaunchFlags(initialArgs, launchConfigCwd, currentExtensionFlagValues, sessionOptions.deadline),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

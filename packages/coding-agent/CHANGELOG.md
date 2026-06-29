@@ -1500,6 +1500,7 @@
 - Fixed `/restart` API-key handoffs for resumed/forked sessions by skipping fresh-launch model validation until the restored session model is available.
 - Fixed `/restart` capturing built-in launch flags from the extension-aware parse so extension-registered flags that shadow built-ins do not replay stale built-in values.
 - Fixed `/restart` replaying relative launch path flags such as `--config` against a moved session cwd instead of the original launch cwd.
+- Fixed `/restart` dropping `--max-time`; restarted sessions now replay only the remaining wall-clock budget instead of resetting the original duration.
 - Fixed the bash interceptor blocking `echo` / `printf` redirects to `/dev/null`, `/dev/tty`, `/dev/stdout`, and `/dev/stderr` device sinks while still directing real file writes to the write tool. ([#3763](https://github.com/can1357/oh-my-pi/issues/3763))
 
 ## [16.2.5] - 2026-06-28

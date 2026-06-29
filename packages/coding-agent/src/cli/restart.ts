@@ -18,7 +18,7 @@ export type RestartToolRestriction = { kind: "none" } | { kind: "allowlist"; too
 /** Extension CLI flag value restored directly after extension discovery on restart. */
 export type RestartExtensionFlagValue = readonly [name: string, value: boolean | string];
 
-/** CLI launch state for auth, prompts, skills, context, config, and extensions that must survive restart. */
+/** CLI launch state for time budget, auth, prompts, skills, context, config, and extensions that must survive restart. */
 export interface RestartLaunchFlags {
 	apiKey?: string;
 	disableExtensions?: boolean;
@@ -40,6 +40,8 @@ export interface RestartLaunchFlags {
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
+	/** Absolute wall-clock deadline in epoch milliseconds for replaying remaining --max-time. */
+	maxTimeDeadline?: number;
 }
 
 /** Self-entrypoint command before restart-specific CLI arguments are appended. */
@@ -154,6 +156,11 @@ function appendRepeatedFlag(cmd: string[], flag: string, values: readonly string
 	}
 }
 
+function getRestartMaxTimeSeconds(deadline: number | undefined): number | undefined {
+	if (deadline === undefined || !Number.isFinite(deadline)) return undefined;
+	return Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+}
+
 function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | undefined {
 	const childEnv: Record<string, string> = {};
 	let hasChildEnv = false;
@@ -238,6 +245,11 @@ export function buildRestartCommand(
 	}
 	if (options.advisor) {
 		cmd.push("--advisor");
+	}
+
+	const maxTimeSeconds = getRestartMaxTimeSeconds(options.maxTimeDeadline);
+	if (maxTimeSeconds !== undefined) {
+		cmd.push("--max-time", String(maxTimeSeconds));
 	}
 
 	if (options.disableLsp) {

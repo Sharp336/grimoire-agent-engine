@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { buildRestartLaunchFlags, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -75,6 +75,14 @@ describe("parseArgs — --max-time flag", () => {
 		expect(stderr).toContain("Run `omp --help` for available flags.");
 		expect(stderr).not.toContain("parseMaxTimeSeconds");
 		expect(stderr).not.toContain("CliUsageError");
+
+	it("captures the absolute restart deadline for maxTime", () => {
+		const parsed = parseArgs(["--max-time", "30", "--print", "hello"]);
+		const deadline = 1_700_000_030_000;
+
+		const flags = buildRestartLaunchFlags(parsed, "/repo/project", undefined, deadline);
+
+		expect(flags.maxTimeDeadline).toBe(deadline);
 	});
 
 	it("converts maxTime to an absolute session deadline", async () => {

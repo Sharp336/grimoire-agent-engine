@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-	applyRuntimeApiKeyForRestoredSession,
+	applyRuntimeApiKeyBeforeSessionRestore,
+	getPersistedSessionModelProvider,
 	requiresLaunchModelForRuntimeApiKey,
 } from "@oh-my-pi/pi-coding-agent/main";
 
@@ -16,30 +17,64 @@ describe("restart runtime API key validation", () => {
 		expect(requiresLaunchModelForRuntimeApiKey({}, {})).toBe(false);
 	});
 
-	test("applies runtime API key after restored session model supplies the provider", () => {
+	test("derives restart runtime provider from persisted session models", () => {
+		expect(
+			getPersistedSessionModelProvider({
+				getRestorableModelStrings: () => ["anthropic/claude-sonnet-4-5:high"],
+			}),
+		).toBe("anthropic");
+		expect(
+			getPersistedSessionModelProvider({
+				getRestorableModelStrings: () => ["not-a-model", "openai/gpt-5"],
+			}),
+		).toBe("openai");
+		expect(getPersistedSessionModelProvider(undefined)).toBeUndefined();
+	});
+
+	test("applies runtime API key before restored session model lookup", () => {
 		const applied: { provider: string; apiKey: string }[] = [];
 		const authStorage = {
 			setRuntimeApiKey(provider: string, apiKey: string): void {
 				applied.push({ provider, apiKey });
 			},
 		};
+		const restoredSource = {
+			getRestorableModelStrings: () => ["restored-provider/restored-model"],
+		};
 
-		applyRuntimeApiKeyForRestoredSession(
-			{ apiKey: "sk-runtime" },
-			{},
-			{ model: { provider: "restored-provider" } },
-			authStorage,
-		);
-		expect(applied).toEqual([{ provider: "restored-provider", apiKey: "sk-runtime" }]);
+		expect(
+			applyRuntimeApiKeyBeforeSessionRestore(
+				{ apiKey: "sk-runtime" },
+				{ model: { provider: "launch-provider" } },
+				undefined,
+				authStorage,
+			),
+		).toBe(true);
+		expect(
+			applyRuntimeApiKeyBeforeSessionRestore(
+				{ apiKey: "sk-runtime", resume: "sess-1" },
+				{},
+				restoredSource,
+				authStorage,
+			),
+		).toBe(true);
+		expect(applied).toEqual([
+			{ provider: "launch-provider", apiKey: "sk-runtime" },
+			{ provider: "restored-provider", apiKey: "sk-runtime" },
+		]);
 
-		applyRuntimeApiKeyForRestoredSession(
-			{ apiKey: "sk-runtime" },
-			{ model: { provider: "launch-provider" } },
-			{ model: { provider: "restored-provider" } },
-			authStorage,
+		expect(applyRuntimeApiKeyBeforeSessionRestore({ apiKey: "sk-runtime" }, {}, restoredSource, authStorage)).toBe(
+			false,
 		);
-		applyRuntimeApiKeyForRestoredSession({ apiKey: "sk-runtime" }, {}, {}, authStorage);
-		applyRuntimeApiKeyForRestoredSession({}, {}, { model: { provider: "restored-provider" } }, authStorage);
-		expect(applied).toHaveLength(1);
+		expect(
+			applyRuntimeApiKeyBeforeSessionRestore(
+				{ apiKey: "sk-runtime", resume: "sess-1" },
+				{ modelPattern: "extension/model" },
+				restoredSource,
+				authStorage,
+			),
+		).toBe(false);
+		expect(applyRuntimeApiKeyBeforeSessionRestore({}, {}, restoredSource, authStorage)).toBe(false);
+		expect(applied).toHaveLength(2);
 	});
 });

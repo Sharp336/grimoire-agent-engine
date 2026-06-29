@@ -31,7 +31,12 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import {
+	type BuildSessionContextOptions,
+	buildSessionContext,
+	getRestorableSessionModels,
+	type SessionContext,
+} from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -2057,6 +2062,12 @@ export class SessionManager {
 			if (entry.type === "model_change") return entry.role ?? "default";
 		}
 		return undefined;
+	}
+
+	/** Model selectors createSession will try when restoring this branch, in fallback order. */
+	getRestorableModelStrings(): string[] {
+		const context = this.buildSessionContext();
+		return getRestorableSessionModels(context.models, this.getLastModelChangeRole());
 	}
 
 	getEntry(id: string): SessionEntry | undefined {

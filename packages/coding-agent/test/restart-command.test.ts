@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
 	buildRestartCommand,
 	consumeRestartExtensionFlagValues,
@@ -354,6 +354,43 @@ describe("restart command construction", () => {
 		expect(command.cmd.indexOf("--models")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--hide-thinking")).toBeLessThan(command.cmd.indexOf("--resume"));
 		expect(command.cmd.indexOf("--advisor")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves a positive remaining max-time budget across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const now = 1_700_000_000_000;
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			const command = buildRestartCommand({ ...baseOptions(), maxTimeDeadline: now + 125_001 }, env);
+
+			expect(valuesForFlag(command.cmd, "--max-time")).toEqual(["126"]);
+			expect(command.cmd.indexOf("--max-time")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	test("clamps elapsed max-time deadlines to one second across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const now = 1_700_000_000_000;
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			const command = buildRestartCommand({ ...baseOptions(), maxTimeDeadline: now }, env);
+
+			expect(valuesForFlag(command.cmd, "--max-time")).toEqual(["1"]);
+		} finally {
+			nowSpy.mockRestore();
+		}
 	});
 
 	test("preserves disabled tools across restart", () => {
