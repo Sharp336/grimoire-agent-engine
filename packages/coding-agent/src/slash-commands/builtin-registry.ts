@@ -237,7 +237,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			const output = runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.ctx.settings));
+			const output = await runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.ctx.settings));
 			if (verb === "on" || verb === "off") await runtime.ctx.settings.flush();
 			runtime.ctx.showStatus(output || TOKEN_SAVING_COMMAND_USAGE);
 			refreshStatusLine(runtime.ctx);
