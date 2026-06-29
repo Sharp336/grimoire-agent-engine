@@ -1356,7 +1356,7 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
-/** Advisor preserve data carried across snapcompact runs */
+	/** Advisor preserve data carried across snapcompact runs */
 	#advisorPreserveData: Record<string, unknown> | undefined;
 	/** The advisor-scoped tool set assigned at session creation. */
 	#advisorTools?: AgentTool[];
@@ -2483,9 +2483,7 @@ export class AgentSession {
 		let snapcompactResult: snapcompact.CompactionResult | undefined;
 		let snapcompactBlocker: string | undefined;
 		if (compactionSettings.strategy === "snapcompact") {
-			const text = snapcompact.serializeConversation(
-				convertToLlm(preparation.messagesToSummarize),
-			);
+			const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
 			const renderScan = snapcompact.scanRenderability(text);
 			if (!renderScan.isSafe) {
 				const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
@@ -2548,6 +2546,19 @@ export class AgentSession {
 				},
 			} satisfies CompactionResult;
 			this.#advisorPreserveData = compactResult.preserveData;
+
+			const summary = compactResult.summary;
+			const shortSummary = compactResult.shortSummary;
+			const firstKeptEntryId = compactResult.firstKeptEntryId;
+			const tokensBefore = compactResult.tokensBefore;
+
+			// Rebuild messages with the compaction summary
+			const summaryMessage = {
+				...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), shortSummary),
+				firstKeptEntryId,
+			} as CompactionSummaryMessage & { firstKeptEntryId?: string };
+
+			agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
 			return false;
 		} else {
 			// Fall through to LLM summarization below.
@@ -2606,7 +2617,6 @@ export class AgentSession {
 			agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
 			return false;
 		}
-
 	}
 
 	/** Model registry for API key resolution and model discovery */
