@@ -13,6 +13,7 @@ export type TokenSavingSettingPath =
 	| "advisor.immuneTurns"
 	| "advisor.compactionEnabled"
 	| "advisor.compactionThresholdPercent"
+	| "advisor.compactionStrategy"
 	| "enabledModels"
 	| "modelRoles";
 
@@ -28,11 +29,13 @@ export type TokenSavingSettingValue<P extends TokenSavingSettingPath> = P extend
 					? boolean
 					: P extends "advisor.compactionThresholdPercent"
 						? number
-						: P extends "enabledModels"
-					? readonly string[]
-					: P extends "modelRoles"
-						? Record<string, string>
-						: never;
+						: P extends "advisor.compactionStrategy"
+							? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
+							: P extends "enabledModels"
+								? readonly string[]
+								: P extends "modelRoles"
+									? Record<string, string>
+									: never;
 
 export interface TokenSavingSettingsLike {
 	get<P extends TokenSavingSettingPath>(path: P): TokenSavingSettingValue<P>;
@@ -210,6 +213,7 @@ export function applyTokenSaving(settings: TokenSavingSettingsLike): TokenSaving
 	setIfChanged(settings, changes, "advisor.immuneTurns", 10);
 	setIfChanged(settings, changes, "advisor.compactionEnabled", true);
 	setIfChanged(settings, changes, "advisor.compactionThresholdPercent", 25);
+	setIfChanged(settings, changes, "advisor.compactionStrategy", "snapcompact");
 
 
 	if (

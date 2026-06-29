@@ -2292,9 +2292,11 @@ export class AgentSession {
 		if (advisorCompactionEnabled) {
 			const advisorPercent = this.settings.get("advisor.compactionThresholdPercent");
 			const advisorTokens = this.settings.get("advisor.compactionThresholdTokens");
+			const advisorStrategy = this.settings.get("advisor.compactionStrategy");
 			compactionSettings = {
 				...primaryCompaction,
 				enabled: true,
+				strategy: advisorStrategy !== "inherit" ? advisorStrategy : primaryCompaction.strategy,
 				thresholdPercent: advisorPercent > 0 ? advisorPercent : primaryCompaction.thresholdPercent,
 				thresholdTokens: advisorTokens > 0 ? advisorTokens : primaryCompaction.thresholdTokens,
 			};
