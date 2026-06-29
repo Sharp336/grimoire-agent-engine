@@ -48,9 +48,13 @@ export interface TokenSavingSettingsLike {
 	setModelRole(role: string, modelId: string): void;
 	getModelRoles(): Readonly<Record<string, string>>;
 	getAgentDir?(): string;
+	hasExplicitAdvisorModelOverride?(): boolean;
 }
 
-export function toTokenSavingSettings(settings: Settings): TokenSavingSettingsLike {
+export function toTokenSavingSettings(
+	settings: Settings,
+	hasExplicitAdvisorModelOverride?: () => boolean,
+): TokenSavingSettingsLike {
 	return {
 		get: path => settings.get(path) as TokenSavingSettingValue<typeof path>,
 		set: (path, value) => settings.set(path, value as never),
@@ -58,6 +62,7 @@ export function toTokenSavingSettings(settings: Settings): TokenSavingSettingsLi
 		setModelRole: (role, modelId) => settings.setModelRole(role, modelId),
 		getModelRoles: () => ({ ...settings.getModelRoles() }) as Readonly<Record<string, string>>,
 		getAgentDir: () => settings.getAgentDir(),
+		hasExplicitAdvisorModelOverride,
 	};
 }
 
@@ -186,6 +191,12 @@ export function collectTokenSavingWarnings(settings: TokenSavingSettingsLike): s
 	}
 	if (!settings.get("advisor.compactionEnabled"))
 		warnings.push("advisor.compactionEnabled is false; advisor compaction is disabled.");
+	if (settings.hasExplicitAdvisorModelOverride?.()) {
+		warnings.push(
+			"An explicit model override in WATCHDOG.yml forces the advisor model; changing modelRoles.advisor may have no effect.",
+		);
+	}
+
 	if ((settings.get("advisor.compactionThresholdPercent") ?? 0) > 50)
 		warnings.push("advisor.compactionThresholdPercent is above 50; compaction may not trigger effectively.");
 
@@ -412,7 +423,10 @@ export async function handleTokenSavingCommand(
 	const { verb } = parseSubcommand(command.args);
 	if (verb && verb !== "on" && verb !== "off" && verb !== "status") return usage(TOKEN_SAVING_COMMAND_USAGE, runtime);
 	const beforeAdvisor = runtime.settings.getModelRole("advisor");
-	const output = await runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.settings));
+	const output = await runTokenSavingCommand(
+		command.args,
+		toTokenSavingSettings(runtime.settings, () => runtime.session.hasExplicitAdvisorModelOverride()),
+	);
 	await runtime.output(output);
 	if (verb === "on" || verb === "off") {
 		await runtime.settings.flush();

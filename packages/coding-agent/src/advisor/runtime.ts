@@ -40,7 +40,7 @@ export interface AdvisorRuntimeHost {
 	 * Optional: hosts that omit it get no maintenance (context only shrinks when
 	 * the primary's next compaction triggers {@link AdvisorRuntime.reset}).
 	 */
-	maintainContext?(incomingTokens: number): Promise<boolean>;
+	maintainContext?(incomingTokens: number): Promise<boolean | "drop">;
 	/**
 	 * Called immediately before each `agent.prompt(batch)` cycle. Lets the host
 	 * clear per-update advisor state — currently the one-advise-per-update gate
@@ -128,6 +128,7 @@ export class AdvisorRuntime {
 		}
 		return promise;
 	}
+	#lastPromptTime = 0;
 
 	dispose(): void {
 		this.disposed = true;
@@ -290,10 +291,10 @@ export class AdvisorRuntime {
 					timestamp: Date.now(),
 				});
 
-				let shouldReprime = false;
+				let maintainResult: boolean | "drop" = false;
 				if (this.host.maintainContext) {
 					try {
-						shouldReprime = await this.host.maintainContext(incomingTokens);
+						maintainResult = await this.host.maintainContext(incomingTokens);
 					} catch (err) {
 						logger.debug("advisor context maintenance failed", { err: String(err) });
 					}
@@ -303,7 +304,12 @@ export class AdvisorRuntime {
 
 				let batch: string | null;
 				let finalTurns: number;
-				if (shouldReprime) {
+				if (maintainResult === "drop") {
+					// The input is completely beyond the context window. Drop it.
+					logger.warn("Advisor delta dropped due to maintainContext rejecting the payload");
+					batch = null;
+					finalTurns = turnsCovered;
+				} else if (maintainResult === true) {
 					// Promotion could not fit the advisor's context — re-prime.
 					const newTurns = this.#pending.reduce((sum, b) => sum + b.turns, 0);
 					this.#resetAdvisorContext(false, false);
@@ -312,6 +318,31 @@ export class AdvisorRuntime {
 				} else {
 					batch = candidateBatch;
 					finalTurns = turnsCovered;
+				}
+
+				// ---------------------------------------------------------------------
+				// DEBOUNCE / LOOP PREVENTION
+				// ---------------------------------------------------------------------
+				// Prevent infinite advisor loops by enforcing a minimum interval
+				// between actual LLM dispatches. If a Delta triggers a dispatch too
+				// soon after the last one, delay or ignore it.
+				// Disable debounce during tests (where execution takes mere ms).
+				const now = Date.now();
+				const MIN_INTERVAL_MS = process.env.NODE_ENV === "test" ? 0 : 15000;
+				if (this.#lastPromptTime > 0 && now - this.#lastPromptTime < MIN_INTERVAL_MS) {
+					logger.warn("Advisor delta dropped due to minimum interval debounce (loop protection)", {
+						elapsedMs: now - this.#lastPromptTime,
+					});
+					batch = null;
+				}
+				// Final fail-safe against massive payloads post-reprime (or bypass).
+				// If the resulting payload exceeds a safe max window (like 128k chars roughly ~32k tokens),
+				// truncate it heavily. The advisor prompt handles `... [truncated] ...` better than spending $100.
+				if (batch && batch.length > 200000) {
+					const truncationNotice = `\n\n... [Delta truncated: payload exceeded maximum safe advisor window] ...\n`;
+					const keepEnd = 50000;
+					const keepStart = 50000;
+					batch = batch.substring(0, keepStart) + truncationNotice + batch.substring(batch.length - keepEnd);
 				}
 
 				if (this.disposed || batch === null) {
@@ -328,6 +359,7 @@ export class AdvisorRuntime {
 				// would leak orphan failures into the next successful run's context.
 				const messageSnapshot = this.agent.state.messages.length;
 				try {
+					this.#lastPromptTime = Date.now();
 					// Reset the host's per-update advisor state (one-advise-per-update
 					// gate) before each model cycle, so the new batch starts with a
 					// fresh budget. Dedupe history persists across cycles.

@@ -2379,7 +2379,7 @@ export class AgentSession {
 		}
 	}
 
-	async #maintainAdvisorContext(advisor: ActiveAdvisor, incomingTokens: number): Promise<boolean> {
+	async #maintainAdvisorContext(advisor: ActiveAdvisor, incomingTokens: number): Promise<boolean | "drop"> {
 		const agent = advisor.agent;
 
 		const advisorCompactionEnabled = this.settings.get("advisor.compactionEnabled");
@@ -2400,20 +2400,33 @@ export class AgentSession {
 				thresholdTokens: advisorTokens > 0 ? advisorTokens : -1,
 			};
 		}
-		if (compactionSettings.strategy === "off") return false;
 
 		let advisorModel = agent.state.model;
 		let contextWindow = advisorModel.contextWindow ?? 0;
 
-		if (!compactionSettings.enabled) return false;
 		if (contextWindow <= 0) return false;
+
+		// Hard input limit: if the incoming delta ALONE exceeds the usable window (leaving
+		// room for the underlying provider reserve), we drop it. This guards against
+		// massive un-compactable batches (like blindly pasting 1MB of text).
+		const usableBudget = Math.max(0, contextWindow - effectiveReserveTokens(contextWindow, compactionSettings));
+		if (incomingTokens > usableBudget) {
+			logger.warn("Advisor delta alone exceeds window limit; dropping to protect context", {
+				incomingTokens,
+				usableBudget,
+				contextWindow,
+			});
+			return "drop";
+		}
+
+		if (!compactionSettings.enabled) return false;
+		if (compactionSettings.strategy === "off") return false;
 
 		const messages = agent.state.messages;
 		let contextTokens = incomingTokens;
 		for (const message of messages) {
 			contextTokens += estimateTokens(message);
 		}
-
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			return false;
 		}
@@ -2485,7 +2498,7 @@ export class AgentSession {
 		const candidates = this.#resolveCompactionModelCandidates(snapcompactModel, availableModels);
 		if (candidates.length === 0) {
 			// No compaction candidates, fallback to re-prime
-			return true;
+			return false;
 		}
 		const advisorSessionId = this.#advisorSessionId(advisor.slug);
 		const preparation = prepareCompaction(
@@ -2495,7 +2508,7 @@ export class AgentSession {
 		);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
-			return true;
+			return false;
 		}
 
 		// Carry forward snapcompact frame archives from a previous advisor
@@ -2648,7 +2661,7 @@ export class AgentSession {
 
 			if (!compactResult) {
 				logger.warn("Advisor compaction failed, falling back to re-prime", { error: String(lastError) });
-				return true;
+				return false;
 			}
 
 			const summary = compactResult.summary;
@@ -14639,6 +14652,13 @@ export class AgentSession {
 			cost,
 			messages: { user, assistant, total: messages.length },
 		};
+	}
+
+	/**
+	 * Whether the WATCHDOG config has a hardcoded model override for any advisor.
+	 */
+	hasExplicitAdvisorModelOverride(): boolean {
+		return (this.#advisorConfigs ?? []).some(config => !!config.model?.trim());
 	}
 
 	/**

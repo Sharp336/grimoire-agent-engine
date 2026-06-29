@@ -238,7 +238,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			const beforeAdvisor = runtime.ctx.settings.getModelRole("advisor");
-			const output = await runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.ctx.settings));
+			const output = await runTokenSavingCommand(
+				command.args,
+				toTokenSavingSettings(runtime.ctx.settings, () => runtime.ctx.session.hasExplicitAdvisorModelOverride()),
+			);
 			if (verb === "on" || verb === "off") {
 				await runtime.ctx.settings.flush();
 				if (beforeAdvisor !== runtime.ctx.settings.getModelRole("advisor")) {

@@ -22,6 +22,8 @@ class FakeSettings implements TokenSavingSettingsLike {
 	modelRoles: Record<string, string>;
 
 	agentDir?: string;
+	hasExplicitAdvisorModelOverride?: () => boolean;
+
 	constructor(
 		options: {
 			values?: Partial<
@@ -32,6 +34,7 @@ class FakeSettings implements TokenSavingSettingsLike {
 			>;
 			modelRoles?: Record<string, string>;
 			agentDir?: string;
+			hasExplicitAdvisorModelOverride?: boolean;
 		} = {},
 	) {
 		this.values = {
@@ -52,6 +55,9 @@ class FakeSettings implements TokenSavingSettingsLike {
 		>;
 		this.modelRoles = { ...options.modelRoles };
 		this.agentDir = options.agentDir;
+		if (options.hasExplicitAdvisorModelOverride) {
+			this.hasExplicitAdvisorModelOverride = () => true;
+		}
 	}
 
 	get<P extends TokenSavingSettingPath>(path: P): TokenSavingSettingValue<P> {
@@ -152,6 +158,30 @@ describe("tokensaving helper", () => {
 			"modelRoles.task is not a cheap model; task subagents may still use an expensive model.",
 		);
 		expect(await formatTokenSavingStatus(settings)).toContain("Token saving: off");
+	});
+
+	it("warns if WATCHDOG.yml explicitly overrides the advisor model", async () => {
+		const settings = new FakeSettings({
+			values: {
+				"task.eager": "always",
+				"advisor.subagents": false,
+				"advisor.syncBacklog": "off",
+				"advisor.immuneTurns": 10,
+				"advisor.compactionEnabled": true,
+			},
+			modelRoles: {
+				default: "gpt-cheap",
+				task: "gpt-cheap",
+				advisor: "gpt-cheap",
+			},
+			hasExplicitAdvisorModelOverride: true,
+		});
+
+		const warnings = collectTokenSavingWarnings(settings);
+
+		expect(warnings).toContain(
+			"An explicit model override in WATCHDOG.yml forces the advisor model; changing modelRoles.advisor may have no effect.",
+		);
 	});
 
 	it("applies task routing and advisor economy levers", () => {

@@ -964,6 +964,37 @@ describe("advisor", () => {
 			expect(promptInputs[1]).toContain("bbb");
 			expect(resetCount).toBe(1);
 		});
+		it("fails or drops gracefully when a single input batch is larger than the entire context window", async () => {
+			const promptInputs: string[] = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				maintainContext: async tokens => {
+					if (tokens > 50000) return "drop";
+					return false;
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			// Send a massive delta
+			const massiveContent = "b".repeat(200000);
+			messages.push({ role: "user", content: massiveContent, timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await Promise.resolve();
+
+			// Since maintainContext returned "drop", the runtime should drop the massive input
+			// and not prompt the agent with the fatal payload.
+			expect(promptInputs).toHaveLength(0);
+		});
 		it("tracks backlog and blocks until caught up", async () => {
 			const promptInputs: string[] = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
