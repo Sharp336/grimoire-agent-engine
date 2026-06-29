@@ -99,7 +99,7 @@ describe("tokensaving helper", () => {
 		expect(collectTokenSavingWarnings(settings)).toContain(
 			"modelRoles.task equals modelRoles.default; task subagents are not shifted to a cheap model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: needs attention");
+		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
 	it("warns when task role is non-default and not cheap", () => {
@@ -120,7 +120,7 @@ describe("tokensaving helper", () => {
 		expect(collectTokenSavingWarnings(settings)).toContain(
 			"modelRoles.task is not a cheap model; task subagents may still use an expensive model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: needs attention");
+		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
 	it("warns when task role points at a protected expensive orchestration role model", () => {
@@ -146,7 +146,7 @@ describe("tokensaving helper", () => {
 		expect(warnings).toContain(
 			"modelRoles.task is not a cheap model; task subagents may still use an expensive model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: needs attention");
+		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
 	it("applies task routing and advisor economy levers", () => {

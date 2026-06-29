@@ -2298,10 +2298,14 @@ export class AgentSession {
 				enabled: true,
 				strategy: advisorStrategy !== "inherit" ? advisorStrategy : primaryCompaction.strategy,
 				thresholdPercent: advisorPercent > 0 ? advisorPercent : primaryCompaction.thresholdPercent,
-				thresholdTokens: advisorTokens > 0 ? advisorTokens : primaryCompaction.thresholdTokens,
+				thresholdTokens: advisorTokens > 0 ? advisorTokens : -1,
 			};
 		}
 
+		const advisorModel = advisor.state.model;
+		const contextWindow = advisorModel.contextWindow ?? 0;
+
+		if (compactionSettings.strategy === "off") return false;
 		if (!compactionSettings.enabled) return false;
 		if (contextWindow <= 0) return false;
 

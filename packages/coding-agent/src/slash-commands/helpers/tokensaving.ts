@@ -75,7 +75,7 @@ export interface TokenSavingEnableResult extends TokenSavingApplyResult {
 	snapshotError?: string;
 }
 
-const CHEAP_MODEL_RE = /(deepseek|flash|smol|cheap|tiny|mini|qwen|gemma|local|ollama)/i;
+const CHEAP_MODEL_RE = /\b(deepseek|flash|smol|cheap|tiny|mini|qwen|gemma|local|ollama)\b/i;
 const ROLE_CANDIDATE_ORDER = ["task", "smol", "tiny", "advisor"] as const;
 const EXPENSIVE_ROLE_NAMES = ["default", "slow", "plan", "vision"] as const;
 
@@ -112,7 +112,7 @@ export function selectTokenSavingModel(settings: TokenSavingSettingsLike): strin
 	const enabledModels = settings.get("enabledModels");
 	const cheapEnabledModel = enabledModels.find(model => isLikelyCheapModel(model) && !protectedModels.has(model));
 	if (cheapEnabledModel) return cheapEnabledModel;
-
+	return;
 }
 
 function setIfChanged<P extends TokenSavingSettingPath>(
@@ -182,9 +182,11 @@ export function collectTokenSavingWarnings(settings: TokenSavingSettingsLike): s
 
 export function formatTokenSavingStatus(settings: TokenSavingSettingsLike): string {
 	const warnings = collectTokenSavingWarnings(settings);
-	const active = warnings.length === 0;
+	const snapshotPath_ = snapshotPath(settings);
+	const snapshotExists = snapshotPath_ ? fs.existsSync(snapshotPath_) : false;
+	const active = snapshotExists;
 	const lines = [
-		`Token saving: ${active ? "on" : "needs attention"}`,
+		`Token saving: ${active ? "on" : "off"}`,
 		`Models: default=${display(settings.getModelRole("default"))}, task=${display(settings.getModelRole("task"))}, advisor=${display(settings.getModelRole("advisor"))}`,
 		`Task routing: task.eager=${settings.get("task.eager")}`,
 		`Advisor scope: subagents=${settings.get("advisor.subagents")}, syncBacklog=${settings.get("advisor.syncBacklog")}, immuneTurns=${settings.get("advisor.immuneTurns")}`,
@@ -214,7 +216,6 @@ export function applyTokenSaving(settings: TokenSavingSettingsLike): TokenSaving
 	setIfChanged(settings, changes, "advisor.compactionEnabled", true);
 	setIfChanged(settings, changes, "advisor.compactionThresholdPercent", 25);
 	setIfChanged(settings, changes, "advisor.compactionStrategy", "snapcompact");
-
 
 	if (
 		candidate &&
