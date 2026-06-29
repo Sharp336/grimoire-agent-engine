@@ -25,6 +25,7 @@ import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
 import { executePatchSingle, type PatchEditEntry, type PatchParams, patchEditSchema } from "./modes/patch";
 import { executeReplaceSingle, type ReplaceEditEntry, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type LspBatchRequest } from "./renderer";
+import { pruneOversizedEditDetails, pruneOversizedEditPerFileResult } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 
 export * from "@oh-my-pi/hashline";
@@ -147,18 +148,20 @@ async function executeApplyPatchPerFile(
 		try {
 			const result = await run(batchRequest);
 			const details = result.details;
-			perFileResults.push({
-				path: details?.path ?? path,
-				diff: details?.diff ?? "",
-				firstChangedLine: details?.firstChangedLine,
-				diagnostics: details?.diagnostics,
-				op: details?.op,
-				move: details?.move,
-				sourcePath: details?.sourcePath,
-				meta: details?.meta,
-				oldText: details?.oldText,
-				newText: details?.newText,
-			});
+			perFileResults.push(
+				pruneOversizedEditPerFileResult({
+					path: details?.path ?? path,
+					diff: details?.diff ?? "",
+					firstChangedLine: details?.firstChangedLine,
+					diagnostics: details?.diagnostics,
+					op: details?.op,
+					move: details?.move,
+					sourcePath: details?.sourcePath,
+					meta: details?.meta,
+					oldText: details?.oldText,
+					newText: details?.newText,
+				}),
+			);
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
 		} catch (err) {
@@ -186,14 +189,14 @@ async function executeApplyPatchPerFile(
 
 	return {
 		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: {
+		details: pruneOversizedEditDetails({
 			diff: perFileResults
 				.map(r => r.diff)
 				.filter(Boolean)
 				.join("\n"),
 			firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
 			perFileResults,
-		},
+		}),
 	};
 }
 
@@ -276,13 +279,13 @@ async function executeSinglePathEntries(
 
 	return {
 		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: {
+		details: pruneOversizedEditDetails({
 			diff: diffTexts.join("\n"),
 			firstChangedLine,
 			path: metadataPath ?? path,
 			...(hasFirstOldText ? { oldText: firstOldText } : {}),
 			...(hasLastNewText ? { newText: lastNewText } : {}),
-		},
+		}),
 		// Any per-entry failure marks the aggregate result as an error so the
 		// renderer takes the error branch instead of falling through to the
 		// streaming-edit preview (which displays the *proposed* diff and looks

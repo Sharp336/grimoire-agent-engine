@@ -72,6 +72,27 @@ describe("executePatchSingle — oldText/newText propagation", () => {
 		expect(result.details?.newText).toBe("b\n");
 	});
 
+	test("update: oversized oldText and newText are omitted from persisted details", async () => {
+		const largePrefix = "x".repeat(80_000);
+		await Bun.write(path.join(tempDir, "large.txt"), `${largePrefix}\na\n`);
+
+		const result = await executePatchSingle({
+			session: makeSession(tempDir),
+			path: "large.txt",
+			params: { op: "update", diff: "@@\n-a\n+b" },
+			allowFuzzy: true,
+			fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
+			writethrough: writethroughNoop,
+			beginDeferredDiagnosticsForPath: noopBeginDeferred,
+		});
+
+		expect(result.details?.path).toBe(path.join(tempDir, "large.txt"));
+		expect(result.details?.diff).toContain("-a");
+		expect(result.details?.diff).toContain("+b");
+		expect("oldText" in (result.details ?? {})).toBe(false);
+		expect("newText" in (result.details ?? {})).toBe(false);
+	});
+
 	test("create: oldText is undefined, newText is the created content", async () => {
 		const result = await executePatchSingle({
 			session: makeSession(tempDir),
