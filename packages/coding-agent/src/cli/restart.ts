@@ -8,6 +8,15 @@ export type RestartApprovalMode = "always-ask" | "write" | "yolo";
 /** Tool filter that must be restored in the restarted process. */
 export type RestartToolRestriction = { kind: "none" } | { kind: "allowlist"; toolNames: string[] };
 
+/** CLI launch flags for config and extension discovery that must survive restart. */
+export interface RestartLaunchFlags {
+	disableExtensions?: boolean;
+	configFiles?: string[];
+	extensionPaths?: string[];
+	hookPaths?: string[];
+	pluginDirs?: string[];
+}
+
 /** Self-entrypoint command before restart-specific CLI arguments are appended. */
 export interface RestartCommandBase {
 	cmd: string[];
@@ -29,12 +38,11 @@ export interface RestartCommandEnvironment {
 }
 
 /** Inputs copied from live interactive state into the restarted process argv. */
-export interface BuildRestartCommandOptions {
+export interface BuildRestartCommandOptions extends RestartLaunchFlags {
 	sessionId: string;
 	cwd: string;
 	sessionDir: string;
 	activeProfile?: string;
-	disableExtensions?: boolean;
 	toolRestriction?: RestartToolRestriction;
 	approvalMode: RestartApprovalMode;
 }
@@ -67,6 +75,12 @@ function defaultRestartCommandEnvironment(): RestartCommandEnvironment {
 	};
 }
 
+function appendRepeatedFlag(cmd: string[], flag: string, values: readonly string[] | undefined): void {
+	for (const value of values ?? []) {
+		cmd.push(flag, value);
+	}
+}
+
 /** Resolve the base command that re-enters the same OMP build. */
 export function resolveRestartBaseCommand(
 	env: RestartCommandEnvironment = defaultRestartCommandEnvironment(),
@@ -93,9 +107,15 @@ export function buildRestartCommand(
 		cmd.push("--profile", options.activeProfile);
 	}
 
+	appendRepeatedFlag(cmd, "--config", options.configFiles);
+
 	if (options.disableExtensions) {
 		cmd.push("--no-extensions");
 	}
+
+	appendRepeatedFlag(cmd, "--extension", options.extensionPaths);
+	appendRepeatedFlag(cmd, "--hook", options.hookPaths);
+	appendRepeatedFlag(cmd, "--plugin-dir", options.pluginDirs);
 
 	cmd.push("--cwd", options.cwd, "--approval-mode", options.approvalMode);
 

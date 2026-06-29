@@ -27,7 +27,7 @@ import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import type { RestartToolRestriction } from "./cli/restart";
+import type { RestartLaunchFlags, RestartToolRestriction } from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -412,6 +412,18 @@ function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): R
 	return undefined;
 }
 
+function buildRestartLaunchFlags(
+	parsed: Pick<Args, "config" | "extensions" | "hooks" | "noExtensions" | "pluginDirs">,
+): RestartLaunchFlags {
+	return {
+		disableExtensions: Boolean(parsed.noExtensions),
+		configFiles: parsed.config,
+		extensionPaths: parsed.extensions,
+		hookPaths: parsed.hooks,
+		pluginDirs: parsed.pluginDirs,
+	};
+}
+
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
@@ -430,7 +442,7 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	joinLink?: string,
 	restartToolRestriction?: RestartToolRestriction,
-	restartDisableExtensions = false,
+	restartLaunchFlags?: RestartLaunchFlags,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -441,7 +453,7 @@ async function runInteractiveMode(
 		mcpManager,
 		eventBus,
 		restartToolRestriction,
-		restartDisableExtensions,
+		restartLaunchFlags,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -1602,7 +1614,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(parsedArgs),
-				Boolean(parsedArgs.noExtensions),
+				buildRestartLaunchFlags(parsedArgs),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

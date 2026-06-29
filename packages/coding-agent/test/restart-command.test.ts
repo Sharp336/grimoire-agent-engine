@@ -18,6 +18,14 @@ function baseOptions() {
 	};
 }
 
+function valuesForFlag(cmd: string[], flag: string): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < cmd.length - 1; index++) {
+		if (cmd[index] === flag) values.push(cmd[index + 1] as string);
+	}
+	return values;
+}
+
 describe("restart command construction", () => {
 	test("builds a compiled binary restart command", () => {
 		const env: RestartCommandEnvironment = {
@@ -120,6 +128,47 @@ describe("restart command construction", () => {
 		expect(command.cmd).toContain("--no-extensions");
 		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves custom config files across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), configFiles: ["./dev.yml", "/tmp/override.yml"] }, env);
+
+		expect(valuesForFlag(command.cmd, "--config")).toEqual(["./dev.yml", "/tmp/override.yml"]);
+		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves explicit extension and plugin roots across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				extensionPaths: ["./ext-one", "pkg-two"],
+				hookPaths: ["./hook-one"],
+				pluginDirs: ["./plugin-one", "./plugin-two"],
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--extension")).toEqual(["./ext-one", "pkg-two"]);
+		expect(valuesForFlag(command.cmd, "--hook")).toEqual(["./hook-one"]);
+		expect(valuesForFlag(command.cmd, "--plugin-dir")).toEqual(["./plugin-one", "./plugin-two"]);
+		expect(command.cmd.indexOf("--extension")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--hook")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--plugin-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
 
 	test("preserves disabled tools across restart", () => {
