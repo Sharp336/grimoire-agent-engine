@@ -178,43 +178,41 @@ function getTerminalName(): string | undefined {
 
 /** Cached system info structure */
 interface GpuCache {
-	gpu: string;
+	gpu: string | null;
 }
 
-function getSystemInfoCachePath(): string {
-	return getGpuCachePath();
-}
-
-async function loadGpuCache(): Promise<GpuCache | null> {
+async function loadGpuCache(cachePath: string): Promise<GpuCache | null> {
 	try {
-		const cachePath = getSystemInfoCachePath();
-		const content = await Bun.file(cachePath).json();
-		return content as GpuCache;
+		return (await Bun.file(cachePath).json()) as GpuCache;
 	} catch {
 		return null;
 	}
 }
 
-async function saveGpuCache(info: GpuCache): Promise<void> {
+async function saveGpuCache(cachePath: string, info: GpuCache): Promise<void> {
 	try {
-		const cachePath = getSystemInfoCachePath();
 		await Bun.write(cachePath, JSON.stringify(info, null, "\t"));
 	} catch {
 		// Silently ignore cache write failures
 	}
 }
 
-async function getCachedGpu(): Promise<string | undefined> {
-	const cached = await logger.time("getCachedGpu:loadGpuCache", loadGpuCache);
-	if (cached) return cached.gpu;
-	const gpu = await logger.time("getCachedGpu:getGpuModel", getGpuModel);
-	if (gpu) {
-		await logger.time("getCachedGpu:saveGpuCache", saveGpuCache, { gpu });
-	}
+export async function getCachedGpu(
+	probe: () => Promise<string | null> = getGpuModel,
+	cachePath: string = getGpuCachePath(),
+): Promise<string | undefined> {
+	const cached = await loadGpuCache(cachePath);
+	if (cached) return cached.gpu ?? undefined;
+	const gpu = await probe();
+	// Persist unconditionally — including a null (no GPU found / probe failed).
+	// Without this, a slow or unparseable probe (Windows 11 24H2 removed wmic;
+	// a degraded WMI service returns nothing) is never cached and the slow
+	// `wmic` spawn reruns on every boot.
+	await saveGpuCache(cachePath, { gpu: gpu ?? null });
 	return gpu ?? undefined;
 }
-async function getEnvironmentInfo(): Promise<Array<{ label: string; value: string }>> {
-	const gpu = await getCachedGpu();
+
+function buildEnvironmentInfo(gpu: string | undefined): Array<{ label: string; value: string }> {
 	let cpuModel: string | undefined;
 	try {
 		cpuModel = os.cpus()[0]?.model;
@@ -575,6 +573,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills,
 		workspaceTree,
 		activeRepoContext,
+		gpu,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
@@ -597,6 +596,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
+		withDeadline("getCachedGpu", getCachedGpu(), undefined),
 	]);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
 
@@ -675,7 +675,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = await logger.time("getEnvironmentInfo", getEnvironmentInfo);
+	const environment = buildEnvironmentInfo(gpu);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,

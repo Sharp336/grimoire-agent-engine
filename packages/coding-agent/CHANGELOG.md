@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed slow startup on Windows caused by the system-prompt GPU probe (`wmic path win32_VideoController get name`) running on the boot path with no timeout and re-running every launch because failed/empty probes were never cached. The probe result is now cached even when no GPU is found (so it runs at most once per machine), and the probe is bounded by the existing 5s system-prompt prep deadline so a slow or wedged WMI service can no longer hang startup; OS/CPU/terminal info always render. (The Linux `lspci` probe gets the same negative-caching + deadline treatment.) ([#3835](https://github.com/can1357/oh-my-pi/issues/3835))
+
 ## [16.2.6] - 2026-06-29
 
 ### Changed
