@@ -77,7 +77,7 @@ export interface TokenSavingEnableResult extends TokenSavingApplyResult {
 }
 
 const CHEAP_MODEL_RE =
-	/\b(deepseek|flash|smol|cheap|tiny|mini|qwen(?=\d|[\s:/-]|$)|gemma(?=\d|[\s:/-]|$)|local|ollama)\b/i;
+	/\b(deepseek|flash|smol|cheap|tiny|mini|qwen(?=\d|[\s:/-]|$)|gemma(?=\d|[\s:/-]|$)|local|ollama)/i;
 const ROLE_CANDIDATE_ORDER = ["task", "smol", "tiny", "advisor"] as const;
 const EXPENSIVE_ROLE_NAMES = ["default", "slow", "plan", "vision"] as const;
 
@@ -114,7 +114,7 @@ export function selectTokenSavingModel(settings: TokenSavingSettingsLike): strin
 	const enabledModels = settings.get("enabledModels");
 	const cheapEnabledModel = enabledModels.find(model => isLikelyCheapModel(model) && !protectedModels.has(model));
 	if (cheapEnabledModel) return cheapEnabledModel;
-	return;
+	return undefined;
 }
 
 function setIfChanged<P extends TokenSavingSettingPath>(
