@@ -255,12 +255,14 @@ export interface InteractiveRestartCommandInput {
 	liveProviderSessionId: string;
 	liveAdvisorEnabled: boolean;
 	liveHideThinkingBlock: boolean;
+	liveModel?: Pick<Model, "provider" | "id">;
 }
 
 /** Build `/restart` options with live session state overriding stale launch-time flags. */
 export function buildInteractiveRestartCommandOptions(
 	options: InteractiveRestartCommandInput,
 ): restartProcess.BuildRestartCommandOptions {
+	const liveModelSelector = options.liveModel ? `${options.liveModel.provider}/${options.liveModel.id}` : undefined;
 	return {
 		sessionId: options.sessionId,
 		cwd: options.cwd,
@@ -269,6 +271,8 @@ export function buildInteractiveRestartCommandOptions(
 		toolRestriction: options.toolRestriction,
 		approvalMode: options.approvalMode,
 		...options.launchFlags,
+		provider: liveModelSelector ? undefined : options.launchFlags?.provider,
+		model: liveModelSelector ?? options.launchFlags?.model,
 		providerSessionId: options.liveProviderSessionId,
 		advisor: options.liveAdvisorEnabled,
 		hideThinking: options.liveHideThinkingBlock,
@@ -4072,6 +4076,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				launchFlags: this.#restartLaunchFlags,
 				liveAdvisorEnabled: this.session.isAdvisorEnabled(),
 				liveHideThinkingBlock: this.hideThinkingBlock,
+				liveModel: this.session.model,
 				liveProviderSessionId: this.session.sessionId,
 			}),
 		);

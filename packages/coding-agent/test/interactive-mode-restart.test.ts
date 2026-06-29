@@ -65,6 +65,23 @@ describe("restart command options", () => {
 		expect(options.providerSessionId).toBe("fresh-provider-session");
 	});
 
+	test("uses the live model after stale launch flags", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { provider: "anthropic", model: "claude-launch" },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveModel: { provider: "openai", id: "gpt-5-live" },
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(options.provider).toBeUndefined();
+		expect(options.model).toBe("openai/gpt-5-live");
+	});
+
 	test("uses the live advisor state after stale launch flags", () => {
 		const enabledOptions = buildInteractiveRestartCommandOptions({
 			sessionId: "local-session",
