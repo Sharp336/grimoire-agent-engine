@@ -11057,7 +11057,8 @@ export class AgentSession {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
+		const effectiveModel = modelOverride ?? this.model;
+		const shape = snapcompact.resolveShape(effectiveModel, this.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
