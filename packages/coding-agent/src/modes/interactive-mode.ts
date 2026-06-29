@@ -102,7 +102,7 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { formatTaskId } from "../task/render";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { previewLine, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName, todoMatchesAnyDescription } from "../tools/todo";
@@ -329,6 +329,11 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * one hooked row per running agent in the same `Id: description` shape the
  * inline task rows use (muted task preview when no description was given).
+ * A running row may carry a live-preview sub-row — the agent's current (or,
+ * between calls, most recent) tool call with a one-line detail and an elapsed
+ * marker, when one is available — read off the observable-session progress
+ * channel so detached spawns are no longer a black box. Detail is budgeted to
+ * the viewport.
  * Only detached background spawns are listed: a sync task call blocks the
  * parent turn and its inline tool block already renders progress live, and
  * eval `agent()` spawns are rendered by their own eval cell tree.
@@ -361,6 +366,36 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 			}
 		}
 		lines.push(line);
+		// Live preview of what the subagent is doing right now: its current (or,
+		// between calls, most recent) tool call with a one-line detail, mirroring
+		// the inline task tool block so detached spawns are no longer a black box.
+		const progress = session.progress;
+		if (progress?.status === "running") {
+			const currentTool = progress.currentTool;
+			const recent = progress.recentTools[0];
+			const tool = currentTool ?? recent?.tool;
+			if (tool) {
+				const detail = progress.lastIntent ?? (currentTool ? progress.currentToolArgs : recent?.args);
+				const toolPrefix = `${indent}  ${hook} `;
+				// Elapsed marker only once a call has been running long enough.
+				let elapsedLabel = "";
+				if (progress.currentToolStartMs) {
+					const elapsed = Date.now() - progress.currentToolStartMs;
+					if (elapsed > 5000) {
+						elapsedLabel = `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
+					}
+				}
+				let toolLine = `${toolPrefix}${theme.fg(currentTool ? "muted" : "dim", tool)}`;
+				// Budget the detail so the row stays within the viewport (the
+				// ": " separator counts too): never overflow, just shorten it.
+				const detailBudget = columns - visibleWidth(toolLine) - visibleWidth(elapsedLabel) - 2;
+				if (detail && detailBudget >= 8) {
+					toolLine += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
+				}
+				toolLine += elapsedLabel;
+				lines.push(toolLine);
+			}
+		}
 	});
 	return lines;
 }
