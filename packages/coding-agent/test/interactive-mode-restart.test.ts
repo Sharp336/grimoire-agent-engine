@@ -58,9 +58,34 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { providerSessionId: "launch-provider-session" },
 			liveProviderSessionId: "fresh-provider-session",
+			liveAdvisorEnabled: false,
 		});
 
 		expect(options.providerSessionId).toBe("fresh-provider-session");
+	});
+
+	test("uses the live advisor state after stale launch flags", () => {
+		const enabledOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { advisor: false },
+			liveAdvisorEnabled: true,
+			liveProviderSessionId: "provider-session",
+		});
+		const disabledOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { advisor: true },
+			liveAdvisorEnabled: false,
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(enabledOptions.advisor).toBe(true);
+		expect(disabledOptions.advisor).toBe(false);
 	});
 });
 describe("restart active-work guard", () => {

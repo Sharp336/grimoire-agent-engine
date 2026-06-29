@@ -1,7 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import {
 	buildRestartCommand,
+	consumeRestartAdvisorEnabled,
 	consumeRestartExtensionFlagValues,
+	RESTART_ADVISOR_ENABLED_ENV,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
 	RESTART_EXTENSION_FLAG_VALUES_ENV,
@@ -232,11 +234,45 @@ describe("restart command construction", () => {
 		});
 	});
 
+	test("hands off live advisor state via child env", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), advisor: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), advisor: false }, env);
+
+		expect(enabledCommand.cmd).toContain("--advisor");
+		expect(enabledCommand.env).toEqual({
+			[RESTART_ADVISOR_ENABLED_ENV]: "1",
+		});
+		expect(disabledCommand.cmd).not.toContain("--advisor");
+		expect(disabledCommand.env).toEqual({
+			[RESTART_ADVISOR_ENABLED_ENV]: "0",
+		});
+	});
+
 	test("ignores malformed restart extension flag env payloads", () => {
 		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "not-json" };
 
 		expect(consumeRestartExtensionFlagValues(env)).toBeUndefined();
 		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("consumes restart advisor env toggles", () => {
+		const enabledEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "1" };
+		const disabledEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "0" };
+		const invalidEnv = { [RESTART_ADVISOR_ENABLED_ENV]: "yes" };
+
+		expect(consumeRestartAdvisorEnabled(enabledEnv)).toBe(true);
+		expect(consumeRestartAdvisorEnabled(disabledEnv)).toBe(false);
+		expect(consumeRestartAdvisorEnabled(invalidEnv)).toBeUndefined();
+		expect(enabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+		expect(disabledEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
+		expect(invalidEnv[RESTART_ADVISOR_ENABLED_ENV]).toBeUndefined();
 	});
 
 	test("restores only registered extension flag values", () => {

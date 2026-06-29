@@ -7,6 +7,8 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 export const RESTART_API_KEY_ENV = "OMP_RESTART_API_KEY";
 /** Environment variable used for one-hop restart handoff of the runtime CLI API key's original provider. */
 export const RESTART_API_KEY_PROVIDER_ENV = "OMP_RESTART_API_KEY_PROVIDER";
+/** Environment variable used for one-hop restart handoff of the live advisor toggle. */
+export const RESTART_ADVISOR_ENABLED_ENV = "OMP_RESTART_ADVISOR_ENABLED";
 
 /** Environment variable used for one-hop restart handoff of extension CLI flag values. */
 export const RESTART_EXTENSION_FLAG_VALUES_ENV = "OMP_RESTART_EXTENSION_FLAG_VALUES";
@@ -108,6 +110,18 @@ export interface RestartExtensionFlagSink {
 	setFlagValue(name: string, value: boolean | string): void;
 }
 
+/** Consume the restart-only advisor toggle override from the one-hop restart environment. */
+export function consumeRestartAdvisorEnabled(
+	env: Record<string, string | undefined> = process.env,
+): boolean | undefined {
+	const encoded = env[RESTART_ADVISOR_ENABLED_ENV];
+	if (encoded === undefined) return undefined;
+	delete env[RESTART_ADVISOR_ENABLED_ENV];
+	if (encoded === "1") return true;
+	if (encoded === "0") return false;
+	return undefined;
+}
+
 /** Consume extension CLI flag values from the one-hop restart environment payload. */
 export function consumeRestartExtensionFlagValues(
 	env: Record<string, string | undefined> = process.env,
@@ -177,6 +191,10 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 	}
 	if (options.extensionFlagValues && options.extensionFlagValues.length > 0) {
 		childEnv[RESTART_EXTENSION_FLAG_VALUES_ENV] = JSON.stringify(options.extensionFlagValues);
+		hasChildEnv = true;
+	}
+	if (options.advisor !== undefined) {
+		childEnv[RESTART_ADVISOR_ENABLED_ENV] = options.advisor ? "1" : "0";
 		hasChildEnv = true;
 	}
 	return hasChildEnv ? childEnv : undefined;

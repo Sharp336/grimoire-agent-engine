@@ -29,6 +29,7 @@ import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-fla
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import {
+	consumeRestartAdvisorEnabled,
 	consumeRestartExtensionFlagValues,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
@@ -1325,6 +1326,7 @@ export async function runRootCommand(
 	const restartApiKeyHandoff = applyRestartApiKeyHandoff(parsedArgs);
 	const restartApiKeyProvider = restartApiKeyHandoff?.provider;
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
+	const restartAdvisorEnabled = consumeRestartAdvisorEnabled();
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
@@ -1446,6 +1448,9 @@ export async function runRootCommand(
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
+	}
+	if (restartAdvisorEnabled !== undefined) {
+		settingsInstance.override("advisor.enabled", restartAdvisorEnabled);
 	}
 
 	await logger.time(
