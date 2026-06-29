@@ -86,6 +86,7 @@ describe("restart launch flags", () => {
 
 		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).toBe(sessionPromptPath);
 		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).not.toBe(launchPromptPath);
+		expect(await resolveRestartPromptLaunchValue(undefined, sessionCwd, launchPromptPath)).toBe(launchPromptPath);
 		expect(await resolveRestartPromptLaunchValue("literal prompt", sessionCwd)).toBe("literal prompt");
 		expect(await resolveRestartPromptLaunchValue("literal\nprompt", sessionCwd)).toBe("literal\nprompt");
 	});

@@ -434,14 +434,16 @@ function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: s
 export async function resolveRestartPromptLaunchValue(
 	value: string | undefined,
 	launchCwd: string,
+	fallbackValue?: string,
 ): Promise<string | undefined> {
-	if (!value || value.includes("\n")) return value;
-	const resolved = resolveRestartLaunchPath(value, launchCwd);
+	const source = value ?? fallbackValue;
+	if (!source || source.includes("\n")) return source;
+	const resolved = resolveRestartLaunchPath(source, launchCwd);
 	try {
 		await Bun.file(resolved).text();
 		return resolved;
 	} catch {
-		return value;
+		return source;
 	}
 }
 
@@ -1028,6 +1030,13 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+interface RestartPromptSources {
+	discoveredSystemPromptSource?: string;
+	discoveredAppendPromptSource?: string;
+}
+
+const restartPromptSources = new WeakMap<CreateAgentSessionOptions, RestartPromptSources>();
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1050,8 +1059,11 @@ export async function buildSessionOptions(
 	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
-	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
+	const discoveredSystemPromptSource = parsed.systemPrompt === undefined ? discoverSystemPromptFile() : undefined;
+	const systemPromptSource = parsed.systemPrompt ?? discoveredSystemPromptSource;
+	const discoveredAppendPromptSource =
+		parsed.appendSystemPrompt === undefined ? discoverAppendSystemPromptFile() : undefined;
+	const appendPromptSource = parsed.appendSystemPrompt ?? discoveredAppendPromptSource;
 	const titleSystemPromptSource = discoverTitleSystemPromptFile();
 	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
 		resolvePromptInput(systemPromptSource, "system prompt"),
@@ -1278,6 +1290,7 @@ export async function buildSessionOptions(
 		options.additionalExtensionPaths = [];
 	}
 
+	restartPromptSources.set(options, { discoveredSystemPromptSource, discoveredAppendPromptSource });
 	return options;
 }
 
@@ -1586,6 +1599,7 @@ export async function runRootCommand(
 		modelRegistry,
 		settingsInstance,
 	);
+	const { discoveredSystemPromptSource, discoveredAppendPromptSource } = restartPromptSources.get(sessionOptions) ?? {};
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
@@ -1825,8 +1839,16 @@ export async function runRootCommand(
 				buildRestartLaunchFlags(
 					{
 						...applyLiveThinkingToRestartLaunchArgs(initialArgs, session.configuredThinkingLevel()),
-						systemPrompt: await resolveRestartPromptLaunchValue(initialArgs.systemPrompt, cwd),
-						appendSystemPrompt: await resolveRestartPromptLaunchValue(initialArgs.appendSystemPrompt, cwd),
+						systemPrompt: await resolveRestartPromptLaunchValue(
+							initialArgs.systemPrompt,
+							cwd,
+							discoveredSystemPromptSource,
+						),
+						appendSystemPrompt: await resolveRestartPromptLaunchValue(
+							initialArgs.appendSystemPrompt,
+							cwd,
+							discoveredAppendPromptSource,
+						),
 					},
 					launchConfigCwd,
 					currentExtensionFlagValues,
