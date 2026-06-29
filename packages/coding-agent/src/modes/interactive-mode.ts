@@ -244,6 +244,33 @@ export function hasRestartBlockingWork(
 	);
 }
 
+export interface InteractiveRestartCommandInput {
+	sessionId: string;
+	cwd: string;
+	sessionDir: string;
+	activeProfile?: string;
+	toolRestriction?: restartProcess.RestartToolRestriction;
+	approvalMode: restartProcess.RestartApprovalMode;
+	launchFlags?: restartProcess.RestartLaunchFlags;
+	liveProviderSessionId: string;
+}
+
+/** Build `/restart` options with live session state overriding stale launch-time flags. */
+export function buildInteractiveRestartCommandOptions(
+	options: InteractiveRestartCommandInput,
+): restartProcess.BuildRestartCommandOptions {
+	return {
+		sessionId: options.sessionId,
+		cwd: options.cwd,
+		sessionDir: options.sessionDir,
+		activeProfile: options.activeProfile,
+		toolRestriction: options.toolRestriction,
+		approvalMode: options.approvalMode,
+		...options.launchFlags,
+		providerSessionId: options.liveProviderSessionId,
+	};
+}
+
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
 	mid: "muted",
@@ -4030,15 +4057,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		const command = restartProcess.buildRestartCommand({
-			sessionId: this.sessionManager.getSessionId(),
-			cwd: this.sessionManager.getCwd(),
-			sessionDir: this.sessionManager.getSessionDir(),
-			activeProfile: getActiveProfile(),
-			toolRestriction: this.#restartToolRestriction,
-			approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
-			...this.#restartLaunchFlags,
-		});
+		const command = restartProcess.buildRestartCommand(
+			buildInteractiveRestartCommandOptions({
+				sessionId: this.sessionManager.getSessionId(),
+				cwd: this.sessionManager.getCwd(),
+				sessionDir: this.sessionManager.getSessionDir(),
+				activeProfile: getActiveProfile(),
+				toolRestriction: this.#restartToolRestriction,
+				approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
+				launchFlags: this.#restartLaunchFlags,
+				liveProviderSessionId: this.session.sessionId,
+			}),
+		);
 
 		this.#isShuttingDown = true;
 		try {

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { hasRestartBlockingWork } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import {
+	buildInteractiveRestartCommandOptions,
+	hasRestartBlockingWork,
+} from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
@@ -46,6 +49,20 @@ const deliveringDeliverySnapshot: AsyncJobSnapshot = {
 	delivery: { queued: 0, delivering: true, pendingJobIds: ["job-3"] },
 };
 
+describe("restart command options", () => {
+	test("uses the live provider session id after stale launch flags", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { providerSessionId: "launch-provider-session" },
+			liveProviderSessionId: "fresh-provider-session",
+		});
+
+		expect(options.providerSessionId).toBe("fresh-provider-session");
+	});
+});
 describe("restart active-work guard", () => {
 	test("allows restart when the session is idle", () => {
 		expect(hasRestartBlockingWork(sessionState())).toBe(false);
