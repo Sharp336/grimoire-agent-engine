@@ -329,7 +329,9 @@ describe("tokensaving helper", () => {
 		});
 
 		const warnings = collectTokenSavingWarnings(settings);
-		expect(warnings).toContain("advisor.compactionThresholdPercent is above 50; compaction may not trigger effectively.");
+		expect(warnings).toContain(
+			"advisor.compactionThresholdPercent is above 50; compaction may not trigger effectively.",
+		);
 	});
 
 	it("sets advisor.compactionThresholdTokens to -1 when enabling token saving", async () => {

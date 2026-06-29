@@ -814,6 +814,8 @@ interface ActiveAdvisor {
 	agentUnsubscribe?: () => void;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	/** Snapcompact preserve data carried across compaction runs for this advisor. */
+	preserveData?: Record<string, unknown>;
 }
 
 export interface FreshSessionResult {
@@ -1356,8 +1358,6 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
-	/** Advisor preserve data carried across snapcompact runs */
-	#advisorPreserveData: Record<string, unknown> | undefined;
 	/** The advisor-scoped tool set assigned at session creation. */
 	#advisorTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
@@ -2025,6 +2025,7 @@ export class AgentSession {
 			a.runtime.reset();
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
+			a.preserveData = undefined;
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -2477,7 +2478,7 @@ export class AgentSession {
 
 		// Carry forward snapcompact frame archives from a previous advisor
 		// compaction run so iterative snapcompact can build on its own history.
-		preparation.previousPreserveData = this.#advisorPreserveData;
+		preparation.previousPreserveData = advisor.preserveData;
 
 		// Try snapcompact first when the advisor strategy requests it.
 		let snapcompactResult: snapcompact.CompactionResult | undefined;
@@ -2541,11 +2542,11 @@ export class AgentSession {
 				tokensBefore: snapcompactResult.tokensBefore,
 				details: snapcompactResult.details,
 				preserveData: {
-					...(this.#advisorPreserveData ?? {}),
+					...(advisor.preserveData ?? {}),
 					...(snapcompactResult.preserveData ?? {}),
 				},
 			} satisfies CompactionResult;
-			this.#advisorPreserveData = compactResult.preserveData;
+			advisor.preserveData = compactResult.preserveData;
 
 			const summary = compactResult.summary;
 			const shortSummary = compactResult.shortSummary;
@@ -2553,8 +2554,18 @@ export class AgentSession {
 			const tokensBefore = compactResult.tokensBefore;
 
 			// Rebuild messages with the compaction summary
+			const archive = snapcompact.getPreservedArchive(compactResult.preserveData);
+			const blocks = archive ? snapcompact.historyBlocks(archive) : undefined;
 			const summaryMessage = {
-				...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), shortSummary),
+				...createCompactionSummaryMessage(
+					summary,
+					tokensBefore,
+					new Date().toISOString(),
+					shortSummary,
+					undefined,
+					undefined,
+					blocks,
+				),
 				firstKeptEntryId,
 			} as CompactionSummaryMessage & { firstKeptEntryId?: string };
 
