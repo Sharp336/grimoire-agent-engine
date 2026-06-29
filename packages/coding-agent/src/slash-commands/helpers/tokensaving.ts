@@ -12,6 +12,7 @@ export type TokenSavingSettingPath =
 	| "advisor.compactionEnabled"
 	| "advisor.compactionThresholdPercent"
 	| "advisor.compactionThresholdTokens"
+	| "advisor.compactionModel"
 	| "advisor.compactionStrategy"
 	| "enabledModels"
 	| "modelRoles";
@@ -30,8 +31,10 @@ export type TokenSavingSettingValue<P extends TokenSavingSettingPath> = P extend
 						? number
 						: P extends "advisor.compactionThresholdTokens"
 							? number
-							: P extends "advisor.compactionStrategy"
-								? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
+							: P extends "advisor.compactionModel"
+								? string
+								: P extends "advisor.compactionStrategy"
+									? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
 								: P extends "enabledModels"
 									? readonly string[]
 									: P extends "modelRoles"

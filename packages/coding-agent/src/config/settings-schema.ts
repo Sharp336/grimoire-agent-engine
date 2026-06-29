@@ -492,6 +492,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"advisor.compactionModel": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Compaction Model",
+			description:
+				"Override the model used for advisor compaction. If empty, the advisor's own model is used. Supports role tags (e.g. 'smol') or exact model IDs (e.g. 'google/gemini-2.5-flash').",
+			condition: "advisorEnabled",
+		},
+	},
+
 	"advisor.compactionStrategy": {
 		type: "enum",
 		values: ["inherit", "context-full", "handoff", "shake", "snapcompact"] as const,

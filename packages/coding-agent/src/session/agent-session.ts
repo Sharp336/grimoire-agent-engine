@@ -2463,7 +2463,26 @@ export class AgentSession {
 		});
 
 		const availableModels = this.#modelRegistry.getAvailable();
-		const candidates = this.#resolveCompactionModelCandidates(advisorModel, availableModels);
+		
+		const advisorCompactionModelStr = this.settings.get("advisor.compactionModel")?.trim();
+		let resolvedAdvisorCompactionModel: Model | undefined = undefined;
+		
+		if (advisorCompactionModelStr) {
+			const resolution = resolveModelRoleValue(advisorCompactionModelStr, availableModels, {
+				settings: this.settings,
+				matchPreferences: getModelMatchPreferences(this.settings),
+				modelRegistry: this.#modelRegistry,
+			});
+			resolvedAdvisorCompactionModel = resolution.model;
+			if (!resolvedAdvisorCompactionModel) {
+				this.agent.telemetry?.emit("advisor.compaction.error", {
+					message: `Could not resolve advisor.compactionModel '${advisorCompactionModelStr}', falling back to ${advisorModel.id}`,
+				});
+			}
+		}
+
+		const snapcompactModel = resolvedAdvisorCompactionModel ?? advisorModel;
+		const candidates = this.#resolveCompactionModelCandidates(snapcompactModel, availableModels);
 		if (candidates.length === 0) {
 			// No compaction candidates, fallback to re-prime
 			return true;
@@ -2517,8 +2536,8 @@ export class AgentSession {
 				} else {
 					snapcompactResult = await snapcompact.compact(preparation, {
 						convertToLlm,
-						model: advisorModel,
-						shape: snapcompact.resolveShape(advisorModel, this.settings.get("snapcompact.shape")),
+						model: snapcompactModel,
+						shape: snapcompact.resolveShape(snapcompactModel, this.settings.get("snapcompact.shape")),
 						maxFrames,
 					});
 					if (snapcompactResult) {
