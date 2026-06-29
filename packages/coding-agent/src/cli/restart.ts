@@ -34,6 +34,7 @@ export interface BuildRestartCommandOptions {
 	cwd: string;
 	sessionDir: string;
 	activeProfile?: string;
+	disableExtensions?: boolean;
 	toolRestriction?: RestartToolRestriction;
 	approvalMode: RestartApprovalMode;
 }
@@ -90,6 +91,10 @@ export function buildRestartCommand(
 
 	if (options.activeProfile !== undefined) {
 		cmd.push("--profile", options.activeProfile);
+	}
+
+	if (options.disableExtensions) {
+		cmd.push("--no-extensions");
 	}
 
 	cmd.push("--cwd", options.cwd, "--approval-mode", options.approvalMode);

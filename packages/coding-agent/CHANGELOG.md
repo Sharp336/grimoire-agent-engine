@@ -1487,6 +1487,9 @@
 - Fixed the DuckDuckGo web_search provider returning empty results for non-encyclopedic queries by switching from the Instant Answer API to parsing the HTML frontend, and added clear error handling for bot-challenge throttling.
 - Fixed Windows --extension paths with spaces or \\?\ prefixes being truncated or incorrectly passed to Bun import/spawn APIs.
 - Fixed /mcp reauth compatibility with Cloudflare by aligning OAuth prompt behavior with the reference MCP SDK and updating the client label to oh-my-pi.
+### Fixed
+
+- Fixed `/restart` dropping the `--no-extensions` launch state, so restarted TUI sessions continue to suppress configured/project extensions and custom commands.
 
 ## [16.2.5] - 2026-06-28
 

@@ -430,6 +430,7 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	joinLink?: string,
 	restartToolRestriction?: RestartToolRestriction,
+	restartDisableExtensions = false,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -440,6 +441,7 @@ async function runInteractiveMode(
 		mcpManager,
 		eventBus,
 		restartToolRestriction,
+		restartDisableExtensions,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -1600,6 +1602,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(parsedArgs),
+				Boolean(parsedArgs.noExtensions),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

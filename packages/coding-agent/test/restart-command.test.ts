@@ -107,6 +107,21 @@ describe("restart command construction", () => {
 		expect(command.cwd).toBe("/repo/project");
 	});
 
+	test("preserves disabled extension discovery across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), disableExtensions: true }, env);
+
+		expect(command.cmd).toContain("--no-extensions");
+		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
 	test("preserves disabled tools across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,

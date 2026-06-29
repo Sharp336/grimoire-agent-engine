@@ -650,6 +650,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
 	readonly #restartToolRestriction: restartProcess.RestartToolRestriction | undefined;
+	readonly #restartDisableExtensions: boolean;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
@@ -671,6 +672,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
 		restartToolRestriction?: restartProcess.RestartToolRestriction,
+		restartDisableExtensions = false,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -687,6 +689,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.#eventBus = eventBus;
 		this.#restartToolRestriction = restartToolRestriction;
+		this.#restartDisableExtensions = restartDisableExtensions;
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -4016,6 +4019,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeProfile: getActiveProfile(),
 			toolRestriction: this.#restartToolRestriction,
 			approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
+			disableExtensions: this.#restartDisableExtensions,
 		});
 
 		this.#isShuttingDown = true;
