@@ -39,6 +39,7 @@ class FakeSettings implements TokenSavingSettingsLike {
 			"advisor.subagents": true,
 			"advisor.syncBacklog": "5",
 			"advisor.immuneTurns": 3,
+			"advisor.compactionThresholdTokens": 0,
 			enabledModels: [],
 			...options.values,
 		} as Record<
@@ -81,7 +82,7 @@ class FakeSettings implements TokenSavingSettingsLike {
 }
 
 describe("tokensaving helper", () => {
-	it("warns when task role equals the default model", () => {
+	it("warns when task role equals the default model", async () => {
 		const settings = new FakeSettings({
 			values: {
 				"task.eager": "always",
@@ -99,10 +100,10 @@ describe("tokensaving helper", () => {
 		expect(collectTokenSavingWarnings(settings)).toContain(
 			"modelRoles.task equals modelRoles.default; task subagents are not shifted to a cheap model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
+		expect(await formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
-	it("warns when task role is non-default and not cheap", () => {
+	it("warns when task role is non-default and not cheap", async () => {
 		const settings = new FakeSettings({
 			values: {
 				"task.eager": "always",
@@ -120,10 +121,10 @@ describe("tokensaving helper", () => {
 		expect(collectTokenSavingWarnings(settings)).toContain(
 			"modelRoles.task is not a cheap model; task subagents may still use an expensive model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
+		expect(await formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
-	it("warns when task role points at a protected expensive orchestration role model", () => {
+	it("warns when task role points at a protected expensive orchestration role model", async () => {
 		const settings = new FakeSettings({
 			values: {
 				"task.eager": "always",
@@ -146,7 +147,7 @@ describe("tokensaving helper", () => {
 		expect(warnings).toContain(
 			"modelRoles.task is not a cheap model; task subagents may still use an expensive model.",
 		);
-		expect(formatTokenSavingStatus(settings)).toContain("Token saving: off");
+		expect(await formatTokenSavingStatus(settings)).toContain("Token saving: off");
 	});
 
 	it("applies task routing and advisor economy levers", () => {
@@ -292,7 +293,59 @@ describe("tokensaving helper", () => {
 		expect(settings.getModelRole("task")).toBe("vendor/flash-small");
 	});
 
-	it("off restores settings from the snapshot created by on", () => {
+	it("warns when advisor compaction is disabled", () => {
+		const settings = new FakeSettings({
+			values: {
+				"task.eager": "always",
+				"advisor.subagents": false,
+				"advisor.syncBacklog": "off",
+				"advisor.immuneTurns": 10,
+				"advisor.compactionEnabled": false,
+			},
+			modelRoles: {
+				default: "gpt-expensive",
+				task: "opencode-go/deepseek-v4-flash:xhigh",
+			},
+		});
+
+		const warnings = collectTokenSavingWarnings(settings);
+		expect(warnings).toContain("advisor.compactionEnabled is false; advisor compaction is disabled.");
+	});
+
+	it("warns when advisor compaction threshold is above 50", () => {
+		const settings = new FakeSettings({
+			values: {
+				"task.eager": "always",
+				"advisor.subagents": false,
+				"advisor.syncBacklog": "off",
+				"advisor.immuneTurns": 10,
+				"advisor.compactionEnabled": true,
+				"advisor.compactionThresholdPercent": 75,
+			},
+			modelRoles: {
+				default: "gpt-expensive",
+				task: "opencode-go/deepseek-v4-flash:xhigh",
+			},
+		});
+
+		const warnings = collectTokenSavingWarnings(settings);
+		expect(warnings).toContain("advisor.compactionThresholdPercent is above 50; compaction may not trigger effectively.");
+	});
+
+	it("sets advisor.compactionThresholdTokens to -1 when enabling token saving", async () => {
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-tokensaving-"));
+		const settings = new FakeSettings({
+			agentDir,
+			values: { enabledModels: ["vendor/flash-small"] },
+			modelRoles: { default: "gpt-expensive", task: "gpt-expensive" },
+		});
+
+		await enableTokenSaving(settings);
+
+		expect(settings.get("advisor.compactionThresholdTokens")).toBe(-1);
+	});
+
+	it("off restores settings from the snapshot created by on", async () => {
 		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-tokensaving-"));
 		const settings = new FakeSettings({
 			agentDir,
@@ -300,14 +353,14 @@ describe("tokensaving helper", () => {
 			modelRoles: { default: "gpt-expensive", task: "gpt-expensive", slow: "gpt-slow" },
 		});
 
-		const enabled = enableTokenSaving(settings);
+		const enabled = await enableTokenSaving(settings);
 		expect(enabled.snapshotCreated).toBe(true);
 		expect(settings.get("task.eager")).toBe("always");
 		expect(settings.getModelRole("task")).toBe("vendor/flash-small");
 
 		settings.set("task.eager", "preferred");
 		settings.setModelRole("task", "temporary-model");
-		expect(disableTokenSaving(settings)).toContain("restored");
+		expect(await disableTokenSaving(settings)).toContain("restored");
 
 		expect(settings.get("task.eager")).toBe("default");
 		expect(settings.get("advisor.subagents")).toBe(true);
@@ -318,14 +371,14 @@ describe("tokensaving helper", () => {
 		expect(fs.existsSync(path.join(agentDir, "tokensaving-snapshot.json"))).toBe(false);
 	});
 
-	it("off does not mutate settings when no snapshot exists", () => {
+	it("off does not mutate settings when no snapshot exists", async () => {
 		const settings = new FakeSettings({
 			agentDir: fs.mkdtempSync(path.join(os.tmpdir(), "omp-tokensaving-")),
 			modelRoles: { default: "gpt-expensive", task: "opencode-go/deepseek-v4-flash:xhigh" },
 		});
 		const before = JSON.stringify({ values: settings.values, roles: settings.modelRoles });
 
-		expect(runTokenSavingCommand("off", settings)).toContain("no token-saving snapshot");
+		expect(await runTokenSavingCommand("off", settings)).toContain("no token-saving snapshot");
 		expect(JSON.stringify({ values: settings.values, roles: settings.modelRoles })).toBe(before);
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/tokensaving` slash command to enable/disable token-saving settings with a single command, including advisor compaction levers (`advisor.compactionEnabled`, `advisor.compactionThresholdPercent`, `advisor.compactionStrategy`, `advisor.compactionThresholdTokens`), task routing economy, and snapshot-based restore. ([#3814](https://github.com/can1357/oh-my-pi/issues/3814))
+
 ### Changed
 
 - Optimized argument streaming to throttle JSON re-parsing for renderers that do not require raw input

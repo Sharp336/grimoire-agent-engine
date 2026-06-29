@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { Settings } from "../../config/settings";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, parseSubcommand, usage } from "./parse";
@@ -13,6 +11,7 @@ export type TokenSavingSettingPath =
 	| "advisor.immuneTurns"
 	| "advisor.compactionEnabled"
 	| "advisor.compactionThresholdPercent"
+	| "advisor.compactionThresholdTokens"
 	| "advisor.compactionStrategy"
 	| "enabledModels"
 	| "modelRoles";
@@ -29,13 +28,15 @@ export type TokenSavingSettingValue<P extends TokenSavingSettingPath> = P extend
 					? boolean
 					: P extends "advisor.compactionThresholdPercent"
 						? number
-						: P extends "advisor.compactionStrategy"
-							? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
-							: P extends "enabledModels"
-								? readonly string[]
-								: P extends "modelRoles"
-									? Record<string, string>
-									: never;
+						: P extends "advisor.compactionThresholdTokens"
+							? number
+							: P extends "advisor.compactionStrategy"
+								? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
+								: P extends "enabledModels"
+									? readonly string[]
+									: P extends "modelRoles"
+										? Record<string, string>
+										: never;
 
 export interface TokenSavingSettingsLike {
 	get<P extends TokenSavingSettingPath>(path: P): TokenSavingSettingValue<P>;
@@ -75,7 +76,8 @@ export interface TokenSavingEnableResult extends TokenSavingApplyResult {
 	snapshotError?: string;
 }
 
-const CHEAP_MODEL_RE = /\b(deepseek|flash|smol|cheap|tiny|mini|qwen|gemma|local|ollama)\b/i;
+const CHEAP_MODEL_RE =
+	/\b(deepseek|flash|smol|cheap|tiny|mini|qwen(?=\d|[\s:/-]|$)|gemma(?=\d|[\s:/-]|$)|local|ollama)\b/i;
 const ROLE_CANDIDATE_ORDER = ["task", "smol", "tiny", "advisor"] as const;
 const EXPENSIVE_ROLE_NAMES = ["default", "slow", "plan", "vision"] as const;
 
@@ -176,14 +178,18 @@ export function collectTokenSavingWarnings(settings: TokenSavingSettingsLike): s
 			"modelRoles.advisor points at an expensive orchestration role; advisor review is additive model spend.",
 		);
 	}
+	if (!settings.get("advisor.compactionEnabled"))
+		warnings.push("advisor.compactionEnabled is false; advisor compaction is disabled.");
+	if ((settings.get("advisor.compactionThresholdPercent") ?? 0) > 50)
+		warnings.push("advisor.compactionThresholdPercent is above 50; compaction may not trigger effectively.");
 
 	return warnings;
 }
 
-export function formatTokenSavingStatus(settings: TokenSavingSettingsLike): string {
+export async function formatTokenSavingStatus(settings: TokenSavingSettingsLike): Promise<string> {
 	const warnings = collectTokenSavingWarnings(settings);
 	const snapshotPath_ = snapshotPath(settings);
-	const snapshotExists = snapshotPath_ ? fs.existsSync(snapshotPath_) : false;
+	const snapshotExists = snapshotPath_ ? await Bun.file(snapshotPath_).exists() : false;
 	const active = snapshotExists;
 	const lines = [
 		`Token saving: ${active ? "on" : "off"}`,
@@ -252,7 +258,7 @@ interface TokenSavingSnapshot {
 
 function snapshotPath(settings: TokenSavingSettingsLike): string | undefined {
 	const agentDir = settings.getAgentDir?.();
-	return agentDir ? path.join(agentDir, SNAPSHOT_FILE) : undefined;
+	return agentDir ? `${agentDir}/${SNAPSHOT_FILE}` : undefined;
 }
 
 function buildSnapshot(changes: readonly TokenSavingChange[]): TokenSavingSnapshot {
@@ -272,26 +278,24 @@ function buildSnapshot(changes: readonly TokenSavingChange[]): TokenSavingSnapsh
 	}
 	return snapshot;
 }
-
-function readSnapshot(file: string): TokenSavingSnapshot | undefined {
-	if (!fs.existsSync(file)) return undefined;
-	const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as TokenSavingSnapshot;
+async function readSnapshot(file: string): Promise<TokenSavingSnapshot | undefined> {
+	if (!(await Bun.file(file).exists())) return undefined;
+	const text = await Bun.file(file).text();
+	const parsed = JSON.parse(text) as TokenSavingSnapshot;
 	if (parsed.version !== 1 || !Array.isArray(parsed.settings) || !Array.isArray(parsed.modelRoles)) {
 		throw new Error("Invalid token-saving snapshot format");
 	}
 	return parsed;
 }
-
-function writeSnapshotIfMissing(
+async function writeSnapshotIfMissing(
 	settings: TokenSavingSettingsLike,
 	changes: readonly TokenSavingChange[],
-): Pick<TokenSavingEnableResult, "snapshotCreated" | "snapshotPath" | "snapshotError"> {
+): Promise<Pick<TokenSavingEnableResult, "snapshotCreated" | "snapshotPath" | "snapshotError">> {
 	const file = snapshotPath(settings);
 	if (!file || changes.length === 0) return { snapshotCreated: false, snapshotPath: file };
-	if (fs.existsSync(file)) return { snapshotCreated: false, snapshotPath: file };
+	if (await Bun.file(file).exists()) return { snapshotCreated: false, snapshotPath: file };
 	try {
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, `${JSON.stringify(buildSnapshot(changes), null, 2)}\n`);
+		await Bun.write(file, `${JSON.stringify(buildSnapshot(changes), null, 2)}\n`);
 		return { snapshotCreated: true, snapshotPath: file };
 	} catch (err) {
 		return {
@@ -302,19 +306,19 @@ function writeSnapshotIfMissing(
 	}
 }
 
-export function enableTokenSaving(settings: TokenSavingSettingsLike): TokenSavingEnableResult {
+export async function enableTokenSaving(settings: TokenSavingSettingsLike): Promise<TokenSavingEnableResult> {
 	const result = applyTokenSaving(settings);
-	return { ...result, ...writeSnapshotIfMissing(settings, result.changes) };
+	setIfChanged(settings, result.changes, "advisor.compactionThresholdTokens", -1);
+	return { ...result, ...(await writeSnapshotIfMissing(settings, result.changes)) };
 }
-
-export function disableTokenSaving(settings: TokenSavingSettingsLike): string {
+export async function disableTokenSaving(settings: TokenSavingSettingsLike): Promise<string> {
 	const file = snapshotPath(settings);
 	if (!file) {
 		return "Token saving restore is unavailable: settings object does not expose an agent directory.";
 	}
 	let snapshot: TokenSavingSnapshot | undefined;
 	try {
-		snapshot = readSnapshot(file);
+		snapshot = await readSnapshot(file);
 	} catch (err) {
 		return `Token saving restore failed: ${err instanceof Error ? err.message : String(err)}`;
 	}
@@ -333,18 +337,18 @@ export function disableTokenSaving(settings: TokenSavingSettingsLike): string {
 		settings.set("modelRoles", roles);
 	}
 	try {
-		fs.unlinkSync(file);
+		await Bun.file(file).delete();
 	} catch (err) {
 		return `Token saving restored, but snapshot cleanup failed: ${err instanceof Error ? err.message : String(err)}`;
 	}
 	return "Token saving settings restored from snapshot.";
 }
 
-export function runTokenSavingCommand(args: string, settings: TokenSavingSettingsLike): string {
+export async function runTokenSavingCommand(args: string, settings: TokenSavingSettingsLike): Promise<string> {
 	const { verb } = parseSubcommand(args);
 	if (!verb || verb === "status") return formatTokenSavingStatus(settings);
 	if (verb === "on") {
-		const result = enableTokenSaving(settings);
+		const result = await enableTokenSaving(settings);
 		const lines = ["Token saving enabled."];
 		if (result.candidate) lines.push(`Cheap model candidate: ${result.candidate}`);
 		if (result.changes.length === 0) lines.push("No setting changes were needed.");
@@ -375,7 +379,8 @@ export async function handleTokenSavingCommand(
 ): Promise<SlashCommandResult> {
 	const { verb } = parseSubcommand(command.args);
 	if (verb && verb !== "on" && verb !== "off" && verb !== "status") return usage(TOKEN_SAVING_COMMAND_USAGE, runtime);
-	await runtime.output(runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.settings)));
+	const output = await runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.settings));
+	await runtime.output(output);
 	if (verb === "on" || verb === "off") await runtime.settings.flush();
 	return commandConsumed();
 }
