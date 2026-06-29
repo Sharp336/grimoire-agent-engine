@@ -75,6 +75,11 @@ const NAPI_TOKIO_MAX_WORKER_THREADS: usize = 4;
 /// created on demand, not at load, so this only bounds peak fan-out.
 #[cfg(target_os = "windows")]
 const NAPI_TOKIO_MAX_BLOCKING_THREADS: usize = 8;
+/// Cap on rayon's global thread pool. Rayon handles CPU-heavy parallel work
+/// (token counting, sort); a moderate pool avoids over-commitment on Windows
+/// where commit charge is often the bottleneck, not core count.
+#[cfg(target_os = "windows")]
+const RAYON_MAX_THREADS: usize = 4;
 
 /// Windows worker count we'd *like*, before checking what the OS will actually
 /// grant: the Tokio default (one per core) clamped to
@@ -224,4 +229,25 @@ pub fn omp_install_tokio_runtime() {
 	if let Some(runtime) = create_windows_napi_tokio_runtime() {
 		create_custom_tokio_runtime(runtime);
 	}
+	#[cfg(target_os = "windows")]
+	configure_rayon_pool();
+}
+
+/// Size rayon's global thread pool to what the host can actually spawn,
+/// mirroring the Tokio probe strategy. Without this, rayon lazily initializes
+/// with one thread per core and **panics** (not `Err`) inside
+/// `std::thread::scope` when Windows refuses a thread (`os error 1455`),
+/// aborting the process.
+#[cfg(target_os = "windows")]
+fn configure_rayon_pool() {
+	let desired = std::thread::available_parallelism()
+		.map_or(1, |p| p.get())
+		.clamp(1, RAYON_MAX_THREADS);
+	let available = probe_spawnable_workers(desired);
+	let threads = available.max(1);
+	// `build_global` returns `Err` if the pool is already initialized — that's
+	// fine; we tried our best. The first rayon op will use whatever is there.
+	let _ = rayon::ThreadPoolBuilder::new()
+		.num_threads(threads)
+		.build_global();
 }
