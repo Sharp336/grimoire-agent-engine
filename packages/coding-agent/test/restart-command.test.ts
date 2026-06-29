@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildRestartCommand,
+	consumeRestartExtensionFlagValues,
 	RESTART_API_KEY_ENV,
+	RESTART_EXTENSION_FLAG_VALUES_ENV,
 	type RestartCommandEnvironment,
+	type RestartExtensionFlagValue,
 	type RestartSpawn,
 	type RestartSpawnInput,
+	restoreRestartExtensionFlagValues,
 	spawnRestartProcess,
 } from "@oh-my-pi/pi-coding-agent/cli/restart";
 
@@ -186,6 +190,56 @@ describe("restart command construction", () => {
 		expect(command.cmd).not.toContain("--api-key");
 		expect(command.cmd).not.toContain("sk-runtime");
 		expect(command.env).toEqual({ [RESTART_API_KEY_ENV]: "sk-runtime" });
+	});
+
+	test("hands off extension CLI flag values via child env instead of argv", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const extensionFlagValues: RestartExtensionFlagValue[] = [
+			["spawn-peer", "reviewer"],
+			["headless", true],
+		];
+
+		const command = buildRestartCommand({ ...baseOptions(), extensionFlagValues }, env);
+
+		expect(command.cmd).not.toContain("--spawn-peer");
+		expect(command.cmd).not.toContain("--headless");
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_FLAG_VALUES_ENV]: JSON.stringify(extensionFlagValues),
+		});
+	});
+
+	test("ignores malformed restart extension flag env payloads", () => {
+		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "not-json" };
+
+		expect(consumeRestartExtensionFlagValues(env)).toBeUndefined();
+		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("restores only registered extension flag values", () => {
+		const recorded = new Map<string, boolean | string>();
+		const registeredFlags: Record<string, true> = { "spawn-peer": true, headless: true };
+		const sink = {
+			getFlags: () => ({ has: (name: string) => registeredFlags[name] === true }),
+			setFlagValue: (name: string, value: boolean | string) => {
+				recorded.set(name, value);
+			},
+		};
+
+		restoreRestartExtensionFlagValues(sink, [
+			["spawn-peer", "reviewer"],
+			["missing", "dropped"],
+			["headless", true],
+		]);
+
+		expect([...recorded.entries()]).toEqual([
+			["spawn-peer", "reviewer"],
+			["headless", true],
+		]);
 	});
 
 	test("preserves disabled context flags across restart", () => {

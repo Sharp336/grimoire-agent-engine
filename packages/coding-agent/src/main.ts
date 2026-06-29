@@ -27,7 +27,14 @@ import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { RESTART_API_KEY_ENV, type RestartLaunchFlags, type RestartToolRestriction } from "./cli/restart";
+import {
+	consumeRestartExtensionFlagValues,
+	RESTART_API_KEY_ENV,
+	type RestartExtensionFlagValue,
+	type RestartLaunchFlags,
+	type RestartToolRestriction,
+	restoreRestartExtensionFlagValues,
+} from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -428,6 +435,7 @@ function buildRestartLaunchFlags(
 		| "skills"
 		| "systemPrompt"
 	>,
+	extensionFlagValues?: readonly RestartExtensionFlagValue[],
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
@@ -440,6 +448,7 @@ function buildRestartLaunchFlags(
 		extensionPaths: parsed.extensions,
 		hookPaths: parsed.hooks,
 		pluginDirs: parsed.pluginDirs,
+		extensionFlagValues,
 		skillPatterns: parsed.skills,
 		systemPrompt: parsed.systemPrompt,
 	};
@@ -1152,6 +1161,7 @@ export async function runRootCommand(
 
 	const parsedArgs = parsed;
 	applyRestartApiKeyHandoff(parsedArgs);
+	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
@@ -1502,7 +1512,15 @@ export async function runRootCommand(
 				extensionsResult.runtime.flagValues.set(name, value);
 			},
 		};
-		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+		const parsedWithExtensionFlags = restartExtensionFlagValues
+			? null
+			: applyExtensionFlags(extensionFlagSink, rawArgs);
+		const initialArgs = parsedWithExtensionFlags ?? parsedArgs;
+		const extensionFlagValues = parsedWithExtensionFlags?.unknownFlags;
+		const currentExtensionFlagValues =
+			restartExtensionFlagValues ??
+			(extensionFlagValues && extensionFlagValues.size > 0 ? [...extensionFlagValues.entries()] : undefined);
+		restoreRestartExtensionFlagValues(extensionFlagSink, restartExtensionFlagValues);
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 			if (isInteractive) {
@@ -1643,7 +1661,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(parsedArgs),
-				buildRestartLaunchFlags(parsedArgs),
+				buildRestartLaunchFlags(parsedArgs, currentExtensionFlagValues),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

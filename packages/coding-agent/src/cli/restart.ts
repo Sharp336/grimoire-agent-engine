@@ -5,13 +5,19 @@ import { isCompiledBinary, workerHostEntry } from "@oh-my-pi/pi-utils";
 /** Environment variable used for one-hop restart handoff of runtime CLI API keys. */
 export const RESTART_API_KEY_ENV = "OMP_RESTART_API_KEY";
 
+/** Environment variable used for one-hop restart handoff of extension CLI flag values. */
+export const RESTART_EXTENSION_FLAG_VALUES_ENV = "OMP_RESTART_EXTENSION_FLAG_VALUES";
+
 /** Tool approval modes that can be restored across a process restart. */
 export type RestartApprovalMode = "always-ask" | "write" | "yolo";
 
 /** Tool filter that must be restored in the restarted process. */
 export type RestartToolRestriction = { kind: "none" } | { kind: "allowlist"; toolNames: string[] };
 
-/** CLI launch flags for config, prompt, context, auth, and extension discovery that must survive restart. */
+/** Extension CLI flag value restored directly after extension discovery on restart. */
+export type RestartExtensionFlagValue = readonly [name: string, value: boolean | string];
+
+/** CLI launch state for auth, prompts, skills, context, config, and extensions that must survive restart. */
 export interface RestartLaunchFlags {
 	apiKey?: string;
 	disableExtensions?: boolean;
@@ -22,6 +28,7 @@ export interface RestartLaunchFlags {
 	extensionPaths?: string[];
 	hookPaths?: string[];
 	pluginDirs?: string[];
+	extensionFlagValues?: readonly RestartExtensionFlagValue[];
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -48,7 +55,7 @@ export interface RestartCommandEnvironment {
 	packageRoot: string;
 }
 
-/** Inputs copied from live interactive state into the restarted process argv. */
+/** Inputs copied from live interactive state into the restarted process argv/env. */
 export interface BuildRestartCommandOptions extends RestartLaunchFlags {
 	sessionId: string;
 	cwd: string;
@@ -81,6 +88,49 @@ export interface SpawnRestartProcessOptions {
 	spawn?: RestartSpawn;
 }
 
+/** Minimal extension flag sink needed to restore restart-carried flag values. */
+export interface RestartExtensionFlagSink {
+	getFlags(): { has(name: string): boolean };
+	setFlagValue(name: string, value: boolean | string): void;
+}
+
+/** Consume extension CLI flag values from the one-hop restart environment payload. */
+export function consumeRestartExtensionFlagValues(
+	env: Record<string, string | undefined> = process.env,
+): RestartExtensionFlagValue[] | undefined {
+	const encoded = env[RESTART_EXTENSION_FLAG_VALUES_ENV];
+	if (!encoded) return undefined;
+	delete env[RESTART_EXTENSION_FLAG_VALUES_ENV];
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(encoded);
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(decoded)) return undefined;
+	const values: RestartExtensionFlagValue[] = [];
+	for (const entry of decoded) {
+		if (!Array.isArray(entry) || entry.length !== 2) continue;
+		const [name, value] = entry;
+		if (typeof name !== "string") continue;
+		if (typeof value !== "boolean" && typeof value !== "string") continue;
+		values.push([name, value]);
+	}
+	return values.length > 0 ? values : undefined;
+}
+
+/** Restore restart-carried extension flag values for names still registered after discovery. */
+export function restoreRestartExtensionFlagValues(
+	sink: RestartExtensionFlagSink,
+	values: readonly RestartExtensionFlagValue[] | undefined,
+): void {
+	if (!values) return;
+	const registeredFlags = sink.getFlags();
+	for (const [name, value] of values) {
+		if (registeredFlags.has(name)) sink.setFlagValue(name, value);
+	}
+}
+
 function defaultRestartCommandEnvironment(): RestartCommandEnvironment {
 	return {
 		isCompiledBinary,
@@ -94,6 +144,20 @@ function appendRepeatedFlag(cmd: string[], flag: string, values: readonly string
 	for (const value of values ?? []) {
 		cmd.push(flag, value);
 	}
+}
+
+function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | undefined {
+	const childEnv: Record<string, string> = {};
+	let hasChildEnv = false;
+	if (options.apiKey) {
+		childEnv[RESTART_API_KEY_ENV] = options.apiKey;
+		hasChildEnv = true;
+	}
+	if (options.extensionFlagValues && options.extensionFlagValues.length > 0) {
+		childEnv[RESTART_EXTENSION_FLAG_VALUES_ENV] = JSON.stringify(options.extensionFlagValues);
+		hasChildEnv = true;
+	}
+	return hasChildEnv ? childEnv : undefined;
 }
 
 function buildChildEnv(overrides: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -126,7 +190,7 @@ export function buildRestartCommand(
 ): RestartCommand {
 	const base = resolveRestartBaseCommand(env);
 	const cmd = [...base.cmd];
-	const childEnv = options.apiKey ? { [RESTART_API_KEY_ENV]: options.apiKey } : undefined;
+	const childEnv = buildRestartEnv(options);
 	if (options.activeProfile !== undefined) {
 		cmd.push("--profile", options.activeProfile);
 	}
