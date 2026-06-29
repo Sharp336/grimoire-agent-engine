@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed large `omp resume` sessions dominated by repeated compaction summaries exhausting memory on Ctrl+C/resume shutdown. Session loading now streams multi-MiB JSONL files and elides superseded compaction payloads, sync flush skips whole-file rewrites when append state is already current, and session list previews can fall back to developer/assistant turns instead of showing `(no messages)` for forked plan sessions.
+
 ## [16.1.17] - 2026-06-24
 
 ### Fixed

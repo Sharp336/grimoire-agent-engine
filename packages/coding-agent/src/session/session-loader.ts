@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as readline from "node:readline";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
@@ -7,9 +9,49 @@ import { migrateToCurrentVersion } from "./session-migrations";
 import { isImageBlock, isImageDataPayload } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 
+const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
+const ELIDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided during session load]";
+
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {
 	return parseJsonlLenient<FileEntry>(content);
+}
+
+function elideCompactionSummary(entry: FileEntry | undefined): void {
+	if (entry?.type !== "compaction") return;
+	entry.summary = ELIDED_COMPACTION_SUMMARY;
+	entry.shortSummary ??= "Superseded compaction elided";
+	entry.preserveData = undefined;
+}
+
+async function loadEntriesFromFileStream(filePath: string): Promise<FileEntry[]> {
+	const entries: FileEntry[] = [];
+	let latestCompactionIndex: number | undefined;
+	const input = fs.createReadStream(filePath, { encoding: "utf8" });
+	const lines = readline.createInterface({ input, crlfDelay: Infinity });
+
+	try {
+		for await (const line of lines) {
+			if (!line) continue;
+			let entry: FileEntry;
+			try {
+				entry = JSON.parse(line) as FileEntry;
+			} catch {
+				continue;
+			}
+			if (entry.type === "compaction") {
+				elideCompactionSummary(latestCompactionIndex === undefined ? undefined : entries[latestCompactionIndex]);
+				latestCompactionIndex = entries.length;
+			}
+			entries.push(entry);
+		}
+	} catch (err) {
+		input.destroy();
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+
+	return entries;
 }
 
 /** Exported for testing */
@@ -17,14 +59,17 @@ export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<FileEntry[]> {
-	let content: string;
+	let entries: FileEntry[];
 	try {
-		content = await storage.readText(filePath);
+		const stat = storage.statSync(filePath);
+		entries =
+			storage instanceof FileSessionStorage && stat.size >= STREAM_LOAD_THRESHOLD_BYTES
+				? await loadEntriesFromFileStream(filePath)
+				: parseSessionEntries(await storage.readText(filePath));
 	} catch (err) {
 		if (isEnoent(err)) return [];
 		throw err;
 	}
-	const entries = parseJsonlLenient<FileEntry>(content);
 
 	// Validate session header
 	if (entries.length === 0) return entries;

@@ -63,6 +63,9 @@ import {
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 
+const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
+const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
+
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
@@ -622,6 +625,25 @@ export class SessionManager {
 		};
 	}
 
+	#elideSupersededCompactions(): boolean {
+		let changed = false;
+		for (const entry of this.#entries) {
+			if (entry.type !== "compaction") continue;
+			if (
+				entry.summary === SUPERSEDED_COMPACTION_SUMMARY &&
+				entry.shortSummary === SUPERSEDED_COMPACTION_SHORT_SUMMARY &&
+				entry.preserveData === undefined
+			) {
+				continue;
+			}
+			entry.summary = SUPERSEDED_COMPACTION_SUMMARY;
+			entry.shortSummary = SUPERSEDED_COMPACTION_SHORT_SUMMARY;
+			entry.preserveData = undefined;
+			changed = true;
+		}
+		return changed;
+	}
+
 	#recordEntry(entry: SessionEntry): void {
 		this.#entries.push(entry);
 		this.#index.insert(entry);
@@ -947,14 +969,18 @@ export class SessionManager {
 	}
 
 	/**
-	 * Synchronously flush all in-memory entries to disk. Use when the process may
-	 * exit before an async flush settles (Ctrl+C in the TUI). Software-crash
-	 * durable; not atomic and not power-loss safe — a same-process crash never
-	 * lands mid-`writeFileSync`.
+	 * Synchronously makes the current append-only session durable. Avoid rewriting
+	 * an already-current file: large restored sessions can contain GiB of compacted
+	 * history, and Ctrl+C must not rebuild the whole JSONL string just to flush.
 	 */
 	flushSync(): void {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#fileIsCurrent && !this.#rewriteRequired) {
+			const writerError = this.#writer?.getError();
+			if (writerError) throw writerError;
+			return;
+		}
 		this.#rewriteSynchronously();
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -1215,6 +1241,7 @@ export class SessionManager {
 		fromExtension?: boolean,
 		preserveData?: Record<string, unknown>,
 	): string {
+		const elidedSupersededCompactions = this.#elideSupersededCompactions();
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			...this.#freshEntryFields(),
@@ -1227,6 +1254,9 @@ export class SessionManager {
 			preserveData,
 		};
 		this.#recordEntry(entry);
+		if (elidedSupersededCompactions) {
+			void this.#rewriteAtomically().catch(err => this.#noteDiskFailure(err));
+		}
 		return entry.id;
 	}
 
