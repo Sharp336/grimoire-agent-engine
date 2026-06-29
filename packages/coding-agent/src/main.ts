@@ -27,7 +27,7 @@ import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import type { RestartLaunchFlags, RestartToolRestriction } from "./cli/restart";
+import { RESTART_API_KEY_ENV, type RestartLaunchFlags, type RestartToolRestriction } from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -413,15 +413,28 @@ function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): R
 }
 
 function buildRestartLaunchFlags(
-	parsed: Pick<Args, "config" | "extensions" | "hooks" | "noExtensions" | "pluginDirs">,
+	parsed: Pick<
+		Args,
+		"apiKey" | "config" | "extensions" | "hooks" | "noExtensions" | "noLsp" | "noRules" | "noSkills" | "pluginDirs"
+	>,
 ): RestartLaunchFlags {
 	return {
+		apiKey: parsed.apiKey,
 		disableExtensions: Boolean(parsed.noExtensions),
+		disableLsp: Boolean(parsed.noLsp),
+		disableRules: Boolean(parsed.noRules),
+		disableSkills: Boolean(parsed.noSkills),
 		configFiles: parsed.config,
 		extensionPaths: parsed.extensions,
 		hookPaths: parsed.hooks,
 		pluginDirs: parsed.pluginDirs,
 	};
+}
+function applyRestartApiKeyHandoff(parsed: Args, env: Record<string, string | undefined> = process.env): void {
+	const apiKey = env[RESTART_API_KEY_ENV];
+	if (!apiKey) return;
+	if (!parsed.apiKey) parsed.apiKey = apiKey;
+	delete env[RESTART_API_KEY_ENV];
 }
 
 async function runInteractiveMode(
@@ -1123,6 +1136,7 @@ export async function runRootCommand(
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
+	applyRestartApiKeyHandoff(parsedArgs);
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];

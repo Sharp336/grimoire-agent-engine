@@ -2,15 +2,22 @@ import * as path from "node:path";
 
 import { isCompiledBinary, workerHostEntry } from "@oh-my-pi/pi-utils";
 
+/** Environment variable used for one-hop restart handoff of runtime CLI API keys. */
+export const RESTART_API_KEY_ENV = "OMP_RESTART_API_KEY";
+
 /** Tool approval modes that can be restored across a process restart. */
 export type RestartApprovalMode = "always-ask" | "write" | "yolo";
 
 /** Tool filter that must be restored in the restarted process. */
 export type RestartToolRestriction = { kind: "none" } | { kind: "allowlist"; toolNames: string[] };
 
-/** CLI launch flags for config and extension discovery that must survive restart. */
+/** CLI launch flags for config, context, auth, and extension discovery that must survive restart. */
 export interface RestartLaunchFlags {
+	apiKey?: string;
 	disableExtensions?: boolean;
+	disableLsp?: boolean;
+	disableRules?: boolean;
+	disableSkills?: boolean;
 	configFiles?: string[];
 	extensionPaths?: string[];
 	hookPaths?: string[];
@@ -23,10 +30,11 @@ export interface RestartCommandBase {
 	cwd?: string;
 }
 
-/** Complete restart command with the cwd used to spawn it. */
+/** Complete restart command with the cwd/env used to spawn it. */
 export interface RestartCommand {
 	cmd: string[];
 	cwd: string;
+	env?: Record<string, string>;
 }
 
 /** Runtime dependencies used to resolve the current OMP entrypoint. */
@@ -52,14 +60,18 @@ export interface RestartSubprocess {
 	exited: Promise<number>;
 }
 
-/** Injectable restart child spawner used by tests. */
-export type RestartSpawn = (options: {
+/** Bun.spawn-compatible options used to launch the restart child. */
+export interface RestartSpawnInput {
 	cmd: string[];
 	cwd: string;
+	env?: Record<string, string>;
 	stdin: "inherit";
 	stdout: "inherit";
 	stderr: "inherit";
-}) => RestartSubprocess;
+}
+
+/** Injectable restart child spawner used by tests. */
+export type RestartSpawn = (options: RestartSpawnInput) => RestartSubprocess;
 
 /** Optional dependencies for spawning the restart process. */
 export interface SpawnRestartProcessOptions {
@@ -79,6 +91,15 @@ function appendRepeatedFlag(cmd: string[], flag: string, values: readonly string
 	for (const value of values ?? []) {
 		cmd.push(flag, value);
 	}
+}
+
+function buildChildEnv(overrides: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!overrides) return undefined;
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	return { ...env, ...overrides };
 }
 
 /** Resolve the base command that re-enters the same OMP build. */
@@ -102,7 +123,7 @@ export function buildRestartCommand(
 ): RestartCommand {
 	const base = resolveRestartBaseCommand(env);
 	const cmd = [...base.cmd];
-
+	const childEnv = options.apiKey ? { [RESTART_API_KEY_ENV]: options.apiKey } : undefined;
 	if (options.activeProfile !== undefined) {
 		cmd.push("--profile", options.activeProfile);
 	}
@@ -116,6 +137,16 @@ export function buildRestartCommand(
 	appendRepeatedFlag(cmd, "--extension", options.extensionPaths);
 	appendRepeatedFlag(cmd, "--hook", options.hookPaths);
 	appendRepeatedFlag(cmd, "--plugin-dir", options.pluginDirs);
+
+	if (options.disableLsp) {
+		cmd.push("--no-lsp");
+	}
+	if (options.disableSkills) {
+		cmd.push("--no-skills");
+	}
+	if (options.disableRules) {
+		cmd.push("--no-rules");
+	}
 
 	cmd.push("--cwd", options.cwd, "--approval-mode", options.approvalMode);
 
@@ -131,7 +162,7 @@ export function buildRestartCommand(
 
 	cmd.push("--session-dir", options.sessionDir, "--resume", options.sessionId);
 
-	return { cmd, cwd: base.cwd ?? options.cwd };
+	return { cmd, cwd: base.cwd ?? options.cwd, ...(childEnv ? { env: childEnv } : {}) };
 }
 
 /** Spawn the replacement OMP process with inherited stdio and return its exit code. */
@@ -140,13 +171,16 @@ export async function spawnRestartProcess(
 	options: SpawnRestartProcessOptions = {},
 ): Promise<number> {
 	const spawn = options.spawn ?? Bun.spawn;
-	const proc = spawn({
+	const spawnOptions: RestartSpawnInput = {
 		cmd: command.cmd,
 		cwd: command.cwd,
 		stdin: "inherit",
 		stdout: "inherit",
 		stderr: "inherit",
-	});
+	};
+	const env = buildChildEnv(command.env);
+	if (env) spawnOptions.env = env;
+	const proc = spawn(spawnOptions);
 
 	return await proc.exited;
 }

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildRestartCommand,
+	RESTART_API_KEY_ENV,
 	type RestartCommandEnvironment,
 	type RestartSpawn,
+	type RestartSpawnInput,
 	spawnRestartProcess,
 } from "@oh-my-pi/pi-coding-agent/cli/restart";
 
@@ -171,6 +173,42 @@ describe("restart command construction", () => {
 		expect(command.cmd.indexOf("--plugin-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
 
+	test("hands off CLI API keys via child env instead of argv", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), apiKey: "sk-runtime" }, env);
+
+		expect(command.cmd).not.toContain("--api-key");
+		expect(command.cmd).not.toContain("sk-runtime");
+		expect(command.env).toEqual({ [RESTART_API_KEY_ENV]: "sk-runtime" });
+	});
+
+	test("preserves disabled context flags across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{ ...baseOptions(), disableLsp: true, disableRules: true, disableSkills: true },
+			env,
+		);
+
+		expect(command.cmd).toContain("--no-lsp");
+		expect(command.cmd).toContain("--no-skills");
+		expect(command.cmd).toContain("--no-rules");
+		expect(command.cmd.indexOf("--no-lsp")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-skills")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--no-rules")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
 	test("preserves disabled tools across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,
@@ -206,17 +244,9 @@ describe("restart command construction", () => {
 	});
 });
 
-type RecordedSpawnOptions = {
-	cmd: string[];
-	cwd: string;
-	stdin: "inherit";
-	stdout: "inherit";
-	stderr: "inherit";
-};
-
 describe("restart process spawning", () => {
 	test("spawns with inherited stdio and returns the child exit code", async () => {
-		let recorded: RecordedSpawnOptions | undefined;
+		let recorded: RestartSpawnInput | undefined;
 		const spawn: RestartSpawn = options => {
 			recorded = options;
 			return { exited: Promise.resolve(7) };
@@ -235,5 +265,21 @@ describe("restart process spawning", () => {
 			stdout: "inherit",
 			stderr: "inherit",
 		});
+	});
+
+	test("passes restart env overrides to the child process", async () => {
+		let recorded: RestartSpawnInput | undefined;
+		const spawn: RestartSpawn = options => {
+			recorded = options;
+			return { exited: Promise.resolve(0) };
+		};
+
+		await spawnRestartProcess(
+			{ cmd: ["/opt/omp/omp", "--resume", "sess-1"], cwd: "/repo/project", env: { [RESTART_API_KEY_ENV]: "sk" } },
+			{ spawn },
+		);
+
+		expect(recorded?.cmd).toEqual(["/opt/omp/omp", "--resume", "sess-1"]);
+		expect(recorded?.env?.[RESTART_API_KEY_ENV]).toBe("sk");
 	});
 });
