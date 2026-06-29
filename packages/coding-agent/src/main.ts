@@ -405,9 +405,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			enableMCP: false,
 			titleSystemPrompt,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
-		}
+		applyRuntimeApiKeyForRestoredSession(args.parsedArgs, args.baseOptions, nextSession, args.authStorage);
 		applyExtensionFlags(nextSession.extensionRunner, args.rawArgs);
 		return nextSession;
 	};
@@ -476,6 +474,17 @@ export function requiresLaunchModelForRuntimeApiKey(
 	if (!parsed.apiKey) return false;
 	if (parsed.continue || parsed.resume || parsed.fork) return false;
 	return !sessionOptions.model && !sessionOptions.modelPattern;
+}
+
+/** Apply a CLI runtime API key after createSession restores a session model provider. */
+export function applyRuntimeApiKeyForRestoredSession(
+	parsed: Pick<Args, "apiKey">,
+	sessionOptions: { model?: { provider: string } },
+	session: { model?: { provider: string } },
+	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
+): void {
+	if (!parsed.apiKey || sessionOptions.model || !session.model) return;
+	authStorage.setRuntimeApiKey(session.model.provider, parsed.apiKey);
 }
 
 function applyRestartApiKeyHandoff(parsed: Args, env: Record<string, string | undefined> = process.env): void {
@@ -1610,9 +1619,7 @@ export async function runRootCommand(
 			}),
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);
-		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
-		}
+		applyRuntimeApiKeyForRestoredSession(parsedArgs, sessionOptions, session, authStorage);
 
 		if (modelFallbackMessage) {
 			notifs.push({ kind: "warn", message: modelFallbackMessage });

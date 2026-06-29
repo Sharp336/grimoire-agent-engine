@@ -40,13 +40,26 @@ const queuedDeliverySnapshot: AsyncJobSnapshot = {
 	delivery: { queued: 1, delivering: false, pendingJobIds: ["job-2"] },
 };
 
+const deliveringDeliverySnapshot: AsyncJobSnapshot = {
+	running: [],
+	recent: [],
+	delivery: { queued: 0, delivering: true, pendingJobIds: ["job-3"] },
+};
+
 describe("restart active-work guard", () => {
 	test("allows restart when the session is idle", () => {
 		expect(hasRestartBlockingWork(sessionState())).toBe(false);
 	});
 
-	test("blocks restart while direct work, async work, or async delivery is active", () => {
+	test("blocks restart while main session work is active", () => {
+		expect(hasRestartBlockingWork(sessionState({ isStreaming: true }))).toBe(true);
+		expect(hasRestartBlockingWork(sessionState({ isCompacting: true }))).toBe(true);
+		expect(hasRestartBlockingWork(sessionState({ hasPostPromptWork: true }))).toBe(true);
 		expect(hasRestartBlockingWork(sessionState({ isBashRunning: true }))).toBe(true);
+		expect(hasRestartBlockingWork(sessionState({ isEvalRunning: true }))).toBe(true);
+	});
+
+	test("blocks restart while async work or async delivery is active", () => {
 		expect(
 			hasRestartBlockingWork(
 				sessionState({
@@ -58,6 +71,13 @@ describe("restart active-work guard", () => {
 			hasRestartBlockingWork(
 				sessionState({
 					getAsyncJobSnapshot: () => queuedDeliverySnapshot,
+				}),
+			),
+		).toBe(true);
+		expect(
+			hasRestartBlockingWork(
+				sessionState({
+					getAsyncJobSnapshot: () => deliveringDeliverySnapshot,
 				}),
 			),
 		).toBe(true);

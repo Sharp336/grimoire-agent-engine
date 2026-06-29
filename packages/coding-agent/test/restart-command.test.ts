@@ -121,6 +121,21 @@ describe("restart command construction", () => {
 		expect(command.cwd).toBe("/repo/project");
 	});
 
+	test("preserves custom session dirs across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), sessionDir: "/tmp/omp-sessions" }, env);
+
+		expect(valuesForFlag(command.cmd, "--session-dir")).toEqual(["/tmp/omp-sessions"]);
+		expect(command.cmd.indexOf("--session-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cwd).toBe("/repo/project");
+	});
+
 	test("preserves disabled extension discovery across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { requiresLaunchModelForRuntimeApiKey } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	applyRuntimeApiKeyForRestoredSession,
+	requiresLaunchModelForRuntimeApiKey,
+} from "@oh-my-pi/pi-coding-agent/main";
 
 describe("restart runtime API key validation", () => {
 	test("requires a launch model only for fresh CLI API-key runs", () => {
@@ -11,5 +14,32 @@ describe("restart runtime API key validation", () => {
 			false,
 		);
 		expect(requiresLaunchModelForRuntimeApiKey({}, {})).toBe(false);
+	});
+
+	test("applies runtime API key after restored session model supplies the provider", () => {
+		const applied: { provider: string; apiKey: string }[] = [];
+		const authStorage = {
+			setRuntimeApiKey(provider: string, apiKey: string): void {
+				applied.push({ provider, apiKey });
+			},
+		};
+
+		applyRuntimeApiKeyForRestoredSession(
+			{ apiKey: "sk-runtime" },
+			{},
+			{ model: { provider: "restored-provider" } },
+			authStorage,
+		);
+		expect(applied).toEqual([{ provider: "restored-provider", apiKey: "sk-runtime" }]);
+
+		applyRuntimeApiKeyForRestoredSession(
+			{ apiKey: "sk-runtime" },
+			{ model: { provider: "launch-provider" } },
+			{ model: { provider: "restored-provider" } },
+			authStorage,
+		);
+		applyRuntimeApiKeyForRestoredSession({ apiKey: "sk-runtime" }, {}, {}, authStorage);
+		applyRuntimeApiKeyForRestoredSession({}, {}, { model: { provider: "restored-provider" } }, authStorage);
+		expect(applied).toHaveLength(1);
 	});
 });
