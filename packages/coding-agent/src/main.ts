@@ -92,7 +92,7 @@ import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
+import { AUTO_THINKING, concreteThinkingLevel, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import {
 	getChangelogPath,
@@ -443,6 +443,15 @@ export async function resolveRestartPromptLaunchValue(
 	} catch {
 		return value;
 	}
+}
+
+/** Return parsed restart launch args with the current session thinking selector overriding stale launch input. */
+export function applyLiveThinkingToRestartLaunchArgs<T extends Pick<Args, "thinking">>(
+	initialArgs: T,
+	liveThinking: ConfiguredThinkingLevel | undefined,
+): T {
+	if (liveThinking === undefined) return initialArgs;
+	return { ...initialArgs, thinking: liveThinking };
 }
 
 /** Build restart launch state, resolving config/plugin paths from launch cwd and extension roots from session cwd. */
@@ -1815,7 +1824,7 @@ export async function runRootCommand(
 				buildRestartToolRestriction(initialArgs),
 				buildRestartLaunchFlags(
 					{
-						...initialArgs,
+						...applyLiveThinkingToRestartLaunchArgs(initialArgs, session.configuredThinkingLevel()),
 						systemPrompt: await resolveRestartPromptLaunchValue(initialArgs.systemPrompt, cwd),
 						appendSystemPrompt: await resolveRestartPromptLaunchValue(initialArgs.appendSystemPrompt, cwd),
 					},

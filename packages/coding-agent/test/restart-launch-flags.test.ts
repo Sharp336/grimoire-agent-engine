@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { buildRestartLaunchFlags, resolveRestartPromptLaunchValue } from "@oh-my-pi/pi-coding-agent/main";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	applyLiveThinkingToRestartLaunchArgs,
+	buildRestartLaunchFlags,
+	resolveRestartPromptLaunchValue,
+} from "@oh-my-pi/pi-coding-agent/main";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("restart launch flags", () => {
@@ -52,6 +57,23 @@ describe("restart launch flags", () => {
 		);
 
 		expect(cliFlags.apiKey).toBe("sk-cli");
+	});
+
+	test("uses the live thinking selector instead of the stale launch selector", () => {
+		const restartArgs = applyLiveThinkingToRestartLaunchArgs({ thinking: ThinkingLevel.High }, ThinkingLevel.Low);
+		const flags = buildRestartLaunchFlags(
+			restartArgs,
+			"/repo/original",
+			undefined,
+			undefined,
+			undefined,
+			"/repo/resumed",
+		);
+
+		expect(flags.thinking).toBe(ThinkingLevel.Low);
+		expect(applyLiveThinkingToRestartLaunchArgs({ thinking: ThinkingLevel.High }, undefined).thinking).toBe(
+			ThinkingLevel.High,
+		);
 	});
 
 	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {
