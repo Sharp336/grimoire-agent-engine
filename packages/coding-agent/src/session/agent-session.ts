@@ -2530,7 +2530,6 @@ export class AgentSession {
 						const projected = this.#projectSnapcompactContextTokens(
 							preparation,
 							snapcompactResult,
-							advisorModel ?? undefined,
 						);
 						if (projected > budget) {
 							logger.warn("Advisor snapcompact still overflows the window after frame-budget sizing", {
@@ -11079,7 +11078,6 @@ export class AgentSession {
 	#projectSnapcompactContextTokens(
 		preparation: CompactionPreparation,
 		result: snapcompact.CompactionResult,
-		modelOverride?: Model,
 	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive ? snapcompact.historyBlocks(archive) : undefined;
