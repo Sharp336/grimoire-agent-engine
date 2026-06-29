@@ -2402,8 +2402,8 @@ export class AgentSession {
 		}
 		if (compactionSettings.strategy === "off") return false;
 
-		const advisorModel = agent.state.model;
-		const contextWindow = advisorModel.contextWindow ?? 0;
+		let advisorModel = agent.state.model;
+		let contextWindow = advisorModel.contextWindow ?? 0;
 
 		if (!compactionSettings.enabled) return false;
 		if (contextWindow <= 0) return false;
@@ -2428,6 +2428,9 @@ export class AgentSession {
 				if (!stillNeedsCompaction) return false;
 			}
 		}
+
+		advisorModel = agent.state.model;
+		contextWindow = advisorModel.contextWindow ?? 0;
 
 		// 2. Run compaction on advisor messages
 		const pathEntries: SessionEntry[] = messages.map((message, i) => {
