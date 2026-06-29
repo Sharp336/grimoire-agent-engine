@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -417,7 +418,36 @@ function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): R
 	return undefined;
 }
 
-function buildRestartLaunchFlags(
+function resolveRestartLaunchPath(value: string, cwd: string): string {
+	if (value === "~") return os.homedir();
+	if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+	return path.isAbsolute(value) ? value : path.resolve(cwd, value);
+}
+
+function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: string): string[] | undefined {
+	return values?.map(value => resolveRestartLaunchPath(value, cwd));
+}
+
+function isExplicitPathLikeLaunchValue(value: string): boolean {
+	return (
+		value === "~" ||
+		value.startsWith("~/") ||
+		path.isAbsolute(value) ||
+		value === "." ||
+		value === ".." ||
+		value.startsWith("./") ||
+		value.startsWith("../") ||
+		value.startsWith(".\\") ||
+		value.startsWith("..\\")
+	);
+}
+
+function resolvePathLikeRestartLaunchValues(values: readonly string[] | undefined, cwd: string): string[] | undefined {
+	return values?.map(value => (isExplicitPathLikeLaunchValue(value) ? resolveRestartLaunchPath(value, cwd) : value));
+}
+
+/** Build restart launch state from parsed args, resolving path flags against the original launch cwd. */
+export function buildRestartLaunchFlags(
 	parsed: Pick<
 		Args,
 		| "apiKey"
@@ -440,6 +470,7 @@ function buildRestartLaunchFlags(
 		| "thinking"
 		| "systemPrompt"
 	>,
+	launchCwd: string,
 	extensionFlagValues?: readonly RestartExtensionFlagValue[],
 ): RestartLaunchFlags {
 	return {
@@ -450,10 +481,10 @@ function buildRestartLaunchFlags(
 		disableLsp: Boolean(parsed.noLsp),
 		disableRules: Boolean(parsed.noRules),
 		disableSkills: Boolean(parsed.noSkills),
-		configFiles: parsed.config,
-		extensionPaths: parsed.extensions,
-		hookPaths: parsed.hooks,
-		pluginDirs: parsed.pluginDirs,
+		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
+		extensionPaths: resolvePathLikeRestartLaunchValues(parsed.extensions, launchCwd),
+		hookPaths: resolvePathLikeRestartLaunchValues(parsed.hooks, launchCwd),
+		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
 		modelPatterns: parsed.models,
 		planModel: parsed.plan,
 		thinking: parsed.thinking,
@@ -1254,6 +1285,7 @@ export async function runRootCommand(
 	}
 
 	let cwd = getProjectDir();
+	const launchConfigCwd = cwd;
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 	if (parsedArgs.approvalMode) {
@@ -1692,7 +1724,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(initialArgs),
-				buildRestartLaunchFlags(initialArgs, currentExtensionFlagValues),
+				buildRestartLaunchFlags(initialArgs, launchConfigCwd, currentExtensionFlagValues),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

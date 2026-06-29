@@ -1499,6 +1499,7 @@
 - Fixed `/restart` allowing process teardown while async background jobs or detached subagents were still running, which could cancel pending work and deliveries.
 - Fixed `/restart` API-key handoffs for resumed/forked sessions by skipping fresh-launch model validation until the restored session model is available.
 - Fixed `/restart` capturing built-in launch flags from the extension-aware parse so extension-registered flags that shadow built-ins do not replay stale built-in values.
+- Fixed `/restart` replaying relative launch path flags such as `--config` against a moved session cwd instead of the original launch cwd.
 - Fixed the bash interceptor blocking `echo` / `printf` redirects to `/dev/null`, `/dev/tty`, `/dev/stdout`, and `/dev/stderr` device sinks while still directing real file writes to the write tool. ([#3763](https://github.com/can1357/oh-my-pi/issues/3763))
 
 ## [16.2.5] - 2026-06-28
