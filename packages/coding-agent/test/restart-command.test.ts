@@ -209,6 +209,50 @@ describe("restart command construction", () => {
 		expect(command.cmd.indexOf("--no-rules")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
 
+	test("preserves CLI system prompts across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				systemPrompt: "Use this exact prompt",
+				appendSystemPrompt: "Append this guidance",
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--system-prompt")).toEqual(["Use this exact prompt"]);
+		expect(valuesForFlag(command.cmd, "--append-system-prompt")).toEqual(["Append this guidance"]);
+		expect(command.cmd.indexOf("--system-prompt")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--append-system-prompt")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves skill filters across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), skillPatterns: ["git-*", "review"] }, env);
+		const disabledCommand = buildRestartCommand(
+			{ ...baseOptions(), disableSkills: true, skillPatterns: ["git-*"] },
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--skills")).toEqual(["git-*,review"]);
+		expect(command.cmd.indexOf("--skills")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--skills")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(disabledCommand.cmd).toContain("--no-skills");
+		expect(valuesForFlag(disabledCommand.cmd, "--skills")).toEqual(["git-*"]);
+	});
+
 	test("preserves disabled tools across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,

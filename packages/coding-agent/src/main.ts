@@ -415,11 +415,23 @@ function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): R
 function buildRestartLaunchFlags(
 	parsed: Pick<
 		Args,
-		"apiKey" | "config" | "extensions" | "hooks" | "noExtensions" | "noLsp" | "noRules" | "noSkills" | "pluginDirs"
+		| "apiKey"
+		| "appendSystemPrompt"
+		| "config"
+		| "extensions"
+		| "hooks"
+		| "noExtensions"
+		| "noLsp"
+		| "noRules"
+		| "noSkills"
+		| "pluginDirs"
+		| "skills"
+		| "systemPrompt"
 	>,
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
+		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
 		disableLsp: Boolean(parsed.noLsp),
 		disableRules: Boolean(parsed.noRules),
@@ -428,8 +440,11 @@ function buildRestartLaunchFlags(
 		extensionPaths: parsed.extensions,
 		hookPaths: parsed.hooks,
 		pluginDirs: parsed.pluginDirs,
+		skillPatterns: parsed.skills,
+		systemPrompt: parsed.systemPrompt,
 	};
 }
+
 function applyRestartApiKeyHandoff(parsed: Args, env: Record<string, string | undefined> = process.env): void {
 	const apiKey = env[RESTART_API_KEY_ENV];
 	if (!apiKey) return;

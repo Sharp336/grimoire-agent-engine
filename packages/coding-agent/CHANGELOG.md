@@ -1493,7 +1493,7 @@
 
 ### Fixed
 
-- Fixed `/restart` dropping launch-only auth, context, config, and extension state (`--api-key`, `--no-lsp`, `--no-skills`, `--no-rules`, `--no-extensions`, `--config`, `--extension`, `--hook`, and `--plugin-dir`), so restarted TUI sessions preserve runtime API keys, disabled context sources, custom config overlays, and extension/plugin roots.
+- Fixed `/restart` dropping launch-only auth, prompt, skill, context, config, and extension state (`--api-key`, `--system-prompt`, `--append-system-prompt`, `--skills`, `--no-lsp`, `--no-skills`, `--no-rules`, `--no-extensions`, `--config`, `--extension`, `--hook`, and `--plugin-dir`), so restarted TUI sessions preserve runtime API keys, custom system prompts, skill filters, disabled context sources, custom config overlays, and extension/plugin roots.
 
 ## [16.2.5] - 2026-06-28
 

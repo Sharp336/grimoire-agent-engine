@@ -11,7 +11,7 @@ export type RestartApprovalMode = "always-ask" | "write" | "yolo";
 /** Tool filter that must be restored in the restarted process. */
 export type RestartToolRestriction = { kind: "none" } | { kind: "allowlist"; toolNames: string[] };
 
-/** CLI launch flags for config, context, auth, and extension discovery that must survive restart. */
+/** CLI launch flags for config, prompt, context, auth, and extension discovery that must survive restart. */
 export interface RestartLaunchFlags {
 	apiKey?: string;
 	disableExtensions?: boolean;
@@ -22,6 +22,9 @@ export interface RestartLaunchFlags {
 	extensionPaths?: string[];
 	hookPaths?: string[];
 	pluginDirs?: string[];
+	skillPatterns?: string[];
+	systemPrompt?: string;
+	appendSystemPrompt?: string;
 }
 
 /** Self-entrypoint command before restart-specific CLI arguments are appended. */
@@ -137,6 +140,12 @@ export function buildRestartCommand(
 	appendRepeatedFlag(cmd, "--extension", options.extensionPaths);
 	appendRepeatedFlag(cmd, "--hook", options.hookPaths);
 	appendRepeatedFlag(cmd, "--plugin-dir", options.pluginDirs);
+	if (options.systemPrompt !== undefined) {
+		cmd.push("--system-prompt", options.systemPrompt);
+	}
+	if (options.appendSystemPrompt !== undefined) {
+		cmd.push("--append-system-prompt", options.appendSystemPrompt);
+	}
 
 	if (options.disableLsp) {
 		cmd.push("--no-lsp");
@@ -146,6 +155,9 @@ export function buildRestartCommand(
 	}
 	if (options.disableRules) {
 		cmd.push("--no-rules");
+	}
+	if (options.skillPatterns && options.skillPatterns.length > 0) {
+		cmd.push("--skills", options.skillPatterns.join(","));
 	}
 
 	cmd.push("--cwd", options.cwd, "--approval-mode", options.approvalMode);
