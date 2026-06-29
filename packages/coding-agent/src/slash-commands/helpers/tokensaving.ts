@@ -35,11 +35,11 @@ export type TokenSavingSettingValue<P extends TokenSavingSettingPath> = P extend
 								? string
 								: P extends "advisor.compactionStrategy"
 									? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
-								: P extends "enabledModels"
-									? readonly string[]
-									: P extends "modelRoles"
-										? Record<string, string>
-										: never;
+									: P extends "enabledModels"
+										? readonly string[]
+										: P extends "modelRoles"
+											? Record<string, string>
+											: never;
 
 export interface TokenSavingSettingsLike {
 	get<P extends TokenSavingSettingPath>(path: P): TokenSavingSettingValue<P>;

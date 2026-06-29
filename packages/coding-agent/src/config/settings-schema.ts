@@ -500,7 +500,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Advisor Compaction Model",
 			description:
-				"Override the model used for advisor compaction. If empty, the advisor's own model is used. Supports role tags (e.g. 'smol') or exact model IDs (e.g. 'google/gemini-2.5-flash').",
+				"Override the model used for advisor compaction. If empty, the advisor's own model is used. Supports role tags (e.g. 'pi/smol') or exact model IDs (e.g. 'google/gemini-2.5-flash').",
 			condition: "advisorEnabled",
 		},
 	},

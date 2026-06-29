@@ -40,6 +40,10 @@ class FakeSettings implements TokenSavingSettingsLike {
 			"advisor.syncBacklog": "5",
 			"advisor.immuneTurns": 3,
 			"advisor.compactionThresholdTokens": 0,
+			"advisor.compactionEnabled": false,
+			"advisor.compactionThresholdPercent": 100,
+			"advisor.compactionModel": "",
+			"advisor.compactionStrategy": "inherit",
 			enabledModels: [],
 			...options.values,
 		} as Record<

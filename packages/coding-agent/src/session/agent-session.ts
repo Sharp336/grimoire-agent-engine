@@ -2463,10 +2463,10 @@ export class AgentSession {
 		});
 
 		const availableModels = this.#modelRegistry.getAvailable();
-		
+
 		const advisorCompactionModelStr = this.settings.get("advisor.compactionModel")?.trim();
-		let resolvedAdvisorCompactionModel: Model | undefined = undefined;
-		
+		let resolvedAdvisorCompactionModel: Model | undefined;
+
 		if (advisorCompactionModelStr) {
 			const resolution = resolveModelRoleValue(advisorCompactionModelStr, availableModels, {
 				settings: this.settings,
@@ -2475,7 +2475,7 @@ export class AgentSession {
 			});
 			resolvedAdvisorCompactionModel = resolution.model;
 			if (!resolvedAdvisorCompactionModel) {
-				this.agent.telemetry?.emit("advisor.compaction.error", {
+				logger.warn("Advisor compaction model resolution failed", {
 					message: `Could not resolve advisor.compactionModel '${advisorCompactionModelStr}', falling back to ${advisorModel.id}`,
 				});
 			}
@@ -2507,9 +2507,11 @@ export class AgentSession {
 		let snapcompactBlocker: string | undefined;
 		let action: "snapcompact" | "context-full" =
 			compactionSettings.strategy === "snapcompact" ? "snapcompact" : "context-full";
-		if (action === "snapcompact" && advisorModel && !advisorModel.input.includes("image")) {
+		if (action === "snapcompact" && snapcompactModel && !snapcompactModel.input.includes("image")) {
 			action = "context-full";
-			logger.warn("Advisor snapcompact skipped: advisor model does not support vision", { model: advisorModel.id });
+			logger.warn("Advisor snapcompact skipped: advisor compaction model does not support vision", {
+				model: snapcompactModel.id,
+			});
 		}
 		if (action === "snapcompact") {
 			const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
@@ -2517,7 +2519,7 @@ export class AgentSession {
 			if (!renderScan.isSafe) {
 				const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 				logger.warn("Advisor snapcompact disabled: high non-ASCII rate detected", {
-					model: advisorModel?.id,
+					model: snapcompactModel?.id,
 					unrenderableRatio: renderScan.unrenderableRatio,
 				});
 				snapcompactBlocker = `snapcompact disabled: high non-ASCII rate detected (${percent}%); using LLM summary instead.`;
@@ -2525,11 +2527,11 @@ export class AgentSession {
 				const maxFrames = this.#computeSnapcompactMaxFrames(
 					preparation,
 					compactionSettings,
-					advisorModel ?? undefined,
+					snapcompactModel ?? undefined,
 				);
 				if (maxFrames < 1) {
 					logger.warn("Advisor snapcompact skipped: kept history alone exceeds the context budget", {
-						model: advisorModel?.id,
+						model: snapcompactModel?.id,
 					});
 					snapcompactBlocker =
 						"snapcompact: kept history alone exceeds the context budget; using LLM summary instead.";
@@ -2546,10 +2548,7 @@ export class AgentSession {
 							ctxWindow > 0
 								? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
 								: Number.POSITIVE_INFINITY;
-						const projected = this.#projectSnapcompactContextTokens(
-							preparation,
-							snapcompactResult,
-						);
+						const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
 						if (projected > budget) {
 							logger.warn("Advisor snapcompact still overflows the window after frame-budget sizing", {
 								model: advisorModel?.id,
@@ -11094,10 +11093,7 @@ export class AgentSession {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(
-		preparation: CompactionPreparation,
-		result: snapcompact.CompactionResult,
-	): number {
+	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive ? snapcompact.historyBlocks(archive) : undefined;
 		const summaryMessage = createCompactionSummaryMessage(
