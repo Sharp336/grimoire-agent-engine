@@ -475,9 +475,10 @@ export function buildRestartLaunchFlags(
 	maxTimeDeadline?: number,
 	apiKeyProvider?: string,
 	sessionStartCwd: string = launchCwd,
+	restartApiKey?: string,
 ): RestartLaunchFlags {
 	return {
-		apiKey: parsed.apiKey,
+		apiKey: parsed.apiKey ?? restartApiKey,
 		apiKeyProvider,
 		advisor: Boolean(parsed.advisor),
 		appendSystemPrompt: parsed.appendSystemPrompt,
@@ -576,17 +577,23 @@ export function applyRuntimeApiKeyForRestoredSession(
 	return provider;
 }
 
+interface RestartApiKeyHandoff {
+	apiKey?: string;
+	provider?: string;
+}
+
 function applyRestartApiKeyHandoff(
 	parsed: Args,
 	env: Record<string, string | undefined> = process.env,
-): string | undefined {
+): RestartApiKeyHandoff | undefined {
 	const apiKey = env[RESTART_API_KEY_ENV];
 	const apiKeyProvider = env[RESTART_API_KEY_PROVIDER_ENV];
 	delete env[RESTART_API_KEY_ENV];
 	delete env[RESTART_API_KEY_PROVIDER_ENV];
 	if (!apiKey) return undefined;
-	if (!parsed.apiKey) parsed.apiKey = apiKey;
-	return apiKeyProvider;
+	const injectedApiKey = parsed.apiKey ? undefined : apiKey;
+	if (injectedApiKey) parsed.apiKey = injectedApiKey;
+	return { apiKey: injectedApiKey, provider: apiKeyProvider };
 }
 
 async function runInteractiveMode(
@@ -1288,7 +1295,8 @@ export async function runRootCommand(
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
-	const restartApiKeyProvider = applyRestartApiKeyHandoff(parsedArgs);
+	const restartApiKeyHandoff = applyRestartApiKeyHandoff(parsedArgs);
+	const restartApiKeyProvider = restartApiKeyHandoff?.provider;
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
@@ -1816,6 +1824,7 @@ export async function runRootCommand(
 					sessionOptions.deadline,
 					runtimeApiKeyProvider,
 					cwd,
+					restartApiKeyHandoff?.apiKey,
 				),
 			);
 		} else {

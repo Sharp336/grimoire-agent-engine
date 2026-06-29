@@ -27,6 +27,33 @@ describe("restart launch flags", () => {
 		expect(flags.providerSessionId).toBe("provider-session-1");
 	});
 
+	test("carries env-injected API keys through extension-aware restart snapshots", () => {
+		const flags = buildRestartLaunchFlags(
+			{},
+			"/repo/original",
+			undefined,
+			undefined,
+			"openai",
+			"/repo/resumed",
+			"sk-runtime",
+		);
+
+		expect(flags.apiKey).toBe("sk-runtime");
+		expect(flags.apiKeyProvider).toBe("openai");
+
+		const cliFlags = buildRestartLaunchFlags(
+			{ apiKey: "sk-cli" },
+			"/repo/original",
+			undefined,
+			undefined,
+			"openai",
+			"/repo/resumed",
+			"sk-runtime",
+		);
+
+		expect(cliFlags.apiKey).toBe("sk-cli");
+	});
+
 	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {
 		using tempDir = TempDir.createSync("@omp-restart-prompts-");
 		const launchPromptPath = path.join(tempDir.path(), "launch", "prompts", "system.md");
