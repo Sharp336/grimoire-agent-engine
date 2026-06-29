@@ -1304,6 +1304,7 @@ export class AgentSession {
 	#advisorEnabled = false;
 	/** The advisor's own agent, retained so `/dump advisor` can serialize its transcript. Undefined when no advisor is active. */
 	#advisorAgent?: Agent;
+	#advisorPreserveData: Record<string, unknown> | undefined;
 	#advisorAdviseTool?: AdviseTool;
 	#advisorReadOnlyTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
@@ -2374,66 +2375,136 @@ export class AgentSession {
 			return true;
 		}
 
-		const advisorCompactionThinkingLevel: ThinkingLevel | undefined = advisor.state.disableReasoning
-			? ThinkingLevel.Off
-			: advisor.state.thinkingLevel;
+		// Carry forward snapcompact frame archives from a previous advisor
+		// compaction run so iterative snapcompact can build on its own history.
+		preparation.previousPreserveData = this.#advisorPreserveData;
 
-		// Advisor state is in-memory-only, so snapcompact's frame archive has no
-		// stable SessionEntry preserveData slot to carry across future advisor
-		// maintenance runs. Use an LLM summary even when the primary session is
-		// configured for snapcompact.
-
-		let compactResult: CompactionResult | undefined;
-		let lastError: unknown;
-		const advisorSessionId = this.sessionId ? `${this.sessionId}-advisor` : undefined;
-		// Instrument the advisor's overflow-compaction one-shot like the primary
-		// compaction path so the advisor model's maintenance call also emits spans.
-		const telemetry = resolveTelemetry(advisor.telemetry, advisorSessionId);
-
-		for (const candidate of candidates) {
-			const apiKey = await this.#modelRegistry.getApiKey(candidate, advisorSessionId);
-			if (!apiKey) continue;
-
-			try {
-				compactResult = await compact(
-					preparation,
-					candidate,
-					this.#modelRegistry.resolver(candidate, advisorSessionId),
-					undefined,
-					undefined,
-					{
-						thinkingLevel: advisorCompactionThinkingLevel,
-						convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
-						telemetry,
-						tools: advisor.state.tools,
-						sessionId: advisorSessionId,
-						promptCacheKey: advisorSessionId,
-					},
-				);
-				break;
-			} catch (error) {
-				lastError = error;
+		// Try snapcompact first when the advisor strategy requests it.
+		let snapcompactResult: snapcompact.CompactionResult | undefined;
+		let snapcompactBlocker: string | undefined;
+		if (compactionSettings.strategy === "snapcompact") {
+			const text = snapcompact.serializeConversation(
+				convertToLlm(preparation.messagesToSummarize),
+			);
+			const renderScan = snapcompact.scanRenderability(text);
+			if (!renderScan.isSafe) {
+				const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
+				logger.warn("Advisor snapcompact disabled: high non-ASCII rate detected", {
+					model: advisorModel?.id,
+					unrenderableRatio: renderScan.unrenderableRatio,
+				});
+				snapcompactBlocker = `snapcompact disabled: high non-ASCII rate detected (${percent}%); using LLM summary instead.`;
+			} else {
+				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
+				if (maxFrames < 1) {
+					logger.warn("Advisor snapcompact skipped: kept history alone exceeds the context budget", {
+						model: advisorModel?.id,
+					});
+					snapcompactBlocker =
+						"snapcompact: kept history alone exceeds the context budget; using LLM summary instead.";
+				} else {
+					snapcompactResult = await snapcompact.compact(preparation, {
+						convertToLlm,
+						model: advisorModel,
+						shape: snapcompact.resolveShape(advisorModel, this.settings.get("snapcompact.shape")),
+						maxFrames,
+					});
+					if (snapcompactResult) {
+						const ctxWindow = advisorModel?.contextWindow ?? 0;
+						const budget =
+							ctxWindow > 0
+								? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
+								: Number.POSITIVE_INFINITY;
+						const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+						if (projected > budget) {
+							logger.warn("Advisor snapcompact still overflows the window after frame-budget sizing", {
+								model: advisorModel?.id,
+								projected,
+								budget,
+							});
+							snapcompactBlocker =
+								"snapcompact could not bring the context under the limit; using LLM summary instead.";
+							snapcompactResult = undefined;
+						}
+					}
+				}
+			}
+			if (snapcompactBlocker) {
+				this.emitNotice("warning", snapcompactBlocker, "compaction");
 			}
 		}
 
-		if (!compactResult) {
-			logger.warn("Advisor compaction failed, falling back to re-prime", { error: String(lastError) });
-			return true;
+		let compactResult: CompactionResult | undefined;
+		if (snapcompactResult) {
+			compactResult = {
+				summary: snapcompactResult.summary,
+				shortSummary: snapcompactResult.shortSummary,
+				firstKeptEntryId: snapcompactResult.firstKeptEntryId,
+				tokensBefore: snapcompactResult.tokensBefore,
+				details: snapcompactResult.details,
+				preserveData: {
+					...(this.#advisorPreserveData ?? {}),
+					...(snapcompactResult.preserveData ?? {}),
+				},
+			} satisfies CompactionResult;
+			this.#advisorPreserveData = compactResult.preserveData;
+		} else {
+			// Fall through to LLM summarization below.
+			const advisorCompactionThinkingLevel: ThinkingLevel | undefined = advisor.state.disableReasoning
+				? ThinkingLevel.Off
+				: advisor.state.thinkingLevel;
+
+			let lastError: unknown;
+			const advisorSessionId = this.sessionId ? `${this.sessionId}-advisor` : undefined;
+			// Instrument the advisor's overflow-compaction one-shot like the primary
+			// compaction path so the advisor model's maintenance call also emits spans.
+			const telemetry = resolveTelemetry(advisor.telemetry, advisorSessionId);
+
+			for (const candidate of candidates) {
+				const apiKey = await this.#modelRegistry.getApiKey(candidate, advisorSessionId);
+				if (!apiKey) continue;
+
+				try {
+					compactResult = await compact(
+						preparation,
+						candidate,
+						this.#modelRegistry.resolver(candidate, advisorSessionId),
+						undefined,
+						undefined,
+						{
+							thinkingLevel: advisorCompactionThinkingLevel,
+							convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+							telemetry,
+							tools: advisor.state.tools,
+							sessionId: advisorSessionId,
+							promptCacheKey: advisorSessionId,
+						},
+					);
+					break;
+				} catch (error) {
+					lastError = error;
+				}
+			}
+
+			if (!compactResult) {
+				logger.warn("Advisor compaction failed, falling back to re-prime", { error: String(lastError) });
+				return true;
+			}
+
+			const summary = compactResult.summary;
+			const shortSummary = compactResult.shortSummary;
+			const firstKeptEntryId = compactResult.firstKeptEntryId;
+			const tokensBefore = compactResult.tokensBefore;
+
+			// Rebuild messages with the compaction summary
+			const summaryMessage = {
+				...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), shortSummary),
+				firstKeptEntryId,
+			} as CompactionSummaryMessage & { firstKeptEntryId?: string };
+
+			advisor.replaceMessages([summaryMessage, ...preparation.recentMessages]);
+			return false;
 		}
-
-		const summary = compactResult.summary;
-		const shortSummary = compactResult.shortSummary;
-		const firstKeptEntryId = compactResult.firstKeptEntryId;
-		const tokensBefore = compactResult.tokensBefore;
-
-		// Rebuild messages with the compaction summary
-		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), shortSummary),
-			firstKeptEntryId,
-		} as CompactionSummaryMessage & { firstKeptEntryId?: string };
-
-		advisor.replaceMessages([summaryMessage, ...preparation.recentMessages]);
-		return false;
 	}
 
 	/** Model registry for API key resolution and model discovery */
