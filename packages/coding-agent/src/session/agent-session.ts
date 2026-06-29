@@ -2400,11 +2400,11 @@ export class AgentSession {
 				thresholdTokens: advisorTokens > 0 ? advisorTokens : -1,
 			};
 		}
+		if (compactionSettings.strategy === "off") return false;
 
 		const advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
 
-		if (compactionSettings.strategy === "off") return false;
 		if (!compactionSettings.enabled) return false;
 		if (contextWindow <= 0) return false;
 
