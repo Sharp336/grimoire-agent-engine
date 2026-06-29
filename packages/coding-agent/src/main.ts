@@ -518,14 +518,19 @@ export function buildRestartLaunchFlags(
 type RuntimeApiKeySessionOptions = { model?: { provider: string }; modelPattern?: string };
 type RestorableModelSource = Pick<SessionManager, "getRestorableModelStrings">;
 
-/** Return whether a runtime API key needs an explicit launch model before session restore. */
+/** Return whether a runtime API key lacks both a launch model and a restorable provider. */
 export function requiresLaunchModelForRuntimeApiKey(
 	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
 	sessionOptions: Pick<CreateAgentSessionOptions, "model" | "modelPattern">,
+	sessionManager?: RestorableModelSource,
+	restartApiKeyProvider?: string,
 ): boolean {
 	if (!parsed.apiKey) return false;
-	if (parsed.continue || parsed.resume || parsed.fork) return false;
-	return !sessionOptions.model && !sessionOptions.modelPattern;
+	if (sessionOptions.model || sessionOptions.modelPattern || restartApiKeyProvider) return false;
+	if (parsed.continue || parsed.resume || parsed.fork) {
+		return getPersistedSessionModelProvider(sessionManager) === undefined;
+	}
+	return true;
 }
 
 /** Return the provider for the first persisted model that session restore will try. */
@@ -1618,7 +1623,7 @@ export async function runRootCommand(
 	let runtimeApiKeyProvider = restartApiKeyProvider;
 	let runtimeApiKeyInstalledBeforeSessionRestore = false;
 	if (parsedArgs.apiKey) {
-		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions)) {
+		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions, sessionManager, restartApiKeyProvider)) {
 			process.stderr.write(
 				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 			);

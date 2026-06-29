@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	applyRuntimeApiKeyBeforeSessionRestore,
 	applyRuntimeApiKeyForRestoredSession,
@@ -7,11 +8,38 @@ import {
 } from "@oh-my-pi/pi-coding-agent/main";
 
 describe("restart runtime API key validation", () => {
-	test("requires a launch model only for fresh CLI API-key runs", () => {
+	test("requires a launch model unless resume can restore a provider", () => {
+		const restorableSource = {
+			getRestorableModelStrings: () => ["openai/gpt-5"],
+		};
+		const emptySource = {
+			getRestorableModelStrings: () => [],
+		};
+		const launchModel = buildModel({
+			id: "gpt-5",
+			name: "gpt-5",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 2048,
+		});
+
 		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime" }, {})).toBe(true);
-		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", resume: "sess-1" }, {})).toBe(false);
-		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", continue: true }, {})).toBe(false);
-		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", fork: "sess-1" }, {})).toBe(false);
+		expect(
+			requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", resume: "sess-1" }, {}, restorableSource),
+		).toBe(false);
+		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", resume: "sess-1" }, {}, emptySource)).toBe(
+			true,
+		);
+		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", continue: true }, {})).toBe(true);
+		expect(
+			requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime", fork: "sess-1" }, {}, undefined, "openai"),
+		).toBe(false);
+		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime" }, { model: launchModel })).toBe(false);
 		expect(requiresLaunchModelForRuntimeApiKey({ apiKey: "sk-runtime" }, { modelPattern: "openai/gpt-5" })).toBe(
 			false,
 		);
