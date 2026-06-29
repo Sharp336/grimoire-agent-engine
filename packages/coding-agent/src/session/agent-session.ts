@@ -2483,7 +2483,13 @@ export class AgentSession {
 		// Try snapcompact first when the advisor strategy requests it.
 		let snapcompactResult: snapcompact.CompactionResult | undefined;
 		let snapcompactBlocker: string | undefined;
-		if (compactionSettings.strategy === "snapcompact") {
+		let action: "snapcompact" | "context-full" =
+			compactionSettings.strategy === "snapcompact" ? "snapcompact" : "context-full";
+		if (action === "snapcompact" && advisorModel && !advisorModel.input.includes("image")) {
+			action = "context-full";
+			logger.warn("Advisor snapcompact skipped: advisor model does not support vision", { model: advisorModel.id });
+		}
+		if (action === "snapcompact") {
 			const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
 			const renderScan = snapcompact.scanRenderability(text);
 			if (!renderScan.isSafe) {
@@ -2494,7 +2500,11 @@ export class AgentSession {
 				});
 				snapcompactBlocker = `snapcompact disabled: high non-ASCII rate detected (${percent}%); using LLM summary instead.`;
 			} else {
-				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
+				const maxFrames = this.#computeSnapcompactMaxFrames(
+					preparation,
+					compactionSettings,
+					advisorModel ?? undefined,
+				);
 				if (maxFrames < 1) {
 					logger.warn("Advisor snapcompact skipped: kept history alone exceeds the context budget", {
 						model: advisorModel?.id,
@@ -2514,7 +2524,11 @@ export class AgentSession {
 							ctxWindow > 0
 								? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
 								: Number.POSITIVE_INFINITY;
-						const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+						const projected = this.#projectSnapcompactContextTokens(
+							preparation,
+							snapcompactResult,
+							advisorModel ?? undefined,
+						);
 						if (projected > budget) {
 							logger.warn("Advisor snapcompact still overflows the window after frame-budget sizing", {
 								model: advisorModel?.id,
@@ -2625,6 +2639,9 @@ export class AgentSession {
 				firstKeptEntryId,
 			} as CompactionSummaryMessage & { firstKeptEntryId?: string };
 
+			if (compactResult) {
+				advisor.preserveData = compactResult.preserveData;
+			}
 			agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
 			return false;
 		}
@@ -10999,8 +11016,12 @@ export class AgentSession {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: CompactionSettings): number {
-		const ctxWindow = this.model?.contextWindow ?? 0;
+	#computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: CompactionSettings,
+		modelOverride?: Model,
+	): number {
+		const ctxWindow = (modelOverride ?? this.model)?.contextWindow ?? 0;
 		if (ctxWindow <= 0) return snapcompact.MAX_FRAMES_DEFAULT;
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this);
@@ -11051,7 +11072,11 @@ export class AgentSession {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+		modelOverride?: Model,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive ? snapcompact.historyBlocks(archive) : undefined;
 		const summaryMessage = createCompactionSummaryMessage(
