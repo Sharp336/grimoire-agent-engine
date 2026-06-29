@@ -220,6 +220,27 @@ import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 
+/** Return whether `/restart` must wait for active session work before teardown. */
+export function hasRestartBlockingWork(
+	session: Pick<
+		AgentSession,
+		"isStreaming" | "isCompacting" | "hasPostPromptWork" | "isBashRunning" | "isEvalRunning" | "getAsyncJobSnapshot"
+	>,
+): boolean {
+	const asyncJobSnapshot = session.getAsyncJobSnapshot();
+	const hasPendingAsyncDelivery =
+		(asyncJobSnapshot?.delivery.queued ?? 0) > 0 || asyncJobSnapshot?.delivery.delivering === true;
+	return (
+		session.isStreaming ||
+		session.isCompacting ||
+		session.hasPostPromptWork ||
+		session.isBashRunning ||
+		session.isEvalRunning ||
+		(asyncJobSnapshot?.running.length ?? 0) > 0 ||
+		hasPendingAsyncDelivery
+	);
+}
+
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
 	mid: "muted",
@@ -3989,13 +4010,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Leave collab first (/leave)");
 			return;
 		}
-		if (
-			this.session.isStreaming ||
-			this.session.isCompacting ||
-			this.session.hasPostPromptWork ||
-			this.session.isBashRunning ||
-			this.session.isEvalRunning
-		) {
+		if (hasRestartBlockingWork(this.session)) {
 			this.showWarning("Wait for the current response or tool execution to finish or abort it before restarting.");
 			return;
 		}

@@ -1494,6 +1494,8 @@
 ### Fixed
 
 - Fixed `/restart` dropping launch-only auth, prompt, skill, context, config, and extension state (`--api-key`, `--system-prompt`, `--append-system-prompt`, `--skills`, `--no-lsp`, `--no-skills`, `--no-rules`, `--no-extensions`, `--config`, `--extension`, `--hook`, `--plugin-dir`, and extension-registered CLI flags), so restarted TUI sessions preserve runtime API keys, custom system prompts, skill filters, disabled context sources, custom config overlays, extension/plugin roots, and extension flag values.
+- Fixed `/restart` dropping launch-only model, thinking, and advisor overrides (`--models`, `--smol`, `--slow`, `--plan`, `--thinking`, `--hide-thinking`, and `--advisor`).
+- Fixed `/restart` allowing process teardown while async background jobs were still running, which could cancel pending job work and deliveries.
 
 ## [16.2.5] - 2026-06-28
 

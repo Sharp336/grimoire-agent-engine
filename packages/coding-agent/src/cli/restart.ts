@@ -1,6 +1,7 @@
 import * as path from "node:path";
 
 import { isCompiledBinary, workerHostEntry } from "@oh-my-pi/pi-utils";
+import type { ConfiguredThinkingLevel } from "../thinking";
 
 /** Environment variable used for one-hop restart handoff of runtime CLI API keys. */
 export const RESTART_API_KEY_ENV = "OMP_RESTART_API_KEY";
@@ -29,6 +30,13 @@ export interface RestartLaunchFlags {
 	hookPaths?: string[];
 	pluginDirs?: string[];
 	extensionFlagValues?: readonly RestartExtensionFlagValue[];
+	modelPatterns?: string[];
+	smolModel?: string;
+	slowModel?: string;
+	planModel?: string;
+	thinking?: ConfiguredThinkingLevel;
+	hideThinking?: boolean;
+	advisor?: boolean;
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -209,6 +217,27 @@ export function buildRestartCommand(
 	}
 	if (options.appendSystemPrompt !== undefined) {
 		cmd.push("--append-system-prompt", options.appendSystemPrompt);
+	}
+	if (options.modelPatterns && options.modelPatterns.length > 0) {
+		cmd.push("--models", options.modelPatterns.join(","));
+	}
+	if (options.smolModel !== undefined) {
+		cmd.push("--smol", options.smolModel);
+	}
+	if (options.slowModel !== undefined) {
+		cmd.push("--slow", options.slowModel);
+	}
+	if (options.planModel !== undefined) {
+		cmd.push("--plan", options.planModel);
+	}
+	if (options.thinking !== undefined) {
+		cmd.push("--thinking", options.thinking);
+	}
+	if (options.hideThinking) {
+		cmd.push("--hide-thinking");
+	}
+	if (options.advisor) {
+		cmd.push("--advisor");
 	}
 
 	if (options.disableLsp) {

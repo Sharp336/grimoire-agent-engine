@@ -423,22 +423,30 @@ function buildRestartLaunchFlags(
 	parsed: Pick<
 		Args,
 		| "apiKey"
+		| "advisor"
 		| "appendSystemPrompt"
 		| "config"
 		| "extensions"
+		| "hideThinking"
 		| "hooks"
+		| "models"
 		| "noExtensions"
 		| "noLsp"
 		| "noRules"
 		| "noSkills"
 		| "pluginDirs"
+		| "plan"
 		| "skills"
+		| "slow"
+		| "smol"
+		| "thinking"
 		| "systemPrompt"
 	>,
 	extensionFlagValues?: readonly RestartExtensionFlagValue[],
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
+		advisor: Boolean(parsed.advisor),
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
 		disableLsp: Boolean(parsed.noLsp),
@@ -448,8 +456,14 @@ function buildRestartLaunchFlags(
 		extensionPaths: parsed.extensions,
 		hookPaths: parsed.hooks,
 		pluginDirs: parsed.pluginDirs,
+		modelPatterns: parsed.models,
+		planModel: parsed.plan,
+		thinking: parsed.thinking,
 		extensionFlagValues,
 		skillPatterns: parsed.skills,
+		slowModel: parsed.slow,
+		smolModel: parsed.smol,
+		hideThinking: Boolean(parsed.hideThinking),
 		systemPrompt: parsed.systemPrompt,
 	};
 }

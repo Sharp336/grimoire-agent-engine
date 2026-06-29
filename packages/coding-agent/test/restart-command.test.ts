@@ -307,6 +307,40 @@ describe("restart command construction", () => {
 		expect(valuesForFlag(disabledCommand.cmd, "--skills")).toEqual(["git-*"]);
 	});
 
+	test("preserves CLI-only model and UI overrides across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				modelPatterns: ["sonnet", "gpt-5"],
+				smolModel: "haiku",
+				slowModel: "opus",
+				planModel: "planner",
+				thinking: "auto",
+				hideThinking: true,
+				advisor: true,
+			},
+			env,
+		);
+
+		expect(valuesForFlag(command.cmd, "--models")).toEqual(["sonnet,gpt-5"]);
+		expect(valuesForFlag(command.cmd, "--smol")).toEqual(["haiku"]);
+		expect(valuesForFlag(command.cmd, "--slow")).toEqual(["opus"]);
+		expect(valuesForFlag(command.cmd, "--plan")).toEqual(["planner"]);
+		expect(valuesForFlag(command.cmd, "--thinking")).toEqual(["auto"]);
+		expect(command.cmd).toContain("--hide-thinking");
+		expect(command.cmd).toContain("--advisor");
+		expect(command.cmd.indexOf("--models")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--hide-thinking")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--advisor")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
 	test("preserves disabled tools across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,
