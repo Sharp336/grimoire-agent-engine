@@ -4,7 +4,7 @@ import { buildRestartLaunchFlags, resolveRestartPromptLaunchValue } from "@oh-my
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("restart launch flags", () => {
-	test("resolves path launch flags against the original launch cwd", () => {
+	test("resolves launch and session path flags against their live startup cwd", () => {
 		const flags = buildRestartLaunchFlags(
 			{
 				config: ["./omp.yml", "/tmp/global.yml"],
@@ -14,22 +14,30 @@ describe("restart launch flags", () => {
 				providerSessionId: "provider-session-1",
 			},
 			"/repo/original",
+			undefined,
+			undefined,
+			undefined,
+			"/repo/resumed",
 		);
 
 		expect(flags.configFiles).toEqual(["/repo/original/omp.yml", "/tmp/global.yml"]);
-		expect(flags.extensionPaths).toEqual(["/repo/original/ext", "/repo/original/pkg-extension", "/repo/shared/ext"]);
-		expect(flags.hookPaths).toEqual(["/repo/original/hooks/restart.ts", "/repo/original/@scope/pkg"]);
+		expect(flags.extensionPaths).toEqual(["/repo/resumed/ext", "/repo/resumed/pkg-extension", "/repo/shared/ext"]);
+		expect(flags.hookPaths).toEqual(["/repo/resumed/hooks/restart.ts", "/repo/resumed/@scope/pkg"]);
 		expect(flags.pluginDirs).toEqual(["/repo/original/plugins", "/opt/plugins"]);
 		expect(flags.providerSessionId).toBe("provider-session-1");
 	});
 
-	test("absolutizes only file-backed prompt launch flags", async () => {
+	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {
 		using tempDir = TempDir.createSync("@omp-restart-prompts-");
-		const promptPath = path.join(tempDir.path(), "prompts", "system.md");
-		await Bun.write(promptPath, "single-line prompt");
+		const launchPromptPath = path.join(tempDir.path(), "launch", "prompts", "system.md");
+		const sessionCwd = path.join(tempDir.path(), "session");
+		const sessionPromptPath = path.join(sessionCwd, "prompts", "system.md");
+		await Bun.write(launchPromptPath, "launch prompt");
+		await Bun.write(sessionPromptPath, "session prompt");
 
-		expect(await resolveRestartPromptLaunchValue("prompts/system.md", tempDir.path())).toBe(promptPath);
-		expect(await resolveRestartPromptLaunchValue("literal prompt", tempDir.path())).toBe("literal prompt");
-		expect(await resolveRestartPromptLaunchValue("literal\nprompt", tempDir.path())).toBe("literal\nprompt");
+		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).toBe(sessionPromptPath);
+		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).not.toBe(launchPromptPath);
+		expect(await resolveRestartPromptLaunchValue("literal prompt", sessionCwd)).toBe("literal prompt");
+		expect(await resolveRestartPromptLaunchValue("literal\nprompt", sessionCwd)).toBe("literal\nprompt");
 	});
 });

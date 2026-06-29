@@ -445,7 +445,7 @@ export async function resolveRestartPromptLaunchValue(
 	}
 }
 
-/** Build restart launch state from parsed args and deadline, resolving path flags against the original launch cwd. */
+/** Build restart launch state, resolving config/plugin paths from launch cwd and extension roots from session cwd. */
 export function buildRestartLaunchFlags(
 	parsed: Pick<
 		Args,
@@ -474,6 +474,7 @@ export function buildRestartLaunchFlags(
 	extensionFlagValues?: readonly RestartExtensionFlagValue[],
 	maxTimeDeadline?: number,
 	apiKeyProvider?: string,
+	sessionStartCwd: string = launchCwd,
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
@@ -485,8 +486,8 @@ export function buildRestartLaunchFlags(
 		disableRules: Boolean(parsed.noRules),
 		disableSkills: Boolean(parsed.noSkills),
 		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
-		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, launchCwd),
-		hookPaths: resolveRestartLaunchPaths(parsed.hooks, launchCwd),
+		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
+		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),
 		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
 		modelPatterns: parsed.models,
 		planModel: parsed.plan,
@@ -1807,16 +1808,14 @@ export async function runRootCommand(
 				buildRestartLaunchFlags(
 					{
 						...initialArgs,
-						systemPrompt: await resolveRestartPromptLaunchValue(initialArgs.systemPrompt, launchConfigCwd),
-						appendSystemPrompt: await resolveRestartPromptLaunchValue(
-							initialArgs.appendSystemPrompt,
-							launchConfigCwd,
-						),
+						systemPrompt: await resolveRestartPromptLaunchValue(initialArgs.systemPrompt, cwd),
+						appendSystemPrompt: await resolveRestartPromptLaunchValue(initialArgs.appendSystemPrompt, cwd),
 					},
 					launchConfigCwd,
 					currentExtensionFlagValues,
 					sessionOptions.deadline,
 					runtimeApiKeyProvider,
+					cwd,
 				),
 			);
 		} else {
