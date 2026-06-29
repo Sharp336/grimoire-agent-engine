@@ -31,6 +31,7 @@ import { buildInitialMessage } from "./cli/initial-message";
 import {
 	consumeRestartExtensionFlagValues,
 	RESTART_API_KEY_ENV,
+	RESTART_API_KEY_PROVIDER_ENV,
 	type RestartExtensionFlagValue,
 	type RestartLaunchFlags,
 	type RestartToolRestriction,
@@ -429,22 +430,19 @@ function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: s
 	return values?.map(value => resolveRestartLaunchPath(value, cwd));
 }
 
-function isExplicitPathLikeLaunchValue(value: string): boolean {
-	return (
-		value === "~" ||
-		value.startsWith("~/") ||
-		path.isAbsolute(value) ||
-		value === "." ||
-		value === ".." ||
-		value.startsWith("./") ||
-		value.startsWith("../") ||
-		value.startsWith(".\\") ||
-		value.startsWith("..\\")
-	);
-}
-
-function resolvePathLikeRestartLaunchValues(values: readonly string[] | undefined, cwd: string): string[] | undefined {
-	return values?.map(value => (isExplicitPathLikeLaunchValue(value) ? resolveRestartLaunchPath(value, cwd) : value));
+/** Resolve a restart prompt flag to its original file path only when the launch input was file-backed. */
+export async function resolveRestartPromptLaunchValue(
+	value: string | undefined,
+	launchCwd: string,
+): Promise<string | undefined> {
+	if (!value || value.includes("\n")) return value;
+	const resolved = resolveRestartLaunchPath(value, launchCwd);
+	try {
+		await Bun.file(resolved).text();
+		return resolved;
+	} catch {
+		return value;
+	}
 }
 
 /** Build restart launch state from parsed args and deadline, resolving path flags against the original launch cwd. */
@@ -465,6 +463,7 @@ export function buildRestartLaunchFlags(
 		| "noSkills"
 		| "pluginDirs"
 		| "plan"
+		| "providerSessionId"
 		| "skills"
 		| "slow"
 		| "smol"
@@ -474,9 +473,11 @@ export function buildRestartLaunchFlags(
 	launchCwd: string,
 	extensionFlagValues?: readonly RestartExtensionFlagValue[],
 	maxTimeDeadline?: number,
+	apiKeyProvider?: string,
 ): RestartLaunchFlags {
 	return {
 		apiKey: parsed.apiKey,
+		apiKeyProvider,
 		advisor: Boolean(parsed.advisor),
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
@@ -484,11 +485,12 @@ export function buildRestartLaunchFlags(
 		disableRules: Boolean(parsed.noRules),
 		disableSkills: Boolean(parsed.noSkills),
 		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
-		extensionPaths: resolvePathLikeRestartLaunchValues(parsed.extensions, launchCwd),
-		hookPaths: resolvePathLikeRestartLaunchValues(parsed.hooks, launchCwd),
+		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, launchCwd),
+		hookPaths: resolveRestartLaunchPaths(parsed.hooks, launchCwd),
 		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
 		modelPatterns: parsed.models,
 		planModel: parsed.plan,
+		providerSessionId: parsed.providerSessionId,
 		thinking: parsed.thinking,
 		extensionFlagValues,
 		maxTimeDeadline,
@@ -525,23 +527,37 @@ export function getPersistedSessionModelProvider(
 	return undefined;
 }
 
+/** Return the provider a runtime API key should be installed for before session restore. */
+export function getRuntimeApiKeyProviderBeforeSessionRestore(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: RuntimeApiKeySessionOptions,
+	sessionManager: RestorableModelSource | undefined,
+	restartApiKeyProvider?: string,
+): string | undefined {
+	if (!parsed.apiKey) return undefined;
+	if (restartApiKeyProvider) return restartApiKeyProvider;
+	if (sessionOptions.model) return sessionOptions.model.provider;
+	if (sessionOptions.modelPattern || !(parsed.continue || parsed.resume || parsed.fork)) return undefined;
+	return getPersistedSessionModelProvider(sessionManager);
+}
+
 /** Install a runtime API key before createSession can restore a persisted model. */
 export function applyRuntimeApiKeyBeforeSessionRestore(
 	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
 	sessionOptions: RuntimeApiKeySessionOptions,
 	sessionManager: RestorableModelSource | undefined,
 	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
-): boolean {
-	if (!parsed.apiKey) return false;
-	if (sessionOptions.model) {
-		authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
-		return true;
-	}
-	if (sessionOptions.modelPattern || !(parsed.continue || parsed.resume || parsed.fork)) return false;
-	const provider = getPersistedSessionModelProvider(sessionManager);
-	if (!provider) return false;
+	restartApiKeyProvider?: string,
+): string | undefined {
+	const provider = getRuntimeApiKeyProviderBeforeSessionRestore(
+		parsed,
+		sessionOptions,
+		sessionManager,
+		restartApiKeyProvider,
+	);
+	if (!parsed.apiKey || !provider) return undefined;
 	authStorage.setRuntimeApiKey(provider, parsed.apiKey);
-	return true;
+	return provider;
 }
 
 /** Apply a runtime API key when the provider was only known after createSession. */
@@ -550,16 +566,26 @@ export function applyRuntimeApiKeyForRestoredSession(
 	sessionOptions: RuntimeApiKeySessionOptions,
 	session: { model?: { provider: string } },
 	authStorage: Pick<AuthStorage, "setRuntimeApiKey">,
-): void {
-	if (!parsed.apiKey || sessionOptions.model || !session.model) return;
-	authStorage.setRuntimeApiKey(session.model.provider, parsed.apiKey);
+	restartApiKeyProvider?: string,
+): string | undefined {
+	if (!parsed.apiKey || sessionOptions.model) return undefined;
+	const provider = restartApiKeyProvider ?? session.model?.provider;
+	if (!provider) return undefined;
+	authStorage.setRuntimeApiKey(provider, parsed.apiKey);
+	return provider;
 }
 
-function applyRestartApiKeyHandoff(parsed: Args, env: Record<string, string | undefined> = process.env): void {
+function applyRestartApiKeyHandoff(
+	parsed: Args,
+	env: Record<string, string | undefined> = process.env,
+): string | undefined {
 	const apiKey = env[RESTART_API_KEY_ENV];
-	if (!apiKey) return;
-	if (!parsed.apiKey) parsed.apiKey = apiKey;
+	const apiKeyProvider = env[RESTART_API_KEY_PROVIDER_ENV];
 	delete env[RESTART_API_KEY_ENV];
+	delete env[RESTART_API_KEY_PROVIDER_ENV];
+	if (!apiKey) return undefined;
+	if (!parsed.apiKey) parsed.apiKey = apiKey;
+	return apiKeyProvider;
 }
 
 async function runInteractiveMode(
@@ -1261,7 +1287,7 @@ export async function runRootCommand(
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
-	applyRestartApiKeyHandoff(parsedArgs);
+	const restartApiKeyProvider = applyRestartApiKeyHandoff(parsedArgs);
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
@@ -1557,6 +1583,7 @@ export async function runRootCommand(
 	}
 
 	// Handle CLI --api-key as runtime override (not persisted)
+	let runtimeApiKeyProvider = restartApiKeyProvider;
 	let runtimeApiKeyInstalledBeforeSessionRestore = false;
 	if (parsedArgs.apiKey) {
 		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions)) {
@@ -1565,12 +1592,15 @@ export async function runRootCommand(
 			);
 			process.exit(1);
 		}
-		runtimeApiKeyInstalledBeforeSessionRestore = applyRuntimeApiKeyBeforeSessionRestore(
+		const installedProvider = applyRuntimeApiKeyBeforeSessionRestore(
 			parsedArgs,
 			sessionOptions,
 			sessionManager,
 			authStorage,
+			restartApiKeyProvider,
 		);
+		runtimeApiKeyInstalledBeforeSessionRestore = installedProvider !== undefined;
+		runtimeApiKeyProvider = installedProvider ?? runtimeApiKeyProvider;
 	}
 
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
@@ -1693,7 +1723,14 @@ export async function runRootCommand(
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);
 		if (!runtimeApiKeyInstalledBeforeSessionRestore) {
-			applyRuntimeApiKeyForRestoredSession(parsedArgs, sessionOptions, session, authStorage);
+			const restoredProvider = applyRuntimeApiKeyForRestoredSession(
+				parsedArgs,
+				sessionOptions,
+				session,
+				authStorage,
+				restartApiKeyProvider,
+			);
+			runtimeApiKeyProvider = restoredProvider ?? runtimeApiKeyProvider;
 		}
 
 		if (modelFallbackMessage) {
@@ -1767,7 +1804,20 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				buildRestartToolRestriction(initialArgs),
-				buildRestartLaunchFlags(initialArgs, launchConfigCwd, currentExtensionFlagValues, sessionOptions.deadline),
+				buildRestartLaunchFlags(
+					{
+						...initialArgs,
+						systemPrompt: await resolveRestartPromptLaunchValue(initialArgs.systemPrompt, launchConfigCwd),
+						appendSystemPrompt: await resolveRestartPromptLaunchValue(
+							initialArgs.appendSystemPrompt,
+							launchConfigCwd,
+						),
+					},
+					launchConfigCwd,
+					currentExtensionFlagValues,
+					sessionOptions.deadline,
+					runtimeApiKeyProvider,
+				),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

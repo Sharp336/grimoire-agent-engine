@@ -3,6 +3,7 @@ import {
 	buildRestartCommand,
 	consumeRestartExtensionFlagValues,
 	RESTART_API_KEY_ENV,
+	RESTART_API_KEY_PROVIDER_ENV,
 	RESTART_EXTENSION_FLAG_VALUES_ENV,
 	type RestartCommandEnvironment,
 	type RestartExtensionFlagValue,
@@ -200,11 +201,14 @@ describe("restart command construction", () => {
 			packageRoot,
 		};
 
-		const command = buildRestartCommand({ ...baseOptions(), apiKey: "sk-runtime" }, env);
+		const command = buildRestartCommand({ ...baseOptions(), apiKey: "sk-runtime", apiKeyProvider: "openai" }, env);
 
 		expect(command.cmd).not.toContain("--api-key");
 		expect(command.cmd).not.toContain("sk-runtime");
-		expect(command.env).toEqual({ [RESTART_API_KEY_ENV]: "sk-runtime" });
+		expect(command.env).toEqual({
+			[RESTART_API_KEY_ENV]: "sk-runtime",
+			[RESTART_API_KEY_PROVIDER_ENV]: "openai",
+		});
 	});
 
 	test("hands off extension CLI flag values via child env instead of argv", () => {
@@ -299,6 +303,21 @@ describe("restart command construction", () => {
 		expect(valuesForFlag(command.cmd, "--append-system-prompt")).toEqual(["Append this guidance"]);
 		expect(command.cmd.indexOf("--system-prompt")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--append-system-prompt")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves provider session ids across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), providerSessionId: "provider-session-1" }, env);
+
+		expect(valuesForFlag(command.cmd, "--provider-session-id")).toEqual(["provider-session-1"]);
+		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
 
 	test("preserves skill filters across restart", () => {

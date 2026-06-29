@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	applyRuntimeApiKeyBeforeSessionRestore,
+	applyRuntimeApiKeyForRestoredSession,
 	getPersistedSessionModelProvider,
 	requiresLaunchModelForRuntimeApiKey,
 } from "@oh-my-pi/pi-coding-agent/main";
@@ -49,7 +50,7 @@ describe("restart runtime API key validation", () => {
 				undefined,
 				authStorage,
 			),
-		).toBe(true);
+		).toBe("launch-provider");
 		expect(
 			applyRuntimeApiKeyBeforeSessionRestore(
 				{ apiKey: "sk-runtime", resume: "sess-1" },
@@ -57,14 +58,14 @@ describe("restart runtime API key validation", () => {
 				restoredSource,
 				authStorage,
 			),
-		).toBe(true);
+		).toBe("restored-provider");
 		expect(applied).toEqual([
 			{ provider: "launch-provider", apiKey: "sk-runtime" },
 			{ provider: "restored-provider", apiKey: "sk-runtime" },
 		]);
 
 		expect(applyRuntimeApiKeyBeforeSessionRestore({ apiKey: "sk-runtime" }, {}, restoredSource, authStorage)).toBe(
-			false,
+			undefined,
 		);
 		expect(
 			applyRuntimeApiKeyBeforeSessionRestore(
@@ -73,8 +74,51 @@ describe("restart runtime API key validation", () => {
 				restoredSource,
 				authStorage,
 			),
-		).toBe(false);
-		expect(applyRuntimeApiKeyBeforeSessionRestore({}, {}, restoredSource, authStorage)).toBe(false);
+		).toBeUndefined();
+		expect(applyRuntimeApiKeyBeforeSessionRestore({}, {}, restoredSource, authStorage)).toBeUndefined();
 		expect(applied).toHaveLength(2);
+	});
+
+	test("uses the original provider when installing restart API keys before restore", () => {
+		const applied: { provider: string; apiKey: string }[] = [];
+		const authStorage = {
+			setRuntimeApiKey(provider: string, apiKey: string): void {
+				applied.push({ provider, apiKey });
+			},
+		};
+		const restoredSource = {
+			getRestorableModelStrings: () => ["anthropic/claude-sonnet-4-5"],
+		};
+
+		expect(
+			applyRuntimeApiKeyBeforeSessionRestore(
+				{ apiKey: "sk-runtime", resume: "sess-1" },
+				{},
+				restoredSource,
+				authStorage,
+				"openai",
+			),
+		).toBe("openai");
+		expect(applied).toEqual([{ provider: "openai", apiKey: "sk-runtime" }]);
+	});
+
+	test("keeps post-restore API key handoff scoped to the original provider", () => {
+		const applied: { provider: string; apiKey: string }[] = [];
+		const authStorage = {
+			setRuntimeApiKey(provider: string, apiKey: string): void {
+				applied.push({ provider, apiKey });
+			},
+		};
+
+		expect(
+			applyRuntimeApiKeyForRestoredSession(
+				{ apiKey: "sk-runtime" },
+				{},
+				{ model: { provider: "anthropic" } },
+				authStorage,
+				"openai",
+			),
+		).toBe("openai");
+		expect(applied).toEqual([{ provider: "openai", apiKey: "sk-runtime" }]);
 	});
 });

@@ -5,6 +5,8 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 
 /** Environment variable used for one-hop restart handoff of runtime CLI API keys. */
 export const RESTART_API_KEY_ENV = "OMP_RESTART_API_KEY";
+/** Environment variable used for one-hop restart handoff of the runtime CLI API key's original provider. */
+export const RESTART_API_KEY_PROVIDER_ENV = "OMP_RESTART_API_KEY_PROVIDER";
 
 /** Environment variable used for one-hop restart handoff of extension CLI flag values. */
 export const RESTART_EXTENSION_FLAG_VALUES_ENV = "OMP_RESTART_EXTENSION_FLAG_VALUES";
@@ -21,6 +23,7 @@ export type RestartExtensionFlagValue = readonly [name: string, value: boolean |
 /** CLI launch state for time budget, auth, prompts, skills, context, config, and extensions that must survive restart. */
 export interface RestartLaunchFlags {
 	apiKey?: string;
+	apiKeyProvider?: string;
 	disableExtensions?: boolean;
 	disableLsp?: boolean;
 	disableRules?: boolean;
@@ -37,6 +40,7 @@ export interface RestartLaunchFlags {
 	thinking?: ConfiguredThinkingLevel;
 	hideThinking?: boolean;
 	advisor?: boolean;
+	providerSessionId?: string;
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -166,6 +170,9 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 	let hasChildEnv = false;
 	if (options.apiKey) {
 		childEnv[RESTART_API_KEY_ENV] = options.apiKey;
+		if (options.apiKeyProvider) {
+			childEnv[RESTART_API_KEY_PROVIDER_ENV] = options.apiKeyProvider;
+		}
 		hasChildEnv = true;
 	}
 	if (options.extensionFlagValues && options.extensionFlagValues.length > 0) {
@@ -224,6 +231,9 @@ export function buildRestartCommand(
 	}
 	if (options.appendSystemPrompt !== undefined) {
 		cmd.push("--append-system-prompt", options.appendSystemPrompt);
+	}
+	if (options.providerSessionId !== undefined) {
+		cmd.push("--provider-session-id", options.providerSessionId);
 	}
 	if (options.modelPatterns && options.modelPatterns.length > 0) {
 		cmd.push("--models", options.modelPatterns.join(","));
