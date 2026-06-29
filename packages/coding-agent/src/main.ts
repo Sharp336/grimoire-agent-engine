@@ -90,7 +90,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { discoverTitleSystemPromptFile, encodeLiteralPromptInput, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { AUTO_THINKING, concreteThinkingLevel, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -444,7 +444,7 @@ export async function resolveRestartPromptLaunchValue(
 		await Bun.file(resolved).text();
 		return resolved;
 	} catch {
-		return source;
+		return encodeLiteralPromptInput(source);
 	}
 }
 
@@ -467,6 +467,7 @@ export function buildRestartLaunchFlags(
 		| "config"
 		| "extensions"
 		| "hideThinking"
+		| "model"
 		| "hooks"
 		| "models"
 		| "noExtensions"
@@ -475,6 +476,7 @@ export function buildRestartLaunchFlags(
 		| "noSkills"
 		| "pluginDirs"
 		| "plan"
+		| "provider"
 		| "providerSessionId"
 		| "skills"
 		| "slow"
@@ -502,9 +504,11 @@ export function buildRestartLaunchFlags(
 		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
 		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),
 		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
+		model: parsed.model,
 		modelPatterns: parsed.models,
 		planModel: parsed.plan,
 		providerSessionId: parsed.providerSessionId,
+		provider: parsed.provider,
 		thinking: parsed.thinking,
 		extensionFlagValues,
 		maxTimeDeadline,

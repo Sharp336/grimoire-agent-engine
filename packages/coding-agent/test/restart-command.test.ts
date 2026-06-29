@@ -388,6 +388,8 @@ describe("restart command construction", () => {
 		const command = buildRestartCommand(
 			{
 				...baseOptions(),
+				provider: "openai",
+				model: "gpt-5",
 				modelPatterns: ["sonnet", "gpt-5"],
 				smolModel: "haiku",
 				slowModel: "opus",
@@ -399,6 +401,8 @@ describe("restart command construction", () => {
 			env,
 		);
 
+		expect(valuesForFlag(command.cmd, "--provider")).toEqual(["openai"]);
+		expect(valuesForFlag(command.cmd, "--model")).toEqual(["gpt-5"]);
 		expect(valuesForFlag(command.cmd, "--models")).toEqual(["sonnet,gpt-5"]);
 		expect(valuesForFlag(command.cmd, "--smol")).toEqual(["haiku"]);
 		expect(valuesForFlag(command.cmd, "--slow")).toEqual(["opus"]);
@@ -406,6 +410,8 @@ describe("restart command construction", () => {
 		expect(valuesForFlag(command.cmd, "--thinking")).toEqual(["auto"]);
 		expect(command.cmd).toContain("--hide-thinking");
 		expect(command.cmd).toContain("--advisor");
+		expect(command.cmd.indexOf("--provider")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--model")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--models")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--hide-thinking")).toBeLessThan(command.cmd.indexOf("--resume"));
 		expect(command.cmd.indexOf("--advisor")).toBeLessThan(command.cmd.indexOf("--resume"));

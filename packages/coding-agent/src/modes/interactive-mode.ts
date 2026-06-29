@@ -254,6 +254,7 @@ export interface InteractiveRestartCommandInput {
 	launchFlags?: restartProcess.RestartLaunchFlags;
 	liveProviderSessionId: string;
 	liveAdvisorEnabled: boolean;
+	liveHideThinkingBlock: boolean;
 }
 
 /** Build `/restart` options with live session state overriding stale launch-time flags. */
@@ -270,6 +271,7 @@ export function buildInteractiveRestartCommandOptions(
 		...options.launchFlags,
 		providerSessionId: options.liveProviderSessionId,
 		advisor: options.liveAdvisorEnabled,
+		hideThinking: options.liveHideThinkingBlock,
 	};
 }
 
@@ -4069,6 +4071,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
 				launchFlags: this.#restartLaunchFlags,
 				liveAdvisorEnabled: this.session.isAdvisorEnabled(),
+				liveHideThinkingBlock: this.hideThinkingBlock,
 				liveProviderSessionId: this.session.sessionId,
 			}),
 		);

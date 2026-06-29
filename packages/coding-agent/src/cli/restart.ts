@@ -35,6 +35,8 @@ export interface RestartLaunchFlags {
 	hookPaths?: string[];
 	pluginDirs?: string[];
 	extensionFlagValues?: readonly RestartExtensionFlagValue[];
+	provider?: string;
+	model?: string;
 	modelPatterns?: string[];
 	smolModel?: string;
 	slowModel?: string;
@@ -244,6 +246,12 @@ export function buildRestartCommand(
 	appendRepeatedFlag(cmd, "--extension", options.extensionPaths);
 	appendRepeatedFlag(cmd, "--hook", options.hookPaths);
 	appendRepeatedFlag(cmd, "--plugin-dir", options.pluginDirs);
+	if (options.provider !== undefined) {
+		cmd.push("--provider", options.provider);
+	}
+	if (options.model !== undefined) {
+		cmd.push("--model", options.model);
+	}
 	if (options.systemPrompt !== undefined) {
 		cmd.push("--system-prompt", options.systemPrompt);
 	}

@@ -59,6 +59,7 @@ describe("restart command options", () => {
 			launchFlags: { providerSessionId: "launch-provider-session" },
 			liveProviderSessionId: "fresh-provider-session",
 			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
 		});
 
 		expect(options.providerSessionId).toBe("fresh-provider-session");
@@ -72,6 +73,7 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { advisor: false },
 			liveAdvisorEnabled: true,
+			liveHideThinkingBlock: false,
 			liveProviderSessionId: "provider-session",
 		});
 		const disabledOptions = buildInteractiveRestartCommandOptions({
@@ -81,11 +83,38 @@ describe("restart command options", () => {
 			approvalMode: "write",
 			launchFlags: { advisor: true },
 			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
 			liveProviderSessionId: "provider-session",
 		});
 
 		expect(enabledOptions.advisor).toBe(true);
 		expect(disabledOptions.advisor).toBe(false);
+	});
+
+	test("uses the live thinking visibility state after stale launch flags", () => {
+		const hiddenOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { hideThinking: false },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: true,
+			liveProviderSessionId: "provider-session",
+		});
+		const visibleOptions = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { hideThinking: true },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(hiddenOptions.hideThinking).toBe(true);
+		expect(visibleOptions.hideThinking).toBe(false);
 	});
 });
 describe("restart active-work guard", () => {

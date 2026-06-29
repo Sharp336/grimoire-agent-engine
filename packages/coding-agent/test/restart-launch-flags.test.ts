@@ -6,6 +6,7 @@ import {
 	buildRestartLaunchFlags,
 	resolveRestartPromptLaunchValue,
 } from "@oh-my-pi/pi-coding-agent/main";
+import { resolvePromptInput } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("restart launch flags", () => {
@@ -17,6 +18,8 @@ describe("restart launch flags", () => {
 				hooks: ["./hooks/restart.ts", "@scope/pkg"],
 				pluginDirs: ["plugins", "/opt/plugins"],
 				providerSessionId: "provider-session-1",
+				provider: "openai",
+				model: "gpt-5",
 			},
 			"/repo/original",
 			undefined,
@@ -30,6 +33,8 @@ describe("restart launch flags", () => {
 		expect(flags.hookPaths).toEqual(["/repo/resumed/hooks/restart.ts", "/repo/resumed/@scope/pkg"]);
 		expect(flags.pluginDirs).toEqual(["/repo/original/plugins", "/opt/plugins"]);
 		expect(flags.providerSessionId).toBe("provider-session-1");
+		expect(flags.provider).toBe("openai");
+		expect(flags.model).toBe("gpt-5");
 	});
 
 	test("carries env-injected API keys through extension-aware restart snapshots", () => {
@@ -87,7 +92,10 @@ describe("restart launch flags", () => {
 		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).toBe(sessionPromptPath);
 		expect(await resolveRestartPromptLaunchValue("prompts/system.md", sessionCwd)).not.toBe(launchPromptPath);
 		expect(await resolveRestartPromptLaunchValue(undefined, sessionCwd, launchPromptPath)).toBe(launchPromptPath);
-		expect(await resolveRestartPromptLaunchValue("literal prompt", sessionCwd)).toBe("literal prompt");
+		const literalRestartValue = await resolveRestartPromptLaunchValue("literal prompt", sessionCwd);
+		expect(literalRestartValue).not.toBe("literal prompt");
+		await Bun.write(path.join(sessionCwd, "literal prompt"), "session literal file");
+		expect(await resolvePromptInput(literalRestartValue, "system prompt")).toBe("literal prompt");
 		expect(await resolveRestartPromptLaunchValue("literal\nprompt", sessionCwd)).toBe("literal\nprompt");
 	});
 });

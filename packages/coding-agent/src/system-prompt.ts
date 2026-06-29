@@ -311,10 +311,31 @@ export function discoverTitleSystemPromptFile(cwd?: string): string | undefined 
 	return undefined;
 }
 
+const LITERAL_PROMPT_INPUT_PREFIX = "omp-restart-literal-prompt:";
+
+/** Encode a prompt string so later prompt resolution cannot reinterpret it as a file path. */
+export function encodeLiteralPromptInput(input: string): string {
+	return `${LITERAL_PROMPT_INPUT_PREFIX}${Buffer.from(input, "utf8").toString("base64url")}`;
+}
+
+function decodeLiteralPromptInput(input: string): string | undefined {
+	if (!input.startsWith(LITERAL_PROMPT_INPUT_PREFIX)) return undefined;
+	const encoded = input.slice(LITERAL_PROMPT_INPUT_PREFIX.length);
+	try {
+		return Buffer.from(encoded, "base64url").toString("utf8");
+	} catch {
+		return undefined;
+	}
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
 		return undefined;
+	}
+	const decodedLiteral = decodeLiteralPromptInput(input);
+	if (decodedLiteral !== undefined) {
+		return decodedLiteral;
 	} else if (input.includes("\n")) {
 		return input;
 	}
