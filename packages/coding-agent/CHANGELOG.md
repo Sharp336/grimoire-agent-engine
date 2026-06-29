@@ -1496,6 +1496,10 @@
 - Fixed `/restart` dropping launch-only auth, prompt, skill, context, config, and extension state (`--api-key`, `--system-prompt`, `--append-system-prompt`, `--skills`, `--no-lsp`, `--no-skills`, `--no-rules`, `--no-extensions`, `--config`, `--extension`, `--hook`, `--plugin-dir`, and extension-registered CLI flags), so restarted TUI sessions preserve runtime API keys, custom system prompts, skill filters, disabled context sources, custom config overlays, extension/plugin roots, and extension flag values.
 - Fixed `/restart` dropping launch-only model, thinking, and advisor overrides (`--models`, `--smol`, `--slow`, `--plan`, `--thinking`, `--hide-thinking`, and `--advisor`).
 - Fixed `/restart` allowing process teardown while async background jobs were still running, which could cancel pending job work and deliveries.
+- Fixed `/restart` allowing process teardown while async background jobs or detached subagents were still running, which could cancel pending work and deliveries.
+- Fixed `/restart` API-key handoffs for resumed/forked sessions by skipping fresh-launch model validation until the restored session model is available.
+- Fixed `/restart` capturing built-in launch flags from the extension-aware parse so extension-registered flags that shadow built-ins do not replay stale built-in values.
+- Fixed the bash interceptor blocking `echo` / `printf` redirects to `/dev/null`, `/dev/tty`, `/dev/stdout`, and `/dev/stderr` device sinks while still directing real file writes to the write tool. ([#3763](https://github.com/can1357/oh-my-pi/issues/3763))
 
 ## [16.2.5] - 2026-06-28
 

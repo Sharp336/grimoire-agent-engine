@@ -226,10 +226,12 @@ export function hasRestartBlockingWork(
 		AgentSession,
 		"isStreaming" | "isCompacting" | "hasPostPromptWork" | "isBashRunning" | "isEvalRunning" | "getAsyncJobSnapshot"
 	>,
+	subagentRegistry?: AgentRegistry,
 ): boolean {
 	const asyncJobSnapshot = session.getAsyncJobSnapshot();
 	const hasPendingAsyncDelivery =
 		(asyncJobSnapshot?.delivery.queued ?? 0) > 0 || asyncJobSnapshot?.delivery.delivering === true;
+	const hasRunningSubagents = subagentRegistry ? countRunningSubagentBadgeAgents(subagentRegistry) > 0 : false;
 	return (
 		session.isStreaming ||
 		session.isCompacting ||
@@ -237,7 +239,8 @@ export function hasRestartBlockingWork(
 		session.isBashRunning ||
 		session.isEvalRunning ||
 		(asyncJobSnapshot?.running.length ?? 0) > 0 ||
-		hasPendingAsyncDelivery
+		hasPendingAsyncDelivery ||
+		hasRunningSubagents
 	);
 }
 
@@ -4010,7 +4013,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Leave collab first (/leave)");
 			return;
 		}
-		if (hasRestartBlockingWork(this.session)) {
+		if (hasRestartBlockingWork(this.session, getRunningSubagentBadgeRegistry(this.collabGuest))) {
 			this.showWarning("Wait for the current response or tool execution to finish or abort it before restarting.");
 			return;
 		}

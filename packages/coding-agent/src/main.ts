@@ -468,6 +468,16 @@ function buildRestartLaunchFlags(
 	};
 }
 
+/** Return whether a runtime API key needs an explicit launch model before session restore. */
+export function requiresLaunchModelForRuntimeApiKey(
+	parsed: Pick<Args, "apiKey" | "continue" | "resume" | "fork">,
+	sessionOptions: Pick<CreateAgentSessionOptions, "model" | "modelPattern">,
+): boolean {
+	if (!parsed.apiKey) return false;
+	if (parsed.continue || parsed.resume || parsed.fork) return false;
+	return !sessionOptions.model && !sessionOptions.modelPattern;
+}
+
 function applyRestartApiKeyHandoff(parsed: Args, env: Record<string, string | undefined> = process.env): void {
 	const apiKey = env[RESTART_API_KEY_ENV];
 	if (!apiKey) return;
@@ -1470,7 +1480,7 @@ export async function runRootCommand(
 
 	// Handle CLI --api-key as runtime override (not persisted)
 	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
+		if (requiresLaunchModelForRuntimeApiKey(parsedArgs, sessionOptions)) {
 			process.stderr.write(
 				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 			);
@@ -1674,8 +1684,8 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
-				buildRestartToolRestriction(parsedArgs),
-				buildRestartLaunchFlags(parsedArgs, currentExtensionFlagValues),
+				buildRestartToolRestriction(initialArgs),
+				buildRestartLaunchFlags(initialArgs, currentExtensionFlagValues),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

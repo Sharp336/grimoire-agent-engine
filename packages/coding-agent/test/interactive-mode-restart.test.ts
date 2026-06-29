@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hasRestartBlockingWork } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 type RestartBlockingSessionState = Pick<
@@ -60,5 +61,26 @@ describe("restart active-work guard", () => {
 				}),
 			),
 		).toBe(true);
+	});
+
+	test("blocks restart while detached subagents are running", () => {
+		const registry = new AgentRegistry();
+
+		expect(hasRestartBlockingWork(sessionState(), registry)).toBe(false);
+
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			status: "running",
+			session: null,
+			sessionFile: "/tmp/Worker.jsonl",
+		});
+
+		expect(hasRestartBlockingWork(sessionState(), registry)).toBe(true);
+
+		registry.setStatus("Worker", "idle");
+
+		expect(hasRestartBlockingWork(sessionState(), registry)).toBe(false);
 	});
 });
