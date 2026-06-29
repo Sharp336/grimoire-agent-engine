@@ -2,14 +2,36 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Defaulted reasoning context to all_turns for all Codex requests
+## [16.2.5] - 2026-06-28
 
 ### Fixed
 
+- Fixed Google and Cloud Code Assist streams that end without a finish reason (dropped connections or truncated responses) being treated as fatal; they are now classified as transient so the coding agent automatically retries.
+
+## [16.2.4] - 2026-06-28
+
+### Added
+
 - Enabled freeform tool patch support for Azure OpenAI and Codex models
-- Fixed /usage show returning "No usage data available" when using a custom proxy base URL for Codex by routing usage and credit-reset requests to the canonical ChatGPT origin
+
+### Fixed
+
+- Fixed usage reporting for Antigravity and Z.AI to correctly surface and preserve distinct quota windows (daily, weekly, monthly) instead of collapsing or duplicating them
+- Fixed an issue where `/usage show` returned "No usage data available" when using a custom proxy base URL for Codex
+- Fixed OpenAI stream read errors being incorrectly classified as non-transient, enabling the coding agent to automatically retry after recoverable stream failures
+
+## [16.2.3] - 2026-06-28
+
+### Changed
+
+- Enabled automatic removal of leaked reasoning tags for all models
+- Prevented reasoning text duplication when models emit both structured and inline thinking
+- Defaulted reasoning context to all turns for all Codex requests.
+
+### Fixed
+
+- Enabled freeform tool patch support for Azure OpenAI and Codex models.
+- Fixed an issue where the `/usage show` command returned "No usage data available" when using a custom proxy base URL for Codex.
 
 ## [16.2.2] - 2026-06-27
 

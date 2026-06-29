@@ -2,43 +2,94 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Added mouse support for scrolling and interaction in the debug log and raw SSE stream viewers.
-- Added the `statusLine.compactThinkingLevel` setting to render the model segment's thinking level as a single leading glyph instead of a separate text suffix.
-- Added support for tracking reasoning tokens in session and advisor statistics.
-- Added Remote Compaction V2 streaming configuration settings (`compaction.remoteStreamingV2Enabled` and `compaction.v2RetainedMessageBudget`) to control token budgets and toggle V2 streaming for remote compaction.
-- Added the `edit.citationTags` setting to emit model-facing hashline section headers as OpenAI citation markers with opaque source IDs, along with citation-marker unwrapping for hashline edit parsing, diff previews, and streaming matching.
-- Added mutable session titles backed by a fixed JSONL title slot with append-only title-change audit entries, replan title refresh, and configurable idle recaps.
-- Added incremental `yield` submissions with typed sections and last-turn final results for subagents.
+- Optimized argument streaming to throttle JSON re-parsing for renderers that do not require raw input
+
+### Fixed
+
+- Fixed memory leaks in benchmark CLI by properly closing provider sessions after completion
+
+- Fixed streamed tool-call argument previews starving TUI shimmer frames by throttling reveal-side JSON reparses and suppressing unchanged write-preview arg updates while preserving raw-prefix updates for bash/edit/custom renderers.
+- Fixed llama.cpp discovery mapping unlimited `max_tokens = -1` / `n_predict = -1` output limits to the generic 32K discovery cap instead of the discovered runtime context window. ([#3781](https://github.com/can1357/oh-my-pi/issues/3781))
+- Fixed the bash interceptor blocking `echo` / `printf` redirects to `/dev/null`, `/dev/tty`, `/dev/stdout`, and `/dev/stderr` device sinks while still directing real file writes to the write tool. ([#3763](https://github.com/can1357/oh-my-pi/issues/3763))
+- Fixed the `edit` tool persisting unbounded full-file `oldText` / `newText` snapshots in tool-result `details`, inflating per-turn session JSONL lines (hundreds of KB per edit on large files). `details.oldText`/`details.newText` are now pruned when their combined length exceeds 32 KB; the visible diff, path, line, and diagnostic metadata are preserved, and ACP `diff` content still flows for smaller edits. ([#3786](https://github.com/can1357/oh-my-pi/issues/3786))
+
+## [16.2.5] - 2026-06-28
 
 ### Changed
 
-- Refactored and improved the debug log and raw SSE stream viewers to use a standard, wider, bordered overlay component with clearer status indicators, controls, and dynamic layouts.
+- Status line now collapses a linked git worktree path to the project name with a worktree icon, leaving the git segment to show the branch once instead of repeating it in the path.
+
+### Fixed
+
+- Fixed Ollama and llama.cpp discovery overestimating local context windows by using model training metadata instead of the runtime `num_ctx` / `n_ctx`, which could let compaction retry prompts that llama.cpp rejects as over context. ([#3752](https://github.com/can1357/oh-my-pi/issues/3752))
+- Fixed isolated subagent worktrees embedding long task ids and `merged` in the working path; isolation now uses compact hashed segments with an `m` mount dir. ([#3756](https://github.com/can1357/oh-my-pi/issues/3756))
+- Fixed recoverable context-overflow compaction keeping the failed assistant error turn in visible session history after scheduling the retry. ([#3747](https://github.com/can1357/oh-my-pi/issues/3747))
+- Fixed editing a file read from outside the workspace (e.g. `~/.claude/settings.json`) failing with "File not found": the read snapshot header now carries the full out-of-workspace path so the edit resolves it directly instead of against the working directory.
+- Fixed subagents spawned with an output schema (`agent(..., schema=...)`, `task` with structured output) failing with `schema_violation: missing required fields` since the typed-yield rework: a `type: "result"` finalize carrying the full object was assembled as a section named `result`, nesting the payload one level deep. String-typed yields are now treated as terminal finalizers (their data is the complete result), only array-typed yields form accumulating sections, and a data-less finalize keeps accumulated sections instead of collapsing to the last assistant turn.
+- Fixed the per-provider concurrency cap (e.g. `providers.ollama-cloud.maxConcurrency`) bracketing the whole subagent lifecycle, which deadlocked any spawn tree wider than the cap because parents held every slot while waiting for children queued on the same cap. The semaphore now wraps each provider HTTP request, so a parent's slot frees between turns and child subagents can acquire while their parent's tool calls are running. ([#3749](https://github.com/can1357/oh-my-pi/issues/3749))
+- Fixed Ctrl+Q / Ctrl+Enter follow-up submissions sending the literal `[Paste #N]` marker instead of the expanded paste body ([#3737](https://github.com/can1357/oh-my-pi/issues/3737)).
+
+## [16.2.4] - 2026-06-28
+
+### Fixed
+
+- Fixed todo-reminder HUD rendering outside durable chat history while preserving native collapsing and auto-clear behavior.
+- Fixed goal-mode continuations losing track of persisted todo progress, ensuring autonomous goal turns reconcile stale in-progress items before moving to subsequent tasks.
+- Fixed the /move <dir> command to correctly relocate the current session and its artifacts to the target directory, allowing /resume to work seamlessly from the new location.
+- Fixed omp update leaving behind stale Bun install-cache directories for globally installed packages.
+- Fixed a reconnection loop issue in /collab sessions caused by oversized entries (such as large tool outputs) by truncating replicated payloads that exceed 1 MB.
+- Fixed autolearn and local memory writes mutating Anthropic prompt-cache prefixes mid-session, ensuring prompt injections remain session-stable.
+
+## [16.2.3] - 2026-06-28
+
+### Added
+
+- Added support for multiple configurable advisors via WATCHDOG.yml/WATCHDOG.yaml files, allowing per-advisor models, tool subsets, and instructions.
+- Added /advisor configure, a full-screen, mouse-driven TUI to easily manage the advisor roster, configure models, toggle tool permissions, and edit instructions.
+- Added full unified edit diffs to advisor transcripts, allowing advisors to see changes directly without re-reading files.
+- Added the statusLine.compactThinkingLevel setting to render the model segment's thinking level as a single leading glyph instead of a separate text suffix.
+- Added support for tracking reasoning tokens in session and advisor statistics.
+- Added Remote Compaction V2 streaming configuration settings (compaction.remoteStreamingV2Enabled and compaction.v2RetainedMessageBudget) to control token budgets and toggle V2 streaming for remote compaction.
+- Added the edit.citationTags setting to emit model-facing hashline section headers as OpenAI citation markers with opaque source IDs, along with citation-marker unwrapping for hashline edit parsing, diff previews, and streaming matching.
+- Added mutable session titles with automatic replan title refreshes and configurable idle recaps.
+- Added support for incremental yield submissions with typed sections and final results for subagents.
+
+### Changed
+
+- Reduced session file size by removing redundant thinking signatures already present in payloads
+- Advisors can now be granted any built-in agent tool (including edit, write, and bash), removing the previous read-only restriction.
+- Improved the debug log and raw SSE stream viewers with a wider, bordered overlay, clearer status indicators, dynamic layouts, and mouse support for scrolling and interaction.
 - Updated the idle recap feature to use an LLM-generated summary of where things stand (anchored by the live goal and active todo task) instead of a static status line.
 - Refined interrupted thinking system instructions to encourage smoother continuation.
 
 ### Fixed
 
-- Fixed array-typed output schema validation by correctly assembling incremental yields into lists
-- Fixed OpenAI/Codex compatibility by removing top-level schema combinators from tool parameters
-- Fixed validation errors for untyped final yields in strict-mode providers by allowing `null` types
-
-- Fixed Alt+M default-role model configuration being disabled by the current session's context size. ([#3708](https://github.com/can1357/oh-my-pi/issues/3708))
-- Fixed MCP `type: "sse"` servers by adding the legacy HTTP+SSE endpoint handshake and streaming JSON-RPC response path. ([#3710](https://github.com/can1357/oh-my-pi/issues/3710))
-- Fixed interrupted reasoning blocks being incorrectly stripped when they contained a valid signature
+- Fixed array-typed output schema validation by correctly assembling incremental yields into lists.
+- Fixed OpenAI/Codex compatibility by removing top-level schema combinators from tool parameters.
+- Fixed validation errors for untyped final yields in strict-mode providers by allowing null types.
+- Fixed Alt+M default-role model configuration being disabled by the current session's context size.
+- Fixed MCP type: "sse" servers by adding the legacy HTTP+SSE endpoint handshake and streaming JSON-RPC response path.
+- Fixed interrupted reasoning blocks being incorrectly stripped when they contained a valid signature.
 - Fixed interrupted thinking being lost in LLM provider requests after user interrupts by properly stripping trailing reasoning blocks from assistant turns while preserving them in the UI and session history.
 - Fixed the live todo HUD going stale during long tool-use loops by introducing a mid-run reconciliation reminder that prompts the agent to update incomplete items.
 - Fixed resumed OpenAI and OpenAI-Codex sessions losing encrypted reasoning and native assistant turns during rehydration.
 - Fixed the ask tool's custom answer editor dropping the original question and option list while typing.
 - Fixed auto-snapcompact failing the session on local blockers (such as text-only active models, high non-ASCII transcripts, or context budget overflows) by gracefully downgrading automatic maintenance to context-full compaction.
-- Fixed autoresearch's `before_agent_start` handler crashing when the system prompt was undefined.
-- Fixed OMP exiting silently during startup when encountering standalone Codex hook scripts in `~/.codex/hooks/`.
-- Fixed unreachable keyboard shortcuts in HTML session exports by changing the "toggle thinking" and "toggle tools" shortcuts from `Ctrl+T` and `Ctrl+O` to bare `T` and `O` keys.
-- Fixed user-invoked `/skill:` prompts reaching model providers as developer turns instead of user turns, including during compaction.
+- Fixed autoresearch's before_agent_start handler crashing when the system prompt was undefined.
+- Fixed OMP exiting silently during startup when encountering standalone Codex hook scripts in ~/.codex/hooks/.
+- Fixed unreachable keyboard shortcuts in HTML session exports by changing the "toggle thinking" and "toggle tools" shortcuts from Ctrl+T and Ctrl+O to bare T and O keys.
+- Fixed user-invoked /skill: prompts reaching model providers as developer turns instead of user turns, including during compaction.
 - Fixed reasoning streaming being locked off for OpenAI-compatible providers that stream reasoning content without advertising reasoning support in model metadata.
-- Fixed `/shake` and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
-- Fixed the `time_spent` status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
+- Fixed /shake and other mid-stream chat rebuilds erasing live LLM output by preserving the in-flight streaming components and pending tools.
+- Fixed the time_spent status-line segment ticking continuously during idle sessions by ensuring it only accumulates active agent execution windows and resets correctly across session switches.
+- Fixed expanded pending SSH previews committing provisional rows to native scrollback before the final result render.
+- Fixed ssh:// rejecting POSIX-capable remotes whose login-shell classification was ambiguous by verifying a working transfer shell directly and gating transfers on that capability.
+
+### Removed
+
+- Removed history URI support for reading agent transcripts
 
 ## [16.2.2] - 2026-06-27
 

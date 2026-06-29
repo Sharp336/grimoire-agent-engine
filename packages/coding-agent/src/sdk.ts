@@ -19,7 +19,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
-	ADVISOR_READONLY_TOOL_NAMES,
+	discoverAdvisorConfigs,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
@@ -130,6 +130,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
+import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -1158,6 +1159,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	activeRepoContextPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
 	watchdogFilesPromise.catch(() => {});
+	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
+	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
 		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
@@ -1403,12 +1406,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		return result;
 	};
-	const [contextFiles, resolvedWorkspaceTree, watchdogFiles, activeRepoContext] = await Promise.all([
-		contextFilesPromise,
-		raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
-		watchdogFilesPromise,
-		activeRepoContextPromise,
-	]);
+	const [contextFiles, resolvedWorkspaceTree, watchdogFiles, activeRepoContext, discoveredAdvisors] =
+		await Promise.all([
+			contextFilesPromise,
+			raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
+			watchdogFilesPromise,
+			activeRepoContextPromise,
+			advisorConfigsPromise,
+		]);
 
 	let agent: Agent;
 	let session!: AgentSession;
@@ -2531,11 +2536,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
 		let notifyFirstChatDispatch = options.onFirstChatDispatch;
-		// Shared, settings-aware stream wrapper used by both the main agent and
-		// the advisor (via AgentSessionConfig.streamFn). Keeps OpenRouter
-		// sticky-routing variants, antigravity endpoint routing, in-flight caps,
-		// and the loop guard consistent across every agent the session drives.
-		const settingsAwareStreamFn = createSettingsAwareStreamFn(settings);
+		// Shared, settings-aware stream wrapper used by the main agent, advisor,
+		// and side-channel requests (`/btw`, `/omfg`, IRC auto-replies, handoff).
+		// Keeps OpenRouter sticky-routing variants, antigravity endpoint routing,
+		// in-flight caps, and the loop guard consistent across every provider call
+		// the session drives. Wrapped in a per-provider concurrency limiter so
+		// each LLM HTTP request — not the whole subagent lifecycle — holds the
+		// slot, preventing the nested-spawn deadlock from issue #3749.
+		const settingsAwareStreamFn = wrapStreamFnWithProviderConcurrency(
+			settings,
+			createSettingsAwareStreamFn(settings),
+		);
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -2633,34 +2644,32 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
-		// Hard-isolated read-only toolset for the advisor (built unconditionally so
-		// it can be toggled at runtime). Fresh ReadTool/GrepTool/GlobTool bound to a
-		// DISTINCT ToolSession so the advisor's investigative reads never touch the
-		// primary's snapshot, seen-lines, conflict, or summary caches (all keyed on
-		// session identity). `cwd` stays dynamic; edit/yield capabilities are off.
+		// Full toolset for the advisor, built unconditionally so it can be toggled at
+		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
+		// agent id) so the advisor's tool state — snapshot, seen-lines, conflict, and
+		// summary caches, all keyed on session identity — stays isolated from the
+		// primary, while edit/bash/write stay fully functional: the advisor is a full
+		// agent and its config's `tools` selects which of these it actually gets
+		// (defaulting to read/grep/glob).
 		const advisorToolSession: ToolSession = {
 			...toolSession,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
-			hasEditTool: false,
+			hasEditTool: true,
 			requireYieldTool: false,
-			conflictHistory: undefined,
-			fileSnapshotStore: undefined,
 			getSessionId: () => {
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},
 			getAgentId: () => "advisor",
 		};
-		const built = await Promise.all(
-			[...ADVISOR_READONLY_TOOL_NAMES].map(name =>
-				BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession),
-			),
-		);
-		const advisorReadOnlyTools: Tool[] = built
-			.filter((tool): tool is Tool => tool != null)
-			.map(wrapToolWithMetaNotice);
+		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
+		for (const name in BUILTIN_TOOLS) {
+			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
+		}
+		const built = await Promise.all(advisorToolBuilds);
+		const advisorTools: Tool[] = built.filter((tool): tool is Tool => tool != null).map(wrapToolWithMetaNotice);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (activeRepoContext) {
@@ -2677,6 +2686,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		session = new AgentSession({
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
+			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
+			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
@@ -2705,7 +2716,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			transformProviderContext,
 			onPayload,
 			onResponse,
+			sideStreamFn: settingsAwareStreamFn,
 			advisorStreamFn: settingsAwareStreamFn,
+			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			reloadSshTool,
@@ -2736,7 +2749,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			parentEvalSessionId: options.parentEvalSessionId,
-			advisorReadOnlyTools,
+			advisorTools,
 		});
 		hasSession = true;
 		if (asyncJobManager) {

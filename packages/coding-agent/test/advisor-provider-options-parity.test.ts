@@ -7,8 +7,8 @@
  * with only `sessionId`/`getApiKey`/telemetry — it dropped the session's
  * `streamFn` wrapper (so `providers.openrouterVariant` and `loopGuard` never
  * landed on advisor requests), its `promptCacheKey` (so OpenAI Responses
- * fell back to a different cache shard), and its shared `providerSessionState`
- * (so Codex websocket / Anthropic fast-mode state was not reused).
+ * fell back to a different cache shard), its shared `providerSessionState`,
+ * and its explicit websocket preference.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -68,7 +68,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		} catch {}
 	});
 
-	it("inherits streamFn, promptCacheKey and providerSessionState from the session", () => {
+	it("inherits streamFn, promptCacheKey, and providerSessionState from the session", () => {
 		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -78,8 +78,9 @@ describe("AgentSession advisor provider-options parity", () => {
 			sessionManager,
 			settings: settings(),
 			modelRegistry,
-			advisorReadOnlyTools: [],
+			advisorTools: [],
 			advisorStreamFn,
+			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -125,12 +126,13 @@ describe("AgentSession advisor provider-options parity", () => {
 			sessionManager,
 			settings: settings(),
 			modelRegistry,
-			advisorReadOnlyTools: [],
+			advisorTools: [],
 			advisorStreamFn: captureStreamFn,
 			onPayload,
 			onResponse,
 			onSseEvent,
 			transformProviderContext,
+			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -160,5 +162,6 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.sessionId).toBe(advisor.sessionId);
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
+		expect(opts.preferWebsockets).toBe(true);
 	});
 });

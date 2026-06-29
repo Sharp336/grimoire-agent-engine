@@ -6,6 +6,7 @@ import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
@@ -29,7 +30,6 @@ import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
@@ -471,16 +471,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "advisor",
 		description: "Toggle the advisor (a second model that reviews each turn and injects notes)",
 		acpDescription: "Toggle advisor",
-		acpInputHint: "[on|off|status|dump [raw]]",
+		acpInputHint: "[on|off|status|dump [raw]|configure]",
 		subcommands: [
 			{ name: "on", description: "Enable the advisor" },
 			{ name: "off", description: "Disable the advisor" },
 			{ name: "status", description: "Show advisor status" },
 			{ name: "dump", description: "Copy the advisor's transcript to clipboard", usage: "[raw]" },
+			{ name: "configure", description: "Open the advisor configuration editor (TUI)" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const stats = runtime.ctx.session.getAdvisorStats();
+			if (stats.active && stats.advisors.length > 1) return `Advisor: on (${stats.advisors.length} advisors)`;
 			if (stats.active && stats.model) return `Advisor: on (${stats.model.provider}/${stats.model.id})`;
 			if (stats.configured) return "Advisor: configured, no model";
 			return "Advisor: off";
@@ -521,7 +523,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output(text ?? "Advisor is not active for this session.");
 				return commandConsumed();
 			}
-			return usage("Usage: /advisor [on|off|status|dump [raw]]", runtime);
+			if (verb === "configure") {
+				await runtime.output(
+					"/advisor configure opens an interactive editor and is only available in the interactive TUI.",
+				);
+				return commandConsumed();
+			}
+			return usage("Usage: /advisor [on|off|status|dump [raw]|configure]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -566,7 +574,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /advisor [on|off|status|dump [raw]]");
+			if (verb === "configure") {
+				runtime.ctx.showAdvisorConfigure();
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /advisor [on|off|status|dump [raw]|configure]");
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -1626,8 +1639,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "move",
-		description: "Switch to a fresh session in a different directory",
-		acpDescription: "Start a fresh session in a different directory",
+		description: "Move the current session to a different directory",
+		acpDescription: "Move the current session to a different directory",
 		inlineHint: "[<path>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -1642,32 +1655,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			} catch {
 				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
 			}
-			let newSessionFile: string | undefined;
 			try {
-				newSessionFile = SessionManager.createEmptySessionFile(resolvedPath);
-				const switched = await runtime.session.switchSession(newSessionFile);
-				if (!switched) {
-					await runtime.sessionManager.dropSession(newSessionFile);
-					return usage("Move cancelled.", runtime);
-				}
+				await runtime.sessionManager.moveTo(resolvedPath);
 			} catch (err) {
-				if (newSessionFile) {
-					try {
-						await runtime.sessionManager.dropSession(newSessionFile);
-					} catch (dropErr) {
-						return usage(
-							`Move failed: ${errorMessage(err)}; failed to remove empty session: ${errorMessage(dropErr)}`,
-							runtime,
-						);
-					}
-				}
 				return usage(`Move failed: ${errorMessage(err)}`, runtime);
 			}
-			runtime.session.markMovedFromEmptySessionFile(newSessionFile!);
 			setProjectDir(resolvedPath);
+			await runtime.settings.reloadForCwd(resolvedPath);
+			applyProviderGlobalsFromSettings(runtime.settings);
 			// Reload plugin/capability caches so the next prompt sees commands and
 			// capabilities scoped to the new cwd.
 			await runtime.reloadPlugins();
+			await runtime.notifyConfigChanged?.();
 			await runtime.notifyTitleChanged?.();
 			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
 			return commandConsumed();
