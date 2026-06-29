@@ -438,6 +438,57 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.compactionEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Compaction",
+			description:
+				"Use a separate compaction threshold for the advisor model. When off, the advisor inherits the primary session's compaction settings. Turn on to set a tighter threshold (e.g. 25 %) so the advisor compacts its accumulating context more often, saving tokens on every advisor LLM call.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.compactionThresholdPercent": {
+		type: "number",
+		default: 50,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Compaction % Threshold",
+			description:
+				"Percent of the advisor model's context window at which its internal compaction triggers. A lower value (e.g. 25 %) forces the advisor to compact more aggressively than the primary session, keeping its token usage lean.",
+			options: [
+				{ value: "10", label: "10 %", description: "Very aggressive — compact after 10 % of window" },
+				{ value: "25", label: "25 %", description: "Aggressive — compact after 25 % of window" },
+				{ value: "50", label: "50 %", description: "Default — compact at half the context window" },
+				{ value: "75", label: "75 %", description: "Relaxed — compact at three-quarters" },
+				{ value: "90", label: "90 %", description: "Near limit — compact close to overflow" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.compactionThresholdTokens": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Compaction Token Limit",
+			description:
+				"Fixed token limit for advisor compaction; overrides the percentage threshold when set. For example, 50000 forces the advisor to compact after 50K tokens regardless of model window size.",
+			options: [
+				{ value: "-1", label: "Default", description: "Use the percentage-based threshold" },
+				{ value: "25000", label: "25K tokens", description: "Aggressive — compact very early" },
+				{ value: "50000", label: "50K tokens", description: "Compact at 50K tokens" },
+				{ value: "100000", label: "100K tokens", description: "Compact at 100K tokens" },
+				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+
 	shellPath: { type: "string", default: undefined },
 	"git.enabled": {
 		type: "boolean",

@@ -44,6 +44,12 @@ import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } f
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
+import {
+	handleTokenSavingCommand,
+	runTokenSavingCommand,
+	TOKEN_SAVING_COMMAND_USAGE,
+	toTokenSavingSettings,
+} from "./helpers/tokensaving";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type {
@@ -208,6 +214,33 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "tokensaving",
+		aliases: ["savetoken"],
+		description: "Route heavy work to cheap task subagents and keep advisor economical",
+		acpDescription: "Toggle token-saving task delegation mode",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Apply token-saving settings" },
+			{ name: "off", description: "Restore settings from the token-saving snapshot" },
+			{ name: "status", description: "Show token-saving status" },
+		],
+		allowArgs: true,
+		handle: handleTokenSavingCommand,
+		handleTui: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			if (verb && verb !== "on" && verb !== "off" && verb !== "status") {
+				runtime.ctx.showStatus(TOKEN_SAVING_COMMAND_USAGE);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const output = runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.ctx.settings));
+			if (verb === "on" || verb === "off") await runtime.ctx.settings.flush();
+			runtime.ctx.showStatus(output || TOKEN_SAVING_COMMAND_USAGE);
+			refreshStatusLine(runtime.ctx);
 			runtime.ctx.editor.setText("");
 		},
 	},

@@ -2283,12 +2283,24 @@ export class AgentSession {
 		const advisor = this.#advisorAgent;
 		if (!advisor) return false;
 
-		const compactionSettings = this.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return false;
-		if (!compactionSettings.enabled) return false;
+		const advisorCompactionEnabled = this.settings.get("advisor.compactionEnabled");
+		const primaryCompaction = this.settings.getGroup("compaction");
 
-		const advisorModel = advisor.state.model;
-		const contextWindow = advisorModel.contextWindow ?? 0;
+		// When advisor-specific compaction is off, fall back to the primary
+		// session's compaction settings (backward compatible).
+		let compactionSettings = primaryCompaction;
+		if (advisorCompactionEnabled) {
+			const advisorPercent = this.settings.get("advisor.compactionThresholdPercent");
+			const advisorTokens = this.settings.get("advisor.compactionThresholdTokens");
+			compactionSettings = {
+				...primaryCompaction,
+				enabled: true,
+				thresholdPercent: advisorPercent > 0 ? advisorPercent : primaryCompaction.thresholdPercent,
+				thresholdTokens: advisorTokens > 0 ? advisorTokens : primaryCompaction.thresholdTokens,
+			};
+		}
+
+		if (!compactionSettings.enabled) return false;
 		if (contextWindow <= 0) return false;
 
 		const messages = advisor.state.messages;
