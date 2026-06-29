@@ -6506,6 +6506,7 @@ export class AgentSession {
 		const canCallTodoTool = activeToolNames.includes("todo");
 		const canDiscoverTodoTool =
 			!canCallTodoTool && this.getDiscoverableTools({ source: "builtin" }).some(tool => tool.name === "todo");
+		const canActivateTodoTool = canDiscoverTodoTool && activeToolNames.includes("search_tool_bm25");
 		if (!canCallTodoTool && !canDiscoverTodoTool) return undefined;
 		const phases = this.getTodoPhases().filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return undefined;
@@ -6528,6 +6529,7 @@ export class AgentSession {
 
 		return prompt.render(goalTodoContextPrompt, {
 			canCallTodoTool,
+			canActivateTodoTool,
 			closed: String(closed),
 			open: String(open),
 			phases: promptPhases,
