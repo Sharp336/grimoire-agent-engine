@@ -237,8 +237,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
+			const beforeAdvisor = runtime.ctx.settings.getModelRole("advisor");
 			const output = await runTokenSavingCommand(command.args, toTokenSavingSettings(runtime.ctx.settings));
-			if (verb === "on" || verb === "off") await runtime.ctx.settings.flush();
+			if (verb === "on" || verb === "off") {
+				await runtime.ctx.settings.flush();
+				if (beforeAdvisor !== runtime.ctx.settings.getModelRole("advisor")) {
+					runtime.ctx.session.rebuildAdvisorRuntime();
+				}
+			}
 			runtime.ctx.showStatus(output || TOKEN_SAVING_COMMAND_USAGE);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.editor.setText("");

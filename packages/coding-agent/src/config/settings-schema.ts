@@ -507,7 +507,7 @@ export const SETTINGS_SCHEMA = {
 
 	"advisor.compactionStrategy": {
 		type: "enum",
-		values: ["inherit", "context-full", "handoff", "shake", "snapcompact"] as const,
+		values: ["inherit", "context-full", "snapcompact"] as const,
 		default: "inherit",
 		ui: {
 			tab: "model",
@@ -521,12 +521,6 @@ export const SETTINGS_SCHEMA = {
 					value: "context-full",
 					label: "Context-full",
 					description: "Summarize in-place and keep the current session",
-				},
-				{ value: "handoff", label: "Handoff", description: "Generate handoff and continue in a new session" },
-				{
-					value: "shake",
-					label: "Shake",
-					description: "Drop heavy content (tool results + large blocks) in place",
 				},
 				{
 					value: "snapcompact",

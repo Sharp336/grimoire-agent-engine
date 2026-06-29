@@ -2507,10 +2507,14 @@ export class AgentSession {
 		let snapcompactBlocker: string | undefined;
 		let action: "snapcompact" | "context-full" =
 			compactionSettings.strategy === "snapcompact" ? "snapcompact" : "context-full";
-		if (action === "snapcompact" && snapcompactModel && !snapcompactModel.input.includes("image")) {
+		if (
+			action === "snapcompact" &&
+			(!snapcompactModel?.input.includes("image") || !advisorModel?.input.includes("image"))
+		) {
 			action = "context-full";
-			logger.warn("Advisor snapcompact skipped: advisor compaction model does not support vision", {
-				model: snapcompactModel.id,
+			logger.warn("Advisor snapcompact skipped: advisor or compaction model does not support vision", {
+				compactionModel: snapcompactModel?.id,
+				advisorModel: advisorModel?.id,
 			});
 		}
 		if (action === "snapcompact") {
@@ -2612,7 +2616,6 @@ export class AgentSession {
 				: agent.state.thinkingLevel;
 
 			let lastError: unknown;
-			const advisorSessionId = this.sessionId ? `${this.sessionId}-advisor` : undefined;
 			// Instrument the advisor's overflow-compaction one-shot like the primary
 			// compaction path so the advisor model's maintenance call also emits spans.
 			const telemetry = resolveTelemetry(agent.telemetry, advisorSessionId);
@@ -14496,6 +14499,17 @@ export class AgentSession {
 	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
+		if (!this.#advisorEnabled) return 0;
+		this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+		return this.#advisors.length;
+	}
+
+	/**
+	 * Stops and rebuilds the active advisor runtime(s), applying any new settings
+	 * or model roles. Does nothing if the advisor is disabled.
+	 */
+	rebuildAdvisorRuntime(): number {
 		if (!this.#advisorEnabled) return 0;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
