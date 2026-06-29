@@ -13,7 +13,6 @@ export type TokenSavingSettingPath =
 	| "advisor.immuneTurns"
 	| "advisor.compactionEnabled"
 	| "advisor.compactionThresholdPercent"
-	| "advisor.compactionStrategy"
 	| "enabledModels"
 	| "modelRoles";
 
@@ -29,13 +28,11 @@ export type TokenSavingSettingValue<P extends TokenSavingSettingPath> = P extend
 					? boolean
 					: P extends "advisor.compactionThresholdPercent"
 						? number
-						: P extends "advisor.compactionStrategy"
-							? "inherit" | "context-full" | "handoff" | "shake" | "snapcompact"
-							: P extends "enabledModels"
-								? readonly string[]
-								: P extends "modelRoles"
-									? Record<string, string>
-									: never;
+						: P extends "enabledModels"
+							? readonly string[]
+							: P extends "modelRoles"
+								? Record<string, string>
+								: never;
 
 export interface TokenSavingSettingsLike {
 	get<P extends TokenSavingSettingPath>(path: P): TokenSavingSettingValue<P>;
@@ -171,6 +168,9 @@ export function collectTokenSavingWarnings(settings: TokenSavingSettingsLike): s
 		warnings.push("advisor.syncBacklog is not off; the expensive main can wait on advisor catch-up.");
 	if (settings.get("advisor.immuneTurns") < 10)
 		warnings.push("advisor.immuneTurns is below 10; repeated advisor interruptions can trigger extra main turns.");
+	if (advisorRole && advisorRole !== defaultRole && !isLikelyCheapModel(advisorRole)) {
+		warnings.push("modelRoles.advisor is not a cheap model; advisor reviews may still use an expensive model.");
+	}
 	if (advisorRole && isProtectedExpensiveRoleModel(advisorRole, roles)) {
 		warnings.push(
 			"modelRoles.advisor points at an expensive orchestration role; advisor review is additive model spend.",
@@ -215,7 +215,6 @@ export function applyTokenSaving(settings: TokenSavingSettingsLike): TokenSaving
 	setIfChanged(settings, changes, "advisor.immuneTurns", 10);
 	setIfChanged(settings, changes, "advisor.compactionEnabled", true);
 	setIfChanged(settings, changes, "advisor.compactionThresholdPercent", 25);
-	setIfChanged(settings, changes, "advisor.compactionStrategy", "snapcompact");
 
 	if (
 		candidate &&

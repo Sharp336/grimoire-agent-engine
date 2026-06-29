@@ -163,7 +163,6 @@ describe("tokensaving helper", () => {
 		expect(settings.get("advisor.immuneTurns")).toBe(10);
 		expect(settings.get("advisor.compactionEnabled")).toBe(true);
 		expect(settings.get("advisor.compactionThresholdPercent")).toBe(25);
-		expect(settings.get("advisor.compactionStrategy")).toBe("snapcompact");
 		expect(settings.getModelRole("task")).toBe("opencode-go/deepseek-v4-flash");
 		expect(settings.getModelRole("advisor")).toBe("opencode-go/deepseek-v4-flash");
 		expect(result.changes.map(change => change.key)).toContain("modelRoles.task");
