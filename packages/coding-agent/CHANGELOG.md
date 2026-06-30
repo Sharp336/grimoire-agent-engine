@@ -11,6 +11,8 @@
 
 - Improved binary file detection and terminal handling to prevent corruption from non-UTF-8 content, and updated file summaries to explicitly note skipped binary files.
 - Enhanced context compaction (snapcompact) to resolve shapes contextually based on rendered text content.
+- Reduced the in-process latency between submitting a message and the first streamed token by deduplicating per-turn non-message token estimation (tool-schema serialization now runs once per prompt instead of three times) and skipping the pre-prompt compaction token estimate when compaction is disabled.
+- Auto thinking no longer blocks turn start on the difficulty classifier: classification races a short pre-dispatch deadline, so a fast classifier still pins the current turn while a slow one runs the turn at the carried/provisional effort and applies its result to the next turn instead of stalling for up to the classification timeout.
 
 ### Fixed
 

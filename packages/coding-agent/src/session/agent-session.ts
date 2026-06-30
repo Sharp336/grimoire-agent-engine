@@ -739,6 +739,8 @@ export interface ContextUsageBreakdown {
 	systemContextTokens: number;
 	skillsTokens: number;
 	messagesTokens: number;
+	/** Total non-message tokens: system prompt (all parts) + tools. (Identical to computeNonMessageTokens.) */
+	nonMessageTokens: number;
 }
 
 /** Session statistics for /session command */
@@ -1337,6 +1339,15 @@ export class AgentSession {
 	#autoThinking: boolean = false;
 	/** The level `auto` last resolved to (for UI); undefined until a turn is classified. */
 	#autoResolvedLevel: Effort | undefined;
+	/**
+	 * The classification result carried from the previous turn, applied at the
+	 * start of the next user turn. Lets `auto` thinking adapt without blocking
+	 * turn start on a (potentially slow) classifier round-trip: the in-flight
+	 * turn runs at this carried effort (or the provisional level), and the
+	 * classifier for the current prompt resolves concurrently and feeds the
+	 * NEXT turn. Generation-guarded + clamped to the current model on apply.
+	 */
+	#pendingAutoThinkingEffort: Effort | undefined;
 	#promptTemplates: PromptTemplate[];
 	#slashCommands: FileSlashCommand[];
 
@@ -7005,10 +7016,10 @@ export class AgentSession {
 				return;
 			}
 
-			// Auto thinking: classify this real user turn and set the effective level
-			// before the model request. Synthetic/tool-continuation turns (developer/
-			// custom roles) and non-auto sessions are skipped. Never blocks the turn —
-			// failures fall back to a concrete level inside the helper.
+			// Auto thinking: race classification against a short pre-dispatch
+			// deadline so a fast classifier pins this turn while a slow one never
+			// blocks turn start for the full timeout. Synthetic/tool-continuation
+			// turns (developer/custom roles) and non-auto sessions are skipped.
 			if (this.#autoThinking && message.role === "user") {
 				await this.#applyAutoThinkingLevel(expandedText, generation);
 				if (this.#promptGeneration !== generation) {
@@ -7022,9 +7033,12 @@ export class AgentSession {
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			const nonMessageTokens = computeNonMessageTokens(this);
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
+			// Derive non-message tokens from the breakdown (which already tokenizes the
+			// tool schemas once) instead of recomputing them via a separate
+			// `computeNonMessageTokens` pass over the full tool registry.
+			const nonMessageTokens = breakdown?.nonMessageTokens ?? computeNonMessageTokens(this);
 			const promptTokens =
 				breakdown?.usedTokens ??
 				nonMessageTokens +
@@ -8322,6 +8336,7 @@ export class AgentSession {
 			const wasAuto = this.#autoThinking;
 			this.#autoThinking = true;
 			this.#autoResolvedLevel = undefined;
+			this.#pendingAutoThinkingEffort = undefined;
 			this.#thinkingLevel = provisional;
 			this.#applyThinkingLevelToAgent(provisional);
 			if (persist) {
@@ -8336,6 +8351,7 @@ export class AgentSession {
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
+		this.#pendingAutoThinkingEffort = undefined;
 		const effectiveLevel = resolveThinkingLevelForModel(this.model, level);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
@@ -8386,14 +8402,29 @@ export class AgentSession {
 		return nextLevel;
 	}
 
-	/** Timeout (ms) for per-turn auto-thinking classification before falling back. */
+	/** Hard timeout (ms) for the per-turn auto-thinking classification (aborts it). */
 	static readonly #AUTO_THINKING_TIMEOUT_MS = 4000;
+	/**
+	 * How long (ms) turn start waits for the classifier before dispatching at the
+	 * carried/provisional effort. Sized to let a fast (local) classifier pin the
+	 * current turn; a slow (online) classifier misses it and its result applies
+	 * to the next turn instead of blocking turn start for the full hard timeout.
+	 */
+	static readonly #AUTO_THINKING_DISPATCH_DEADLINE_MS = 200;
 
 	/**
-	 * Classify the current user turn and set the effective thinking level for it.
-	 * Bounded by a timeout + abort; on any failure (no smol model, timeout, parse
-	 * error) it falls back to the provisional concrete level and continues. Never
-	 * throws into the turn, and never clears `#autoThinking` (auto stays active).
+	 * Set the effective thinking level for the current user turn.
+	 *
+	 * Classification races a short pre-dispatch deadline: a fast (local)
+	 * classifier finishes in time and pins THIS turn; a slow (online) classifier
+	 * misses the deadline and the turn runs at the carried/provisional effort
+	 * instead of blocking turn start for up to the full hard timeout. A late
+	 * result only updates {@link #pendingAutoThinkingEffort} for the NEXT turn —
+	 * it never mutates agent state during this turn, so it cannot change the
+	 * in-flight request, whose reasoning effort the agent loop snapshots once at
+	 * dispatch via `getReasoning()`. `ultrathink` is synchronous and pins the
+	 * current turn immediately. Never throws into the turn; never clears
+	 * `#autoThinking`.
 	 */
 	async #applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
 		const model = this.model;
@@ -8403,37 +8434,73 @@ export class AgentSession {
 		// nothing to pick — skip classification rather than discard its result.
 		if (getSupportedEfforts(model).length === 0) return;
 
-		let resolved: Effort | undefined;
 		if (this.#magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// and jump straight to the highest auto-supported level for this model.
-			resolved = clampAutoThinkingEffort(model, Effort.XHigh);
-		} else {
-			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), AgentSession.#AUTO_THINKING_TIMEOUT_MS);
-			try {
-				resolved = await classifyDifficulty(promptText, {
-					settings: this.settings,
-					registry: this.#modelRegistry,
-					model,
-					sessionId: this.sessionId,
-					signal: controller.signal,
-					metadataResolver: provider => this.agent.metadataForProvider(provider),
-				});
-			} catch (error) {
+			// Synchronous and pre-dispatch, so it pins THIS turn immediately.
+			const ultrathink = clampAutoThinkingEffort(model, Effort.XHigh);
+			if (ultrathink !== undefined && this.#promptGeneration === generation && this.#autoThinking) {
+				this.#applyAutoThinkingResolution(ultrathink);
+			}
+			return;
+		}
+
+		const controller = new AbortController();
+		const hardTimer = setTimeout(() => controller.abort(), AgentSession.#AUTO_THINKING_TIMEOUT_MS);
+		const classification: Promise<Effort | undefined> = classifyDifficulty(promptText, {
+			settings: this.settings,
+			registry: this.#modelRegistry,
+			model,
+			sessionId: this.sessionId,
+			signal: controller.signal,
+			metadataResolver: provider => this.agent.metadataForProvider(provider),
+		})
+			.catch(error => {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-			} finally {
-				clearTimeout(timer);
-			}
-		}
+				return undefined;
+			})
+			.finally(() => clearTimeout(hardTimer));
 
-		// Drop the result if the turn was aborted/superseded while classifying.
+		const resolved = await Promise.race([
+			classification,
+			Bun.sleep(AgentSession.#AUTO_THINKING_DISPATCH_DEADLINE_MS).then(() => undefined),
+		]);
+
+		// Drop the result if the turn was aborted/superseded while racing.
 		if (this.#promptGeneration !== generation || !this.#autoThinking) return;
 
-		const effort = resolved ?? resolveProvisionalAutoLevel(model);
-		if (effort === undefined) return;
+		if (resolved !== undefined) {
+			// Fast classifier won the race — pin this turn and carry it forward.
+			this.#pendingAutoThinkingEffort = resolved;
+			this.#applyAutoThinkingResolution(resolved);
+			return;
+		}
+
+		// Deadline lost: run this turn at the carried (clamped) or provisional
+		// effort. The classifier keeps running; its late result feeds the NEXT
+		// turn only — never agent state during this turn.
+		const effort = this.#clampedPending(model) ?? resolveProvisionalAutoLevel(model);
+		if (effort !== undefined) {
+			this.#applyAutoThinkingResolution(effort);
+		}
+		void classification.then(late => {
+			if (late === undefined) return;
+			if (this.#promptGeneration !== generation || !this.#autoThinking) return;
+			this.#pendingAutoThinkingEffort = late;
+		});
+	}
+
+	/** The carried-over auto-thinking effort clamped to the current model, or `undefined`. */
+	#clampedPending(model: Model): Effort | undefined {
+		return this.#pendingAutoThinkingEffort === undefined
+			? undefined
+			: clampAutoThinkingEffort(model, this.#pendingAutoThinkingEffort);
+	}
+
+	/** Apply a resolved auto-thinking effort to the agent, persist it, and emit the change. */
+	#applyAutoThinkingResolution(effort: Effort): void {
 		const shouldPersistResolution = this.#autoResolvedLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;
@@ -9385,6 +9452,12 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.settings.getGroup("compaction");
+		// Bail before the (relatively expensive) pre-prompt token estimate when
+		// compaction is disabled — shouldCompact would reject anyway. Mirrors the
+		// enabled gate in #maintainContextMidRun (and the one #checkCompaction
+		// reaches after its cheap overflow/stale-prune passes) and avoids a
+		// redundant full context-breakdown pass on every prompt.
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
@@ -13378,10 +13451,12 @@ export class AgentSession {
 				// effort, so the cold (--continue) and in-app switch paths display
 				// identically as `auto` until then.
 				this.#autoResolvedLevel = undefined;
+				this.#pendingAutoThinkingEffort = undefined;
 				this.#thinkingLevel = resolveProvisionalAutoLevel(this.model);
 			} else {
 				this.#autoThinking = false;
 				this.#autoResolvedLevel = undefined;
+				this.#pendingAutoThinkingEffort = undefined;
 				this.#thinkingLevel = resolveThinkingLevelForModel(this.model, restoredThinkingLevel);
 			}
 			this.#applyThinkingLevelToAgent(this.#thinkingLevel);
@@ -13928,9 +14003,14 @@ export class AgentSession {
 		const rawContextWindow = options?.contextWindow ?? model?.contextWindow ?? 0;
 		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 
-		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(this);
+		const {
+			skillsTokens,
+			toolsTokens,
+			systemContextTokens,
+			systemPromptTokens,
+			nonMessageTokens: currentNonMessageTokens,
+		} = computeNonMessageBreakdown(this);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
-		const currentNonMessageTokens = computeNonMessageTokens(this);
 
 		const branchEntries = this.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
@@ -13987,7 +14067,7 @@ export class AgentSession {
 		if (useAnchor && anchorAssistant) {
 			const promptTokens =
 				anchorAssistant.contextSnapshot?.promptTokens ?? calculatePromptTokens(anchorAssistant.usage);
-			const nonMessageTokens = anchorAssistant.contextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this);
+			const nonMessageTokens = anchorAssistant.contextSnapshot?.nonMessageTokens ?? currentNonMessageTokens;
 			anchored = true;
 			let tailTokens = 0;
 			for (let i = resolvedAnchorIndex + 1; i < resolvedActiveMessages.length; i++) {
@@ -14019,7 +14099,7 @@ export class AgentSession {
 				const msg = resolvedActiveMessages[i];
 				if (msg.role === "assistant" && msg.stopReason !== "aborted" && msg.stopReason !== "error" && msg.usage) {
 					const promptTokens = msg.contextSnapshot?.promptTokens ?? calculatePromptTokens(msg.usage);
-					const nonMessageTokens = msg.contextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this);
+					const nonMessageTokens = msg.contextSnapshot?.nonMessageTokens ?? currentNonMessageTokens;
 
 					let tailTokens = 0;
 					for (let j = i + 1; j < resolvedActiveMessages.length; j++) {
@@ -14058,6 +14138,7 @@ export class AgentSession {
 			systemContextTokens,
 			skillsTokens,
 			messagesTokens,
+			nonMessageTokens: currentNonMessageTokens,
 		};
 	}
 

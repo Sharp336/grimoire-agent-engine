@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -510,5 +511,74 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBeUndefined();
 		expect(session.agent.state.thinkingLevel).toBeUndefined();
 		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+	it("does not block turn start on a slow classifier; the late result carries to the next turn", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const provisional = resolveProvisionalAutoLevel(model);
+		expect(provisional).toBeDefined();
+
+		// Capture the reasoning effort each provider request actually sees
+		// (agent.state.thinkingLevel at streamFn time = what getReasoning()
+		// snapshots at dispatch).
+		const seenEffort: (Effort | undefined)[] = [];
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (m, ctx, opts) => {
+				seenEffort.push(agent.state.thinkingLevel);
+				return mock.stream(m, ctx, opts);
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-slow-classifier.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-slow-classifier.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+
+		// Hold the classifier unresolved so it misses the dispatch deadline.
+		const slowClassifier1 = Promise.withResolvers<Effort>();
+		const classifierSpy = vi
+			.spyOn(autoThinkingClassifier, "classifyDifficulty")
+			.mockReturnValue(slowClassifier1.promise);
+
+		// Integration test of the real dispatch-deadline timer: each prompt pays
+		// one #AUTO_THINKING_DISPATCH_DEADLINE_MS (Bun.sleep in production, not a
+		// test timer) because the deadline races a live, manually-resolved
+		// classifier promise inside the turn. Deterministic fake-timer control is
+		// impractical across that async race.
+		// First turn runs at the provisional effort WITHOUT waiting for the
+		// classifier (the dispatch deadline wins the race).
+		await session.prompt("Implement a focused parser fix");
+		expect(classifierSpy).toHaveBeenCalledTimes(1);
+		expect(seenEffort).toEqual([provisional]);
+		expect(session.thinkingLevel).toBe(provisional);
+
+		// The classifier resolves late. It must NOT mutate the already-dispatched
+		// turn, but must carry forward to the next turn.
+		slowClassifier1.resolve(Effort.Medium);
+		// Drain the late-classifier microtask chain while still in turn 1's
+		// generation so its result lands in the carried effort before turn 2.
+		for (let i = 0; i < 4; i++) await Promise.resolve();
+
+		// Second turn: classifier held again (misses the deadline), so it runs at
+		// the carried Medium from the first turn's late result.
+		const slowClassifier2 = Promise.withResolvers<Effort>();
+		classifierSpy.mockReturnValue(slowClassifier2.promise);
+		await session.prompt("Now refactor the tests");
+		expect(seenEffort).toEqual([provisional, Effort.Medium]);
+
+		// Settle the held classifier so the hard-timeout .finally clears its timer
+		// and drops the session references it captured.
+		slowClassifier2.resolve(Effort.Medium);
+		// Yield so the hard-timeout .finally clears its timer and drops the
+		// session references the held promise captured.
+		for (let i = 0; i < 4; i++) await Promise.resolve();
 	});
 });
