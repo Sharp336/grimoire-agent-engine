@@ -7,7 +7,8 @@ import { AssistantMessageComponent } from "../src/modes/components/assistant-mes
 import { TranscriptContainer } from "../src/modes/components/transcript-container";
 import { Settings } from "../src/config/settings";
 import { getEditorTheme } from "../src/modes/theme/theme";
-import { buildDisplayMessage, nextStep, visibleUnits } from "../src/modes/controllers/streaming-reveal";
+import { BlockUnitCounter, buildDisplayMessage, nextStep, visibleUnits } from "../src/modes/controllers/streaming-reveal";
+import { formatThinkingForDisplay } from "../src/utils/thinking-display";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -55,11 +56,12 @@ bench("WelcomeComponent.render", () => {
 
 // ── A2: streaming reveal + editor render baselines ──────────────────────────
 //
-// Diagnostic series, not a fixed-iteration micro-op. `streamingReveal` proves
-// or refutes the O(N^2) reveal hypothesis: per-step cost (visibleUnits +
-// buildDisplayMessage, the work every stream delta/30fps tick does) is sampled
-// at growing revealed lengths. Rising per-step ms => O(N) per tick => O(N^2)
-// over the message. Flat per-step => already linear.
+// Diagnostic series, not a fixed-iteration micro-op. `streamingReveal` samples
+// per-step cost (visibleUnits + buildDisplayMessage, the work every stream
+// delta/30fps tick does) at growing revealed lengths on the COLD one-shot path
+// (no shared counter). A shared BlockUnitCounter — as the live controller and
+// the "Full" series below use — turns each per-tick slice into O(delta) work,
+// so this isolated series is the upper-bound baseline the Full series beats.
 
 function makeMarkdownCorpus(targetGraphemes: number): string {
 	const para =
@@ -73,6 +75,14 @@ function makeMarkdownCorpus(targetGraphemes: number): string {
 		out += `## Section ${++i}\n\n${para}${para}${codeBlock}${list}`;
 	}
 	return out.slice(0, targetGraphemes);
+}
+
+/** Split `text` into fixed-width slices (preserving newlines), simulating the
+ *  chunks a streaming delta feed delivers one tick at a time. */
+function chunkCorpus(text: string, size = 40): string[] {
+	const chunks: string[] = [];
+	for (let j = 0; j < text.length; j += size) chunks.push(text.slice(j, j + size));
+	return chunks.length > 0 ? chunks : [""];
 }
 
 function makeTextMessage(text: string): AssistantMessage {
@@ -117,23 +127,35 @@ for (const n of REVEAL_CHECKPOINTS) {
 	console.log(`  len=${n}: ${ms.toFixed(4)}ms/step`);
 }
 
-// Real streaming cost: text GROWS every tick, so Markdown's text-keyed cache
-// misses each step (the actual interactive path). Total ms to fully reveal an
-// N-grapheme message in nextStep increments — the number C1+C2 reduce.
-console.log("\nstreamingRevealFull (C1+C2: full incremental reveal, growing text => cache-miss/tick):");
+// Real streaming cost, mirroring StreamingRevealController: the text GROWS as
+// deltas arrive, ONE per-episode BlockUnitCounter is shared by countOf/sliceOf,
+// and every update is transient (the live path Markdown/highlight caches skip).
+// Measures total ms to fully reveal an N-grapheme message in nextStep increments.
+console.log("\nstreamingRevealFull (growing text, shared counter, transient updates):");
 try {
 	for (const n of REVEAL_CHECKPOINTS) {
-		const full = makeTextMessage(REVEAL_CORPUS.slice(0, n));
-		const total = visibleUnits(full, false);
+		const fullText = REVEAL_CORPUS.slice(0, n);
+		const chunks = chunkCorpus(fullText);
 		const component = new AssistantMessageComponent();
+		const counter = new BlockUnitCounter();
+		const countOf = (i: number, t: string): number => counter.count(i, t);
+		const sliceOf = (i: number, t: string, u: number): string => counter.slice(i, t, u);
 		const start = Bun.nanoseconds();
+		let text = "";
 		let revealed = 0;
 		let steps = 0;
-		while (revealed < total) {
+		let ci = 0;
+		while (true) {
+			if (ci < chunks.length) text += chunks[ci++]!;
+			const msg = makeTextMessage(text);
+			const total = countOf(0, text);
 			revealed = Math.min(total, revealed + nextStep(total - revealed));
-			component.updateContent(buildDisplayMessage(full, revealed, false));
+			component.updateContent(buildDisplayMessage(msg, revealed, false, true, countOf, sliceOf), {
+				transient: true,
+			});
 			component.render(WIDTH);
 			steps++;
+			if (ci >= chunks.length && revealed >= total) break;
 		}
 		const ms = (Bun.nanoseconds() - start) / 1e6;
 		console.log(`  len=${n}: ${ms.toFixed(2)}ms total over ${steps} steps (${(ms / steps).toFixed(4)}ms/step)`);
@@ -143,26 +165,40 @@ try {
 }
 
 // Multi-block variant: a finalized thinking block (stable) precedes the growing
-// text block — the shape C2 targets. Current code re-lexes BOTH every tick;
-// after C2 the finalized thinking block stays L1-cached and only the tail re-lexes.
+// text block — the common "thought then answer" shape. The thinking block is
+// count/slice-cached once (formatted once outside the loop, matching what
+// buildDisplayMessage feeds the counter at index 0); only the growing text
+// block re-segments its suffix per tick.
 function makeThinkingPlusText(thinking: string, text: string): AssistantMessage {
 	return { ...makeTextMessage(text), content: [{ type: "thinking", thinking }, { type: "text", text }] };
 }
-console.log("\nstreamingRevealMultiBlock (C2: finalized thinking block + growing text):");
+console.log("\nstreamingRevealMultiBlock (finalized thinking + growing text, shared counter):");
 try {
 	const thinking = makeMarkdownCorpus(2500);
+	const formattedThinking = formatThinkingForDisplay(thinking, true);
 	for (const n of [2000, 4000, 6000]) {
-		const full = makeThinkingPlusText(thinking, REVEAL_CORPUS.slice(0, n));
-		const total = visibleUnits(full, false);
+		const fullText = REVEAL_CORPUS.slice(0, n);
+		const chunks = chunkCorpus(fullText);
 		const component = new AssistantMessageComponent();
+		const counter = new BlockUnitCounter();
+		const countOf = (i: number, t: string): number => counter.count(i, t);
+		const sliceOf = (i: number, t: string, u: number): string => counter.slice(i, t, u);
 		const start = Bun.nanoseconds();
+		let text = "";
 		let revealed = 0;
 		let steps = 0;
-		while (revealed < total) {
+		let ci = 0;
+		while (true) {
+			if (ci < chunks.length) text += chunks[ci++]!;
+			const msg = makeThinkingPlusText(thinking, text);
+			const total = countOf(0, formattedThinking) + countOf(1, text);
 			revealed = Math.min(total, revealed + nextStep(total - revealed));
-			component.updateContent(buildDisplayMessage(full, revealed, false));
+			component.updateContent(buildDisplayMessage(msg, revealed, false, true, countOf, sliceOf), {
+				transient: true,
+			});
 			component.render(WIDTH);
 			steps++;
+			if (ci >= chunks.length && revealed >= total) break;
 		}
 		const ms = (Bun.nanoseconds() - start) / 1e6;
 		console.log(`  text=${n} (+2500 thinking): ${ms.toFixed(2)}ms total over ${steps} steps (${(ms / steps).toFixed(4)}ms/step)`);

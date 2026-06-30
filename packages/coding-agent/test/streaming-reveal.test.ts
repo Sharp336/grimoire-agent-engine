@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import {
+	BlockUnitCounter,
 	buildDisplayMessage,
 	CATCHUP_FRAMES,
 	MIN_STEP,
@@ -11,6 +12,7 @@ import {
 	visibleUnits,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getSegmenter } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -295,5 +297,115 @@ describe("streaming reveal", () => {
 		expect(textAt(latestMessage(component), 0)).toBe("abcdefghi");
 		expect(component.messages).toHaveLength(updates);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+/** Pure reference slice: the first `units` graphemes of `text`, segmenting the
+ *  whole string each call (the O(revealed) behaviour the counter must match). */
+function pureSlice(text: string, units: number): string {
+	if (units <= 0 || text.length === 0) return "";
+	let count = 0;
+	for (const { index, segment } of getSegmenter().segment(text)) {
+		count += 1;
+		if (count >= units) {
+			const end = index + segment.length;
+			return end >= text.length ? text : text.slice(0, end);
+		}
+	}
+	return text;
+}
+
+describe("BlockUnitCounter.slice", () => {
+	it("matches the reference for fixed text with growing units", () => {
+		const counter = new BlockUnitCounter();
+		const text = "Hello, world — güten tag 👋";
+		for (let units = 0; units <= 30; units++) {
+			expect(counter.slice(0, text, units)).toBe(pureSlice(text, units));
+		}
+	});
+
+	it("matches the reference across an append-only stream with growing units", () => {
+		const counter = new BlockUnitCounter();
+		const full = "the quick brown fox jumps over the lazy dog. ".repeat(3);
+		let text = "";
+		for (const chunk of full.match(/.{1,7}/g) ?? []) {
+			text += chunk;
+			const total = counter.count(0, text);
+			for (let units = 0; units <= total; units += 3) {
+				expect(counter.slice(0, text, units)).toBe(pureSlice(text, units));
+			}
+		}
+	});
+
+	it("re-segments when an append extends the boundary cluster (combining mark)", () => {
+		// "a" cached at 1 grapheme; text grows to "a\u0301" — still one grapheme,
+		// but the cluster is now longer. A stale cache would return "a".
+		const counter = new BlockUnitCounter();
+		expect(counter.slice(0, "a", 1)).toBe("a");
+		expect(counter.slice(0, "a\u0301", 1)).toBe("a\u0301");
+		expect(counter.slice(0, "a\u0301b", 2)).toBe("a\u0301b");
+	});
+
+	it("re-segments when an append merges a ZWJ sequence", () => {
+		// "ab👨" (3 graphemes) grows to "ab👨\u200D👩x" — the ZWJ merges the two
+		// emoji into one cluster, so the count stays 3→4 and the 3rd cluster grows.
+		const counter = new BlockUnitCounter();
+		expect(counter.slice(0, "ab👨", 3)).toBe("ab👨");
+		expect(counter.slice(0, "ab👨\u200D👩", 3)).toBe("ab👨\u200D👩");
+		expect(counter.slice(0, "ab👨\u200D👩x", 4)).toBe("ab👨\u200D👩x");
+	});
+
+	it("handles shrunk units via full re-segment", () => {
+		const counter = new BlockUnitCounter();
+		const text = "abcdefgh";
+		expect(counter.slice(0, text, 6)).toBe("abcdef");
+		// Fewer units than cached — cannot extend the boundary cluster backwards.
+		expect(counter.slice(0, text, 3)).toBe("abc");
+		expect(counter.slice(0, text, 1)).toBe("a");
+	});
+
+	it("full re-segments when text is replaced", () => {
+		const counter = new BlockUnitCounter();
+		expect(counter.slice(0, "abcdef", 3)).toBe("abc");
+		// Unrelated text at the same index — no shared prefix.
+		expect(counter.slice(0, "xyz123", 2)).toBe("xy");
+	});
+
+	it("clamps units beyond the total and never returns a stale prefix", () => {
+		// Regression: a cached `units` past the end would let an append fast-path
+		// under-slice. Asking for more graphemes than exist must yield the full text.
+		const counter = new BlockUnitCounter();
+		expect(counter.slice(0, "ab", 5)).toBe("ab");
+		expect(counter.slice(0, "abc", 5)).toBe("abc");
+		expect(counter.slice(0, "abcdef", 5)).toBe("abcde");
+	});
+
+	it("keeps independent cache entries per block index", () => {
+		const counter = new BlockUnitCounter();
+		expect(counter.slice(0, "aaa", 2)).toBe("aa");
+		expect(counter.slice(1, "bbbb", 3)).toBe("bbb");
+		// Index 0's cache must be untouched by index 1's calls.
+		expect(counter.slice(0, "aaa", 2)).toBe("aa");
+		expect(counter.slice(0, "aaaa", 3)).toBe("aaa");
+	});
+
+	it("matches the reference across a randomized fuzz of streams", () => {
+		const counter = new BlockUnitCounter();
+		const alphabet = ["a", "b", "x", "\u0301", "👨", "\u200D", "👩", "\n", "c"];
+		let seed = 1234567;
+		const rand = (): number => {
+			seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+			return seed / 0x7fffffff;
+		};
+		for (let block = 0; block < 5; block++) {
+			let text = "";
+			for (let step = 0; step < 40; step++) {
+				text += alphabet[Math.floor(rand() * alphabet.length)] ?? "a";
+				const total = counter.count(block, text);
+				const units = Math.floor(rand() * (total + 2));
+				expect(counter.slice(block, text, units)).toBe(pureSlice(text, units));
+			}
+			counter.reset();
+		}
 	});
 });

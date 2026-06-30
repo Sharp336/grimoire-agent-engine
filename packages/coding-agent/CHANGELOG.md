@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Sped up streamed text and thinking reveal: per-tick grapheme slicing is now incremental (each 30fps tick re-segments only the newly arrived suffix instead of the whole revealed prefix), so reveal throughput stays flat as a message grows rather than slowing with its length.
+- Reduced per-tick work while reasoning streams: the thinking-display formatter no longer re-processes already-formatted revealed text on each render, and a single-entry memo collapses the remaining count/slice calls to one per tick.
+
 ## [16.2.7] - 2026-06-30
 
 ### Breaking Changes
