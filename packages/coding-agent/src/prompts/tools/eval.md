@@ -12,11 +12,12 @@ Fields:
 - `title` (optional) — short transcript label (e.g. `"imports"`).
 - `timeout` (optional) — seconds. Raise only for heavy compute or long non-agent tool calls.
 - `reset` (optional) — wipe this language's kernel first.{{#ifAll py js}} Per-language: a `py` reset never touches the JS VM.{{/ifAll}}
-- `host` (optional) — configured SSH host name from the `ssh` tool's available hosts; Python only.
-- `cwd` (optional) — remote working directory; valid only with `host`.
+{{#if py}}- `host` (optional) — configured SSH host name from the `ssh` tool's available hosts; Python only.
+- `cwd` (optional) — remote working directory; valid only with `host`.{{/if}}
 
 {{#if py}}Live event loop: use top-level `await` directly; `asyncio.run(…)` raises "cannot be called from a running event loop".{{/if}}
-{{#if py}}Remote Python over SSH: state persists per language+host+cwd; different host = different kernel. Helpers (`tool.*`, `completion`, `agent`) still call this local session while code runs remotely. Plain `read`/`write` use the remote filesystem; use `tool.read`/`tool.write` or `ssh://` for local/session resources.{{/if}}
+{{#if py}}Remote Python over SSH: state persists per language+host+cwd; different host/cwd = different kernel. Plain Python file I/O and `read()`/`write()` use the remote filesystem. `completion()`/`agent()` still orchestrate local session work.{{/if}}
+{{#if py}}Remote tool bridge trusts the SSH account: same-UID remote processes can reach the forwarded loopback bridge while the kernel runs. Use trusted hosts/accounts.{{/if}}
 {{#if js}}JS runs under **Bun**: Bun globals/APIs are available (`Bun.file`, `Bun.write`, `Bun.$`, `fetch`, `Buffer`); top-level `await`/`return` work directly.{{/if}}
 {{#if rb}}Ruby: synchronous; helper options are keyword args (e.g. `output("id", limit: 2)`); the last expression auto-displays unless it is `nil`, an assignment, or a definition (like IRB).{{/if}}
 {{#if jl}}Julia: synchronous; helper options are standard keyword args (e.g. `output("id", limit=2)`); the last expression auto-displays unless it is an assignment or a definition (like the Julia REPL).{{/if}}
@@ -40,6 +41,7 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
     Task/agent output by id; one → text/dict, multiple → list.
 tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.
+{{#if py}}    Remote Python: `tool.bash/ssh/read/write/grep` default to the SSH host/cwd; `glob`/`edit`/`ast_*`/`lsp`/`debug` reject remote defaults.{{/if}}
 completion(prompt, model?="default", system?=None, schema?=None) → str | dict
     Oneshot, stateless (no history/tools). `model`: "smol" fast | "default" session | "slow" most capable. `schema` (JSON-Schema) → structured output, parsed object.
 {{#if spawns}}agent(prompt, agent?="task", model?=None, label?=None, schema?=None, handle?=False) → str | dict

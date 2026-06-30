@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { SSHConnectionTarget } from "../../ssh/connection-manager";
+import { resolveRemoteCwd } from "../../ssh/remote-posix";
 import type { ToolSession } from "../../tools";
 import {
 	attachSessionOwner,
@@ -17,6 +18,7 @@ import {
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
+import type { ToolBridgeInvocationContext } from "../js/tool-bridge";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
@@ -94,6 +96,8 @@ export interface PythonExecutorOptions {
 	 * not injected and any `tool.foo(...)` raises in Python.
 	 */
 	toolSession?: ToolSession;
+	/** Remote tool-call defaults applied to bridge calls made by this kernel execution. */
+	toolBridgeInvocationContext?: ToolBridgeInvocationContext;
 	/** Callback for status events emitted by tool bridge invocations. */
 	emitStatus?: (event: JsStatusEvent) => void;
 	/**
@@ -228,8 +232,16 @@ function buildSessionKey(
 	return buildPythonSessionKey(sessionId, cwd, interpreter, sshHost);
 }
 
-function normalizeExecutionCwd(options: PythonExecutorOptions | undefined): string {
-	if (options?.sshHost) return options.cwd ?? ".";
+async function normalizeExecutionCwd(options: PythonExecutorOptions | undefined, deadlineMs?: number): Promise<string> {
+	if (options?.sshHost) {
+		const requestedCwd = options.cwd ?? ".";
+		if (path.posix.isAbsolute(requestedCwd)) return requestedCwd;
+		const remainingMs = getRemainingTimeoutMs(deadlineMs);
+		return await resolveRemoteCwd(options.sshHost, requestedCwd, {
+			signal: options.signal,
+			timeoutMs: remainingMs !== undefined ? Math.max(1, remainingMs) : undefined,
+		});
+	}
 	return normalizeSessionCwd(options?.cwd ?? getProjectDir());
 }
 
@@ -600,16 +612,22 @@ export async function executePythonWithKernel(
 }
 
 export async function executePython(code: string, options?: PythonExecutorOptions): Promise<PythonResult> {
-	const cwd = normalizeExecutionCwd(options);
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const executionOptions: PythonExecutorOptions = {
 		...(options ?? {}),
-		cwd,
 		deadlineMs,
 	};
 
 	try {
 		requireRemainingTimeoutMs(deadlineMs);
+		const cwd = await normalizeExecutionCwd(executionOptions, deadlineMs);
+		executionOptions.cwd = cwd;
+		if (executionOptions.sshHost) {
+			executionOptions.toolBridgeInvocationContext = {
+				defaultSshHost: executionOptions.sshHost,
+				remoteCwd: cwd,
+			};
+		}
 		if (executionOptions.signal?.aborted) {
 			throw new PythonExecutionCancelledError(
 				isTimedOutCancellation(

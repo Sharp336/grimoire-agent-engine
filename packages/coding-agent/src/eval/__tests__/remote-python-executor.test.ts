@@ -4,12 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import type { SSHHost } from "../../capability/ssh";
+import * as remotePosix from "../../ssh/remote-posix";
 import type { ToolSession } from "../../tools";
 import type { KernelExecuteOptions, KernelExecuteResult } from "../kernel-base";
 import pythonBackend from "../py";
 import { disposeAllKernelSessions, executePython, type PythonExecutorOptions } from "../py/executor";
 import { buildRemotePythonInitScript, RemotePythonKernel } from "../py/remote-kernel";
-import { disposePyToolBridge } from "../py/tool-bridge";
+import * as pyToolBridge from "../py/tool-bridge";
 
 interface RemotePythonExecutorOptions extends PythonExecutorOptions {
 	sshHost: SSHHost;
@@ -129,7 +130,7 @@ describe("remote Python init script", () => {
 describe("executePython remote session reuse", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
-		await disposePyToolBridge();
+		await pyToolBridge.disposePyToolBridge();
 		vi.restoreAllMocks();
 	});
 
@@ -174,6 +175,45 @@ describe("executePython remote session reuse", () => {
 
 		expect(starts).toHaveLength(1);
 		expect(starts[0]?.interpreter).toBeUndefined();
+	});
+
+	it("normalizes a relative remote cwd before kernel start and Python bridge registration", async () => {
+		const { starts } = spyRemoteStarts();
+		const host = sshHost("cwdbox");
+		const resolveSpy = vi.spyOn(remotePosix, "resolveRemoteCwd").mockResolvedValue("/home/pi/project/pkg");
+		vi.spyOn(pyToolBridge, "ensurePyToolBridge").mockResolvedValue({
+			url: "http://127.0.0.1:48123",
+			token: "test-token",
+		});
+		const registrations: Array<Parameters<typeof pyToolBridge.registerPyToolBridge>[2]> = [];
+		const unregisters: string[] = [];
+		vi.spyOn(pyToolBridge, "registerPyToolBridge").mockImplementation((_sessionId, runId, entry) => {
+			registrations.push(entry);
+			return () => {
+				unregisters.push(runId);
+			};
+		});
+
+		await executePython(
+			"value = 1",
+			remoteOptions({
+				cwd: "pkg",
+				sessionId: "remote-relative-cwd-test",
+				interpreter: "/opt/py/bin/python",
+				sshHost: host,
+				toolSession: makeToolSession("/local/project"),
+			}),
+		);
+
+		expect(resolveSpy).toHaveBeenCalledTimes(1);
+		expect(resolveSpy.mock.calls[0]?.[0]).toBe(host);
+		expect(resolveSpy.mock.calls[0]?.[1]).toBe("pkg");
+		expect(starts).toHaveLength(1);
+		expect(starts[0]?.cwd).toBe("/home/pi/project/pkg");
+		expect(registrations).toHaveLength(1);
+		expect(registrations[0]?.invocationContext?.defaultSshHost).toBe(host);
+		expect(registrations[0]?.invocationContext?.remoteCwd).toBe("/home/pi/project/pkg");
+		expect(unregisters).toHaveLength(1);
 	});
 
 	it("keeps the remote loopback bridge URL stable across reused same-host session cells", async () => {

@@ -16,16 +16,24 @@ Anything below → `eval` cell, not bash:
 
 <instruction>
 - `cwd` sets the working dir, not `cd dir && …`
+- `host` runs on a configured SSH host; `cwd` is remote there.
 - `env: { NAME: "…" }` for multiline / quote-heavy / untrusted values; reference `$NAME`
 - Quote expansions (`"$NAME"`) to preserve exact content
 - `pty: true` only when the command needs a real terminal (`sudo`, `ssh` needing input); default `false`
 - `;` only when later commands should run despite earlier failures
 - Multiple bash calls per message run concurrently. NEVER split order-dependent commands across parallel calls — chain with `&&` in one call.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths
+- Remote bash cannot use `pty`; omit `pty` or use `ssh` for interactive remote commands.
 {{#if asyncEnabled}}
-- `async: true` for long-running commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up.
+- `async: true` for long-running local/SSH commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up.
 {{/if}}
 </instruction>
+
+## Remote SSH
+
+- `host` preserves `command`, `env`, `cwd`, `timeout`, `async`.
+- `env` becomes remote environment variables.
+- Internal URIs in remote `command`/`env`/`cwd` are rejected; use remote paths or `ssh://host/abs/path`.
 
 <critical>
 - Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.

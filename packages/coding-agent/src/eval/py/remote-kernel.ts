@@ -8,8 +8,9 @@
  * exposed through a reverse loopback forward.
  */
 import { $flag, Snowflake } from "@oh-my-pi/pi-utils";
-import { buildRemoteCommand, ensureHostInfo, type SSHConnectionTarget } from "../../ssh/connection-manager";
+import { buildRemoteCommand, type SSHConnectionTarget } from "../../ssh/connection-manager";
 import { writeRemoteFile } from "../../ssh/file-transfer";
+import { ensureRemotePosixShell } from "../../ssh/remote-posix";
 import { quotePosixPath, wrapInPosixShell } from "../../ssh/utils";
 import { BaseKernel, getRemainingTimeMs, type KernelExecuteOptions, type KernelStartOptions } from "../kernel-base";
 import { PYTHON_PRELUDE } from "./prelude";
@@ -86,6 +87,8 @@ export function buildRemotePythonCommand(options: {
 	for (const [key, value] of Object.entries(options.env ?? {})) {
 		if (typeof value === "string") env[key] = value;
 	}
+	// PI_TOOL_BRIDGE_* values live in the remote process environment; eval.md documents
+	// the trusted SSH account requirement for same-UID remote processes.
 	const envArgs = Object.entries(env).map(([key, value]) => `${key}=${quotePosixPath(value)}`);
 	const envPrefix = envArgs.length > 0 ? `env ${envArgs.join(" ")} ` : "";
 	const runnerPath = quotePosixPath(options.runnerPath);
@@ -108,19 +111,6 @@ export function buildRemotePythonInitScript(cwd: string, env?: Record<string, st
 		"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 		"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
 	].join("\n");
-}
-
-async function ensureRemotePosixShell(host: SSHConnectionTarget): Promise<"sh" | "bash" | "zsh"> {
-	const info = await ensureHostInfo(host);
-	if (info.os === "windows") {
-		throw new Error(`Remote Python eval requires a POSIX SSH host; ${host.name} is Windows`);
-	}
-	if (!info.transferShell) {
-		throw new Error(
-			`Remote Python eval requires a verified POSIX shell on ${host.name}; none of sh/bash/zsh passed the capability probe`,
-		);
-	}
-	return info.transferShell;
 }
 
 async function stageRemoteRunner(host: SSHConnectionTarget, signal: AbortSignal | undefined): Promise<string> {

@@ -5,6 +5,7 @@ import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
+import type { ToolBridgeInvocationContext } from "./js/tool-bridge";
 import type { KernelDisplayOutput } from "./py/display";
 import { registerPyToolBridge } from "./py/tool-bridge";
 
@@ -32,6 +33,7 @@ export interface KernelExecutorBaseOptions {
 	onStatus?: (event: JsStatusEvent) => void;
 	emitStatus?: (event: JsStatusEvent) => void;
 	toolSession?: ToolSession;
+	toolBridgeInvocationContext?: ToolBridgeInvocationContext;
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
@@ -322,6 +324,7 @@ export async function executeWithKernelBase<
 					toolSession: options.toolSession,
 					signal: options.signal,
 					emitStatus,
+					invocationContext: options.toolBridgeInvocationContext,
 				})
 			: null;
 

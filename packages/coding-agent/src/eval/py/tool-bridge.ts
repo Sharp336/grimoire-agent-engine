@@ -9,12 +9,13 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
-import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import { callSessionTool, type JsStatusEvent, type ToolBridgeInvocationContext } from "../js/tool-bridge";
 
 export interface PyToolBridgeEntry {
 	toolSession: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
+	invocationContext?: ToolBridgeInvocationContext;
 }
 
 export interface PyToolBridgeInfo {
@@ -52,6 +53,7 @@ async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: 
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
+		invocationContext: entry.invocationContext,
 	});
 	const signal = entry.signal;
 	if (!signal) return await call;
