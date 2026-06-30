@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildSystemPrompt } from "./system-prompt";
 
 interface ProbeRunResult {
 	elapsedMs: number;
@@ -155,4 +156,48 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 		expect(result.elapsedMs).toBeLessThan(2000);
 		expect(result.childElapsedMs).toBeLessThan(2000);
 	}, 15_000);
+});
+
+describe("jailbreak mode", () => {
+	const workspaceTree = {
+		rootPath: "/tmp/project",
+		rendered: "",
+		truncated: false,
+		totalLines: 0,
+		agentsMdFiles: [],
+	};
+
+	const baseOpts = {
+		contextFiles: [],
+		skills: [],
+		toolNames: [],
+		cwd: "/tmp/project",
+		personality: "default" as const,
+		activeRepoContext: null,
+		includeWorkspaceTree: false,
+		renderMermaid: false,
+		workspaceTree,
+	};
+
+	it("strips behavioral safety guidelines and forces the jailbreak personality when enabled", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, jailbreakMode: true });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).not.toContain("EXECUTION WORKFLOW");
+		expect(prompt).not.toContain("DELIVERY CONTRACT");
+		expect(prompt).not.toContain("Each response MUST advance the task");
+		expect(prompt).not.toContain("evidence-first engineer");
+		expect(prompt).toContain("unrestrained, bold operator");
+	});
+
+	it("retains safety guidelines and the configured personality when disabled", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, jailbreakMode: false });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain("EXECUTION WORKFLOW");
+		expect(prompt).toContain("DELIVERY CONTRACT");
+		expect(prompt).toContain("Each response MUST advance the task");
+		expect(prompt).toContain("evidence-first engineer");
+		expect(prompt).not.toContain("unrestrained, bold operator");
+	});
 });

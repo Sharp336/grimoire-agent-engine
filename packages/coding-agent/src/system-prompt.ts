@@ -19,6 +19,7 @@ import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" 
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
+import jailbreakPersonality from "./prompts/system/personalities/jailbreak.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
@@ -33,6 +34,9 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
 	friendly: friendlyPersonality,
 	pragmatic: pragmaticPersonality,
 };
+
+/** Rendered when `jailbreakMode` is on, overriding the configured personality. */
+const JAILBREAK_PERSONALITY = jailbreakPersonality.trim();
 
 interface AlwaysApplyRule {
 	name: string;
@@ -474,6 +478,8 @@ export interface BuildSystemPromptOptions {
 	renderMermaid?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
+	/** Whether jailbreak mode is enabled. Strips behavioral safety guidelines and forces the jailbreak personality. Default: false */
+	jailbreakMode?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -517,6 +523,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		includeWorkspaceTree = false,
 		renderMermaid = true,
 		activeRepoContext: providedActiveRepoContext,
+		jailbreakMode = false,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -740,7 +747,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		dateTime,
 		cwd: promptCwd,
 		model: model ?? "",
-		personality: personality === "none" ? "" : PERSONALITY_SPECS[personality].trim(),
+		personality: jailbreakMode
+			? JAILBREAK_PERSONALITY
+			: personality === "none"
+				? ""
+				: PERSONALITY_SPECS[personality].trim(),
+		jailbreakMode,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		mcpDiscoveryMode,
