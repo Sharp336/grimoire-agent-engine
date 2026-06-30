@@ -747,11 +747,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		dateTime,
 		cwd: promptCwd,
 		model: model ?? "",
-		personality: jailbreakMode
-			? JAILBREAK_PERSONALITY
-			: personality === "none"
-				? ""
-				: PERSONALITY_SPECS[personality].trim(),
+		personality:
+			personality === "none" ? "" : jailbreakMode ? JAILBREAK_PERSONALITY : PERSONALITY_SPECS[personality].trim(),
 		jailbreakMode,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",

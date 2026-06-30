@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import defaultPersonalityText from "./prompts/system/personalities/default.md" with { type: "text" };
+import jailbreakPersonalityText from "./prompts/system/personalities/jailbreak.md" with { type: "text" };
 import { buildSystemPrompt } from "./system-prompt";
 
 interface ProbeRunResult {
@@ -186,8 +188,8 @@ describe("jailbreak mode", () => {
 		expect(prompt).not.toContain("EXECUTION WORKFLOW");
 		expect(prompt).not.toContain("DELIVERY CONTRACT");
 		expect(prompt).not.toContain("Each response MUST advance the task");
-		expect(prompt).not.toContain("evidence-first engineer");
-		expect(prompt).toContain("unrestrained, bold operator");
+		expect(prompt).not.toContain(defaultPersonalityText.trim());
+		expect(prompt).toContain(jailbreakPersonalityText.trim());
 	});
 
 	it("retains safety guidelines and the configured personality when disabled", async () => {
@@ -197,7 +199,26 @@ describe("jailbreak mode", () => {
 		expect(prompt).toContain("EXECUTION WORKFLOW");
 		expect(prompt).toContain("DELIVERY CONTRACT");
 		expect(prompt).toContain("Each response MUST advance the task");
-		expect(prompt).toContain("evidence-first engineer");
-		expect(prompt).not.toContain("unrestrained, bold operator");
+		expect(prompt).toContain(defaultPersonalityText.trim());
+		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
+	});
+
+	it("does not render the jailbreak personality for subagents (personality none)", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, personality: "none", jailbreakMode: true });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
+		expect(prompt).not.toContain("<personality>");
+	});
+
+	it("renders the jailbreak personality in the custom system prompt path", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			...baseOpts,
+			jailbreakMode: true,
+			customPrompt: "You are a custom assistant.",
+		});
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain(jailbreakPersonalityText.trim());
 	});
 });
