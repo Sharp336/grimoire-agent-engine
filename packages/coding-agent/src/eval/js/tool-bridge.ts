@@ -1,6 +1,10 @@
+import * as path from "node:path";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import type { SSHConnectionTarget } from "../../ssh/connection-manager";
 import type { ToolSession } from "../../tools";
+import { splitPathAndSel } from "../../tools/path-utils";
+import { resolveSshHostByName } from "../../tools/ssh-host-resolution";
 import { ToolError } from "../../tools/tool-errors";
 import { EVAL_AGENT_BRIDGE_NAME, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
@@ -10,10 +14,16 @@ import type { JsStatusEvent } from "./shared/types";
 
 export type { JsStatusEvent } from "./shared/types";
 
+export interface ToolBridgeInvocationContext {
+	defaultSshHost?: SSHConnectionTarget;
+	remoteCwd?: string;
+}
+
 interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
+	invocationContext?: ToolBridgeInvocationContext;
 }
 
 type ToolValue =
@@ -53,6 +63,145 @@ function normalizeArgs(args: unknown): unknown {
 		record[INTENT_FIELD] = "js prelude";
 	}
 	return record;
+}
+
+const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const REMOTE_FILE_BRIDGE_TOOLS = new Set(["read", "write", "grep"]);
+const REMOTE_CONTEXT_UNSUPPORTED_TOOLS = new Set(["glob", "ast_grep", "ast_edit", "edit", "lsp", "debug"]);
+const REMOTE_BRIDGE_DEFAULT_TOOLS = new Set(["bash", "ssh", ...REMOTE_FILE_BRIDGE_TOOLS]);
+
+function recordArgs(args: unknown): Record<string, unknown> | null {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+	return args as Record<string, unknown>;
+}
+
+function explicitBridgeHostName(args: Record<string, unknown> | null): string | undefined {
+	if (!args || args.host === undefined) return undefined;
+	if (typeof args.host !== "string" || args.host.trim().length === 0) {
+		throw new ToolError("SSH host must be a non-empty string");
+	}
+	return args.host.trim();
+}
+
+function encodedSshPath(remotePath: string): string {
+	const normalized = path.posix.normalize(remotePath);
+	const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
+	return absolute
+		.split("/")
+		.map((segment, index) => (index === 0 ? "" : encodeURIComponent(segment)))
+		.join("/");
+}
+
+function sshUrlForPath(host: SSHConnectionTarget, remotePath: string): string {
+	return `ssh://${encodeURIComponent(host.name)}${encodedSshPath(remotePath)}`;
+}
+
+function shouldKeepPathLocal(value: string): boolean {
+	const trimmed = value.trim();
+	return URL_SCHEME_RE.test(trimmed) || trimmed.startsWith("local:/");
+}
+
+function rewriteRemotePath(value: string, host: SSHConnectionTarget, remoteCwd: string | undefined): string {
+	if (shouldKeepPathLocal(value)) return value;
+	const split = splitPathAndSel(value);
+	const rawPath = split.path || ".";
+	if (!path.posix.isAbsolute(rawPath) && !remoteCwd) {
+		throw new ToolError(`Remote tool path "${value}" is relative, but no remote cwd is available`);
+	}
+	const base = remoteCwd && path.posix.isAbsolute(remoteCwd) ? remoteCwd : "/";
+	const absolutePath = path.posix.isAbsolute(rawPath)
+		? path.posix.normalize(rawPath)
+		: path.posix.resolve(base, rawPath);
+	const rewritten = sshUrlForPath(host, absolutePath);
+	return split.sel ? `${rewritten}:${split.sel}` : rewritten;
+}
+
+function rewritePathField(
+	record: Record<string, unknown>,
+	host: SSHConnectionTarget,
+	remoteCwd: string | undefined,
+): void {
+	if (typeof record.path === "string") {
+		record.path = rewriteRemotePath(record.path, host, remoteCwd);
+	}
+}
+
+function rewritePathsField(
+	record: Record<string, unknown>,
+	host: SSHConnectionTarget,
+	remoteCwd: string | undefined,
+): void {
+	if (typeof record.paths === "string") {
+		record.paths = rewriteRemotePath(record.paths, host, remoteCwd);
+		return;
+	}
+	if (Array.isArray(record.paths)) {
+		record.paths = record.paths.map(entry =>
+			typeof entry === "string" ? rewriteRemotePath(entry, host, remoteCwd) : entry,
+		);
+	}
+}
+
+async function resolveBridgeHost(
+	name: string,
+	args: Record<string, unknown> | null,
+	options: ToolBridgeOptions,
+): Promise<SSHConnectionTarget | undefined> {
+	const explicitHost = explicitBridgeHostName(args);
+	if (explicitHost && REMOTE_BRIDGE_DEFAULT_TOOLS.has(name)) {
+		return await resolveSshHostByName(options.session, explicitHost);
+	}
+	if (!explicitHost && REMOTE_BRIDGE_DEFAULT_TOOLS.has(name)) {
+		return options.invocationContext?.defaultSshHost;
+	}
+	return undefined;
+}
+
+async function applyBridgeInvocationContext(name: string, args: unknown, options: ToolBridgeOptions): Promise<unknown> {
+	const record = recordArgs(args);
+	const explicitHost = explicitBridgeHostName(record);
+	if (explicitHost && REMOTE_CONTEXT_UNSUPPORTED_TOOLS.has(name)) {
+		throw new ToolError(`${name} does not support SSH host execution from eval cells yet.`);
+	}
+	if (options.invocationContext?.defaultSshHost !== undefined && REMOTE_CONTEXT_UNSUPPORTED_TOOLS.has(name)) {
+		throw new ToolError(
+			`${name} does not support default SSH execution from a remote eval cell yet; call an explicit SSH-capable tool/path instead.`,
+		);
+	}
+	const host = await resolveBridgeHost(name, record, options);
+	if (!record || !host) return args;
+	const next = { ...record };
+	const remoteCwd = typeof next.cwd === "string" ? next.cwd : options.invocationContext?.remoteCwd;
+	if (name === "bash" || name === "ssh") {
+		next.host = host.name;
+		if (next.cwd === undefined && remoteCwd) next.cwd = remoteCwd;
+		return next;
+	}
+	if (name === "read" || name === "write") {
+		if (typeof next.path !== "string") {
+			throw new ToolError(`${name} requires a path string for SSH remote execution`);
+		}
+		rewritePathField(next, host, remoteCwd);
+		delete next.host;
+		delete next.cwd;
+		return next;
+	}
+	if (name === "grep") {
+		const paths = next.paths;
+		const validPaths =
+			typeof paths === "string" ||
+			(Array.isArray(paths) && paths.length > 0 && paths.every(entry => typeof entry === "string"));
+		if (!validPaths) {
+			throw new ToolError(
+				"grep requires explicit string paths for SSH remote execution; remote directory recursion is not supported by grep yet",
+			);
+		}
+		rewritePathsField(next, host, remoteCwd);
+		delete next.host;
+		delete next.cwd;
+		return next;
+	}
+	return args;
 }
 
 function summarizeToolResult(
@@ -121,7 +270,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		return runEvalConcurrency(args, options);
 	}
 	const tool = getTool(options.session, name);
-	const normalizedArgs = normalizeArgs(args);
+	const normalizedArgs = await applyBridgeInvocationContext(name, normalizeArgs(args), options);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
 		const result = await tool.execute(toolCallId, normalizedArgs, options.signal);

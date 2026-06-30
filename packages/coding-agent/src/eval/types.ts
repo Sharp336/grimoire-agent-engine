@@ -17,12 +17,21 @@ export type EvalDisplayOutput =
 	| { type: "markdown"; text?: string }
 	| { type: "status"; event: EvalStatusEvent };
 
+/** Remote execution target for eval cells. */
+export interface EvalExecutionTarget {
+	kind: "ssh";
+	host: string;
+}
+
 /** Per-cell execution result for transcript rendering. */
 export interface EvalCellResult {
 	index: number;
 	title?: string;
 	code: string;
 	language?: EvalLanguage;
+	host?: string;
+	target?: EvalExecutionTarget;
+	cwd?: string;
 	output: string;
 	status: "pending" | "running" | "complete" | "error";
 	durationMs?: number;
@@ -34,6 +43,9 @@ export interface EvalCellResult {
 /** Tool result detail object surfaced to the UI/transcript. */
 export interface EvalToolDetails {
 	cells?: EvalCellResult[];
+	host?: string;
+	target?: EvalExecutionTarget;
+	cwd?: string;
 	jsonOutputs?: unknown[];
 	images?: ImageContent[];
 	statusEvents?: EvalStatusEvent[];

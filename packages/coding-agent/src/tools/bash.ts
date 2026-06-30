@@ -18,6 +18,9 @@ import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type { ClientBridgeTerminalExitStatus, ClientBridgeTerminalOutput } from "../session/client-bridge";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
+import { buildRemotePosixCommand, ensureRemotePosixShell } from "../ssh/remote-posix";
+import { executeSSH } from "../ssh/ssh-executor";
+import { wrapInPosixShell } from "../ssh/utils";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -32,12 +35,14 @@ import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { capPreviewLines, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
+import { resolveSshHostByName } from "./ssh-host-resolution";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 export const BASH_DEFAULT_PREVIEW_LINES = 10;
 
+const REMOTE_BASH_INTERNAL_URL_RE = /(?:skill|agent|artifact|plan|memory|rule|local):\/\/|(?:^|[^./\\\w-])local:\//i;
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 
@@ -101,6 +106,7 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 }
 
 const bashSchemaBase = type({
+	"host?": type("string").describe("configured SSH host name for remote execution"),
 	command: type("string").describe("command to execute"),
 	"env?": type({ "[string]": "string" }).describe("extra env vars"),
 	"timeout?": type("number").describe("timeout in seconds"),
@@ -110,6 +116,7 @@ const bashSchemaBase = type({
 
 const bashSchemaWithAsync = type({
 	command: "string",
+	"host?": "string",
 	"env?": { "[string]": "string" },
 	"timeout?": "number",
 	"cwd?": "string",
@@ -120,6 +127,7 @@ const bashSchemaWithAsync = type({
 type BashToolSchema = typeof bashSchemaBase | typeof bashSchemaWithAsync;
 
 export interface BashToolInput {
+	host?: string;
 	command: string;
 	env?: Record<string, string>;
 	timeout?: number;
@@ -156,6 +164,13 @@ type ManagedBashJobCompletion =
 			error: unknown;
 	  };
 
+type ManagedBashRunner = (options: {
+	signal?: AbortSignal;
+	artifactPath?: string;
+	artifactId?: string;
+	onChunk: (chunk: string) => void;
+}) => Promise<BashResult | BashInteractiveResult>;
+
 interface ManagedBashJobHandle {
 	jobId: string;
 	label: string;
@@ -182,6 +197,14 @@ function normalizeBashEnv(env: Record<string, string> | undefined): Record<strin
 		normalized[key] = value;
 	}
 	return normalized;
+}
+
+function assertRemoteBashInternalUrlsUnsupported(label: string, value: string | undefined): void {
+	if (value && REMOTE_BASH_INTERNAL_URL_RE.test(value)) {
+		throw new ToolError(
+			`Remote bash cannot expand local/session internal URLs in ${label}; use ssh:// paths or pass remote filesystem paths instead.`,
+		);
+	}
 }
 
 function escapeBashEnvValueForDisplay(value: string): string {
@@ -352,22 +375,35 @@ function stripExitCodeNotice(text: string, exitCode: number | undefined): string
 /**
  * Bash tool implementation.
  *
- * Executes bash commands with optional timeout and working directory.
+ * Executes shell commands with support for timeout, working directory,
+ * environment variables, and streaming output.
  */
 export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSchemaWithAsync, BashToolDetails> {
 	readonly name = "bash";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
+		const host = (args as Partial<BashToolInput>).host;
 		if (command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))) {
-			return { tier: "exec", override: true, reason: "Critical pattern detected" };
+			return {
+				tier: "exec",
+				override: true,
+				reason: host ? `Critical pattern detected for SSH host ${host}` : "Critical pattern detected",
+			};
+		}
+		if (host) {
+			return { tier: "exec", override: true, reason: `Remote SSH host: ${host}` };
 		}
 		return "exec";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const rawCommand = (args as Partial<BashToolInput>).command;
+		const params = args as Partial<BashToolInput>;
+		const rawCommand = params.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
-		return [`Command: ${truncateForPrompt(command)}`];
+		const details = [`Command: ${truncateForPrompt(command)}`];
+		if (params.host) details.push(`Host: ${truncateForPrompt(params.host)}`);
+		if (params.cwd) details.push(`Cwd: ${truncateForPrompt(params.cwd)}`);
+		return details;
 	};
 	readonly label = "Bash";
 	readonly loadMode = "essential";
@@ -543,6 +579,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		resolvedEnv?: Record<string, string>;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		startBackgrounded: boolean;
+		run?: ManagedBashRunner;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -562,21 +599,24 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
 				try {
-					const result = await executeBash(options.command, {
-						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
-						timeout: options.timeoutMs,
-						signal: runSignal,
-						env: options.resolvedEnv,
-						artifactPath,
-						artifactId,
-						onChunk: chunk => {
-							tailBuffer.append(chunk);
-							latestText = tailBuffer.text();
-							void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-						},
-						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-					});
+					const onChunk = (chunk: string) => {
+						tailBuffer.append(chunk);
+						latestText = tailBuffer.text();
+						void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+					};
+					const result = options.run
+						? await options.run({ signal: runSignal, artifactPath, artifactId, onChunk })
+						: await executeBash(options.command, {
+								cwd: options.commandCwd,
+								sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+								timeout: options.timeoutMs,
+								signal: runSignal,
+								env: options.resolvedEnv,
+								artifactPath,
+								artifactId,
+								onChunk,
+								onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+							});
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
@@ -663,11 +703,42 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		return Math.max(0, Math.min(this.#autoBackgroundThresholdMs, timeoutMs - timeoutBufferMs));
 	}
 
+	async #executeRemoteBash(options: {
+		hostName: string;
+		command: string;
+		cwd?: string;
+		env?: Record<string, string>;
+		timeoutMs: number;
+		signal?: AbortSignal;
+		artifactPath?: string;
+		artifactId?: string;
+		onChunk?: (chunk: string) => void;
+	}): Promise<BashResult> {
+		const host = await resolveSshHostByName(this.session, options.hostName);
+		const shell = await ensureRemotePosixShell(host, "Remote bash");
+		const remoteCommand = wrapInPosixShell(
+			shell,
+			buildRemotePosixCommand({
+				command: options.command,
+				cwd: options.cwd,
+				env: options.env,
+			}),
+		);
+		return await executeSSH(host, remoteCommand, {
+			timeout: options.timeoutMs,
+			signal: options.signal,
+			artifactPath: options.artifactPath,
+			artifactId: options.artifactId,
+			onChunk: options.onChunk,
+		});
+	}
+
 	async execute(
 		_toolCallId: string,
 		{
 			command: rawCommand,
 			env: rawEnv,
+			host,
 			timeout: rawTimeout = 300,
 			cwd,
 
@@ -680,6 +751,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	): Promise<AgentToolResult<BashToolDetails>> {
 		let command = rawCommand;
 		const env = normalizeBashEnv(rawEnv);
+		const remoteHost = typeof host === "string" && host.trim().length > 0 ? host.trim() : undefined;
 
 		// Apply conservative bash fixups (strip trailing `| head|tail` and redundant
 		// `2>&1`). The helper is single-line only and refuses anything that could
@@ -707,6 +779,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (asyncRequested && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
+		if (remoteHost && pty) {
+			throw new ToolError(
+				"Remote bash over SSH does not support pty; omit pty or use the ssh tool for an interactive remote command.",
+			);
+		}
 
 		// Check both the original command and the cwd-normalized command so
 		// leading `cd ... &&` wrappers do not hide either shell-navigation rules
@@ -722,54 +799,59 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 		}
 
-		const internalUrlOptions: InternalUrlExpansionOptions = {
-			skills: this.session.skills ?? [],
-			internalRouter: InternalUrlRouter.instance(),
-			localOptions: {
-				getArtifactsDir: this.session.getArtifactsDir,
-				getSessionId: this.session.getSessionId,
-			},
-		};
-		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
-		const resolvedEnv = env
-			? Object.fromEntries(
-					await Promise.all(
-						Object.entries(env).map(async ([key, value]) => [
-							key,
-							await expandInternalUrls(value, {
-								...internalUrlOptions,
-								ensureLocalParentDirs: true,
-								noEscape: true,
-							}),
-						]),
-					),
-				)
-			: undefined;
-
-		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
-		if (cwd?.includes("://") || cwd?.includes("local:/")) {
-			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
-		}
-
-		// Best-effort cache invalidation: drop github-cache rows for any issue/PR
-		// number touched by a mutating `gh` subcommand inside this bash call so
-		// subsequent issue:// / pr:// reads pick up the post-mutation state
-		// instead of the cached pre-mutation snapshot.
-		invalidateGithubCacheForBashCommand(command);
-
-		const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
-		let cwdStat: fs.Stats;
-		try {
-			cwdStat = await fs.promises.stat(commandCwd);
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+		let resolvedEnv = env;
+		let commandCwd = cwd ?? "";
+		if (remoteHost) {
+			assertRemoteBashInternalUrlsUnsupported("command", command);
+			assertRemoteBashInternalUrlsUnsupported("cwd", cwd);
+			for (const [key, value] of Object.entries(env ?? {})) {
+				assertRemoteBashInternalUrlsUnsupported(`env.${key}`, value);
 			}
-			throw err;
+		} else {
+			const internalUrlOptions: InternalUrlExpansionOptions = {
+				skills: this.session.skills ?? [],
+				internalRouter: InternalUrlRouter.instance(),
+				localOptions: {
+					getArtifactsDir: this.session.getArtifactsDir,
+					getSessionId: this.session.getSessionId,
+				},
+			};
+			command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
+			resolvedEnv = env
+				? Object.fromEntries(
+						await Promise.all(
+							Object.entries(env).map(async ([key, value]) => [
+								key,
+								await expandInternalUrls(value, {
+									...internalUrlOptions,
+									ensureLocalParentDirs: true,
+									noEscape: true,
+								}),
+							]),
+						),
+					)
+				: undefined;
+
+			// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
+			if (cwd?.includes("://") || cwd?.includes("local:/")) {
+				cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
+			}
+
+			commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
+			let cwdStat: fs.Stats;
+			try {
+				cwdStat = await fs.promises.stat(commandCwd);
+			} catch (err) {
+				if (isEnoent(err)) {
+					throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+				}
+				throw err;
+			}
+			if (!cwdStat.isDirectory()) {
+				throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+			}
 		}
-		if (!cwdStat.isDirectory()) {
-			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
-		}
+		invalidateGithubCacheForBashCommand(command);
 
 		// Clamp to reasonable range: 1s - 3600s (1 hour)
 		const requestedTimeoutSec = rawTimeout;
@@ -778,6 +860,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const pendingNotices: string[] = [];
 		const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec);
 		if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
+		const remoteRun: ManagedBashRunner | undefined = remoteHost
+			? ({ signal: runSignal, artifactPath, artifactId, onChunk }) =>
+					this.#executeRemoteBash({
+						hostName: remoteHost,
+						command,
+						cwd: commandCwd || undefined,
+						env: resolvedEnv,
+						timeoutMs,
+						signal: runSignal,
+						artifactPath,
+						artifactId,
+						onChunk,
+					})
+			: undefined;
 
 		if (asyncRequested) {
 			if (!this.session.asyncJobManager) {
@@ -794,6 +890,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				startBackgrounded: true,
+				run: remoteRun,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, job.label, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -805,9 +902,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// when available it wins over auto-backgrounding (both are opt-in, and
 		// auto-background would otherwise silently disable the terminal route).
 		const clientBridge = this.session.getClientBridge?.();
-		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
-		);
+		const bridgeTerminalAvailable =
+			!remoteHost && Boolean(clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty);
 
 		const autoBgManager = this.session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
@@ -832,6 +928,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				startBackgrounded,
+				run: remoteRun,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, job.label, "", timeoutSec, {
@@ -864,7 +961,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+		if (bridgeTerminalAvailable && clientBridge?.createTerminal) {
 			const bridgeWallTimeStart = performance.now();
 			const handle = await clientBridge.createTerminal({
 				command,
@@ -1044,6 +1141,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
 		}
 		const wallTimeStart = performance.now();
+		const directOnChunk = streamTailUpdates(tailBuffer, onUpdate);
 		const result: BashResult | BashInteractiveResult = interactiveUi
 			? await runInteractiveBashPty(interactiveUi, {
 					command,
@@ -1054,17 +1152,19 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					artifactPath,
 					artifactId,
 				})
-			: await executeBash(command, {
-					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
-					timeout: timeoutMs,
-					signal,
-					env: resolvedEnv,
-					artifactPath,
-					artifactId,
-					onChunk: streamTailUpdates(tailBuffer, onUpdate),
-					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-				});
+			: remoteRun
+				? await remoteRun({ signal, artifactPath, artifactId, onChunk: directOnChunk })
+				: await executeBash(command, {
+						cwd: commandCwd,
+						sessionKey: this.session.getSessionId?.() ?? undefined,
+						timeout: timeoutMs,
+						signal,
+						env: resolvedEnv,
+						artifactPath,
+						artifactId,
+						onChunk: directOnChunk,
+						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {
 			const out = normalizeResultOutput(result);
@@ -1096,6 +1196,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 // TUI Renderer
 // =============================================================================
 export interface BashRenderArgs {
+	host?: string;
 	command?: string;
 	env?: Record<string, string>;
 	timeout?: number;
@@ -1122,6 +1223,7 @@ export interface ShellRendererConfig<TArgs> {
 	resolveCommand?: (args: TArgs | undefined) => string | undefined;
 	resolveCwd?: (args: TArgs | undefined) => string | undefined;
 	resolveEnv?: (args: TArgs | undefined) => Record<string, string> | undefined;
+	resolveHost?: (args: TArgs | undefined) => string | undefined;
 	showHeader?: boolean;
 }
 
@@ -1153,6 +1255,7 @@ export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): st
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, cwd);
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const prefixParts = ["$"];
+	if (args.host) prefixParts.push(`ssh ${replaceTabs(args.host)}`);
 	if (displayWorkdir) prefixParts.push(`cd ${displayWorkdir} &&`);
 	if (envAssignments) prefixParts.push(envAssignments);
 	const prefix = uiTheme.fg("dim", `${prefixParts.join(" ")} `);
@@ -1164,6 +1267,7 @@ export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): st
 function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererConfig<TArgs>): BashRenderArgs {
 	return {
 		command: config.resolveCommand?.(args),
+		host: config.resolveHost?.(args),
 		cwd: config.resolveCwd?.(args),
 		env: config.resolveEnv?.(args),
 		__partialJson: getPartialJson(args),
@@ -1409,4 +1513,5 @@ export const bashToolRenderer = createShellRenderer<BashRenderArgs>({
 	resolveCwd: args => args?.cwd,
 	resolveEnv: args => args?.env,
 	showHeader: false,
+	resolveHost: args => args?.host,
 });

@@ -1,10 +1,12 @@
 import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import type { SSHConnectionTarget } from "../ssh/connection-manager";
 import type { ToolSession } from "../tools";
 import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
 	cwd: string;
+	sshHost?: SSHConnectionTarget;
 	sessionId: string;
 	sessionFile: string | undefined;
 	kernelOwnerId: string | undefined;

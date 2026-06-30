@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getRemoteHostDir } from "@oh-my-pi/pi-utils";
+import { buildRemotePythonSshExtraArgs } from "../../eval/py/remote-kernel";
 import {
 	buildRemoteCommand,
 	extractProbePayload,
@@ -27,6 +28,42 @@ describe("buildRemoteCommand stdin handling", () => {
 	it("omits -n when allowStdin is set so the remote command reads piped stdin", async () => {
 		const args = await buildRemoteCommand(TARGET, "cat", { allowStdin: true });
 		expect(args).not.toContain("-n");
+	});
+});
+
+describe("buildRemoteCommand remote eval forwarding", () => {
+	it("keeps stdin attached, bypasses shared ControlMaster sockets, and installs the loopback reverse forward", async () => {
+		type RemoteEvalSshOptions = NonNullable<Parameters<typeof buildRemoteCommand>[2]> & {
+			allowStdin: true;
+			controlMaster: false;
+			extraArgs: string[];
+		};
+		const options: RemoteEvalSshOptions = {
+			allowStdin: true,
+			controlMaster: false,
+			extraArgs: buildRemotePythonSshExtraArgs({
+				localPort: 48123,
+				remotePort: 39123,
+				remoteUrl: "http://127.0.0.1:39123",
+			}),
+		};
+
+		const args = await buildRemoteCommand(
+			{ name: "box", host: "box.example", username: "alice" },
+			"python -u runner.py",
+			options,
+		);
+
+		expect(args).not.toContain("-n");
+		expect(args).not.toContain("ControlMaster=auto");
+		expect(args.some(arg => arg.startsWith("ControlPath="))).toBe(false);
+		expect(args).not.toContain("ControlPersist=3600");
+		expect(args).toContain("ControlMaster=no");
+		expect(args).toContain("ExitOnForwardFailure=yes");
+		expect(args).toContain("-R");
+		expect(args).toContain("127.0.0.1:39123:127.0.0.1:48123");
+		expect(args.at(-2)).toBe("alice@box.example");
+		expect(args.at(-1)).toBe("python -u runner.py");
 	});
 });
 
