@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import type { SSHConnectionTarget } from "../../ssh/connection-manager";
 import type { ToolSession } from "../../tools";
 import {
 	attachSessionOwner,
@@ -21,8 +22,16 @@ import {
 	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
+	type KernelShutdownOptions,
+	type KernelShutdownResult,
 	PythonKernel,
 } from "./kernel";
+import {
+	buildRemotePythonBridgeForward,
+	type RemotePythonBridgeForward,
+	RemotePythonKernel,
+	selectRemoteBridgePort,
+} from "./remote-kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
 import { ensurePyToolBridge } from "./tool-bridge";
 
@@ -31,6 +40,8 @@ export type PythonKernelMode = "session" | "per-call";
 export interface PythonExecutorOptions {
 	/** Working directory for command execution */
 	cwd?: string;
+	/** Configured SSH target for remote Python execution. */
+	sshHost?: SSHConnectionTarget;
 	/** Timeout in milliseconds */
 	timeoutMs?: number;
 	/** Absolute wall-clock deadline in milliseconds since epoch */
@@ -96,10 +107,17 @@ export interface PythonExecutorOptions {
 	bridgeSessionId?: string;
 	/** @internal Bridge endpoint info, set by `executePython` before delegating. */
 	bridge?: { url: string; token: string };
+	/** @internal Remote reverse-forward metadata for the Python tool bridge. */
+	remoteBridge?: RemotePythonBridgeForward;
 }
 
 export interface PythonKernelExecutor {
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
+}
+
+interface ManagedPythonKernel extends PythonKernelExecutor {
+	isAlive: () => boolean;
+	shutdown: (options?: KernelShutdownOptions) => Promise<KernelShutdownResult>;
 }
 
 export interface PythonResult {
@@ -140,8 +158,9 @@ interface PythonSession {
 	sessionKey: string;
 	sessionId: string;
 	cwd: string;
-	kernel: PythonKernel;
+	kernel: ManagedPythonKernel;
 	ownerIds: Set<string>;
+	remoteBridgePort?: number;
 	hasFallbackOwner: boolean;
 }
 
@@ -163,9 +182,66 @@ function normalizeExplicitInterpreter(cwd: string, interpreter: string | undefin
 	}
 }
 
-function buildSessionKey(sessionId: string, cwd: string, interpreter: string | undefined): string {
-	const normalizedCwd = normalizeSessionCwd(cwd);
-	return `${sessionId}\0${normalizedCwd}\0${normalizeExplicitInterpreter(normalizedCwd, interpreter)}`;
+export function buildPythonSshHostSessionIdentity(sshHost: SSHConnectionTarget | undefined): string {
+	if (!sshHost) return "";
+	return [
+		"ssh",
+		sshHost.name,
+		sshHost.username ?? "",
+		sshHost.host,
+		sshHost.port !== undefined ? String(sshHost.port) : "",
+		sshHost.keyPath ?? "",
+	].join("\0");
+}
+
+function normalizeInterpreterForSession(
+	cwd: string,
+	interpreter: string | undefined,
+	sshHost: SSHConnectionTarget | undefined,
+): string {
+	return sshHost ? (interpreter ?? "") : normalizeExplicitInterpreter(cwd, interpreter);
+}
+
+export function buildPythonSessionKey(
+	sessionId: string,
+	cwd: string,
+	interpreter: string | undefined,
+	sshHost?: SSHConnectionTarget,
+): string {
+	if (!sshHost) {
+		const normalizedCwd = normalizeSessionCwd(cwd);
+		return `${sessionId}\0${normalizedCwd}\0${normalizeExplicitInterpreter(normalizedCwd, interpreter)}`;
+	}
+	return `${sessionId}\0${buildPythonSshHostSessionIdentity(sshHost)}\0${cwd}\0${normalizeInterpreterForSession(
+		cwd,
+		interpreter,
+		sshHost,
+	)}`;
+}
+
+function buildSessionKey(
+	sessionId: string,
+	cwd: string,
+	interpreter: string | undefined,
+	sshHost?: SSHConnectionTarget,
+): string {
+	return buildPythonSessionKey(sessionId, cwd, interpreter, sshHost);
+}
+
+function normalizeExecutionCwd(options: PythonExecutorOptions | undefined): string {
+	if (options?.sshHost) return options.cwd ?? ".";
+	return normalizeSessionCwd(options?.cwd ?? getProjectDir());
+}
+
+function buildRemoteBridgeIdentity(options: PythonExecutorOptions): string {
+	const cwd = options.cwd ?? ".";
+	if (options.kernelMode === "per-call") {
+		return `per-call\0${crypto.randomUUID()}\0${buildPythonSshHostSessionIdentity(options.sshHost)}\0${cwd}\0${
+			options.interpreter ?? ""
+		}`;
+	}
+	const sessionId = options.sessionId ?? `session:${cwd}`;
+	return buildPythonSessionKey(sessionId, cwd, options.interpreter, options.sshHost);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,8 +295,19 @@ function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): Pyt
 // Kernel start helpers
 // ---------------------------------------------------------------------------
 
-async function startKernel(cwd: string, options: PythonExecutorOptions): Promise<PythonKernel> {
+async function startKernel(cwd: string, options: PythonExecutorOptions): Promise<ManagedPythonKernel> {
 	requireRemainingTimeoutMs(options.deadlineMs);
+	if (options.sshHost) {
+		return await RemotePythonKernel.start({
+			cwd,
+			env: buildManagedKernelEnv(options),
+			signal: options.signal,
+			deadlineMs: options.deadlineMs,
+			interpreter: options.interpreter,
+			sshHost: options.sshHost,
+			bridge: options.remoteBridge,
+		});
+	}
 	return await PythonKernel.start({
 		cwd,
 		env: buildManagedKernelEnv(options),
@@ -254,6 +341,7 @@ async function acquireSession(
 			sessionId,
 			cwd,
 			kernel,
+			remoteBridgePort: options.remoteBridge?.remotePort,
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
 		};
@@ -290,6 +378,7 @@ async function replaceSessionKernel(
 		throw new PythonExecutionCancelledError(false);
 	}
 	session.kernel = next;
+	session.remoteBridgePort = options.remoteBridge?.remotePort;
 }
 
 async function resetSession(sessionKey: string): Promise<void> {
@@ -401,7 +490,17 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
 	if (!options.toolSession || options.bridge) return;
 	try {
-		options.bridge = await ensurePyToolBridge();
+		const bridge = await ensurePyToolBridge();
+		if (options.sshHost) {
+			const remoteBridge = buildRemotePythonBridgeForward(
+				bridge.url,
+				selectRemoteBridgePort(buildRemoteBridgeIdentity(options)),
+			);
+			options.remoteBridge = remoteBridge;
+			options.bridge = { url: remoteBridge.remoteUrl, token: bridge.token };
+			return;
+		}
+		options.bridge = bridge;
 	} catch (err) {
 		logger.warn("Failed to start Python tool bridge", {
 			error: err instanceof Error ? err.message : String(err),
@@ -423,7 +522,7 @@ async function executePerCall(code: string, cwd: string, options: PythonExecutor
 
 async function executeOnSession(code: string, cwd: string, options: PythonExecutorOptions): Promise<PythonResult> {
 	const sessionId = options.sessionId ?? `session:${cwd}`;
-	const sessionKey = buildSessionKey(sessionId, cwd, options.interpreter);
+	const sessionKey = buildSessionKey(sessionId, cwd, options.interpreter, options.sshHost);
 	if (options.bridge && !options.bridgeSessionId) {
 		options.bridgeSessionId = sessionId;
 	}
@@ -461,6 +560,12 @@ async function executeOnSession(code: string, cwd: string, options: PythonExecut
 	if (sessions.get(session.sessionKey) !== session) {
 		throw new PythonExecutionCancelledError(false);
 	}
+	if (options.sshHost && options.remoteBridge && session.remoteBridgePort !== options.remoteBridge.remotePort) {
+		await replaceSessionKernel(session, cwd, options);
+		if (sessions.get(session.sessionKey) !== session) {
+			throw new PythonExecutionCancelledError(false);
+		}
+	}
 	if (!session.kernel.isAlive()) {
 		await replaceSessionKernel(session, cwd, options);
 		if (sessions.get(session.sessionKey) !== session) {
@@ -495,7 +600,7 @@ export async function executePythonWithKernel(
 }
 
 export async function executePython(code: string, options?: PythonExecutorOptions): Promise<PythonResult> {
-	const cwd = normalizeSessionCwd(options?.cwd ?? getProjectDir());
+	const cwd = normalizeExecutionCwd(options);
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const executionOptions: PythonExecutorOptions = {
 		...(options ?? {}),
@@ -514,7 +619,9 @@ export async function executePython(code: string, options?: PythonExecutorOption
 				),
 			);
 		}
-		await ensureKernelAvailable(cwd, executionOptions);
+		if (!executionOptions.sshHost) {
+			await ensureKernelAvailable(cwd, executionOptions);
+		}
 		await ensureToolBridge(executionOptions);
 
 		const kernelMode = executionOptions.kernelMode ?? "session";

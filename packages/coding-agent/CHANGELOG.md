@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added remote Python eval over configured SSH hosts, including persistent per-host kernels and host-side tool bridge support for `tool.*`, `completion`, and `agent` calls.
+
 ## [16.2.9] - 2026-06-30
 
 ### Breaking Changes

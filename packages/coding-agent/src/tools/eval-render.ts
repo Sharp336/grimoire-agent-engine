@@ -13,7 +13,13 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Text } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
-import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type {
+	EvalCellResult,
+	EvalExecutionTarget,
+	EvalLanguage,
+	EvalStatusEvent,
+	EvalToolDetails,
+} from "../eval/types";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
@@ -49,16 +55,28 @@ function languageForHighlighter(language: EvalLanguage | undefined): "python" | 
 	return "python";
 }
 
+interface EvalRenderTargetArg {
+	kind?: string;
+	type?: string;
+	host?: string;
+}
+
 interface EvalRenderCellArg {
 	language?: string;
 	code?: string;
 	title?: string;
+	host?: string;
+	cwd?: string;
+	target?: EvalRenderTargetArg;
 }
 
 interface EvalRenderArgs {
 	language?: string;
 	code?: string;
 	title?: string;
+	host?: string;
+	cwd?: string;
+	target?: EvalRenderTargetArg;
 	cells?: EvalRenderCellArg[];
 	__partialJson?: string;
 }
@@ -74,6 +92,9 @@ interface EvalRenderCell {
 	language: EvalLanguage;
 	code: string;
 	title?: string;
+	host?: string;
+	cwd?: string;
+	target?: EvalExecutionTarget;
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
@@ -83,8 +104,23 @@ function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
 	return "python";
 }
 
+function stringField(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function targetHostFrom(target: EvalRenderTargetArg | EvalExecutionTarget | undefined): string | undefined {
+	if (!target) return undefined;
+	const kind =
+		stringField("kind" in target ? target.kind : undefined) ??
+		stringField("type" in target ? target.type : undefined);
+	if (kind !== undefined && kind !== "ssh") return undefined;
+	return stringField(target.host);
+}
+
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	if (!args) return [];
+	const defaultHost = stringField(args.host) ?? targetHostFrom(args.target);
+	const defaultCwd = stringField(args.cwd);
 	const raw = Array.isArray(args.cells) ? args.cells : typeof args.code === "string" ? [args] : [];
 	const out: EvalRenderCell[] = [];
 	for (const cell of raw) {
@@ -94,9 +130,39 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 			language: normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined),
 			code,
 			title: typeof cell.title === "string" ? cell.title : undefined,
+			host: stringField(cell.host) ?? targetHostFrom(cell.target) ?? defaultHost,
+			cwd: stringField(cell.cwd) ?? defaultCwd,
 		});
 	}
 	return out;
+}
+
+const TARGET_TITLE_SEPARATOR = " · ";
+
+function sanitizeHeaderPart(value: string): string {
+	return replaceTabs(value).replace(/\s+/g, " ").trim();
+}
+
+function formatTargetTitle(host: string | undefined, cwd: string | undefined, width: number): string | undefined {
+	if (!host) return undefined;
+	const parts = [`ssh:${sanitizeHeaderPart(host)}`];
+	if (cwd !== undefined) {
+		parts.push(`cwd:${shortenPath(sanitizeHeaderPart(cwd))}`);
+	}
+	return truncateToWidth(parts.join(TARGET_TITLE_SEPARATOR), Math.max(12, Math.min(72, width - 4)));
+}
+
+function withTargetTitle(
+	title: string | undefined,
+	host: string | undefined,
+	cwd: string | undefined,
+	width: number,
+): string | undefined {
+	const targetTitle = formatTargetTitle(host, cwd, width);
+	if (!targetTitle) return title;
+	if (!title) return targetTitle;
+	const titleBudget = Math.max(12, width - targetTitle.length - TARGET_TITLE_SEPARATOR.length - 8);
+	return `${truncateToWidth(sanitizeHeaderPart(title), titleBudget)}${TARGET_TITLE_SEPARATOR}${targetTitle}`;
 }
 
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
@@ -502,7 +568,7 @@ export const evalToolRenderer = {
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
-				const key = `${options.expanded ? 1 : 0}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
+				const key = `${options.expanded ? 1 : 0}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.host ?? ""}:${c.cwd ?? ""}:${c.code.length}`).join("|")}`;
 				if (cached && cached.key === key && cached.width === width) {
 					return cached.result;
 				}
@@ -517,7 +583,7 @@ export const evalToolRenderer = {
 							showLanguage: true,
 							index: i,
 							total: cells.length,
-							title: cell.title,
+							title: withTargetTitle(cell.title, cell.host, cell.cwd, width),
 							status: "pending",
 							width,
 							// Viewport-sized tail window following the newest streamed code
@@ -616,6 +682,9 @@ export const evalToolRenderer = {
 							}
 							outputLines.push(...statusLines);
 						}
+						const resultHost =
+							cell.host ?? targetHostFrom(cell.target) ?? details?.host ?? targetHostFrom(details?.target);
+						const resultCwd = cell.cwd ?? details?.cwd;
 						const cellLines = renderCodeCell(
 							{
 								code: cell.code,
@@ -623,7 +692,7 @@ export const evalToolRenderer = {
 								showLanguage: true,
 								index: i,
 								total: cellResults.length,
-								title: cell.title,
+								title: withTargetTitle(cell.title, resultHost, resultCwd, width),
 								status: cell.status,
 								spinnerFrame: options.spinnerFrame,
 								duration: cell.durationMs,

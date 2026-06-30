@@ -2,12 +2,22 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import type { SSHHost } from "../capability/ssh";
+import { sshCapability } from "../capability/ssh";
+import { loadCapability } from "../discovery";
 import { jsBackend, juliaBackend, pythonBackend, rubyBackend } from "../eval";
-import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
+import type { ExecutorBackend, ExecutorBackendExecOptions, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
 import { defaultEvalSessionId } from "../eval/session-id";
-import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type {
+	EvalCellResult,
+	EvalDisplayOutput,
+	EvalExecutionTarget,
+	EvalLanguage,
+	EvalStatusEvent,
+	EvalToolDetails,
+} from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { webpExclusionForModel } from "../utils/image-loading";
@@ -86,6 +96,8 @@ const evalCellCommonFields = {
 	"title?": type("string").describe('short label shown in transcript (e.g. "imports", "load config")'),
 	"timeout?": type("number").describe("timeout for this eval call in seconds"),
 	"reset?": type("boolean").describe("wipe this language's kernel before running. Other languages are untouched."),
+	"host?": type("string").describe("configured SSH host name for remote Python execution"),
+	"cwd?": type("string").describe("remote working directory when host is set"),
 };
 
 /**
@@ -188,6 +200,7 @@ export interface EvalToolOptions {
 
 interface ResolvedBackend {
 	backend: ExecutorBackend;
+	sshHost?: SSHHost;
 	notice?: string;
 }
 
@@ -198,6 +211,10 @@ interface ResolvedEvalCell {
 	timeoutMs: number;
 	reset: boolean;
 	resolved: ResolvedBackend;
+	effectiveCwd: string;
+	host?: string;
+	target?: EvalExecutionTarget;
+	cwd?: string;
 }
 
 function uniqueEvalLanguages(cells: ResolvedEvalCell[]): EvalLanguage[] {
@@ -215,7 +232,31 @@ function timeoutSecondsFromMs(timeoutMs: number): number {
 	return clampTimeout("eval", timeoutMs / 1000);
 }
 
-async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
+function formatAvailableHosts(hostNames: readonly string[]): string {
+	return hostNames.length > 0 ? hostNames.join(", ") : "(none)";
+}
+
+async function resolveEvalSshHost(session: ToolSession, hostName: string): Promise<SSHHost> {
+	const result = await loadCapability<SSHHost>(sshCapability.id, { cwd: session.cwd });
+	const hostsByName = new Map<string, SSHHost>();
+	for (const host of result.items) {
+		if (!hostsByName.has(host.name)) {
+			hostsByName.set(host.name, host);
+		}
+	}
+	const sshHost = hostsByName.get(hostName);
+	if (!sshHost) {
+		const hostNames = Array.from(hostsByName.keys()).sort();
+		throw new ToolError(`Unknown SSH host: ${hostName}. Available hosts: ${formatAvailableHosts(hostNames)}`);
+	}
+	return sshHost;
+}
+
+async function resolveBackend(
+	session: ToolSession,
+	language: EvalLanguage,
+	options: { sshHost?: SSHHost } = {},
+): Promise<ResolvedBackend> {
 	const backends = resolveEvalBackends(session);
 	const allowPy = backends.python;
 	const allowJs = backends.js;
@@ -224,7 +265,7 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
-		if (!(await pythonBackend.isAvailable(session))) {
+		if (!options.sshHost && !(await pythonBackend.isAvailable(session))) {
 			const alternatives = [allowJs ? '"js"' : null, allowRb ? '"rb"' : null, allowJl ? '"jl"' : null].filter(
 				Boolean,
 			);
@@ -234,7 +275,7 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 					: 'Python backend is unavailable in this session. Install the python kernel to use language: "py".',
 			);
 		}
-		return { backend: pythonBackend };
+		return { backend: pythonBackend, sshHost: options.sshHost };
 	}
 	if (language === "ruby") {
 		if (!allowRb) throw new ToolError("Ruby backend is disabled (PI_RB=0 or eval.rb = false).");
@@ -283,7 +324,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const language =
 			typeof params.language === "string" ? formatEvalInputLanguage(params.language) : "javascript (default)";
 		const code = typeof params.code === "string" ? params.code : "";
-		return [`Language: ${language}`, `Code:\n${truncateForPrompt(code)}`];
+		const details = [`Language: ${language}`];
+		if (typeof params.host === "string") {
+			details.push(`Host: ${truncateForPrompt(params.host)}`);
+			details.push(`Cwd: ${truncateForPrompt(typeof params.cwd === "string" ? params.cwd : ".")}`);
+		} else if (typeof params.cwd === "string") {
+			details.push(`Cwd: ${truncateForPrompt(params.cwd)}`);
+		}
+		details.push(`Code:\n${truncateForPrompt(code)}`);
+		return details;
 	};
 	get summary(): string {
 		return summarizeEvalLanguages(this.#enabledLanguages());
@@ -395,6 +444,22 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		onUpdate?: AgentToolUpdateCallback,
 		_ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
+		const cellLanguage: EvalLanguage =
+			params.language === "py"
+				? "python"
+				: params.language === "rb"
+					? "ruby"
+					: params.language === "jl"
+						? "julia"
+						: "js";
+		const requestedHost = typeof params.host === "string" ? params.host : undefined;
+		const requestedCwd = typeof params.cwd === "string" ? params.cwd : undefined;
+		if (requestedCwd !== undefined && requestedHost === undefined) {
+			throw new ToolError("cwd is only supported when host is set for remote Python eval.");
+		}
+		if (requestedHost !== undefined && cellLanguage !== "python") {
+			throw new ToolError('host is only supported with language: "py" for remote Python eval.');
+		}
 		if (this.#proxyExecutor) {
 			return this.#proxyExecutor(params, signal);
 		}
@@ -405,15 +470,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const session = this.session;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
-		const cellLanguage: EvalLanguage =
-			params.language === "py"
-				? "python"
-				: params.language === "rb"
-					? "ruby"
-					: params.language === "jl"
-						? "julia"
-						: "js";
-		const resolved = await resolveBackend(session, cellLanguage);
+		const sshHost = requestedHost ? await resolveEvalSshHost(session, requestedHost) : undefined;
+		const effectiveCwd = sshHost ? (requestedCwd ?? ".") : session.cwd;
+		const target: EvalExecutionTarget | undefined = sshHost ? { kind: "ssh", host: sshHost.name } : undefined;
+		const resolved = await resolveBackend(session, cellLanguage, { sshHost });
 		const cells: ResolvedEvalCell[] = [
 			{
 				index: 0,
@@ -422,10 +482,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				timeoutMs: (params.timeout ?? 30) * 1000,
 				reset: params.reset ?? false,
 				resolved,
+				effectiveCwd,
+				host: sshHost?.name,
+				target,
+				cwd: sshHost ? effectiveCwd : undefined,
 			},
 		];
 		const languages = uniqueEvalLanguages(cells);
 		const notice = detailsNotice(cells);
+		const targetMetadataCell = cells.find(cell => cell.host || cell.target || cell.cwd);
+		const addTargetDetails = (details: EvalToolDetails): void => {
+			if (!targetMetadataCell) return;
+			if (targetMetadataCell.host) details.host = targetMetadataCell.host;
+			if (targetMetadataCell.target) details.target = targetMetadataCell.target;
+			if (targetMetadataCell.cwd) details.cwd = targetMetadataCell.cwd;
+		};
 		const sessionAbortController = new AbortController();
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
@@ -454,6 +525,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					title: cell.title,
 					code: cell.code,
 					language: cell.resolved.backend.id,
+					host: cell.host,
+					target: cell.target,
+					cwd: cell.cwd,
 					output: "",
 					status: "pending",
 				}));
@@ -479,6 +553,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							statusEvents: cell.statusEvents ? [...cell.statusEvents] : undefined,
 						})),
 					};
+					addTargetDetails(details);
 					if (jsonOutputs.length > 0) {
 						details.jsonOutputs = jsonOutputs;
 					}
@@ -551,8 +626,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const startTime = Date.now();
 					let result: ExecutorBackendResult;
 					try {
-						result = await backend.execute(cell.code, {
-							cwd: session.cwd,
+						const executeOptions: ExecutorBackendExecOptions & { sshHost?: SSHHost } = {
+							cwd: cell.effectiveCwd,
 							sessionId,
 							sessionFile: sessionFile ?? undefined,
 							kernelOwnerId,
@@ -576,7 +651,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 								upsertStatusEvent(cellResult.statusEvents, event);
 								pushUpdate();
 							},
-						});
+						};
+						if (cell.resolved.sshHost) {
+							executeOptions.sshHost = cell.resolved.sshHost;
+						}
+						result = await backend.execute(cell.code, executeOptions);
 					} finally {
 						idle.dispose();
 						activeLiveCell = undefined;
@@ -662,6 +741,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
 						};
+						addTargetDetails(details);
 						if (notice) details.notice = notice;
 
 						return toolResult(details)
@@ -687,6 +767,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
 						};
+						addTargetDetails(details);
 						if (notice) details.notice = notice;
 
 						return toolResult(details)
@@ -715,6 +796,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 					statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 				};
+				addTargetDetails(details);
 				if (notice) details.notice = notice;
 
 				return toolResult(details)

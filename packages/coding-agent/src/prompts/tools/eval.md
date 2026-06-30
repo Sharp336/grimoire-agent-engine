@@ -12,8 +12,11 @@ Fields:
 - `title` (optional) — short transcript label (e.g. `"imports"`).
 - `timeout` (optional) — seconds. Raise only for heavy compute or long non-agent tool calls.
 - `reset` (optional) — wipe this language's kernel first.{{#ifAll py js}} Per-language: a `py` reset never touches the JS VM.{{/ifAll}}
+- `host` (optional) — configured SSH host name from the `ssh` tool's available hosts; Python only.
+- `cwd` (optional) — remote working directory; valid only with `host`.
 
 {{#if py}}Live event loop: use top-level `await` directly; `asyncio.run(…)` raises "cannot be called from a running event loop".{{/if}}
+{{#if py}}Remote Python over SSH: state persists per language+host+cwd; different host = different kernel. Helpers (`tool.*`, `completion`, `agent`) still call this local session while code runs remotely. Plain `read`/`write` use the remote filesystem; use `tool.read`/`tool.write` or `ssh://` for local/session resources.{{/if}}
 {{#if js}}JS runs under **Bun**: Bun globals/APIs are available (`Bun.file`, `Bun.write`, `Bun.$`, `fetch`, `Buffer`); top-level `await`/`return` work directly.{{/if}}
 {{#if rb}}Ruby: synchronous; helper options are keyword args (e.g. `output("id", limit: 2)`); the last expression auto-displays unless it is `nil`, an assignment, or a definition (like IRB).{{/if}}
 {{#if jl}}Julia: synchronous; helper options are standard keyword args (e.g. `output("id", limit=2)`); the last expression auto-displays unless it is an assignment or a definition (like the Julia REPL).{{/if}}
@@ -68,5 +71,5 @@ Pipe handles through stage helpers to build a dependency graph — acyclic waves
 {{/if}}
 
 <critical>
-Prior top-level names (`data`, `sessions`, helpers, imports) survive into the next eval call — reuse them; NEVER re-import, re-require, or re-declare a helper. Re-read a file only if it may have changed since the last read. Re-run setup only after `reset`, a crash, or a `NameError`/`ReferenceError`.
+Prior top-level names (`data`, `sessions`, helpers, imports) survive into the next eval call only for the same language+host+cwd kernel — reuse them there. Different `host`/`cwd` = different kernel; re-run setup as after `reset`, a crash, or a `NameError`/`ReferenceError`.
 </critical>

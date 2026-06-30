@@ -51,6 +51,10 @@ interface SSHArgsOptions {
 	platform?: SshPlatform;
 	/** When true, omit `-n` so the remote command can read from our piped stdin. */
 	allowStdin?: boolean;
+	/** When false, force this invocation not to use or create an SSH ControlMaster. */
+	controlMaster?: boolean;
+	/** Extra ssh options inserted before the remote target. */
+	extraArgs?: readonly string[];
 }
 
 function ensureControlDir() {
@@ -100,11 +104,14 @@ async function validateKeyPermissions(keyPath?: string, platform: SshPlatform = 
 function buildCommonArgs(host: SSHConnectionTarget, options?: SSHArgsOptions): string[] {
 	const args = options?.allowStdin ? [] : ["-n"];
 
-	if (supportsSshControlMaster(options?.platform)) {
+	if (options?.controlMaster === false) {
+		args.push("-o", "ControlMaster=no", "-S", "none");
+	} else if (supportsSshControlMaster(options?.platform)) {
 		args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${CONTROL_PATH}`, "-o", "ControlPersist=3600");
 	}
 
 	args.push("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new");
+	if (options?.extraArgs) args.push(...options.extraArgs);
 
 	if (host.port) {
 		args.push("-p", String(host.port));

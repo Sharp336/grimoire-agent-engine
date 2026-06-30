@@ -35,16 +35,18 @@ export default {
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const kernelMode = readSetting<PythonExecutorOptions["kernelMode"]>(opts.session, "python.kernelMode");
+		const remote = opts.sshHost !== undefined;
 		const executorOptions: PythonExecutorOptions = {
 			cwd: opts.cwd,
+			sshHost: opts.sshHost,
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
 			sessionId: namespaceSessionId(opts.sessionId),
 			kernelMode,
-			interpreter: readInterpreterSetting(opts.session),
-			sessionFile: opts.sessionFile,
-			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
-			localRoots: resolveEvalUrlRoots(opts.session),
+			interpreter: remote ? undefined : readInterpreterSetting(opts.session),
+			sessionFile: remote ? undefined : opts.sessionFile,
+			artifactsDir: remote ? undefined : (opts.session.getArtifactsDir?.() ?? undefined),
+			localRoots: remote ? undefined : resolveEvalUrlRoots(opts.session),
 			kernelOwnerId: opts.kernelOwnerId,
 			reset: opts.reset,
 			onChunk: opts.onChunk,
