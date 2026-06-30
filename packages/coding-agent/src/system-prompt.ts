@@ -480,6 +480,8 @@ export interface BuildSystemPromptOptions {
 	activeRepoContext?: ActiveRepoContext | null;
 	/** Whether jailbreak mode is enabled. Strips behavioral safety guidelines and forces the jailbreak personality. Default: false */
 	jailbreakMode?: boolean;
+	/** When true, omits the personality block entirely — used to suppress personality for subagents. Default: false */
+	suppressPersonality?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -524,6 +526,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		renderMermaid = true,
 		activeRepoContext: providedActiveRepoContext,
 		jailbreakMode = false,
+		suppressPersonality = false,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -747,8 +750,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		dateTime,
 		cwd: promptCwd,
 		model: model ?? "",
-		personality:
-			personality === "none" ? "" : jailbreakMode ? JAILBREAK_PERSONALITY : PERSONALITY_SPECS[personality].trim(),
+		personality: suppressPersonality
+			? ""
+			: jailbreakMode
+				? JAILBREAK_PERSONALITY
+				: personality === "none"
+					? ""
+					: PERSONALITY_SPECS[personality].trim(),
 		jailbreakMode,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",

@@ -203,12 +203,20 @@ describe("jailbreak mode", () => {
 		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
 	});
 
-	it("does not render the jailbreak personality for subagents (personality none)", async () => {
+	it("renders the jailbreak personality when a main-session user has personality none", async () => {
 		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, personality: "none", jailbreakMode: true });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain(jailbreakPersonalityText.trim());
+	});
+
+	it("suppresses the personality when suppressPersonality is set (subagent invariant)", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, suppressPersonality: true, jailbreakMode: true });
 		const prompt = systemPrompt.join("\n");
 
 		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
 		expect(prompt).not.toContain("<personality>");
+		expect(prompt).not.toContain("EXECUTION WORKFLOW");
 	});
 
 	it("renders the jailbreak personality in the custom system prompt path", async () => {

@@ -2287,6 +2287,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				jailbreakMode: settings.get("jailbreakMode"),
+				suppressPersonality: agentKind === "sub",
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});
