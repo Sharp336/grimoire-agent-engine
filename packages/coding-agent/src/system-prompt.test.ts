@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import defaultPersonalityText from "./prompts/system/personalities/default.md" with { type: "text" };
+import jailbreakPersonalityText from "./prompts/system/personalities/jailbreak.md" with { type: "text" };
+import { buildSystemPrompt } from "./system-prompt";
 
 interface ProbeRunResult {
 	elapsedMs: number;
@@ -155,4 +158,67 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 		expect(result.elapsedMs).toBeLessThan(2000);
 		expect(result.childElapsedMs).toBeLessThan(2000);
 	}, 15_000);
+});
+
+describe("jailbreak mode", () => {
+	const workspaceTree = {
+		rootPath: "/tmp/project",
+		rendered: "",
+		truncated: false,
+		totalLines: 0,
+		agentsMdFiles: [],
+	};
+
+	const baseOpts = {
+		contextFiles: [],
+		skills: [],
+		toolNames: [],
+		cwd: "/tmp/project",
+		personality: "default" as const,
+		activeRepoContext: null,
+		includeWorkspaceTree: false,
+		renderMermaid: false,
+		workspaceTree,
+	};
+
+	it("strips behavioral safety guidelines and forces the jailbreak personality when enabled", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, jailbreakMode: true });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).not.toContain("EXECUTION WORKFLOW");
+		expect(prompt).not.toContain("DELIVERY CONTRACT");
+		expect(prompt).not.toContain("Each response MUST advance the task");
+		expect(prompt).not.toContain(defaultPersonalityText.trim());
+		expect(prompt).toContain(jailbreakPersonalityText.trim());
+	});
+
+	it("retains safety guidelines and the configured personality when disabled", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, jailbreakMode: false });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain("EXECUTION WORKFLOW");
+		expect(prompt).toContain("DELIVERY CONTRACT");
+		expect(prompt).toContain("Each response MUST advance the task");
+		expect(prompt).toContain(defaultPersonalityText.trim());
+		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
+	});
+
+	it("does not render the jailbreak personality for subagents (personality none)", async () => {
+		const { systemPrompt } = await buildSystemPrompt({ ...baseOpts, personality: "none", jailbreakMode: true });
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).not.toContain(jailbreakPersonalityText.trim());
+		expect(prompt).not.toContain("<personality>");
+	});
+
+	it("renders the jailbreak personality in the custom system prompt path", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			...baseOpts,
+			jailbreakMode: true,
+			customPrompt: "You are a custom assistant.",
+		});
+		const prompt = systemPrompt.join("\n");
+
+		expect(prompt).toContain(jailbreakPersonalityText.trim());
+	});
 });

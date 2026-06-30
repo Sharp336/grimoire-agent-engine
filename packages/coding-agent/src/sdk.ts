@@ -806,6 +806,7 @@ export interface BuildSystemPromptOptions {
 	appendPrompt?: string;
 	inlineToolDescriptors?: boolean;
 	includeWorkspaceTree?: boolean;
+	jailbreakMode?: boolean;
 }
 
 /**
@@ -824,6 +825,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		appendSystemPrompt: options.appendPrompt,
 		inlineToolDescriptors: options.inlineToolDescriptors,
 		includeWorkspaceTree: options.includeWorkspaceTree,
+		jailbreakMode: options.jailbreakMode,
 		toolNames: options.tools?.map(tool => tool.name),
 		tools: toolMap ? buildSystemPromptToolMetadata(toolMap) : undefined,
 	});
@@ -2284,6 +2286,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				memoryRootEnabled: memoryBackend.id === "local",
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
+				jailbreakMode: settings.get("jailbreakMode"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});

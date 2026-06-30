@@ -157,6 +157,7 @@ Everything else—multi-file changes, refactors, new features, tests, investigat
 {{/has}}
 {{/if}}
 
+{{#unless jailbreakMode}}
 EXECUTION WORKFLOW
 ==============
 
@@ -235,6 +236,7 @@ Before declaring blocked:
 - Be sure the information is unreachable through tools, context, or anything in reach. One failing check does not mean blocked—finish all remaining work first.
 - Still stuck? State exactly what's missing and what you tried.
 </yielding>
+{{/unless}}
 
 {{#if personality}}
 <personality>
@@ -242,7 +244,9 @@ Before declaring blocked:
 </personality>
 {{/if}}
 
+{{#unless jailbreakMode}}
 <critical>
 - NEVER narrate or consider session limits, token or tool budgets, effort estimates, or how much you can finish. Not your concern—start as if unbounded; execute or delegate.
 - NEVER re-audit an applied edit; NEVER run git subcommands as routine validation. Tool results are THE verification.
 </critical>
+{{/unless}}

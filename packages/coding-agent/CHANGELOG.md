@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `jailbreakMode` setting that strips the behavioral safety guidelines (MUST/NEVER contract blocks, delivery contract, and session-limit critical blocks) from the system prompt and renders the unrestrained jailbreak personality. When enabled, the configured personality is overridden and no safety-guideline blocks render across both the main system prompt and the project prompt footer.
+
 ## [16.2.9] - 2026-06-30
 
 ### Breaking Changes

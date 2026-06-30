@@ -1061,6 +1061,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	jailbreakMode: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Jailbreak Mode",
+			description:
+				"Removes the behavioral safety guidelines from the system prompt and renders the unrestrained jailbreak personality. When enabled, no MUST/NEVER contract blocks render.",
+		},
+	},
+
 	personality: {
 		type: "enum",
 		values: ["default", "friendly", "pragmatic", "none"] as const,
