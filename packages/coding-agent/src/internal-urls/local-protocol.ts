@@ -189,9 +189,29 @@ async function listFilesRecursively(rootPath: string): Promise<string[]> {
 	return files.sort((a, b) => a.localeCompare(b));
 }
 
+function encodeLocalUrlPath(relativePath: string): string {
+	return relativePath
+		.split("/")
+		.map(segment => encodeURIComponent(segment))
+		.join("/");
+}
+
+function rawDelimiterKind(url: InternalUrl): "query" | "fragment" | null {
+	const queryIndex = url.href.indexOf("?");
+	const fragmentIndex = url.href.indexOf("#");
+	if (fragmentIndex !== -1 && (queryIndex === -1 || fragmentIndex < queryIndex)) {
+		return "fragment";
+	}
+	if (queryIndex !== -1) {
+		return "query";
+	}
+	return null;
+}
+
 async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
 	const files = await listFilesRecursively(localRoot);
-	const listing = files.length === 0 ? "(empty)" : files.map(file => `- [${file}](local://${file})`).join("\n");
+	const listing =
+		files.length === 0 ? "(empty)" : files.map(file => `- [${file}](local://${encodeLocalUrlPath(file)})`).join("\n");
 	const content =
 		`# Local\n\n` +
 		`Session-scoped scratch space for large intermediate data, subagent handoffs, and reusable planning artifacts.\n\n` +
@@ -209,6 +229,21 @@ async function buildListing(url: InternalUrl, localRoot: string): Promise<Intern
 }
 
 function extractRelativePath(url: InternalUrl): string {
+	// `?`/`#` are URL delimiters, so parseInternalUrl strips them from the path
+	// (`local://note.txt?draft` → `note.txt`). Reject the unsupported suffix instead of
+	// silently operating on the truncated path; a literal `?`/`#` in a filename
+	// must be percent-encoded (`%3F`/`%23`).
+	const rawDelimiter = rawDelimiterKind(url);
+	if (rawDelimiter === "query") {
+		throw new Error(
+			`local:// does not support URL query strings; percent-encode a literal '?' as %3F in the path: ${url.href}`,
+		);
+	}
+	if (rawDelimiter === "fragment") {
+		throw new Error(
+			`local:// does not support URL fragments; percent-encode a literal '#' as %23 in the path: ${url.href}`,
+		);
+	}
 	const host = url.rawHost || url.hostname;
 	const pathname = url.rawPathname ?? url.pathname;
 
@@ -460,7 +495,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		const localRoot = path.resolve(resolveLocalRoot(opts));
 		try {
 			const files = await listFilesRecursively(localRoot);
-			return files.map(value => ({ value }));
+			return files.map(file => ({ value: encodeLocalUrlPath(file), label: file }));
 		} catch (err) {
 			if (isEnoent(err)) return [];
 			throw err;

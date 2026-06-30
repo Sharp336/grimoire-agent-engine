@@ -195,4 +195,113 @@ describe("LocalProtocolHandler", () => {
 			).rejects.toThrow("Local file not found: local://PLAN.md");
 		});
 	});
+
+	it("rejects raw query and fragment delimiters in local URLs", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			await fs.mkdir(path.join(artifactsDir, "local"), { recursive: true });
+			await Bun.write(path.join(artifactsDir, "local", "note.txt"), "base");
+
+			LocalProtocolHandler.setOverride({
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-query-fragment",
+			});
+			const router = InternalUrlRouter.instance();
+
+			await expect(router.resolve("local://note.txt?draft")).rejects.toThrow(
+				"local:// does not support URL query strings",
+			);
+			await expect(router.resolve("local://note.txt#draft")).rejects.toThrow(
+				"local:// does not support URL fragments",
+			);
+			expect(() =>
+				resolveLocalUrlToPath("local://note.txt?draft", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-query-fragment",
+				}),
+			).toThrow("local:// does not support URL query strings");
+			expect(() =>
+				resolveLocalUrlToPath("local://note.txt#draft", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-query-fragment",
+				}),
+			).toThrow("local:// does not support URL fragments");
+			await expect(router.resolve("local://note.txt?")).rejects.toThrow(
+				"local:// does not support URL query strings",
+			);
+			await expect(router.resolve("local://note.txt#")).rejects.toThrow("local:// does not support URL fragments");
+			expect(() =>
+				resolveLocalUrlToPath("local://note.txt?", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-query-fragment",
+				}),
+			).toThrow("local:// does not support URL query strings");
+			expect(() =>
+				resolveLocalUrlToPath("local://note.txt#", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-query-fragment",
+				}),
+			).toThrow("local:// does not support URL fragments");
+		});
+	});
+
+	it("resolves percent-encoded query and fragment characters as filename bytes", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			await fs.mkdir(localRoot, { recursive: true });
+			await Bun.write(path.join(localRoot, "note.txt#draft"), "fragment file");
+
+			LocalProtocolHandler.setOverride({
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-encoded-delimiters",
+			});
+			const router = InternalUrlRouter.instance();
+
+			if (process.platform !== "win32") {
+				await Bun.write(path.join(localRoot, "note.txt?draft"), "query file");
+				const queryResource = await router.resolve("local://note.txt%3Fdraft");
+				expect(queryResource.content).toBe("query file");
+			}
+			const fragmentResource = await router.resolve("local://note.txt%23draft");
+
+			expect(fragmentResource.content).toBe("fragment file");
+			expect(
+				resolveLocalUrlToPath("local://note.txt%3Fdraft", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-encoded-delimiters",
+				}),
+			).toBe(path.join(localRoot, "note.txt?draft"));
+			expect(
+				resolveLocalUrlToPath("local://note.txt%23draft", {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "session-encoded-delimiters",
+				}),
+			).toBe(path.join(localRoot, "note.txt#draft"));
+		});
+	});
+
+	it("percent-encodes generated listing links and completion values", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			await fs.mkdir(path.join(localRoot, "nested dir"), { recursive: true });
+			await Bun.write(path.join(localRoot, "nested dir", "note#draft.txt"), "fragment file");
+
+			LocalProtocolHandler.setOverride({
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-generated-links",
+			});
+			const router = InternalUrlRouter.instance();
+
+			const listing = await router.resolve("local://");
+			const completions = await router.complete("local", "");
+
+			expect(listing.content).toContain("[nested dir/note#draft.txt](local://nested%20dir/note%23draft.txt)");
+			expect(completions).toContainEqual({
+				value: "nested%20dir/note%23draft.txt",
+				label: "nested dir/note#draft.txt",
+			});
+		});
+	});
 });
