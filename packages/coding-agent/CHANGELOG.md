@@ -2285,6 +2285,9 @@
 - Fixed performance degradation in session context and branch path reconstruction on deep linear histories.
 - Fixed agents repeating the same tool call across turns without corrective steering by wiring the cross-turn tool-call loop guard into sessions.
 - Fixed OpenAI-compatible model discovery (including LM Studio) reporting flat default context windows when proxies omit context length metadata, by resolving discovered IDs against the bundled model reference catalog to inherit accurate context windows, output limits, display names, modalities, and reasoning support.
+### Added
+
+- Added a `powershell` tool backed by a persistent `pwsh` host (one shared runspace per session via the native `PsHost`). Unlike one-shot shells, session state — variables, imported modules, current location, `$LASTEXITCODE`, and the live result objects from prior commands — persists across calls; `$__omp.Last` exposes the previous command's objects for inspection without re-running. All PowerShell output streams are surfaced: success and `Write-Host`/`Write-Information` verbatim, with `Write-Warning`/`Write-Verbose`/`Write-Debug` labeled and ANSI color-coded (yellow/red) like the console. Output streams through the standard `OutputSink` (tail + artifact spill), non-zero exits and error-stream writes surface as `isError` results, timeout/abort stop only the in-flight pipeline and preserve runspace state, and the result carries the host PID for `Enter-PSHostProcess` debugging. Opt-in via `powershell.enabled` (default off; discoverable; loads only when `pwsh` is on PATH).
 
 ## [16.2.11] - 2026-07-01
 

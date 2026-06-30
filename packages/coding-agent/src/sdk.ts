@@ -217,6 +217,7 @@ import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
+import { disposeAllPsHosts } from "./tools/pshost-manager";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
 import { ttsTool } from "./tools/tts";
@@ -937,6 +938,14 @@ function registerEvalCleanup(): void {
 	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
+let powershellCleanupRegistered = false;
+
+function registerPowerShellCleanup(): void {
+	if (powershellCleanupRegistered) return;
+	powershellCleanupRegistered = true;
+	postmortem.register("powershell-cleanup", disposeAllPsHosts);
+}
+
 export function customToolToDefinition(tool: CustomTool): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
@@ -1240,6 +1249,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	registerSshCleanup();
 	registerEvalCleanup();
+	registerPowerShellCleanup();
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager

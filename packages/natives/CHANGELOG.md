@@ -327,6 +327,9 @@
 
 - Fixed an issue where panics in native worker tasks (such as grep, AST parsing, globbing, workspace listing, HTML-to-markdown conversion, fuzzy finding, and clipboard image reading) would abort the host process instead of properly rejecting the returned JavaScript Promise.
 - Fixed a crash on Windows under low memory or commit charge conditions when spawning worker threads for token counting or sorting operations.
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog self-terminates the sidecar if the host process dies, so a hard crash cannot orphan it.
 
 ## [16.2.11] - 2026-07-01
 

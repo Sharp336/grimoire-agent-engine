@@ -182,6 +182,42 @@ export declare class Process {
   status(): ProcessStatus
 }
 
+/** Persistent PowerShell host backed by a long-lived `pwsh` sidecar. */
+export declare class PsHost {
+  /**
+   * Create a host handle. The sidecar is not launched until [`PsHost::start`]
+   * — construction only allocates channels and resolves the bootstrap script.
+   */
+  constructor(options: PsHostOptions)
+  /**
+   * Launch the sidecar (idempotent) and wait for its ready handshake.
+   *
+   * Returns the sidecar PID, usable with `Enter-PSHostProcess` for debugging.
+   */
+  start(): Promise<number>
+  /** PID of the sidecar (`0` until [`PsHost::start`] completes). */
+  get pid(): number
+  /**
+   * Run `command` on the shared runspace.
+   *
+   * `on_chunk` streams rendered output/error text. Returns exit status and
+   * flags; cancellation (timeout / abort signal) is reported via `cancelled`
+   * / `timed_out` rather than rejection, and leaves the runspace intact.
+   */
+  run(options: PsRunOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<PsRunResult>
+  /**
+   * Request that the in-flight pipeline stop, without tearing down the host.
+   *
+   * Resolves immediately even when nothing is running.
+   */
+  abort(): void
+  /**
+   * Gracefully shut down the sidecar: send `exit`, wait briefly, then
+   * hard-kill the process tree if it has not exited.
+   */
+  dispose(): Promise<void>
+}
+
 /** Stateful PTY session for interactive stdin/stdout passthrough. */
 export declare class PtySession {
   constructor()
@@ -1660,6 +1696,55 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+}
+
+/** Options for spawning a persistent PowerShell host. */
+export interface PsHostOptions {
+  /** PowerShell executable to launch. Defaults to `pwsh`. */
+  shellPath?: string
+  /** Working directory for the host process (initial location). */
+  cwd?: string
+  /** Environment variables applied once at host launch. */
+  sessionEnv?: Record<string, string>
+  /**
+   * PID of the omp process; the host self-terminates if it dies (orphan
+   * guard). Omit or `0` to disable the watchdog.
+   */
+  parentPid?: number
+  /** Cap on retained result history entries. Defaults to `20`. */
+  historyDepth?: number
+  /** Milliseconds to wait for the ready handshake. Defaults to `15000`. */
+  startupTimeoutMs?: number
+}
+
+/** Options for running a command on the host. */
+export interface PsRunOptions {
+  /** PowerShell command text to execute in the shared runspace. */
+  command: string
+  /** Location to set before running (persists into the runspace). */
+  cwd?: string
+  /** Environment variables to set before running. */
+  env?: Record<string, string>
+  /** Render width passed to `Out-String`. Defaults to `120`. */
+  width?: number
+  /** Timeout in milliseconds before the in-flight pipeline is stopped. */
+  timeoutMs?: number
+  /** Abort signal for cancelling the operation. */
+  signal?: unknown
+}
+
+/** Result of running a command on the host. */
+export interface PsRunResult {
+  /** `$LASTEXITCODE` after the command, when set. */
+  exitCode?: number
+  /** Whether the command wrote to the error stream or set `HadErrors`. */
+  hadErrors: boolean
+  /** Whether the command was cancelled (abort signal or external stop). */
+  cancelled: boolean
+  /** Whether the command timed out before completion. */
+  timedOut: boolean
+  /** Monotonic id of this execution within the host. */
+  execId: number
 }
 
 /** Result of a PTY command run. */
