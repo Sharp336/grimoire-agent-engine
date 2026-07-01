@@ -55,9 +55,11 @@ describe("xiaomi oauth validation", () => {
 	it("sends Authorization: Bearer for standard sk- keys as well", async () => {
 		const capturedHeaders: Record<string, string>[] = [];
 		const capturedUrls: string[] = [];
+		const capturedBodies: Array<{ model?: string; max_tokens?: number; messages?: Array<{ role: string; content: string }> }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
 			capturedUrls.push(typeof input === "string" ? input : input.toString());
 			capturedHeaders.push((init?.headers ?? {}) as Record<string, string>);
+			capturedBodies.push(JSON.parse(String(init?.body ?? "{}")));
 			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 		});
 
@@ -72,5 +74,8 @@ describe("xiaomi oauth validation", () => {
 		const headers = capturedHeaders[0];
 		expect(headers.Authorization).toBe("Bearer sk-test-key");
 		expect(headers["x-api-key"]).toBeUndefined();
+		expect(capturedBodies[0]?.model).toBe("mimo-v2.5");
+		expect(capturedBodies[0]?.max_tokens).toBe(1);
+		expect(capturedBodies[0]?.messages).toEqual([{ role: "user", content: "ping" }]);
 	});
 });
