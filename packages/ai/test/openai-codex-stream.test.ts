@@ -53,6 +53,22 @@ function createCodexTestModel(baseUrl?: string): Model<"openai-codex-responses">
 	});
 }
 
+function createCodexApiKeyGatewayModel(): Model<"openai-codex-responses"> {
+	return buildModel({
+		id: "gpt-5.5",
+		name: "GPT-5.5 via Codex Gateway",
+		api: "openai-codex-responses",
+		provider: "codex-api-key-gateway",
+		baseUrl: "https://codex-gateway.example.test",
+		reasoning: true,
+		preferWebsockets: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 270000,
+		maxTokens: 128000,
+	});
+}
+
 function createCodexTestContext(): Context {
 	return {
 		systemPrompt: ["You are a helpful assistant."],
@@ -67,6 +83,18 @@ function createCompletedCodexSse(text: string): string {
 		`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text }] } })}`,
 		`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
 	].join("\n\n")}\n\n`;
+}
+
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(`git ${args.join(" ")} failed: ${Buffer.from(result.stderr).toString("utf8")}`);
+	}
+	return Buffer.from(result.stdout).toString("utf8").trim();
 }
 
 function createStatefulCodexSse(text: string, responseId: string): string {
@@ -305,6 +333,127 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(capturedBody?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "replacement" }] }]);
 		expect(capturedBody?.prompt_cache_key).toBe("replacement-cache-key");
+	});
+
+	it("uses Codex Desktop request metadata for API-key custom providers", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-");
+		setAgentDir(tempDir.path());
+		const sessionId = "019f1e0a-778b-7f72-ac5d-c947c5cbd7ec";
+		const apiKey = "gateway-test-key";
+		const model = createCodexApiKeyGatewayModel();
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Headers | undefined;
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			capturedUrl = String(input);
+			capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey,
+			sessionId,
+			fetch: fetchMock,
+			preferWebsockets: false,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedUrl).toBe("https://codex-gateway.example.test/codex/responses");
+		expect(capturedHeaders?.get("authorization")).toBe(`Bearer ${apiKey}`);
+		expect(capturedHeaders?.has("chatgpt-account-id")).toBe(false);
+		expect(capturedHeaders?.has("openai-beta")).toBe(false);
+		expect(capturedHeaders?.get("originator")).toBe("pi");
+		expect(capturedHeaders?.get("accept")).toBe("text/event-stream");
+		expect(capturedHeaders?.get("content-type")).toBe("application/json");
+		expect(capturedHeaders?.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+		expect(capturedHeaders?.get("session-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("thread-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("x-client-request-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("x-codex-window-id")).toBe(`${sessionId}:0`);
+		expect(capturedHeaders?.get("user-agent")).toStartWith("pi/");
+
+		const turnMetadataHeader = capturedHeaders?.get("x-codex-turn-metadata");
+		expect(turnMetadataHeader).toBeString();
+		const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+		expect(turnMetadata).toMatchObject({
+			session_id: sessionId,
+			thread_id: sessionId,
+			window_id: `${sessionId}:0`,
+			request_kind: "turn",
+			thread_source: "user",
+			sandbox: "seatbelt",
+			workspace_kind: "projectless",
+		});
+		expect(typeof turnMetadata.installation_id).toBe("string");
+		expect(typeof turnMetadata.turn_id).toBe("string");
+		expect(typeof turnMetadata.turn_started_at_unix_ms).toBe("number");
+		expect(turnMetadata.workspaces).toBeUndefined();
+
+		const clientMetadata = capturedBody?.client_metadata as Record<string, string> | undefined;
+		expect(clientMetadata).toMatchObject({
+			"x-codex-window-id": `${sessionId}:0`,
+			"x-codex-installation-id": turnMetadata.installation_id,
+			turn_id: turnMetadata.turn_id,
+			thread_id: sessionId,
+			session_id: sessionId,
+			"x-codex-turn-metadata": turnMetadataHeader,
+		});
+		expect(capturedBody?.store).toBe(false);
+		expect(capturedBody?.previous_response_id).toBeUndefined();
+	});
+
+	it("includes Codex Desktop workspace metadata for API-key project requests", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-project-");
+		setAgentDir(tempDir.path());
+		const repoDir = tempDir.path();
+		await Bun.write(`${repoDir}/file.txt`, "hello\n");
+		runGit(repoDir, ["init", "--initial-branch=main"]);
+		runGit(repoDir, ["config", "user.email", "tester@example.com"]);
+		runGit(repoDir, ["config", "user.name", "Tester"]);
+		runGit(repoDir, ["add", "file.txt"]);
+		runGit(repoDir, ["commit", "-m", "baseline"]);
+		runGit(repoDir, ["remote", "add", "origin", "https://example.test/repo.git"]);
+		const head = runGit(repoDir, ["rev-parse", "HEAD"]);
+		const sessionId = "019f1e0a-778b-7f72-ac5d-c947c5cbd7ec";
+		const model = createCodexApiKeyGatewayModel();
+		let capturedHeaders: Headers | undefined;
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: "gateway-test-key",
+			sessionId,
+			fetch: fetchMock,
+			preferWebsockets: false,
+			cwd: repoDir,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		const turnMetadataHeader = capturedHeaders?.get("x-codex-turn-metadata");
+		expect(turnMetadataHeader).toBeString();
+		const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+		expect(turnMetadata.workspace_kind).toBe("project");
+		expect(turnMetadata.workspaces).toEqual({
+			[repoDir]: {
+				associated_remote_urls: { origin: "https://example.test/repo.git" },
+				latest_git_commit_hash: head,
+				has_changes: false,
+			},
+		});
+		const clientMetadata = capturedBody?.client_metadata as Record<string, string> | undefined;
+		expect(clientMetadata?.["x-codex-turn-metadata"]).toBe(turnMetadataHeader ?? undefined);
+		expect(clientMetadata?.["x-codex-window-id"]).toBe(`${sessionId}:0`);
 	});
 
 	it("forwards SimpleStreamOptions textVerbosity into the Codex request body", async () => {
