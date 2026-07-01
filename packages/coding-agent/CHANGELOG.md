@@ -8,6 +8,10 @@
 - Added SSH-host execution for the bash tool and SSH-aware remote Python bridge defaults for `tool.bash`, `tool.ssh`, `tool.read`, `tool.write`, and explicit-path `tool.grep` calls.
 - Added a `copy` built-in tool for byte-exact regular-file copies between local paths, `local://`/`vault://` internal URIs, and `ssh://` remote hosts; remote Python eval `tool.copy` defaults to the SSH host/cwd.
 
+### Fixed
+
+- Fixed the eval status line briefly showing "running javascript" for Python cells during partial argument streaming, before the full `language` field parsed.
+
 ## [16.2.9] - 2026-06-30
 
 ### Breaking Changes
