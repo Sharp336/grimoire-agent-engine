@@ -258,6 +258,30 @@ describe("learned-lesson read-back", () => {
 		expect(out).toContain("[REDACTED]");
 	});
 
+	it("preserves non-list content across subsequent lesson saves", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const root = getMemoryRoot(agentDir, settings.getCwd());
+		// Hand-edit learned.md with a header, prose, and blank lines
+		// interspersed with list entries.
+		await Bun.write(
+			path.join(root, "learned.md"),
+			"# Project Lessons\n\nRemember these conventions:\n\n- existing 1\n- existing 2\n",
+		);
+		// Save a new lesson — must not destroy the header or prose.
+		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "new lesson" });
+		const raw = await Bun.file(path.join(root, "learned.md")).text();
+		expect(raw).toContain("# Project Lessons");
+		expect(raw).toContain("Remember these conventions:");
+		expect(raw).toContain("- new lesson");
+		expect(raw).toContain("- existing 1");
+		expect(raw).toContain("- existing 2");
+		// Dedup: saving the same lesson twice should not duplicate it.
+		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "new lesson" });
+		const deduped = await Bun.file(path.join(root, "learned.md")).text();
+		const count = [...deduped.matchAll(/^- new lesson$/gm)].length;
+		expect(count).toBe(1);
+	});
+
 	it("drops learned lessons when the summary already fills the injection budget", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const root = getMemoryRoot(agentDir, settings.getCwd());

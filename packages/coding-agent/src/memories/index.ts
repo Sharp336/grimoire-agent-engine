@@ -1341,12 +1341,24 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 	}
-	const prior = existing
-		.split("\n")
-		.map(l => l.trim())
-		.filter(l => l.startsWith("- ") && l !== line);
-	const lessons = [line, ...prior].slice(0, MAX_LEARNED_LESSONS);
-	await Bun.write(filePath, `${lessons.join("\n")}\n`);
+	// Split existing content, preserving non-list lines (headers, prose,
+	// blank lines, blockquotes, etc.) while deduping and capping only the
+	// bullet-list lesson entries.  Hand-edited content outside the list
+	// region survives every write — the read path already preserves all
+	// lines (readLearnedLessons), so this brings the write path in line.
+	const preserved: string[] = [];
+	const priorLessons: string[] = [];
+	for (const l of existing.split("\n")) {
+		const trimmed = l.trim();
+		if (trimmed.startsWith("- ")) {
+			if (trimmed !== line) priorLessons.push(trimmed);
+		} else {
+			preserved.push(l);
+		}
+	}
+	const lessons = [line, ...priorLessons].slice(0, MAX_LEARNED_LESSONS);
+	const output = [...preserved, ...lessons].join("\n").trim();
+	await Bun.write(filePath, `${output}\n`);
 }
 
 /**
