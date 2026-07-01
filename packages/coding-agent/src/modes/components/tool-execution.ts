@@ -605,7 +605,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	#shouldResetDisplayOnFirstResult(): boolean {
 		const tool = this.#tool as { forceFirstResultViewportRepaint?: boolean } | undefined;
-		return tool?.forceFirstResultViewportRepaint ?? toolRenderers[this.#toolName]?.forceFirstResultViewportRepaint ?? false;
+		return (
+			tool?.forceFirstResultViewportRepaint ??
+			toolRenderers[this.#toolName]?.forceFirstResultViewportRepaint ??
+			false
+		);
 	}
 
 	#shouldResetDisplayOnSettle(): boolean {

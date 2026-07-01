@@ -77,7 +77,10 @@ describe("ssh tool block commit stability", () => {
 	it("resets display when the first SSH result replaces a provisional pending preview", () => {
 		const resetDisplay = vi.fn();
 		const requestRender = vi.fn();
-		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, { resetDisplay, requestRender } as unknown as TUI);
+		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, {
+			resetDisplay,
+			requestRender,
+		} as unknown as TUI);
 
 		component.updateResult(partialResult("connecting…"), true);
 
@@ -88,7 +91,10 @@ describe("ssh tool block commit stability", () => {
 	it("resets display again when a provisional SSH result settles", () => {
 		const resetDisplay = vi.fn();
 		const requestRender = vi.fn();
-		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, { resetDisplay, requestRender } as unknown as TUI);
+		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, {
+			resetDisplay,
+			requestRender,
+		} as unknown as TUI);
 
 		component.updateResult(partialResult("connecting…"), true);
 		component.updateResult(partialResult("done\n"), false);

@@ -466,7 +466,14 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 
 		transcript.addChild(new StaticBlock(["lead-0", "lead-1"]));
 		transcript.addChild(new LiveBarrier(["assistant: still working in a parallel tool…"]));
-		const ssh = new ToolExecutionComponent("ssh", { __partialJson: '{"host":"build-host"' }, {}, undefined, tui, process.cwd());
+		const ssh = new ToolExecutionComponent(
+			"ssh",
+			{ __partialJson: '{"host":"build-host"' },
+			{},
+			undefined,
+			tui,
+			process.cwd(),
+		);
 		transcript.addChild(ssh);
 		tui.addChild(transcript);
 		tui.addChild(new Footer(4));
@@ -475,7 +482,10 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 			tui.start();
 			await settle();
 
-			const initialViewportText = term.getViewport().map(row => Bun.stripANSI(row).trimEnd()).join("\n");
+			const initialViewportText = term
+				.getViewport()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
 			expect(initialViewportText).toContain("⏳ SSH: […]");
 			expect(initialViewportText).toContain("$ …");
 

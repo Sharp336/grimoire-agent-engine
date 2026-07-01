@@ -2787,7 +2787,11 @@ export class TUI extends Container {
 			// or settles, matching the commit-unstable contract used by provisional tool
 			// renders whose top rows would otherwise strand stale history.
 			const commitCeiling =
-				liveRegionStart === undefined ? frameLength : offerBoundary > liveRegionStart ? offerBoundary : liveRegionStart;
+				liveRegionStart === undefined
+					? frameLength
+					: offerBoundary > liveRegionStart
+						? offerBoundary
+						: liveRegionStart;
 			chunkTo = hasVisibleOverlay || geometryChanged ? this.#committedRows : Math.min(windowTop, commitCeiling);
 			if (geometryChanged) {
 				committedPrefixResliced = true;
