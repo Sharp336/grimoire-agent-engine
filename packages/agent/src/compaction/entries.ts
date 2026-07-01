@@ -11,6 +11,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Usage limit/window identifier this assistant request consumed against, when known. */
+	planId?: string | null;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

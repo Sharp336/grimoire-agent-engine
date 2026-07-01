@@ -15,7 +15,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import type { UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageHistoryEntry, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import * as opencodeGoUsage from "@oh-my-pi/pi-ai/usage/opencode-go";
 
@@ -185,6 +185,83 @@ describe("AuthStorage usage history recording", () => {
 		const sevenDay = rows.find(row => row.limitId === "anthropic:7d");
 		expect(sevenDay?.usedFraction).toBeCloseTo(0.84);
 		expect(sevenDay?.status).toBe("warning");
+	});
+});
+describe("AuthStorage active usage limit attribution", () => {
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+	let fetchCalls = 0;
+
+	function activeAnthropicReport(fetchedAt = Date.now()): UsageReport {
+		return {
+			provider: "anthropic",
+			fetchedAt,
+			limits: [
+				{
+					id: "anthropic:7d",
+					label: "Claude 7 Day",
+					scope: { provider: "anthropic", windowId: "7d", shared: true },
+					window: { id: "7d", label: "7 Day", resetsAt: fetchedAt + 7 * 24 * HOUR },
+					amount: { used: 84, limit: 100, usedFraction: 0.84, unit: "percent" },
+					status: "warning",
+				},
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", windowId: "5h", shared: true },
+					window: { id: "5h", label: "5 Hour", resetsAt: fetchedAt + 5 * HOUR },
+					amount: { used: 42, limit: 100, usedFraction: 0.42, unit: "percent" },
+					status: "ok",
+				},
+			],
+			metadata: { accountId: "account-active", email: "active@example.com" },
+		};
+	}
+
+	beforeEach(async () => {
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		store.upsertAuthCredentialForProvider("anthropic", {
+			type: "oauth",
+			access: "oat-active",
+			refresh: "refresh-active",
+			expires: Date.now() + HOUR,
+			accountId: "account-active",
+			email: "active@example.com",
+		});
+		fetchCalls = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			async fetchUsage(params) {
+				fetchCalls += 1;
+				return params.credential.accountId === "account-active" ? activeAnthropicReport() : null;
+			},
+		};
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+		});
+		await storage.reload();
+	});
+
+	afterEach(() => {
+		storage.close();
+		vi.restoreAllMocks();
+	});
+
+	it("resolves the active Anthropic plan id from cached multi-window usage only", async () => {
+		const sessionId = "active-plan-session";
+		expect(await storage.getApiKey("anthropic", sessionId)).toBe("oat-active");
+
+		expect(storage.resolveActiveUsageLimitId("anthropic", { sessionId, modelId: "claude-sonnet-4" })).toBeUndefined();
+		expect(fetchCalls).toBe(0);
+
+		const reports = await storage.fetchUsageReports();
+		expect(reports?.map(report => report.provider)).toEqual(["anthropic"]);
+		expect(fetchCalls).toBe(1);
+
+		expect(storage.resolveActiveUsageLimitId("anthropic", { sessionId, modelId: "claude-sonnet-4" })).toBe(
+			"anthropic:5h",
+		);
+		expect(fetchCalls).toBe(1);
 	});
 });
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Session message metadata now preserves optional plan attribution for host-side stats pipelines. ([#3618](https://github.com/can1357/oh-my-pi/issues/3618))
+
 ## [16.2.4] - 2026-06-28
 
 ### Changed

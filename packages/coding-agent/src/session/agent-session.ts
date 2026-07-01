@@ -317,6 +317,8 @@ import {
 	type CustomMessage,
 	convertToLlm,
 	demoteInterruptedThinking,
+	type FileMentionMessage,
+	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isUserInterruptAbort,
@@ -339,6 +341,14 @@ import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 import { YieldQueue } from "./yield-queue";
+
+type PersistableSessionMessage =
+	| Message
+	| CustomMessage
+	| HookMessage
+	| BashExecutionMessage
+	| PythonExecutionMessage
+	| FileMentionMessage;
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
@@ -2932,6 +2942,20 @@ export class AgentSession {
 		return false;
 	}
 
+	#resolveAssistantPlanId(message: AssistantMessage): string | undefined {
+		return this.#modelRegistry.authStorage.resolveActiveUsageLimitId(message.provider, {
+			sessionId: this.#activeProviderSessionId(),
+			baseUrl: this.#modelRegistry.getProviderBaseUrl(message.provider),
+			modelId: message.model,
+		});
+	}
+
+	#appendSessionMessage(message: PersistableSessionMessage): string {
+		if (message.role !== "assistant") return this.sessionManager.appendMessage(message);
+		const planId = this.#resolveAssistantPlanId(message as AssistantMessage);
+		return this.sessionManager.appendMessage(message, planId ? { planId } : undefined);
+	}
+
 	#persistSessionMessageIfMissing(message: AgentMessage): void {
 		if (
 			message.role !== "user" &&
@@ -2958,7 +2982,7 @@ export class AgentSession {
 			message.toolName === "rewind" &&
 			this.#rewoundToolResultIds.delete(message.toolCallId);
 		if (!skipPersistedRewindResult) {
-			this.sessionManager.appendMessage(message);
+			this.#appendSessionMessage(message);
 		}
 	}
 
@@ -9928,7 +9952,7 @@ export class AgentSession {
 		if (!recoveryCommitted) {
 			const compactionEntryAfter = getLatestCompactionEntry(this.sessionManager.getBranch());
 			if (compactionEntryAfter === compactionEntryBefore) {
-				this.sessionManager.appendMessage(assistantMessage);
+				this.#appendSessionMessage(assistantMessage);
 			}
 		}
 		return result;

@@ -35,6 +35,10 @@ export interface MessageStats {
 	usage: Usage;
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
+	/** Resolved thinking level active for this request, if known */
+	thinkingLevel?: string | null;
+	/** Usage limit/window identifier this request consumed against, if recorded */
+	planId?: string | null;
 }
 
 /**
@@ -61,10 +65,20 @@ export interface SessionHeader {
 
 export interface SessionMessageEntry {
 	type: "message";
+	planId?: string | null;
 	id: string;
 	parentId: string | null;
 	timestamp: string;
 	message: AssistantMessage | { role: "user" | "toolResult" };
+}
+
+export interface SessionThinkingLevelChangeEntry {
+	type: "thinking_level_change";
+	id: string;
+	parentId?: string | null;
+	timestamp: string;
+	thinkingLevel?: string | null;
+	configured?: string | null;
 }
 
 export interface SessionServiceTierChangeEntry {
@@ -75,7 +89,12 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionThinkingLevelChangeEntry
+	| SessionServiceTierChangeEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-request thinking level and plan attribution to message stats, including a one-shot reparse backfill for existing sessions. ([#3618](https://github.com/can1357/oh-my-pi/issues/3618))
+
 ## [16.2.7] - 2026-06-30
 
 ### Fixed

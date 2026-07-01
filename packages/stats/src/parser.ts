@@ -14,6 +14,7 @@ import type {
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
+	SessionThinkingLevelChangeEntry,
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
@@ -86,6 +87,23 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 }
 
 /**
+ * Check if an entry is a thinking-level change.
+ */
+function isThinkingLevelChange(entry: SessionEntry): entry is SessionThinkingLevelChangeEntry {
+	return entry.type === "thinking_level_change";
+}
+
+function normalizeSessionText(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const normalized = value.trim();
+	return normalized.length > 0 ? normalized : null;
+}
+
+function resolveThinkingLevelChange(entry: SessionThinkingLevelChangeEntry): string | null {
+	return normalizeSessionText(entry.thinkingLevel) ?? normalizeSessionText(entry.configured);
+}
+
+/**
  * Extract plain text from a user message content payload.
  */
 function extractUserText(content: unknown): string {
@@ -137,6 +155,7 @@ function extractStats(
 	folder: string,
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
+	currentThinkingLevel: string | null | undefined,
 	agentType: AgentType,
 ): MessageStats | null {
 	const msg = entry.message as AssistantMessage;
@@ -168,6 +187,8 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		thinkingLevel: currentThinkingLevel ?? null,
+		planId: normalizeSessionText(entry.planId),
 	};
 }
 
@@ -221,6 +242,14 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
+function scanLastThinkingLevel(bytes: Uint8Array): string | null | undefined {
+	let currentThinkingLevel: string | null | undefined;
+	visitSessionEntriesLenient(bytes, entry => {
+		if (isThinkingLevelChange(entry)) currentThinkingLevel = resolveThinkingLevelChange(entry);
+	});
+	return currentThinkingLevel;
+}
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
@@ -262,10 +291,17 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
 	let currentServiceTier: ServiceTierByFamily | undefined;
+	let currentThinkingLevel: string | null | undefined;
 	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
+		const prefix = bytes.subarray(0, start);
+		currentServiceTier = scanLastServiceTier(prefix);
+		currentThinkingLevel = scanLastThinkingLevel(prefix);
 	}
 	for (const entry of entries) {
+		if (isThinkingLevelChange(entry)) {
+			currentThinkingLevel = resolveThinkingLevelChange(entry);
+			continue;
+		}
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			continue;
@@ -279,7 +315,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			continue;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, currentThinkingLevel, agentType);
 			if (msgStats) stats.push(msgStats);
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
