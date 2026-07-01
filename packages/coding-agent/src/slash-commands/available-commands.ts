@@ -1,4 +1,5 @@
 import type { AvailableCommand } from "@agentclientprotocol/sdk";
+import type { PromptTemplate } from "../config/prompt-templates";
 import type { SkillsSettings } from "../config/settings";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
@@ -6,8 +7,16 @@ import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
+import { toCommandSlashName } from "./names";
 
-export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
+export type AvailableSlashCommandSource =
+	| "builtin"
+	| "skill"
+	| "extension"
+	| "custom"
+	| "mcp_prompt"
+	| "file"
+	| "prompt_template";
 
 export interface InternalAvailableSlashCommand {
 	name: string;
@@ -22,6 +31,7 @@ export interface AvailableCommandsSession {
 	readonly extensionRunner?: ExtensionRunner;
 	readonly customCommands: ReadonlyArray<LoadedCustomCommand>;
 	readonly mcpPromptCommands?: ReadonlyArray<LoadedCustomCommand>;
+	readonly promptTemplates?: ReadonlyArray<PromptTemplate>;
 	readonly skills: ReadonlyArray<Skill>;
 	readonly skillsSettings?: SkillsSettings;
 	setSlashCommands(slashCommands: FileSlashCommand[]): void;
@@ -44,8 +54,8 @@ export async function buildAvailableSlashCommands(
 		if (!command.handle) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
-			name: command.name,
-			aliases: command.aliases,
+			name: toCommandSlashName(command.name),
+			aliases: command.aliases?.map(toCommandSlashName),
 			description: command.acpDescription ?? command.description,
 			input: hint ? { hint } : undefined,
 			subcommands: command.subcommands,
@@ -69,7 +79,7 @@ export async function buildAvailableSlashCommands(
 		for (const command of runner.getRegisteredCommands(ACP_BUILTIN_RESERVED_NAMES)) {
 			if (isAcpBuiltinShadowedName(command.name)) continue;
 			appendCommand({
-				name: command.name,
+				name: toCommandSlashName(command.name),
 				description: command.description ?? "(extension command)",
 				input: { hint: "arguments" },
 				source: "extension",
@@ -80,7 +90,7 @@ export async function buildAvailableSlashCommands(
 	for (const command of session.customCommands) {
 		const source: AvailableSlashCommandSource = command.path?.startsWith("mcp:") ? "mcp_prompt" : "custom";
 		appendCommand({
-			name: command.command.name,
+			name: toCommandSlashName(command.command.name),
 			description: command.command.description,
 			input: { hint: "arguments" },
 			source,
@@ -90,7 +100,16 @@ export async function buildAvailableSlashCommands(
 	const fileCommands = await loadFileCommands(session.sessionManager.getCwd());
 	session.setSlashCommands(fileCommands);
 	for (const command of fileCommands) {
-		appendCommand({ name: command.name, description: command.description, source: "file" });
+		appendCommand({ name: toCommandSlashName(command.name), description: command.description, source: "file" });
+	}
+
+	for (const template of session.promptTemplates ?? []) {
+		appendCommand({
+			name: toCommandSlashName(template.name),
+			description: template.description,
+			input: { hint: "arguments" },
+			source: "prompt_template",
+		});
 	}
 
 	return commands;

@@ -70,6 +70,16 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(addToHistory).toHaveBeenCalledWith("/mcp list");
 	});
 
+	it("normalizes cmd-prefixed /mcp before dispatch and history filtering", async () => {
+		const { ctx, editor, addToHistory, handleMCPCommand } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/cmd:mcp list");
+
+		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp list");
+		expect(addToHistory).toHaveBeenCalledWith("/cmd:mcp list");
+	});
+
 	it("does NOT record /mcp add with a --token (would leak the bearer token)", async () => {
 		const { ctx, editor, addToHistory, handleMCPCommand } = makeCtx();
 		controllerFor(ctx);

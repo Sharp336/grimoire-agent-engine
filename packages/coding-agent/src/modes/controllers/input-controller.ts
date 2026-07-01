@@ -18,6 +18,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { isLowSignalTitleInput } from "../../tiny/text";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -48,21 +49,16 @@ import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title
  * on the earliest whitespace or colon — so /login:?code=... is correctly matched.
  */
 export function shouldSkipHistory(slashText: string): boolean {
-	if (!slashText.startsWith("/")) return false;
-	const body = slashText.slice(1);
-	// Match parseSlashCommand: split on earliest whitespace or colon.
-	const firstWs = body.search(/\s/);
-	const firstColon = body.indexOf(":");
-	const sep = firstWs === -1 ? firstColon : firstColon === -1 ? firstWs : Math.min(firstWs, firstColon);
-	const name = sep === -1 ? body : body.slice(0, sep);
-	const hasArgs = sep !== -1;
+	const parsed = parseSlashCommand(slashText);
+	if (!parsed) return false;
+	const { name, args } = parsed;
+	const hasArgs = args.length > 0;
 	// /login <anything> — parseCallbackInput() accepts redirect URLs, query
 	// strings (?code=...), and raw auth codes, all of which carry secrets.
 	if (name === "login" && hasArgs) return true;
 	// /join <link> — the link carries the 32-byte room key and write token.
 	if (name === "join" && hasArgs) return true;
 	if (name === "mcp") {
-		const args = body.slice(sep + 1).trim();
 		return args.startsWith("add") && /--token\s/.test(args);
 	}
 	return false;

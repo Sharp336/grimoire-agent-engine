@@ -237,18 +237,18 @@ describe("parseCommandArgs + substituteArgs integration", () => {
 // ============================================================================
 
 describe("template expansion fallback", () => {
-	function createSlashCommand(content: string): FileSlashCommand {
+	function createSlashCommand(content: string, name = "test-command"): FileSlashCommand {
 		return {
-			name: "test-command",
+			name,
 			description: "Test command",
 			content,
 			source: "test",
 		};
 	}
 
-	function createPromptTemplate(content: string): PromptTemplate {
+	function createPromptTemplate(content: string, name = "test-template"): PromptTemplate {
 		return {
-			name: "test-template",
+			name,
 			description: "Test template",
 			content,
 			source: "test",
@@ -273,9 +273,35 @@ describe("template expansion fallback", () => {
 		expect(result).toBe("Do something.\n\nsample input text");
 	});
 
+	test("should expand cmd-prefixed slash commands using the underlying command name", () => {
+		const result = expandSlash("/cmd:test-command sample input text", "Do something.");
+		expect(result).toBe("Do something.\n\nsample input text");
+	});
+
+	test("should prefer legacy slash commands whose raw names start with cmd", () => {
+		const result = expandSlashCommand("/cmd:test-command sample input text", [
+			createSlashCommand("Namespaced command."),
+			createSlashCommand("Legacy command.", "cmd:test-command"),
+		]);
+		expect(result).toBe("Legacy command.\n\nsample input text");
+	});
+
 	test("should append trailing inline args for prompt template without placeholders", () => {
 		const result = expandPrompt("/test-template sample input text", "Do something.");
 		expect(result).toBe("Do something.\n\nsample input text");
+	});
+
+	test("should expand cmd-prefixed prompt templates using the underlying template name", () => {
+		const result = expandPrompt("/cmd:test-template sample input text", "Do something.");
+		expect(result).toBe("Do something.\n\nsample input text");
+	});
+
+	test("should prefer legacy prompt templates whose raw names start with cmd", () => {
+		const result = expandPromptTemplate("/cmd:test-template sample input text", [
+			createPromptTemplate("Namespaced template."),
+			createPromptTemplate("Legacy template.", "cmd:test-template"),
+		]);
+		expect(result).toBe("Legacy template.\n\nsample input text");
 	});
 
 	test("should not append fallback text when $ARGUMENTS consumes args", () => {

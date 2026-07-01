@@ -8,6 +8,7 @@ import {
 	parseFrontmatter,
 	prompt,
 } from "@oh-my-pi/pi-utils";
+import { parseSlashToken } from "../slash-commands/names";
 import { jtdToTypeScript } from "../tools/jtd-to-typescript";
 import { parseCommandArgs, substituteArgs } from "../utils/command-args";
 
@@ -187,11 +188,13 @@ export async function loadPromptTemplates(options: LoadPromptTemplatesOptions = 
 export function expandPromptTemplate(text: string, templates: PromptTemplate[]): string {
 	if (!text.startsWith("/")) return text;
 
-	const spaceIndex = text.indexOf(" ");
-	const templateName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-	const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+	const parsed = parseSlashToken(text);
+	if (!parsed) return text;
+	const { args: argsString } = parsed;
 
-	const template = templates.find(t => t.name === templateName);
+	const template =
+		(parsed.legacyName ? templates.find(t => t.name === parsed.legacyName) : undefined) ??
+		templates.find(t => t.name === parsed.name);
 	if (template) {
 		const args = parseCommandArgs(argsString);
 		const argsText = args.join(" ");

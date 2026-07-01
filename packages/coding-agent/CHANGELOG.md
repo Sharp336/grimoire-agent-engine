@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Namespaced non-skill slash commands under `/cmd:<name>` in command autocomplete and ACP command metadata so `/cmd:` filters commands separately from `/skill:<name>`.
+
 ## [16.2.12] - 2026-07-01
 
 ### Breaking Changes

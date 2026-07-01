@@ -43,12 +43,12 @@ Logins are **provider-scoped**: authenticating `anthropic` does not authenticate
 
 Use the interactive slash commands inside a session:
 
-- `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
-- `/logout` — opens the provider selector to remove stored credentials.
+- `/cmd:login` — opens the OAuth/key selector. `/cmd:login <provider>` jumps straight to one provider (e.g. `/cmd:login anthropic`); for an OAuth flow that needs a pasted callback, run `/cmd:login <redirect-url>` to complete it.
+- `/cmd:logout` — opens the provider selector to remove stored credentials.
 
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 
-When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
+When a model has no credentials, `omp` tells you to run `/cmd:login` or set the provider's environment variable.
 
 ### Pinning a key in `models.yml`
 

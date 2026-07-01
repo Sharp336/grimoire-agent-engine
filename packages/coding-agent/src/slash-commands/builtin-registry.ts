@@ -46,6 +46,7 @@ import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-d
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
+import { parseSlashToken, stripCommandSlashName, toCommandSlashName } from "./names";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -2416,7 +2417,11 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		name: toCommandSlashName(cmd.name),
+		aliases: cmd.aliases?.map(toCommandSlashName),
+	};
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
@@ -2462,6 +2467,9 @@ export async function executeBuiltinSlashCommand(
 	text: string,
 	runtime: BuiltinSlashCommandRuntime,
 ): Promise<string | boolean> {
+	const token = parseSlashToken(text);
+	if (token?.legacyName && runtime.ctx.session?.hasRawSlashCommandName?.(token.legacyName)) return false;
+
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 
@@ -2516,7 +2524,7 @@ export async function executeBuiltinSlashCommand(
 
 /** Look up a unified spec by name or alias. Used by the ACP dispatcher. */
 export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | undefined {
-	return BUILTIN_SLASH_COMMAND_LOOKUP.get(name);
+	return BUILTIN_SLASH_COMMAND_LOOKUP.get(stripCommandSlashName(name));
 }
 
 export type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec, TuiSlashCommandRuntime };

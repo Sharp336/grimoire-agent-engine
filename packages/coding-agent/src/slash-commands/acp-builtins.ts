@@ -1,6 +1,7 @@
 import type { AvailableCommand } from "@agentclientprotocol/sdk";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
+import { parseSlashToken, stripCommandSlashName, toCommandSlashName } from "./names";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
 
 export type { AcpBuiltinSlashCommandResult } from "./types";
@@ -11,9 +12,14 @@ export type { AcpBuiltinSlashCommandResult } from "./types";
  * dispatch time (e.g. `models` is an alias for `/model`, so an extension
  * registering `models` would appear in the palette but execute the builtin).
  */
-export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
+const RAW_ACP_BUILTIN_RESERVED_NAMES = new Set(
 	BUILTIN_SLASH_COMMANDS_INTERNAL.filter(c => c.handle !== undefined).flatMap(c => [c.name, ...(c.aliases ?? [])]),
 );
+
+export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set([
+	...RAW_ACP_BUILTIN_RESERVED_NAMES,
+	...[...RAW_ACP_BUILTIN_RESERVED_NAMES].map(toCommandSlashName),
+]);
 
 /**
  * Whether an extension command named `name` would be captured by ACP builtin
@@ -24,9 +30,10 @@ export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
  * advertised to ACP clients.
  */
 export function isAcpBuiltinShadowedName(name: string): boolean {
-	if (ACP_BUILTIN_RESERVED_NAMES.has(name)) return true;
-	const colon = name.indexOf(":");
-	return colon !== -1 && ACP_BUILTIN_RESERVED_NAMES.has(name.slice(0, colon));
+	const rawName = stripCommandSlashName(name);
+	if (RAW_ACP_BUILTIN_RESERVED_NAMES.has(rawName) || ACP_BUILTIN_RESERVED_NAMES.has(name)) return true;
+	const colon = rawName.indexOf(":");
+	return colon !== -1 && RAW_ACP_BUILTIN_RESERVED_NAMES.has(rawName.slice(0, colon));
 }
 
 /**
@@ -42,7 +49,7 @@ export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMM
 	// otherwise fall back to the unified `description` / `inlineHint`.
 	const hint = command.acpInputHint ?? command.inlineHint;
 	return {
-		name: command.name,
+		name: toCommandSlashName(command.name),
 		description: command.acpDescription ?? command.description,
 		input: hint ? { hint } : undefined,
 	};
@@ -60,6 +67,9 @@ export async function executeAcpBuiltinSlashCommand(
 	text: string,
 	runtime: SlashCommandRuntime,
 ): Promise<AcpBuiltinSlashCommandResult> {
+	const token = parseSlashToken(text);
+	if (token?.legacyName && runtime.session.hasRawSlashCommandName?.(token.legacyName)) return false;
+
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 	const command = lookupBuiltinSlashCommand(parsed.name);

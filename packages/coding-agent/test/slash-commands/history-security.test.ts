@@ -25,6 +25,11 @@ describe("shouldSkipHistory — security filter for slash command history", () =
 		expect(shouldSkipHistory("/login:auth-code-xyz")).toBe(true);
 	});
 
+	it("skips cmd-prefixed /login with secret-bearing arguments", () => {
+		expect(shouldSkipHistory("/cmd:login ?code=abc&state=xyz")).toBe(true);
+		expect(shouldSkipHistory("/cmd:login:auth-code-xyz")).toBe(true);
+	});
+
 	it("skips /join with a link argument (carries 32-byte room key and write token)", () => {
 		expect(shouldSkipHistory("/join omp://share/abc123def456...")).toBe(true);
 		expect(shouldSkipHistory("/join omp:abc123def456...")).toBe(true);

@@ -133,18 +133,26 @@ Current embedded set comes from `src/task/commands.ts` and is used as a fallback
 
 Interactive mode combines multiple command sources for autocomplete and command routing.
 
+Non-skill commands are surfaced with a `cmd:` namespace in the picker:
+
+- built-ins appear as `/cmd:model`, `/cmd:compact`, etc.
+- extension, TypeScript custom, MCP prompt, file, and prompt-template commands appear as `/cmd:<name>`
+- skills remain `/skill:<name>` so typing `/cmd:` narrows to commands and typing `/skill:` narrows to skills
+
+The dispatcher still normalizes `/cmd:<name>` to the underlying command name before execution/expansion, so `/cmd:review args` resolves the same loaded file or custom command as its raw command record. Legacy raw invocations remain accepted for compatibility, but autocomplete advertises the namespaced form.
+
 At construction time it builds a pending command list from:
 
-- built-ins (`BUILTIN_SLASH_COMMANDS`, includes argument completion and inline hints for selected commands)
-- extension-registered slash commands (`extensionRunner.getRegisteredCommands(...)`)
-- TypeScript custom commands (`session.customCommands`), mapped to slash command labels
+- built-ins (`buildTuiBuiltinSlashCommands`, includes argument completion and inline hints for selected commands, materialized as `cmd:` names)
+- extension-registered slash commands (`extensionRunner.getRegisteredCommands(...)`, materialized as `cmd:` names)
+- TypeScript custom commands (`session.customCommands`), mapped to `cmd:` slash command labels
 - optional skill commands (`/skill:<name>`) when `skills.enableSkillCommands` is enabled
 
 Then `init()` calls `refreshSlashCommandState(...)` to load file-based commands and install one autocomplete provider (`createPromptActionAutocompleteProvider`, a `PromptActionAutocompleteProvider` wrapping a `CombinedAutocompleteProvider`) containing:
 
 - pending commands above
-- discovered file-based commands
-- discovered prompt-template commands whose names aren't already taken by a built-in/hook/custom/skill/file command
+- discovered file-based commands, materialized as `cmd:` names
+- discovered prompt-template commands whose raw names aren't already taken by a built-in/hook/custom/skill/file command, materialized as `cmd:` names
 
 `refreshSlashCommandState(...)` also updates `session.setSlashCommands(...)` so prompt expansion uses the same discovered file command set.
 

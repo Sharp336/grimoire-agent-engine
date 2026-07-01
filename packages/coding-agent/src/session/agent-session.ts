@@ -263,6 +263,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import { parseSlashToken } from "../slash-commands/names";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import {
 	AUTO_THINKING,
@@ -6486,6 +6487,16 @@ export class AgentSession {
 		return this.#promptTemplates;
 	}
 
+	hasRawSlashCommandName(name: string): boolean {
+		return (
+			this.#customCommands.some(command => command.command.name === name) ||
+			this.#mcpPromptCommands.some(command => command.command.name === name) ||
+			this.#slashCommands.some(command => command.name === name) ||
+			this.#promptTemplates.some(template => template.name === name) ||
+			Boolean(this.#extensionRunner?.getCommand(name))
+		);
+	}
+
 	/** Replace file-based slash commands used for prompt expansion. */
 	setSlashCommands(slashCommands: FileSlashCommand[]): void {
 		this.#slashCommands = [...slashCommands];
@@ -7138,13 +7149,14 @@ export class AgentSession {
 	async #tryExecuteExtensionCommand(text: string): Promise<boolean> {
 		if (!this.#extensionRunner) return false;
 
-		// Parse command name and args
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+		const parsed = parseSlashToken(text);
+		if (!parsed) return false;
+		const args = parsed.args;
 
-		const command = this.#extensionRunner.getCommand(commandName);
+		const legacyCommand = parsed.legacyName ? this.#extensionRunner.getCommand(parsed.legacyName) : undefined;
+		const command = legacyCommand ?? this.#extensionRunner.getCommand(parsed.name);
 		if (!command) return false;
+		const commandName = legacyCommand && parsed.legacyName ? parsed.legacyName : parsed.name;
 
 		// Get command context from extension runner (includes session control methods)
 		const ctx = this.#extensionRunner.createCommandContext();
@@ -7229,15 +7241,19 @@ export class AgentSession {
 	async #tryExecuteCustomCommand(text: string): Promise<string | null> {
 		if (this.#customCommands.length === 0 && this.#mcpPromptCommands.length === 0) return null;
 
-		// Parse command name and args
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+		const parsed = parseSlashToken(text);
+		if (!parsed) return null;
+		const argsString = parsed.args;
 
 		// Find matching command
 		const loaded =
-			this.#customCommands.find(c => c.command.name === commandName) ??
-			this.#mcpPromptCommands.find(c => c.command.name === commandName);
+			(parsed.legacyName
+				? (this.#customCommands.find(c => c.command.name === parsed.legacyName) ??
+					this.#mcpPromptCommands.find(c => c.command.name === parsed.legacyName))
+				: undefined) ??
+			this.#customCommands.find(c => c.command.name === parsed.name) ??
+			this.#mcpPromptCommands.find(c => c.command.name === parsed.name);
+		const commandName = loaded?.command.name ?? parsed.name;
 		if (!loaded) return null;
 
 		// Get command context from extension runner (includes session control methods)
@@ -7461,9 +7477,11 @@ export class AgentSession {
 	#throwIfExtensionCommand(text: string): void {
 		if (!this.#extensionRunner) return;
 
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		const command = this.#extensionRunner.getCommand(commandName);
+		const parsed = parseSlashToken(text);
+		if (!parsed) return;
+		const legacyCommand = parsed.legacyName ? this.#extensionRunner.getCommand(parsed.legacyName) : undefined;
+		const command = legacyCommand ?? this.#extensionRunner.getCommand(parsed.name);
+		const commandName = legacyCommand && parsed.legacyName ? parsed.legacyName : parsed.name;
 
 		if (command) {
 			throw new Error(

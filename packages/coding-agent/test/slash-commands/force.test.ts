@@ -5,15 +5,19 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
 
-function createRuntimeHarness(overrides?: { setForcedToolChoice?: (toolName: string) => void }) {
+function createRuntimeHarness(overrides?: {
+	setForcedToolChoice?: (toolName: string) => void;
+	hasRawSlashCommandName?: (name: string) => boolean;
+}) {
 	const setForcedToolChoice = vi.fn(overrides?.setForcedToolChoice ?? ((_toolName: string) => {}));
+	const hasRawSlashCommandName = vi.fn(overrides?.hasRawSlashCommandName ?? ((_name: string) => false));
 	const setText = vi.fn();
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 
 	const ctx = {
 		editor: { setText } as unknown as InteractiveModeContext["editor"],
-		session: { setForcedToolChoice } as unknown as InteractiveModeContext["session"],
+		session: { setForcedToolChoice, hasRawSlashCommandName } as unknown as InteractiveModeContext["session"],
 		showStatus,
 		showError,
 	} as unknown as InteractiveModeContext;
@@ -40,6 +44,27 @@ describe("/force slash command", () => {
 		expect(harness.showStatus).toHaveBeenCalledWith("Next turn forced to use write.");
 		expect(harness.showError).not.toHaveBeenCalled();
 		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("accepts cmd-prefixed built-in commands with colon subcommand syntax", async () => {
+		const harness = createRuntimeHarness();
+
+		const result = await executeBuiltinSlashCommand("/cmd:force:write fix the tests", harness.runtime);
+
+		expect(result).toBe("fix the tests");
+		expect(harness.setForcedToolChoice).toHaveBeenCalledWith("write");
+		expect(harness.showStatus).toHaveBeenCalledWith("Next turn forced to use write.");
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("does not consume a legacy cmd-prefixed raw command before dynamic dispatch", async () => {
+		const harness = createRuntimeHarness({ hasRawSlashCommandName: name => name === "cmd:force:write" });
+
+		const result = await executeBuiltinSlashCommand("/cmd:force:write fix the tests", harness.runtime);
+
+		expect(result).toBe(false);
+		expect(harness.setForcedToolChoice).not.toHaveBeenCalled();
 	});
 
 	it("shows usage when tool name is missing", async () => {

@@ -97,6 +97,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import { stripCommandSlashName, toCommandSlashName } from "../slash-commands/names";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
@@ -669,14 +670,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []
 		).map(cmd => ({
-			name: cmd.name,
+			name: toCommandSlashName(cmd.name),
 			description: cmd.description ?? "(hook command)",
 			getArgumentCompletions: cmd.getArgumentCompletions,
 		}));
 
 		// Convert custom commands (TypeScript) to SlashCommand format
 		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
-			name: loaded.command.name,
+			name: toCommandSlashName(loaded.command.name),
 			description: `${loaded.command.description} (${loaded.source})`,
 		}));
 
@@ -998,7 +999,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
-			name: cmd.name,
+			name: toCommandSlashName(cmd.name),
 			description: cmd.description,
 		}));
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
@@ -1007,18 +1008,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		// resolution order by skipping templates whose names already appear in any
 		// builtin/hook/custom/skill/file command token.
 		const reservedNames = new Set<string>();
+		const reserveName = (name: string) => {
+			reservedNames.add(name);
+			reservedNames.add(stripCommandSlashName(name));
+		};
 		for (const command of this.#pendingSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+			reserveName(command.name);
+			for (const alias of command.aliases ?? []) reserveName(alias);
 		}
 		for (const command of fileSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+			reserveName(command.name);
+			for (const alias of command.aliases ?? []) reserveName(alias);
 		}
 		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
 			.filter(template => !reservedNames.has(template.name))
 			.map(template => ({
-				name: template.name,
+				name: toCommandSlashName(template.name),
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,

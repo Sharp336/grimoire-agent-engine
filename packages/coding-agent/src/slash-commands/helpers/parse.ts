@@ -1,3 +1,4 @@
+import { stripCommandSlashInvocation } from "../names";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 
 export interface ParsedSubcommand {
@@ -21,17 +22,18 @@ export interface NamedScopeArgs {
  */
 export function parseSlashCommand(text: string): ParsedSlashCommand | null {
 	if (!text.startsWith("/")) return null;
-	const body = text.slice(1);
+	const normalized = stripCommandSlashInvocation(text);
+	const body = normalized.slice(1);
 	if (!body) return null;
 	const firstWhitespace = body.search(/\s/);
 	const firstColon = body.indexOf(":");
 	const firstSeparator =
 		firstWhitespace === -1 ? firstColon : firstColon === -1 ? firstWhitespace : Math.min(firstWhitespace, firstColon);
-	if (firstSeparator === -1) return { name: body, args: "", text };
+	if (firstSeparator === -1) return { name: body, args: "", text: normalized };
 	return {
 		name: body.slice(0, firstSeparator),
 		args: body.slice(firstSeparator + 1).trim(),
-		text,
+		text: normalized,
 	};
 }
 

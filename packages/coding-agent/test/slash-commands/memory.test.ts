@@ -38,4 +38,13 @@ describe("/memory slash command", () => {
 		expect(handled).toBe(true);
 		expect(harness.handleMemoryCommand).toHaveBeenCalledWith("/memory    stats");
 	});
+
+	it("normalizes cmd-prefixed invocations before routing to the memory handler", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/cmd:memory stats", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.handleMemoryCommand).toHaveBeenCalledWith("/memory stats");
+	});
 });
