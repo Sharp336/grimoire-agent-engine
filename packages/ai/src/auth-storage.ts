@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
+import { isAnthropicOAuthNotAllowedError } from "./error/auth-classify";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
@@ -4259,6 +4260,22 @@ export class AuthStorage {
 		);
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
 		this.#clearSessionCredential(provider, sessionId);
+
+		if (
+			target &&
+			provider === "anthropic" &&
+			sessionCredential.type === "oauth" &&
+			isAnthropicOAuthNotAllowedError(error)
+		) {
+			this.#tryDisableCredentialAtIfMatches(
+				provider,
+				sessionCredential.index,
+				target.credential,
+				"anthropic oauth not allowed for organization",
+			);
+			return hasSibling;
+		}
+
 		this.#markCredentialBlocked(providerKey, sessionCredential.index, Date.now() + AuthStorage.#defaultBackoffMs);
 
 		if (target) {

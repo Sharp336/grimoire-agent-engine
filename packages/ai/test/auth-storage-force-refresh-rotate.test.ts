@@ -31,6 +31,15 @@ function invalidRequestError(): Error & { status: number } {
 	return Object.assign(new Error("400 invalid_request_error: model unsupported"), { status: 400 });
 }
 
+function anthropicOAuthNotAllowedError(): Error & { status: number } {
+	return Object.assign(
+		new Error(
+			'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}',
+		),
+		{ status: 403 },
+	);
+}
+
 describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 	let tempDir = "";
 	let store: AuthCredentialStore | undefined;
@@ -39,7 +48,10 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-rotate-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		authStorage = new AuthStorage(store);
+		authStorage = new AuthStorage(store, {
+			rankingStrategyResolver: () => undefined,
+			usageProviderResolver: () => undefined,
+		});
 	});
 
 	afterEach(async () => {
@@ -194,6 +206,33 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		await authStorage.rotateSessionCredential(PROVIDER, "invalid-request", { error: invalidRequestError() });
 
 		expect(usageLimitSpy).not.toHaveBeenCalled();
+	});
+
+	test("rotateSessionCredential disables Anthropic OAuth org-not-allowed accounts", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set("anthropic", [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry(), email: "bad@example.com" },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry(), email: "good@example.com" },
+		]);
+
+		const first = await authStorage.getApiKey("anthropic", "sess");
+		expect(["acc-A", "acc-B"]).toContain(first ?? "");
+		const expectedNext = first === "acc-A" ? "acc-B" : "acc-A";
+
+		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+		const rotated = await authStorage.rotateSessionCredential("anthropic", "sess", {
+			error: anthropicOAuthNotAllowedError(),
+		});
+
+		expect(rotated).toBe(true);
+		expect(usageLimitSpy).not.toHaveBeenCalled();
+		expect(
+			store
+				.listAuthCredentials("anthropic")
+				.map(row => (row.credential.type === "oauth" ? row.credential.access : undefined)),
+		).toEqual([expectedNext]);
+		expect(await authStorage.getApiKey("anthropic", "sess")).toBe(expectedNext);
 	});
 
 	test("rotateSessionCredential leaves informative transient 429s out of the quota block path", async () => {

@@ -20,11 +20,28 @@ export function isDefinitiveOAuthFailure(errorMsg: string): boolean {
  * Transient 429s (`Too many requests`, per-minute caps) stay in the
  * upstream-backoff lane.
  */
+const ANTHROPIC_OAUTH_NOT_ALLOWED_MESSAGE = "OAuth authentication is currently not allowed for this organization";
+
+/**
+ * Anthropic returns this 403 when an OAuth credential belongs to an org that
+ * is not permitted to use Claude Code-style OAuth requests. This is
+ * credential/org-specific, not a generic WAF/egress 403 and not a dead OAuth
+ * grant, so callers should rotate away from that stored account.
+ */
+export function isAnthropicOAuthNotAllowedError(error: unknown): boolean {
+	const httpStatus = extractHttpStatusFromError(error);
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
+	const status = httpStatus ?? embeddedStatus;
+	return status === 403 && message?.includes(ANTHROPIC_OAUTH_NOT_ALLOWED_MESSAGE) === true;
+}
+
 export function isAuthRetryableError(error: unknown): boolean {
 	const httpStatus = extractHttpStatusFromError(error);
 	if (httpStatus === 401) return true;
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
 	if (embeddedStatus === 401) return true;
+	if (isAnthropicOAuthNotAllowedError(error)) return true;
 	return isUsageLimitOutcome(httpStatus ?? embeddedStatus, message);
 }

@@ -52,6 +52,16 @@ describe("isAuthRetryableError", () => {
 		// credentials won't help an org/global limit.
 		expect(isAuthRetryableError(Object.assign(new Error("429 too many requests"), { status: 429 }))).toBe(false);
 		expect(isAuthRetryableError("Error: 401 unauthorized")).toBe(true);
+		expect(
+			isAuthRetryableError(
+				Object.assign(
+					new Error(
+						'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization."}}',
+					),
+					{ status: 403 },
+				),
+			),
+		).toBe(true);
 		expect(isAuthRetryableError(authError(403))).toBe(false);
 		expect(isAuthRetryableError(authError(500))).toBe(false);
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
