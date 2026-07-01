@@ -95,12 +95,25 @@ interface PendingExecution {
 
 type EscapeState = "normal" | "escape" | "csi" | "osc" | "oscEscape" | "string" | "stringEscape" | "charset";
 
-class TerminalEscapeStripper {
+// CAN (0x18) and SUB (0x1a) cancel any in-flight escape sequence (ECMA-48
+// §5.4), and C1 controls (0x80-0x9f) cannot legally appear mid-sequence. Evcxr's
+// completion markers ARE C1 bytes (U+0091/U+0092), so treating these as aborts
+// guarantees an unterminated OSC/DCS/APC/PM string from user code can never
+// swallow the marker+prompt and hang the cell until timeout.
+function isEscapeAbort(char: string): boolean {
+	const code = char.codePointAt(0) ?? 0;
+	return code === 0x18 || code === 0x1a || (code >= 0x80 && code <= 0x9f);
+}
+
+export class TerminalEscapeStripper {
 	#state: EscapeState = "normal";
 
 	write(chunk: string): string {
 		let output = "";
 		for (const char of chunk) {
+			if (this.#state !== "normal" && isEscapeAbort(char)) {
+				this.#state = "normal";
+			}
 			switch (this.#state) {
 				case "normal": {
 					if (char === "\u001b") {

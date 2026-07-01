@@ -172,13 +172,27 @@ function createCancelledRustResult(timedOut: boolean, timeoutMs?: number): RustR
 
 async function startKernel(cwd: string, options: RustExecutorOptions): Promise<RustKernel> {
 	requireRemainingTimeoutMs(options.deadlineMs);
-	return await RustKernel.start({
-		cwd,
-		env: buildManagedKernelEnv(options),
-		signal: options.signal,
-		deadlineMs: options.deadlineMs,
-		interpreter: options.interpreter,
-	});
+	try {
+		return await RustKernel.start({
+			cwd,
+			env: buildManagedKernelEnv(options),
+			signal: options.signal,
+			deadlineMs: options.deadlineMs,
+			interpreter: options.interpreter,
+		});
+	} catch (err) {
+		// A caller deadline that expires DURING startup surfaces as a plain
+		// startup Error; convert it to a timed-out cancellation so executeRust's
+		// catch returns a cancelled result instead of throwing. The built-in
+		// STARTUP_TIMEOUT_MS failure (no caller deadline) stays a real error.
+		if (!isCancellationError(err, RustExecutionCancelledError)) {
+			const remaining = getRemainingTimeoutMs(options.deadlineMs);
+			if (remaining !== undefined && remaining <= 0) {
+				throw new RustExecutionCancelledError(true);
+			}
+		}
+		throw err;
+	}
 }
 
 async function acquireSession(
@@ -357,7 +371,9 @@ export async function executeRustWithKernel(
 	options: RustExecutorOptions | undefined,
 ): Promise<RustResult> {
 	if (options?.signal?.aborted) {
-		return createCancelledRustResult(false);
+		return createCancelledRustResult(
+			isTimedOutCancellation(options.signal.reason, RustExecutionCancelledError, options.signal),
+		);
 	}
 	if (kernelLocks.has(kernel)) {
 		throw new Error("concurrent execution on the same Rust kernel is not allowed");

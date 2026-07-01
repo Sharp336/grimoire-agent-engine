@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added optional Rust eval backend powered by the Evcxr REPL.
+- Added optional Rust eval backend powered by the Evcxr REPL, hardened against terminal-escape marker swallowing and startup-deadline cancellation edge cases.
 
 ## [16.2.13] - 2026-07-01
 

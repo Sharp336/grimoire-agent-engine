@@ -148,5 +148,50 @@ describe("Rust executor lifecycle", () => {
 			await p1;
 			expect(fakeKernel.executeCalls).toBe(1);
 		});
+		it("classifies a pre-aborted TimeoutError signal as cancelled with a timeout annotation", async () => {
+			const fakeKernel = new FakeRustKernel("fake-timeout-signal");
+			const controller = new AbortController();
+			controller.abort(new DOMException("t", "TimeoutError"));
+
+			const result = await executeRustWithKernel(fakeKernel, "1 + 1", { signal: controller.signal });
+
+			expect(result.cancelled).toBe(true);
+			expect(result.output).toContain("timed out");
+			expect(fakeKernel.executeCalls).toBe(0);
+		});
+
+		it("classifies a pre-aborted non-timeout signal as cancelled with empty output", async () => {
+			const fakeKernel = new FakeRustKernel("fake-plain-signal");
+			const controller = new AbortController();
+			controller.abort(new Error("user cancelled"));
+
+			const result = await executeRustWithKernel(fakeKernel, "1 + 1", { signal: controller.signal });
+
+			expect(result.cancelled).toBe(true);
+			expect(result.output).toBe("");
+			expect(fakeKernel.executeCalls).toBe(0);
+		});
+	});
+	describe("startup-deadline group", () => {
+		it("converts a caller deadline expiring during kernel startup into a cancelled+timedOut result", async () => {
+			using tempDir = TempDir.createSync("@rust-kernel-session-");
+			// Real wall-clock delay (not fake timers): the fix under test reads
+			// Date.now() directly in getRemainingTimeoutMs, so the deadline must
+			// actually expire during startup.  60ms >= 2x the 30ms budget keeps
+			// this deterministic on a loaded machine.
+			RustKernel.start = (async () => {
+				await Bun.sleep(60);
+				throw new Error("evcxr boom");
+			}) as typeof RustKernel.start;
+
+			const result = await executeRust("1 + 1", {
+				sessionId: `startup-deadline-${Date.now()}`,
+				cwd: tempDir.path(),
+				deadlineMs: Date.now() + 30,
+			});
+
+			expect(result.cancelled).toBe(true);
+			expect(result.output).toContain("timed out");
+		});
 	});
 });
