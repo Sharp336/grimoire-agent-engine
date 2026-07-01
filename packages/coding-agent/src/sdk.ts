@@ -50,6 +50,7 @@ import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { disposeAllRubyKernelSessions, disposeRubyKernelSessionsByOwner } from "./eval/rb/executor";
+import { disposeAllRustKernelSessions, disposeRustKernelSessionsByOwner } from "./eval/rs/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
 import {
 	type CustomCommandsLoadResult,
@@ -881,6 +882,7 @@ function registerEvalCleanup(): void {
 	evalCleanupRegistered = true;
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
 	postmortem.register("ruby-cleanup", disposeAllRubyKernelSessions);
+	postmortem.register("rust-cleanup", disposeAllRustKernelSessions);
 	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
@@ -2989,6 +2991,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeRubyKernelSessionsByOwner(evalKernelOwnerId);
+				await disposeRustKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeJuliaKernelSessionsByOwner(evalKernelOwnerId);
 				if (ownsAuthStorage) authStorage.close();
 			}

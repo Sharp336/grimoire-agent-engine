@@ -10,6 +10,7 @@ import { EditTool } from "../edit";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { checkRubyKernelAvailability } from "../eval/rb/kernel";
+import { checkRustKernelAvailability } from "../eval/rs/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -498,13 +499,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const allowJs = backends.js;
 	const allowRuby = backends.ruby;
 	const allowJulia = backends.julia;
+	const allowRust = backends.rust;
 	const skipEvalPreflight = session.skipPythonPreflight === true;
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
+	// we only probe external kernels when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
 	let pythonAvailable = true;
 	let rubyAvailable = true;
 	let juliaAvailable = true;
+	let rustAvailable = true;
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
@@ -539,14 +542,26 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				logger.warn("Julia kernel unavailable and JS backend disabled", { reason: availability.reason });
 			}
 		}
+		if (allowRust) {
+			const availability = await checkRustKernelAvailability(
+				session.cwd,
+				session.settings.get("rust.interpreter")?.trim() || undefined,
+			);
+			rustAvailable = availability.ok;
+			if (!availability.ok) {
+				logger.warn("Rust kernel unavailable and JS backend disabled", { reason: availability.reason });
+			}
+		}
 	}
 
 	const effectivePythonAllowed = allowPython && pythonAvailable;
 	const effectiveRubyAllowed = allowRuby && rubyAvailable;
 	const effectiveJuliaAllowed = allowJulia && juliaAvailable;
+	const effectiveRustAllowed = allowRust && rustAvailable;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
-	const allowEval = effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed;
+	const allowEval =
+		effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed || effectiveRustAllowed;
 
 	// Auto-include AST counterparts when their text-based sibling is present
 	if (requestedTools) {

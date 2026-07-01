@@ -3244,6 +3244,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.rs": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust Eval Backend",
+			description: "Allow the eval tool to dispatch Rust cells to the persistent evcxr REPL kernel",
+		},
+	},
+
 	// Runtime knobs (consumed by eval backends and the /python slash command)
 	"python.kernelMode": {
 		type: "enum",
@@ -3287,6 +3298,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Julia Interpreter",
 			description:
 				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
+		},
+	},
+	"rust.interpreter": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust REPL Interpreter",
+			description: "Optional path to an exact evcxr executable. When set, automatic Rust REPL discovery is skipped.",
 		},
 	},
 
