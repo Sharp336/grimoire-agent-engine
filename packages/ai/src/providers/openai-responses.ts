@@ -301,6 +301,11 @@ function isOpenAIResponsesStalePreviousResponseError(error: unknown): boolean {
 	);
 }
 
+function isOpenAIResponsesToolPairingChainError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	return /No tool (?:call|output) found/i.test(error.message);
+}
+
 function registerOpenAIResponsesChainStaleFailure(chain: OpenAIResponsesChainState, error: unknown): void {
 	resetOpenAIResponsesChainState(chain);
 	chain.staleFailures += 1;
@@ -614,7 +619,11 @@ const streamOpenAIResponsesOnce = (
 						error instanceof Error &&
 						/previous[ _]?response/i.test(error.message) &&
 						/zero[ _-]?data[ _-]?retention/i.test(error.message);
-					if (!zdrRejection && !isOpenAIResponsesStalePreviousResponseError(error)) {
+					if (
+						!zdrRejection &&
+						!isOpenAIResponsesStalePreviousResponseError(error) &&
+						!isOpenAIResponsesToolPairingChainError(error)
+					) {
 						throw error;
 					}
 					// Server rejected the chain baseline: reset, count the failure (or

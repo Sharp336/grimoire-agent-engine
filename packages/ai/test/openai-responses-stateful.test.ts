@@ -44,6 +44,29 @@ function createStatefulSse(text: string, responseId: string): Response {
 	});
 }
 
+function createStatefulFunctionCallSse(responseId: string, callId: string): Response {
+	const args = JSON.stringify({ path: "README.md" });
+	const item = { type: "function_call", id: `fc_${responseId}`, call_id: callId, name: "read", arguments: args };
+	const events = [
+		{ type: "response.created", response: { id: responseId } },
+		{ type: "response.output_item.added", item: { ...item, arguments: "" } },
+		{ type: "response.function_call_arguments.done", arguments: args },
+		{ type: "response.output_item.done", item },
+		{
+			type: "response.completed",
+			response: {
+				id: responseId,
+				status: "completed",
+				usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 function createCapturingFetch(sentRequests: Array<Record<string, unknown>>): FetchImpl {
 	return vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
 		sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -231,6 +254,66 @@ describe("openai-responses stateful chaining", () => {
 		expect(sentRequests[2]?.previous_response_id).toBeUndefined();
 		expect(JSON.stringify(sentRequests[2]?.input)).toContain("First question");
 		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
+	});
+
+	it("retries a chained tool-output pairing rejection with the full transcript", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const callId = "call_read_stateful";
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			sentRequests.push(request);
+			if (sentRequests.length === 1) return createStatefulFunctionCallSse("resp_1", callId);
+			if (typeof request.previous_response_id === "string") {
+				return new Response(
+					JSON.stringify({
+						error: {
+							message: `No tool call found for function call output with call_id ${callId}.`,
+							type: "invalid_request_error",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return createStatefulSse(`Answer ${sentRequests.length}`, `resp_${sentRequests.length}`);
+		}) as FetchImpl;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-tool-pairing-session",
+			providerSessionState,
+			statefulResponses: true,
+			reasoning: "low" as const,
+			fetch: fetchMock,
+		};
+
+		const firstUser = { role: "user" as const, content: "Read the file", timestamp: 1000 };
+		const firstResponse = await streamOpenAIResponses(
+			model,
+			{ systemPrompt, messages: [firstUser] },
+			options,
+		).result();
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: callId,
+			toolName: "read",
+			content: [{ type: "text" as const, text: "file contents" }],
+			isError: false,
+			timestamp: 1001,
+		};
+		const secondResponse = await streamOpenAIResponses(
+			model,
+			{ systemPrompt, messages: [firstUser, firstResponse, toolResult] },
+			options,
+		).result();
+
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(sentRequests).toHaveLength(3);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+		const retryInput = JSON.stringify(sentRequests[2]?.input);
+		expect(retryInput).toContain('"function_call"');
+		expect(retryInput).toContain('"function_call_output"');
+		expect(retryInput).toContain(callId);
 	});
 
 	it("disables chaining for the session after repeated stale failures and stops forcing store", async () => {
