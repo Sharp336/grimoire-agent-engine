@@ -12,6 +12,7 @@ export const TOOL_TIMEOUTS = {
 	eval: { default: 30, min: 1, max: 3600 },
 	browser: { default: 30, min: 1, max: 300 },
 	ssh: { default: 60, min: 1, max: 3600 },
+	copy: { default: 60, min: 1, max: 3600 },
 	fetch: { default: 20, min: 1, max: 45 },
 	lsp: { default: 20, min: 5, max: 60 },
 	debug: { default: 30, min: 5, max: 300 },

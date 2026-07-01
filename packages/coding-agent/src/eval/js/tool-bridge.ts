@@ -66,7 +66,7 @@ function normalizeArgs(args: unknown): unknown {
 }
 
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
-const REMOTE_FILE_BRIDGE_TOOLS = new Set(["read", "write", "grep"]);
+const REMOTE_FILE_BRIDGE_TOOLS = new Set(["read", "write", "grep", "copy"]);
 const REMOTE_CONTEXT_UNSUPPORTED_TOOLS = new Set(["glob", "ast_grep", "ast_edit", "edit", "lsp", "debug"]);
 const REMOTE_BRIDGE_DEFAULT_TOOLS = new Set(["bash", "ssh", ...REMOTE_FILE_BRIDGE_TOOLS]);
 
@@ -105,15 +105,23 @@ function rewriteRemotePath(value: string, host: SSHConnectionTarget, remoteCwd: 
 	if (shouldKeepPathLocal(value)) return value;
 	const split = splitPathAndSel(value);
 	const rawPath = split.path || ".";
-	if (!path.posix.isAbsolute(rawPath) && !remoteCwd) {
-		throw new ToolError(`Remote tool path "${value}" is relative, but no remote cwd is available`);
+	let absolutePath: string;
+	if (path.posix.isAbsolute(rawPath)) {
+		absolutePath = path.posix.normalize(rawPath);
+	} else {
+		if (!remoteCwd || !path.posix.isAbsolute(remoteCwd)) {
+			throw new ToolError(`Remote tool path "${value}" is relative, but no absolute remote cwd is available`);
+		}
+		absolutePath = path.posix.resolve(remoteCwd, rawPath);
 	}
-	const base = remoteCwd && path.posix.isAbsolute(remoteCwd) ? remoteCwd : "/";
-	const absolutePath = path.posix.isAbsolute(rawPath)
-		? path.posix.normalize(rawPath)
-		: path.posix.resolve(base, rawPath);
 	const rewritten = sshUrlForPath(host, absolutePath);
 	return split.sel ? `${rewritten}:${split.sel}` : rewritten;
+}
+
+function resolveRemoteCwd(rawCwd: unknown, defaultCwd: string | undefined): string | undefined {
+	if (typeof rawCwd !== "string") return defaultCwd;
+	if (path.posix.isAbsolute(rawCwd)) return path.posix.normalize(rawCwd);
+	return defaultCwd && path.posix.isAbsolute(defaultCwd) ? path.posix.resolve(defaultCwd, rawCwd) : rawCwd;
 }
 
 function rewritePathField(
@@ -140,6 +148,18 @@ function rewritePathsField(
 			typeof entry === "string" ? rewriteRemotePath(entry, host, remoteCwd) : entry,
 		);
 	}
+}
+
+function rewriteCopyFields(
+	record: Record<string, unknown>,
+	host: SSHConnectionTarget,
+	remoteCwd: string | undefined,
+): void {
+	if (typeof record.source !== "string" || typeof record.destination !== "string") {
+		throw new ToolError("copy requires source and destination strings for SSH remote execution");
+	}
+	record.source = rewriteRemotePath(record.source, host, remoteCwd);
+	record.destination = rewriteRemotePath(record.destination, host, remoteCwd);
 }
 
 async function resolveBridgeHost(
@@ -171,7 +191,7 @@ async function applyBridgeInvocationContext(name: string, args: unknown, options
 	const host = await resolveBridgeHost(name, record, options);
 	if (!record || !host) return args;
 	const next = { ...record };
-	const remoteCwd = typeof next.cwd === "string" ? next.cwd : options.invocationContext?.remoteCwd;
+	const remoteCwd = resolveRemoteCwd(next.cwd, options.invocationContext?.remoteCwd);
 	if (name === "bash" || name === "ssh") {
 		next.host = host.name;
 		if (next.cwd === undefined && remoteCwd) next.cwd = remoteCwd;
@@ -182,6 +202,12 @@ async function applyBridgeInvocationContext(name: string, args: unknown, options
 			throw new ToolError(`${name} requires a path string for SSH remote execution`);
 		}
 		rewritePathField(next, host, remoteCwd);
+		delete next.host;
+		delete next.cwd;
+		return next;
+	}
+	if (name === "copy") {
+		rewriteCopyFields(next, host, remoteCwd);
 		delete next.host;
 		delete next.cwd;
 		return next;

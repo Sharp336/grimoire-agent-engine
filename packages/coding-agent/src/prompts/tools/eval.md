@@ -41,7 +41,7 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
     Task/agent output by id; one → text/dict, multiple → list.
 tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.
-{{#if py}}    Remote Python: `tool.bash/ssh/read/write/grep` default to the SSH host/cwd; `glob`/`edit`/`ast_*`/`lsp`/`debug` reject remote defaults.{{/if}}
+{{#if py}}    Remote Python: `tool.bash/ssh/read/write/grep/copy` default to the SSH host/cwd; `glob`/`edit`/`ast_*`/`lsp`/`debug` reject remote defaults.{{/if}}
 completion(prompt, model?="default", system?=None, schema?=None) → str | dict
     Oneshot, stateless (no history/tools). `model`: "smol" fast | "default" session | "slow" most capable. `schema` (JSON-Schema) → structured output, parsed object.
 {{#if spawns}}agent(prompt, agent?="task", model?=None, label?=None, schema?=None, handle?=False) → str | dict

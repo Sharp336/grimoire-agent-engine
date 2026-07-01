@@ -6,6 +6,7 @@
 
 - Added remote Python eval over configured SSH hosts, including persistent per-host kernels and host-side tool bridge support for `tool.*`, `completion`, and `agent` calls.
 - Added SSH-host execution for the bash tool and SSH-aware remote Python bridge defaults for `tool.bash`, `tool.ssh`, `tool.read`, `tool.write`, and explicit-path `tool.grep` calls.
+- Added a `copy` built-in tool for byte-exact regular-file copies between local paths, `local://`/`vault://` internal URIs, and `ssh://` remote hosts; remote Python eval `tool.copy` defaults to the SSH host/cwd.
 
 ## [16.2.9] - 2026-06-30
 

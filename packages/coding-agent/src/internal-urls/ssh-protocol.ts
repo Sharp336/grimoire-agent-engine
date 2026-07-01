@@ -253,6 +253,15 @@ function formatDirListing(entries: readonly RemoteDirEntry[]): string {
 	return entries.map(entry => `${entry.name}${entry.isDirectory ? "/" : ""}`).join("\n");
 }
 
+export interface SshUrlTransferTarget {
+	target: SSHConnectionTarget;
+	remotePath: string;
+}
+
+export async function resolveSshUrlTransferTarget(url: InternalUrl, cwd?: string): Promise<SshUrlTransferTarget> {
+	return { target: await resolveTarget(url, cwd), remotePath: remotePathFromUrl(url) };
+}
+
 export class SshProtocolHandler implements ProtocolHandler {
 	readonly scheme = "ssh";
 	readonly immutable = false;
