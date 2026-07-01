@@ -46,6 +46,7 @@ const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
+const MESSAGE_METADATA_BACKFILL_KEY = "message_metadata_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -96,6 +97,8 @@ export async function initDb(): Promise<Database> {
 			cost_cache_write REAL NOT NULL,
 			cost_total REAL NOT NULL,
 			agent_type TEXT NOT NULL DEFAULT 'main',
+			thinking_level TEXT,
+			plan_id TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -155,6 +158,14 @@ export async function initDb(): Promise<Database> {
 	if (!hasAgentTypeColumn) {
 		db.run("ALTER TABLE messages ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'main'");
 	}
+	const hasThinkingLevelColumn = messageColumns.some(column => column.name === "thinking_level");
+	if (!hasThinkingLevelColumn) {
+		db.run("ALTER TABLE messages ADD COLUMN thinking_level TEXT");
+	}
+	const hasPlanIdColumn = messageColumns.some(column => column.name === "plan_id");
+	if (!hasPlanIdColumn) {
+		db.run("ALTER TABLE messages ADD COLUMN plan_id TEXT");
+	}
 	// For any pre-existing table, enroll the backfill PENDING unless a prior run
 	// already settled the sentinel — `OR IGNORE` leaves an existing
 	// COMPLETE/PENDING value intact, so an ALTER that committed before its
@@ -166,6 +177,14 @@ export async function initDb(): Promise<Database> {
 		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
 	);
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
+	if (messagesTableExisted) {
+		backfillMessageMetadata(db);
+	} else {
+		db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(
+			MESSAGE_METADATA_BACKFILL_KEY,
+			BACKFILL_COMPLETE,
+		);
+	}
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
 	// already produced the new schema, but we want a clean wipe + re-ingest.
@@ -357,16 +376,30 @@ export function insertMessageStats(stats: MessageStats[]): number {
 			session_file, entry_id, folder, model, provider, api, timestamp,
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, agent_type
+			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, agent_type,
+			thinking_level, plan_id
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
 		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
-			premium_requests = excluded.premium_requests
+			premium_requests = CASE
+				WHEN messages.premium_requests < excluded.premium_requests THEN excluded.premium_requests
+				ELSE messages.premium_requests
+			END,
+			thinking_level = COALESCE(excluded.thinking_level, messages.thinking_level),
+			plan_id = COALESCE(excluded.plan_id, messages.plan_id)
 		WHERE messages.premium_requests < excluded.premium_requests
+			OR (
+				excluded.thinking_level IS NOT NULL
+				AND (messages.thinking_level IS NULL OR messages.thinking_level <> excluded.thinking_level)
+			)
+			OR (
+				excluded.plan_id IS NOT NULL
+				AND (messages.plan_id IS NULL OR messages.plan_id <> excluded.plan_id)
+			)
 	`);
 
 	let inserted = 0;
@@ -397,6 +430,8 @@ export function insertMessageStats(stats: MessageStats[]): number {
 				cost.cacheWrite,
 				cost.total,
 				s.agentType,
+				s.thinkingLevel ?? null,
+				s.planId ?? null,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
 				s.entryId,
@@ -773,6 +808,8 @@ function rowToMessageStats(row: any): MessageStats {
 			},
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
+		thinkingLevel: row.thinking_level ?? null,
+		planId: row.plan_id ?? null,
 	};
 }
 
@@ -970,6 +1007,24 @@ function repairUserMessageLinks(database: Database): void {
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_PENDING);
+}
+
+/**
+ * One-shot wipe of `file_offsets` so the next sync re-parses every session
+ * and fills nullable per-request metadata columns from the JSONL transcript.
+ * The guarded UPSERT in `insertMessageStats` updates existing rows when the
+ * reparse can now provide `thinking_level` or `plan_id`.
+ */
+function backfillMessageMetadata(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(MESSAGE_METADATA_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(MESSAGE_METADATA_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
 /**

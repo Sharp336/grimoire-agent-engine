@@ -1275,8 +1275,10 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		metadata?: { planId?: string | null },
 	): string {
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		if (metadata?.planId !== undefined) entry.planId = metadata.planId;
 		this.#recordEntry(entry);
 		return entry.id;
 	}

@@ -746,6 +746,60 @@ function hasOpenAICodexProPlan(report: UsageReport | null): boolean {
 	return getUsagePlanType(report)?.includes("pro") === true;
 }
 
+function preferredUsageLimitIds(provider: string, modelId: string | undefined): readonly string[] {
+	if (provider === "anthropic") return ["anthropic:5h", "anthropic:7d"];
+	if (provider === "openai-codex") {
+		if (requiresOpenAICodexProModel(provider, modelId)) {
+			return [
+				"openai-codex:spark:primary",
+				"openai-codex:spark:secondary",
+				"openai-codex:primary",
+				"openai-codex:secondary",
+			];
+		}
+		return ["openai-codex:primary", "openai-codex:secondary"];
+	}
+	return [];
+}
+
+function finiteWindowDuration(limit: UsageLimit): number | undefined {
+	const duration = limit.window?.durationMs;
+	return duration !== undefined && Number.isFinite(duration) && duration > 0 ? duration : undefined;
+}
+
+function shortestWindowLimit(limits: readonly UsageLimit[]): UsageLimit | undefined {
+	let selected: UsageLimit | undefined;
+	let selectedDuration = Number.POSITIVE_INFINITY;
+	for (const limit of limits) {
+		const duration = finiteWindowDuration(limit);
+		if (duration === undefined) continue;
+		if (
+			!selected ||
+			duration < selectedDuration ||
+			(duration === selectedDuration && limit.id.localeCompare(selected.id) < 0)
+		) {
+			selected = limit;
+			selectedDuration = duration;
+		}
+	}
+	return selected;
+}
+
+function resolvePrimaryUsageLimitId(
+	provider: string,
+	limits: readonly UsageLimit[],
+	modelId: string | undefined,
+): string | undefined {
+	if (limits.length === 0) return undefined;
+	const modelScoped = modelId ? limits.filter(limit => limit.scope.modelId === modelId) : [];
+	const candidates = modelScoped.length > 0 ? modelScoped : limits;
+	for (const id of preferredUsageLimitIds(provider, modelId)) {
+		if (candidates.some(limit => limit.id === id)) return id;
+	}
+	if (candidates.length === 1) return candidates[0]?.id;
+	return shortestWindowLimit(candidates)?.id;
+}
+
 function compareUsageRankingMetric(left: number, right: number): number {
 	if (left === right) return 0;
 	if (!Number.isFinite(left) || !Number.isFinite(right)) return left < right ? -1 : 1;
@@ -2295,6 +2349,31 @@ export class AuthStorage {
 	 */
 	listUsageHistory(query?: UsageHistoryQuery): UsageHistoryEntry[] {
 		return this.#store.listUsageHistory?.(query) ?? [];
+	}
+
+	/**
+	 * Best-effort request-time usage limit attribution for stats persistence.
+	 *
+	 * Synchronous and cache-only by design: this reads the session-sticky
+	 * credential's stale cached usage report (including just-ingested response
+	 * headers) and never performs an upstream usage probe on the hot
+	 * message-persistence path. Returns undefined when no cached report or
+	 * deterministic primary limit is available.
+	 */
+	resolveActiveUsageLimitId(
+		provider: Provider,
+		options?: { sessionId?: string; baseUrl?: string; modelId?: string },
+	): string | undefined {
+		const credential = this.#resolveObservedUsageCredential(provider, options?.sessionId);
+		if (!credential) return undefined;
+		const cacheKey = this.#buildUsageReportCacheKey({
+			provider,
+			credential,
+			baseUrl: options?.baseUrl,
+		});
+		const report = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
+		if (!report || report.limits.length === 0) return undefined;
+		return resolvePrimaryUsageLimitId(provider, report.limits, options?.modelId);
 	}
 
 	/** Record one observed provider request cost for later local usage aggregation. */

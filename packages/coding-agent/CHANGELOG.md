@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Assistant session entries now persist cached active plan attribution for stats requests. ([#3618](https://github.com/can1357/oh-my-pi/issues/3618))
+
 ## [16.2.11] - 2026-07-01
 
 ### Fixed
