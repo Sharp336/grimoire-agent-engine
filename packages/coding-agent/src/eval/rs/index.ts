@@ -40,6 +40,7 @@ export default {
 			signal: opts.signal,
 			sessionId: namespaceSessionId(opts.sessionId),
 			interpreter: readInterpreterSetting(opts.session),
+			cacheMiB: opts.session.settings.get("eval.rs.cacheMiB") ?? 512,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
 			localRoots: resolveEvalUrlRoots(opts.session),

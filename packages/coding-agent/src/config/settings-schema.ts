@@ -3255,6 +3255,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.rs.cacheMiB": {
+		type: "number",
+		default: 512,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust Eval Compile Cache (MiB)",
+			description:
+				"Size of evcxr's on-disk crate compilation cache (~/.cache/evcxr) shared across sessions. 0 disables. Speeds up repeat :dep across fresh kernels.",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "128", label: "128 MiB" },
+				{ value: "256", label: "256 MiB" },
+				{ value: "512", label: "512 MiB" },
+				{ value: "1024", label: "1024 MiB" },
+				{ value: "2048", label: "2048 MiB" },
+			],
+		},
+	},
+
 	// Runtime knobs (consumed by eval backends and the /python slash command)
 	"python.kernelMode": {
 		type: "enum",

@@ -282,7 +282,7 @@ export class RustKernel {
 		this.#startStderrReader(proc.stderr as ReadableStream<Uint8Array>);
 	}
 
-	static async start(options: KernelStartOptions): Promise<RustKernel> {
+	static async start(options: KernelStartOptions & { cacheMiB?: number }): Promise<RustKernel> {
 		const availability = await logger.time(
 			"RustKernel.start:availabilityCheck",
 			checkRustKernelAvailability,
@@ -338,7 +338,41 @@ export class RustKernel {
 				STARTUP_TIMEOUT_MS,
 			);
 			await waitForStartupPrompt(proc, startupBudget, startup.signal);
-			return new RustKernel(kernelId, proc, configDir);
+			const kernel = new RustKernel(kernelId, proc, configDir);
+			const cacheMiB = options.cacheMiB ?? 0;
+			if (cacheMiB > 0) {
+				// Bound priming by the remaining startup budget. getRemainingTimeMs returns
+				// 0 (not undefined) at/after the deadline, and execute() arms no timer when
+				// timeoutMs <= 0 — a raw 0 would let a hung :cache outrun the budget. Guard
+				// it: no time left => fail startup into the outer catch.
+				const cacheTimeoutMs = getRemainingTimeMs(options.deadlineMs) ?? STARTUP_TIMEOUT_MS;
+				if (cacheTimeoutMs <= 0) {
+					throw new Error("Rust kernel startup deadline exhausted before evcxr :cache priming");
+				}
+				// execute REJECTS only on transport/kernel failure (e.g. dead stdin pipe).
+				// Do NOT catch it: let it propagate to the outer catch (terminateProcess +
+				// config-dir rm) so a broken kernel never enters the sessions map.
+				const primeResult = await kernel.execute(`:cache ${cacheMiB}`, {
+					id: Snowflake.next(),
+					signal: options.signal,
+					timeoutMs: cacheTimeoutMs,
+					onChunk: () => {},
+					onDisplay: () => {},
+				});
+				// A timeout/abort during priming RESOLVES with cancelled/kernelKilled after
+				// #cancelPending already killed the kernel + called shutdown(). Returning
+				// that dead kernel would poison the sessions map, so throw into the outer
+				// catch and fail startup cleanly for a fresh retry.
+				if (primeResult.kernelKilled || primeResult.cancelled || !kernel.isAlive()) {
+					throw new Error("Rust kernel died while priming evcxr :cache during startup");
+				}
+				// A still-ALIVE status:"error" means this evcxr predates :cache. Non-fatal:
+				// log once and keep the kernel with caching off.
+				if (primeResult.status === "error") {
+					logger.warn("evcxr :cache unsupported by this evcxr; compile cache disabled for kernel", { kernelId });
+				}
+			}
+			return kernel;
 		} catch (err) {
 			if (proc) await terminateProcess(proc, SHUTDOWN_GRACE_MS).catch(() => false);
 			await fs.promises.rm(configDir, { recursive: true, force: true }).catch(() => {});

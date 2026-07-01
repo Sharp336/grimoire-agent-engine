@@ -55,6 +55,8 @@ export interface RustExecutorOptions {
 	 * `PI_EVAL_LOCAL_ROOTS` (JSON).
 	 */
 	localRoots?: Record<string, string>;
+	/** evcxr compile-cache size in MiB; 0 disables. Primed via `:cache` at kernel start. */
+	cacheMiB?: number;
 }
 
 export interface RustResult {
@@ -177,6 +179,7 @@ async function startKernel(cwd: string, options: RustExecutorOptions): Promise<R
 			cwd,
 			env: buildManagedKernelEnv(options),
 			signal: options.signal,
+			cacheMiB: options.cacheMiB,
 			deadlineMs: options.deadlineMs,
 			interpreter: options.interpreter,
 		});
