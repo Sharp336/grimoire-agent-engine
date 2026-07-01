@@ -16,7 +16,7 @@
  */
 import type { SkillsSettings } from "../../config/settings";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../../slash-commands/builtin-registry";
-import { toCommandSlashName } from "../../slash-commands/names";
+import { toExtensionSlashName } from "../../slash-commands/names";
 import type { CustomCommandSource, LoadedCustomCommand } from "../custom-commands";
 import { getSkillSlashCommandName, type Skill } from "../skills";
 import type { SlashCommandInfo, SlashCommandLocation } from "../slash-commands";
@@ -36,7 +36,7 @@ export function getSessionSlashCommands(session: CommandsCapableSession): SlashC
 	if (runner) {
 		for (const cmd of runner.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES)) {
 			out.push({
-				name: toCommandSlashName(cmd.name),
+				name: toExtensionSlashName(cmd.name),
 				description: cmd.description,
 				source: "extension",
 			});
@@ -45,7 +45,7 @@ export function getSessionSlashCommands(session: CommandsCapableSession): SlashC
 
 	for (const cmd of session.customCommands) {
 		out.push({
-			name: toCommandSlashName(cmd.command.name),
+			name: cmd.command.name,
 			description: cmd.command.description,
 			source: "prompt",
 			location: customCommandLocation(cmd.source),

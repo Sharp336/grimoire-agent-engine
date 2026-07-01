@@ -97,7 +97,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
-import { stripCommandSlashName, toCommandSlashName } from "../slash-commands/names";
+import { stripCommandSlashName, toBuiltinSlashName, toExtensionSlashName, toMcpSlashName, toPromptSlashName } from "../slash-commands/names";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
@@ -670,14 +670,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []
 		).map(cmd => ({
-			name: toCommandSlashName(cmd.name),
+			name: toBuiltinSlashName(cmd.name),
 			description: cmd.description ?? "(hook command)",
 			getArgumentCompletions: cmd.getArgumentCompletions,
 		}));
 
 		// Convert custom commands (TypeScript) to SlashCommand format
 		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
-			name: toCommandSlashName(loaded.command.name),
+			name: loaded.path?.startsWith("mcp:") ? toMcpSlashName(loaded.command.name) : loaded.command.name,
 			description: `${loaded.command.description} (${loaded.source})`,
 		}));
 
@@ -999,7 +999,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
-			name: toCommandSlashName(cmd.name),
+			name: toExtensionSlashName(cmd.name),
 			description: cmd.description,
 		}));
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
@@ -1023,7 +1023,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
 			.filter(template => !reservedNames.has(template.name))
 			.map(template => ({
-				name: toCommandSlashName(template.name),
+				name: toPromptSlashName(template.name),
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,

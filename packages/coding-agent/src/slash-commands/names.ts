@@ -1,15 +1,55 @@
-export const COMMAND_SLASH_PREFIX = "cmd:";
+export const BUILTIN_SLASH_PREFIX = "cmd:";
+export const EXTENSION_SLASH_PREFIX = "ext:";
+export const MCP_SLASH_PREFIX = "mcp:";
+export const PROMPT_SLASH_PREFIX = "prompt:";
 
-export function toCommandSlashName(name: string): string {
-	return `${COMMAND_SLASH_PREFIX}${name}`;
+export function toBuiltinSlashName(name: string): string {
+	return `${BUILTIN_SLASH_PREFIX}${name}`;
+}
+
+export function toExtensionSlashName(name: string): string {
+	return `${EXTENSION_SLASH_PREFIX}${name}`;
+}
+
+export function toMcpSlashName(name: string): string {
+	return `${MCP_SLASH_PREFIX}${name}`;
+}
+
+export function toPromptSlashName(name: string): string {
+	return `${PROMPT_SLASH_PREFIX}${name}`;
 }
 
 export function stripCommandSlashName(name: string): string {
-	return name.startsWith(COMMAND_SLASH_PREFIX) ? name.slice(COMMAND_SLASH_PREFIX.length) : name;
+	const colonPos = name.indexOf(":");
+	if (colonPos !== -1) {
+		const prefix = name.slice(0, colonPos + 1);
+		if (
+			prefix === BUILTIN_SLASH_PREFIX ||
+			prefix === EXTENSION_SLASH_PREFIX ||
+			prefix === MCP_SLASH_PREFIX ||
+			prefix === PROMPT_SLASH_PREFIX
+		) {
+			return name.slice(prefix.length);
+		}
+	}
+	return name;
 }
 
 export function stripCommandSlashInvocation(text: string): string {
-	return text.startsWith(`/${COMMAND_SLASH_PREFIX}`) ? `/${text.slice(COMMAND_SLASH_PREFIX.length + 1)}` : text;
+	if (!text.startsWith("/")) return text;
+	const colonPos = text.indexOf(":");
+	if (colonPos !== -1) {
+		const prefix = text.slice(1, colonPos + 1);
+		if (
+			prefix === BUILTIN_SLASH_PREFIX ||
+			prefix === EXTENSION_SLASH_PREFIX ||
+			prefix === MCP_SLASH_PREFIX ||
+			prefix === PROMPT_SLASH_PREFIX
+		) {
+			return `/${text.slice(1 + prefix.length)}`;
+		}
+	}
+	return text;
 }
 
 export interface ParsedSlashToken {
@@ -26,6 +66,9 @@ export function parseSlashToken(text: string): ParsedSlashToken | null {
 	return {
 		name: stripCommandSlashName(rawName),
 		args: rawArgs,
-		...(rawName.startsWith(COMMAND_SLASH_PREFIX) && { legacyName: rawName }),
+		...((rawName.startsWith(BUILTIN_SLASH_PREFIX) ||
+			rawName.startsWith(EXTENSION_SLASH_PREFIX) ||
+			rawName.startsWith(MCP_SLASH_PREFIX) ||
+			rawName.startsWith(PROMPT_SLASH_PREFIX)) && { legacyName: rawName }),
 	};
 }

@@ -46,7 +46,7 @@ import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-d
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
-import { parseSlashToken, stripCommandSlashName, toCommandSlashName } from "./names";
+import { parseSlashToken, stripCommandSlashName, toBuiltinSlashName } from "./names";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -2419,8 +2419,8 @@ function materializeTuiBuiltinSlashCommand(
 ): TuiBuiltinSlashCommand {
 	const materialized: TuiBuiltinSlashCommand = {
 		...cmd,
-		name: toCommandSlashName(cmd.name),
-		aliases: cmd.aliases?.map(toCommandSlashName),
+		name: toBuiltinSlashName(cmd.name),
+		aliases: cmd.aliases?.map(toBuiltinSlashName),
 	};
 	if (cmd.subcommands) {
 		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);

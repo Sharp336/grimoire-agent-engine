@@ -7,7 +7,7 @@ import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
-import { toCommandSlashName } from "./names";
+import { toBuiltinSlashName, toExtensionSlashName, toMcpSlashName, toPromptSlashName } from "./names";
 
 export type AvailableSlashCommandSource =
 	| "builtin"
@@ -54,8 +54,8 @@ export async function buildAvailableSlashCommands(
 		if (!command.handle) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
-			name: toCommandSlashName(command.name),
-			aliases: command.aliases?.map(toCommandSlashName),
+			name: toBuiltinSlashName(command.name),
+			aliases: command.aliases?.map(toBuiltinSlashName),
 			description: command.acpDescription ?? command.description,
 			input: hint ? { hint } : undefined,
 			subcommands: command.subcommands,
@@ -79,7 +79,7 @@ export async function buildAvailableSlashCommands(
 		for (const command of runner.getRegisteredCommands(ACP_BUILTIN_RESERVED_NAMES)) {
 			if (isAcpBuiltinShadowedName(command.name)) continue;
 			appendCommand({
-				name: toCommandSlashName(command.name),
+				name: toExtensionSlashName(command.name),
 				description: command.description ?? "(extension command)",
 				input: { hint: "arguments" },
 				source: "extension",
@@ -90,7 +90,7 @@ export async function buildAvailableSlashCommands(
 	for (const command of session.customCommands) {
 		const source: AvailableSlashCommandSource = command.path?.startsWith("mcp:") ? "mcp_prompt" : "custom";
 		appendCommand({
-			name: toCommandSlashName(command.command.name),
+			name: source === "mcp_prompt" ? toMcpSlashName(command.command.name) : command.command.name,
 			description: command.command.description,
 			input: { hint: "arguments" },
 			source,
@@ -100,12 +100,12 @@ export async function buildAvailableSlashCommands(
 	const fileCommands = await loadFileCommands(session.sessionManager.getCwd());
 	session.setSlashCommands(fileCommands);
 	for (const command of fileCommands) {
-		appendCommand({ name: toCommandSlashName(command.name), description: command.description, source: "file" });
+		appendCommand({ name: command.name, description: command.description, source: "file" });
 	}
 
 	for (const template of session.promptTemplates ?? []) {
 		appendCommand({
-			name: toCommandSlashName(template.name),
+			name: toPromptSlashName(template.name),
 			description: template.description,
 			input: { hint: "arguments" },
 			source: "prompt_template",

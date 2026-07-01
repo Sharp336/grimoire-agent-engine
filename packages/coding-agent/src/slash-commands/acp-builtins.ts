@@ -1,7 +1,7 @@
 import type { AvailableCommand } from "@agentclientprotocol/sdk";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
-import { parseSlashToken, stripCommandSlashName, toCommandSlashName } from "./names";
+import { parseSlashToken, stripCommandSlashName, toBuiltinSlashName } from "./names";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
 
 export type { AcpBuiltinSlashCommandResult } from "./types";
@@ -18,7 +18,7 @@ const RAW_ACP_BUILTIN_RESERVED_NAMES = new Set(
 
 export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set([
 	...RAW_ACP_BUILTIN_RESERVED_NAMES,
-	...[...RAW_ACP_BUILTIN_RESERVED_NAMES].map(toCommandSlashName),
+	...[...RAW_ACP_BUILTIN_RESERVED_NAMES].map(toBuiltinSlashName),
 ]);
 
 /**
@@ -49,7 +49,7 @@ export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMM
 	// otherwise fall back to the unified `description` / `inlineHint`.
 	const hint = command.acpInputHint ?? command.inlineHint;
 	return {
-		name: toCommandSlashName(command.name),
+		name: toBuiltinSlashName(command.name),
 		description: command.acpDescription ?? command.description,
 		input: hint ? { hint } : undefined,
 	};

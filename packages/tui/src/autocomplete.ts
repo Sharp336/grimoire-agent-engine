@@ -285,64 +285,121 @@ function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number
 	return fuzzyMatch(lowerPrefix, lowerTarget) ? fuzzyScore(lowerPrefix, lowerTarget) : 0;
 }
 
-function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
-	return commands
-		.flatMap(cmd => {
-			const name = getCommandName(cmd);
-			if (!name) return [];
-			const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
-			const staticDesc = getStaticCommandDescription(cmd);
-			let fullDescMemo: string | undefined;
-			let fullDescComputed = false;
-			// Resolve the (possibly live) display description lazily, only once a
-			// candidate actually matches — getAutocompleteDescription reads live
-			// session state and must not run for every command on each keystroke.
-			const resolveFullDesc = (): string | undefined => {
-				if (!fullDescComputed) {
-					const displayDesc = getAutocompleteCommandDescription(cmd);
-					fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
-					fullDescComputed = true;
-				}
-				return fullDescMemo;
-			};
-			const candidates: Array<AutocompleteItem & { score: number }> = [];
+const KNOWN_NAMESPACES = new Map([
+	["cmd", "Built-in commands"],
+	["ext", "Extension commands"],
+	["mcp", "MCP server commands"],
+	["prompt", "Prompt templates"],
+	["skill", "Agent skills"],
+]);
 
-			const isSkillCommand = name.startsWith("skill:");
-			const nameScore =
-				lowerPrefix.length === 0 && isSkillCommand ? 950 : scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
-			const lowerDesc = staticDesc.toLowerCase();
-			const descScore =
-				lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
-			const primaryScore = Math.max(nameScore, descScore);
-			if (primaryScore > 0) {
-				const fullDesc = resolveFullDesc();
+function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: string, isMidPrompt = false): AutocompleteItem[] {
+	if (isMidPrompt) {
+		return commands
+			.flatMap(cmd => processSlashCommand(cmd, lowerPrefix))
+			.sort((a, b) => b.score - a.score)
+			.map(({ score: _, ...rest }) => rest);
+	}
+
+	const colonIndex = lowerPrefix.indexOf(":");
+	let targetNamespace: string | undefined;
+	let activeCommands = commands;
+
+	if (colonIndex === -1) {
+		const namespacesPresent = new Set<string>();
+		const flatCommands: CommandEntry[] = [];
+		for (const cmd of commands) {
+			const name = getCommandName(cmd);
+			if (!name) continue;
+			const colonPos = name.indexOf(":");
+			if (colonPos !== -1 && KNOWN_NAMESPACES.has(name.slice(0, colonPos))) {
+				namespacesPresent.add(name.slice(0, colonPos));
+			} else {
+				flatCommands.push(cmd);
+			}
+		}
+
+		const candidates: Array<AutocompleteItem & { score: number }> = [];
+		for (const ns of namespacesPresent) {
+			const score = scoreCommandTextMatch(lowerPrefix, ns);
+			if (score > 0) {
 				candidates.push({
-					value: name,
-					label: "name" in cmd ? cmd.name : cmd.label,
-					score: primaryScore,
-					...(fullDesc && { description: fullDesc }),
+					value: `${ns}:`,
+					label: `${ns}:`,
+					description: KNOWN_NAMESPACES.get(ns),
+					score: score === 1 ? 1000 : score,
 				});
 			}
+		}
 
-			if (lowerPrefix.length > 0) {
-				for (const alias of getCommandAliases(cmd)) {
-					if (alias === name) continue;
-					const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-					if (aliasScore === 0) continue;
-					const fullDesc = resolveFullDesc();
-					candidates.push({
-						value: alias,
-						label: alias,
-						score: aliasScore,
-						...(fullDesc && { description: fullDesc }),
-					});
-				}
-			}
+		activeCommands = flatCommands;
+		return activeCommands
+			.flatMap(cmd => processSlashCommand(cmd, lowerPrefix))
+			.concat(candidates)
+			.sort((a, b) => b.score - a.score)
+			.map(({ score: _, ...rest }) => rest);
+	} else {
+		targetNamespace = lowerPrefix.slice(0, colonIndex);
+		activeCommands = commands.filter(cmd => {
+			const name = getCommandName(cmd);
+			return name && name.startsWith(`${targetNamespace}:`);
+		});
+		return activeCommands
+			.flatMap(cmd => processSlashCommand(cmd, lowerPrefix))
+			.sort((a, b) => b.score - a.score)
+			.map(({ score: _, ...rest }) => rest);
+	}
+}
 
-			return candidates;
-		})
-		.sort((a, b) => b.score - a.score)
-		.map(({ score: _, ...rest }) => rest);
+function processSlashCommand(cmd: CommandEntry, lowerPrefix: string): Array<AutocompleteItem & { score: number }> {
+	const name = getCommandName(cmd);
+	if (!name) return [];
+	const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
+	const staticDesc = getStaticCommandDescription(cmd);
+	let fullDescMemo: string | undefined;
+	let fullDescComputed = false;
+	const resolveFullDesc = (): string | undefined => {
+		if (!fullDescComputed) {
+			const displayDesc = getAutocompleteCommandDescription(cmd);
+			fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
+			fullDescComputed = true;
+		}
+		return fullDescMemo;
+	};
+	const candidates: Array<AutocompleteItem & { score: number }> = [];
+
+	const isSkillCommand = name.startsWith("skill:");
+	const nameScore =
+		lowerPrefix.length === 0 && isSkillCommand ? 950 : scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
+	const lowerDesc = staticDesc.toLowerCase();
+	const descScore = lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
+	const primaryScore = Math.max(nameScore, descScore);
+	if (primaryScore > 0) {
+		const fullDesc = resolveFullDesc();
+		candidates.push({
+			value: name,
+			label: "name" in cmd ? cmd.name : cmd.label,
+			score: primaryScore,
+			...(fullDesc && { description: fullDesc }),
+		});
+	}
+
+	if (lowerPrefix.length > 0) {
+		for (const alias of getCommandAliases(cmd)) {
+			if (alias === name) continue;
+			const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
+			if (aliasScore === 0) continue;
+			const fullDesc = resolveFullDesc();
+			candidates.push({
+				value: alias,
+				label: alias,
+				score: aliasScore,
+				...(fullDesc && { description: fullDesc }),
+			});
+		}
+	}
+
+	return candidates;
 }
 
 function hasPromptTextBeforeSlash(
@@ -361,6 +418,7 @@ function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: s
 	return buildSlashCommandCompletions(
 		commands.filter(cmd => getCommandName(cmd)?.startsWith("skill:")),
 		lowerPrefix,
+		true
 	);
 }
 
