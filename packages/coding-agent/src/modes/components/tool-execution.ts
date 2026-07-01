@@ -485,6 +485,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			return;
 		}
 		const wasPartial = this.#isPartial;
+		const hadResult = this.#result !== undefined;
 		this.#result = result;
 		this.#resultVersion++;
 		this.#isPartial = isPartial;
@@ -496,13 +497,17 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
 		this.#updateDisplay();
-		// A provisional partial render (pending SSH/tool chrome, streamed edit preview,
-		// etc.) can change row topology when it settles: headers flip state and final
-		// sections like `Output` appear. Force the next repaint through the full-window
-		// update path so an in-window diff cannot strand stale pending rows above the
-		// settled block in the live viewport.
-		if (wasPartial && !isPartial && this.#shouldForceSettleViewportRepaint()) {
-			this.#ui.requestRender(true);
+		// Two topology flips need transcript-wide intervention to avoid stranding
+		// stale pending rows above the settled block:
+		// 1) a provisional pending call preview disappears once a merged result
+		//    render takes over, which must retire any frozen snapshots of that
+		//    preview before repainting, and
+		// 2) a provisional partial result settles to its final chrome/body, which
+		//    must also retire any frozen snapshots of the old pending glyph/state.
+		if (!hadResult && this.#shouldResetDisplayOnFirstResult()) {
+			this.#ui.resetDisplay();
+		} else if (wasPartial && !isPartial && this.#shouldResetDisplayOnSettle()) {
+			this.#ui.resetDisplay();
 		}
 		// Convert non-PNG images to PNG for Kitty protocol (async)
 		this.#maybeConvertImagesForKitty();
@@ -598,7 +603,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		}
 	}
 
-	#shouldForceSettleViewportRepaint(): boolean {
+	#shouldResetDisplayOnFirstResult(): boolean {
+		const tool = this.#tool as { forceFirstResultViewportRepaint?: boolean } | undefined;
+		return tool?.forceFirstResultViewportRepaint ?? toolRenderers[this.#toolName]?.forceFirstResultViewportRepaint ?? false;
+	}
+
+	#shouldResetDisplayOnSettle(): boolean {
 		if (this.#result === undefined) return false;
 		const tool = this.#tool as { provisionalPartialResult?: boolean } | undefined;
 		return tool?.provisionalPartialResult ?? toolRenderers[this.#toolName]?.provisionalPartialResult ?? false;

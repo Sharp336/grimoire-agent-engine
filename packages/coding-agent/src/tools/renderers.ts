@@ -63,6 +63,11 @@ export type ToolRenderer = {
 	 * with the final render and may commit like any settled stream.
 	 */
 	provisionalPartialResult?: boolean;
+	/**
+	 * Whether the first merged result render must force a full display reset
+	 * because it replaces the pending-call placeholder wholesale.
+	 */
+	forceFirstResultViewportRepaint?: boolean;
 };
 
 export const toolRenderers: Record<string, ToolRenderer> = {

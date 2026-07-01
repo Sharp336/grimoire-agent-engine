@@ -450,6 +450,87 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 		}
 	}, 30_000);
 
+	test("ssh regression: settling after an ellipsis placeholder repaints away the stale placeholder rows", async () => {
+		if (process.platform === "win32") return;
+		const rows = 14;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(60, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const command = ["python3 - <<'PY'", ...Array.from({ length: 50 }, (_unused, i) => `line_${i}`), "PY"].join("\n");
+		const settle = async () => {
+			scheduler.flush();
+			await term.flush();
+		};
+
+		transcript.addChild(new StaticBlock(["lead-0", "lead-1"]));
+		transcript.addChild(new LiveBarrier(["assistant: still working in a parallel tool…"]));
+		const ssh = new ToolExecutionComponent("ssh", { __partialJson: '{"host":"build-host"' }, {}, undefined, tui, process.cwd());
+		transcript.addChild(ssh);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		try {
+			tui.start();
+			await settle();
+
+			const initialViewportText = term.getViewport().map(row => Bun.stripANSI(row).trimEnd()).join("\n");
+			expect(initialViewportText).toContain("⏳ SSH: […]");
+			expect(initialViewportText).toContain("$ …");
+
+			for (let i = 0; i < 60; i++) {
+				term.scrollLines(1_000);
+				tui.requestRender();
+				await settle();
+			}
+
+			ssh.updateArgs({ host: "build-host", command });
+			ssh.setExpanded(true);
+			ssh.setArgsComplete();
+			tui.requestRender();
+			await settle();
+
+			ssh.updateResult({ content: [{ type: "text", text: "REMOTE_PY_BEGIN" }], isError: false }, true);
+			for (let i = 0; i < 60; i++) {
+				term.scrollLines(1_000);
+				tui.requestRender();
+				await settle();
+			}
+
+			ssh.updateResult(
+				{
+					content: [{ type: "text", text: ["REMOTE_PY_BEGIN", "REMOTE_PY_END"].join("\n") }],
+					isError: false,
+				},
+				false,
+			);
+			tui.requestRender();
+			await settle();
+			term.scrollLines(1_000);
+			await term.flush();
+
+			const bufferText = term
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+			const viewportText = term
+				.getViewport()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+
+			expect(viewportText).not.toContain("⏳ SSH: […]");
+			expect(bufferText).not.toContain("⏳ SSH: […]");
+			expect(bufferText).toContain("⇄ SSH: [build-host]");
+			expect(bufferText).toContain("REMOTE_PY_BEGIN");
+			expect(bufferText).toContain("REMOTE_PY_END");
+		} finally {
+			ssh.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
 	test("transcript regression: a stable live block growing above finalized lower content does not lose rows", async () => {
 		if (process.platform === "win32") return;
 		const rows = 4;

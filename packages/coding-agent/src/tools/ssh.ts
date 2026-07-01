@@ -377,6 +377,12 @@ export const sshToolRenderer = {
 	// and the pending `╰──╯` footer reused in-place as the new `├── Output ──┤`
 	// separator with a fresh footer pushed below it.
 	provisionalPendingPreview: true,
+	// The earliest args-stream placeholder (`⏳ SSH: […]` / `$ …`) is also a
+	// provisional shape: once the first result lands, `mergeCallAndResult`
+	// suppresses `renderCall()` entirely. Force that first settle through a
+	// full-window repaint so an in-window diff cannot strand the placeholder rows
+	// above the result block.
+	forceFirstResultViewportRepaint: true,
 	// Partial-result chrome (pending icon and frame state) differs from the
 	// final SSH glyph/state, so the block stays commit-unstable while
 	// `options.isPartial` holds. Without this, a long-running SSH command's

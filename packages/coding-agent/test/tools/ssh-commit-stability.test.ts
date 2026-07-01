@@ -17,7 +17,7 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
-const uiStub = { requestRender() {} } as unknown as TUI;
+const uiStub = { requestRender() {}, resetDisplay() {} } as unknown as TUI;
 
 function makeSshComponent() {
 	return new ToolExecutionComponent("ssh", { host: "sccpu", command: "uptime" }, {}, undefined, uiStub);
@@ -74,6 +74,28 @@ describe("ssh tool block commit stability", () => {
 		expect(component.isTranscriptBlockCommitStable()).toBe(false);
 	});
 
+	it("resets display when the first SSH result replaces a provisional pending preview", () => {
+		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
+		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, { resetDisplay, requestRender } as unknown as TUI);
+
+		component.updateResult(partialResult("connecting…"), true);
+
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("resets display again when a provisional SSH result settles", () => {
+		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
+		const component = new ToolExecutionComponent("ssh", {}, {}, undefined, { resetDisplay, requestRender } as unknown as TUI);
+
+		component.updateResult(partialResult("connecting…"), true);
+		component.updateResult(partialResult("done\n"), false);
+
+		expect(resetDisplay).toHaveBeenCalledTimes(2);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
 	it("flips commit-stable as soon as the SSH result settles", () => {
 		const component = makeSshComponent();
 		component.updateResult(partialResult("connecting…"), true);
