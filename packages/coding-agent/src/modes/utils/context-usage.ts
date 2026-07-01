@@ -103,13 +103,22 @@ export function computeNonMessageBreakdown(session: AgentSession): {
 	toolsTokens: number;
 	systemContextTokens: number;
 	systemPromptTokens: number;
+	/**
+	 * Total non-message tokens: system prompt (all parts) + tools. Identical to
+	 * {@link computeNonMessageTokens} but computed here so callers that already
+	 * need the category split don't pay for a second `estimateToolSchemaTokens`
+	 * pass over the (potentially large) tool registry.
+	 */
+	nonMessageTokens: number;
 } {
 	const skillsTokens = estimateSkillsTokens(session.skills ?? []);
 	const toolsTokens = estimateToolSchemaTokens(session.agent?.state?.tools ?? []);
 	const systemPromptParts = session.systemPrompt ?? [];
+	const firstPartTokens = countTokens(systemPromptParts[0] ?? "");
 	const systemContextTokens = countTokens(systemPromptParts.slice(1));
-	const systemPromptTokens = Math.max(0, countTokens(systemPromptParts[0] ?? "") - skillsTokens);
-	return { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens };
+	const systemPromptTokens = Math.max(0, firstPartTokens - skillsTokens);
+	const nonMessageTokens = firstPartTokens + systemContextTokens + toolsTokens;
+	return { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens, nonMessageTokens };
 }
 
 /**
