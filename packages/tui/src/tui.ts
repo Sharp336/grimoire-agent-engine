@@ -2782,10 +2782,12 @@ export class TUI extends Container {
 			// cannot erase the stale preview from immutable scrollback. Rows between
 			// durableBoundary and offerBoundary are different: they are permanent enough
 			// to commit, but still audited because live growth above may shift them.
-			// A wholly volatile live region keeps the historical forced-overflow path so
-			// its eventual replacement can be recommitted rather than dropped.
+			// A wholly volatile live region offers nothing past its seam: its scrolled-
+			// off head stays repaint-only until the block either earns a durable prefix
+			// or settles, matching the commit-unstable contract used by provisional tool
+			// renders whose top rows would otherwise strand stale history.
 			const commitCeiling =
-				liveRegionStart !== undefined && offerBoundary > liveRegionStart ? offerBoundary : frameLength;
+				liveRegionStart === undefined ? frameLength : offerBoundary > liveRegionStart ? offerBoundary : liveRegionStart;
 			chunkTo = hasVisibleOverlay || geometryChanged ? this.#committedRows : Math.min(windowTop, commitCeiling);
 			if (geometryChanged) {
 				committedPrefixResliced = true;

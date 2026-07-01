@@ -484,6 +484,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		if (isPartial && this.#toolName === "task" && this.#maybeFreezeBackgroundTask()) {
 			return;
 		}
+		const wasPartial = this.#isPartial;
 		this.#result = result;
 		this.#resultVersion++;
 		this.#isPartial = isPartial;
@@ -495,6 +496,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
 		this.#updateDisplay();
+		// A provisional partial render (pending SSH/tool chrome, streamed edit preview,
+		// etc.) can change row topology when it settles: headers flip state and final
+		// sections like `Output` appear. Force the next repaint through the full-window
+		// update path so an in-window diff cannot strand stale pending rows above the
+		// settled block in the live viewport.
+		if (wasPartial && !isPartial && this.#shouldForceSettleViewportRepaint()) {
+			this.#ui.requestRender(true);
+		}
 		// Convert non-PNG images to PNG for Kitty protocol (async)
 		this.#maybeConvertImagesForKitty();
 	}
@@ -587,6 +596,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+	}
+
+	#shouldForceSettleViewportRepaint(): boolean {
+		if (this.#result === undefined) return false;
+		const tool = this.#tool as { provisionalPartialResult?: boolean } | undefined;
+		return tool?.provisionalPartialResult ?? toolRenderers[this.#toolName]?.provisionalPartialResult ?? false;
 	}
 
 	/**

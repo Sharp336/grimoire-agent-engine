@@ -388,6 +388,68 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 		}
 	}, 30_000);
 
+	test("ssh regression: settling a provisional result repaints away the pending header in viewport", async () => {
+		if (process.platform === "win32") return;
+		const rows = 14;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(60, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const command = ["python3 - <<'PY'", "print('hi')", "PY"].join("\n");
+		const settle = async () => {
+			scheduler.flush();
+			await term.flush();
+		};
+
+		transcript.addChild(new StaticBlock(["lead-0", "lead-1"]));
+		transcript.addChild(new LiveBarrier(["assistant: still working in a parallel tool…"]));
+		const ssh = new ToolExecutionComponent("ssh", { host: "build-host", command }, {}, undefined, tui, process.cwd());
+		transcript.addChild(ssh);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		try {
+			tui.start();
+			await settle();
+
+			ssh.setExpanded(true);
+			ssh.setArgsComplete();
+			tui.requestRender();
+			await settle();
+
+			ssh.updateResult({ content: [{ type: "text", text: "REMOTE_PY_BEGIN" }], isError: false }, true);
+			tui.requestRender();
+			await settle();
+
+			const pendingViewportRows = term.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+			expect(pendingViewportRows.join("\n")).toContain("REMOTE_PY_BEGIN");
+			expect(pendingViewportRows.join("\n")).toContain("⏳ SSH: [build-host]");
+			expect(pendingViewportRows.join("\n")).toContain("Output");
+
+			ssh.updateResult(
+				{
+					content: [{ type: "text", text: ["REMOTE_PY_BEGIN", "REMOTE_PY_END"].join("\n") }],
+					isError: false,
+				},
+				false,
+			);
+			tui.requestRender();
+			await settle();
+
+			const viewportRows = term.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+			const viewportText = viewportRows.join("\n");
+			expect(viewportRows.filter(row => row.includes("⏳ SSH: [build-host]"))).toHaveLength(0);
+			expect(viewportText).toContain("⇄ SSH: [build-host]");
+			expect(viewportText).toContain("REMOTE_PY_END");
+			expect(viewportText).toContain("Output");
+		} finally {
+			ssh.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
 	test("transcript regression: a stable live block growing above finalized lower content does not lose rows", async () => {
 		if (process.platform === "win32") return;
 		const rows = 4;
