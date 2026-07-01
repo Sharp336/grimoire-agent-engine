@@ -211,16 +211,22 @@ export interface OverlayFocusOwner {
  * dropped row or an audit re-anchor spray. Provisional live blocks (collapsing
  * tool/edit previews whose head is a throwaway tail window) omit it. Defaults to
  * `commitSafeEnd ?? liveRegionStart` when absent.
+ * `getNativeScrollbackOfferEnd` optionally reports an even deeper boundary: rows
+ * up to this line may enter native scrollback, but they MUST stay audited after
+ * commit because their position may still shift when live rows above them grow
+ * (for example, a finalized lower transcript card below a still-live append-only
+ * block). Defaults to `snapshotSafeEnd ?? commitSafeEnd ?? liveRegionStart`.
  *
  * When several root children report a seam in the same frame, the topmost
- * one (and its commit-safe / snapshot-safe extension) defines the boundary:
- * commits are prefix-only, so everything below the first seam is already
- * excluded.
+ * one (and its own commit-safe / snapshot-safe / offer extension) defines the
+ * boundary: commits are prefix-only, so everything below the first seam is
+ * already excluded.
  */
 export interface NativeScrollbackLiveRegion {
 	getNativeScrollbackLiveRegionStart(): number | undefined;
 	getNativeScrollbackCommitSafeEnd?(): number | undefined;
 	getNativeScrollbackSnapshotSafeEnd?(): number | undefined;
+	getNativeScrollbackOfferEnd?(): number | undefined;
 }
 
 export interface NativeScrollbackCommittedRows {
@@ -248,6 +254,10 @@ function getNativeScrollbackCommitSafeEnd(component: Component): number | undefi
 
 function getNativeScrollbackSnapshotSafeEnd(component: Component): number | undefined {
 	return (component as Component & Partial<NativeScrollbackLiveRegion>).getNativeScrollbackSnapshotSafeEnd?.();
+}
+
+function getNativeScrollbackOfferEnd(component: Component): number | undefined {
+	return (component as Component & Partial<NativeScrollbackLiveRegion>).getNativeScrollbackOfferEnd?.();
 }
 
 /**
@@ -637,6 +647,7 @@ interface FrameSegment {
 	liveLocalStart?: number;
 	commitLocalEnd?: number;
 	snapshotLocalEnd?: number;
+	offerLocalEnd?: number;
 }
 
 /** Depth-first identity search through `Container`-shaped children. */
@@ -877,6 +888,7 @@ export function findCommittedPrefixResync(
 			let samples = 0;
 			let mismatches = 0;
 			let scanned = 0;
+			let forcedOverflowMismatch = false;
 			for (let j = 1; j <= committed && scanned < RESYNC_TAIL_LOOKBACK && samples < RESYNC_TAIL_SAMPLES; j++) {
 				const idx = committed - j;
 				if (!audited(idx)) continue;
@@ -889,10 +901,17 @@ export function findCommittedPrefixResync(
 				}
 				if (isBlankRow(row) && isBlankRow(old)) continue;
 				samples++;
-				if (!rowsEquivalent(row, old)) mismatches++;
+				if (!rowsEquivalent(row, old)) {
+					mismatches++;
+					if (idx >= exTo) forcedOverflowMismatch = true;
+				}
 			}
-			// No signal (all-blank/all-exempt tail) or at most one edited row: aligned.
-			if (samples === 0 || mismatches <= 1) return -1;
+			// No signal (all-blank/all-exempt tail): aligned. Byte-stable rows keep the
+			// historic one-row tolerance so a lone offscreen spinner tick or in-place
+			// edit does not spray duplicates. Forced-overflow rows are stricter: any
+			// mismatch there is a stale committed preview under a commit-unstable
+			// barrier, so re-anchor immediately.
+			if (samples === 0 || (!forcedOverflowMismatch && mismatches <= 1)) return -1;
 		}
 	}
 	// Misaligned (hard mismatch, tail-sample shift, or the frame no longer covers
@@ -1028,6 +1047,7 @@ export class TUI extends Container {
 	#nativeScrollbackLiveRegionStart: number | undefined;
 	#nativeScrollbackCommitSafeEnd: number | undefined;
 	#nativeScrollbackSnapshotSafeEnd: number | undefined;
+	#nativeScrollbackOfferEnd: number | undefined;
 	#fullRedrawCount = 0;
 	// Caps how many inline images render as live graphics; older ones fall back
 	// to text via a purge + full redraw. Cap is configured by the host app.
@@ -1147,6 +1167,7 @@ export class TUI extends Container {
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackCommitSafeEnd = undefined;
 		this.#nativeScrollbackSnapshotSafeEnd = undefined;
+		this.#nativeScrollbackOfferEnd = undefined;
 		const children = this.children;
 		const previousSegments = this.#frameSegments;
 		const segments: FrameSegment[] = new Array(children.length);
@@ -1169,12 +1190,14 @@ export class TUI extends Container {
 			let liveLocalStart: number | undefined;
 			let commitLocalEnd: number | undefined;
 			let snapshotLocalEnd: number | undefined;
+			let offerLocalEnd: number | undefined;
 			let reported: number | undefined;
 			if (reuse) {
 				childLines = previous.lines;
 				liveLocalStart = previous.liveLocalStart;
 				commitLocalEnd = previous.commitLocalEnd;
 				snapshotLocalEnd = previous.snapshotLocalEnd;
+				offerLocalEnd = previous.offerLocalEnd;
 			} else {
 				// Feed the engine's committed-row claim (from the previous frame's
 				// emit) before rendering so the child can skip re-deriving blocks
@@ -1203,6 +1226,15 @@ export class TUI extends Container {
 							? Math.max(snapshotFloor, Math.min(childLines.length, Math.trunc(snapshotSafeEnd)))
 							: childLines.length;
 					}
+					const offerEnd = getNativeScrollbackOfferEnd(child);
+					if (offerEnd !== undefined) {
+						const offerFloor = snapshotLocalEnd ?? commitLocalEnd ?? liveLocalStart;
+						offerLocalEnd = Number.isFinite(offerEnd)
+							? Math.max(offerFloor, Math.min(childLines.length, Math.trunc(offerEnd)))
+							: childLines.length;
+					} else {
+						offerLocalEnd = snapshotLocalEnd;
+					}
 				}
 				// Consume the stability report unconditionally for implementers:
 				// reading re-bases the component's baseline to the state this
@@ -1213,9 +1245,9 @@ export class TUI extends Container {
 				reported = getRenderStablePrefixRows(child);
 			}
 			// Topmost seam wins. Commits are prefix-only: the first child that
-			// reports a live region (plus its own commit-safe extension) already
-			// bounds everything below it, so a lower sibling's seam (e.g. a
-			// status loader under a streaming transcript) must never overwrite
+			// reports a live region (plus its own commit-safe / snapshot-safe / offer
+			// extension) already bounds everything below it, so a lower sibling's seam
+			// (e.g. a status loader under a streaming transcript) must never overwrite
 			// it — moving the boundary down would commit the earlier child's
 			// still-mutable rows as stale history.
 			if (liveLocalStart !== undefined && this.#nativeScrollbackLiveRegionStart === undefined) {
@@ -1225,6 +1257,9 @@ export class TUI extends Container {
 				}
 				if (snapshotLocalEnd !== undefined) {
 					this.#nativeScrollbackSnapshotSafeEnd = offset + snapshotLocalEnd;
+				}
+				if (offerLocalEnd !== undefined) {
+					this.#nativeScrollbackOfferEnd = offset + offerLocalEnd;
 				}
 			}
 			if (chainStable) {
@@ -1256,6 +1291,7 @@ export class TUI extends Container {
 				liveLocalStart,
 				commitLocalEnd,
 				snapshotLocalEnd,
+				offerLocalEnd,
 			};
 			offset += childLines.length;
 		}
@@ -2597,21 +2633,27 @@ export class TUI extends Container {
 		// The commit floor is windowTop in every non-frozen path (see chunkTo), so
 		// whatever scrolls above the window is committed — never committed nowhere
 		// AND painted nowhere (the loss bug). The boundaries no longer gate the
-		// commit; they define the audit-exempt span. byteStableBoundary: rows below
+		// commit; they classify the committed prefix. byteStableBoundary: rows below
 		// it are byte-stable (never re-layout), audited. durableBoundary: rows in
 		// [byteStableBoundary, durableBoundary) are durable — permanent on scroll-off
 		// but may drift in place (a streaming table re-aligning), committed
-		// audit-EXEMPT. Rows at/beyond durableBoundary committed only because they
-		// scrolled above the window (a commit-unstable barrier over a long tail) are
-		// forced-overflow rows: audited, so a later shift/finalize/removal re-anchors
-		// (duplication, never loss) instead of stranding a stale prefix. Built on the
-		// finalized prefix (live-region start); the whole frame when the root reports
-		// no seam (shell semantics: whatever scrolls is final).
+		// audit-EXEMPT. Rows in [durableBoundary, offerBoundary) are permanent enough
+		// to commit but still audited because live rows above may shift them. Rows at
+		// or beyond offerBoundary committed only because they scrolled above the
+		// window under a commit-unstable barrier are forced-overflow rows: audited,
+		// so a later shift/finalize/removal re-anchors (duplication, never loss)
+		// instead of stranding a stale prefix. Built on the finalized prefix
+		// (live-region start); the whole frame when the root reports no seam (shell
+		// semantics: whatever scrolls is final).
 		const frameLength = rawFrame.length;
 		const byteStableBoundary = Math.max(0, Math.min(frameLength, commitSafeEnd ?? liveRegionStart ?? frameLength));
 		const durableBoundary = Math.max(
 			byteStableBoundary,
 			Math.min(frameLength, snapshotSafeEnd ?? byteStableBoundary),
+		);
+		const offerBoundary = Math.max(
+			durableBoundary,
+			Math.min(frameLength, this.#nativeScrollbackOfferEnd ?? durableBoundary),
 		);
 
 		// 2. Transition state captured before any emitter runs.
@@ -2733,8 +2775,18 @@ export class TUI extends Container {
 			// overlay closes. A multiplexer resize also commits nothing — the
 			// pane keeps its own (old-wrap) history — and re-bases the audit
 			// prefix at the new width so the accepted wrap drift does not read
-			// as a violation on the next ordinary frame.
-			chunkTo = hasVisibleOverlay || geometryChanged ? this.#committedRows : windowTop;
+			// as a violation on the next ordinary frame. When a live region has a
+			// durable prefix followed by commit-unstable rows, the unstable suffix is
+			// only viewport content: if it scrolls into native history before the
+			// settled render replaces it, a later audit can duplicate fresh rows but
+			// cannot erase the stale preview from immutable scrollback. Rows between
+			// durableBoundary and offerBoundary are different: they are permanent enough
+			// to commit, but still audited because live growth above may shift them.
+			// A wholly volatile live region keeps the historical forced-overflow path so
+			// its eventual replacement can be recommitted rather than dropped.
+			const commitCeiling =
+				liveRegionStart !== undefined && offerBoundary > liveRegionStart ? offerBoundary : frameLength;
+			chunkTo = hasVisibleOverlay || geometryChanged ? this.#committedRows : Math.min(windowTop, commitCeiling);
 			if (geometryChanged) {
 				committedPrefixResliced = true;
 				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
@@ -3662,7 +3714,7 @@ export class TUI extends Container {
 				: `fullPaint(clearScrollback=${intent.clearScrollback})`;
 		const state =
 			`committed=${this.#committedRows}, windowTop=${this.#windowTopRow}, ` +
-			`lrStart=${this.#nativeScrollbackLiveRegionStart}, commitSafeEnd=${this.#nativeScrollbackCommitSafeEnd}`;
+			`lrStart=${this.#nativeScrollbackLiveRegionStart}, commitSafeEnd=${this.#nativeScrollbackCommitSafeEnd}, offerEnd=${this.#nativeScrollbackOfferEnd}`;
 		const msg = `[${new Date().toISOString()}] render: ${detail} (prev=${this.#previousFrameLength}, new=${newLength}, height=${height}, ${state})\n`;
 		fs.appendFileSync(getDebugLogPath(), msg);
 	}

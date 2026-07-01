@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed TUI scrollback committing stale pending SSH preview rows and forced-overflow snapshots, which could strand duplicate pending headers or stale tool chrome above the final settled output.
+
 ## [16.2.8] - 2026-06-30
 
 ### Added

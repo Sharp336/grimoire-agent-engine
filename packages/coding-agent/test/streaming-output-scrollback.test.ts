@@ -79,6 +79,23 @@ class LiveBarrier extends StaticBlock {
 	}
 }
 
+class MutableLiveBarrier extends LiveBarrier {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		super(lines);
+		this.#lines = lines;
+	}
+
+	set(lines: string[]): void {
+		this.#lines = lines;
+	}
+
+	override render(_width: number): string[] {
+		return this.#lines;
+	}
+}
+
 // Stand-in for the input editor + status drawn below the transcript.
 class Footer implements Component {
 	#rows: number;
@@ -94,6 +111,26 @@ class Footer implements Component {
 const ORIGINAL_ROWS = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 function stubStdoutRows(rows: number): void {
 	Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+}
+
+function contiguousAt(buffer: string[], needle: string[]): number[] {
+	const hits: number[] = [];
+	outer: for (let start = 0; start <= buffer.length - needle.length; start++) {
+		for (let i = 0; i < needle.length; i++) {
+			if ((buffer[start + i] ?? "") !== needle[i]) continue outer;
+		}
+		hits.push(start);
+	}
+	return hits;
+}
+
+function expectNoLoss(term: VirtualTerminal, frame: string[]): string[] {
+	const buffer = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+	const hits = contiguousAt(buffer, frame);
+	expect(hits.length).toBeGreaterThan(0);
+	const tailStart = hits.at(-1)! + frame.length;
+	for (let i = tailStart; i < buffer.length; i++) expect(buffer[i]).toBe("");
+	return buffer;
 }
 
 describe("streaming tool output never sprays duplicate scrollback banners", () => {
@@ -137,6 +174,262 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 			expect(banners).toBeLessThanOrEqual(1);
 		} finally {
 			bash.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
+	test("ssh: settled native scrollback does not keep a stale pending host header above the final frame", async () => {
+		if (process.platform === "win32") return;
+		const rows = 14;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(60, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const command = [
+			"python3 - <<'PY'",
+			"import time",
+			'BLOB = """',
+			"alpha",
+			"beta",
+			"gamma",
+			"delta",
+			"epsilon",
+			"zeta",
+			"eta",
+			"theta",
+			"iota",
+			"kappa",
+			"lambda",
+			"mu",
+			"nu",
+			"xi",
+			"omicron",
+			"pi",
+			"rho",
+			"sigma",
+			"tau",
+			"upsilon",
+			"phi",
+			"chi",
+			"psi",
+			"omega",
+			'"""',
+			"",
+			"def chunk(label):",
+			"    print(label)",
+			"    print(BLOB[:40])",
+			"",
+			'print("REMOTE_PY_BEGIN")',
+			'chunk("REMOTE_PY_BLOB")',
+			"time.sleep(1)",
+			'print("REMOTE_PY_TICK_1")',
+			"time.sleep(1)",
+			'print("REMOTE_PY_TICK_2")',
+			"time.sleep(1)",
+			'print("REMOTE_PY_TICK_3")',
+			'print("REMOTE_PY_END")',
+			"PY",
+		].join("\n");
+		const settle = async () => {
+			scheduler.flush();
+			await term.flush();
+		};
+
+		transcript.addChild(
+			new StaticBlock([
+				"Use only the ssh tool on build-host.",
+				"Do not pass cwd and do not use tilde.",
+				"Set command to: python3 - <<'PY'",
+				...command.split("\n"),
+			]),
+		);
+		transcript.addChild(new LiveBarrier(["assistant: still working in a parallel tool…"]));
+		const ssh = new ToolExecutionComponent("ssh", { host: "build-host", command }, {}, undefined, tui, process.cwd());
+		transcript.addChild(ssh);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		try {
+			tui.start();
+			await settle();
+
+			ssh.setArgsComplete();
+			tui.requestRender();
+			await settle();
+
+			ssh.updateResult(
+				{
+					content: [
+						{
+							type: "text",
+							text: [
+								"REMOTE_PY_BEGIN",
+								"REMOTE_PY_BLOB",
+								"",
+								"alpha",
+								"beta",
+								"gamma",
+								"delta",
+								"epsilon",
+								"zeta",
+								"eta",
+								"REMOTE_PY_TICK_1",
+								"REMOTE_PY_TICK_2",
+								"REMOTE_PY_TICK_3",
+								"REMOTE_PY_END",
+							].join("\n"),
+						},
+					],
+					isError: false,
+				},
+				false,
+			);
+			tui.requestRender();
+			await settle();
+
+			term.scrollLines(1_000);
+			await term.flush();
+
+			const bufferRows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+			const viewportText = term
+				.getViewport()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+
+			// Final-state contract: once the SSH block settles, neither the viewport nor
+			// native scrollback should retain a stale pending host header. Use a generic
+			// host label so the oracle is repo-local, not machine-local.
+			expect(viewportText).not.toContain("⏳ SSH: [build-host]");
+			expect(bufferRows.filter(row => row.includes("⇄ SSH: [build-host]")).length).toBe(1);
+			expect(bufferRows.filter(row => row.includes("⏳ SSH: [build-host]")).length).toBe(0);
+		} finally {
+			ssh.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
+	test("ssh regression: settled output must not leave a stale pending host header in native scrollback", async () => {
+		if (process.platform === "win32") return;
+		const rows = 14;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(60, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const command = ["python3 - <<'PY'", ...Array.from({ length: 50 }, (_unused, i) => `line_${i}`), "PY"].join("\n");
+		const settle = async () => {
+			scheduler.flush();
+			await term.flush();
+		};
+
+		transcript.addChild(new StaticBlock(["lead-0", "lead-1"]));
+		transcript.addChild(new LiveBarrier(["assistant: still working in a parallel tool…"]));
+		const ssh = new ToolExecutionComponent("ssh", { host: "build-host", command }, {}, undefined, tui, process.cwd());
+		transcript.addChild(ssh);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		try {
+			tui.start();
+			await settle();
+
+			ssh.setExpanded(true);
+			ssh.setArgsComplete();
+			for (let i = 0; i < 60; i++) {
+				term.scrollLines(1_000);
+				tui.requestRender();
+				await settle();
+			}
+
+			ssh.updateResult({ content: [{ type: "text", text: "REMOTE_PY_BEGIN" }], isError: false }, true);
+			for (let i = 0; i < 60; i++) {
+				term.scrollLines(1_000);
+				tui.requestRender();
+				await settle();
+			}
+
+			ssh.updateResult(
+				{
+					content: [{ type: "text", text: ["REMOTE_PY_BEGIN", "REMOTE_PY_END"].join("\n") }],
+					isError: false,
+				},
+				false,
+			);
+			tui.requestRender();
+			await settle();
+			term.scrollLines(1_000);
+			await term.flush();
+
+			const bufferText = term
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+			const viewportText = term
+				.getViewport()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+
+			// Replay-like regression: the current engine leaves a stale pending host
+			// header in native scrollback even though the settled viewport is clean.
+			// Desired contract: once fixed, the settled state retains only the final
+			// output/content, never the old pending host header.
+			expect(viewportText).not.toContain("⏳ SSH: [build-host]");
+			expect(bufferText).not.toContain("⏳ SSH: [build-host]");
+			expect(bufferText).toContain("Output");
+			expect(bufferText).toContain("REMOTE_PY_BEGIN");
+			expect(bufferText).toContain("REMOTE_PY_END");
+		} finally {
+			ssh.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
+	test("transcript regression: a stable live block growing above finalized lower content does not lose rows", async () => {
+		if (process.platform === "win32") return;
+		const rows = 4;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(40, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const live = new MutableLiveBarrier(["live-0"]);
+		const finalFrame1 = ["head-0", "head-1", "", "live-0", "", "tail-0", "tail-1", "tail-2"];
+		const finalFrame2 = ["head-0", "head-1", "", "live-0", "live-1", "", "tail-0", "tail-1", "tail-2"];
+		const settle = async () => {
+			scheduler.flush();
+			await term.flush();
+		};
+
+		transcript.addChild(new StaticBlock(["head-0", "head-1"]));
+		transcript.addChild(live);
+		transcript.addChild(new StaticBlock(["tail-0", "tail-1", "tail-2"]));
+		tui.addChild(transcript);
+
+		try {
+			tui.start();
+			await settle();
+
+			for (let i = 0; i < 40; i++) {
+				tui.requestRender();
+				await settle();
+			}
+
+			expect(transcript.getNativeScrollbackSnapshotSafeEnd()).toBe(4);
+			expect(transcript.getNativeScrollbackOfferEnd()).toBe(8);
+			expectNoLoss(term, finalFrame1);
+
+			live.set(["live-0", "live-1"]);
+			tui.requestRender();
+			await settle();
+
+			const buffer = expectNoLoss(term, finalFrame2);
+			expect(buffer).toContain("live-1");
+			expect(buffer).toContain("tail-2");
+		} finally {
 			tui.stop();
 			await term.flush();
 		}

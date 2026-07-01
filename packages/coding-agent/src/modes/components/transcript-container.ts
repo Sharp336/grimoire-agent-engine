@@ -441,8 +441,13 @@ export class TranscriptContainer
 	// engine must append their scroll-off snapshot rather than drop it. Reported
 	// separately from the byte-stable commit-safe end because these rows may still
 	// drift after commit; the engine commits them audit-exempt. Provisional
-	// (commit-unstable) blocks never extend it.
+	// (commit-unstable) blocks never extend it, and lower siblings below a still-
+	// live block stay out because later live growth above them shifts position.
 	#nativeScrollbackSnapshotSafeEnd: number | undefined;
+	// Local line index up to which rows may still be offered to native scrollback.
+	// Unlike the durable snapshot end, rows offered below a still-live block stay
+	// audited after commit because later live growth above them may shift them.
+	#nativeScrollbackOfferEnd: number | undefined;
 	// Persistent assembled transcript rows. Rows before the stable floor are
 	// byte-identical to the previous render; rows at/after it were re-pushed.
 	#lines: string[] = [];
@@ -489,6 +494,10 @@ export class TranscriptContainer
 
 	getNativeScrollbackSnapshotSafeEnd(): number | undefined {
 		return this.#nativeScrollbackSnapshotSafeEnd;
+	}
+
+	getNativeScrollbackOfferEnd(): number | undefined {
+		return this.#nativeScrollbackOfferEnd;
 	}
 
 	/**
@@ -583,6 +592,7 @@ export class TranscriptContainer
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackCommitSafeEnd = undefined;
 		this.#nativeScrollbackSnapshotSafeEnd = undefined;
+		this.#nativeScrollbackOfferEnd = undefined;
 
 		const count = this.children.length;
 
@@ -621,10 +631,14 @@ export class TranscriptContainer
 		// invariant — otherwise re-pushed rows land after the stale frame.
 		if (!chainStable) lines.length = 0;
 
-		// Tracks whether we are still inside the leading run of commit-safe live
-		// blocks. The first still-live volatile block closes it, but rendering
-		// continues so lower blocks remain visible.
+		// Tracks whether we are still inside the leading run of byte-stable live
+		// blocks. The first still-live block closes it, but rendering continues so
+		// lower blocks remain visible. Snapshot-safety is tracked separately below:
+		// a still-live block may expose its own durable body, but lower siblings below
+		// it stay audited because later live growth above them shifts position.
 		let commitSafeOpen = true;
+		let snapshotSafeOpen = true;
+		let offerOpen = true;
 		// The live-region start is recorded at the first visible row at/after
 		// liveStartIndex; empty leading blocks (or a separator) must not claim it
 		// early.
@@ -700,7 +714,11 @@ export class TranscriptContainer
 			// still closes the commit-safe run: if it later gains rows, it pushes
 			// everything below it.
 			if (contribution.length === 0) {
-				if (i >= liveStartIndex && commitSafeOpen && !finalized) commitSafeOpen = false;
+				if (i >= liveStartIndex && !finalized) {
+					if (commitSafeOpen) commitSafeOpen = false;
+					if (snapshotSafeOpen) snapshotSafeOpen = false;
+					if (offerOpen) offerOpen = false;
+				}
 				if (chainStable && !(reusable && previous.rowCount === 0 && previous.startRow === row)) {
 					chainStable = false;
 					lines.length = row;
@@ -750,26 +768,36 @@ export class TranscriptContainer
 			}
 
 			const blockStart = row + sep;
+			const safeLength = finalized ? contribution.length : (liveCommitState?.safeLength ?? 0);
 			if (i >= liveStartIndex && commitSafeOpen) {
-				const safeLength = finalized ? contribution.length : (liveCommitState?.safeLength ?? 0);
 				if (safeLength > 0) {
 					this.#nativeScrollbackCommitSafeEnd = blockStart + safeLength;
 				}
+			}
+			const snapshotLength = finalized || isBlockCommitStable(child) ? contribution.length : safeLength;
+			if (i >= liveStartIndex && snapshotSafeOpen) {
 				// Durable snapshot end: a commit-stable block's whole body is durable
 				// content — its scrolled-off rows are permanent even while interior
 				// rows re-lay-out (a streaming table re-aligning columns), so the
 				// engine must commit their snapshot on scroll-off rather than drop it.
-				// Finalized blocks are wholly durable; provisional (commit-unstable)
-				// blocks offer nothing beyond their byte-stable safe length.
-				const snapshotLength = finalized || isBlockCommitStable(child) ? contribution.length : safeLength;
+				// Lower siblings below a still-live block are excluded here: they may be
+				// final content, but later live growth above them shifts their position,
+				// so they stay audited rather than entering the durable-exempt window.
 				if (snapshotLength > 0) {
 					this.#nativeScrollbackSnapshotSafeEnd = blockStart + snapshotLength;
 				}
-				// A finalized, fully safe block may let the contiguous safe run extend
-				// into blocks rendered below it. A still-live block keeps pushing lower
-				// rows around as it grows, so the run closes there.
-				if (!(finalized && safeLength >= contribution.length)) commitSafeOpen = false;
 			}
+			if (i >= liveStartIndex && offerOpen) {
+				if (snapshotLength > 0) {
+					this.#nativeScrollbackOfferEnd = blockStart + snapshotLength;
+				}
+				if (snapshotLength < contribution.length) offerOpen = false;
+			}
+			if (!finalized) snapshotSafeOpen = false;
+			// A finalized, fully safe block may let the contiguous byte-stable run
+			// extend into blocks rendered below it. A still-live block keeps pushing
+			// lower rows around as it grows, so the run closes there.
+			if (!(finalized && safeLength >= contribution.length)) commitSafeOpen = false;
 
 			segments[i] = {
 				component: child,

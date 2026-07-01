@@ -386,6 +386,19 @@ describe("TranscriptContainer", () => {
 		for (let frame = 0; frame < 4; frame++) container.render(60);
 		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBeGreaterThan(0);
 	});
+
+	it("keeps finalized lower siblings offerable but outside the durable snapshot window under a live block", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["earlier turn"], true));
+		container.addChild(new StreamingBlock(["live-0"]));
+		container.addChild(new MutableBlock(["tail-0", "tail-1"]));
+
+		for (let frame = 0; frame < 40; frame++) container.render(60);
+
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
+		expect(container.getNativeScrollbackSnapshotSafeEnd()).toBe(3);
+		expect(container.getNativeScrollbackOfferEnd()).toBe(6);
+	});
 	it("does not re-render finalized rows already committed to native scrollback", () => {
 		const container = new TranscriptContainer();
 		const committed = new CountingFinalizedBlock(["committed"]);
