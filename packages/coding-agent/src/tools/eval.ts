@@ -321,8 +321,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<EvalToolParams>;
-		const language =
-			typeof params.language === "string" ? formatEvalInputLanguage(params.language) : "javascript (default)";
+		const language = typeof params.language === "string" ? formatEvalInputLanguage(params.language) : "pending";
 		const code = typeof params.code === "string" ? params.code : "";
 		const details = [`Language: ${language}`];
 		if (typeof params.host === "string") {
@@ -413,8 +412,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly strict = true;
 	readonly intent = (args: Partial<typeof evalSchema.infer>): string | undefined => {
 		const title = typeof args.title === "string" ? args.title : undefined;
-		const language = typeof args.language === "string" ? formatEvalInputLanguage(args.language) : "javascript";
-		return title || `running ${language}`;
+		const language = typeof args.language === "string" ? formatEvalInputLanguage(args.language) : undefined;
+		return title || (language ? `running ${language}` : "running eval");
 	};
 
 	readonly #proxyExecutor?: EvalProxyExecutor;
