@@ -245,7 +245,7 @@ fn git_capture(cwd: &Path, args: &[&str]) -> IsoResult<Vec<u8>> {
 }
 
 fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
-	use std::io::Write as _;
+	use std::io::{Read as _, Write as _};
 	let mut child = std::process::Command::new("git")
 		.arg("-C")
 		.arg(cwd)
@@ -264,6 +264,18 @@ fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
 				IsoError::other(format!("spawn git apply: {err}"))
 			}
 		})?;
+
+	let mut child_stderr = child
+		.stderr
+		.take()
+		.ok_or_else(|| IsoError::other("git apply: child stderr was not piped".to_string()))?;
+
+	let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+		let mut buf = Vec::new();
+		child_stderr.read_to_end(&mut buf)?;
+		Ok(buf)
+	});
+
 	{
 		let stdin = child
 			.stdin
@@ -273,17 +285,21 @@ fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
 			.write_all(patch)
 			.map_err(|err| IsoError::other(format!("write patch to git apply: {err}")))?;
 	}
-	let output = child
-		.wait_with_output()
+	drop(child.stdin.take());
+
+	let stderr_bytes = stderr_reader
+		.join()
+		.map_err(|_| IsoError::other("git apply: stderr reader thread panicked".to_string()))?
+		.map_err(|err| IsoError::other(format!("read git apply stderr: {err}")))?;
+
+	let status = child
+		.wait()
 		.map_err(|err| IsoError::other(format!("wait git apply: {err}")))?;
-	if output.status.success() {
+	if status.success() {
 		return Ok(());
 	}
-	let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-	Err(IsoError::other(format!(
-		"git apply (exit {}): {stderr}",
-		output.status.code().unwrap_or(-1)
-	)))
+	let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+	Err(IsoError::other(format!("git apply (exit {}): {stderr}", status.code().unwrap_or(-1))))
 }
 
 /// Copy a single path (regular file, symlink, or directory) from `src`
