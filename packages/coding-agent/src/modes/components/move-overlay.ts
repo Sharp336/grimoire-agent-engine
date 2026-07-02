@@ -29,19 +29,32 @@ const OVERLAY_WIDTH = 68;
 
 /** TTL for the directory listing cache (ms). */
 const DIR_CACHE_TTL = 500;
-const dirCache = new Map<string, { time: number; entries: string[] }>();
+const dirCache = new Map<string, { time: number; entries: fs.Dirent[] }>();
 
-function readDirCached(dir: string): string[] {
+function readDirCached(dir: string): fs.Dirent[] {
 	const now = Date.now();
 	const cached = dirCache.get(dir);
 	if (cached && now - cached.time < DIR_CACHE_TTL) return cached.entries;
 	try {
-		const entries = fs.readdirSync(dir);
+		const entries = fs.readdirSync(dir, { withFileTypes: true });
 		dirCache.set(dir, { time: now, entries });
 		return entries;
 	} catch {
 		return [];
 	}
+}
+
+/** Directory test that follows symlinks (Dirent.isDirectory reports the entry, not its target). */
+function direntIsDir(dir: string, entry: fs.Dirent): boolean {
+	if (entry.isDirectory()) return true;
+	if (entry.isSymbolicLink()) {
+		try {
+			return fs.statSync(path.join(dir, entry.name)).isDirectory();
+		} catch {
+			return false;
+		}
+	}
+	return false;
 }
 
 function printableInput(data: string): string {
@@ -76,17 +89,11 @@ export function resolveExistingDirectory(input: string, cwd: string): string | n
 
 function listChildDirectories(dirPath: string, max: number, includeHidden = false): DirEntry[] {
 	const results: DirEntry[] = [];
-	const names = readDirCached(dirPath);
-	for (const name of names) {
+	for (const entry of readDirCached(dirPath)) {
 		if (results.length >= max) break;
-		if (!includeHidden && name.startsWith(".")) continue;
-		const full = path.join(dirPath, name);
-		try {
-			if (!fs.statSync(full).isDirectory()) continue;
-		} catch {
-			continue;
-		}
-		results.push({ value: full, label: `${name}/` });
+		if (!includeHidden && entry.name.startsWith(".")) continue;
+		if (!direntIsDir(dirPath, entry)) continue;
+		results.push({ value: path.join(dirPath, entry.name), label: `${entry.name}/` });
 	}
 	results.sort((a, b) => a.label.localeCompare(b.label));
 	return results;
@@ -118,18 +125,12 @@ function searchDirectories(prefix: string, cwd: string, max: number): DirEntry[]
 
 	const lower = query.toLowerCase();
 	const results: DirEntry[] = [];
-	const names = readDirCached(baseDir);
-	for (const name of names) {
+	for (const entry of readDirCached(baseDir)) {
 		if (results.length >= max) break;
-		if (!includeHidden && name.startsWith(".")) continue;
-		const full = path.join(baseDir, name);
-		try {
-			if (!fs.statSync(full).isDirectory()) continue;
-		} catch {
-			continue;
-		}
-		if (!query || name.toLowerCase().includes(lower)) {
-			results.push({ value: full, label: `${name}/` });
+		if (!includeHidden && entry.name.startsWith(".")) continue;
+		if (!direntIsDir(baseDir, entry)) continue;
+		if (!query || entry.name.toLowerCase().includes(lower)) {
+			results.push({ value: path.join(baseDir, entry.name), label: `${entry.name}/` });
 		}
 	}
 	return results;
