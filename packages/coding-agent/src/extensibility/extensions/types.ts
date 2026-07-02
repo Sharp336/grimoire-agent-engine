@@ -289,6 +289,12 @@ export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
+	 * Host-only guidance for the built-in LLM summarizer. Unlike
+	 * `customInstructions`, this is not user focus text and is not forwarded to
+	 * `session_before_compact` handlers.
+	 */
+	internalInstructions?: string;
+	/**
 	 * Force a one-off compaction mode for this invocation, overriding the
 	 * configured `compaction.strategy` / `remoteEnabled` (the `/compact`
 	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.

@@ -2606,7 +2606,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// the try/finally is idempotent and kept for the !compactBeforeExecute
 				// branch.
 				this.session.setPlanReferencePath(options.planFilePath);
-				compactOutcome = await this.handleCompactCommand(compactionPrompt, undefined, outcome =>
+				compactOutcome = await this.handleCompactCommand({ internalInstructions: compactionPrompt }, undefined, outcome =>
 					this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
 				);
 			}
@@ -3897,11 +3897,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	handleCompactCommand(
-		customInstructions?: string,
+		customInstructionsOrOptions?: string | CompactOptions,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 	): Promise<CompactionOutcome> {
-		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush);
+		return this.#commandController.handleCompactCommand(customInstructionsOrOptions, mode, beforeFlush);
 	}
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {

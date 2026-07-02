@@ -9404,8 +9404,8 @@ export class AgentSession {
 	/**
 	 * Manually compact the session context.
 	 * Aborts current agent operation first.
-	 * @param customInstructions Optional instructions for the compaction summary
-	 * @param options Optional callbacks for completion/error handling
+	 * @param customInstructions Optional user focus instructions for the compaction summary
+	 * @param options Optional callbacks and host-only compaction options
 	 */
 	async compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
 		if (this.#compactionAbortController) {
@@ -9422,6 +9422,7 @@ export class AgentSession {
 		}
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
+		const summaryInstructions = [customInstructions, options?.internalInstructions].filter(Boolean).join("\n\n");
 
 		try {
 			this.#disconnectFromAgent();
@@ -9498,12 +9499,12 @@ export class AgentSession {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
-			// Strategy honored on manual /compact too. Custom instructions imply a
+			// Strategy honored on manual /compact too. Custom/internal instructions imply a
 			// directed LLM summary; a text-only model cannot read snapcompact frames.
 			// When snapcompact itself was requested, fail locally instead of silently
 			// converting the "no LLM call" path into a provider-backed summary.
 			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
+				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !summaryInstructions;
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
@@ -9636,7 +9637,7 @@ export class AgentSession {
 				try {
 					const result = await this.#compactWithFallbackModel(
 						preparation,
-						customInstructions,
+						summaryInstructions || undefined,
 						compactionAbortController.signal,
 						{
 							promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),

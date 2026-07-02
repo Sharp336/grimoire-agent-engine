@@ -1121,7 +1121,7 @@ export class CommandController {
 	}
 
 	async handleCompactCommand(
-		customInstructions?: string,
+		customInstructionsOrOptions?: string | CompactOptions,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 	): Promise<CompactionOutcome> {
@@ -1133,7 +1133,7 @@ export class CommandController {
 			return "ok";
 		}
 
-		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+		return this.executeCompaction(customInstructionsOrOptions, false, beforeFlush, mode);
 	}
 
 	/**

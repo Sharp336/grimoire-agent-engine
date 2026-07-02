@@ -1203,11 +1203,17 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		// Compaction was run with the rendered planning-specific custom instruction.
+		// Plan-mode guidance is host-only: it must reach the native compactor through
+		// CompactOptions.internalInstructions, not as user focus text.
 		expect(compactSpy).toHaveBeenCalledTimes(1);
-		const [compactInstruction] = compactSpy.mock.calls[0]!;
-		expect(typeof compactInstruction).toBe("string");
-		expect(compactInstruction as string).toContain(planFilePath);
+		const compactCall = compactSpy.mock.calls[0];
+		expect(compactCall).toBeDefined();
+		if (!compactCall) throw new Error("Expected compact call");
+		const [compactOptions] = compactCall;
+		expect(typeof compactOptions).toBe("object");
+		expect(compactOptions).toMatchObject({
+			internalInstructions: expect.stringContaining(planFilePath),
+		});
 
 		// Plan-approved synthetic prompt was dispatched.
 		const planApprovedIdx = promptSpy.mock.calls.findIndex(isPlanApprovedCall);
