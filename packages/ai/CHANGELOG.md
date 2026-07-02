@@ -6,6 +6,11 @@
 
 - Removed automated injection of reasoning suppression prompts in OpenAI responses
 
+### Fixed
+
+- Bound Cursor proxy socket connect with abort signal and 30s timeout to prevent pre-start hangs. ([#4226](https://github.com/can1357/oh-my-pi/issues/4226))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
