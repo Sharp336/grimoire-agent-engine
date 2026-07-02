@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound DAP stdin flush with timeout and adapter-exit race, and kill spawned adapter on socket connect timeout ([#4233](https://github.com/can1357/oh-my-pi/issues/4233))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
