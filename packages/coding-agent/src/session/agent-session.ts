@@ -284,7 +284,11 @@ import {
 } from "../thinking";
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
+import {
+	countToolsForAutoDiscovery,
+	estimateMcpToolSchemaTokens,
+	resolveEffectiveToolDiscoveryMode,
+} from "../tool-discovery/mode";
 import {
 	buildDiscoverableToolSearchIndex,
 	collectDiscoverableTools,
@@ -5956,10 +5960,11 @@ export class AgentSession {
 
 	/** Resolve effective discovery mode from the current registry size. */
 	#resolveEffectiveDiscoveryMode(): "off" | "mcp-only" | "all" {
-		const mode = resolveEffectiveToolDiscoveryMode(
-			this.settings,
-			countToolsForAutoDiscovery(this.#toolRegistry.keys()),
-		);
+		const mcpTools = Array.from(this.#toolRegistry.values()).filter(tool => isMCPToolName(tool.name));
+		const mode = resolveEffectiveToolDiscoveryMode(this.settings, countToolsForAutoDiscovery(this.#toolRegistry.keys()), {
+			mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
+			contextWindow: this.model?.contextWindow ?? 0,
+		});
 		if (mode !== "off") return mode;
 		return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";
 	}

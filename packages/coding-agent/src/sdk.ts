@@ -143,7 +143,11 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "./thinking";
-import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "./tool-discovery/mode";
+import {
+	countToolsForAutoDiscovery,
+	estimateMcpToolSchemaTokens,
+	resolveEffectiveToolDiscoveryMode,
+} from "./tool-discovery/mode";
 import {
 	collectDiscoverableTools,
 	type DiscoverableTool,
@@ -1715,6 +1719,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								const projectedMode = resolveEffectiveToolDiscoveryMode(
 									settings,
 									countToolsForAutoDiscovery([...nonMCPToolNames, ...mcpResult.tools.map(tool => tool.name)]),
+									{
+										mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpResult.tools),
+										contextWindow: liveSession.model?.contextWindow ?? 0,
+									},
 								);
 								if (projectedMode !== "off") {
 									effectiveDiscoveryMode = projectedMode;
@@ -2154,10 +2162,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// `let`: the deferred MCP discovery closure upgrades these when the real
 		// MCP tool count pushes `auto` past its threshold; `rebuildSystemPrompt`
 		// below reads the live bindings.
-		let effectiveDiscoveryMode = resolveEffectiveToolDiscoveryMode(
-			settings,
-			countToolsForAutoDiscovery(toolRegistry.keys()),
-		);
+		const mcpTools = Array.from(toolRegistry.values()).filter(tool => isMCPToolName(tool.name));
+		let effectiveDiscoveryMode = resolveEffectiveToolDiscoveryMode(settings, countToolsForAutoDiscovery(toolRegistry.keys()), {
+			mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
+			contextWindow: model?.contextWindow ?? 0,
+		});
 		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
 			const searchTool: Tool = new SearchToolBm25Tool(toolSession);
 			toolRegistry.set(

@@ -3788,8 +3788,13 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Tool Discovery",
 			description:
-				"Hide tools behind a search tool to save tokens. 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'all' hides all non-essential built-ins too.",
+				"Hide tools behind a search tool to save tokens. 'auto' hides MCP tools once the tool set has more than 40 tools or, when tools.discoveryContextShare is greater than 0, once MCP schemas exceed that share of the active context window; 'mcp-only' always hides MCP tools; 'all' hides all non-essential built-ins too.",
 		},
+	},
+
+	"tools.discoveryContextShare": {
+		type: "number",
+		default: 0,
 	},
 
 	"tools.essentialOverride": {
