@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid O(n²) per-entry array copies in guest snapshot commits by keeping a mutable entries accumulator and rebuilding the readonly snapshot only when entries change ([#4252](https://github.com/can1357/oh-my-pi/issues/4252))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Fixed

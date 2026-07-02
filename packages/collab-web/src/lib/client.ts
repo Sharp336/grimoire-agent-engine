@@ -105,7 +105,10 @@ export class GuestClient {
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
 	#header: SessionHeader | null = null;
-	#entries: readonly SessionEntry[] = [];
+	#mutableEntries: SessionEntry[] = [];
+	#entriesVersion = 0;
+	#entriesSnapshotVersion = -1;
+	#entriesSnapshot: readonly SessionEntry[] = [];
 	#state: SessionState | null = null;
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
@@ -288,7 +291,8 @@ export class GuestClient {
 				// Reset accumulator: a fresh welcome arriving mid-load (reconnect)
 				// supersedes any partially-streamed snapshot from the prior session.
 				this.#header = frame.header;
-				this.#entries = [];
+				this.#mutableEntries = [];
+				this.#entriesVersion++;
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -313,7 +317,8 @@ export class GuestClient {
 				// Stream transcript fragments into the live snapshot. The host
 				// always closes the train with `final: true`; that flip is what
 				// moves the guest from "waiting" to "live".
-				this.#entries = [...this.#entries, ...frame.entries];
+				this.#mutableEntries.push(...frame.entries);
+				this.#entriesVersion++;
 				if (frame.final) {
 					this.#clearSnapshotProgressTimer();
 					this.#phase = "live";
@@ -323,7 +328,8 @@ export class GuestClient {
 				break;
 			}
 			case "entry":
-				this.#entries = [...this.#entries, frame.entry];
+				this.#mutableEntries.push(frame.entry);
+				this.#entriesVersion++;
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
 					this.#stream = null;
 					this.#streamDone = false;
@@ -494,11 +500,16 @@ export class GuestClient {
 	}
 
 	#buildSnapshot(): GuestSnapshot {
+		if (this.#entriesSnapshotVersion !== this.#entriesVersion) {
+			this.#entriesSnapshot = [...this.#mutableEntries];
+			this.#entriesSnapshotVersion = this.#entriesVersion;
+		}
+
 		return {
 			phase: this.#phase,
 			endedReason: this.#endedReason,
 			header: this.#header,
-			entries: this.#entries,
+			entries: this.#entriesSnapshot,
 			state: this.#state,
 			agents: this.#agents,
 			progress: this.#progress,
