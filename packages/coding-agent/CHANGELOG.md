@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound status-line GitHub PR lookup with a timeout and non-interactive environment to prevent hangs ([#4234](https://github.com/can1357/oh-my-pi/issues/4234))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added

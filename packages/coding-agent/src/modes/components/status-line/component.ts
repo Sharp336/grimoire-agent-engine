@@ -4,7 +4,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
@@ -708,13 +707,17 @@ export class StatusLineComponent implements Component {
 			};
 			try {
 				// Requires `gh repo set-default` to be configured; fails gracefully if not
-				const result = await $`gh pr view --json number,url`.cwd(lookupCwd).quiet().nothrow();
+				const result = await git.github.run(
+					lookupCwd,
+					["pr", "view", "--json", "number,url"],
+					AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+				);
 				if (this.#disposed) return;
 				if (result.exitCode !== 0) {
 					setCachedPr(null);
 					return;
 				}
-				const pr = JSON.parse(result.stdout.toString()) as { number: number; url: string };
+				const pr = JSON.parse(result.stdout) as { number: number; url: string };
 				if (typeof pr.number === "number") {
 					setCachedPr({ number: pr.number, url: pr.url });
 				} else {
