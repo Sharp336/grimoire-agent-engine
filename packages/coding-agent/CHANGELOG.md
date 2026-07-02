@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced startup filesystem work by loading only the native provider during extension-module discovery (`discoverExtensionPaths`), instead of walking all providers and discarding non-native results ([#4198](https://github.com/can1357/oh-my-pi/issues/4198)).
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
