@@ -7,6 +7,10 @@
 - Added optional Rust eval backend powered by the Evcxr REPL, hardened against terminal-escape marker swallowing, startup-deadline cancellation, and unbounded per-cell stdout buffering edge cases.
 - Rust eval backend now reuses compiled crate artifacts across sessions via evcxr's built-in `:cache`, gated by the new `eval.rs.cacheMiB` setting (default 512 MiB; 0 disables).
 
+### Fixed
+
+- Fixed the eval runtime environment filter (Ruby, Julia, and Rust backends) leaking URL-embedded credentials such as `CARGO_HTTP_PROXY=https://user:pass@host` into eval subprocesses when the variable name itself was not secret-shaped.
+
 ## [16.2.13] - 2026-07-01
 
 ### Fixed

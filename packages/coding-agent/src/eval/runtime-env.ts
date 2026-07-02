@@ -13,6 +13,14 @@ export const CASE_INSENSITIVE_ENV = process.platform === "win32";
 export const SECRET_KEY_PATTERN =
 	/API[_-]?KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|ACCESS[_-]?KEY|PRIVATE[_-]?KEY/i;
 
+// Secret-shaped VALUES that must never leak even under an innocuous key name the
+// key pattern above cannot catch. Targets URL userinfo credentials —
+// `scheme://user:pass@host` and `scheme://:pass@host` (e.g. CARGO_HTTP_PROXY,
+// SCCACHE_REDIS, PI_REGISTRY carrying `user:pass@`). Deliberately narrow: it
+// requires a password segment before an `@`, so plain paths (`/usr/bin`),
+// credential-free URLs (`https://example.com`), and `host:port/path` do not match.
+export const SECRET_VALUE_PATTERN = /\/\/[^/\s@]*:[^/\s@]+@/;
+
 export interface EnvFilterOptions {
 	allowList: string[];
 	windowsAllowList: string[];
@@ -41,6 +49,10 @@ export function createEnvFilter(
 			if (value === undefined) continue;
 			const normalizedKey = CASE_INSENSITIVE_ENV ? key.toUpperCase() : key;
 			if (normalizedDenyList.has(normalizedKey)) continue;
+			// Drop any value carrying URL-embedded credentials, before the allow
+			// checks — a value-borne secret must not pass even under an allowlisted
+			// or prefix-allowed name.
+			if (SECRET_VALUE_PATTERN.test(value)) continue;
 			if (normalizedAllowList.has(normalizedKey)) {
 				filtered[normalizedKey === "PATH" ? "PATH" : key] = value;
 				continue;
