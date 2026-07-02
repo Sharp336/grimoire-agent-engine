@@ -604,9 +604,10 @@ export class RustKernel {
 	}
 
 	#streamStdoutForLiveUx(pending: PendingExecution): void {
-		// Live UX and correctness use separate passes: stdoutBuffer remains an
-		// untouched transcript for the quiescence-time protocol decision, while
-		// this pass streams only stdout that is definitely before the first marker.
+		// Live UX and correctness use separate passes: this pass streams stdout
+		// that is definitely before the first marker. Pre-marker bytes are dropped
+		// from stdoutBuffer once streamed (see the no-marker branch below) so a
+		// large pre-marker output keeps peak memory at O(chunk), not O(total).
 		if (pending.liveMarkerSeen) return;
 		const successIndex = pending.stdoutBuffer.indexOf(SUCCESS_MARKER, pending.liveStdoutCursor);
 		const failureIndex = pending.stdoutBuffer.indexOf(FAILURE_MARKER, pending.liveStdoutCursor);
@@ -620,6 +621,19 @@ export class RustKernel {
 			pending.liveMarkerSeen = true;
 			const marker = successIndex === markerIndex ? SUCCESS_MARKER : FAILURE_MARKER;
 			pending.liveMarkerEndIndex = markerIndex + marker.length;
+			// Marker seen: stop compacting from here on so the marker + trailing
+			// prompt region stays intact for #checkArmSettleTimer and
+			// #finalizeSettledOutput (both index into stdoutBuffer).
+			return;
+		}
+		// No marker yet: everything up to liveStdoutCursor has been streamed and,
+		// by definition, contains no marker (marker codepoints are atomic under the
+		// streaming TextDecoder, so none can straddle the cut). Drop the streamed
+		// prefix and rebase the cursor to 0 to keep both in the same coordinate
+		// space; this bounds pre-marker memory without changing delivered output.
+		if (pending.liveStdoutCursor > 0) {
+			pending.stdoutBuffer = pending.stdoutBuffer.slice(pending.liveStdoutCursor);
+			pending.liveStdoutCursor = 0;
 		}
 	}
 
