@@ -9,7 +9,7 @@
  */
 import { $flag, Snowflake } from "@oh-my-pi/pi-utils";
 import { buildRemoteCommand, type SSHConnectionTarget } from "../../ssh/connection-manager";
-import { writeRemoteFile } from "../../ssh/file-transfer";
+import { statRemotePath, writeRemoteFile } from "../../ssh/file-transfer";
 import { ensureRemotePosixShell } from "../../ssh/remote-posix";
 import { quotePosixPath, wrapInPosixShell } from "../../ssh/utils";
 import { BaseKernel, getRemainingTimeMs, type KernelExecuteOptions, type KernelStartOptions } from "../kernel-base";
@@ -87,8 +87,12 @@ export function buildRemotePythonCommand(options: {
 	for (const [key, value] of Object.entries(options.env ?? {})) {
 		if (typeof value === "string") env[key] = value;
 	}
-	// PI_TOOL_BRIDGE_* values live in the remote process environment; eval.md documents
-	// the trusted SSH account requirement for same-UID remote processes.
+	// PI_TOOL_BRIDGE_* values live in the remote process environment via
+	// `env KEY=VAL` on the remote command line. The bridge is reverse-forwarded
+	// to the local machine, so any same-UID process on the remote host can read
+	// the token from /proc/<pid>/environ (Linux) or `ps eww` (macOS/BSD) and
+	// reach the local tool bridge. eval.md documents the trusted-host/account
+	// requirement; this is a deliberate trust-boundary trade-off, not an oversight.
 	const envArgs = Object.entries(env).map(([key, value]) => `${key}=${quotePosixPath(value)}`);
 	const envPrefix = envArgs.length > 0 ? `env ${envArgs.join(" ")} ` : "";
 	const runnerPath = quotePosixPath(options.runnerPath);
@@ -115,6 +119,11 @@ export function buildRemotePythonInitScript(cwd: string, env?: Record<string, st
 
 async function stageRemoteRunner(host: SSHConnectionTarget, signal: AbortSignal | undefined): Promise<string> {
 	const runnerPath = buildRemotePythonRunnerPath();
+	// Skip re-upload when the content-addressed runner already exists on the
+	// remote host — the path is keyed by Bun.hash of the script, so a matching
+	// path means the bytes are identical.
+	const existing = await statRemotePath(host, runnerPath, { signal });
+	if (existing === "file") return runnerPath;
 	await writeRemoteFile(host, runnerPath, new TextEncoder().encode(RUNNER_SCRIPT), { signal });
 	return runnerPath;
 }
@@ -175,6 +184,16 @@ export class RemotePythonKernel extends BaseKernel<KernelExecuteOptions> {
 			await kernel.executeWithBudget(PYTHON_PRELUDE, startup.signal, startupBudget, "Python kernel prelude");
 			return kernel;
 		} catch (err) {
+			// Translate raw OpenSSH ExitOnForwardFailure stderr (e.g. from a
+			// bridge port collision or an already-bound remote port) into a
+			// clear error so the user knows which port/host clashed instead of
+			// seeing a raw ssh diagnostic.
+			if (err instanceof Error && /remote port forwarding failed/i.test(err.message)) {
+				const port = options.bridge?.remotePort;
+				throw new Error(
+					`Remote eval bridge port ${port ?? "?"} on ${options.sshHost.name} is already bound; another eval session or service may be using it.`,
+				);
+			}
 			await kernel.shutdown({ timeoutMs: SHUTDOWN_GRACE_MS }).catch(() => {});
 			throw err;
 		}

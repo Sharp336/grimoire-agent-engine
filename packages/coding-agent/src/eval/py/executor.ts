@@ -572,6 +572,9 @@ async function executeOnSession(code: string, cwd: string, options: PythonExecut
 	if (sessions.get(session.sessionKey) !== session) {
 		throw new PythonExecutionCancelledError(false);
 	}
+	// Defensive: the bridge identity collapses to the same port as the session
+	// key — both derive from (sessionId, cwd, interpreter, sshHost). Only
+	// reachable on internal drift between options and the persisted session.
 	if (options.sshHost && options.remoteBridge && session.remoteBridgePort !== options.remoteBridge.remotePort) {
 		await replaceSessionKernel(session, cwd, options);
 		if (sessions.get(session.sessionKey) !== session) {
