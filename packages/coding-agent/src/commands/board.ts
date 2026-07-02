@@ -38,7 +38,7 @@ export default class BoardCommand extends Command {
 		const { args, flags } = await this.parse(BoardCommand);
 		const action = args.action ?? "view";
 
-		const core = new Core(process.cwd());
+		const core = new Core(getProjectDir());
 		await core.ensureConfigLoaded();
 		const tasks = await core.listTasks();
 
@@ -58,6 +58,11 @@ export default class BoardCommand extends Command {
 			const content = `${header}${table}\n`;
 
 			const fullPath = path.resolve(filePath);
+			if (!flags.force && (await Bun.file(fullPath).exists())) {
+				process.stderr.write(`Error: ${fullPath} already exists. Use --force to overwrite.\n`);
+				process.exitCode = 1;
+				return;
+			}
 			await Bun.write(fullPath, content);
 			process.stdout.write(`Exported board to ${fullPath}\n`);
 			return;

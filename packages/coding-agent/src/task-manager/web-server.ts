@@ -7,6 +7,7 @@
  */
 
 import { openPath } from "../utils/open";
+import { generateKanbanBoardWithMetadata } from "./board";
 import type { Core } from "./core";
 
 export interface WebServerOptions {
@@ -75,7 +76,6 @@ async function handleApiRoute(core: Core, path: string, req: Request): Promise<R
 
 	if (path === "/api/board") {
 		const tasks = await core.listTasks();
-		const { generateKanbanBoardWithMetadata } = await import("./board");
 		const board = generateKanbanBoardWithMetadata(tasks, core.config.statuses);
 		return jsonResponse(board);
 	}
@@ -102,7 +102,6 @@ function jsonResponse(data: unknown, status = 200): Response {
 		status,
 		headers: {
 			"content-type": "application/json; charset=utf-8",
-			"access-control-allow-origin": "*",
 		},
 	});
 }
@@ -158,7 +157,7 @@ el.innerHTML = '';
 for (const col of board.columns) {
 const colEl = document.createElement('div');
 colEl.className = 'column';
-colEl.innerHTML = '<h2>' + col.status + ' (' + col.tasks.length + ')</h2>';
+colEl.innerHTML = '<h2>' + escapeHtml(col.status) + ' (' + col.tasks.length + ')</h2>';
 for (const task of col.tasks) {
 const card = document.createElement('div');
 card.className = 'task-card';

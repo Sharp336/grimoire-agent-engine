@@ -13,7 +13,7 @@ import type { Settings } from "../config/settings";
 import acGenerationPrompt from "../prompts/task-ac-generation.md" with { type: "text" };
 import overviewPrompt from "../prompts/task-overview.md" with { type: "text" };
 import type { Core } from "./core";
-import { computeStatistics } from "./statistics";
+import { computeStatistics, type TaskStatistics } from "./statistics";
 
 /** Resolve the taskMgr model, falling back to default. */
 function resolveTaskMgrModel(registry: ModelRegistry, settings: Settings): Model<Api> | undefined {
@@ -140,7 +140,7 @@ export async function generateAcceptanceCriteria(
 }
 
 /** Text fallback for overview when no model is available. */
-function formatOverviewText(core: Core, stats: ReturnType<typeof computeStatistics>): string {
+function formatOverviewText(core: Core, stats: TaskStatistics): string {
 	const lines: string[] = [];
 	lines.push(`Project: ${core.config.projectName}`);
 	lines.push(`Total tasks: ${stats.total} (${stats.drafts} drafts, ${stats.archived} archived)`);

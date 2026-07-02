@@ -28,7 +28,7 @@ export default class TaskBrowserCommand extends Command {
 		}
 
 		const { flags } = await this.parse(TaskBrowserCommand);
-		const core = new Core(process.cwd());
+		const core = new Core(getProjectDir());
 		await core.ensureConfigLoaded();
 
 		await startTaskManagerWebServer(core, {
@@ -37,9 +37,9 @@ export default class TaskBrowserCommand extends Command {
 		});
 
 		// Keep the process alive
-		await new Promise<void>(resolve => {
-			process.on("SIGINT", () => resolve());
-			process.on("SIGTERM", () => resolve());
-		});
+		const done = Promise.withResolvers<void>();
+		process.on("SIGINT", () => done.resolve());
+		process.on("SIGTERM", () => done.resolve());
+		await done.promise;
 	}
 }

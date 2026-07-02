@@ -87,7 +87,7 @@ export default class TaskCommand extends Command {
 			return;
 		}
 		const idArgs = Array.isArray(args.id) ? args.id : args.id ? [args.id] : [];
-		const core = new Core(process.cwd());
+		const core = new Core(getProjectDir());
 		switch (subcommand) {
 			case "init":
 				await this.#init(core, idArgs, flags);
@@ -114,7 +114,7 @@ export default class TaskCommand extends Command {
 				await this.#search(core, idArgs, flags);
 				break;
 			case "draft":
-				await this.#setDraft(core, idArgs, true);
+				await this.#createDraft(core, idArgs);
 				break;
 			case "promote":
 				await this.#setDraft(core, idArgs, false);
@@ -151,7 +151,7 @@ export default class TaskCommand extends Command {
 			}
 		}
 		name = name || "Project";
-		const config = await core.initializeProject(name, Boolean(flags.defaults));
+		const config = await core.initializeProject(name, Boolean(flags.defaults), !flags["no-git"]);
 		process.stdout.write(`Initialized Task Manager in ${core.fs.rootDir}/.omp/tasks/\n`);
 		process.stdout.write(`Project: ${config.projectName}\n`);
 	}
@@ -171,7 +171,7 @@ export default class TaskCommand extends Command {
 			: [];
 		const ac = flags.ac
 			? String(flags.ac)
-					.split("|")
+					.split(",")
 					.map(s => s.trim())
 					.filter(Boolean)
 			: [];
@@ -297,17 +297,17 @@ export default class TaskCommand extends Command {
 			process.stdout.write(`Added comment to ${id}\n`);
 			return;
 		}
-		await core.updateTask(id, {
-			description: flags.desc as string | undefined,
-			status: flags.status as string | undefined,
-			assignee: flags.assignee as string | null,
-			labels,
-			priority: flags.priority as string | null,
-			milestone: flags.milestone as string | null,
-			taskPlan: flags.plan as string | null,
-			notes: flags.notes as string | null,
-			finalSummary: flags["final-summary"] as string | null,
-		});
+		const update: Record<string, unknown> = {};
+		if (flags.desc !== undefined) update.description = flags.desc;
+		if (flags.status !== undefined) update.status = flags.status;
+		if (flags.assignee !== undefined) update.assignee = flags.assignee;
+		if (labels !== undefined) update.labels = labels;
+		if (flags.priority !== undefined) update.priority = flags.priority;
+		if (flags.milestone !== undefined) update.milestone = flags.milestone;
+		if (flags.plan !== undefined) update.taskPlan = flags.plan;
+		if (flags.notes !== undefined) update.notes = flags.notes;
+		if (flags["final-summary"] !== undefined) update.finalSummary = flags["final-summary"];
+		await core.updateTask(id, update);
 		process.stdout.write(`Updated task ${id}\n`);
 	}
 	// ─── archive ────────────────────────────────────────────────────────────
@@ -368,6 +368,17 @@ export default class TaskCommand extends Command {
 		await core.updateTask(id, { draft } as never);
 		process.stdout.write(`${draft ? "Marked" : "Promoted"} task ${id}\n`);
 	}
+	async #createDraft(core: Core, idArgs: string[]): Promise<void> {
+		const title = idArgs.join(" ");
+		if (!title) {
+			process.stderr.write("Error: title is required\n");
+			process.exitCode = 1;
+			return;
+		}
+		const task = await core.createTask({ title, draft: true });
+		process.stdout.write(`Created draft ${task.id}: ${task.title}\n`);
+	}
+
 	// ─── milestone / doc / decision (Phase 2 stubs) ─────────────────────────
 	async #milestone(core: Core, idArgs: string[], flags: Record<string, unknown>): Promise<void> {
 		const action = idArgs[0];

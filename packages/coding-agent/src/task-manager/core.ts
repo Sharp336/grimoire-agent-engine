@@ -85,11 +85,14 @@ export class Core {
 
 	// ─── Init ────────────────────────────────────────────────────────────────
 
-	async initializeProject(name: string, _defaults: boolean = false): Promise<TaskConfig> {
-		const config: TaskConfig = {
+	async initializeProject(name: string, _defaults: boolean = false, enableGit: boolean = true): Promise<TaskConfig> {
+		const baseConfig: TaskConfig = {
 			...DEFAULT_INIT_CONFIG,
 			projectName: name,
 		};
+		const config: TaskConfig = enableGit
+			? baseConfig
+			: { ...baseConfig, git: { ...baseConfig.git, enabled: false, autoCommit: false } };
 
 		this.fs.setConfig(config);
 		this.#config = config;
@@ -187,9 +190,10 @@ export class Core {
 
 	async updateTask(id: string, input: TaskUpdateInput): Promise<Task> {
 		const task = await this.loadTask(id);
+		const filtered = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined));
 		const updated: Task = {
 			...task,
-			...input,
+			...filtered,
 			updatedAt: new Date().toISOString(),
 		};
 		const content = serializeTask(updated);
@@ -264,7 +268,7 @@ export class Core {
 		if (this.config.git.enabled && (await this.git.isRepo())) {
 			const filePath = this.fs.filePathFor("tasks", resolvedId);
 			await this.git.rm([filePath]);
-			await this.git.commit(`${this.config.git.commitPrefix} delete ${resolvedId}`);
+			await this.git.commit([filePath], `${this.config.git.commitPrefix} delete ${resolvedId}`);
 		}
 	}
 

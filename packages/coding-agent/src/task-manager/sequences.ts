@@ -49,7 +49,9 @@ export class Sequences {
 	}
 
 	async #load(): Promise<SequenceMap> {
-		if (this.#cache) return { ...this.#cache };
+		// Always re-read from disk — the cache is only a write buffer,
+		// never a read short-circuit. A separate process may have
+		// advanced the counter between our lock and our read.
 		try {
 			const text = await Bun.file(this.filePath).text();
 			const parsed = JSON.parse(text) as Partial<SequenceMap>;

@@ -33,22 +33,27 @@ export class GitOperations {
 
 	async add(paths: string[]): Promise<void> {
 		if (!this.#enabled || paths.length === 0) return;
-		await $`git add ${paths}`.cwd(this.#cwd).quiet().nothrow();
+		const result = await $`git add ${paths}`.cwd(this.#cwd).quiet().nothrow();
+		if (result.exitCode !== 0) throw new Error(`git add failed: ${result.stderr.toString().trim()}`);
 	}
 
 	async rm(paths: string[]): Promise<void> {
 		if (!this.#enabled || paths.length === 0) return;
-		await $`git rm ${paths}`.cwd(this.#cwd).quiet().nothrow();
+		const result = await $`git rm ${paths}`.cwd(this.#cwd).quiet().nothrow();
+		if (result.exitCode !== 0) throw new Error(`git rm failed: ${result.stderr.toString().trim()}`);
 	}
 
-	async commit(message: string): Promise<void> {
+	async commit(paths: string[] | null, message: string): Promise<void> {
 		if (!this.#enabled) return;
-		await $`git commit -m ${message}`.cwd(this.#cwd).quiet().nothrow();
+		const result = paths
+			? await $`git commit --only ${paths} -m ${message}`.cwd(this.#cwd).quiet().nothrow()
+			: await $`git commit -m ${message}`.cwd(this.#cwd).quiet().nothrow();
+		if (result.exitCode !== 0) throw new Error(`git commit failed: ${result.stderr.toString().trim()}`);
 	}
 
 	async addAndCommit(paths: string[], message: string): Promise<void> {
 		await this.add(paths);
-		await this.commit(message);
+		await this.commit(paths, message);
 	}
 
 	async currentBranch(): Promise<string | null> {
