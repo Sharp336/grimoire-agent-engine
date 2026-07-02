@@ -15,8 +15,30 @@ const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
 const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
 
+const WATCH_CI_DEADLINE_MS = 90 * 60 * 1000;
+const GH_COMMAND_TIMEOUT_MS = 60 * 1000;
+
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
+}
+
+async function ghCommand(args: readonly string[], opts: { nothrow?: boolean } = {}): Promise<string> {
+	const proc = Bun.spawn(["gh", ...args], {
+		stdout: "pipe",
+		stderr: "pipe",
+		timeout: GH_COMMAND_TIMEOUT_MS,
+		killSignal: "SIGKILL",
+	});
+	const [, stdout, stderr] = await Promise.all([proc.exited, proc.stdout.text(), proc.stderr.text()]);
+	if (proc.exitCode === 0) {
+		return stdout;
+	}
+	if (opts.nothrow) {
+		return stdout;
+	}
+	throw new Error(
+		`gh ${args.join(" ")} failed (exit ${proc.exitCode ?? proc.signalCode}): ${stderr || stdout}`.trim(),
+	);
 }
 
 // =============================================================================
@@ -27,8 +49,22 @@ async function watchCI(): Promise<boolean> {
 	const commitSha = (await git(["rev-parse", "HEAD"]).text()).trim();
 	console.log(`  Commit: ${commitSha.slice(0, 8)}`);
 
+	const deadline = Date.now() + WATCH_CI_DEADLINE_MS;
+
 	while (true) {
-		const runsOutput = await $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text();
+		if (Date.now() >= deadline) {
+			console.error("\nCI watch timed out after 90 minutes.");
+			return false;
+		}
+
+		const runsOutput = await ghCommand([
+			"run",
+			"list",
+			"--commit",
+			commitSha,
+			"--json",
+			"databaseId,status,conclusion,name",
+		]);
 		const runs: Array<{ databaseId: number; status: string; conclusion: string | null; name: string }> =
 			JSON.parse(runsOutput);
 
@@ -43,7 +79,9 @@ async function watchCI(): Promise<boolean> {
 		const inProgressRuns = runs.filter(r => r.status === "in_progress" || r.status === "queued");
 
 		for (const run of inProgressRuns) {
-			const jobsOutput = await $`gh run view ${run.databaseId} --json jobs`.quiet().nothrow().text();
+			const jobsOutput = await ghCommand(["run", "view", String(run.databaseId), "--json", "jobs"], {
+				nothrow: true,
+			});
 			try {
 				const { jobs } = JSON.parse(jobsOutput) as {
 					jobs: Array<{ name: string; databaseId: number; status: string; conclusion: string | null }>;
@@ -68,7 +106,9 @@ async function watchCI(): Promise<boolean> {
 			for (const f of failedJobs) {
 				console.error(`  - ${f.workflow} / ${f.job} (job ${f.jobId}): ${f.conclusion}`);
 				// Tail the failed job's log
-				const log = await $`gh run view --job ${f.jobId} --log-failed`.quiet().nothrow().text();
+				const log = await ghCommand(["run", "view", "--job", String(f.jobId), "--log-failed"], {
+					nothrow: true,
+				});
 				if (log.trim()) {
 					const lines = log.trimEnd().split("\n");
 					const tail = lines.slice(-20).join("\n");
@@ -90,14 +130,18 @@ async function watchCI(): Promise<boolean> {
 			for (const r of failed) {
 				console.error(`  - ${r.name}: ${r.conclusion}`);
 				// Fetch failed jobs and tail their logs
-				const jobsOutput = await $`gh run view ${r.databaseId} --json jobs`.quiet().nothrow().text();
+				const jobsOutput = await ghCommand(["run", "view", String(r.databaseId), "--json", "jobs"], {
+					nothrow: true,
+				});
 				try {
 					const { jobs } = JSON.parse(jobsOutput) as {
 						jobs: Array<{ name: string; databaseId: number; status: string; conclusion: string | null }>;
 					};
 					for (const job of jobs) {
 						if (job.conclusion !== "success" && job.conclusion !== "skipped") {
-							const log = await $`gh run view --job ${job.databaseId} --log-failed`.quiet().nothrow().text();
+							const log = await ghCommand(["run", "view", "--job", String(job.databaseId), "--log-failed"], {
+								nothrow: true,
+							});
 							if (log.trim()) {
 								const lines = log.trimEnd().split("\n");
 								const tail = lines.slice(-20).join("\n");
