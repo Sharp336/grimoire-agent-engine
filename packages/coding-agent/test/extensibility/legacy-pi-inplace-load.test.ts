@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -427,25 +427,30 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 	});
 
 	it("loadLegacyPiModule cache-busting is wall-clock independent", async () => {
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "rapid-reload-ext", version: "1.0.0" }),
-			"index.ts": 'export const version = "v1";',
-		});
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1234567890);
+		try {
+			const dir = await writePackage({
+				"package.json": JSON.stringify({ name: "rapid-reload-ext", version: "1.0.0" }),
+				"index.ts": 'export const version = "v1";',
+			});
 
-		const extensionPath = path.join(dir, "index.ts");
+			const extensionPath = path.join(dir, "index.ts");
 
-		// 1. Load initial version
-		const mod1 = (await loadLegacyPiModule(extensionPath)) as { version: string };
-		expect(mod1.version).toBe("v1");
+			// 1. Load initial version
+			const mod1 = (await loadLegacyPiModule(extensionPath)) as { version: string };
+			expect(mod1.version).toBe("v1");
 
-		// 2. Edit and reload immediately (no sleeps)
-		await fs.writeFile(extensionPath, 'export const version = "v2";', "utf8");
-		const mod2 = (await loadLegacyPiModule(extensionPath)) as { version: string };
-		expect(mod2.version).toBe("v2");
+			// 2. Edit and reload immediately (no sleeps)
+			await fs.writeFile(extensionPath, 'export const version = "v2";', "utf8");
+			const mod2 = (await loadLegacyPiModule(extensionPath)) as { version: string };
+			expect(mod2.version).toBe("v2");
 
-		// 3. Edit and reload immediately again (no sleeps)
-		await fs.writeFile(extensionPath, 'export const version = "v3";', "utf8");
-		const mod3 = (await loadLegacyPiModule(extensionPath)) as { version: string };
-		expect(mod3.version).toBe("v3");
+			// 3. Edit and reload immediately again (no sleeps)
+			await fs.writeFile(extensionPath, 'export const version = "v3";', "utf8");
+			const mod3 = (await loadLegacyPiModule(extensionPath)) as { version: string };
+			expect(mod3.version).toBe("v3");
+		} finally {
+			nowSpy.mockRestore();
+		}
 	});
 });

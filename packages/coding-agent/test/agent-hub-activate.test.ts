@@ -575,4 +575,185 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		// The container children should still have only the other selector
 		expect(ctx.editorContainer.children).toEqual([otherComponent]);
 	});
+
+	it("mounts explicit hub, then showAgentHub({requireContent:true}) resolves EMPTY => old hub stays mounted and undisposed", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-empty-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		let shown: AgentHubOverlayComponent | undefined;
+		const editor = {};
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					if (child !== editor) shown = child as AgentHubOverlayComponent;
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		const disposedHubs = new Set<AgentHubOverlayComponent>();
+		const originalDispose = AgentHubOverlayComponent.prototype.dispose;
+		Object.defineProperty(AgentHubOverlayComponent.prototype, "dispose", {
+			configurable: true,
+			value() {
+				disposedHubs.add(this);
+				originalDispose.call(this);
+			},
+		});
+
+		try {
+			// 1. Mount an explicit (non-requireContent) Agent Hub
+			controller.showAgentHub(new SessionObserverRegistry());
+			const oldHub = shown;
+			expect(oldHub).toBeDefined();
+			expect(disposedHubs.has(oldHub!)).toBe(false);
+
+			// 2. Call showAgentHub({requireContent:true}) which will resolve EMPTY
+			controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+			// Captured the second hub
+			expect(capturedHubs.length).toBe(1);
+			const newHub = capturedHubs[0];
+			expect(newHub).not.toBe(oldHub);
+
+			// Initially, oldHub is still the mounted one
+			expect(shown).toBe(oldHub);
+			expect(disposedHubs.has(oldHub!)).toBe(false);
+			expect(disposedHubs.has(newHub)).toBe(false);
+
+			// Wait for the new hub's persistedSubagentsReady to resolve
+			await capturedPromises[0];
+
+			// Flush microtasks to let the new hub handle the empty resolution
+			for (let i = 0; i < 20; i++) {
+				await Promise.resolve();
+			}
+
+			// The already-mounted hub stays mounted and undisposed, editor state coherent
+			expect(shown).toBe(oldHub);
+			expect(disposedHubs.has(oldHub!)).toBe(false);
+			// The new hub gets disposed
+			expect(disposedHubs.has(newHub)).toBe(true);
+
+			// Clean up the old hub manually at the end of the test
+			oldHub!.dispose();
+			expect(disposedHubs.has(oldHub!)).toBe(true);
+		} finally {
+			Object.defineProperty(AgentHubOverlayComponent.prototype, "dispose", {
+				configurable: true,
+				value: originalDispose,
+			});
+		}
+	});
+
+	it("mounts explicit hub, then showAgentHub({requireContent:true}) resolves NON-EMPTY => old hub is disposed exactly when replacement mounts", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-nonempty-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+		await Bun.write(workerSessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		let shown: AgentHubOverlayComponent | undefined;
+		const editor = {};
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					if (child !== editor) shown = child as AgentHubOverlayComponent;
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		const disposedHubs = new Set<AgentHubOverlayComponent>();
+		const originalDispose = AgentHubOverlayComponent.prototype.dispose;
+		Object.defineProperty(AgentHubOverlayComponent.prototype, "dispose", {
+			configurable: true,
+			value() {
+				disposedHubs.add(this);
+				originalDispose.call(this);
+			},
+		});
+
+		try {
+			// 1. Mount an explicit (non-requireContent) Agent Hub
+			controller.showAgentHub(new SessionObserverRegistry());
+			const oldHub = shown;
+			expect(oldHub).toBeDefined();
+			expect(disposedHubs.has(oldHub!)).toBe(false);
+
+			// 2. Call showAgentHub({requireContent:true}) which will resolve NON-EMPTY
+			controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+			// Captured the second hub
+			expect(capturedHubs.length).toBe(1);
+			const newHub = capturedHubs[0];
+			expect(newHub).not.toBe(oldHub);
+
+			// Before the promise resolves, oldHub is still mounted and undisposed
+			expect(shown).toBe(oldHub);
+			expect(disposedHubs.has(oldHub!)).toBe(false);
+			expect(disposedHubs.has(newHub)).toBe(false);
+
+			// Wait for the new hub's persistedSubagentsReady to resolve
+			await capturedPromises[0];
+
+			// Flush microtasks to let the new hub mount
+			for (let i = 0; i < 20; i++) {
+				await Promise.resolve();
+			}
+
+			// Now newHub should be mounted and oldHub disposed
+			expect(shown).toBe(newHub);
+			expect(disposedHubs.has(oldHub!)).toBe(true);
+			expect(disposedHubs.has(newHub)).toBe(false);
+
+			// Clean up newHub at the end
+			newHub.dispose();
+			expect(disposedHubs.has(newHub)).toBe(true);
+		} finally {
+			Object.defineProperty(AgentHubOverlayComponent.prototype, "dispose", {
+				configurable: true,
+				value: originalDispose,
+			});
+		}
+	});
 });
