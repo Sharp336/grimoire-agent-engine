@@ -187,6 +187,11 @@ export class HindsightRetainQueue {
 	}
 }
 
+/** Stable fingerprint of a retention-cache boundary message (see #lastRetainedBoundaryKey). */
+function retentionBoundaryKey(message: HindsightMessage): string {
+	return Bun.hash(`${message.role}\u0000${message.content}`).toString(36);
+}
+
 /** Per-session Hindsight runtime state owned by its AgentSession. */
 export class HindsightSessionState {
 	/** Session id used for retain-queue metadata. */
@@ -204,6 +209,13 @@ export class HindsightSessionState {
 	lastRetainedTurn: number;
 	#lastRetainedMessageIndex: number = 0;
 	#cachedTranscript: string = "";
+	// Fingerprint of messages[#lastRetainedMessageIndex - 1] at cache time. The
+	// incremental full-session cache assumes the branch is append-only; a rewind,
+	// branch switch, or compaction rewrites the prefix without changing the
+	// session id. Verifying the boundary message at use time makes the cache
+	// self-healing: on mismatch (or shrink) we rebuild the full transcript
+	// instead of retaining stale content or silently retaining nothing forever.
+	#lastRetainedBoundaryKey: string = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -240,6 +252,7 @@ export class HindsightSessionState {
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
+		this.#lastRetainedBoundaryKey = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
@@ -249,6 +262,7 @@ export class HindsightSessionState {
 		this.sessionId = sessionId;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
+		this.#lastRetainedBoundaryKey = "";
 	}
 
 	resetConversationTracking(): void {
@@ -257,6 +271,7 @@ export class HindsightSessionState {
 		this.lastRecallSnippet = undefined;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
+		this.#lastRetainedBoundaryKey = "";
 	}
 
 	enqueueRetain(content: string, context?: string): void {
@@ -299,6 +314,16 @@ export class HindsightSessionState {
 
 		if (retainFullWindow) {
 			documentId = this.sessionId;
+			const boundary = this.#lastRetainedMessageIndex;
+			const boundaryMessage = boundary > 0 ? messages[boundary - 1] : undefined;
+			if (
+				boundary > messages.length ||
+				(boundaryMessage !== undefined && retentionBoundaryKey(boundaryMessage) !== this.#lastRetainedBoundaryKey)
+			) {
+				this.#lastRetainedMessageIndex = 0;
+				this.#cachedTranscript = "";
+				this.#lastRetainedBoundaryKey = "";
+			}
 			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
 			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true);
 			if (!newPart) return;
@@ -310,6 +335,7 @@ export class HindsightSessionState {
 			documentId = `${this.sessionId}-${retainedAt.getTime()}`;
 			this.#lastRetainedMessageIndex = 0;
 			this.#cachedTranscript = "";
+			this.#lastRetainedBoundaryKey = "";
 			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true);
 			if (!windowTranscript) return;
 			transcript = windowTranscript;
@@ -327,6 +353,8 @@ export class HindsightSessionState {
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
 			this.#lastRetainedMessageIndex = messages.length;
+			const last = messages[messages.length - 1];
+			this.#lastRetainedBoundaryKey = last === undefined ? "" : retentionBoundaryKey(last);
 		}
 	}
 
