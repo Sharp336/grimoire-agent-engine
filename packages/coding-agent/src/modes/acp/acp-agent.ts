@@ -81,6 +81,7 @@ import {
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import type { WorkspaceIdentifierMode } from "../../utils/workspace-storage-identifier";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	buildToolCallStartUpdate,
@@ -167,6 +168,16 @@ type ManagedSessionRecord = {
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
+};
+
+type StoredSessionCwdResolution = {
+	cwd: string;
+	usesStoredCwd: boolean;
+};
+
+type StoredSessionTarget = {
+	cwd: string;
+	path: string;
 };
 
 type ReplayableMessage = {
@@ -953,7 +964,7 @@ export class AcpAgent implements Agent {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				if (!cwd) throw new Error("cwd required");
 				const limit = typeof params.limit === "number" ? Math.max(1, Math.min(500, params.limit as number)) : 100;
-				const sessions = await SessionManager.list(cwd);
+				const sessions = await this.#listStoredSessions(cwd);
 				const sorted = sessions.sort((l, r) => r.modified.getTime() - l.modified.getTime()).slice(0, limit);
 				return { sessions: sorted.map(s => this.#toSessionInfo(s)) };
 			}
@@ -1024,33 +1035,39 @@ export class AcpAgent implements Agent {
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
+		const storedSession = await this.#findStoredSession(sessionId, cwd);
 		const existing = this.#sessions.get(sessionId);
 		if (existing) {
-			this.#assertMatchingCwd(existing.session, cwd);
+			const expectedCwd = storedSession
+				? (await this.#resolveStoredSessionCwd(storedSession, cwd)).cwd
+				: path.resolve(cwd);
+			this.#assertMatchingCwd(existing.session, expectedCwd);
 			await this.#configureMcpServers(existing, mcpServers);
 			return existing;
 		}
 
-		const storedSession = await this.#findStoredSession(sessionId, cwd);
 		if (!storedSession) {
 			throw new Error(`ACP session not found: ${sessionId}`);
 		}
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		return await this.#openStoredSession(storedSession, cwd, mcpServers, sessionId);
 	}
 
 	async #resumeManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
+		const storedSession = await this.#findStoredSession(sessionId, cwd);
 		const existing = this.#sessions.get(sessionId);
 		if (existing) {
-			this.#assertMatchingCwd(existing.session, cwd);
+			const expectedCwd = storedSession
+				? (await this.#resolveStoredSessionCwd(storedSession, cwd)).cwd
+				: path.resolve(cwd);
+			this.#assertMatchingCwd(existing.session, expectedCwd);
 			await this.#configureMcpServers(existing, mcpServers);
 			return existing;
 		}
 
-		const storedSession = await this.#findStoredSession(sessionId, cwd);
 		if (!storedSession) {
 			throw new Error(`ACP session not found: ${sessionId}`);
 		}
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		return await this.#openStoredSession(storedSession, cwd, mcpServers, sessionId);
 	}
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
@@ -1073,14 +1090,15 @@ export class AcpAgent implements Agent {
 	}
 
 	async #openStoredSession(
-		sessionPath: string,
+		storedSession: StoredSessionInfo,
 		cwd: string,
 		mcpServers: McpServer[],
 		sessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const session = await this.#createSession(path.resolve(cwd));
+		const target = await this.#resolveStoredSessionTarget(storedSession, cwd);
+		const session = await this.#createSession(target.cwd);
 		try {
-			const success = await session.switchSession(sessionPath);
+			const success = await session.switchSession(target.path);
 			if (!success) {
 				throw new Error(`ACP session load was cancelled: ${sessionId}`);
 			}
@@ -1089,6 +1107,62 @@ export class AcpAgent implements Agent {
 			throw error;
 		}
 		return await this.#registerPreparedSession(session, mcpServers);
+	}
+
+	async #resolveStoredSessionTarget(storedSession: StoredSessionInfo, cwd: string): Promise<StoredSessionTarget> {
+		const resolved = await this.#resolveStoredSessionCwd(storedSession, cwd);
+		if (resolved.usesStoredCwd) {
+			return { cwd: resolved.cwd, path: storedSession.path };
+		}
+
+		const workspaceIdentifierMode = await this.#workspaceIdentifierModeForCwd(resolved.cwd);
+		const storedSessionPath = path.resolve(storedSession.path);
+		const storedCwd = storedSession.cwd.trim();
+		const rescopeFromCwd = storedCwd ? path.resolve(storedCwd) : path.dirname(storedSessionPath);
+		const manager = await SessionManager.open(storedSession.path, path.dirname(storedSessionPath), undefined, {
+			initialCwd: rescopeFromCwd,
+			suppressBreadcrumb: true,
+			workspaceIdentifierMode,
+		});
+		const targetSessionDir = SessionManager.getDefaultSessionDir(
+			resolved.cwd,
+			undefined,
+			undefined,
+			workspaceIdentifierMode,
+		);
+		try {
+			await manager.moveTo(resolved.cwd, targetSessionDir);
+			await manager.flush();
+			const sessionPath = manager.getSessionFile();
+			if (!sessionPath) {
+				throw new Error(`ACP session cannot be loaded before it is persisted: ${storedSession.id}`);
+			}
+			return { cwd: resolved.cwd, path: sessionPath };
+		} finally {
+			await manager.close();
+		}
+	}
+
+	async #resolveStoredSessionCwd(storedSession: StoredSessionInfo, cwd: string): Promise<StoredSessionCwdResolution> {
+		const storedCwd = storedSession.cwd.trim();
+		if (storedCwd) {
+			const resolvedStoredCwd = path.resolve(storedCwd);
+			if (await this.#isDirectory(resolvedStoredCwd)) {
+				return { cwd: resolvedStoredCwd, usesStoredCwd: true };
+			}
+		}
+		return { cwd: path.resolve(cwd), usesStoredCwd: false };
+	}
+
+	async #isDirectory(candidate: string): Promise<boolean> {
+		try {
+			return (await fs.stat(candidate)).isDirectory();
+		} catch (error) {
+			if (isEnoent(error)) {
+				return false;
+			}
+			throw error;
+		}
 	}
 
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1853,8 +1927,29 @@ export class AcpAgent implements Agent {
 		return usage;
 	}
 
+	#activeSettings(cwd?: string): Settings | undefined {
+		if (cwd) {
+			for (const record of this.#sessions.values()) {
+				if (record.session.sessionManager.getCwd() === cwd) {
+					return record.session.settings;
+				}
+			}
+		}
+		const [firstRecord] = this.#sessions.values();
+		return this.#initialSession?.settings ?? firstRecord?.session.settings;
+	}
+
+	async #workspaceIdentifierModeForCwd(cwd: string): Promise<WorkspaceIdentifierMode> {
+		const baseSettings = this.#activeSettings(cwd);
+		if (!baseSettings) return "path";
+		const scopedSettings = await baseSettings.cloneForCwd(cwd);
+		return scopedSettings.get("workspace.identifier");
+	}
+
 	async #listStoredSessions(cwd?: string): Promise<StoredSessionInfo[]> {
-		const sessions = cwd ? await SessionManager.list(cwd) : await SessionManager.listAll();
+		const sessions = cwd
+			? await SessionManager.list(cwd, undefined, undefined, await this.#workspaceIdentifierModeForCwd(cwd))
+			: await SessionManager.listAll();
 		return sessions.sort((left, right) => right.modified.getTime() - left.modified.getTime());
 	}
 

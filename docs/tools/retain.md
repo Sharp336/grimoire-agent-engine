@@ -102,7 +102,7 @@ Mnemopi:
 - Mnemopi retain settings:
   - `mnemopi.retainEveryNTurns` default `4`
   - `mnemopi.autoRetain` controls automatic retention of completed conversation turns
-  - `mnemopi.scoping` selects `global`, `per-project`, or `per-project-tagged`
+  - `mnemopi.scoping` selects `global`, `per-project`, or `per-project-tagged`; per-project banks use `workspace.identifier` (`path`, `git-remote`, or `git-root`)
 
 ## Errors
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.

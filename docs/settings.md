@@ -514,6 +514,9 @@ compaction:
 
 memory:
   backend: off               # off, local, hindsight, mnemopi
+
+workspace:
+  identifier: path           # path, git-remote, git-root
 ```
 
 | Key | Type | Default | Notes |
@@ -529,6 +532,7 @@ memory:
 | `compaction.remoteEnabled` | boolean | `true` | Allow remote compaction service. |
 | `compaction.autoContinue` | boolean | `true` | Continue automatically after compaction. |
 | `memory.backend` | enum | `off` | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys. |
+| `workspace.identifier` | enum | `path` | Controls how default session directories and per-project memory banks are keyed. `path` uses the canonical working directory; `git-remote` uses `origin` or the first configured remote URL; `git-root` uses the repository's first reachable commit. Git modes fall back to `path` outside Git, in shallow repositories for `git-root`, or when `git` is unavailable. |
 | `autolearn.enabled` | boolean | `false` | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue` | boolean | `false` | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn. |
 | `autolearn.minToolCalls` | number | `5` | Only nudge after a turn that used at least this many tools. |

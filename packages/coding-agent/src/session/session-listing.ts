@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message, TextContent } from "@oh-my-pi/pi-ai";
 import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import type { WorkspaceIdentifierMode } from "../utils/workspace-storage-identifier";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 
@@ -616,6 +617,8 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+	/** Mode to resolve the identifier for the workspace to share storage. */
+	identifierMode?: WorkspaceIdentifierMode;
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -631,7 +634,11 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
+	const localSessionDir =
+		sessionDir ??
+		computeDefaultSessionDir(cwd, storage, {
+			identifierMode: resolvedOptions.identifierMode,
+		});
 	const localSessions = await listSessions(localSessionDir, storage);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {

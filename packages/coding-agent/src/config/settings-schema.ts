@@ -35,6 +35,7 @@ import {
 	TTS_LOCAL_VOICE_VALUES,
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
+import { WORKSPACE_IDENTIFIER_MODES } from "../utils/workspace-storage-identifier";
 import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES, type SearchProviderId } from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -2096,6 +2097,38 @@ export const SETTINGS_SCHEMA = {
 			label: "Elide Uneventful Results",
 			description:
 				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
+		},
+	},
+
+	"workspace.identifier": {
+		type: "enum",
+		values: WORKSPACE_IDENTIFIER_MODES,
+		default: "path",
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Workspace Identifier",
+			description:
+				"Controls how default sessions and per-project memories are keyed. Git modes fall back to path outside Git or when git is unavailable.",
+			options: [
+				{
+					value: "path",
+					label: "Path",
+					description: "Default behavior: key by normalized project path.",
+				},
+				{
+					value: "git-remote",
+					label: "Git remote",
+					description:
+						"Use origin URL, or the first configured remote URL, so worktrees for one git repository share memories and storage.",
+				},
+				{
+					value: "git-root",
+					label: "Git root commit",
+					description:
+						"Use the first reachable commit hash so all forks of a repository across hosting platforms share memories and storage.",
+				},
+			],
 		},
 	},
 

@@ -86,7 +86,7 @@ When no matches exist:
   - `hindsight.recallTypes = ["world", "experience"]`
 - Mnemopi recall settings:
   - `mnemopi.recallLimit = 8`
-  - `mnemopi.scoping` selects which local bank(s) are searched
+  - `mnemopi.scoping` selects which local bank(s) are searched; per-project banks use `workspace.identifier` (`path`, `git-remote`, or `git-root`)
 - The explicit tool path does not apply `hindsight.recallContextTurns`, `hindsight.recallMaxQueryChars`, `mnemopi.recallContextTurns`, or `mnemopi.recallMaxQueryChars`; those caps only affect backend auto-recall query composition.
 
 ## Errors

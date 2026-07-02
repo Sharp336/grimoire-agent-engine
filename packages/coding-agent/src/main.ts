@@ -84,6 +84,7 @@ import {
 	writeLastChangelogVersion,
 } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
+import type { WorkspaceIdentifierMode } from "./utils/workspace-storage-identifier";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
@@ -360,7 +361,12 @@ export interface AcpSessionFactoryOptions {
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
 	return async cwd => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
-		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
+		const nextSessionManager = SessionManager.create(
+			cwd,
+			args.sessionDir,
+			undefined,
+			nextSettings.get("workspace.identifier"),
+		);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so
@@ -575,6 +581,7 @@ async function moveMissingCwdSessionIfNeeded(
 	session: SessionInfo,
 	cwd: string,
 	sessionDir: string | undefined,
+	workspaceIdentifierMode: WorkspaceIdentifierMode,
 	askToMoveSession: SessionPrompt,
 ): Promise<MissingCwdMoveResult> {
 	const sourceCwd = session.cwd;
@@ -596,11 +603,56 @@ async function moveMissingCwdSessionIfNeeded(
 	// to the launch cwd, which would make the `moveTo` below a no-op whenever the
 	// move target equals the current project dir. moveTo never chdirs, so the
 	// stale cwd is only a relocation source, not a directory we enter.
-	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
+	const manager = await SessionManager.open(session.path, sessionDir, undefined, {
+		initialCwd: sourceCwd,
+		workspaceIdentifierMode,
+	});
 	await manager.moveTo(cwd, sessionDir);
 	return { status: "moved", manager };
 }
 
+// Shared git-identifier buckets can return a session whose header cwd belongs
+// to another existing worktree. Match the startup picker: adopt that project
+// before the AgentSession is built so settings, plugins, and capabilities are
+// scoped to the resumed session rather than the launch directory.
+async function rescopeStartupToManagerCwd(
+	manager: SessionManager,
+	activeSettings: Settings,
+	beforeProjectDirChange: () => Promise<void> = async () => {},
+): Promise<SessionManager> {
+	const targetCwd = manager.getCwd();
+	if (
+		targetCwd &&
+		normalizePathForComparison(targetCwd) !== normalizePathForComparison(getProjectDir()) &&
+		(await directoryExists(targetCwd))
+	) {
+		await beforeProjectDirChange();
+		setProjectDir(targetCwd);
+		clearPluginRootsAndCaches();
+		resetCapabilities();
+		await activeSettings.reloadForCwd(getProjectDir());
+	}
+	return manager;
+}
+
+async function rescopeStartupToManagerCwdForSharedWorkspace(
+	manager: SessionManager,
+	workspaceIdentifierMode: WorkspaceIdentifierMode | undefined,
+	activeSettings: Settings,
+	beforeProjectDirChange: () => Promise<void> = async () => {},
+): Promise<SessionManager> {
+	const targetCwd = manager.getCwd();
+	if (workspaceIdentifierMode === "path" || workspaceIdentifierMode === undefined || !targetCwd) {
+		return manager;
+	}
+	if (normalizePathForComparison(targetCwd) === normalizePathForComparison(getProjectDir())) {
+		return manager;
+	}
+	if (!(await directoryExists(targetCwd))) {
+		return manager;
+	}
+	return await rescopeStartupToManagerCwd(manager, activeSettings, beforeProjectDirChange);
+}
 async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
 	if (parsed.continue || parsed.resume) {
 		return undefined;
@@ -638,23 +690,31 @@ export async function createSessionManager(
 	activeSettings: Settings = settings,
 	askToForkSession: SessionPrompt = promptForkSession,
 	askToMoveSession: SessionPrompt = promptMoveSession,
+	beforeProjectDirChange: () => Promise<void> = async () => {},
 ): Promise<SessionManager | undefined> {
+	const workspaceMode = activeSettings.get("workspace.identifier");
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
 		}
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
-			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, {
+				workspaceIdentifierMode: workspaceMode,
+			});
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir, {
+			identifierMode: workspaceMode,
+		});
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
 				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
 			);
 		}
-		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, {
+			workspaceIdentifierMode: workspaceMode,
+		});
 	}
 
 	if (parsed.noSession) {
@@ -663,9 +723,18 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-			return await SessionManager.open(sessionArg, parsed.sessionDir);
+			return await rescopeStartupToManagerCwdForSharedWorkspace(
+				await SessionManager.open(sessionArg, parsed.sessionDir, undefined, {
+					workspaceIdentifierMode: workspaceMode,
+				}),
+				workspaceMode,
+				activeSettings,
+				beforeProjectDirChange,
+			);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
+		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir, {
+			identifierMode: workspaceMode,
+		});
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
@@ -678,6 +747,7 @@ export async function createSessionManager(
 				match.session,
 				cwd,
 				parsed.sessionDir,
+				workspaceMode,
 				askToMoveSession,
 			);
 			if (moveResult.status === "moved") {
@@ -696,6 +766,7 @@ export async function createSessionManager(
 					match.session,
 					cwd,
 					parsed.sessionDir,
+					workspaceMode,
 					askToMoveSession,
 				);
 				if (moveResult.status === "moved") {
@@ -716,25 +787,45 @@ export async function createSessionManager(
 					// by checking `typeof parsed.resume === "string"`.
 					return undefined;
 				}
-				return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+				return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, {
+					workspaceIdentifierMode: workspaceMode,
+				});
 			}
 		}
-		return await SessionManager.open(match.session.path, parsed.sessionDir);
+		return await rescopeStartupToManagerCwdForSharedWorkspace(
+			await SessionManager.open(match.session.path, parsed.sessionDir, undefined, {
+				initialCwd: match.session.cwd || cwd,
+				workspaceIdentifierMode: workspaceMode,
+			}),
+			workspaceMode,
+			activeSettings,
+			beforeProjectDirChange,
+		);
 	}
 	if (parsed.continue) {
-		return await SessionManager.continueRecent(cwd, parsed.sessionDir);
+		return await rescopeStartupToManagerCwdForSharedWorkspace(
+			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, workspaceMode),
+			workspaceMode,
+			activeSettings,
+			beforeProjectDirChange,
+		);
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
-		return SessionManager.create(cwd, parsed.sessionDir);
+		return SessionManager.create(cwd, parsed.sessionDir, undefined, workspaceMode);
 	}
 	// Auto-resume: behave like --continue if the setting is enabled and a prior
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
 	if (activeSettings.get("autoResume")) {
-		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
+		const manager = await rescopeStartupToManagerCwdForSharedWorkspace(
+			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, workspaceMode),
+			workspaceMode,
+			activeSettings,
+			beforeProjectDirChange,
+		);
 		if (manager.getEntries().length > 0) {
 			parsed.continue = true;
 		}
@@ -1129,6 +1220,11 @@ export async function runRootCommand(
 			parsedArgs,
 			cwd,
 			settingsInstance,
+			promptForkSession,
+			promptMoveSession,
+			async () => {
+				await pluginPreloadPromise.catch(() => {});
+			},
 		);
 	} catch (error: unknown) {
 		if (error instanceof SessionResolutionError) {
@@ -1140,6 +1236,7 @@ export async function runRootCommand(
 		}
 		throw error;
 	}
+	cwd = getProjectDir();
 
 	// User declined the cross-project fork prompt — exit cleanly with a friendly
 	// message rather than letting the decline bubble up as an uncaught exception
@@ -1152,7 +1249,15 @@ export async function runRootCommand(
 
 	// Handle --resume (no value): show session picker
 	if (parsedArgs.resume === true && !parsedArgs.fork) {
-		const folderSessions = await logger.time("SessionManager.list", SessionManager.list, cwd, parsedArgs.sessionDir);
+		const workspaceMode = settingsInstance.get("workspace.identifier");
+		const folderSessions = await logger.time(
+			"SessionManager.list",
+			SessionManager.list,
+			cwd,
+			parsedArgs.sessionDir,
+			undefined,
+			workspaceMode,
+		);
 		let preloadedAllSessions: SessionInfo[] | undefined;
 		if (folderSessions.length === 0) {
 			// Probe globally so we can exit fast when the user has no sessions at
@@ -1206,7 +1311,9 @@ export async function runRootCommand(
 			// project in place so the session is built with its configuration.
 			await settingsInstance.reloadForCwd(cwd);
 		}
-		sessionManager = await SessionManager.open(selected.path);
+		sessionManager = await SessionManager.open(selected.path, undefined, undefined, {
+			workspaceIdentifierMode: settingsInstance.get("workspace.identifier"),
+		});
 	}
 
 	if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork)) {

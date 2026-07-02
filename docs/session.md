@@ -35,16 +35,22 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 Default session file location:
 
 ```text
-~/.omp/agent/sessions/<dir-encoded>/<timestamp>_<sessionId>.jsonl
+~/.omp/agent/sessions/<workspace-segment>/<timestamp>_<sessionId>.jsonl
 ```
 
-`<dir-encoded>` depends on where the canonicalized cwd lives:
+`<workspace-segment>` is selected by `workspace.identifier`:
+
+- `path` (default) uses `<dir-encoded>` from the canonicalized cwd.
+- `git-remote` uses `git-remote-<remote-slug>-<hash>` from `origin` or the first configured remote URL.
+- `git-root` uses `git-root-<root-commit>` from the repository's first reachable commit.
+
+Git modes fall back to the `path` segment outside Git, in shallow repositories for `git-root`, or when `git` is unavailable. `<dir-encoded>` depends on where the canonicalized cwd lives:
 
 - inside the home directory: `-<relative-path>` with `/`, `\\`, and `:` replaced by `-` (bare `-` for home itself)
 - inside the OS temp root: `-tmp-<relative-path>` with the same replacement
 - anywhere else: legacy absolute form `--<cwd-without-leading-slash-with-same-replacement>--`
 
-Old `--<home-encoded>-*--` directories are migrated to the new home-relative names once per sessions root on first access (best-effort).
+Old `--<home-encoded>-*--` directories are migrated to the new home-relative names once per sessions root on first access in `path` mode (best-effort).
 
 Blob store location:
 

@@ -24,9 +24,11 @@ It focuses on current implementation behavior, including fallback paths and cave
 
 `SessionManager` stores sessions under a cwd-scoped directory by default:
 
-- `~/.omp/agent/sessions/<dir-encoded>/*.jsonl` (home-relative `-<rel>` names, `-tmp-<rel>` for temp paths, legacy `--<abs>--` otherwise)
+- `~/.omp/agent/sessions/<workspace-segment>/*.jsonl`
 
-`SessionManager.list(cwd, sessionDir?)` reads only that directory unless an explicit `sessionDir` is provided.
+`workspace.identifier` controls `<workspace-segment>`: `path` uses home-relative `-<rel>` names, `-tmp-<rel>` for temp paths, and legacy `--<abs>--` otherwise; `git-remote` uses the repository remote identity; `git-root` uses the repository's first reachable commit. Git modes fall back to `path` when no usable Git identity is available.
+
+`SessionManager.list(cwd, sessionDir?)` reads only that directory unless an explicit `sessionDir` is provided. Callers that honor `workspace.identifier` pass the resolved identifier mode so `--resume`, completion, and ACP project chat lookup read the same bucket that session creation uses.
 
 ### Two listing paths with different payloads
 
@@ -101,7 +103,7 @@ No match -> throws error (`Session "..." not found.`).
 
 Handled after initial session-manager construction:
 
-1. list local sessions with `SessionManager.list(cwd, parsed.sessionDir)`
+1. list local sessions with `SessionManager.list(cwd, parsed.sessionDir, undefined, settings.get("workspace.identifier"))`
 2. if empty: preload `SessionManager.listAll()` and open the picker in all-projects scope; print `No sessions found` and exit early only when the global list is also empty
 3. open TUI picker (`selectSession`, with optional preloaded `allSessions`/`startInAllScope`)
 4. if canceled: print `No session selected` and exit early

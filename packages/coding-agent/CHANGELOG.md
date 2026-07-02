@@ -310,6 +310,8 @@
 
 ### Added
 
+- Added experimental workspace identifier modes for sharing default sessions and per-project memories by Git remote or root commit.
+- Added `grep -q`/`--quiet`/`--silent` and `-x`/`--line-regexp` to the in-process `grep` builtin used by the bash tool. `-q` suppresses all stdout and exits 0 on the first match (short-circuiting, with match status taking precedence over read errors per GNU); `-x` anchors each pattern to whole lines. Unblocks shell conditionals such as `grep -qx "$applet" <(strings bin)`.
 - Added a new `tiny` model role for consolidated online task handling.
 - Added a `textVerbosity` setting to control OpenAI and Codex response detail.
 
