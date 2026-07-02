@@ -8,14 +8,14 @@
  * `callSessionTool` implementation the JS bridge uses.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { ToolSession } from "../../tools";
-import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import { callSessionTool } from "../js/tool-bridge";
+import {
+	clearPyToolBridgeRegistrations,
+	getPyToolBridgeEntry,
+	type PyToolBridgeEntry,
+} from "./tool-bridge-registry";
+export { registerPyToolBridge, type PyToolBridgeEntry } from "./tool-bridge-registry";
 
-export interface PyToolBridgeEntry {
-	toolSession: ToolSession;
-	signal?: AbortSignal;
-	emitStatus?: (event: JsStatusEvent) => void;
-}
 
 export interface PyToolBridgeInfo {
 	url: string;
@@ -27,7 +27,6 @@ interface BridgeServer {
 	stop: () => Promise<void>;
 }
 
-const registrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
 /**
@@ -98,8 +97,8 @@ async function startServer(): Promise<BridgeServer> {
 			if (!sessionId || !runId || !name) {
 				return Response.json({ ok: false, error: "Missing session/run/name" }, { status: 400 });
 			}
-			const registrationKey = bridgeRegistrationKey(sessionId, runId);
-			const entry = registrations.get(registrationKey) ?? registrations.get(sessionId);
+			const registrationKey = `${sessionId}:${runId}`;
+			const entry = getPyToolBridgeEntry(sessionId, runId);
 			if (!entry) {
 				return Response.json(
 					{ ok: false, error: `No active Python tool bridge session: ${registrationKey}` },
@@ -147,27 +146,10 @@ export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
 	}
 }
 
-/**
- * Register a tool session for the duration of one execution. The returned
- * function MUST be called to remove the entry once execution finishes.
- */
-function bridgeRegistrationKey(sessionId: string, runId: string): string {
-	return `${sessionId}:${runId}`;
-}
-
-export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
-	const key = bridgeRegistrationKey(sessionId, runId);
-	registrations.set(key, entry);
-	return () => {
-		if (registrations.get(key) === entry) {
-			registrations.delete(key);
-		}
-	};
-}
 
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {
-	registrations.clear();
+	clearPyToolBridgeRegistrations();
 	const pending = serverPromise;
 	serverPromise = null;
 	if (!pending) return;
