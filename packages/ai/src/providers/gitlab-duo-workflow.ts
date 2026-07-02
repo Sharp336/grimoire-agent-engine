@@ -117,6 +117,22 @@ const GITLAB_DUO_WORKFLOW_GOAL_HARD_OVERFLOW_BYTES = 2_000_000;
 function buildGitLabDuoWorkflowGoalOverflowMessage(goalBytes: number): string {
 	return `prompt is too long: ${goalBytes} bytes exceeds the GitLab Duo Agent goal byte budget (soft ${GITLAB_DUO_WORKFLOW_GOAL_SOFT_OVERFLOW_BYTES}, hard ${GITLAB_DUO_WORKFLOW_GOAL_HARD_OVERFLOW_BYTES})`;
 }
+
+/**
+ * Combine the caller's abort signal with an absolute timeout so post-start REST
+ * setup fetches (settings, discovery, direct_access, workflow create, models)
+ * cannot hang silently. The timeout maps to the provider error path through the
+ * normal fetch rejection/catch in `streamGitLabDuoWorkflow`.
+ */
+function gitLabDuoWorkflowFetchSignal(
+	signal: AbortSignal | undefined,
+	timeoutMs: number = GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS,
+): AbortSignal | undefined {
+	if (signal?.aborted) return signal;
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
 const GITLAB_DUO_WORKFLOW_LANGUAGE_SERVER_VERSION = "8.104.0";
 const GITLAB_DUO_WORKFLOW_AVAILABLE_MODELS_QUERY = `query omp_gitlabDuoWorkflowAvailableModels($rootNamespaceId: GroupID!) {
   aiChatAvailableModels(rootNamespaceId: $rootNamespaceId) {
@@ -1074,7 +1090,7 @@ async function runGitLabDuoWorkflow(
 			// success or 4xx). A transient network error / 5xx returns false so a later
 			// turn retries instead of permanently skipping the PUT on a namespace whose
 			// flags are still off.
-			if (await ensureGitLabDuoWorkflowSettings(fetchImpl, baseUrl, apiKey, restNamespaceId)) {
+			if (await ensureGitLabDuoWorkflowSettings(fetchImpl, baseUrl, apiKey, restNamespaceId, options.signal)) {
 				markGitLabDuoWorkflowSettingsEnsured(apiKey, baseUrl, options.cwd);
 			}
 		}
@@ -1089,7 +1105,7 @@ async function runGitLabDuoWorkflow(
 			!configuredProjectPath && !configuredProjectId && isGitLabDuoWorkflowInlineFlow(workflowDefinition)
 				? namespaceSelection.projectPath
 					? { path: namespaceSelection.projectPath }
-					: await discoverGitLabDuoWorkflowProject(fetchImpl, baseUrl, apiKey, restNamespaceId)
+					: await discoverGitLabDuoWorkflowProject(fetchImpl, baseUrl, apiKey, restNamespaceId, options.signal)
 				: undefined;
 		if (discoveredProject) {
 			traceGitLabDuoWorkflow("project.discover", {
@@ -1111,7 +1127,7 @@ async function runGitLabDuoWorkflow(
 		const webSocketProjectId =
 			projectId ??
 			(projectPath
-				? await resolveGitLabDuoWorkflowNumericProjectId(fetchImpl, baseUrl, apiKey, projectPath)
+				? await resolveGitLabDuoWorkflowNumericProjectId(fetchImpl, baseUrl, apiKey, projectPath, options.signal)
 				: undefined);
 		const workflowConnection: GitLabDuoWorkflowDirectAccessConnection = options.workflowToken
 			? { token: options.workflowToken, headers: {}, serviceEndpoint: false }
@@ -1122,6 +1138,7 @@ async function runGitLabDuoWorkflow(
 					rootNamespaceId,
 					restProjectId,
 					workflowDefinition,
+					options.signal,
 				);
 		const workflowId =
 			options.workflowId ??
@@ -1135,7 +1152,13 @@ async function runGitLabDuoWorkflow(
 				workflowDefinition,
 				options.signal,
 			));
-		const availableModels = await fetchGitLabDuoWorkflowAvailableModels(fetchImpl, baseUrl, apiKey, rootNamespaceId);
+		const availableModels = await fetchGitLabDuoWorkflowAvailableModels(
+			fetchImpl,
+			baseUrl,
+			apiKey,
+			rootNamespaceId,
+			options.signal,
+		);
 		const selectedModelIdentifier = selectGitLabDuoWorkflowModelRef(model.id, availableModels);
 		// A `toolChoice: "none"` side-request (e.g. handoff keeps live tool definitions
 		// in the cache prefix but disables tool use) must not advertise the tools to
@@ -1466,6 +1489,7 @@ async function fetchGitLabDuoWorkflowAvailableModels(
 	baseUrl: string,
 	apiKey: string,
 	rootNamespaceId: string,
+	signal?: AbortSignal,
 ): Promise<GitLabAvailableModelsPayload | undefined> {
 	try {
 		const response = await fetchImpl(gitLabApiUrl(baseUrl, "/api/graphql"), {
@@ -1478,6 +1502,7 @@ async function fetchGitLabDuoWorkflowAvailableModels(
 				query: GITLAB_DUO_WORKFLOW_AVAILABLE_MODELS_QUERY,
 				variables: { rootNamespaceId: toGitLabGraphQLNamespaceId(rootNamespaceId) },
 			}),
+			signal: gitLabDuoWorkflowFetchSignal(signal),
 		});
 		if (!response.ok) return undefined;
 		const payload: unknown = await response.json();
@@ -1513,6 +1538,7 @@ async function resolveGitLabDuoWorkflowNumericProjectId(
 	baseUrl: string,
 	apiKey: string,
 	projectPath: string,
+	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	try {
 		const response = await fetchImpl(gitLabApiUrl(baseUrl, `/api/v4/projects/${encodeURIComponent(projectPath)}`), {
@@ -1521,6 +1547,7 @@ async function resolveGitLabDuoWorkflowNumericProjectId(
 				Authorization: `Bearer ${apiKey}`,
 				"content-type": "application/json",
 			},
+			signal: gitLabDuoWorkflowFetchSignal(signal),
 		});
 		if (!response.ok) return undefined;
 		const payload: unknown = await response.json();
@@ -1549,6 +1576,7 @@ async function discoverGitLabDuoWorkflowProject(
 	baseUrl: string,
 	apiKey: string,
 	restNamespaceId: string,
+	signal?: AbortSignal,
 ): Promise<GitLabDuoWorkflowDiscoveredProject | undefined> {
 	const query = "per_page=1&min_access_level=30&order_by=last_activity_at&sort=desc";
 	const endpoints = [
@@ -1563,6 +1591,7 @@ async function discoverGitLabDuoWorkflowProject(
 					Authorization: `Bearer ${apiKey}`,
 					"content-type": "application/json",
 				},
+				signal: gitLabDuoWorkflowFetchSignal(signal),
 			});
 			if (!response.ok) continue;
 			const payload: unknown = await response.json();
@@ -1582,6 +1611,7 @@ async function requestGitLabDuoWorkflowDirectAccess(
 	rootNamespaceId: string,
 	projectId?: string,
 	workflowDefinition: GitLabDuoWorkflowDefinition = GITLAB_DUO_WORKFLOW_DEFINITION,
+	signal?: AbortSignal,
 ): Promise<GitLabDuoWorkflowDirectAccessConnection> {
 	const response = await fetchImpl(gitLabApiUrl(baseUrl, "/api/v4/ai/duo_workflows/direct_access"), {
 		method: "POST",
@@ -1590,6 +1620,7 @@ async function requestGitLabDuoWorkflowDirectAccess(
 			"content-type": "application/json",
 		},
 		body: JSON.stringify(buildGitLabDuoWorkflowDirectAccessBody(rootNamespaceId, projectId, workflowDefinition)),
+		signal: gitLabDuoWorkflowFetchSignal(signal),
 	});
 	traceGitLabDuoWorkflow("direct_access.response", {
 		status: response.status,
@@ -1654,7 +1685,7 @@ async function createGitLabDuoWorkflow(
 			"content-type": "application/json",
 		},
 		body: JSON.stringify(body),
-		signal,
+		signal: gitLabDuoWorkflowFetchSignal(signal),
 	});
 	traceGitLabDuoWorkflow("workflow.create.response", {
 		status: response.status,
@@ -1721,6 +1752,7 @@ async function ensureGitLabDuoWorkflowSettings(
 	baseUrl: string,
 	apiKey: string,
 	restNamespaceId: string,
+	signal?: AbortSignal,
 ): Promise<boolean> {
 	// Returns whether the attempt was DEFINITIVE (so the caller may stop retrying):
 	// any HTTP response — 2xx (flags now on) or 4xx (insufficient rights / no such
@@ -1735,6 +1767,7 @@ async function ensureGitLabDuoWorkflowSettings(
 				"content-type": "application/json",
 			},
 			body: JSON.stringify(buildGitLabDuoWorkflowSettingsBody()),
+			signal: gitLabDuoWorkflowFetchSignal(signal),
 		});
 		traceGitLabDuoWorkflow("settings.ensure", { status: response.status, ok: response.ok });
 		return response.status < 500;
