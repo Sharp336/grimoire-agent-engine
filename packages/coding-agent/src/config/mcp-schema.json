@@ -160,6 +160,11 @@
             "cwd": {
               "type": "string",
               "description": "Working directory used when spawning the stdio process."
+            },
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Configured OMP SSH host used to run the stdio process remotely."
             }
           },
           "not": {

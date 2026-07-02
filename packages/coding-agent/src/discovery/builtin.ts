@@ -162,6 +162,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
 				cwd: serverConfig.cwd as string | undefined,
+				host: serverConfig.host as string | undefined,
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
 				auth: serverConfig.auth as

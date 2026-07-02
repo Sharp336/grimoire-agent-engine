@@ -30,6 +30,7 @@ interface MCPConfigFile {
 			args?: string[];
 			env?: Record<string, string>;
 			cwd?: string;
+			host?: string;
 			url?: string;
 			headers?: Record<string, string>;
 			auth?: {
@@ -91,6 +92,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				args: serverConfig.args,
 				env: serverConfig.env,
 				cwd: serverConfig.cwd,
+				host: serverConfig.host,
 				url: serverConfig.url,
 				headers: serverConfig.headers,
 				auth: serverConfig.auth,
@@ -104,6 +106,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			if (server.args) server.args = expandEnvVarsDeep(server.args);
 			if (server.env) server.env = expandEnvVarsDeep(server.env);
 			if (server.cwd) server.cwd = expandEnvVarsDeep(server.cwd);
+			if (server.host) server.host = expandEnvVarsDeep(server.host);
 			if (server.url) server.url = expandEnvVarsDeep(server.url);
 			if (server.headers) server.headers = expandEnvVarsDeep(server.headers);
 			if (server.auth) server.auth = expandEnvVarsDeep(server.auth);

@@ -86,6 +86,8 @@ export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	args?: string[];
 	env?: Record<string, string>;
 	cwd?: string;
+	/** Configured SSH host for remote stdio transport */
+	host?: string;
 }
 
 /** HTTP server configuration (Streamable HTTP transport) */

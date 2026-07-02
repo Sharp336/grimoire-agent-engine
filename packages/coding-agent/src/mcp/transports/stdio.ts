@@ -9,6 +9,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getProjectDir, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import { type Subprocess, spawn } from "bun";
+import type { SSHHost } from "../../capability/ssh";
+import { sshCapability } from "../../capability/ssh";
+import * as discovery from "../../discovery";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
 	JsonRpcError,
@@ -20,6 +23,9 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
+import * as sshConnection from "../../ssh/connection-manager";
+import * as remotePosix from "../../ssh/remote-posix";
+import { quotePosixPath, wrapInPosixShell } from "../../ssh/utils";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
@@ -57,6 +63,49 @@ export interface ResolveStdioSpawnOptions {
 	env: Record<string, string | undefined>;
 	hostHasInheritableConsole?: boolean;
 	platform?: NodeJS.Platform;
+}
+
+export interface RemoteStdioSpawnCommand extends StdioSpawnCommand {
+	remoteCwd: string;
+}
+
+async function resolveConfiguredSshHost(hostName: string, cwd: string): Promise<sshConnection.SSHConnectionTarget> {
+	const result = await discovery.loadCapability<SSHHost>(sshCapability.id, { cwd });
+	const host = result.items.find(item => item.name === hostName);
+	if (!host) {
+		const names = result.items.map(item => item.name).sort();
+		const suffix = names.length > 0 ? ` Available hosts: ${names.join(", ")}` : " No SSH hosts are configured.";
+		throw new Error(`Unknown SSH host: ${hostName}.${suffix}`);
+	}
+	return {
+		name: host.name,
+		host: host.host,
+		username: host.username,
+		port: host.port,
+		keyPath: host.keyPath,
+		compat: host.compat,
+	};
+}
+
+export async function resolveRemoteStdioSpawnCommand(
+	config: MCPStdioServerConfig & { host: string },
+	options: { cwd: string },
+): Promise<RemoteStdioSpawnCommand> {
+	const target = await resolveConfiguredSshHost(config.host, options.cwd);
+	const shell = await remotePosix.ensureRemotePosixShell(target, "Remote MCP stdio");
+	const remoteCwd = await remotePosix.resolveRemoteCwd(target, config.cwd);
+	const command = [config.command, ...(config.args ?? [])].map(quotePosixPath).join(" ");
+	const remoteCommand = remotePosix.buildRemotePosixCommand({
+		command,
+		cwd: remoteCwd,
+		env: config.env,
+	});
+	const args = await sshConnection.buildRemoteCommand(target, wrapInPosixShell(shell, remoteCommand), {
+		allowStdin: true,
+		controlMaster: false,
+		extraArgs: ["-T"],
+	});
+	return { cmd: ["ssh", ...args], detached: false, remoteCwd };
 }
 
 const DEFAULT_WINDOWS_PATHEXT = [".COM", ".EXE", ".BAT", ".CMD"];
@@ -341,7 +390,10 @@ export class StdioTransport implements MCPTransport {
 	onNotification?: (method: string, params: unknown) => void;
 	onRequest?: (method: string, params: unknown) => Promise<unknown>;
 
-	constructor(private config: MCPStdioServerConfig) {}
+	constructor(
+		private config: MCPStdioServerConfig,
+		private cwd = getProjectDir(),
+	) {}
 
 	get connected(): boolean {
 		return this.#connected;
@@ -353,17 +405,21 @@ export class StdioTransport implements MCPTransport {
 	async connect(): Promise<void> {
 		if (this.#connected) return;
 
-		const env = {
-			...Bun.env,
-			...this.config.env,
-		};
-		const cwd = this.config.cwd ?? getProjectDir();
-		const spawnCommand = await resolveStdioSpawnCommand(this.config, {
-			cwd,
-			env,
-			platform: process.platform,
-			hostHasInheritableConsole: hostHasInheritableConsole(),
-		});
+		const remoteHost = this.config.host?.trim();
+		const env = remoteHost ? { ...Bun.env } : { ...Bun.env, ...this.config.env };
+		const cwd = remoteHost ? this.cwd : (this.config.cwd ?? this.cwd);
+		const spawnCommand = remoteHost
+			? await resolveRemoteStdioSpawnCommand({ ...this.config, host: remoteHost }, { cwd: this.cwd })
+			: await resolveStdioSpawnCommand(this.config, {
+					cwd,
+					env,
+					platform: process.platform,
+					hostHasInheritableConsole: hostHasInheritableConsole(),
+				});
+		if (remoteHost && "remoteCwd" in spawnCommand && typeof spawnCommand.remoteCwd === "string") {
+			this.config.host = remoteHost;
+			this.config.cwd = spawnCommand.remoteCwd;
+		}
 
 		// Platform-derived session and console-window handling come from
 		// `resolveStdioSpawnCommand`: POSIX detaches into its own session to
@@ -646,8 +702,11 @@ export class StdioTransport implements MCPTransport {
 /**
  * Create and connect a stdio transport.
  */
-export async function createStdioTransport(config: MCPStdioServerConfig): Promise<StdioTransport> {
-	const transport = new StdioTransport(config);
+export async function createStdioTransport(
+	config: MCPStdioServerConfig,
+	cwd = getProjectDir(),
+): Promise<StdioTransport> {
+	const transport = new StdioTransport(config, cwd);
 	await transport.connect();
 	return transport;
 }

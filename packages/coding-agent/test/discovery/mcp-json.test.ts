@@ -29,6 +29,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		PI_MCP_HEADER: process.env.PI_MCP_HEADER,
 		PI_MCP_URL: process.env.PI_MCP_URL,
 		PI_MCP_ENV: process.env.PI_MCP_ENV,
+		PI_MCP_HOST: process.env.PI_MCP_HOST,
 	};
 
 	beforeEach(async () => {
@@ -41,6 +42,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		process.env.PI_MCP_HEADER = "Bearer test-token";
 		process.env.PI_MCP_URL = "https://mcp.example.com";
 		process.env.PI_MCP_ENV = "env-value";
+		process.env.PI_MCP_HOST = "pi";
 	});
 
 	afterEach(async () => {
@@ -63,6 +65,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 						url: `${envPlaceholder("PI_MCP_URL")}/mcp`,
 						headers: { Authorization: envPlaceholder("PI_MCP_HEADER") },
 						env: { MCP_VALUE: envPlaceholder("PI_MCP_ENV") },
+						host: envPlaceholder("PI_MCP_HOST"),
 						auth: {
 							type: "oauth",
 							tokenUrl: envPlaceholder("PI_OAUTH_TOKEN_URL"),
@@ -86,6 +89,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		expect(server?.url).toBe("https://mcp.example.com/mcp");
 		expect(server?.headers).toEqual({ Authorization: "Bearer test-token" });
 		expect(server?.env).toEqual({ MCP_VALUE: "env-value" });
+		expect(server?.host).toBe("pi");
 		expect(server?.auth).toEqual({
 			type: "oauth",
 			tokenUrl: "https://provider.example/token",

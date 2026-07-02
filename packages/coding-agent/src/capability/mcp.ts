@@ -25,6 +25,8 @@ export interface MCPServer {
 	env?: Record<string, string>;
 	/** Working directory for stdio transport */
 	cwd?: string;
+	/** Configured SSH host for stdio transport */
+	host?: string;
 	/** URL (for HTTP/SSE transport) */
 	url?: string;
 	/** HTTP headers (for HTTP transport) */

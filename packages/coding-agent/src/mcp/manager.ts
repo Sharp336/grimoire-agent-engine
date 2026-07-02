@@ -46,6 +46,7 @@ import type {
 	MCPResourceTemplate,
 	MCPServerConfig,
 	MCPServerConnection,
+	MCPStdioServerConfig,
 	MCPToolDefinition,
 	MCPTransport,
 } from "./types";
@@ -71,6 +72,11 @@ type TrackedPromise<T> = {
 };
 
 const STARTUP_TIMEOUT_MS = 250;
+function isRemoteStdioConfig(config: MCPServerConfig | undefined): config is MCPStdioServerConfig & { host: string } {
+	if ((config?.type ?? "stdio") !== "stdio") return false;
+	const stdioConfig = config as MCPStdioServerConfig;
+	return typeof stdioConfig.host === "string" && stdioConfig.host.trim().length > 0;
+}
 
 /**
  * Per-server reconnect-storm circuit breaker.
@@ -405,11 +411,12 @@ export class MCPManager {
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
 				return connectToServer(name, resolvedConfig, {
+					cwd: this.cwd,
 					onNotification: (method, params) => {
 						this.#handleServerNotification(name, method, params);
 					},
 					onRequest: (method, params) => {
-						return this.#handleServerRequest(method, params);
+						return this.#handleServerRequest(name, method, params, resolvedConfig);
 					},
 				});
 			})().then(
@@ -624,23 +631,30 @@ export class MCPManager {
 	}
 
 	/** Handle server-to-client JSON-RPC requests (e.g. ping, roots/list). */
-	async #handleServerRequest(method: string, _params: unknown): Promise<unknown> {
+	async #handleServerRequest(
+		_serverName: string,
+		method: string,
+		_params: unknown,
+		config?: MCPServerConfig,
+	): Promise<unknown> {
 		switch (method) {
 			case "ping":
 				return {};
 			case "roots/list":
-				return this.#getRoots();
+				return this.#getRoots(config);
 			default:
 				throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
 		}
 	}
 
-	#getRoots(): { roots: Array<{ uri: string; name: string }> } {
+	#getRoots(config?: MCPServerConfig): { roots: Array<{ uri: string; name: string }> } {
+		const rootPath = isRemoteStdioConfig(config) ? config.cwd : this.cwd;
+		if (!rootPath || (isRemoteStdioConfig(config) && !path.isAbsolute(rootPath))) return { roots: [] };
 		return {
 			roots: [
 				{
-					uri: url.pathToFileURL(this.cwd).href,
-					name: path.basename(this.cwd),
+					uri: url.pathToFileURL(rootPath).href,
+					name: path.basename(rootPath),
 				},
 			],
 		};
@@ -944,11 +958,12 @@ export class MCPManager {
 	): Promise<MCPServerConnection> {
 		const resolvedConfig = await this.#resolveAuthConfig(config);
 		const connection = await connectToServer(name, resolvedConfig, {
+			cwd: this.cwd,
 			onNotification: (method, params) => {
 				this.#handleServerNotification(name, method, params);
 			},
 			onRequest: (method, params) => {
-				return this.#handleServerRequest(method, params);
+				return this.#handleServerRequest(name, method, params, resolvedConfig);
 			},
 		});
 

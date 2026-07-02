@@ -50,17 +50,24 @@ const CLIENT_INFO = {
 /**
  * Default handler for standard MCP server-to-client requests.
  * Handles `ping` and `roots/list`; rejects unknown methods with -32601.
- * Reads getProjectDir() at call time so the root stays stable even if
- * the process cwd changes during tool execution.
+ * Uses a remote stdio config's resolved remote cwd when present; otherwise reads
+ * getProjectDir() at call time so the root stays stable even if the process cwd
+ * changes during tool execution.
  */
-async function defaultRequestHandler(method: string, _params: unknown): Promise<unknown> {
+async function defaultRequestHandler(method: string, _params: unknown, config?: MCPServerConfig): Promise<unknown> {
 	switch (method) {
 		case "ping":
 			return {};
 		case "roots/list": {
-			const cwd = getProjectDir();
+			const stdioConfig =
+				(config?.type ?? "stdio") === "stdio" ? (config as MCPStdioServerConfig | undefined) : undefined;
+			const isRemoteStdio = typeof stdioConfig?.host === "string";
+			const cwd = isRemoteStdio ? stdioConfig.cwd : getProjectDir();
 			return {
-				roots: [{ uri: url.pathToFileURL(cwd).href, name: path.basename(cwd) }],
+				roots:
+					cwd && (!isRemoteStdio || path.isAbsolute(cwd))
+						? [{ uri: url.pathToFileURL(cwd).href, name: path.basename(cwd) }]
+						: [],
 			};
 		}
 		default:
@@ -71,12 +78,12 @@ async function defaultRequestHandler(method: string, _params: unknown): Promise<
 /**
  * Create a transport for the given server config.
  */
-async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
+async function createTransport(config: MCPServerConfig, cwd = getProjectDir()): Promise<MCPTransport> {
 	const serverType = config.type ?? "stdio";
 
 	switch (serverType) {
 		case "stdio":
-			return createStdioTransport(config as MCPStdioServerConfig);
+			return createStdioTransport(config as MCPStdioServerConfig, cwd);
 		case "http":
 			return createHttpTransport(config as MCPHttpServerConfig);
 		case "sse":
@@ -136,6 +143,7 @@ export async function connectToServer(
 	config: MCPServerConfig,
 	options?: {
 		signal?: AbortSignal;
+		cwd?: string;
 		onNotification?: (method: string, params: unknown) => void;
 		onRequest?: (method: string, params: unknown) => Promise<unknown>;
 	},
@@ -144,7 +152,7 @@ export async function connectToServer(
 	let transport: MCPTransport | undefined;
 
 	const connect = async (): Promise<MCPServerConnection> => {
-		transport = await createTransport(config);
+		transport = await createTransport(config, options?.cwd);
 		if (options?.onNotification) {
 			transport.onNotification = options.onNotification;
 		}
@@ -152,7 +160,7 @@ export async function connectToServer(
 		// Always handle standard MCP server-to-client requests (ping, roots/list).
 		// The initialize request declares roots capability, so we must respond to
 		// roots/list — even for short-lived test connections.
-		transport.onRequest = options?.onRequest ?? defaultRequestHandler;
+		transport.onRequest = options?.onRequest ?? ((method, params) => defaultRequestHandler(method, params, config));
 
 		try {
 			const initResult = await initializeConnection(transport, {

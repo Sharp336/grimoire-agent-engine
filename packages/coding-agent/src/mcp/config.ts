@@ -54,6 +54,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		if (server.args) config.args = server.args;
 		if (server.env) config.env = server.env;
 		if (server.cwd) config.cwd = server.cwd;
+		if (server.host) config.host = server.host;
 		return config;
 	}
 
@@ -266,9 +267,12 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	}
 
 	if (serverType === "stdio") {
-		const stdioConfig = config as { command?: string };
+		const stdioConfig = config as { command?: string; host?: string };
 		if (!stdioConfig.command) {
 			errors.push(`Server "${name}": stdio server requires "command" field`);
+		}
+		if (stdioConfig.host !== undefined && stdioConfig.host.trim().length === 0) {
+			errors.push(`Server "${name}": stdio server "host" must not be empty`);
 		}
 	} else if (serverType === "http" || serverType === "sse") {
 		const httpConfig = config as { url?: string };
