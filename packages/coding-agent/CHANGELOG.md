@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced repeated startup filesystem work (notably on Windows) by memoizing plugin enumeration (`getEnabledPlugins`) per working directory and caching legacy-pi bare-dependency, package-manifest, node-package-root, and realpath resolution, all invalidated through the existing plugin-cache reset path ([#4197](https://github.com/can1357/oh-my-pi/issues/4197)).
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
