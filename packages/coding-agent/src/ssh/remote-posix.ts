@@ -44,7 +44,10 @@ export function buildRemotePosixCommand(options: {
 	env?: Record<string, string>;
 }): string {
 	const assignments = formatPosixEnvAssignments(options.env);
-	const command = assignments ? `env ${assignments} ${options.command}` : options.command;
+	// Export vars in the wrapper shell (not via `env KEY=val cmd`) so that
+	// shell expansion ($VAR, ${VAR}) in the command sees the env values —
+	// `env` only sets vars for the child process, not the parsing shell.
+	const command = assignments ? `export ${assignments}; ${options.command}` : options.command;
 	if (!options.cwd) return command;
 	return `cd -- ${quotePosixPath(options.cwd)} && ${command}`;
 }

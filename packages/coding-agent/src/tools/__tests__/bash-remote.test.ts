@@ -79,7 +79,7 @@ describe("BashTool SSH execution", () => {
 		expect(remoteCommand).toContain("bash -c ");
 		expect(remoteCommand).toContain("cd --");
 		expect(remoteCommand).toContain("/srv/remote app");
-		expect(remoteCommand).toContain("env");
+		expect(remoteCommand).toContain("export");
 		expect(remoteCommand).toContain("ALPHA=");
 		expect(remoteCommand).toContain("first value");
 		expect(remoteCommand).toContain("TARGET=");

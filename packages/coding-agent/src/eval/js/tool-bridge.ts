@@ -98,13 +98,18 @@ function sshUrlForPath(host: SSHConnectionTarget, remotePath: string): string {
 
 function shouldKeepPathLocal(value: string): boolean {
 	const trimmed = value.trim();
+	if (trimmed.startsWith("file://")) return false;
 	return URL_SCHEME_RE.test(trimmed) || trimmed.startsWith("local:/");
 }
 
 function rewriteRemotePath(value: string, host: SSHConnectionTarget, remoteCwd: string | undefined): string {
 	if (shouldKeepPathLocal(value)) return value;
 	const split = splitPathAndSel(value);
-	const rawPath = split.path || ".";
+	let rawPath = split.path || ".";
+	// Strip a file:// prefix so file URIs are rewritten to ssh:// URLs
+	// instead of bypassing remote path rewriting.
+	const fileMatch = rawPath.match(/^file:\/\/(.+)$/);
+	if (fileMatch) rawPath = fileMatch[1]!;
 	let absolutePath: string;
 	if (path.posix.isAbsolute(rawPath)) {
 		absolutePath = path.posix.normalize(rawPath);
@@ -194,7 +199,7 @@ async function applyBridgeInvocationContext(name: string, args: unknown, options
 	const remoteCwd = resolveRemoteCwd(next.cwd, options.invocationContext?.remoteCwd);
 	if (name === "bash" || name === "ssh") {
 		next.host = host.name;
-		if (next.cwd === undefined && remoteCwd) next.cwd = remoteCwd;
+		if (remoteCwd) next.cwd = remoteCwd;
 		return next;
 	}
 	if (name === "read" || name === "write") {
