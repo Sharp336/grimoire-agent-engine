@@ -30,13 +30,6 @@ type DapReverseRequestHandler = (args: unknown) => unknown | Promise<unknown>;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
-async function writeMessage(sink: DapWriteSink, message: DapRequestMessage | DapResponseMessage): Promise<void> {
-	const content = JSON.stringify(message);
-	sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
-	sink.write(content);
-	await sink.flush();
-}
-
 function toErrorMessage(value: unknown): string {
 	if (value instanceof Error) return value.message;
 	return String(value);
@@ -139,7 +132,12 @@ export class DapClient {
 			detached: true,
 		});
 
-		await waitForCondition(() => isUnixSocketReady(socketPath), 10_000, proc);
+		try {
+			await waitForCondition(() => isUnixSocketReady(socketPath), 10_000, proc);
+		} catch (error) {
+			proc.kill();
+			throw error;
+		}
 
 		const { readable, writeSink, socket } = await connectSocket({ unix: socketPath });
 		const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
@@ -191,6 +189,9 @@ export class DapClient {
 		);
 		try {
 			rawSocket = await Promise.race([connPromise, timeoutPromise]);
+		} catch (error) {
+			proc.kill();
+			throw error;
 		} finally {
 			clearTimeout(connectTimeout);
 			server.stop();
@@ -289,6 +290,48 @@ export class DapClient {
 		return promise;
 	}
 
+	async #writeMessage(message: DapRequestMessage | DapResponseMessage): Promise<void> {
+		const sink = this.#writeSink;
+		const content = JSON.stringify(message);
+		sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
+		sink.write(content);
+
+		const flushPromise = Promise.resolve().then(() => sink.flush());
+		let flushTimeout: NodeJS.Timeout | undefined;
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			flushTimeout = setTimeout(
+				() => reject(new Error(`DAP message flush timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`)),
+				DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+		});
+		let exitAborted = false;
+		const exitPromise = this.proc.exited.then(
+			() => {
+				if (!exitAborted) {
+					throw new Error(`DAP adapter ${this.adapter.name} exited during message flush`);
+				}
+			},
+			() => {
+				if (!exitAborted) {
+					throw new Error(`DAP adapter ${this.adapter.name} exited during message flush`);
+				}
+			},
+		);
+		// Keep exitPromise handled so a late process exit after the flush wins
+		// does not become an unhandled rejection.
+		exitPromise.catch(() => {});
+
+		try {
+			await Promise.race([flushPromise, timeoutPromise, exitPromise]);
+		} catch (error) {
+			void this.dispose();
+			throw error;
+		} finally {
+			clearTimeout(flushTimeout);
+			exitAborted = true;
+		}
+	}
+
 	async sendRequest<TBody = unknown>(
 		command: string,
 		args?: unknown,
@@ -308,10 +351,11 @@ export class DapClient {
 			command,
 			arguments: args,
 		};
+
 		const { promise, resolve, reject } = Promise.withResolvers<TBody>();
 		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
-			if (timeout) clearTimeout(timeout);
+			clearTimeout(timeout);
 			if (signal) {
 				signal.removeEventListener("abort", abortHandler);
 			}
@@ -342,12 +386,19 @@ export class DapClient {
 			},
 		});
 		this.#lastActivity = Date.now();
+
+		// Attach a temporary no-op handler so that if the response timer fires
+		// while the flush is still pending, the rejection is not unhandled.
+		const promiseGuard = promise.catch(() => {});
 		try {
-			await writeMessage(this.#writeSink, request);
+			await this.#writeMessage(request);
 		} catch (error) {
 			this.#pendingRequests.delete(requestSeq);
 			cleanup();
 			throw error;
+		} finally {
+			// Dropping the guard leaves the real caller as promise's handler.
+			void promiseGuard;
 		}
 		return promise;
 	}
@@ -362,7 +413,7 @@ export class DapClient {
 			...(message ? { message } : {}),
 			...(body !== undefined ? { body } : {}),
 		};
-		await writeMessage(this.#writeSink, response);
+		await this.#writeMessage(response);
 	}
 
 	async dispose(): Promise<void> {
