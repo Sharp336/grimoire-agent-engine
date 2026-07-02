@@ -202,6 +202,8 @@ export class HindsightSessionState {
 	session: AgentSession;
 	banksSet: Set<string>;
 	lastRetainedTurn: number;
+	#lastRetainedMessageIndex: number = 0;
+	#cachedTranscript: string = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -236,6 +238,8 @@ export class HindsightSessionState {
 		this.session = options.session;
 		this.banksSet = options.banksSet;
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
@@ -243,12 +247,16 @@ export class HindsightSessionState {
 
 	setSessionId(sessionId: string): void {
 		this.sessionId = sessionId;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
 	}
 
 	resetConversationTracking(): void {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
 	}
 
 	enqueueRetain(content: string, context?: string): void {
@@ -285,20 +293,27 @@ export class HindsightSessionState {
 	async retainSession(messages: HindsightMessage[]): Promise<void> {
 		const retainedAt = new Date();
 		const retainFullWindow = this.config.retainMode === "full-session";
-		let target: HindsightMessage[];
 		let documentId: string;
+		let transcript: string;
+		let nextCachedTranscript: string | undefined;
 
 		if (retainFullWindow) {
-			target = messages;
 			documentId = this.sessionId;
+			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true);
+			if (!newPart) return;
+			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
+			transcript = nextCachedTranscript;
 		} else {
 			const windowTurns = this.config.retainEveryNTurns + this.config.retainOverlapTurns;
-			target = sliceLastTurnsByUserBoundary(messages, windowTurns);
+			const target = sliceLastTurnsByUserBoundary(messages, windowTurns);
 			documentId = `${this.sessionId}-${retainedAt.getTime()}`;
+			this.#lastRetainedMessageIndex = 0;
+			this.#cachedTranscript = "";
+			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true);
+			if (!windowTranscript) return;
+			transcript = windowTranscript;
 		}
-
-		const { transcript } = prepareRetentionTranscript(target, true);
-		if (!transcript) return;
 
 		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
 		await this.client.retain(this.bankId, transcript, {
@@ -309,6 +324,10 @@ export class HindsightSessionState {
 			timestamp: retainedAt,
 			async: true,
 		});
+		if (nextCachedTranscript !== undefined) {
+			this.#cachedTranscript = nextCachedTranscript;
+			this.#lastRetainedMessageIndex = messages.length;
+		}
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
