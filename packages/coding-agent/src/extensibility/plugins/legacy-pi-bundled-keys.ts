@@ -989,6 +989,7 @@ export const BUNDLED_PI_REGISTRY_KEYS: ReadonlySet<string> = new Set([
 	"@oh-my-pi/pi-coding-agent/web/search/providers/tinyfish",
 	"@oh-my-pi/pi-coding-agent/web/search/providers/utils",
 	"@oh-my-pi/pi-coding-agent/web/search/providers/xai",
+	"@oh-my-pi/pi-coding-agent/web/search/providers/ydc",
 	"@oh-my-pi/pi-coding-agent/web/search/providers/zai",
 	"@oh-my-pi/pi-natives",
 	"@oh-my-pi/pi-tui",

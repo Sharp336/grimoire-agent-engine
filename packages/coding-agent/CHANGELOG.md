@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added You.com (`ydc`) as a supported web search provider with `YDC_API_KEY` credential discovery, `/login` paste-key support, and provider fallback support
+
 ### Fixed
 
 - Improved reliability of edits when file snapshots share identical 16-bit hash tags

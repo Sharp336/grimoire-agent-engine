@@ -991,6 +991,7 @@ import * as bundledPiCodingAgentWebSearchProvidersTavily from "@oh-my-pi/pi-codi
 import * as bundledPiCodingAgentWebSearchProvidersTinyfish from "@oh-my-pi/pi-coding-agent/web/search/providers/tinyfish";
 import * as bundledPiCodingAgentWebSearchProvidersUtils from "@oh-my-pi/pi-coding-agent/web/search/providers/utils";
 import * as bundledPiCodingAgentWebSearchProvidersXai from "@oh-my-pi/pi-coding-agent/web/search/providers/xai";
+import * as bundledPiCodingAgentWebSearchProvidersYdc from "@oh-my-pi/pi-coding-agent/web/search/providers/ydc";
 import * as bundledPiCodingAgentWebSearchProvidersZai from "@oh-my-pi/pi-coding-agent/web/search/providers/zai";
 import * as bundledPiCodingAgentWebSearchRender from "@oh-my-pi/pi-coding-agent/web/search/render";
 import * as bundledPiCodingAgentWebSearchTypes from "@oh-my-pi/pi-coding-agent/web/search/types";
@@ -3395,6 +3396,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentWebSearchProvidersUtils as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/web/search/providers/xai":
 		bundledPiCodingAgentWebSearchProvidersXai as unknown as Readonly<Record<string, unknown>>,
+	"@oh-my-pi/pi-coding-agent/web/search/providers/ydc":
+		bundledPiCodingAgentWebSearchProvidersYdc as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/web/search/providers/zai":
 		bundledPiCodingAgentWebSearchProvidersZai as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-natives": bundledPiNatives as unknown as Readonly<Record<string, unknown>>,
