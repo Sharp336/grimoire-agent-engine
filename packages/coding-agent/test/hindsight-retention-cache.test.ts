@@ -203,4 +203,56 @@ describe("Hindsight incremental full-session retention cache", () => {
 				"[role: user]\nnext message\n[user:end]",
 		);
 	});
+
+	it("rebuilds when an earlier retained message is rewritten but the boundary message is unchanged", async () => {
+		const client = new FakeHindsightApi();
+		const config = makeConfig({ retainMode: "full-session" });
+		const session = {
+			sessionId: "test-session",
+		} as object as AgentSession;
+		const banksSet = new Set<string>();
+
+		const state = new HindsightSessionState({
+			sessionId: "test-session",
+			client,
+			bankId: "test-bank",
+			config,
+			session,
+			banksSet,
+		});
+
+		const messages1: HindsightMessage[] = [
+			{ role: "user", content: "A" },
+			{ role: "assistant", content: "B" },
+			{ role: "user", content: "C" },
+		];
+
+		await state.retainSession(messages1);
+		expect(client.calls.length).toBe(1);
+		expect(client.calls[0].transcript).toBe(
+			"[role: user]\nA\n[user:end]\n\n[role: assistant]\nB\n[assistant:end]\n\n[role: user]\nC\n[user:end]",
+		);
+
+		client.calls = [];
+
+		// Rewrite only message A, keep B and C identical, append new message D
+		const messages2: HindsightMessage[] = [
+			{ role: "user", content: "A_rewritten" },
+			{ role: "assistant", content: "B" },
+			{ role: "user", content: "C" },
+			{ role: "assistant", content: "D" },
+		];
+
+		await state.retainSession(messages2);
+		expect(client.calls.length).toBe(1);
+
+		const finalTranscript = client.calls[0].transcript;
+		expect(finalTranscript).not.toContain("A\n");
+		expect(finalTranscript).toContain("A_rewritten");
+		expect(finalTranscript).toContain("D");
+		expect(finalTranscript).toBe(
+			"[role: user]\nA_rewritten\n[user:end]\n\n[role: assistant]\nB\n[assistant:end]\n\n" +
+				"[role: user]\nC\n[user:end]\n\n[role: assistant]\nD\n[assistant:end]",
+		);
+	});
 });
