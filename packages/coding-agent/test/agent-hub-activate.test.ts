@@ -637,7 +637,7 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 			expect(newHub).not.toBe(oldHub);
 
 			// Initially, oldHub is still the mounted one
-			expect(shown).toBe(oldHub);
+			expect(ctx.editorContainer.children).toEqual([oldHub]);
 			expect(disposedHubs.has(oldHub!)).toBe(false);
 			expect(disposedHubs.has(newHub)).toBe(false);
 
@@ -650,7 +650,7 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 			}
 
 			// The already-mounted hub stays mounted and undisposed, editor state coherent
-			expect(shown).toBe(oldHub);
+			expect(ctx.editorContainer.children).toEqual([oldHub]);
 			expect(disposedHubs.has(oldHub!)).toBe(false);
 			// The new hub gets disposed
 			expect(disposedHubs.has(newHub)).toBe(true);
@@ -742,7 +742,7 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 			}
 
 			// Now newHub should be mounted and oldHub disposed
-			expect(shown).toBe(newHub);
+			expect(ctx.editorContainer.children).toEqual([newHub]);
 			expect(disposedHubs.has(oldHub!)).toBe(true);
 			expect(disposedHubs.has(newHub)).toBe(false);
 
