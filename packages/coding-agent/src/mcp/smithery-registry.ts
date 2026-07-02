@@ -314,6 +314,7 @@ async function fetchServerDetails(path: string, options?: { apiKey?: string }): 
 	}
 	const response = await fetch(`${SMITHERY_REGISTRY_BASE_URL}/servers/${path}`, {
 		headers,
+		signal: AbortSignal.timeout(10_000),
 	});
 	if (!response.ok) return null;
 	return (await response.json()) as SmitheryServerDetails;
@@ -411,7 +412,7 @@ export async function searchSmitheryRegistry(
 		url.searchParams.set("q", query);
 		url.searchParams.set("pageSize", String(pageSize));
 		if (page > 1) url.searchParams.set("page", String(page));
-		const response = await fetch(url.toString(), { headers });
+		const response = await fetch(url.toString(), { headers, signal: AbortSignal.timeout(10_000) });
 		if (!response.ok) {
 			throw new SmitheryRegistryError(`Smithery search failed with status ${response.status}`, response.status);
 		}
