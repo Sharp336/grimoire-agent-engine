@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound SSH control-master/probe invocations with a 30s timeout via `ptree.exec` to prevent hangs on unreachable or wedged hosts ([#4232](https://github.com/can1357/oh-my-pi/issues/4232))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
