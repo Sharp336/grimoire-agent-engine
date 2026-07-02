@@ -948,7 +948,7 @@ async function buildCodexRequestContext(
 		throw new AIError.MissingApiKeyError(model.provider);
 	}
 
-	const accountId = model.provider === "openai-codex" || model.isOAuth === true ? getAccountId(apiKey) : undefined;
+	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const promptCacheKey = normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
@@ -977,10 +977,7 @@ async function buildCodexRequestContext(
 
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = shouldUseCodexResponsesLite(transformedBody, options?.responsesLite);
-	const sessionKey =
-		accountId !== undefined
-			? getCodexWebSocketSessionKey(transportSessionId, model, accountId, baseUrl, responsesLite)
-			: undefined;
+	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, apiKey, accountId, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (sessionKey && publicSessionKey) {
 		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
@@ -1074,7 +1071,11 @@ async function openInitialCodexEventStream(
 	transport: CodexTransport;
 }> {
 	const { transformedBody, websocketState } = requestContext;
-	if (websocketState && shouldUseCodexWebSocket(model, websocketState, options?.preferWebsockets)) {
+	if (
+		requestContext.accountId &&
+		websocketState &&
+		shouldUseCodexWebSocket(model, websocketState, options?.preferWebsockets)
+	) {
 		const websocketRetryBudget = CODEX_WEBSOCKET_RETRY_BUDGET;
 		let websocketRetries = 0;
 		while (true) {
@@ -2188,14 +2189,15 @@ export async function prewarmOpenAICodexResponses(
 	if (model.provider !== "openai-codex" && model.isOAuth !== true) return;
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 	if (!apiKey) return;
-	const accountId = getAccountId(apiKey);
+	const accountId = getCodexAccountId(apiKey);
+	if (!accountId) return;
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const transportSessionId = normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = options?.responsesLite === true;
-	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, baseUrl, responsesLite);
+	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, apiKey, accountId, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (publicSessionKey && sessionKey) {
 		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
@@ -2228,7 +2230,8 @@ export async function prewarmOpenAICodexResponses(
 function getCodexWebSocketSessionKey(
 	normalizedSessionId: string | undefined,
 	model: Model<"openai-codex-responses">,
-	accountId: string,
+	accessToken: string,
+	accountId: string | undefined,
 	baseUrl: string,
 	responsesLite: boolean,
 ): string | undefined {
@@ -2236,7 +2239,8 @@ function getCodexWebSocketSessionKey(
 	// Responses Lite is connection-scoped on the WebSocket upgrade, so lite and
 	// non-lite turns must never share a pooled socket or append state.
 	const liteSuffix = responsesLite ? ":lite" : "";
-	return `${accountId}:${baseUrl}:${model.id}:${normalizedSessionId}${liteSuffix}`;
+	const authScope = accountId ?? `api-key:${model.provider}:${Bun.hash(accessToken).toString(36)}`;
+	return `${authScope}:${baseUrl}:${model.id}:${normalizedSessionId}${liteSuffix}`;
 }
 
 function getCodexWebSocketSessionState(
@@ -3308,17 +3312,6 @@ function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
 	if (normalized.endsWith("/codex/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
 	return `${normalized}/codex/responses`;
-}
-
-function getAccountId(accessToken: string): string {
-	const accountId = getCodexAccountId(accessToken);
-	if (!accountId) {
-		throw new AIError.OAuthError("Failed to extract accountId from token", {
-			kind: "validation",
-			provider: "openai",
-		});
-	}
-	return accountId;
 }
 
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
