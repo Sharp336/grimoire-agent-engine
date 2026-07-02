@@ -6,6 +6,11 @@
 
 - Removed automated injection of reasoning suppression prompts in OpenAI responses
 
+### Fixed
+
+- Bound GitLab Duo post-start setup fetches with abort signal and timeout to prevent stream hangs ([#4227](https://github.com/can1357/oh-my-pi/issues/4227))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
