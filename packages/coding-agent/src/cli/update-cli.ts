@@ -239,7 +239,17 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
  * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
  */
 async function getLatestRelease(): Promise<ReleaseInfo> {
-	const response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`);
+	let response: Response;
+	try {
+		response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`, {
+			signal: AbortSignal.timeout(30_000),
+		});
+	} catch (err) {
+		if (err instanceof DOMException && err.name === "TimeoutError") {
+			throw new Error("Failed to fetch release info: The operation timed out");
+		}
+		throw err;
+	}
 	if (!response.ok) {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
@@ -832,7 +842,18 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 
-	const response = await fetch(url, { redirect: "follow" });
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			redirect: "follow",
+			signal: AbortSignal.timeout(15 * 60 * 1000),
+		});
+	} catch (err) {
+		if (err instanceof DOMException && err.name === "TimeoutError") {
+			throw new Error("Download failed: The operation timed out");
+		}
+		throw err;
+	}
 	if (!response.ok || !response.body) {
 		throw new Error(`Download failed: ${response.statusText}`);
 	}

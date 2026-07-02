@@ -208,6 +208,8 @@ interface RequestOptions {
 	query?: Record<string, unknown>;
 	/** Return null instead of throwing on a 404 response. */
 	allow404?: boolean;
+	/** Optional caller abort signal; merged with a 30s operation timeout. */
+	signal?: AbortSignal;
 }
 
 export class HindsightApi {
@@ -493,6 +495,9 @@ export class HindsightApi {
 		if (opts?.body !== undefined) {
 			init.body = JSON.stringify(pruneUndefined(opts.body));
 		}
+
+		const timeoutSignal = AbortSignal.timeout(30_000);
+		init.signal = opts?.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
 
 		let response: Response;
 		try {

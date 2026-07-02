@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Add network timeouts to update check, Hindsight recall, and Smithery registry fetches to prevent indefinite hangs ([#4229](https://github.com/can1357/oh-my-pi/issues/4229))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
