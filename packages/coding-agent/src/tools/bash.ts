@@ -751,7 +751,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	): Promise<AgentToolResult<BashToolDetails>> {
 		let command = rawCommand;
 		const env = normalizeBashEnv(rawEnv);
-		const remoteHost = typeof host === "string" && host.trim().length > 0 ? host.trim() : undefined;
+		const remoteHost = typeof host === "string" && host.trim() ? host.trim() : undefined;
+		if (typeof host === "string" && host.trim().length === 0) {
+			throw new ToolError("host must not be empty; set a configured SSH host name or omit it.");
+		}
 
 		// Apply conservative bash fixups (strip trailing `| head|tail` and redundant
 		// `2>&1`). The helper is single-line only and refuses anything that could

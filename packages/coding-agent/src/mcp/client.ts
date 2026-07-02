@@ -61,13 +61,13 @@ async function defaultRequestHandler(method: string, _params: unknown, config?: 
 		case "roots/list": {
 			const stdioConfig =
 				(config?.type ?? "stdio") === "stdio" ? (config as MCPStdioServerConfig | undefined) : undefined;
-			const isRemoteStdio = typeof stdioConfig?.host === "string";
+			const isRemoteStdio = typeof stdioConfig?.host === "string" && stdioConfig.host.trim().length > 0;
 			const cwd = isRemoteStdio ? stdioConfig.cwd : getProjectDir();
+			if (!cwd || (isRemoteStdio && !path.posix.isAbsolute(cwd))) return { roots: [] };
+			const posixPath = isRemoteStdio ? path.posix : path;
+			const uri = isRemoteStdio ? `file://${cwd}` : url.pathToFileURL(cwd).href;
 			return {
-				roots:
-					cwd && (!isRemoteStdio || path.isAbsolute(cwd))
-						? [{ uri: url.pathToFileURL(cwd).href, name: path.basename(cwd) }]
-						: [],
+				roots: [{ uri, name: posixPath.basename(cwd) }],
 			};
 		}
 		default:

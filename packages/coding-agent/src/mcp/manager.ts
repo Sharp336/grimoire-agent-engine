@@ -648,13 +648,18 @@ export class MCPManager {
 	}
 
 	#getRoots(config?: MCPServerConfig): { roots: Array<{ uri: string; name: string }> } {
-		const rootPath = isRemoteStdioConfig(config) ? config.cwd : this.cwd;
-		if (!rootPath || (isRemoteStdioConfig(config) && !path.isAbsolute(rootPath))) return { roots: [] };
+		const isRemote = isRemoteStdioConfig(config);
+		const rootPath = isRemote ? config.cwd : this.cwd;
+		if (!rootPath || (isRemote && !path.posix.isAbsolute(rootPath))) return { roots: [] };
+		// Remote stdio servers run on POSIX SSH hosts, so always use POSIX
+		// path semantics for their roots — even when OMP itself runs on Windows.
+		const posixPath = isRemote ? path.posix : path;
+		const uri = isRemote ? `file://${rootPath}` : url.pathToFileURL(rootPath).href;
 		return {
 			roots: [
 				{
-					uri: url.pathToFileURL(rootPath).href,
-					name: path.basename(rootPath),
+					uri,
+					name: posixPath.basename(rootPath),
 				},
 			],
 		};

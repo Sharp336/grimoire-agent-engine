@@ -451,12 +451,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					: params.language === "jl"
 						? "julia"
 						: "js";
-		const requestedHost = typeof params.host === "string" ? params.host : undefined;
+		const requestedHost = typeof params.host === "string" ? params.host.trim() : undefined;
 		const requestedCwd = typeof params.cwd === "string" ? params.cwd : undefined;
-		if (requestedCwd !== undefined && requestedHost === undefined) {
+		if (requestedHost === "") {
+			throw new ToolError("host must not be empty; set a configured SSH host name or omit it.");
+		}
+		if (requestedCwd !== undefined && !requestedHost) {
 			throw new ToolError("cwd is only supported when host is set for remote Python eval.");
 		}
-		if (requestedHost !== undefined && cellLanguage !== "python") {
+		if (requestedHost && cellLanguage !== "python") {
 			throw new ToolError('host is only supported with language: "py" for remote Python eval.');
 		}
 		if (this.#proxyExecutor) {
