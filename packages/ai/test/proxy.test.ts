@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	connectProxiedSocket,
 	getProxyForProvider,
 	isLocalOrMetadataHost,
 	shouldBypassProxy,
@@ -185,5 +186,134 @@ describe("wrapFetchForProxy", () => {
 		await wrapFetchForProxy(fetch, "wrap-badurl")("not a url");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].proxy).toBeUndefined();
+	});
+});
+
+describe("connectProxiedSocket", () => {
+	it("caller AbortSignal rejects the connect and destroys the in-flight socket", async () => {
+		let serverSocketClosed = false;
+		const { promise: socketOpened, resolve: resolveOpened } = Promise.withResolvers<void>();
+		const { promise: socketClosed, resolve: resolveClosed } = Promise.withResolvers<void>();
+
+		const server = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				open() {
+					resolveOpened();
+				},
+				data() {
+					// accepts but never completes CONNECT
+				},
+				close() {
+					serverSocketClosed = true;
+					resolveClosed();
+				},
+				error() {},
+			},
+		});
+
+		try {
+			const port = server.port;
+			const controller = new AbortController();
+
+			const connectPromise = connectProxiedSocket(
+				`http://127.0.0.1:${port}`,
+				"https://example.com",
+				controller.signal,
+			);
+
+			await socketOpened;
+
+			controller.abort();
+
+			try {
+				await connectPromise;
+				throw new Error("expected to reject");
+			} catch (err) {
+				expect((err as Error).name).toBe("AbortError");
+			}
+
+			await socketClosed;
+			expect(serverSocketClosed).toBe(true);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("pre-aborted AbortSignal rejects the connect immediately", async () => {
+		const controller = new AbortController();
+		controller.abort();
+
+		let connected = false;
+		const server = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				open() {
+					connected = true;
+				},
+				data() {},
+				close() {},
+				error() {},
+			},
+		});
+
+		try {
+			const connectPromise = connectProxiedSocket(
+				`http://127.0.0.1:${server.port}`,
+				"https://example.com",
+				controller.signal,
+			);
+
+			try {
+				await connectPromise;
+				throw new Error("expected to reject");
+			} catch (err) {
+				expect((err as Error).name).toBe("AbortError");
+			}
+			expect(connected).toBe(false);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("timeoutMs elapsing rejects and destroys", async () => {
+		let serverSocketClosed = false;
+		const { promise: socketOpened, resolve: resolveOpened } = Promise.withResolvers<void>();
+		const { promise: socketClosed, resolve: resolveClosed } = Promise.withResolvers<void>();
+
+		const server = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				open() {
+					resolveOpened();
+				},
+				data() {
+					// accepts but never completes CONNECT
+				},
+				close() {
+					serverSocketClosed = true;
+					resolveClosed();
+				},
+				error() {},
+			},
+		});
+
+		try {
+			const port = server.port;
+
+			const connectPromise = connectProxiedSocket(`http://127.0.0.1:${port}`, "https://example.com", undefined, 50);
+
+			await socketOpened;
+
+			await expect(connectPromise).rejects.toThrow(/timed out/);
+
+			await socketClosed;
+			expect(serverSocketClosed).toBe(true);
+		} finally {
+			server.stop(true);
+		}
 	});
 });

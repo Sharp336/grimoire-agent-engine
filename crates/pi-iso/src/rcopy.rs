@@ -265,10 +265,11 @@ fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
 			}
 		})?;
 
-	let mut child_stderr = child
-		.stderr
-		.take()
-		.ok_or_else(|| IsoError::other("git apply: child stderr was not piped".to_string()))?;
+	let Some(mut child_stderr) = child.stderr.take() else {
+		drop(child.stdin.take());
+		let _ = child.wait();
+		return Err(IsoError::other("git apply: child stderr was not piped".to_string()));
+	};
 
 	let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
 		let mut buf = Vec::new();
@@ -276,25 +277,36 @@ fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
 		Ok(buf)
 	});
 
-	{
-		let stdin = child
-			.stdin
-			.as_mut()
-			.ok_or_else(|| IsoError::other("git apply: child stdin was not piped".to_string()))?;
-		stdin
-			.write_all(patch)
-			.map_err(|err| IsoError::other(format!("write patch to git apply: {err}")))?;
-	}
-	drop(child.stdin.take());
+	let write_result = match child.stdin.take() {
+		Some(mut stdin) => stdin.write_all(patch),
+		None => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child stdin was not piped")),
+	};
 
-	let stderr_bytes = stderr_reader
+	let stderr_result = stderr_reader
 		.join()
-		.map_err(|_| IsoError::other("git apply: stderr reader thread panicked".to_string()))?
-		.map_err(|err| IsoError::other(format!("read git apply stderr: {err}")))?;
+		.map_err(|_| IsoError::other("git apply: stderr reader thread panicked".to_string()))
+		.and_then(|result| {
+			result.map_err(|err| IsoError::other(format!("read git apply stderr: {err}")))
+		});
 
-	let status = child
+	let status_result = child
 		.wait()
-		.map_err(|err| IsoError::other(format!("wait git apply: {err}")))?;
+		.map_err(|err| IsoError::other(format!("wait git apply: {err}")));
+
+	let stderr_bytes = stderr_result?;
+	let status = status_result?;
+
+	if let Err(err) = write_result {
+		let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+		if stderr.is_empty() {
+			return Err(IsoError::other(format!("write patch to git apply: {err}")));
+		}
+		return Err(IsoError::other(format!(
+			"write patch to git apply: {err}; git apply (exit {}): {stderr}",
+			status.code().unwrap_or(-1)
+		)));
+	}
+
 	if status.success() {
 		return Ok(());
 	}

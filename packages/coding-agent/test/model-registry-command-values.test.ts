@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -131,5 +131,76 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		// The command should have only run once.
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("resolveCommandConfig retries failed executions after TTL", async () => {
+		let mockTime = 1000000;
+		const dateSpy = spyOn(Date, "now").mockImplementation(() => mockTime);
+
+		try {
+			const counterFile = path.join(tempDir, "counter_ttl.txt");
+			fs.writeFileSync(counterFile, "0");
+
+			const stateFile = path.join(tempDir, "state_ttl.txt");
+			if (fs.existsSync(stateFile)) {
+				fs.unlinkSync(stateFile);
+			}
+
+			// A node script that fails on the first run, and succeeds on the second run, writing the counter
+			const failThenSucceedCommand = `node -e "const fs=require('fs'); const cFile='${counterFile.replace(/\\/g, "/")}'; const sFile='${stateFile.replace(/\\/g, "/")}'; fs.writeFileSync(cFile, String(Number(fs.readFileSync(cFile, 'utf8')) + 1)); let s=''; try { s=fs.readFileSync(sFile, 'utf8').trim(); } catch (e) {} if (s==='success') { process.stdout.write('resolved-success-value'); process.exit(0); } else { fs.writeFileSync(sFile, 'success'); process.exit(1); }"`;
+
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"custom-proxy": {
+							baseUrl: "https://custom-proxy.example.com/v1",
+							api: "openai-completions",
+							apiKey: `!${failThenSucceedCommand}`,
+						},
+					},
+				}),
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsPath);
+
+			const dummyModel: Model<Api> = buildModel({
+				id: "foo",
+				name: "foo",
+				api: "openai-completions",
+				provider: "custom-proxy",
+				baseUrl: "a",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			});
+
+			// First resolution: command fails, returns undefined.
+			const key1 = await registry.getApiKey(dummyModel);
+			expect(key1).toBeUndefined();
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+			// Second resolution (within TTL): command should not re-execute, returns undefined.
+			const key2 = await registry.getApiKey(dummyModel);
+			expect(key2).toBeUndefined();
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+			// Advance time past COMMAND_FAILURE_RETRY_MS (30_000 ms)
+			mockTime += 30001;
+
+			// Third resolution (past TTL): command re-runs, succeeds, returns cached value.
+			const key3 = await registry.getApiKey(dummyModel);
+			expect(key3).toBe("resolved-success-value");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("2");
+
+			// Fourth resolution (cached success): returns immediately without running the command.
+			const key4 = await registry.getApiKey(dummyModel);
+			expect(key4).toBe("resolved-success-value");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("2");
+		} finally {
+			dateSpy.mockRestore();
+		}
 	});
 });

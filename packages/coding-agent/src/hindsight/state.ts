@@ -22,6 +22,7 @@ import { extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
+const RETENTION_TRANSCRIPT_CACHE_MAX_CHARS = 2_000_000;
 
 interface PendingRetainItem {
 	content: string;
@@ -355,9 +356,18 @@ export class HindsightSessionState {
 			async: true,
 		});
 		if (nextCachedTranscript !== undefined) {
-			this.#cachedTranscript = nextCachedTranscript;
-			this.#lastRetainedMessageIndex = messages.length;
-			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
+			if (nextCachedTranscript.length > RETENTION_TRANSCRIPT_CACHE_MAX_CHARS) {
+				// Send the full transcript above, but bound session memory: above
+				// this threshold, re-formatting on the next retain is cheaper than
+				// keeping an unbounded formatted transcript cache alive.
+				this.#lastRetainedMessageIndex = 0;
+				this.#cachedTranscript = "";
+				this.#lastRetainedPrefixKey = "";
+			} else {
+				this.#cachedTranscript = nextCachedTranscript;
+				this.#lastRetainedMessageIndex = messages.length;
+				this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
+			}
 		}
 	}
 

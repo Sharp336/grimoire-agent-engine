@@ -201,6 +201,7 @@ export class AgentHubOverlayComponent extends Container {
 	#remote: AgentHubRemote | undefined;
 	/** Resolves after persisted historical subagents have been registered and rows refreshed. */
 	readonly persistedSubagentsReady: Promise<void>;
+	#persistedSubagentsSettled: boolean;
 
 	// Table state
 	#rows: AgentRef[] = [];
@@ -256,6 +257,8 @@ export class AgentHubOverlayComponent extends Container {
 		this.#ageTimer = setInterval(() => this.#requestRender(), AGE_TICK_MS);
 		this.#ageTimer.unref?.();
 
+		const hasPersistedSubagentScan = !this.#remote && deps.sessionFile?.endsWith(".jsonl") === true;
+		this.#persistedSubagentsSettled = !hasPersistedSubagentScan;
 		this.persistedSubagentsReady = this.#remote
 			? Promise.resolve()
 			: registerPersistedSubagents(this.#registry, deps.sessionFile)
@@ -263,6 +266,7 @@ export class AgentHubOverlayComponent extends Container {
 						logger.warn("Failed to register persisted subagents", { error });
 					})
 					.then(() => {
+						this.#persistedSubagentsSettled = true;
 						this.#refreshRows();
 					})
 					.finally(() => this.#requestRender());
@@ -271,11 +275,12 @@ export class AgentHubOverlayComponent extends Container {
 
 	/**
 	 * Whether the table view has no agents to show (every registered agent except
-	 * Main, after the persisted-subagent scan in the constructor). The double-←
-	 * gesture reads this to stay inert when there is nothing to open.
+	 * Main). While the constructor's persisted-subagent scan is still pending, an
+	 * empty live registry is treated as not-empty so the double-← gesture does not
+	 * dispose the hub before historical rows can appear.
 	 */
 	get isEmpty(): boolean {
-		return this.#rows.length === 0;
+		return this.#persistedSubagentsSettled && this.#rows.length === 0;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */

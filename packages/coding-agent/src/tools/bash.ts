@@ -939,6 +939,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				}
 
 				handle = createRaced.handle;
+				const terminalHandle = handle;
 
 				// Emit partial update so the editor can embed the live terminal card.
 				onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
@@ -956,6 +957,45 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const abortRacer = abortedP.then(() => ({ kind: "aborted" as const }));
 				const abortPollRacer = abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined);
 				let lastPolledOutput: ClientBridgeTerminalOutput = { output: "", truncated: false };
+				let lastEmittedOutput: string | undefined;
+
+				const buildTimedOutBridgeResult = async (): Promise<AgentToolResult<BashToolDetails>> => {
+					// Kill before reading final output so a slow `terminal/output`
+					// RPC cannot let a timed-out command keep running past the
+					// enforced timeout. The handle stays valid post-kill so the
+					// buffered output is still readable.
+					await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
+					let current = lastPolledOutput;
+					try {
+						current = await Promise.race([
+							terminalHandle.currentOutput(),
+							Bun.sleep(outputSnapshotGraceMs).then(() => lastPolledOutput),
+						]);
+					} catch (error) {
+						logger.warn("ACP terminal final output read failed", {
+							terminalId: terminalHandle.terminalId,
+							error,
+						});
+					}
+					const outputLineCount = current.output.length > 0 ? current.output.split("\n").length : 0;
+					const timedOutResult: BashInteractiveResult = {
+						output: current.output,
+						exitCode: undefined,
+						cancelled: false,
+						timedOut: true,
+						truncated: current.truncated,
+						totalLines: outputLineCount,
+						totalBytes: current.output.length,
+						outputLines: outputLineCount,
+						outputBytes: current.output.length,
+					};
+					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+						requestedTimeoutSec,
+						notices: pendingNotices,
+						terminalId: terminalHandle.terminalId,
+						wallTimeMs: performance.now() - bridgeWallTimeStart,
+					});
+				};
 
 				// Poll until the process exits, times out, or the caller aborts.
 				for (;;) {
@@ -975,40 +1015,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					}
 
 					if (raced.kind === "timeout") {
-						// Kill before reading final output so a slow `terminal/output`
-						// RPC cannot let a timed-out command keep running past the
-						// enforced timeout. The handle stays valid post-kill so the
-						// buffered output is still readable.
-						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
-						let current = lastPolledOutput;
-						try {
-							current = await Promise.race([
-								handle.currentOutput(),
-								Bun.sleep(outputSnapshotGraceMs).then(() => lastPolledOutput),
-							]);
-						} catch (error) {
-							logger.warn("ACP terminal final output read failed", {
-								terminalId: handle.terminalId,
-								error,
-							});
-						}
-						const timedOutResult: BashInteractiveResult = {
-							output: current.output,
-							exitCode: undefined,
-							cancelled: false,
-							timedOut: true,
-							truncated: current.truncated,
-							totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-							totalBytes: current.output.length,
-							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-							outputBytes: current.output.length,
-						};
-						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
-							requestedTimeoutSec,
-							notices: pendingNotices,
-							terminalId: handle.terminalId,
-							wallTimeMs: performance.now() - bridgeWallTimeStart,
-						});
+						return buildTimedOutBridgeResult();
 					}
 
 					if (raced.kind === "exit") {
@@ -1017,19 +1024,29 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					}
 
 					// Poll tick: push current output so agent-loop transcript stays consistent.
-					// Race the read against abort so a stuck `terminal/output` RPC does not
-					// delay cancellation.
-					const pollOutput = await Promise.race([handle.currentOutput(), abortPollRacer]);
+					// Race the read against abort and timeout so a stuck `terminal/output`
+					// RPC cannot delay cancellation or the enforced command timeout.
+					const pollOutput: ClientBridgeTerminalOutput | { kind: "timeout" } | undefined = await Promise.race([
+						terminalHandle.currentOutput(),
+						abortPollRacer,
+						timeoutPromise,
+					]);
 					if (pollOutput === undefined) {
 						// Abort fired during the poll-tick read; let the next loop iteration
 						// observe `signal?.aborted` and exit via the abort branch.
 						continue;
 					}
+					if ("kind" in pollOutput) {
+						return buildTimedOutBridgeResult();
+					}
 					lastPolledOutput = pollOutput;
-					onUpdate?.({
-						content: [{ type: "text", text: pollOutput.output }],
-						details: { terminalId: handle.terminalId },
-					});
+					if (pollOutput.output !== lastEmittedOutput) {
+						lastEmittedOutput = pollOutput.output;
+						onUpdate?.({
+							content: [{ type: "text", text: pollOutput.output }],
+							details: { terminalId: terminalHandle.terminalId },
+						});
+					}
 				}
 
 				// Fetch final output; the terminal is released in the outer finally.

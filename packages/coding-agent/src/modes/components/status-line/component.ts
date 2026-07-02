@@ -828,6 +828,9 @@ export class StatusLineComponent implements Component {
 				: undefined;
 		this.#cachedUsage = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
 		this.#usageFetchedAt = Date.now();
+		if (!this.#disposed && this.#onBranchChange) {
+			this.#onBranchChange();
+		}
 	}
 
 	#observeLateUsageRefresh(session: AgentSession, reportsPromise: Promise<unknown>): void {

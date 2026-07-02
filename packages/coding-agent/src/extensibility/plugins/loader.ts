@@ -42,11 +42,83 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 	}
 }
 
+interface EnabledPluginPolicyInputs {
+	projectOverridePaths: string[];
+	userRoot: string;
+	projectRoot: string | null;
+	policyPaths: string[];
+}
+
+interface ExistingPolicyFileStat {
+	path: string;
+	mtimeMs: number;
+	size: number;
+}
+
+interface MissingPolicyFileStat {
+	path: string;
+	stat: null;
+}
+
+type PolicyFileStat = ExistingPolicyFileStat | MissingPolicyFileStat;
+
+interface EnabledPluginsCachePayload {
+	plugins: ScopedInstalledPlugin[];
+	policyStats: PolicyFileStat[];
+}
+
+async function resolveEnabledPluginPolicyInputs(
+	cwd: string,
+	home: string | undefined,
+): Promise<EnabledPluginPolicyInputs> {
+	const projectOverridePaths = getConfigDirPaths("plugin-overrides.json", { user: false, cwd });
+	const userRoot = getPluginsDir(home);
+	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
+	const projectRoot = projectRegistryPath ? path.dirname(projectRegistryPath) : null;
+	const roots = projectRoot && projectRoot !== userRoot ? [userRoot, projectRoot] : [userRoot];
+	const policyPaths = [...projectOverridePaths];
+	for (const root of roots) {
+		policyPaths.push(path.join(root, "package.json"), path.join(root, "omp-plugins.lock.json"));
+	}
+	return { projectOverridePaths, userRoot, projectRoot, policyPaths };
+}
+
+async function statPolicyFile(policyPath: string): Promise<PolicyFileStat> {
+	try {
+		const stat = await fs.promises.stat(policyPath);
+		return { path: policyPath, mtimeMs: stat.mtimeMs, size: stat.size };
+	} catch (err) {
+		if (isEnoent(err)) return { path: policyPath, stat: null };
+		throw err;
+	}
+}
+
+async function statPolicyFiles(policyPaths: string[]): Promise<PolicyFileStat[]> {
+	return Promise.all(policyPaths.map(statPolicyFile));
+}
+
+function policyStatsEqual(left: PolicyFileStat[], right: PolicyFileStat[]): boolean {
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index++) {
+		const leftStat = left[index];
+		const rightStat = right[index];
+		if (!leftStat || !rightStat || leftStat.path !== rightStat.path) return false;
+		const leftMissing = "stat" in leftStat;
+		const rightMissing = "stat" in rightStat;
+		if (leftMissing || rightMissing) {
+			if (leftMissing !== rightMissing) return false;
+			continue;
+		}
+		if (leftStat.mtimeMs !== rightStat.mtimeMs || leftStat.size !== rightStat.size) return false;
+	}
+	return true;
+}
+
 /**
  * Load project-local plugin overrides (checks .omp and .pi directories).
  */
-async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
-	for (const overridesPath of getConfigDirPaths("plugin-overrides.json", { user: false, cwd })) {
+async function loadProjectOverridesFromPaths(projectOverridePaths: string[]): Promise<ProjectPluginOverrides> {
+	for (const overridesPath of projectOverridePaths) {
 		try {
 			return await Bun.file(overridesPath).json();
 		} catch (err) {
@@ -55,6 +127,10 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 		}
 	}
 	return {};
+}
+
+async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
+	return loadProjectOverridesFromPaths(getConfigDirPaths("plugin-overrides.json", { user: false, cwd }));
 }
 /**
  * Per-root enumeration of plugins from `<root>/node_modules`,
@@ -169,19 +245,29 @@ async function collectPluginsAtRoot(
 // Inputs are (cwd, home, on-disk plugin state); every plugin-state mutation
 // routes through clearPluginRootsAndCaches -> clearClaudePluginRootsCache, which
 // fires the registered invalidator below, mirroring pluginRootsCache's lifecycle.
-const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
+const enabledPluginsCache = new Map<string, Promise<EnabledPluginsCachePayload>>();
 registerPluginCacheInvalidator(() => enabledPluginsCache.clear());
 
 export function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Promise<ScopedInstalledPlugin[]> {
 	const { home } = opts;
 	const cacheKey = `${home ?? ""}\u0000${cwd}`;
 	const cached = enabledPluginsCache.get(cacheKey);
-	if (cached) return cached;
+	if (cached) {
+		return getValidatedEnabledPluginsCachePayload(cacheKey, cwd, home, cached).then(payload => payload.plugins);
+	}
+	return refreshEnabledPluginsCache(cacheKey, cwd, home).then(payload => payload.plugins);
+}
+
+function refreshEnabledPluginsCache(
+	cacheKey: string,
+	cwd: string,
+	home: string | undefined,
+): Promise<EnabledPluginsCachePayload> {
 	// Cache the promise (not the resolved value) so concurrent callers in one
 	// pass share a single enumeration. On rejection, evict so a transient
 	// failure is retried — but only if this exact promise is still the cached
 	// entry, so a clear()+repopulate that raced ahead of us is not clobbered.
-	const pending = computeEnabledPlugins(cwd, home).catch((err: unknown) => {
+	const pending = computeEnabledPluginsCachePayload(cwd, home).catch((err: unknown) => {
 		if (enabledPluginsCache.get(cacheKey) === pending) {
 			enabledPluginsCache.delete(cacheKey);
 		}
@@ -191,19 +277,39 @@ export function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Pr
 	return pending;
 }
 
-async function computeEnabledPlugins(cwd: string, home: string | undefined): Promise<ScopedInstalledPlugin[]> {
-	const projectOverrides = await loadProjectOverrides(cwd);
+async function getValidatedEnabledPluginsCachePayload(
+	cacheKey: string,
+	cwd: string,
+	home: string | undefined,
+	cached: Promise<EnabledPluginsCachePayload>,
+): Promise<EnabledPluginsCachePayload> {
+	const cachedPayload = await cached;
+	const currentPolicyStats = await statPolicyFiles(cachedPayload.policyStats.map(policyStat => policyStat.path));
+	if (policyStatsEqual(cachedPayload.policyStats, currentPolicyStats)) return cachedPayload;
 
-	const userRoot = getPluginsDir(home);
-	const userPlugins = await collectPluginsAtRoot(userRoot, projectOverrides, "user");
+	const latest = enabledPluginsCache.get(cacheKey);
+	if (latest && latest !== cached) return latest;
+	return refreshEnabledPluginsCache(cacheKey, cwd, home);
+}
+
+async function computeEnabledPluginsCachePayload(
+	cwd: string,
+	home: string | undefined,
+): Promise<EnabledPluginsCachePayload> {
+	const policyInputs = await resolveEnabledPluginPolicyInputs(cwd, home);
+	const policyStats = await statPolicyFiles(policyInputs.policyPaths);
+	const plugins = await computeEnabledPlugins(policyInputs);
+	return { plugins, policyStats };
+}
+
+async function computeEnabledPlugins(policyInputs: EnabledPluginPolicyInputs): Promise<ScopedInstalledPlugin[]> {
+	const projectOverrides = await loadProjectOverridesFromPaths(policyInputs.projectOverridePaths);
+
+	const userPlugins = await collectPluginsAtRoot(policyInputs.userRoot, projectOverrides, "user");
 
 	let projectPlugins: ScopedInstalledPlugin[] = [];
-	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
-	if (projectRegistryPath) {
-		const projectRoot = path.dirname(projectRegistryPath);
-		if (projectRoot !== userRoot) {
-			projectPlugins = await collectPluginsAtRoot(projectRoot, projectOverrides, "project");
-		}
+	if (policyInputs.projectRoot && policyInputs.projectRoot !== policyInputs.userRoot) {
+		projectPlugins = await collectPluginsAtRoot(policyInputs.projectRoot, projectOverrides, "project");
 	}
 
 	if (projectPlugins.length === 0) return userPlugins;

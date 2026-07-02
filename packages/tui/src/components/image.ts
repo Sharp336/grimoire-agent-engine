@@ -180,16 +180,17 @@ export class ImageBudget {
 		this.#lastTotal = total;
 		let reset = false;
 		if (this.#applyingReset) {
+			const purgedIds = new Set<number>();
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
 				this.#purgeIds.push(id);
 				// d=I frees the data too, so the image must re-transmit if it returns.
 				this.#transmitted.delete(id);
-				for (const [k, v] of this.#keyToId) {
-					if (v === id) {
-						this.#keyToId.delete(k);
-						break;
-					}
+				purgedIds.add(id);
+			}
+			if (purgedIds.size > 0) {
+				for (const [key, id] of this.#keyToId) {
+					if (purgedIds.has(id)) this.#keyToId.delete(key);
 				}
 			}
 			this.#onTerminal = this.#planned;

@@ -318,7 +318,18 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					}
 				}
 
-				if (done) break;
+				if (done) {
+					if (pending.length > 0) {
+						throw new AIError.ProviderResponseError(
+							`Devin Connect stream truncated: ${pending.length} buffered bytes`,
+							{
+								provider: model.provider,
+								kind: "envelope",
+							},
+						);
+					}
+					break;
+				}
 			}
 
 			endTextBlock();

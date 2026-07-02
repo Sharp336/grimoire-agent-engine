@@ -24,12 +24,18 @@ interface DirEntry {
 	label: string;
 }
 
+interface DirCacheEntry {
+	time: number;
+	entries: fs.Dirent[];
+	directoryByName: Map<string, boolean>;
+}
+
 const MAX_RESULTS = 15;
 const OVERLAY_WIDTH = 68;
 
 /** TTL for the directory listing cache (ms). */
 const DIR_CACHE_TTL = 500;
-const dirCache = new Map<string, { time: number; entries: fs.Dirent[] }>();
+const dirCache = new Map<string, DirCacheEntry>();
 
 function readDirCached(dir: string): fs.Dirent[] {
 	const now = Date.now();
@@ -37,7 +43,7 @@ function readDirCached(dir: string): fs.Dirent[] {
 	if (cached && now - cached.time < DIR_CACHE_TTL) return cached.entries;
 	try {
 		const entries = fs.readdirSync(dir, { withFileTypes: true });
-		dirCache.set(dir, { time: now, entries });
+		dirCache.set(dir, { time: now, entries, directoryByName: new Map() });
 		return entries;
 	} catch {
 		return [];
@@ -47,14 +53,20 @@ function readDirCached(dir: string): fs.Dirent[] {
 /** Directory test that follows symlinks (Dirent.isDirectory reports the entry, not its target). */
 function direntIsDir(dir: string, entry: fs.Dirent): boolean {
 	if (entry.isDirectory()) return true;
-	if (entry.isSymbolicLink()) {
-		try {
-			return fs.statSync(path.join(dir, entry.name)).isDirectory();
-		} catch {
-			return false;
-		}
+	if (!entry.isSymbolicLink()) return false;
+
+	const directoryByName = dirCache.get(dir)?.directoryByName;
+	const cached = directoryByName?.get(entry.name);
+	if (cached !== undefined) return cached;
+
+	let isDirectory = false;
+	try {
+		isDirectory = fs.statSync(path.join(dir, entry.name)).isDirectory();
+	} catch {
+		isDirectory = false;
 	}
-	return false;
+	directoryByName?.set(entry.name, isDirectory);
+	return isDirectory;
 }
 
 function printableInput(data: string): string {

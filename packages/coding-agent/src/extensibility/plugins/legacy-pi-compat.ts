@@ -931,10 +931,13 @@ function escapeRegExp(value: string): string {
 // native Bun resolutions.
 const EXTENSION_GRAPH_SPECIFIER_REGEX = /(?:from\s+|import\s+|import\s*\(\s*)["']((?:\.\.?\/|#)[^"']+)["']/g;
 
-// Extension entry realpaths that already have a load-time rewrite hook
-// installed. Each `Bun.plugin()` registration is process-global and permanent,
-// so we register at most one hook per entry.
-const hookedExtensionEntries = new Set<string>();
+// Extension entry realpaths that already have load-time rewrite hooks installed.
+// Bun.plugin() registrations are process-global and permanent, so each
+// registered hook keeps an exact covered-path set and reloads only add hooks for
+// newly discovered local modules.
+const hookedExtensionEntries = new Map<string, Set<string>>();
+const extensionGraphModuleSources = new Map<string, Map<string, string>>();
+const extensionGraphHookCounts = new Map<string, number>();
 
 /** Resolve symlinks in a path, falling back to the input if realpath fails. */
 async function realpathOrSelf(p: string): Promise<string> {
@@ -1002,17 +1005,21 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
  * never matches the host, other extensions, `node_modules` deps, or unrelated
  * project source.
  */
-async function ensureExtensionGraphHook(entryRealPath: string): Promise<void> {
-	if (hookedExtensionEntries.has(entryRealPath)) {
-		return;
-	}
-	hookedExtensionEntries.add(entryRealPath);
-
-	const modules = await collectExtensionModules(entryRealPath);
-	const alternation = [...modules.keys()].map(escapeRegExp).join("|");
+function installExtensionGraphHook(
+	entryRealPath: string,
+	filterPaths: Iterable<string>,
+	modules: Map<string, string>,
+): void {
+	const alternation = [...filterPaths].map(escapeRegExp).join("|");
 	const filter = new RegExp(`^(?:${alternation})$`);
+	const sequence = extensionGraphHookCounts.get(entryRealPath) ?? 0;
+	extensionGraphHookCounts.set(entryRealPath, sequence + 1);
+	const hookName =
+		sequence === 0
+			? `omp:legacy-pi-ext:${Bun.hash(entryRealPath).toString(36)}`
+			: `omp:legacy-pi-ext:${Bun.hash(entryRealPath).toString(36)}:${sequence}`;
 	Bun.plugin({
-		name: `omp:legacy-pi-ext:${Bun.hash(entryRealPath).toString(36)}`,
+		name: hookName,
 		setup(build) {
 			build.onLoad({ filter, namespace: "file" }, async args => {
 				const cached = modules.get(args.path);
@@ -1028,6 +1035,39 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<void> {
 			});
 		},
 	});
+}
+
+async function ensureExtensionGraphHook(entryRealPath: string): Promise<void> {
+	const modules = await collectExtensionModules(entryRealPath);
+	const coveredPaths = hookedExtensionEntries.get(entryRealPath);
+	if (coveredPaths === undefined) {
+		hookedExtensionEntries.set(entryRealPath, new Set(modules.keys()));
+		extensionGraphModuleSources.set(entryRealPath, modules);
+		installExtensionGraphHook(entryRealPath, modules.keys(), modules);
+		return;
+	}
+
+	const servingSources = extensionGraphModuleSources.get(entryRealPath);
+	if (servingSources === undefined) {
+		return;
+	}
+
+	const deltaPaths: string[] = [];
+	for (const [modulePath, source] of modules) {
+		if (coveredPaths.has(modulePath)) {
+			if (servingSources.has(modulePath)) {
+				servingSources.set(modulePath, source);
+			}
+			continue;
+		}
+		coveredPaths.add(modulePath);
+		servingSources.set(modulePath, source);
+		deltaPaths.push(modulePath);
+	}
+
+	if (deltaPaths.length > 0) {
+		installExtensionGraphHook(entryRealPath, deltaPaths, servingSources);
+	}
 }
 
 /**
