@@ -196,19 +196,9 @@ describe("BashTool ACP terminal routing", () => {
 	});
 
 	it("kills and releases the client terminal when the command times out", async () => {
-		const sleepSpy = spyOn(Bun, "sleep");
-		let resolveTimeout!: () => void;
-		const fakeTimeoutPromise = new Promise<void>(resolve => {
-			resolveTimeout = resolve;
-		});
-
-		sleepSpy.mockImplementation(ms => {
-			if (ms === 1000 && sleepSpy.mock.calls.length === 1) {
-				return fakeTimeoutPromise;
-			}
-			return Promise.resolve();
-		});
-
+		// Real 1s timeout — no Bun.sleep/setTimeout mocking. Mocking the timer
+		// implementation couples the test to how the timeout is scheduled and
+		// starves the event loop when the implementation changes.
 		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
 		let killCalls = 0;
 		let currentOutputAfterKill = 0;
@@ -217,12 +207,7 @@ describe("BashTool ACP terminal routing", () => {
 			terminalId: "term-timeout",
 			waitForExit: async () => pendingExit.promise,
 			currentOutput: async () => {
-				// Trigger the timeout during the first poll
-				if (killCalls === 0) {
-					resolveTimeout();
-				} else {
-					currentOutputAfterKill++;
-				}
+				if (killCalls > 0) currentOutputAfterKill++;
 				return { output: "timeout output", truncated: false };
 			},
 			kill: async () => {

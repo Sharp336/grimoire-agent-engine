@@ -857,7 +857,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			const bridgeWallTimeStart = performance.now();
 			const killGraceMs = 1000;
 			const outputSnapshotGraceMs = 2000;
-			const timeoutPromise = Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const }));
+			// Cancellable timeout: a bare Bun.sleep(timeoutMs) would leave a live,
+			// ref'd timer for the full command timeout after fast completions —
+			// accumulating timers and delaying process shutdown in SDK/headless use.
+			const { promise: timeoutPromise, resolve: resolveTimeout } = Promise.withResolvers<{
+				kind: "timeout";
+			}>();
+			const timeoutTimer = setTimeout(() => resolveTimeout({ kind: "timeout" }), timeoutMs);
 			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
 			let handle: ClientBridgeTerminalHandle | undefined;
 			let killStarted = false;
@@ -1071,6 +1077,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
 			} finally {
+				clearTimeout(timeoutTimer);
 				signal?.removeEventListener("abort", onAbortSignal);
 				if (handle) {
 					try {
