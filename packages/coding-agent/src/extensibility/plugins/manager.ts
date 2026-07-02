@@ -458,10 +458,13 @@ export class PluginManager {
 				stderr: "pipe",
 				windowsHide: true,
 			});
-			const installExit = await installProc.exited;
+			const [installExit, , installStderr] = await Promise.all([
+				installProc.exited,
+				new Response(installProc.stdout).text(),
+				new Response(installProc.stderr).text(),
+			]);
 			if (installExit !== 0) {
-				const stderr = await new Response(installProc.stderr).text();
-				throw new Error(`bun install failed: ${stderr}`);
+				throw new Error(`bun install failed: ${installStderr}`);
 			}
 			// Resolve actual package name. npm specs encode the name (strip version);
 			// git specs do not, so diff plugins/package.json deps to find the new entry.
@@ -608,7 +611,11 @@ export class PluginManager {
 			windowsHide: true,
 		});
 
-		const exitCode = await proc.exited;
+		const [exitCode] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
 		if (exitCode !== 0) {
 			throw new Error(`npm uninstall failed for ${name}`);
 		}
@@ -1007,7 +1014,12 @@ export class PluginManager {
 				stderr: "pipe",
 				windowsHide: true,
 			});
-			return (await proc.exited) === 0;
+			const [exitCode] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+			return exitCode === 0;
 		} catch {
 			return false;
 		}
