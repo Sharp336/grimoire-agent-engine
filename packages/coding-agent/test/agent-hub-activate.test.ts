@@ -6,16 +6,16 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
+import { IrcBus } from "../src/irc/bus";
+import { AgentHubOverlayComponent } from "../src/modes/components/agent-hub";
+import { SelectorController } from "../src/modes/controllers/selector-controller";
+import { SessionObserverRegistry } from "../src/modes/session-observer-registry";
+import { initTheme } from "../src/modes/theme/theme";
+import type { InteractiveModeContext } from "../src/modes/types";
+import { AgentRegistry } from "../src/registry/agent-registry";
+import type { AgentSession } from "../src/session/agent-session";
 
 const AGENT_ID = "Worker";
 const TEST_CWD = path.resolve("agent-hub-cwd");
@@ -271,34 +271,33 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		initTheme();
 	});
 
-	afterEach(() => {
-		resetSettingsForTest();
+	let capturedHubs: AgentHubOverlayComponent[] = [];
+	let capturedPromises: Promise<void>[] = [];
+	const originalIsEmpty = Object.getOwnPropertyDescriptor(AgentHubOverlayComponent.prototype, "isEmpty")!.get!;
+
+	beforeEach(() => {
+		capturedHubs = [];
+		capturedPromises = [];
+
+		Object.defineProperty(AgentHubOverlayComponent.prototype, "isEmpty", {
+			configurable: true,
+			get() {
+				if (!capturedHubs.includes(this)) {
+					capturedHubs.push(this);
+					capturedPromises.push(this.persistedSubagentsReady);
+				}
+				return originalIsEmpty.call(this);
+			},
+		});
 	});
 
-	function spyReaddir(expectedCount: number) {
-		const originalReaddir = fs.promises.readdir;
-		let readdirCount = 0;
-		const readdirResolved = Promise.withResolvers<void>();
-		const passthrough = async (...args: unknown[]) => {
-			try {
-				// Single-cast pass-through: readdir's overload set cannot be re-declared
-				// structurally by a variadic wrapper; the wrapper forwards verbatim.
-				return await (originalReaddir as (...inner: unknown[]) => Promise<unknown>)(...args);
-			} finally {
-				readdirCount++;
-				if (readdirCount === expectedCount) {
-					readdirResolved.resolve();
-				}
-			}
-		};
-		fs.promises.readdir = passthrough as typeof fs.promises.readdir;
-		return {
-			promise: readdirResolved.promise,
-			restore: () => {
-				fs.promises.readdir = originalReaddir;
-			},
-		};
-	}
+	afterEach(() => {
+		Object.defineProperty(AgentHubOverlayComponent.prototype, "isEmpty", {
+			configurable: true,
+			get: originalIsEmpty,
+		});
+		resetSettingsForTest();
+	});
 
 	it("empty live registry + a session file containing a persisted subagent => the hub MOUNTS after persistedSubagentsReady settles", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-deferred-");
@@ -337,15 +336,14 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
-		const spy = spyReaddir(2);
-
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 
 		// Initially, it shouldn't be mounted
 		expect(shown).toBeUndefined();
 
-		// Wait for all readdirs to finish
-		await spy.promise;
+		// Wait for the hub's persistedSubagentsReady to resolve
+		expect(capturedPromises.length).toBe(1);
+		await capturedPromises[0];
 
 		// Flush microtasks to let the hub mount
 		for (let i = 0; i < 20; i++) {
@@ -356,7 +354,6 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		expect(shown).toBeDefined();
 		expect(shown!.isEmpty).toBe(false);
 		shown!.dispose();
-		spy.restore();
 	});
 
 	it("empty live registry + no persisted subagents => the hub is disposed and never mounts", async () => {
@@ -405,14 +402,13 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 			};
 		};
 
-		const spy = spyReaddir(1);
-
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 
 		expect(shown).toBeUndefined();
 
-		// Wait for readdir to finish
-		await spy.promise;
+		// Wait for the hub's persistedSubagentsReady to resolve
+		expect(capturedPromises.length).toBe(1);
+		await capturedPromises[0];
 
 		// Flush microtasks
 		for (let i = 0; i < 20; i++) {
@@ -420,9 +416,8 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		}
 
 		// It should never have mounted, and the hub should be disposed
-		expect(shown).toBeUndefined();
 		expect(disposed).toBe(true);
-		spy.restore();
+		expect(shown).toBeUndefined();
 	});
 
 	it("a second showAgentHub call during the pending wait supersedes the first (stale hub never mounts)", async () => {
@@ -474,15 +469,16 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 			};
 		};
 
-		const spy = spyReaddir(4);
-
 		// Call 1
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 		// Call 2 immediately after
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 
-		// Wait for both to trigger register (since both will read directory and register)
-		await spy.promise;
+		// We should have captured two hubs
+		expect(capturedPromises.length).toBe(2);
+
+		// Wait for both to resolve
+		await Promise.all(capturedPromises);
 
 		// Flush microtasks
 		for (let i = 0; i < 20; i++) {
@@ -498,6 +494,85 @@ describe("Agent hub showAgentHub requireContent deferred gating", () => {
 		// Dispose the second (active) hub to clean up
 		mountedHubs[0].dispose();
 		expect(totalDisposedCount).toBe(2);
-		spy.restore();
+	});
+
+	it("a pending requireContent hub is superseded by another selector opening (showSelector) before it settles, so the pending hub never mounts", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-cross-supersede-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+		await Bun.write(workerSessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		const mountedComponents: any[] = [];
+		const editor = { id: "editor" };
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					mountedComponents.push(child);
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		let totalDisposedCount = 0;
+		const originalOnChange = agents.onChange.bind(agents);
+		agents.onChange = cb => {
+			const unsub = originalOnChange(cb);
+			return () => {
+				totalDisposedCount++;
+				unsub();
+			};
+		};
+
+		// 1. Trigger pending showAgentHub (requireContent: true)
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+		// We should have captured one hub
+		expect(capturedPromises.length).toBe(1);
+		const pendingHub = capturedHubs[0];
+
+		// 2. Open another selector before the promise resolves
+		const otherComponent = { id: "other-selector", render: () => [] as string[] };
+		controller.showSelector(() => ({
+			component: otherComponent,
+			focus: otherComponent,
+		}));
+
+		// The pending hub should have been disposed immediately when superseded
+		expect(totalDisposedCount).toBe(1);
+
+		// Now await the pending hub's scan to settle
+		await capturedPromises[0];
+
+		// Flush microtasks
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+
+		// The pending hub must NOT be in the mounted components list
+		expect(mountedComponents).toContain(otherComponent);
+		expect(mountedComponents).not.toContain(pendingHub);
+
+		// The container children should still have only the other selector
+		expect(ctx.editorContainer.children).toEqual([otherComponent]);
 	});
 });

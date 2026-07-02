@@ -83,12 +83,21 @@ const MANUAL_LOGIN_TIP = "Tip: You can complete pairing with /login <redirect UR
 
 export class SelectorController {
 	#agentHubRequestToken = 0;
-	#activeAgentHub: AgentHubOverlayComponent | undefined;
+	#pendingAgentHub: AgentHubOverlayComponent | undefined;
+	#mountedAgentHub: AgentHubOverlayComponent | undefined;
 
-	#supersedeAgentHub(): number {
-		this.#activeAgentHub?.dispose();
-		this.#activeAgentHub = undefined;
+	#supersedePendingAgentHub(): number {
+		const pendingHub = this.#pendingAgentHub;
+		this.#pendingAgentHub = undefined;
+		pendingHub?.dispose();
 		return ++this.#agentHubRequestToken;
+	}
+
+	#disposeMountedAgentHub(except?: AgentHubOverlayComponent): void {
+		const mountedHub = this.#mountedAgentHub;
+		if (!mountedHub || mountedHub === except) return;
+		this.#mountedAgentHub = undefined;
+		mountedHub.dispose();
 	}
 
 	constructor(private ctx: InteractiveModeContext) {}
@@ -124,13 +133,14 @@ export class SelectorController {
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
-		this.#supersedeAgentHub();
+		this.#supersedePendingAgentHub();
 		const done = () => {
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 		const { component, focus } = create(done);
+		this.#disposeMountedAgentHub();
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(component);
 		this.ctx.ui.setFocus(focus);
@@ -1387,7 +1397,7 @@ export class SelectorController {
 	}
 
 	showAgentHub(observers: SessionObserverRegistry, options?: { requireContent?: boolean }): void {
-		const requestToken = this.#supersedeAgentHub();
+		const requestToken = this.#supersedePendingAgentHub();
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),
@@ -1398,15 +1408,15 @@ export class SelectorController {
 		// rather than a floating overlay. A non-fullscreen overlay composited over
 		// a live transcript strands a stale copy in native scrollback every time a
 		// running subagent's progress grows the frame and scrolls the window; the
-		// hub is opened mid-run, so those copies stacked into a wall of duplicate
-		// "Agent Hub" frames bleeding the task tree behind them. As an editor-slot
-		// component it rides the normal append-only commit path: the transcript
-		// commits above it exactly once and the hub repaints in place.
+		// hub is opened mid-run, so the transcript path must not append output past
+		// copies committed above it. `AgentHub` becomes the prompt component, and the
+		// transcript commits above it exactly once and the hub repaints in place.
 		const done = () => {
 			const closingHub = hub;
 			closingHub?.dispose();
-			if (this.#activeAgentHub === closingHub) this.#activeAgentHub = undefined;
-			if (this.#agentHubRequestToken !== requestToken) return;
+			if (this.#pendingAgentHub === closingHub) this.#pendingAgentHub = undefined;
+			if (this.#mountedAgentHub !== closingHub) return;
+			this.#mountedAgentHub = undefined;
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(this.ctx.editor);
@@ -1430,50 +1440,55 @@ export class SelectorController {
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
-		this.#activeAgentHub = hub;
+		this.#pendingAgentHub = hub;
 
 		const mountHub = (readyHub: AgentHubOverlayComponent) => {
-			if (this.#agentHubRequestToken !== requestToken || this.#activeAgentHub !== readyHub) {
-				if (this.#activeAgentHub === readyHub) this.#activeAgentHub = undefined;
+			if (
+				this.#agentHubRequestToken !== requestToken ||
+				(this.#pendingAgentHub !== undefined && this.#pendingAgentHub !== readyHub)
+			) {
+				if (this.#pendingAgentHub === readyHub) this.#pendingAgentHub = undefined;
 				readyHub.dispose();
 				return;
 			}
+			if (this.#pendingAgentHub === readyHub) this.#pendingAgentHub = undefined;
+			this.#disposeMountedAgentHub(readyHub);
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(readyHub);
+			this.#mountedAgentHub = readyHub;
 			this.ctx.ui.setFocus(readyHub);
 			this.ctx.ui.requestRender();
 		};
 
 		// The double-← gesture passes requireContent so it stays inert when there
-		// are no subagents to show; the explicit hub/observe keys still open the
+		// are no subagents to show; the explicit hub/observe keys always open the
 		// empty roster. If the live rows are empty, historical parked subagents may
 		// still load asynchronously, so wait before deciding whether to mount.
 		if (options?.requireContent) {
-			if (!hub.isEmpty) {
-				mountHub(hub);
+			if (hub.isEmpty) {
+				this.#pendingAgentHub = hub;
+				const expectedSlotOwner = this.ctx.editorContainer.children?.[0] ?? this.ctx.editor;
+				void hub.persistedSubagentsReady.then(() => {
+					if (!hub) return;
+					if (this.#agentHubRequestToken !== requestToken || this.#pendingAgentHub !== hub) {
+						if (this.#pendingAgentHub === hub) this.#pendingAgentHub = undefined;
+						hub.dispose();
+						return;
+					}
+					if ((this.ctx.editorContainer.children?.[0] ?? this.ctx.editor) !== expectedSlotOwner) {
+						if (this.#pendingAgentHub === hub) this.#pendingAgentHub = undefined;
+						hub.dispose();
+						return;
+					}
+					if (hub.isEmpty) {
+						if (this.#pendingAgentHub === hub) this.#pendingAgentHub = undefined;
+						hub.dispose();
+						return;
+					}
+					mountHub(hub);
+				});
 				return;
 			}
-			const expectedSlotOwner = this.ctx.editorContainer.children?.[0] ?? this.ctx.editor;
-			void hub.persistedSubagentsReady.then(() => {
-				if (!hub) return;
-				if (this.#agentHubRequestToken !== requestToken || this.#activeAgentHub !== hub) {
-					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
-					hub.dispose();
-					return;
-				}
-				if ((this.ctx.editorContainer.children?.[0] ?? this.ctx.editor) !== expectedSlotOwner) {
-					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
-					hub.dispose();
-					return;
-				}
-				if (hub.isEmpty) {
-					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
-					hub.dispose();
-					return;
-				}
-				mountHub(hub);
-			});
-			return;
 		}
 
 		mountHub(hub);
