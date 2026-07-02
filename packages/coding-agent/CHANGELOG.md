@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved `/move` directory autocomplete performance on Windows by caching directory entries (`fs.Dirent[]`) and avoiding a `statSync` per entry on every keystroke ([#4199](https://github.com/can1357/oh-my-pi/issues/4199)).
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
