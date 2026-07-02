@@ -164,6 +164,10 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 		switch (message.role) {
 			case "custom":
 			case "hookMessage": {
+				// A nullish-content custom/hook message carries nothing for the
+				// provider and crashes downstream content consumers (`.content.filter`
+				// on undefined); drop it from the request instead.
+				if (message.content == null) return undefined;
 				const content =
 					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]

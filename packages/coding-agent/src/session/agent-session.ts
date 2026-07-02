@@ -334,11 +334,13 @@ import {
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
+	type CustomMessagePayload,
 	convertToLlm,
 	demoteInterruptedThinking,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isUserInterruptAbort,
+	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
 	readQueueChipText,
 	SILENT_ABORT_MARKER,
@@ -7959,26 +7961,31 @@ export class AgentSession {
 	 * use this to avoid acting on a turn that never ran.
 	 */
 	async sendCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: CustomMessagePayload<T>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; queueChipText?: string },
 	): Promise<boolean> {
+		// Extension/hook payloads arrive untyped from JS (`pi.sendMessage`); a
+		// bare string once destructured into all-undefined fields here and was
+		// persisted as a bare custom_message entry that bricked the session on
+		// every later rebuild. Normalize before anything reads a field.
+		const payload = normalizeCustomMessagePayload(message);
 		const details =
 			options?.queueChipText && options.deliverAs !== "nextTurn"
 				? ({
-						...((message.details && typeof message.details === "object" ? message.details : {}) as Record<
+						...((payload.details && typeof payload.details === "object" ? payload.details : {}) as Record<
 							string,
 							unknown
 						>),
 						__queueChipText: options.queueChipText,
 					} as T)
-				: message.details;
+				: payload.details;
 		const appMessage: CustomMessage<T> = {
 			role: "custom",
-			customType: message.customType,
-			content: message.content,
-			display: message.display,
+			customType: payload.customType,
+			content: payload.content,
+			display: payload.display,
 			details,
-			attribution: message.attribution ?? "agent",
+			attribution: payload.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
@@ -8010,9 +8017,9 @@ export class AgentSession {
 			this.sessionManager.appendCustomMessageEntry(
 				normalizedAppMessage.customType,
 				normalizedAppMessage.content,
-				message.display,
-				message.details,
-				message.attribution ?? "agent",
+				normalizedAppMessage.display,
+				normalizedAppMessage.details,
+				normalizedAppMessage.attribution ?? "agent",
 			);
 			return false;
 		}
@@ -8030,9 +8037,9 @@ export class AgentSession {
 		this.sessionManager.appendCustomMessageEntry(
 			normalizedAppMessage.customType,
 			normalizedAppMessage.content,
-			message.display,
-			message.details,
-			message.attribution ?? "agent",
+			normalizedAppMessage.display,
+			normalizedAppMessage.details,
+			normalizedAppMessage.attribution ?? "agent",
 		);
 		return false;
 	}

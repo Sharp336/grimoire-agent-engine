@@ -253,6 +253,11 @@ export function buildSessionContext(
 		if (entry.type === "message") {
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
+			// Legacy poisoned sessions: a turn-end error path once persisted bare
+			// custom_message entries (undefined-valued keys dropped by
+			// JSON.stringify). They carry nothing — skip instead of fabricating a
+			// nullish-content message that crashes LLM conversion downstream.
+			if (entry.content == null) return;
 			pushMessage(
 				createCustomMessage(
 					entry.customType,

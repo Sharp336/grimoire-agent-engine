@@ -462,6 +462,44 @@ export interface CustomMessage<T = unknown> {
 	timestamp: number;
 }
 
+/** The extension/hook-supplied slice of a {@link CustomMessage}, or a bare
+ *  string as shorthand for `content`. */
+export type CustomMessagePayload<T = unknown> =
+	| string
+	| Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">;
+
+/** {@link CustomMessagePayload} with the persisted field set made concrete. */
+export interface NormalizedCustomMessagePayload<T = unknown> {
+	customType: string;
+	content: string | (TextContent | ImageContent)[];
+	display: boolean;
+	details?: T;
+	attribution?: MessageAttribution;
+}
+
+/**
+ * Normalize an untyped extension/hook `sendMessage` payload into the concrete
+ * field set the session persists. JS hooks have shipped bare strings here;
+ * destructuring fields off one produced an all-undefined custom message whose
+ * keys `JSON.stringify` then dropped from the session JSONL — a *bare*
+ * `custom_message` entry that crashed every later context rebuild
+ * (`.content.filter` on undefined) and permanently bricked the session.
+ * Accept the string as content shorthand and default everything else.
+ */
+export function normalizeCustomMessagePayload<T = unknown>(
+	message: CustomMessagePayload<T>,
+): NormalizedCustomMessagePayload<T> {
+	const source: Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">> =
+		typeof message === "string" ? { content: message } : (message ?? {});
+	return {
+		customType: source.customType ?? "hook-message",
+		content: source.content ?? "",
+		display: source.display ?? false,
+		details: source.details,
+		attribution: source.attribution,
+	};
+}
+
 /**
  * Legacy hook message type (pre-extensions). Kept for session migration.
  */

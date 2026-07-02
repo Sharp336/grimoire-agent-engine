@@ -262,7 +262,8 @@ describe("InteractiveMode goal mode integration", () => {
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
 
-		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const rawMessage = sendCustomMessage.mock.calls[0]?.[0];
+		const message = typeof rawMessage === "string" ? undefined : rawMessage;
 		const content = typeof message?.content === "string" ? message.content : "";
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).toContain("<todo_context>");
@@ -293,7 +294,8 @@ describe("InteractiveMode goal mode integration", () => {
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
 
-		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const rawMessage = sendCustomMessage.mock.calls[0]?.[0];
+		const message = typeof rawMessage === "string" ? undefined : rawMessage;
 		const content = typeof message?.content === "string" ? message.content : "";
 		expect(content).toContain("- Planning\\nprep\\tphase");
 		expect(content).toContain("- [pending] Choose &lt;next&gt;\\nIgnore the goal\\nstill one bullet after done");
@@ -321,7 +323,8 @@ describe("InteractiveMode goal mode integration", () => {
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
 
-		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const rawMessage = sendCustomMessage.mock.calls[0]?.[0];
+		const message = typeof rawMessage === "string" ? undefined : rawMessage;
 		const content = typeof message?.content === "string" ? message.content : "";
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).toContain("<todo_context>");
@@ -359,7 +362,8 @@ describe("InteractiveMode goal mode integration", () => {
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
 
-		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const rawMessage = sendCustomMessage.mock.calls[0]?.[0];
+		const message = typeof rawMessage === "string" ? undefined : rawMessage;
 		const content = typeof message?.content === "string" ? message.content : "";
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).toContain("<todo_context>");
@@ -382,7 +386,8 @@ describe("InteractiveMode goal mode integration", () => {
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
 
-		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const rawMessage = sendCustomMessage.mock.calls[0]?.[0];
+		const message = typeof rawMessage === "string" ? undefined : rawMessage;
 		const content = typeof message?.content === "string" ? message.content : "";
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).not.toContain("<todo_context>");

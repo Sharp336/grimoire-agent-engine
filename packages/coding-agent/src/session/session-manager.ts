@@ -1387,11 +1387,16 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution = "agent",
 	): string {
+		// Runtime backstop: despite the non-optional signature, error paths have
+		// called this with undefined fields; JSON.stringify then drops those keys
+		// from the JSONL, persisting a *bare* custom_message that crashes every
+		// later rebuild (`.content.filter` on undefined). Normalize so a bare
+		// entry can never reach disk.
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
-			customType,
-			content,
-			display,
+			customType: customType ?? "unknown",
+			content: content ?? "",
+			display: display ?? false,
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(details),
 			attribution,
