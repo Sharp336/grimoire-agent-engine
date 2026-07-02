@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type Agent,
+	AgentBusyError,
 	type AgentMessage,
 	type AgentToolResult,
 	EventLoopKeepalive,
@@ -2672,16 +2673,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			planFilePath: options.planFilePath,
 			contextPreserved: options.preserveContext === true,
 		});
-		// The executor's first turn must start on an idle session. The agent may still
-		// be streaming the post-`resolve` continuation (Agent.#emit is fire-and-forget)
-		// or a turn kicked off by the compaction/clear above; prompt() would then throw
-		// AgentBusyError ("Failed to finalize approved plan"). Abort the now-irrelevant
-		// in-flight turn first — abort() bumps the prompt generation and cancels pending
-		// continuations, so nothing re-streams in the synchronous gap before prompt().
+		// A queued compaction message may have started a turn while compaction was
+		// flushing. Preserve that in-flight work and append the hidden execution
+		// directive behind it; if the session becomes busy in the narrow dispatch
+		// window, catch the core guard and queue the same synthetic prompt instead.
+		await this.#dispatchApprovedPlanPrompt(planModePrompt);
+	}
+	async #dispatchApprovedPlanPrompt(planModePrompt: string): Promise<void> {
 		if (this.session.isStreaming) {
-			await this.#abortPlanApprovalTurnSilently();
+			await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+			return;
 		}
-		await this.session.prompt(planModePrompt, { synthetic: true });
+
+		try {
+			await this.session.prompt(planModePrompt, { synthetic: true });
+		} catch (error) {
+			if (!(error instanceof AgentBusyError)) {
+				throw error;
+			}
+			await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+		}
 	}
 	async #abortPlanApprovalTurnSilently(): Promise<void> {
 		this.session.markPlanInternalAbortPending();

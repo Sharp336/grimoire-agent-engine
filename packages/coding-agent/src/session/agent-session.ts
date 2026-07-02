@@ -837,6 +837,15 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 }
 
+export interface FollowUpOptions {
+	/** Queue as a hidden developer/system message instead of a user-attributed follow-up. */
+	synthetic?: boolean;
+	/** Whether to expand file-based prompt templates (default: true). */
+	expandPromptTemplates?: boolean;
+	/** Explicit billing/initiator attribution. Defaults to `agent` for synthetic prompts. */
+	attribution?: MessageAttribution;
+}
+
 /** Result from a handoff operation. */
 export interface HandoffResult {
 	document: string;
@@ -7793,13 +7802,42 @@ export class AgentSession {
 	/**
 	 * Queue a follow-up message to process after the agent would otherwise stop.
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
-		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		const expandedText =
+			options?.expandPromptTemplates === false ? text : expandPromptTemplate(text, [...this.#promptTemplates]);
+		if (options?.synthetic) {
+			await this.#queueSyntheticFollowUp(expandedText, images, options.attribution ?? "agent");
+			return;
+		}
+
 		await this.#queueUserMessage(expandedText, images, "followUp");
+	}
+
+	async #queueSyntheticFollowUp(
+		text: string,
+		images: ImageContent[] | undefined,
+		attribution: MessageAttribution,
+	): Promise<void> {
+		const normalizedImages = await this.#normalizeImagesForModel(images);
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		if (normalizedImages?.length) {
+			content.push(...normalizedImages);
+		}
+		const imageDescriptionNotice = normalizedImages?.length
+			? await this.#buildImageDescriptionNotice(normalizedImages)
+			: undefined;
+		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+		this.agent.followUp({
+			role: "developer",
+			content,
+			attribution,
+			timestamp: Date.now(),
+		});
+		this.#scheduleIdleQueueDrain();
 	}
 
 	async #queueUserMessage(

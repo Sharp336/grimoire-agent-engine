@@ -622,7 +622,7 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 	});
 
-	it("aborts an in-flight turn before dispatching the approved plan instead of surfacing AgentBusyError", async () => {
+	it("queues the approved plan behind an in-flight turn instead of surfacing AgentBusyError", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -638,9 +638,6 @@ describe("InteractiveMode plan review rendering", () => {
 			get: () => streaming,
 		});
 		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
-			// Clear the streaming flag only after an awaited tick, so the test fails
-			// if #approvePlan dispatches the prompt without awaiting abort() — the
-			// real abort() resolves only once the agent loop is idle.
 			await Promise.resolve();
 			streaming = false;
 		});
@@ -649,6 +646,7 @@ describe("InteractiveMode plan review rendering", () => {
 				throw new AgentBusyError();
 			return true;
 		});
+		const followUpSpy = vi.spyOn(session, "followUp").mockResolvedValue();
 		// Simulate a re-stream landing during the overlay, then pick keep-context
 		// (options[2]) — that branch skips clear/compact so `this.session` stays the
 		// instance the spies are on.
@@ -661,8 +659,11 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
 		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Failed to finalize approved plan"));
-		expect(promptSpy).toHaveBeenCalledTimes(1);
-		expect(isPlanApprovedCall(promptSpy.mock.calls[0] as unknown[])).toBe(true);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(followUpSpy).toHaveBeenCalledTimes(1);
+		const [text, _images, options] = followUpSpy.mock.calls[0] as unknown[];
+		expect(isPlanApprovedCall([text, options])).toBe(true);
+		expect(options).toMatchObject({ synthetic: true });
 		expect(abortSpy).toHaveBeenCalled();
 	});
 
