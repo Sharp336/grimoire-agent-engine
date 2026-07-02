@@ -8,7 +8,7 @@ import type {
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import type { HindsightMessage } from "@oh-my-pi/pi-coding-agent/hindsight/content";
-import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { HindsightSessionState, RETENTION_TRANSCRIPT_CACHE_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 const makeConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig => ({
@@ -253,6 +253,57 @@ describe("Hindsight incremental full-session retention cache", () => {
 		expect(finalTranscript).toBe(
 			"[role: user]\nA_rewritten\n[user:end]\n\n[role: assistant]\nB\n[assistant:end]\n\n" +
 				"[role: user]\nC\n[user:end]\n\n[role: assistant]\nD\n[assistant:end]",
+		);
+	});
+
+	it("Cache cap boundary: does not retain transcripts exceeding RETENTION_TRANSCRIPT_CACHE_MAX_CHARS but still sends them", async () => {
+		const client = new FakeHindsightApi();
+		const config = makeConfig({ retainMode: "full-session" });
+		const session = {
+			sessionId: "test-session",
+		} as object as AgentSession;
+		const banksSet = new Set<string>();
+
+		const state = new HindsightSessionState({
+			sessionId: "test-session",
+			client,
+			bankId: "test-bank",
+			config,
+			session,
+			banksSet,
+		});
+
+		// Build a string that makes the formatted transcript exceed the max char limit.
+		// A user message formatted transcript is `[role: user]\n${content}\n[user:end]`.
+		// To keep runtime sane and build the big string cheaply, we construct just-over content.
+		const contentSize = RETENTION_TRANSCRIPT_CACHE_MAX_CHARS;
+		const bigContent = "a".repeat(contentSize);
+		const messages1: HindsightMessage[] = [{ role: "user", content: bigContent }];
+
+		await state.retainSession(messages1);
+
+		// Assert (a): The oversized transcript IS still sent to the client in full
+		expect(client.calls.length).toBe(1);
+		expect(client.calls[0].transcript.length).toBeGreaterThan(RETENTION_TRANSCRIPT_CACHE_MAX_CHARS);
+		expect(client.calls[0].transcript).toBe(`[role: user]\n${bigContent}\n[user:end]`);
+
+		client.calls = [];
+
+		// Assert (b): The cache did not retain it — observable because the NEXT retain re-sends
+		// a full transcript reflecting the current messages (not an incremental append artifact).
+		const messages2: HindsightMessage[] = [...messages1, { role: "assistant", content: "hello new turn" }];
+
+		await state.retainSession(messages2);
+
+		expect(client.calls.length).toBe(1);
+		const secondTranscript = client.calls[0].transcript;
+
+		// If the cache did not retain it, it resets the boundary to 0, causing it to format
+		// both messages from scratch. Thus, the transcript contains both the big content and the new message.
+		expect(secondTranscript).toContain(bigContent);
+		expect(secondTranscript).toContain("hello new turn");
+		expect(secondTranscript).toBe(
+			`[role: user]\n${bigContent}\n[user:end]\n\n[role: assistant]\nhello new turn\n[assistant:end]`,
 		);
 	});
 });

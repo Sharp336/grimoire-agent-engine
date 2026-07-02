@@ -487,3 +487,44 @@ fn filetime_set(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()
 fn filetime_set(_path: &Path, _mtime: std::time::SystemTime) -> std::io::Result<()> {
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_git_apply_early_exit_cleanup() {
+		let temp_dir =
+			std::env::temp_dir().join(format!("pi-iso-git-apply-test-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let mut patch = Vec::new();
+		patch.extend_from_slice(b"diff --git a/missing_file_xyz b/missing_file_xyz\n");
+		patch.extend_from_slice(b"--- a/missing_file_xyz\n");
+		patch.extend_from_slice(b"+++ b/missing_file_xyz\n");
+		patch.extend_from_slice(b"@@ -1,1 +1,1 @@\n");
+		patch.extend_from_slice(b"-a\n");
+		patch.extend_from_slice(b"+b\n");
+
+		// Add 1MB of junk lines to ensure the write fails with BrokenPipe when git
+		// apply exits early.
+		for _ in 0..30_000 {
+			patch.extend_from_slice(
+				b"invalid patch line junk junk junk junk junk junk junk junk junk junk\n",
+			);
+		}
+
+		let result = git_apply(&temp_dir, &patch, &[]);
+
+		let _ = std::fs::remove_dir_all(&temp_dir);
+
+		let err = result.expect_err("git_apply should fail because the patched file is missing");
+		let err_str = err.to_string();
+
+		assert!(
+			err_str.contains("missing_file_xyz") || err_str.contains("No such file or directory"),
+			"Error message should contain git stderr diagnostic, got: {}",
+			err_str
+		);
+	}
+}

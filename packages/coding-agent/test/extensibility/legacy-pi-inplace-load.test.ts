@@ -3,6 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import type {
+	ExtensionCommandContext,
+	ExtensionContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	__rewriteLegacyExtensionSourceForTests,
 	loadLegacyPiModule,
@@ -339,5 +344,85 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		// extension's rewrite hook; its fork-scope import stays unresolved.
 		const siblingUrl = `${url.pathToFileURL(await fs.realpath(path.join(dir, "unrelated.ts"))).href}?nonce=${Date.now()}`;
 		await expect(import(siblingUrl)).rejects.toThrow(/@earendil-works\/pi-ai/);
+	});
+
+	it("reloads legacy-pi extensions with a newly created local module requiring legacy remapping", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "reload-ext", version: "1.0.0" }),
+			"index.ts": [
+				"export default function (pi) {",
+				'  pi.registerCommand("test-reload", { handler: async () => "v1" });',
+				"}",
+			].join("\n"),
+		});
+
+		const extensionPath = path.join(dir, "index.ts");
+
+		// Deliberate documented escape hatch: ExtensionCommandContext / ExtensionContext
+		// are nominally typed via complex runtime internals and cannot be structurally
+		// satisfied by a test fake.
+		const fakeCtx = {} as unknown as ExtensionCommandContext;
+
+		// 1. Load the initial extension version
+		const result1 = await loadExtensions([extensionPath], dir);
+		expect(result1.errors).toHaveLength(0);
+		const ext1 = result1.extensions.find(e => e.path === extensionPath);
+		expect(ext1).toBeDefined();
+		expect(ext1?.commands.has("test-reload")).toBe(true);
+
+		// Execute the initial command to check it works
+		const command1 = ext1?.commands.get("test-reload");
+		expect(command1).toBeDefined();
+		const val1: unknown = await command1?.handler("", fakeCtx);
+		expect(val1).toBe("v1");
+
+		// 2. Create a new module that needs legacy rewriting (e.g. imports legacy pi packages)
+		const newModulePath = path.join(dir, "new-module.ts");
+		await fs.writeFile(
+			newModulePath,
+			[
+				'import { isToolCallEventType } from "@mariozechner/pi-coding-agent";',
+				'export const flag = typeof isToolCallEventType === "function" ? "v2-legacy-ok" : "v2-failed";',
+			].join("\n"),
+			"utf8",
+		);
+
+		// 3. Rewrite index.ts to import new-module.ts and use its exported behavior in a tool or command
+		await fs.writeFile(
+			extensionPath,
+			[
+				'import { flag } from "./new-module.ts";',
+				"export default function (pi) {",
+				"  const { Type } = pi.typebox;",
+				"  pi.registerTool({",
+				'    name: "reload-tool",',
+				'    label: "reload-tool",',
+				'    description: "Reload test tool",',
+				"    parameters: Type.Object({}),",
+				'    execute: async () => ({ content: [{ type: "text", text: flag }] }),',
+				"  });",
+				"}",
+			].join("\n"),
+			"utf8",
+		);
+
+		// 4. Reload via the loader's reload path (fresh loadExtensions call for the same path)
+		const result2 = await loadExtensions([extensionPath], dir);
+		expect(result2.errors).toHaveLength(0);
+		const ext2 = result2.extensions.find(e => e.path === extensionPath);
+		expect(ext2).toBeDefined();
+		expect(ext2?.tools.has("reload-tool")).toBe(true);
+
+		// Assert the new module is rewritten and functional
+		const tool2 = ext2?.tools.get("reload-tool");
+		expect(tool2).toBeDefined();
+		const toolResult = await tool2?.definition.execute(
+			"test-call-id",
+			{},
+			undefined,
+			undefined,
+			fakeCtx as unknown as ExtensionContext,
+		);
+		expect(toolResult).toEqual({ content: [{ type: "text", text: "v2-legacy-ok" }] });
 	});
 });

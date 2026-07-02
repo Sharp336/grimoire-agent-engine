@@ -284,8 +284,15 @@ async function getValidatedEnabledPluginsCachePayload(
 	cached: Promise<EnabledPluginsCachePayload>,
 ): Promise<EnabledPluginsCachePayload> {
 	const cachedPayload = await cached;
-	const currentPolicyStats = await statPolicyFiles(cachedPayload.policyStats.map(policyStat => policyStat.path));
-	if (policyStatsEqual(cachedPayload.policyStats, currentPolicyStats)) return cachedPayload;
+	const policyInputs = await resolveEnabledPluginPolicyInputs(cwd, home);
+	const cachedPolicyPaths = cachedPayload.policyStats.map(policyStat => policyStat.path);
+	const policyPathsMatch =
+		cachedPolicyPaths.length === policyInputs.policyPaths.length &&
+		cachedPolicyPaths.every((policyPath, index) => policyPath === policyInputs.policyPaths[index]);
+	if (policyPathsMatch) {
+		const currentPolicyStats = await statPolicyFiles(policyInputs.policyPaths);
+		if (policyStatsEqual(cachedPayload.policyStats, currentPolicyStats)) return cachedPayload;
+	}
 
 	const latest = enabledPluginsCache.get(cacheKey);
 	if (latest && latest !== cached) return latest;

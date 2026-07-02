@@ -60,6 +60,9 @@ class MockWebSocket {
 	}
 
 	send(data: Uint8Array | ArrayBuffer | string): void {
+		if (this.readyState !== MockWebSocket.OPEN) {
+			throw new Error("InvalidStateError: WebSocket is not in OPEN state");
+		}
 		if (data instanceof Uint8Array) {
 			this.sent.push(data);
 		} else if (data instanceof ArrayBuffer) {
@@ -274,8 +277,6 @@ describe("CollabSocket backpressure and timers", () => {
 	});
 
 	it("cancels the drain retry timer on close (no timer leak)", async () => {
-		const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
-
 		const socket = new CollabSocket({
 			wsUrl: "ws://localhost:8788/r/test-room",
 			role: "host",
@@ -288,18 +289,33 @@ describe("CollabSocket backpressure and timers", () => {
 
 		ws.bufferedAmount = 70 * 1024;
 
-		// Reset spy state after connect (which calls clearTimeout internally).
-		clearTimeoutSpy.mockClear();
-
 		socket.send({ t: "prompt", text: "drain timer test" });
 
 		// Let seal() settle and #scheduleBackpressureDrain to run.
 		await yieldToEventLoop();
 		await yieldToEventLoop();
 
-		// The drain timer was scheduled; close must cancel it.
-		socket.close();
+		// Set up listeners for unhandled rejections/exceptions during the wait.
+		let unhandledError: Error | null = null;
+		const handleError = (err: unknown) => {
+			unhandledError = err instanceof Error ? err : new Error(String(err));
+		};
+		process.on("unhandledRejection", handleError);
+		process.on("uncaughtException", handleError);
 
-		expect(clearTimeoutSpy).toHaveBeenCalled();
+		try {
+			// The drain timer was scheduled; close must cancel it.
+			socket.close();
+
+			// Wait beyond the drain retry interval (25 ms)
+			await Bun.sleep(50);
+
+			// Assert that no frame was sent on the dead socket (since it was closed)
+			expect(ws.sent.length).toBe(0);
+			expect(unhandledError).toBeNull();
+		} finally {
+			process.off("unhandledRejection", handleError);
+			process.off("uncaughtException", handleError);
+		}
 	});
 });

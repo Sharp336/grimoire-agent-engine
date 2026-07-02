@@ -231,4 +231,75 @@ describe("BashTool ACP terminal routing", () => {
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(currentOutputAfterKill).toBeGreaterThan(0);
 	});
+
+	it("asserts timeout fires and kill happens when waitForExit never resolves and currentOutput() hangs during a poll tick", async () => {
+		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		let currentOutputCalls = 0;
+
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-hang-poll",
+			waitForExit: async () => pendingExit.promise,
+			currentOutput: async () => {
+				currentOutputCalls++;
+				if (currentOutputCalls === 1) {
+					// Hang on the first call (during the poll tick)
+					return new Promise(() => {});
+				}
+				// Resolve immediately on subsequent calls (e.g. final output retrieval)
+				return { output: "fallback output", truncated: false };
+			},
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+		const killSpy = spyOn(handle, "kill");
+		const releaseSpy = spyOn(handle, "release");
+
+		const tool = new BashTool(makeSession(bridge));
+		const executePromise = tool.execute("call-hang-poll", { command: "sleep 60", timeout: 1 });
+
+		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
+
+		expect(killSpy).toHaveBeenCalledTimes(1);
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("asserts onUpdate is not called repeatedly with identical content when currentOutput returns an unchanged string", async () => {
+		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		let currentOutputCalls = 0;
+
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-unchanged",
+			waitForExit: async () => pendingExit.promise,
+			currentOutput: async () => {
+				currentOutputCalls++;
+				if (currentOutputCalls === 2) {
+					// After the second poll tick, let the process exit
+					setTimeout(() => pendingExit.resolve({ exitCode: 0, signal: null }), 0);
+				}
+				return { output: "same output", truncated: false };
+			},
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+
+		const tool = new BashTool(makeSession(bridge));
+		const updates: Array<{ content?: Array<{ type: string; text?: string }> }> = [];
+
+		await tool.execute("call-unchanged", { command: "echo same" }, undefined, update => {
+			updates.push(update as { content?: Array<{ type: string; text?: string }> });
+		});
+
+		// Filter for updates that contain text content
+		const textUpdates = updates.filter(u => u.content?.some(c => c.type === "text"));
+		expect(textUpdates).toHaveLength(1);
+		expect(textUpdates[0]!.content![0]!.text).toBe("same output");
+	});
 });

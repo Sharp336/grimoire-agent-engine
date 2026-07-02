@@ -1418,18 +1418,38 @@ export class SelectorController {
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 
+		const mountHub = (readyHub: AgentHubOverlayComponent) => {
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(readyHub);
+			this.ctx.ui.setFocus(readyHub);
+			this.ctx.ui.requestRender();
+		};
+
 		// The double-← gesture passes requireContent so it stays inert when there
 		// are no subagents to show; the explicit hub/observe keys still open the
-		// empty roster. The freshly built hub already ran the persisted-subagent
-		// scan, so its row count is the authoritative "is there anything to show".
-		if (options?.requireContent && hub.isEmpty) {
-			hub.dispose();
+		// empty roster. If the live rows are empty, historical parked subagents may
+		// still load asynchronously, so wait before deciding whether to mount.
+		if (options?.requireContent) {
+			if (!hub.isEmpty) {
+				mountHub(hub);
+				return;
+			}
+			const expectedSlotOwner = this.ctx.editorContainer.children?.[0] ?? this.ctx.editor;
+			void hub.persistedSubagentsReady.then(() => {
+				if (!hub) return;
+				if ((this.ctx.editorContainer.children?.[0] ?? this.ctx.editor) !== expectedSlotOwner) {
+					hub.dispose();
+					return;
+				}
+				if (hub.isEmpty) {
+					hub.dispose();
+					return;
+				}
+				mountHub(hub);
+			});
 			return;
 		}
 
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(hub);
-		this.ctx.ui.setFocus(hub);
-		this.ctx.ui.requestRender();
+		mountHub(hub);
 	}
 }

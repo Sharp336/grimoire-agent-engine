@@ -1011,7 +1011,7 @@ function installExtensionGraphHook(
 	modules: Map<string, string>,
 ): void {
 	const alternation = [...filterPaths].map(escapeRegExp).join("|");
-	const filter = new RegExp(`^(?:${alternation})$`);
+	const filter = new RegExp(`^(?:${alternation})(?:\\?.*)?$`);
 	const sequence = extensionGraphHookCounts.get(entryRealPath) ?? 0;
 	extensionGraphHookCounts.set(entryRealPath, sequence + 1);
 	const hookName =
@@ -1022,16 +1022,17 @@ function installExtensionGraphHook(
 		name: hookName,
 		setup(build) {
 			build.onLoad({ filter, namespace: "file" }, async args => {
-				const cached = modules.get(args.path);
+				const cleanPath = args.path.split("?")[0];
+				const cached = modules.get(cleanPath);
 				let raw: string;
 				if (cached !== undefined) {
 					// consume-once: preserves ?mtime edit-pickup for the re-imported entry
-					modules.delete(args.path);
+					modules.delete(cleanPath);
 					raw = cached;
 				} else {
-					raw = await Bun.file(args.path).text();
+					raw = await Bun.file(cleanPath).text();
 				}
-				return { contents: await rewriteLegacyExtensionSource(raw, args.path), loader: getLoader(args.path) };
+				return { contents: await rewriteLegacyExtensionSource(raw, cleanPath), loader: getLoader(cleanPath) };
 			});
 		},
 	});
@@ -1055,9 +1056,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<void> {
 	const deltaPaths: string[] = [];
 	for (const [modulePath, source] of modules) {
 		if (coveredPaths.has(modulePath)) {
-			if (servingSources.has(modulePath)) {
-				servingSources.set(modulePath, source);
-			}
+			servingSources.set(modulePath, source);
 			continue;
 		}
 		coveredPaths.add(modulePath);
@@ -1088,7 +1087,9 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
 	await ensureExtensionGraphHook(entryRealPath);
 	// `?mtime` busts Bun's module cache so repeat loads pick up edited source.
-	return import(`${toImportSpecifier(entryRealPath)}?mtime=${Date.now()}`);
+	// Bun does not cache-bust file:// URLs with query params, but absolute paths do.
+	const importSpecifier = isBundledVirtualSpecifier(entryRealPath) ? entryRealPath : entryRealPath.replace(/\\/g, "/");
+	return import(`${importSpecifier}?mtime=${Date.now()}`);
 }
 
 function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {

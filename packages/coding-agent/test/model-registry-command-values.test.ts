@@ -92,7 +92,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(counterFile, "0");
 
 		// Command increments a counter and then fails (exit 1).
-		const trackingCommand = `node -e "const fs=require('fs'); fs.writeFileSync('${counterFile.replace(/\\/g, "/")}', String(Number(fs.readFileSync('${counterFile.replace(/\\/g, "/")}', 'utf8')) + 1)); process.exit(1);"`;
+		const pathArg = counterFile.replace(/\\/g, "/");
+		const trackingCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+			`const fs=require('fs'); fs.writeFileSync(${JSON.stringify(pathArg)}, String(Number(fs.readFileSync(${JSON.stringify(pathArg)}, 'utf8')) + 1)); process.exit(1);`,
+		)}`;
 
 		fs.writeFileSync(
 			modelsPath,
@@ -147,7 +150,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 
 			// A node script that fails on the first run, and succeeds on the second run, writing the counter
-			const failThenSucceedCommand = `node -e "const fs=require('fs'); const cFile='${counterFile.replace(/\\/g, "/")}'; const sFile='${stateFile.replace(/\\/g, "/")}'; fs.writeFileSync(cFile, String(Number(fs.readFileSync(cFile, 'utf8')) + 1)); let s=''; try { s=fs.readFileSync(sFile, 'utf8').trim(); } catch (e) {} if (s==='success') { process.stdout.write('resolved-success-value'); process.exit(0); } else { fs.writeFileSync(sFile, 'success'); process.exit(1); }"`;
+			const cFileArg = counterFile.replace(/\\/g, "/");
+			const sFileArg = stateFile.replace(/\\/g, "/");
+			const failThenSucceedCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+				`const fs=require('fs'); const cFile=${JSON.stringify(cFileArg)}; const sFile=${JSON.stringify(sFileArg)}; fs.writeFileSync(cFile, String(Number(fs.readFileSync(cFile, 'utf8')) + 1)); let s=''; try { s=fs.readFileSync(sFile, 'utf8').trim(); } catch (e) {} if (s==='success') { process.stdout.write('resolved-success-value'); process.exit(0); } else { fs.writeFileSync(sFile, 'success'); process.exit(1); }`,
+			)}`;
 
 			fs.writeFileSync(
 				modelsPath,

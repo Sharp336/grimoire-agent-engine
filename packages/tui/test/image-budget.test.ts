@@ -178,6 +178,48 @@ describe("ImageBudget", () => {
 		expect(budget.acquireId("keyC")).toBe(id3);
 	});
 
+	it("evicts every key sharing a purged id in one pass, not just the first match", () => {
+		const budget = new ImageBudget(2, () => {});
+		const idA = budget.acquireId("keyA");
+
+		// Cycle the 24-bit id space (1..0xFFFFFF, skipping 0) all the way
+		// around so the next keyed acquire lands on the same id as keyA.
+		// After consuming idA, 0xFFFFFF-1 more unkeyed calls complete the
+		// cycle and #nextId returns to idA.
+		for (let i = 0; i < 0xffffff - 1; i++) budget.acquireId();
+		const idB = budget.acquireId("keyB");
+		expect(idB).toBe(idA); // two keys now map to the same id
+
+		const idC = budget.acquireId("keyC");
+		const idD = budget.acquireId("keyD");
+
+		// Observe three images — exceeds cap 2, schedules a reset.
+		budget.beginPass();
+		budget.observe(idA);
+		budget.observe(idC);
+		budget.observe(idD);
+		budget.endPass();
+
+		// Demotion frame: purges the oldest image (idA, which keyB also
+		// maps to) in one endPass.
+		budget.beginPass();
+		budget.observe(idA);
+		budget.observe(idC);
+		budget.observe(idD);
+		const reset = budget.endPass();
+		expect(reset).toBe(true);
+		expect([...budget.takePurgeIds()]).toEqual([idA]);
+
+		// Both keys mapped to the purged id must get fresh ids.  A
+		// first-match-only eviction would leave keyB stale, returning idA.
+		expect(budget.acquireId("keyA")).not.toBe(idA);
+		expect(budget.acquireId("keyB")).not.toBe(idA);
+
+		// Non-purged keys keep their ids.
+		expect(budget.acquireId("keyC")).toBe(idC);
+		expect(budget.acquireId("keyD")).toBe(idD);
+	});
+
 	it("clears all keys from the map on takeAllTransmittedIds", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id1 = budget.acquireId("keyA");

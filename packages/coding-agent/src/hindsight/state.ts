@@ -22,7 +22,7 @@ import { extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
-const RETENTION_TRANSCRIPT_CACHE_MAX_CHARS = 2_000_000;
+export const RETENTION_TRANSCRIPT_CACHE_MAX_CHARS = 2_000_000;
 
 interface PendingRetainItem {
 	content: string;

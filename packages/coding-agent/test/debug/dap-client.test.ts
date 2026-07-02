@@ -77,23 +77,82 @@ describe("DapClient sendRequest timeout and abort behavior", () => {
 		// The promise should be rejected
 		await expect(sendPromise).rejects.toThrow("DAP request test-command timed out after 10ms");
 
-		// Simulate a late response arriving via the stdout stream
-		const response = {
-			seq: 2,
+		// Set up an event listener to synchronize stream processing of the late response
+		const eventPromise = client.waitForEvent("sync-event");
+
+		// Send request 2
+		const sendPromise2 = client.sendRequest("test-command-2", {}, undefined, 100);
+
+		// Keep state in an object property so TypeScript does not narrow the
+		// union away after the intermediate `.toBe("pending")` assertions.
+		const promise2State = { value: "pending" as "pending" | "resolved" | "rejected" };
+		let promise2Result: unknown;
+		sendPromise2.then(
+			val => {
+				promise2State.value = "resolved";
+				promise2Result = val;
+			},
+			err => {
+				promise2State.value = "rejected";
+				promise2Result = err;
+			},
+		);
+
+		// Assert request 2 is pending initially
+		expect(promise2State.value).toBe("pending");
+
+		// Simulate a late response arriving via the stdout stream for request 1
+		const response1 = {
+			seq: 3,
 			type: "response",
-			request_seq: 1, // First requestSeq is 1
+			request_seq: 1, // First requestSeq was 1
 			success: true,
 			command: "test-command",
+			body: { ok: false },
+		};
+		const json1 = JSON.stringify(response1);
+		const payload1 = `Content-Length: ${Buffer.byteLength(json1, "utf-8")}\r\n\r\n${json1}`;
+
+		// Simulate a dummy event to serve as our observable processing signal
+		const syncEvent = {
+			seq: 4,
+			type: "event",
+			event: "sync-event",
+			body: {},
+		};
+		const jsonEvent = JSON.stringify(syncEvent);
+		const payloadEvent = `Content-Length: ${Buffer.byteLength(jsonEvent, "utf-8")}\r\n\r\n${jsonEvent}`;
+
+		// Enqueue late response followed by the sync event
+		streamController?.enqueue(new TextEncoder().encode(payload1 + payloadEvent));
+
+		// Await the sync event to guarantee the late response was processed by the reader loop
+		await eventPromise;
+
+		// Assert the late response did not resolve/corrupt request 2
+		expect(promise2State.value).toBe("pending");
+
+		// Now simulate the response for request 2
+		const response2 = {
+			seq: 5,
+			type: "response",
+			request_seq: 2, // Second requestSeq is 2
+			success: true,
+			command: "test-command-2",
 			body: { ok: true },
 		};
-		const json = JSON.stringify(response);
-		const payload = `Content-Length: ${Buffer.byteLength(json, "utf-8")}\r\n\r\n${json}`;
+		const json2 = JSON.stringify(response2);
+		const payload2 = `Content-Length: ${Buffer.byteLength(json2, "utf-8")}\r\n\r\n${json2}`;
 
-		streamController?.enqueue(new TextEncoder().encode(payload));
+		streamController?.enqueue(new TextEncoder().encode(payload2));
 
-		// Yield to the microtask queue so the message reader loop can process the enqueued chunk
-		await Promise.resolve();
-		await Promise.resolve();
+		// Await the promise to resolve properly and propagate state changes
+		const result2 = await sendPromise2;
+
+		// Assert that request 2 resolves with the correct payload and nothing throws
+		expect(promise2State.value).toBe("resolved");
+		expect(result2).toEqual({ ok: true });
+		expect(promise2Result).toEqual({ ok: true });
 
 		// Clean up
 		await client.dispose();
