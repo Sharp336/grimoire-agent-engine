@@ -279,6 +279,16 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 	return (await native.readImageFromClipboard()) ?? null;
 }
 
+async function spawnClipboardText(cmd: string[], timeoutMs: number): Promise<string> {
+	const proc = Bun.spawn(cmd, { stdout: "pipe", timeout: timeoutMs });
+	const stdout = await proc.stdout.text();
+	await proc.exited;
+	if (proc.exitCode !== 0) {
+		throw new Error(`Command failed with exit code ${proc.exitCode}: ${cmd.join(" ")}`);
+	}
+	return stdout;
+}
+
 /**
  * Read plain text from the system clipboard.
  */
@@ -286,13 +296,13 @@ export async function readTextFromClipboard(): Promise<string> {
 	try {
 		const p = process.platform;
 		if (p === "darwin") {
-			return execSync("pbpaste", { encoding: "utf8", timeout: 2000 }).toString();
+			return await spawnClipboardText(["pbpaste"], 2000);
 		}
 		if (p === "win32") {
 			return (await readTextViaPowerShell()) ?? "";
 		}
 		if (process.env.TERMUX_VERSION) {
-			return execSync("termux-clipboard-get", { encoding: "utf8", timeout: 2000 }).toString();
+			return await spawnClipboardText(["termux-clipboard-get"], 2000);
 		}
 		if (isWsl()) {
 			const text = await readTextViaPowerShell();
@@ -303,14 +313,14 @@ export async function readTextFromClipboard(): Promise<string> {
 		const hasX11Display = Boolean(process.env.DISPLAY);
 		if (hasWaylandDisplay) {
 			try {
-				return execSync("wl-paste --type text/plain --no-newline", { encoding: "utf8", timeout: 2000 }).toString();
+				return await spawnClipboardText(["wl-paste", "--type", "text/plain", "--no-newline"], 2000);
 			} catch {
 				if (hasX11Display) {
-					return execSync("xclip -selection clipboard -o", { encoding: "utf8", timeout: 2000 }).toString();
+					return await spawnClipboardText(["xclip", "-selection", "clipboard", "-o"], 2000);
 				}
 			}
 		} else if (hasX11Display) {
-			return execSync("xclip -selection clipboard -o", { encoding: "utf8", timeout: 2000 }).toString();
+			return await spawnClipboardText(["xclip", "-selection", "clipboard", "-o"], 2000);
 		}
 	} catch (error) {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });

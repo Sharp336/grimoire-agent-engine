@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Read clipboard text asynchronously to keep the TUI responsive during paste ([#4235](https://github.com/can1357/oh-my-pi/issues/4235))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
