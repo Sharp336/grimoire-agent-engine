@@ -44,6 +44,9 @@ export const commands: CommandEntry[] = [
 	{ name: "ttsr", load: () => import("./commands/ttsr").then(m => m.default) },
 	{ name: "worktree", load: () => import("./commands/worktree").then(m => m.default), aliases: ["wt"] },
 	{ name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
+	{ name: "task", load: () => import("./commands/task").then(m => m.default) },
+	{ name: "board", load: () => import("./commands/board").then(m => m.default) },
+	{ name: "taskbrowser", load: () => import("./commands/taskbrowser").then(m => m.default) },
 ];
 
 // Documented-looking plugin-management verbs that are NOT registered top-level

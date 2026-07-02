@@ -144,7 +144,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Discovery & MCP",
 		"Developer",
 	],
-	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
+	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills", "Task Manager"],
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
@@ -4194,6 +4194,17 @@ export const SETTINGS_SCHEMA = {
 				{ value: "3600", label: "1 hour" },
 				{ value: "-1", label: "Never" },
 			],
+		},
+	},
+
+	"tasks.taskManager": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Task Manager",
+			label: "Enable Task Manager",
+			description: "Enable omp task/board/taskbrowser commands for markdown-native project task management",
 		},
 	},
 

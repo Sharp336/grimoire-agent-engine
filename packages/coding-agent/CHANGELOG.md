@@ -1,7 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
 
+- Added Task Manager — a markdown-native project task manager with `omp task` (init, create, list, view, edit, archive, delete, search, milestone, doc, decision, overview), `omp board` (kanban table + export), and `omp taskbrowser` (web UI). Gated behind `tasks.taskManager` setting (disabled by default). Adds a `taskMgr` model role for AI-assisted overview and `--ai` acceptance criteria generation.
 ## [16.3.0] - 2026-07-02
 
 ### Added
