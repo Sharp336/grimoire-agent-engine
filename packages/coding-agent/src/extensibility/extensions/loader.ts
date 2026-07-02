@@ -521,8 +521,13 @@ export async function discoverExtensionPaths(
 		}
 	};
 
-	// 1. Discover extension modules via capability API (native .omp/.pi only)
-	const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, loadOptions);
+	// 1. Discover extension modules via capability API. Only the native provider's
+	// modules are used below, so restrict the load to it — this skips the foreign
+	// provider dir-walks (claude/codex/gemini/opencode) whose results we discard.
+	const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
+		...loadOptions,
+		providers: ["native"],
+	});
 	for (const ext of discovered.items) {
 		if (ext._source.provider !== "native") continue;
 		addPath(ext.path);

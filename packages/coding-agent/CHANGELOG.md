@@ -6,6 +6,7 @@
 
 - Reduced extension startup cost, especially on Windows, by reading each extension source-graph module from disk once per load instead of twice (the graph scan now feeds the load-time rewrite hook) ([#4196](https://github.com/can1357/oh-my-pi/issues/4196)).
 - Reduced repeated startup filesystem work (notably on Windows) by memoizing plugin enumeration (`getEnabledPlugins`) per working directory and caching legacy-pi bare-dependency, package-manifest, node-package-root, and realpath resolution, all invalidated through the existing plugin-cache reset path ([#4197](https://github.com/can1357/oh-my-pi/issues/4197)).
+- Reduced startup filesystem work by loading only the native provider during extension-module discovery (`discoverExtensionPaths`), instead of walking all providers and discarding non-native results ([#4198](https://github.com/can1357/oh-my-pi/issues/4198)).
 
 ## [16.3.0] - 2026-07-02
 
