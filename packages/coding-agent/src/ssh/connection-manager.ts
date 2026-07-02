@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
+import { $which, getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem, ptree } from "@oh-my-pi/pi-utils";
 import { buildSshTarget, sanitizeHostName } from "./utils";
 
 export interface SSHConnectionTarget {
@@ -42,6 +41,7 @@ const CONTROL_DIR = getSshControlDir();
 const CONTROL_PATH = path.join(CONTROL_DIR, "%C.sock");
 const HOST_INFO_DIR = getRemoteHostDir();
 const HOST_INFO_VERSION = 4;
+const SSH_SETUP_TIMEOUT_MS = 30_000;
 
 const activeHosts = new Map<string, SSHConnectionTarget>();
 const pendingConnections = new Map<string, Promise<void>>();
@@ -117,16 +117,26 @@ function buildCommonArgs(host: SSHConnectionTarget, options?: SSHArgsOptions): s
 }
 
 async function runSshSync(args: string[]): Promise<{ exitCode: number | null; stderr: string }> {
-	const result = await $`ssh ${args}`.quiet().nothrow();
-	return { exitCode: result.exitCode, stderr: result.stderr.toString().trim() };
+	const result = await ptree.exec(["ssh", ...args], {
+		timeout: SSH_SETUP_TIMEOUT_MS,
+		allowNonZero: true,
+		allowAbort: true,
+		stderr: "full",
+	});
+	return { exitCode: result.exitCode, stderr: result.stderr.trim() };
 }
 
 async function runSshCaptureSync(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-	const result = await $`ssh ${args}`.quiet().nothrow();
+	const result = await ptree.exec(["ssh", ...args], {
+		timeout: SSH_SETUP_TIMEOUT_MS,
+		allowNonZero: true,
+		allowAbort: true,
+		stderr: "full",
+	});
 	return {
 		exitCode: result.exitCode,
-		stdout: result.stdout.toString().trim(),
-		stderr: result.stderr.toString().trim(),
+		stdout: result.stdout.trim(),
+		stderr: result.stderr.trim(),
 	};
 }
 
