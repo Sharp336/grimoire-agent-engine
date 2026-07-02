@@ -4,6 +4,7 @@
  * focus failure keeps the hub open and surfaces the error as a notice.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -262,5 +263,241 @@ describe("Agent hub double-← gating", () => {
 
 		expect(shown()).toBeDefined();
 		shown()!.dispose();
+	});
+});
+
+describe("Agent hub showAgentHub requireContent deferred gating", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	function spyReaddir(expectedCount: number) {
+		const originalReaddir = fs.promises.readdir;
+		let readdirCount = 0;
+		const readdirResolved = Promise.withResolvers<void>();
+		const passthrough = async (...args: unknown[]) => {
+			try {
+				// Single-cast pass-through: readdir's overload set cannot be re-declared
+				// structurally by a variadic wrapper; the wrapper forwards verbatim.
+				return await (originalReaddir as (...inner: unknown[]) => Promise<unknown>)(...args);
+			} finally {
+				readdirCount++;
+				if (readdirCount === expectedCount) {
+					readdirResolved.resolve();
+				}
+			}
+		};
+		fs.promises.readdir = passthrough as typeof fs.promises.readdir;
+		return {
+			promise: readdirResolved.promise,
+			restore: () => {
+				fs.promises.readdir = originalReaddir;
+			},
+		};
+	}
+
+	it("empty live registry + a session file containing a persisted subagent => the hub MOUNTS after persistedSubagentsReady settles", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-deferred-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+		await Bun.write(workerSessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		let shown: AgentHubOverlayComponent | undefined;
+		const editor = {};
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					if (child !== editor) shown = child as AgentHubOverlayComponent;
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		const spy = spyReaddir(2);
+
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+		// Initially, it shouldn't be mounted
+		expect(shown).toBeUndefined();
+
+		// Wait for all readdirs to finish
+		await spy.promise;
+
+		// Flush microtasks to let the hub mount
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+
+		// Now it should be mounted!
+		expect(shown).toBeDefined();
+		expect(shown!.isEmpty).toBe(false);
+		shown!.dispose();
+		spy.restore();
+	});
+
+	it("empty live registry + no persisted subagents => the hub is disposed and never mounts", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-empty-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		let shown: AgentHubOverlayComponent | undefined;
+		const editor = {};
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					if (child !== editor) shown = child as AgentHubOverlayComponent;
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		// Intercept onChange to track disposal
+		let disposed = false;
+		const originalOnChange = agents.onChange.bind(agents);
+		agents.onChange = cb => {
+			const unsub = originalOnChange(cb);
+			return () => {
+				disposed = true;
+				unsub();
+			};
+		};
+
+		const spy = spyReaddir(1);
+
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+		expect(shown).toBeUndefined();
+
+		// Wait for readdir to finish
+		await spy.promise;
+
+		// Flush microtasks
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+
+		// It should never have mounted, and the hub should be disposed
+		expect(shown).toBeUndefined();
+		expect(disposed).toBe(true);
+		spy.restore();
+	});
+
+	it("a second showAgentHub call during the pending wait supersedes the first (stale hub never mounts)", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-supersede-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		await fs.promises.mkdir(path.join(tempDir.path(), "main"), { recursive: true });
+		await Bun.write(sessionFile, "");
+		await Bun.write(workerSessionFile, "");
+
+		const agents = new AgentRegistry();
+
+		const mountedHubs: AgentHubOverlayComponent[] = [];
+		const editor = {};
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor,
+			editorContainer: {
+				children: [editor] as unknown[],
+				clear() {
+					this.children = [];
+				},
+				addChild(child: unknown) {
+					this.children.push(child);
+					if (child !== editor) mountedHubs.push(child as AgentHubOverlayComponent);
+				},
+			},
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			hideThinkingBlock: false,
+		};
+		// Deliberate documented escape hatch: InteractiveModeContext is far wider
+		// than the slice showAgentHub touches; a structural fake cannot satisfy it.
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		let totalDisposedCount = 0;
+		const originalOnChange = agents.onChange.bind(agents);
+		agents.onChange = cb => {
+			const unsub = originalOnChange(cb);
+			return () => {
+				totalDisposedCount++;
+				unsub();
+			};
+		};
+
+		const spy = spyReaddir(4);
+
+		// Call 1
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+		// Call 2 immediately after
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+
+		// Wait for both to trigger register (since both will read directory and register)
+		await spy.promise;
+
+		// Flush microtasks
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+
+		// Only one hub should have mounted (the second one)
+		expect(mountedHubs.length).toBe(1);
+
+		// First hub must be disposed (totalDisposedCount should be 1, which was done synchronously in showAgentHub 2)
+		expect(totalDisposedCount).toBe(1);
+
+		// Dispose the second (active) hub to clean up
+		mountedHubs[0].dispose();
+		expect(totalDisposedCount).toBe(2);
+		spy.restore();
 	});
 });

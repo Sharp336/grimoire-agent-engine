@@ -82,6 +82,15 @@ import { buildCopyTargets } from "../utils/copy-targets";
 const MANUAL_LOGIN_TIP = "Tip: You can complete pairing with /login <redirect URL>.";
 
 export class SelectorController {
+	#agentHubRequestToken = 0;
+	#activeAgentHub: AgentHubOverlayComponent | undefined;
+
+	#supersedeAgentHub(): number {
+		this.#activeAgentHub?.dispose();
+		this.#activeAgentHub = undefined;
+		return ++this.#agentHubRequestToken;
+	}
+
 	constructor(private ctx: InteractiveModeContext) {}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
@@ -115,6 +124,7 @@ export class SelectorController {
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		this.#supersedeAgentHub();
 		const done = () => {
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
@@ -1377,12 +1387,12 @@ export class SelectorController {
 	}
 
 	showAgentHub(observers: SessionObserverRegistry, options?: { requireContent?: boolean }): void {
+		const requestToken = this.#supersedeAgentHub();
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),
 		];
 		let hub: AgentHubOverlayComponent | undefined;
-
 		// Render the hub inline in the editor slot — the same anchored region
 		// every other selector (model, session, tree, the `ask` tool) uses —
 		// rather than a floating overlay. A non-fullscreen overlay composited over
@@ -1393,7 +1403,10 @@ export class SelectorController {
 		// component it rides the normal append-only commit path: the transcript
 		// commits above it exactly once and the hub repaints in place.
 		const done = () => {
-			hub?.dispose();
+			const closingHub = hub;
+			closingHub?.dispose();
+			if (this.#activeAgentHub === closingHub) this.#activeAgentHub = undefined;
+			if (this.#agentHubRequestToken !== requestToken) return;
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(this.ctx.editor);
@@ -1417,8 +1430,14 @@ export class SelectorController {
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
+		this.#activeAgentHub = hub;
 
 		const mountHub = (readyHub: AgentHubOverlayComponent) => {
+			if (this.#agentHubRequestToken !== requestToken || this.#activeAgentHub !== readyHub) {
+				if (this.#activeAgentHub === readyHub) this.#activeAgentHub = undefined;
+				readyHub.dispose();
+				return;
+			}
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(readyHub);
 			this.ctx.ui.setFocus(readyHub);
@@ -1437,11 +1456,18 @@ export class SelectorController {
 			const expectedSlotOwner = this.ctx.editorContainer.children?.[0] ?? this.ctx.editor;
 			void hub.persistedSubagentsReady.then(() => {
 				if (!hub) return;
+				if (this.#agentHubRequestToken !== requestToken || this.#activeAgentHub !== hub) {
+					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
+					hub.dispose();
+					return;
+				}
 				if ((this.ctx.editorContainer.children?.[0] ?? this.ctx.editor) !== expectedSlotOwner) {
+					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
 					hub.dispose();
 					return;
 				}
 				if (hub.isEmpty) {
+					if (this.#activeAgentHub === hub) this.#activeAgentHub = undefined;
 					hub.dispose();
 					return;
 				}

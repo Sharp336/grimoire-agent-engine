@@ -938,6 +938,7 @@ const EXTENSION_GRAPH_SPECIFIER_REGEX = /(?:from\s+|import\s+|import\s*\(\s*)["'
 const hookedExtensionEntries = new Map<string, Set<string>>();
 const extensionGraphModuleSources = new Map<string, Map<string, string>>();
 const extensionGraphHookCounts = new Map<string, number>();
+let reloadToken = 0;
 
 /** Resolve symlinks in a path, falling back to the input if realpath fails. */
 async function realpathOrSelf(p: string): Promise<string> {
@@ -1011,7 +1012,7 @@ function installExtensionGraphHook(
 	modules: Map<string, string>,
 ): void {
 	const alternation = [...filterPaths].map(escapeRegExp).join("|");
-	const filter = new RegExp(`^(?:${alternation})(?:\\?.*)?$`);
+	const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 	const sequence = extensionGraphHookCounts.get(entryRealPath) ?? 0;
 	extensionGraphHookCounts.set(entryRealPath, sequence + 1);
 	const hookName =
@@ -1022,7 +1023,7 @@ function installExtensionGraphHook(
 		name: hookName,
 		setup(build) {
 			build.onLoad({ filter, namespace: "file" }, async args => {
-				const cleanPath = args.path.split("?")[0];
+				const cleanPath = args.path.replace(/\?mtime=\d+$/, "");
 				const cached = modules.get(cleanPath);
 				let raw: string;
 				if (cached !== undefined) {
@@ -1089,7 +1090,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	// `?mtime` busts Bun's module cache so repeat loads pick up edited source.
 	// Bun does not cache-bust file:// URLs with query params, but absolute paths do.
 	const importSpecifier = isBundledVirtualSpecifier(entryRealPath) ? entryRealPath : entryRealPath.replace(/\\/g, "/");
-	return import(`${importSpecifier}?mtime=${Date.now()}`);
+	return import(`${importSpecifier}?mtime=${++reloadToken}`);
 }
 
 function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {

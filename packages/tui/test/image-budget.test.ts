@@ -182,11 +182,7 @@ describe("ImageBudget", () => {
 		const budget = new ImageBudget(2, () => {});
 		const idA = budget.acquireId("keyA");
 
-		// Cycle the 24-bit id space (1..0xFFFFFF, skipping 0) all the way
-		// around so the next keyed acquire lands on the same id as keyA.
-		// After consuming idA, 0xFFFFFF-1 more unkeyed calls complete the
-		// cycle and #nextId returns to idA.
-		for (let i = 0; i < 0xffffff - 1; i++) budget.acquireId();
+		budget.__setNextIdForTests(idA);
 		const idB = budget.acquireId("keyB");
 		expect(idB).toBe(idA); // two keys now map to the same id
 
