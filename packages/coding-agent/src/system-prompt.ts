@@ -14,6 +14,10 @@ import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
+import {
+	type SkillDescriptionRedactionMode,
+	redactSkillDescriptions,
+} from "./system-prompt-redaction";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -480,6 +484,12 @@ export interface BuildSystemPromptOptions {
 	memoryRootEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced to the agent. */
 	model?: string;
+	/** Skill-description redaction mode for the rendered `<skills>` block. Default: "off" */
+	skillDescriptionRedactionMode?: SkillDescriptionRedactionMode;
+	/** Maximum context-window share used as the skill-description redaction budget. Default: 0.05 */
+	skillDescriptionRedactionMaxContextShare?: number;
+	/** Active model context window in tokens, when known. */
+	contextWindow?: number | null;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
 	/** Whether to include the workspace directory tree in the system prompt. Default: false */
@@ -527,6 +537,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
 		model,
+		skillDescriptionRedactionMode = "off",
+		skillDescriptionRedactionMaxContextShare = 0.05,
+		contextWindow,
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
@@ -718,6 +731,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
 	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const promptSkills = redactSkillDescriptions(filteredSkills, {
+		mode: skillDescriptionRedactionMode,
+		maxContextShare: skillDescriptionRedactionMaxContextShare,
+		contextWindow,
+	});
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -747,7 +765,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
-		skills: filteredSkills,
+		skills: promptSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,

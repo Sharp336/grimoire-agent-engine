@@ -250,4 +250,47 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
+
+	it("applies skill description redaction only when enabled", async () => {
+		const skill = {
+			name: "frontend-design",
+			description: "First sentence. Second sentence. Third sentence.",
+			filePath: path.join(tempDir, "SKILL.md"),
+			baseDir: tempDir,
+			source: "test",
+		};
+
+		// 1. Assert redaction is NOT applied when mode is "off" (explicitly enabled as off)
+		const { systemPrompt: systemPromptOff } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [skill],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			skillDescriptionRedactionMode: "off",
+			skillDescriptionRedactionMaxContextShare: 0.05,
+			contextWindow: 100,
+		});
+		const textOff = systemPromptOff.join("\n\n");
+		expect(textOff).toContain("- frontend-design: First sentence. Second sentence. Third sentence.");
+
+		// 2. Assert redaction IS applied when mode is "trim"
+		const { systemPrompt: systemPromptTrim } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [skill],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			skillDescriptionRedactionMode: "trim",
+			skillDescriptionRedactionMaxContextShare: 0.05,
+			contextWindow: 100, // per-skill budget = 100 * 0.05 * 4 = 20 chars. First sentence (15 chars) fits, second (32 chars total) doesn't.
+		});
+		const textTrim = systemPromptTrim.join("\n\n");
+		expect(textTrim).toContain("- frontend-design: First sentence.");
+		expect(textTrim).not.toContain("Second sentence.");
+	});
 });

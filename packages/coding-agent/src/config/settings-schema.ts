@@ -4211,6 +4211,49 @@ export const SETTINGS_SCHEMA = {
 	// Skills
 	"skills.enabled": { type: "boolean", default: true },
 
+	"skills.redaction.mode": {
+		type: "enum",
+		values: ["off", "trim", "cap"] as const,
+		default: "off",
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Description Redaction",
+			description: "Opt-in shortening for skill descriptions in the system prompt. Names are never redacted.",
+			options: [
+				{ value: "off", label: "Off", description: "Render full skill descriptions. Default." },
+				{
+					value: "trim",
+					label: "Trim",
+					description: "Keep complete leading sentences within each skill's share.",
+				},
+				{
+					value: "cap",
+					label: "Cap",
+					description: "Trim the longest descriptions until the skills block fits the context share.",
+				},
+			],
+		},
+	},
+
+	"skills.redaction.maxContextShare": {
+		type: "number",
+		default: 0.05,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Redaction Context Share",
+			description: "Maximum share of the model context window used as the skill-description redaction budget.",
+			options: [
+				{ value: "0.01", label: "1%" },
+				{ value: "0.025", label: "2.5%" },
+				{ value: "0.05", label: "5%", description: "Default" },
+				{ value: "0.1", label: "10%" },
+				{ value: "0.2", label: "20%" },
+			],
+		},
+	},
+
 	"skills.enableSkillCommands": {
 		type: "boolean",
 		default: true,
