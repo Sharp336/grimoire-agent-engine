@@ -3,6 +3,7 @@ import { isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import { isCompiledBinary, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 import { BUNDLED_PI_REGISTRY_KEYS } from "./legacy-pi-bundled-keys";
 
 const IS_COMPILED_BINARY = isCompiledBinary();
@@ -202,6 +203,26 @@ const SOURCE_MODULE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", 
 const SUPPORTED_PACKAGE_IMPORT_CONDITIONS = new Set(["bun", "node", "import", "default"]);
 const packageRootCache = new Map<string, string | null>();
 const packageImportsCache = new Map<string, Record<string, unknown> | null>();
+const bareDependencyResolutionCache = new Map<string, string | null>();
+const packageManifestCache = new Map<string, Record<string, unknown> | null>();
+const nodePackageRootCache = new Map<string, string | null>();
+const realpathCache = new Map<string, string>();
+
+// The four caches above (bare-dep resolution, package manifest, node-package
+// root, realpath) are process-global and keyed by absolute path/specifier. A
+// plugin install/upgrade/reload can rewrite a `node_modules` junction or a
+// symlink target in-process, which would otherwise make these caches serve a
+// stale pre-upgrade path. Self-registered on the plugin-cache invalidation
+// choke point (fired by clearClaudePluginRootsCache) from this cache-owning
+// module so the hook exists whenever the caches can populate, regardless of
+// which loader imported us — a reloaded extension re-resolves fresh.
+function clearLegacyPiCompatCaches(): void {
+	bareDependencyResolutionCache.clear();
+	packageManifestCache.clear();
+	nodePackageRootCache.clear();
+	realpathCache.clear();
+}
+registerPluginCacheInvalidator(clearLegacyPiCompatCaches);
 const PACKAGE_IMPORT_EXCLUDED = Symbol("packageImportExcluded");
 
 // Extensions that imported TypeBox directly used to resolve against a real
@@ -730,14 +751,21 @@ function splitBarePackageSpecifier(specifier: string): BarePackageSpecifier | nu
 }
 
 async function findNodePackageRoot(packageName: string, importerPath: string): Promise<string | null> {
+	const cacheKey = `${path.dirname(importerPath)}\u0000${packageName}`;
+	const cached = nodePackageRootCache.get(cacheKey);
+	if (cached !== undefined) {
+		return cached;
+	}
 	let dir = path.dirname(importerPath);
 	while (true) {
 		const candidate = path.join(dir, "node_modules", packageName);
 		if (await pathExists(path.join(candidate, "package.json"))) {
+			nodePackageRootCache.set(cacheKey, candidate);
 			return candidate;
 		}
 		const parent = path.dirname(dir);
 		if (parent === dir) {
+			nodePackageRootCache.set(cacheKey, null);
 			return null;
 		}
 		dir = parent;
@@ -745,12 +773,19 @@ async function findNodePackageRoot(packageName: string, importerPath: string): P
 }
 
 async function readPackageManifest(packageRoot: string): Promise<Record<string, unknown> | null> {
-	try {
-		const manifest = await Bun.file(path.join(packageRoot, "package.json")).json();
-		return isRecord(manifest) ? manifest : null;
-	} catch {
-		return null;
+	const cached = packageManifestCache.get(packageRoot);
+	if (cached !== undefined) {
+		return cached;
 	}
+	let manifest: Record<string, unknown> | null = null;
+	try {
+		const parsed = await Bun.file(path.join(packageRoot, "package.json")).json();
+		manifest = isRecord(parsed) ? parsed : null;
+	} catch {
+		manifest = null;
+	}
+	packageManifestCache.set(packageRoot, manifest);
+	return manifest;
 }
 
 async function resolvePackageExportTarget(
@@ -841,15 +876,26 @@ async function resolveExtensionBareDependency(specifier: string, importerPath: s
 	if (!isBareExtensionDependencySpecifier(specifier)) {
 		return null;
 	}
+	const dir = path.dirname(importerPath);
+	const cacheKey = `${dir}\u0000${specifier}`;
+	const cached = bareDependencyResolutionCache.get(cacheKey);
+	if (cached !== undefined) {
+		return cached;
+	}
+	let result: string | null = null;
 	try {
-		const resolved = Bun.resolveSync(specifier, path.dirname(importerPath));
+		const resolved = Bun.resolveSync(specifier, dir);
 		if (resolved && resolved !== specifier && !resolved.startsWith("node:") && !resolved.startsWith("bun:")) {
-			return resolved;
+			result = resolved;
 		}
 	} catch {
 		// Compiled binaries do not reliably resolve runtime extension node_modules.
 	}
-	return resolveNodePackageDependency(specifier, importerPath);
+	if (result === null) {
+		result = await resolveNodePackageDependency(specifier, importerPath);
+	}
+	bareDependencyResolutionCache.set(cacheKey, result);
+	return result;
 }
 
 async function rewriteExtensionBareImports(source: string, importerPath: string): Promise<string> {
@@ -892,8 +938,14 @@ const hookedExtensionEntries = new Set<string>();
 
 /** Resolve symlinks in a path, falling back to the input if realpath fails. */
 async function realpathOrSelf(p: string): Promise<string> {
+	const cached = realpathCache.get(p);
+	if (cached !== undefined) {
+		return cached;
+	}
 	try {
-		return await fs.promises.realpath(p);
+		const resolved = await fs.promises.realpath(p);
+		realpathCache.set(p, resolved);
+		return resolved;
 	} catch {
 		return p;
 	}

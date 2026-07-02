@@ -1007,8 +1007,24 @@ export async function listClaudePluginRoots(
 /**
  * Clear the plugin roots cache (useful for testing or when plugins change).
  */
+// Cache-invalidation subscribers registered by dependent modules (e.g. the
+// plugin loader's enabled-plugins memo) so they clear on the same choke point
+// that clears the plugin roots cache — without importing back into this module
+// (keeps the loader→helpers dependency one-directional).
+const pluginCacheInvalidators = new Set<() => void>();
+
+/**
+ * Register a callback invoked whenever the plugin roots cache is cleared
+ * (project switch, plugin install/enable/disable). Returns an unsubscribe fn.
+ */
+export function registerPluginCacheInvalidator(fn: () => void): () => void {
+	pluginCacheInvalidators.add(fn);
+	return () => pluginCacheInvalidators.delete(fn);
+}
+
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
+	for (const invalidate of pluginCacheInvalidators) invalidate();
 	preloadedPluginRoots = [...injectedPluginDirRoots];
 	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
 	if (lastPreloadHome) {

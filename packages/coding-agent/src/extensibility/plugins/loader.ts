@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getPluginsDir, getPluginsLockfile, isEnoent } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
-import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
@@ -161,8 +161,37 @@ async function collectPluginsAtRoot(
  * need to enumerate plugins relative to a non-default home (tests with a
  * tempdir, discovery loaders threaded with `LoadContext.home`).
  */
-export async function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Promise<ScopedInstalledPlugin[]> {
+// Per-(cwd,home) memo for the enabled-plugins enumeration. A single discovery
+// pass calls getEnabledPlugins up to ~11 times (7 omp-plugin capability loaders
+// via listOmpExtensionRoots + getAllPlugin{Tool,Hook,Command,Extension}Paths),
+// each otherwise re-reading user+project package.json/lockfiles and every
+// plugin manifest from disk — a syscall storm that dominates Windows startup.
+// Inputs are (cwd, home, on-disk plugin state); every plugin-state mutation
+// routes through clearPluginRootsAndCaches -> clearClaudePluginRootsCache, which
+// fires the registered invalidator below, mirroring pluginRootsCache's lifecycle.
+const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
+registerPluginCacheInvalidator(() => enabledPluginsCache.clear());
+
+export function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Promise<ScopedInstalledPlugin[]> {
 	const { home } = opts;
+	const cacheKey = `${home ?? ""}\u0000${cwd}`;
+	const cached = enabledPluginsCache.get(cacheKey);
+	if (cached) return cached;
+	// Cache the promise (not the resolved value) so concurrent callers in one
+	// pass share a single enumeration. On rejection, evict so a transient
+	// failure is retried — but only if this exact promise is still the cached
+	// entry, so a clear()+repopulate that raced ahead of us is not clobbered.
+	const pending = computeEnabledPlugins(cwd, home).catch((err: unknown) => {
+		if (enabledPluginsCache.get(cacheKey) === pending) {
+			enabledPluginsCache.delete(cacheKey);
+		}
+		throw err;
+	});
+	enabledPluginsCache.set(cacheKey, pending);
+	return pending;
+}
+
+async function computeEnabledPlugins(cwd: string, home: string | undefined): Promise<ScopedInstalledPlugin[]> {
 	const projectOverrides = await loadProjectOverrides(cwd);
 
 	const userRoot = getPluginsDir(home);
