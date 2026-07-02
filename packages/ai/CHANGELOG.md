@@ -6,6 +6,11 @@
 
 - Removed automated injection of reasoning suppression prompts in OpenAI responses
 
+### Fixed
+
+- Cap Devin Connect frame payloads at 16 MiB to prevent unbounded buffer growth on corrupt frame headers ([#4228](https://github.com/can1357/oh-my-pi/issues/4228))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added
