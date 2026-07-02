@@ -80,11 +80,45 @@ describe("BashTool ACP terminal routing", () => {
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("releases the client terminal when final output retrieval fails", async () => {
+	it("does not allocate a client terminal when the signal is already aborted before createTerminal", async () => {
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-should-not-create",
+			waitForExit: async () => ({ exitCode: 0, signal: null }),
+			currentOutput: async () => ({ output: "should not be reached", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+		const createSpy = spyOn(bridge, "createTerminal");
+
+		const controller = new AbortController();
+		controller.abort();
+
+		const tool = new BashTool(makeSession(bridge));
+
+		await expect(tool.execute("call-pre-abort", { command: "echo hi" }, controller.signal)).rejects.toThrow(
+			/Command aborted/,
+		);
+
+		expect(createSpy).toHaveBeenCalledTimes(0);
+	});
+
+	it("resolves using the last polled output when final output retrieval fails", async () => {
+		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		let currentOutputCalls = 0;
 		const handle: ClientBridgeTerminalHandle = {
 			terminalId: "term-output-failure",
-			waitForExit: async () => ({ exitCode: 0, signal: null }),
+			waitForExit: async () => pendingExit.promise,
 			currentOutput: async () => {
+				currentOutputCalls++;
+				if (currentOutputCalls === 1) {
+					// first poll loop iteration
+					setTimeout(() => pendingExit.resolve({ exitCode: 0, signal: null }), 0);
+					return { output: "polled text", truncated: false };
+				}
 				throw new Error("client output unavailable");
 			},
 			kill: async () => {},
@@ -98,9 +132,11 @@ describe("BashTool ACP terminal routing", () => {
 
 		const tool = new BashTool(makeSession(bridge));
 
-		await expect(tool.execute("call-output-failure", { command: "echo hi" })).rejects.toThrow(
-			/client output unavailable/,
-		);
+		const result = await tool.execute("call-output-failure", { command: "echo hi" });
+
+		const text = result.content.find(c => c.type === "text");
+		expect(text?.text).toContain("polled text"); // proves fallback
+		expect(result.isError).toBeUndefined();
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
 
@@ -128,12 +164,18 @@ describe("BashTool ACP terminal routing", () => {
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("kills and releases the client terminal when the command times out", async () => {
+	it("kills and releases the client terminal when the caller aborts", async () => {
 		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		const controller = new AbortController();
+
 		const handle: ClientBridgeTerminalHandle = {
-			terminalId: "term-timeout",
+			terminalId: "term-abort",
 			waitForExit: async () => pendingExit.promise,
-			currentOutput: async () => ({ output: "", truncated: false }),
+			currentOutput: async () => {
+				// Trigger abort during the poll loop, ensuring handle is assigned
+				controller.abort();
+				return { output: "partial", truncated: false };
+			},
 			kill: async () => {},
 			release: async () => {},
 		};
@@ -144,16 +186,64 @@ describe("BashTool ACP terminal routing", () => {
 		const killSpy = spyOn(handle, "kill");
 		const releaseSpy = spyOn(handle, "release");
 
-		spyOn(Bun, "sleep").mockImplementation(async () => {});
-
 		const tool = new BashTool(makeSession(bridge));
 
-		await expect(tool.execute("call-timeout", { command: "sleep 60", timeout: 1 })).rejects.toThrow(
-			/Command timed out after 1 seconds/,
-		);
+		const executePromise = tool.execute("call-abort", { command: "sleep 60" }, controller.signal);
+
+		await expect(executePromise).rejects.toThrow(/Command aborted/);
+		expect(killSpy).toHaveBeenCalledTimes(1);
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("kills and releases the client terminal when the command times out", async () => {
+		const sleepSpy = spyOn(Bun, "sleep");
+		let resolveTimeout!: () => void;
+		const fakeTimeoutPromise = new Promise<void>(resolve => {
+			resolveTimeout = resolve;
+		});
+
+		sleepSpy.mockImplementation(ms => {
+			if (ms === 1000 && sleepSpy.mock.calls.length === 1) {
+				return fakeTimeoutPromise;
+			}
+			return Promise.resolve();
+		});
+
+		const pendingExit = Promise.withResolvers<{ exitCode: number | null; signal: string | null }>();
+		let killCalls = 0;
+		let currentOutputAfterKill = 0;
+
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-timeout",
+			waitForExit: async () => pendingExit.promise,
+			currentOutput: async () => {
+				// Trigger the timeout during the first poll
+				if (killCalls === 0) {
+					resolveTimeout();
+				} else {
+					currentOutputAfterKill++;
+				}
+				return { output: "timeout output", truncated: false };
+			},
+			kill: async () => {
+				killCalls++;
+			},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+		const killSpy = spyOn(handle, "kill");
+		const releaseSpy = spyOn(handle, "release");
+
+		const tool = new BashTool(makeSession(bridge));
+		const executePromise = tool.execute("call-timeout", { command: "sleep 60", timeout: 1 });
+
+		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
 
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
-		pendingExit.resolve({ exitCode: null, signal: "TERM" });
+		expect(currentOutputAfterKill).toBeGreaterThan(0);
 	});
 });

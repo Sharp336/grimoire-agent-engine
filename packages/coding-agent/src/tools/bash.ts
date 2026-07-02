@@ -16,7 +16,11 @@ import { InternalUrlRouter } from "../internal-urls";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
-import type { ClientBridgeTerminalExitStatus, ClientBridgeTerminalOutput } from "../session/client-bridge";
+import type {
+	ClientBridgeTerminalExitStatus,
+	ClientBridgeTerminalHandle,
+	ClientBridgeTerminalOutput,
+} from "../session/client-bridge";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
@@ -841,40 +845,48 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI).
 		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+			// Invariant (ACP terminal bridge): createTerminal has no signal in its
+			// contract; allocation cannot be cancelled retroactively. Guard before
+			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
+			// we need explicit kill-before-read ordering and distinct abort vs
+			// timeout result shapes. Per-route race retained for testability.
+			if (signal?.aborted) {
+				throw new ToolAbortError("Command aborted");
+			}
+
 			const bridgeWallTimeStart = performance.now();
-			const handle = await clientBridge.createTerminal({
-				command,
-				cwd: commandCwd,
-				env: resolvedEnv
-					? Object.entries(resolvedEnv).map(([name, value]) => ({ name, value: value as string }))
-					: undefined,
-				outputByteLimit: DEFAULT_MAX_BYTES,
-			});
-
-			// Emit partial update so the editor can embed the live terminal card.
-			onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
-
-			const exitPromise = handle.waitForExit();
-			let exitStatus!: ClientBridgeTerminalExitStatus;
-
-			type BridgeRaceResult =
-				| { kind: "exit"; status: ClientBridgeTerminalExitStatus }
-				| { kind: "poll" }
-				| { kind: "timeout" }
-				| { kind: "aborted" };
-
-			// Set up abort listener before entering the poll loop. The listener
-			// kicks off `handle.kill()` synchronously so a `session/cancel`
-			// arriving mid-poll terminates the remote command immediately,
-			// instead of waiting for the next `currentOutput()` to return.
+			const killGraceMs = 1000;
+			const outputSnapshotGraceMs = 2000;
+			const timeoutPromise = Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const }));
 			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
+			let handle: ClientBridgeTerminalHandle | undefined;
 			let killStarted = false;
 			const fireKill = (): Promise<void> => {
 				if (killStarted) return Promise.resolve();
+				const currentHandle = handle;
+				if (!currentHandle) return Promise.resolve();
 				killStarted = true;
-				return handle.kill().catch((error: unknown) => {
-					logger.warn("ACP terminal kill failed", { terminalId: handle.terminalId, error });
+				return currentHandle.kill().catch((error: unknown) => {
+					logger.warn("ACP terminal kill failed", { terminalId: currentHandle.terminalId, error });
 				});
+			};
+			const cleanupLateCreate = (createP: Promise<ClientBridgeTerminalHandle>): void => {
+				void createP
+					.then(async lateHandle => {
+						try {
+							await lateHandle.kill();
+						} catch (error) {
+							logger.warn("ACP terminal kill failed", { terminalId: lateHandle.terminalId, error });
+						}
+						try {
+							await lateHandle.release();
+						} catch (error) {
+							logger.warn("ACP terminal release failed", { terminalId: lateHandle.terminalId, error });
+						}
+					})
+					.catch((error: unknown) => {
+						logger.warn("ACP terminal create failed after cancellation", { error });
+					});
 			};
 			const onAbortSignal = () => {
 				resolveAborted();
@@ -883,92 +895,150 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			signal?.addEventListener("abort", onAbortSignal, { once: true });
 
 			try {
-				try {
-					if (signal?.aborted) {
-						await fireKill();
+				const createP = clientBridge.createTerminal({
+					command,
+					cwd: commandCwd,
+					env: resolvedEnv
+						? Object.entries(resolvedEnv).map(([name, value]) => ({ name, value: value as string }))
+						: undefined,
+					outputByteLimit: DEFAULT_MAX_BYTES,
+				});
+				const createRaced = await Promise.race([
+					createP.then(createdHandle => ({ kind: "created" as const, handle: createdHandle })),
+					timeoutPromise,
+					abortedP.then(() => ({ kind: "aborted" as const })),
+				]);
+				if (createRaced.kind === "aborted" || signal?.aborted) {
+					cleanupLateCreate(createP);
+					throw new ToolAbortError("Command aborted");
+				}
+				if (createRaced.kind === "timeout") {
+					cleanupLateCreate(createP);
+					const timedOutResult: BashInteractiveResult = {
+						output: "",
+						exitCode: undefined,
+						cancelled: false,
+						timedOut: true,
+						truncated: false,
+						totalLines: 0,
+						totalBytes: 0,
+						outputLines: 0,
+						outputBytes: 0,
+					};
+					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+						requestedTimeoutSec,
+						notices: pendingNotices,
+						wallTimeMs: performance.now() - bridgeWallTimeStart,
+					});
+				}
+
+				handle = createRaced.handle;
+
+				// Emit partial update so the editor can embed the live terminal card.
+				onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+
+				const exitPromise = handle.waitForExit();
+				let exitStatus!: ClientBridgeTerminalExitStatus;
+
+				type BridgeRaceResult =
+					| { kind: "exit"; status: ClientBridgeTerminalExitStatus }
+					| { kind: "poll" }
+					| { kind: "timeout" }
+					| { kind: "aborted" };
+
+				const exitRacer = exitPromise.then(status => ({ kind: "exit" as const, status }));
+				const abortRacer = abortedP.then(() => ({ kind: "aborted" as const }));
+				const abortPollRacer = abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined);
+				let lastPolledOutput: ClientBridgeTerminalOutput = { output: "", truncated: false };
+
+				// Poll until the process exits, times out, or the caller aborts.
+				for (;;) {
+					const racers: Array<Promise<BridgeRaceResult>> = [
+						exitRacer,
+						timeoutPromise,
+						Bun.sleep(250).then(() => ({ kind: "poll" as const })),
+					];
+					if (signal) {
+						racers.push(abortRacer);
+					}
+					const raced = await Promise.race(racers);
+
+					if (raced.kind === "aborted" || signal?.aborted) {
+						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
 						throw new ToolAbortError("Command aborted");
 					}
 
-					const timeoutPromise = Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const }));
-					// Poll until the process exits, times out, or the caller aborts.
-					for (;;) {
-						const racers: Array<Promise<BridgeRaceResult>> = [
-							exitPromise.then(s => ({ kind: "exit" as const, status: s })),
-							timeoutPromise,
-							Bun.sleep(250).then(() => ({ kind: "poll" as const })),
-						];
-						if (signal) {
-							racers.push(abortedP.then(() => ({ kind: "aborted" as const })));
-						}
-						const raced = await Promise.race(racers);
-
-						if (raced.kind === "aborted" || signal?.aborted) {
-							await fireKill();
-							throw new ToolAbortError("Command aborted");
-						}
-
-						if (raced.kind === "timeout") {
-							// Kill before reading final output so a slow `terminal/output`
-							// RPC cannot let a timed-out command keep running past the
-							// enforced timeout. The handle stays valid post-kill so the
-							// buffered output is still readable.
-							await fireKill();
-							let current = { output: "", truncated: false };
-							try {
-								current = await handle.currentOutput();
-							} catch (error) {
-								logger.warn("ACP terminal final output read failed", {
-									terminalId: handle.terminalId,
-									error,
-								});
-							}
-							const timedOutResult: BashInteractiveResult = {
-								output: current.output,
-								exitCode: undefined,
-								cancelled: false,
-								timedOut: true,
-								truncated: current.truncated,
-								totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-								totalBytes: current.output.length,
-								outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-								outputBytes: current.output.length,
-							};
-							return this.#buildCompletedResult(timedOutResult, timeoutSec, {
-								requestedTimeoutSec,
-								notices: pendingNotices,
+					if (raced.kind === "timeout") {
+						// Kill before reading final output so a slow `terminal/output`
+						// RPC cannot let a timed-out command keep running past the
+						// enforced timeout. The handle stays valid post-kill so the
+						// buffered output is still readable.
+						await Promise.race([fireKill(), Bun.sleep(killGraceMs)]);
+						let current = lastPolledOutput;
+						try {
+							current = await Promise.race([
+								handle.currentOutput(),
+								Bun.sleep(outputSnapshotGraceMs).then(() => lastPolledOutput),
+							]);
+						} catch (error) {
+							logger.warn("ACP terminal final output read failed", {
 								terminalId: handle.terminalId,
-								wallTimeMs: performance.now() - bridgeWallTimeStart,
+								error,
 							});
 						}
-
-						if (raced.kind === "exit") {
-							exitStatus = raced.status;
-							break;
-						}
-
-						// Poll tick: push current output so agent-loop transcript stays consistent.
-						// Race the read against abort so a stuck `terminal/output` RPC does not
-						// delay cancellation.
-						const pollOutput = await Promise.race([
-							handle.currentOutput(),
-							abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined),
-						]);
-						if (pollOutput === undefined) {
-							// Abort fired during the poll-tick read; let the next loop iteration
-							// observe `signal?.aborted` and exit via the abort branch.
-							continue;
-						}
-						onUpdate?.({
-							content: [{ type: "text", text: pollOutput.output }],
-							details: { terminalId: handle.terminalId },
+						const timedOutResult: BashInteractiveResult = {
+							output: current.output,
+							exitCode: undefined,
+							cancelled: false,
+							timedOut: true,
+							truncated: current.truncated,
+							totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
+							totalBytes: current.output.length,
+							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
+							outputBytes: current.output.length,
+						};
+						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+							requestedTimeoutSec,
+							notices: pendingNotices,
+							terminalId: handle.terminalId,
+							wallTimeMs: performance.now() - bridgeWallTimeStart,
 						});
 					}
-				} finally {
-					signal?.removeEventListener("abort", onAbortSignal);
+
+					if (raced.kind === "exit") {
+						exitStatus = raced.status;
+						break;
+					}
+
+					// Poll tick: push current output so agent-loop transcript stays consistent.
+					// Race the read against abort so a stuck `terminal/output` RPC does not
+					// delay cancellation.
+					const pollOutput = await Promise.race([handle.currentOutput(), abortPollRacer]);
+					if (pollOutput === undefined) {
+						// Abort fired during the poll-tick read; let the next loop iteration
+						// observe `signal?.aborted` and exit via the abort branch.
+						continue;
+					}
+					lastPolledOutput = pollOutput;
+					onUpdate?.({
+						content: [{ type: "text", text: pollOutput.output }],
+						details: { terminalId: handle.terminalId },
+					});
 				}
 
 				// Fetch final output; the terminal is released in the outer finally.
-				const finalOutput = await handle.currentOutput();
+				let finalOutput = lastPolledOutput;
+				try {
+					finalOutput = await Promise.race([
+						handle.currentOutput(),
+						Bun.sleep(outputSnapshotGraceMs).then(() => lastPolledOutput),
+					]);
+				} catch (error) {
+					logger.warn("ACP terminal final output read failed", {
+						terminalId: handle.terminalId,
+						error,
+					});
+				}
 
 				// Map exit status: null exitCode with a signal → treat as signal kill (137).
 				const rawExitCode = exitStatus.exitCode;
@@ -1001,10 +1071,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
 			} finally {
-				try {
-					await handle.release();
-				} catch (error) {
-					logger.warn("ACP terminal release failed", { terminalId: handle.terminalId, error });
+				signal?.removeEventListener("abort", onAbortSignal);
+				if (handle) {
+					try {
+						await handle.release();
+					} catch (error) {
+						logger.warn("ACP terminal release failed", { terminalId: handle.terminalId, error });
+					}
 				}
 			}
 		}
