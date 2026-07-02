@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Drain plugin install/uninstall and registry-build subprocess pipes concurrently with exit to prevent pipe-buffer deadlocks ([#4230](https://github.com/can1357/oh-my-pi/issues/4230))
+
+
 ## [16.3.0] - 2026-07-02
 
 ### Added

@@ -332,10 +332,13 @@ async function formatInPlace(targets: readonly string[]): Promise<void> {
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const exit = await proc.exited;
+	// Start draining both pipes before the process exits to avoid a deadlock
+	// where Biome blocks writing to a full pipe while we wait for it to exit.
+	const stdout = new Response(proc.stdout).text();
+	const stderr = new Response(proc.stderr).text();
+	const [exit, , stderrText] = await Promise.all([proc.exited, stdout, stderr]);
 	if (exit !== 0) {
-		const stderr = await new Response(proc.stderr).text();
-		throw new Error(`biome check --write failed (exit ${exit}): ${stderr}`);
+		throw new Error(`biome check --write failed (exit ${exit}): ${stderrText}`);
 	}
 }
 
