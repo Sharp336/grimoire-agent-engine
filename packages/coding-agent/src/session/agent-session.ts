@@ -6378,7 +6378,17 @@ export class AgentSession {
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
+		// Capture the tool signature before the async build so we can detect if
+		// a concurrent tool-set change (#applyActiveToolsByName) ran a competing
+		// rebuild while we were awaiting #rebuildSystemPrompt. If the signature
+		// changed, our result is stale — the tool rebuild already applied the
+		// correct prompt and we must not overwrite it.
+		const signatureBefore = this.#lastAppliedToolSignature;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
+		// A concurrent #applyActiveToolsByName may have changed the tool set and
+		// rebuilt the prompt while we were awaiting. If so, discard our stale
+		// result — the tool rebuild's prompt is the correct one.
+		if (this.#lastAppliedToolSignature !== signatureBefore) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		this.agent.setSystemPrompt(this.#baseSystemPrompt);

@@ -172,3 +172,81 @@ Loaded via symbolic link.
 		expect(session.skillWarnings).toEqual([]);
 	});
 });
+
+describe("createAgentSession systemPrompt override does not seed promptSkills", () => {
+	let tempDir: string;
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+	let sharedDir: string;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-prompt-override-shared-"));
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		removeSyncWithRetries(sharedDir);
+	});
+
+	beforeEach(() => {
+		tempDir = path.join(os.tmpdir(), `pi-sdk-override-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
+		fs.mkdirSync(skillsDir, { recursive: true });
+		originalHome = process.env.HOME;
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
+		process.env.HOME = tempHomeDir;
+		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
+		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillsDir, "SKILL.md"),
+			`---
+name: test-skill
+description: A test skill for SDK tests.
+---
+
+# Test Skill
+
+This is a test skill.
+`,
+		);
+	});
+
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+
+	it("returns empty promptSkills when a full systemPrompt override is provided", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: "You are a custom agent. Do not use the default prompt.",
+		});
+
+		// session.skills should still contain discovered skills
+		expect(session.skills.length).toBeGreaterThan(0);
+		// But promptSkills should be empty — the full override replaces the
+		// default <skills> block, so /context accounting must not count
+		// skills the provider never receives.
+		expect(session.promptSkills).toEqual([]);
+	});
+
+	it("returns non-empty promptSkills when no systemPrompt override is provided", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+		});
+
+		// Without a full override, the default <skills> block is used and
+		// promptSkills should reflect the discovered skills.
+		expect(session.skills.length).toBeGreaterThan(0);
+		expect(session.promptSkills.length).toBeGreaterThan(0);
+	});
+});

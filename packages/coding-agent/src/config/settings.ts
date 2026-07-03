@@ -243,7 +243,12 @@ export class Settings {
 	 *  skips hooks whose value is unchanged since the last fire so that
 	 *  clone/replay (cloneForCwd, reloadForCwd) does not broadcast spurious
 	 *  change signals — e.g. redaction prompt refreshes — when the effective
-	 *  value is identical. */
+	 *  value is identical.
+	 *
+	 *  Cwd-dependent hooks (see {@link CWD_DEPENDENT_HOOKS}) are exempt: they
+	 *  always fire on clone/reload even when the configured value is unchanged,
+	 *  because their effective state depends on the working directory — e.g.
+	 *  Hindsight bank scoping derives the bank from the project path. */
 	#lastHookedValues = new Map<SettingPath, unknown>();
 
 	/** Paths modified during this session (for partial save) */
@@ -1360,7 +1365,10 @@ export class Settings {
 			// Skip when the effective value is unchanged since the last fire.
 			// This prevents spurious change broadcasts (e.g. redaction prompt
 			// refreshes) during clone/replay when values are identical.
-			if (last !== undefined && Object.is(value, last)) continue;
+			// Cwd-dependent hooks are exempt — they must always fire on
+			// clone/reload because the cwd itself is part of their effective
+			// state (e.g. Hindsight per-project bank scoping).
+			if (last !== undefined && Object.is(value, last) && !(key in CWD_DEPENDENT_HOOKS)) continue;
 			hook(value, last ?? value);
 		}
 	}
@@ -1484,6 +1492,19 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			setWorktreesDir(undefined);
 		}
 	},
+};
+
+/** Hooks whose effective state depends on the working directory, not just the
+ *  configured value. `#fireAllHooks` always fires these on clone/reload even
+ *  when the value is unchanged since the last fire, because a cwd move
+ *  (cloneForCwd / reloadForCwd) can change the effective state — e.g. Hindsight
+ *  bank scoping with `scoping: "per-project"` derives the bank from the project
+ *  path, so moving to a different project must trigger a rebuild despite the
+ *  `hindsight.scoping` value being identical. */
+const CWD_DEPENDENT_HOOKS: Record<string, true> = {
+	"hindsight.bankId": true,
+	"hindsight.bankIdPrefix": true,
+	"hindsight.scoping": true,
 };
 /** Fires when `provider.appendOnlyContext` changes at runtime. */
 const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.appendOnlyContext");

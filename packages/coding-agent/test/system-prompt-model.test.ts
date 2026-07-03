@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { onSkillsRedactionChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { onHindsightScopeChanged, onSkillsRedactionChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	computeNonMessageBreakdown,
@@ -1019,5 +1019,151 @@ describe("AgentSession rebase flag persists through pending snapshot until durab
 		const first = all[0];
 		if (!first) throw new Error("Expected at least one model in the registry");
 		return [first, all[1] ?? first];
+	}
+});
+
+describe("Settings fireAllHooks fires cwd-dependent Hindsight hooks on cwd move even when values unchanged", () => {
+	it("fires Hindsight scope signal during cloneForCwd even when hindsight values are unchanged", async () => {
+		let signalFireCount = 0;
+		const unsubscribe = onHindsightScopeChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			const settings = Settings.isolated({ "compaction.enabled": false });
+			// Set a hindsight value to populate #lastHookedValues via the hook.
+			settings.set("hindsight.scoping", "per-project");
+			const firesAfterSet = signalFireCount;
+			expect(firesAfterSet).toBeGreaterThan(0);
+
+			// Clone for a different cwd — hindsight values haven't changed,
+			// but the hook is cwd-dependent so the signal MUST fire.
+			await settings.cloneForCwd("/tmp/different-cwd-for-hindsight-clone");
+			expect(signalFireCount).toBeGreaterThan(firesAfterSet);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("fires Hindsight scope signal during reloadForCwd even when hindsight values are unchanged", async () => {
+		let signalFireCount = 0;
+		const unsubscribe = onHindsightScopeChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			const settings = Settings.isolated({ "compaction.enabled": false });
+			settings.set("hindsight.bankId", "my-bank");
+			const firesAfterSet = signalFireCount;
+			expect(firesAfterSet).toBeGreaterThan(0);
+
+			// reloadForCwd to a different directory — hindsight values are
+			// not path-scoped, so the effective value is unchanged, but the
+			// hook is cwd-dependent so the signal MUST fire.
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hindsight-reload-"));
+			try {
+				await settings.reloadForCwd(tempDir);
+				expect(signalFireCount).toBeGreaterThan(firesAfterSet);
+			} finally {
+				removeSyncWithRetries(tempDir);
+			}
+		} finally {
+			unsubscribe();
+		}
+	});
+});
+
+describe("AgentSession refreshBaseSystemPrompt discards stale result when tool signature changes during async build", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-tool-race-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("discards redaction refresh result when a concurrent refreshBaseSystemPrompt changes the signature", async () => {
+		const [model] = pickTwoModelsForToolRaceTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = newAgentSessionForToolRaceTest(model, settings, async () => {
+			rebuildCount++;
+			const current = rebuildCount;
+			if (current === 1) {
+				// First rebuild (redaction refresh) is slow — controlled by a
+				// promise we resolve later. While it's pending, a concurrent
+				// refreshBaseSystemPrompt call will complete and change
+				// #lastAppliedToolSignature.
+				await new Promise<void>(resolve => {
+					resolveFirstRebuild = resolve;
+				});
+			}
+			return { systemPrompt: [`result-${current}`] };
+		});
+
+		// Fire the redaction signal — starts a slow rebuild via the chain.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		// The slow rebuild hasn't applied yet.
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// While the redaction rebuild is blocked, directly call
+		// refreshBaseSystemPrompt — this bypasses the redaction chain and
+		// completes immediately, setting #lastAppliedToolSignature.
+		await session.refreshBaseSystemPrompt();
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+
+		// Now resolve the first (redaction) rebuild. It should detect that
+		// #lastAppliedToolSignature changed during its await and discard its
+		// stale result — the prompt must remain "result-2", not "result-1".
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// The redaction refresh's result was discarded — prompt is still
+		// from the concurrent call, not overwritten by the stale rebuild.
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
+
+	function pickTwoModelsForToolRaceTest(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		return [first, all[1] ?? first];
+	}
+
+	function newAgentSessionForToolRaceTest(
+		model: Model,
+		settings: Settings,
+		rebuild: () => Promise<{ systemPrompt: string[] }>,
+	): AgentSession {
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		return new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => rebuild(),
+		});
 	}
 });
