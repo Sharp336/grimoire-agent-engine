@@ -32,6 +32,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{ value: "xai", label: "xAI", description: "Grok web search via xAI Responses API (requires XAI_API_KEY)" },
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
+	{
+		value: "zhipu",
+		label: "Zhipu",
+		description: "Calls Zhipu (bigmodel.cn) webSearchPrime MCP — Z.AI's China-mainland counterpart",
+	},
 	{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
 	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },

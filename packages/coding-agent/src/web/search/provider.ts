@@ -54,6 +54,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.zai,
 		load: async () => new (await import("./providers/zai")).ZaiProvider(),
 	},
+	zhipu: {
+		id: "zhipu",
+		label: SEARCH_PROVIDER_LABELS.zhipu,
+		load: async () => new (await import("./providers/zai")).ZhipuProvider(),
+	},
 	exa: {
 		id: "exa",
 		label: SEARCH_PROVIDER_LABELS.exa,
@@ -130,7 +135,7 @@ export function formatSearchProviderFailure(error: unknown, provider: Pick<Searc
 			return "Anthropic web search returned 404 (model or endpoint not found).";
 		}
 		if (error.status === 401 || error.status === 403) {
-			if (error.provider === "zai") {
+			if (error.provider === "zai" || error.provider === "zhipu") {
 				return error.message;
 			}
 			return `${getSearchProviderLabel(error.provider)} authorization failed (${error.status}). Check API key or base URL.`;

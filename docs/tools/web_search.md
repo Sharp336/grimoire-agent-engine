@@ -28,7 +28,7 @@
   - `packages/coding-agent/src/web/search/providers/tavily.ts` — Tavily search adapter.
   - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
   - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web-search adapter.
-  - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI remote MCP adapter.
+  - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI / Zhipu (bigmodel.cn) remote MCP adapter.
   - `packages/coding-agent/src/web/parallel.ts` — Parallel search/extract HTTP client.
   - `packages/coding-agent/src/web/kagi.ts` — Kagi HTTP client.
   - `packages/coding-agent/src/tools/index.ts` — built-in tool registration and enable flag.

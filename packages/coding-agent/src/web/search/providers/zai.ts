@@ -1,21 +1,51 @@
 /**
- * Z.AI Web Search Provider
+ * Z.AI / Zhipu Web Search Provider
  *
- * Calls Z.AI's remote MCP server (`webSearchPrime`) and adapts results into
- * the unified SearchResponse shape used by the web search tool.
+ * Calls the `webSearchPrime` remote MCP server and adapts results into the
+ * unified SearchResponse shape used by the web search tool. Z.AI (api.z.ai)
+ * and Zhipu's China-mainland open platform (open.bigmodel.cn) expose the same
+ * MCP surface with independently issued credentials, so both search providers
+ * share this implementation and differ only in endpoint and auth provider.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchProviderId, SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const ZAI_MCP_URL = "https://api.z.ai/api/mcp/web_search_prime/mcp";
 const ZAI_TOOL_NAME = "web_search_prime";
 const DEFAULT_NUM_RESULTS = 10;
+
+interface ZaiEndpointConfig {
+	/** Web-search provider id used for errors and `SearchResponse.provider`. */
+	id: Extract<SearchProviderId, "zai" | "zhipu">;
+	/** Human-readable name used in error messages. */
+	label: string;
+	/** Streamable HTTP MCP endpoint serving `web_search_prime`. */
+	mcpUrl: string;
+	/** Auth-broker provider whose credentials authorize the endpoint. */
+	authProvider: "zai" | "zhipu-coding-plan";
+	missingKeyMessage: string;
+}
+
+const ZAI_ENDPOINT: ZaiEndpointConfig = {
+	id: "zai",
+	label: "Z.AI",
+	mcpUrl: "https://api.z.ai/api/mcp/web_search_prime/mcp",
+	authProvider: "zai",
+	missingKeyMessage: "Z.AI credentials not found. Set ZAI_API_KEY or login with 'omp /login zai'.",
+};
+
+const ZHIPU_ENDPOINT: ZaiEndpointConfig = {
+	id: "zhipu",
+	label: "Zhipu",
+	mcpUrl: "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp",
+	authProvider: "zhipu-coding-plan",
+	missingKeyMessage: "Zhipu credentials not found. Set ZHIPU_API_KEY or login with 'omp /login zhipu-coding-plan'.",
+};
 
 export interface ZaiSearchParams {
 	query: string;
@@ -71,7 +101,7 @@ function asString(value: unknown): string | null {
 	return trimmed.length > 0 ? trimmed : null;
 }
 
-function parseZaiMcpResponse(rawText: string): unknown {
+function parseZaiMcpResponse(endpoint: ZaiEndpointConfig, rawText: string): unknown {
 	const parsedMessages: unknown[] = [];
 	for (const line of rawText.split("\n")) {
 		const trimmed = line.trim();
@@ -89,7 +119,7 @@ function parseZaiMcpResponse(rawText: string): unknown {
 		try {
 			parsedMessages.push(JSON.parse(rawText));
 		} catch {
-			throw new SearchProviderError("zai", "Failed to parse Z.AI MCP response", 500);
+			throw new SearchProviderError(endpoint.id, `Failed to parse ${endpoint.label} MCP response`, 500);
 		}
 	}
 
@@ -97,6 +127,7 @@ function parseZaiMcpResponse(rawText: string): unknown {
 }
 
 async function postZaiMcp(
+	endpoint: ZaiEndpointConfig,
 	apiKey: string,
 	method: string,
 	params: Record<string, unknown>,
@@ -123,7 +154,7 @@ async function postZaiMcp(
 		body.id = crypto.randomUUID();
 	}
 
-	const response = await fetchImpl(ZAI_MCP_URL, {
+	const response = await fetchImpl(endpoint.mcpUrl, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
@@ -132,9 +163,13 @@ async function postZaiMcp(
 
 	if (!response.ok) {
 		const errorText = await response.text();
-		const classified = classifyProviderHttpError("zai", response.status, errorText);
+		const classified = classifyProviderHttpError(endpoint.id, response.status, errorText);
 		if (classified) throw classified;
-		throw new SearchProviderError("zai", `Z.AI MCP error (${response.status}): ${errorText}`, response.status);
+		throw new SearchProviderError(
+			endpoint.id,
+			`${endpoint.label} MCP error (${response.status}): ${errorText}`,
+			response.status,
+		);
 	}
 
 	const nextSessionId = response.headers.get("Mcp-Session-Id") ?? sessionId;
@@ -144,12 +179,12 @@ async function postZaiMcp(
 	}
 
 	return {
-		parsed: parseZaiMcpResponse(await response.text()),
+		parsed: parseZaiMcpResponse(endpoint, await response.text()),
 		sessionId: nextSessionId,
 	};
 }
 
-function readJsonRpcPayload(parsed: unknown): JsonRpcPayload {
+function readJsonRpcPayload(endpoint: ZaiEndpointConfig, parsed: unknown): JsonRpcPayload {
 	const parsedRecord = isRecord(parsed) ? parsed : null;
 	const directErrorCode = typeof parsedRecord?.code === "number" ? parsedRecord.code : undefined;
 	const directErrorSuccess = parsedRecord?.success;
@@ -157,22 +192,22 @@ function readJsonRpcPayload(parsed: unknown): JsonRpcPayload {
 		asString(parsedRecord?.msg) ?? asString(parsedRecord?.message) ?? asString(parsedRecord?.error_message);
 	if (directErrorSuccess === false && directErrorMessage) {
 		throw new SearchProviderError(
-			"zai",
-			`Z.AI API error${directErrorCode ? ` (${directErrorCode})` : ""}: ${directErrorMessage}`,
+			endpoint.id,
+			`${endpoint.label} API error${directErrorCode ? ` (${directErrorCode})` : ""}: ${directErrorMessage}`,
 			directErrorCode,
 		);
 	}
 
 	if (!isRecord(parsed)) {
-		throw new SearchProviderError("zai", "Failed to parse Z.AI MCP response", 500);
+		throw new SearchProviderError(endpoint.id, `Failed to parse ${endpoint.label} MCP response`, 500);
 	}
 
 	const payload = parsed as JsonRpcPayload;
 	if (payload.error) {
 		const status = typeof payload.error.code === "number" ? payload.error.code : 400;
 		throw new SearchProviderError(
-			"zai",
-			`Z.AI MCP error${payload.error.code ? ` (${payload.error.code})` : ""}: ${payload.error.message ?? "Unknown error"}`,
+			endpoint.id,
+			`${endpoint.label} MCP error${payload.error.code ? ` (${payload.error.code})` : ""}: ${payload.error.message ?? "Unknown error"}`,
 			status,
 		);
 	}
@@ -190,12 +225,14 @@ export async function findApiKey(
 }
 
 async function callZaiTool(
+	endpoint: ZaiEndpointConfig,
 	apiKey: string,
 	args: Record<string, unknown>,
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
 ): Promise<unknown> {
 	const initialized = await postZaiMcp(
+		endpoint,
 		apiKey,
 		"initialize",
 		{
@@ -209,12 +246,13 @@ async function callZaiTool(
 		true,
 	);
 	if (initialized.parsed !== undefined) {
-		readJsonRpcPayload(initialized.parsed);
+		readJsonRpcPayload(endpoint, initialized.parsed);
 	}
 
-	await postZaiMcp(apiKey, "notifications/initialized", {}, initialized.sessionId, signal, fetchImpl, false);
+	await postZaiMcp(endpoint, apiKey, "notifications/initialized", {}, initialized.sessionId, signal, fetchImpl, false);
 
 	const toolCall = await postZaiMcp(
+		endpoint,
 		apiKey,
 		"tools/call",
 		{
@@ -226,7 +264,7 @@ async function callZaiTool(
 		fetchImpl,
 		true,
 	);
-	const payload = readJsonRpcPayload(toolCall.parsed);
+	const payload = readJsonRpcPayload(endpoint, toolCall.parsed);
 	const resultRecord = isRecord(payload.result) ? payload.result : null;
 	if (resultRecord?.isError === true) {
 		const content = Array.isArray(resultRecord.content) ? resultRecord.content : [];
@@ -240,7 +278,7 @@ async function callZaiTool(
 			.trim();
 		const statusMatch = errorText.match(/MCP error\s*(-?\d+)/i);
 		const statusCode = statusMatch ? Math.abs(Number.parseInt(statusMatch[1], 10)) : 400;
-		throw new SearchProviderError("zai", errorText || "Z.AI MCP tool call failed", statusCode);
+		throw new SearchProviderError(endpoint.id, errorText || `${endpoint.label} MCP tool call failed`, statusCode);
 	}
 
 	if (payload.result !== undefined) {
@@ -250,7 +288,7 @@ async function callZaiTool(
 	return toolCall.parsed;
 }
 
-async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<unknown> {
+async function callZaiSearch(endpoint: ZaiEndpointConfig, apiKey: string, params: ZaiSearchParams): Promise<unknown> {
 	const count = params.num_results ?? DEFAULT_NUM_RESULTS;
 	const fetchImpl = params.fetch ?? fetch;
 	const attempts: Record<string, unknown>[] = [
@@ -262,7 +300,7 @@ async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<u
 	let lastError: unknown;
 	for (let i = 0; i < attempts.length; i++) {
 		try {
-			return await callZaiTool(apiKey, attempts[i], params.signal, fetchImpl);
+			return await callZaiTool(endpoint, apiKey, attempts[i], params.signal, fetchImpl);
 		} catch (error) {
 			lastError = error;
 			const isLastAttempt = i === attempts.length - 1;
@@ -285,7 +323,7 @@ async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<u
 		}
 	}
 
-	throw lastError ?? new SearchProviderError("zai", "Z.AI search failed", 500);
+	throw lastError ?? new SearchProviderError(endpoint.id, `${endpoint.label} search failed`, 500);
 }
 
 function getSearchResults(value: unknown): ZaiSearchResult[] {
@@ -369,15 +407,14 @@ function toSources(results: ZaiSearchResult[]): SearchSource[] {
 	return sources;
 }
 
-/** Execute Z.AI web search via remote MCP endpoint. */
-export async function searchZai(params: ZaiSearchParams): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("zai", {
+async function searchWebSearchPrime(params: ZaiSearchParams, endpoint: ZaiEndpointConfig): Promise<SearchResponse> {
+	const keyOrResolver: ApiKey = params.authStorage.resolver(endpoint.authProvider, {
 		sessionId: params.sessionId,
 	});
 
-	const rawResult = await withAuth(keyOrResolver, key => callZaiSearch(key, params), {
+	const rawResult = await withAuth(keyOrResolver, key => callZaiSearch(endpoint, key, params), {
 		signal: params.signal,
-		missingKeyMessage: "Z.AI credentials not found. Set ZAI_API_KEY or login with 'omp /login zai'.",
+		missingKeyMessage: endpoint.missingKeyMessage,
 	});
 	const payload = parseSearchPayload(rawResult);
 	let sources = toSources(payload.results);
@@ -387,33 +424,59 @@ export async function searchZai(params: ZaiSearchParams): Promise<SearchResponse
 	}
 
 	return {
-		provider: "zai",
+		provider: endpoint.id,
 		answer: payload.answer,
 		sources,
 		requestId: payload.requestId,
 	};
 }
 
+/** Execute Z.AI web search via remote MCP endpoint. */
+export function searchZai(params: ZaiSearchParams): Promise<SearchResponse> {
+	return searchWebSearchPrime(params, ZAI_ENDPOINT);
+}
+
+/** Execute Zhipu (bigmodel.cn) web search via remote MCP endpoint. */
+export function searchZhipu(params: ZaiSearchParams): Promise<SearchResponse> {
+	return searchWebSearchPrime(params, ZHIPU_ENDPOINT);
+}
+
 type ZaiProviderSearchParams = SearchParams & { fetch?: FetchImpl };
 
-/** Search provider for Z.AI web search MCP. */
-export class ZaiProvider extends SearchProvider {
-	readonly id = "zai";
-	readonly label = "Z.AI";
+/** Shared search provider for the webSearchPrime MCP endpoints. */
+abstract class WebSearchPrimeProvider extends SearchProvider {
+	protected abstract readonly endpoint: ZaiEndpointConfig;
 
 	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return authStorage.hasAuth("zai") || !!getEnvApiKey("zai");
+		return authStorage.hasAuth(this.endpoint.authProvider) || !!getEnvApiKey(this.endpoint.authProvider);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
 		const { fetch: fetchOverride } = params as ZaiProviderSearchParams;
-		return searchZai({
-			query: params.query,
-			num_results: params.numSearchResults ?? params.limit,
-			signal: params.signal,
-			authStorage: params.authStorage,
-			sessionId: params.sessionId,
-			fetch: fetchOverride,
-		});
+		return searchWebSearchPrime(
+			{
+				query: params.query,
+				num_results: params.numSearchResults ?? params.limit,
+				signal: params.signal,
+				authStorage: params.authStorage,
+				sessionId: params.sessionId,
+				fetch: fetchOverride,
+			},
+			this.endpoint,
+		);
 	}
+}
+
+/** Search provider for Z.AI web search MCP. */
+export class ZaiProvider extends WebSearchPrimeProvider {
+	readonly id = "zai";
+	readonly label = "Z.AI";
+	protected readonly endpoint = ZAI_ENDPOINT;
+}
+
+/** Search provider for Zhipu (bigmodel.cn) web search MCP. */
+export class ZhipuProvider extends WebSearchPrimeProvider {
+	readonly id = "zhipu";
+	readonly label = "Zhipu";
+	protected readonly endpoint = ZHIPU_ENDPOINT;
 }
