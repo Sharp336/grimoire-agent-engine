@@ -2163,10 +2163,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// MCP tool count pushes `auto` past its threshold; `rebuildSystemPrompt`
 		// below reads the live bindings.
 		const mcpTools = Array.from(toolRegistry.values()).filter(tool => isMCPToolName(tool.name));
-		let effectiveDiscoveryMode = resolveEffectiveToolDiscoveryMode(settings, countToolsForAutoDiscovery(toolRegistry.keys()), {
-			mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
-			contextWindow: model?.contextWindow ?? 0,
-		});
+		let effectiveDiscoveryMode = resolveEffectiveToolDiscoveryMode(
+			settings,
+			countToolsForAutoDiscovery(toolRegistry.keys()),
+			{
+				mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
+				contextWindow: model?.contextWindow ?? 0,
+			},
+		);
 		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
 			const searchTool: Tool = new SearchToolBm25Tool(toolSession);
 			toolRegistry.set(
