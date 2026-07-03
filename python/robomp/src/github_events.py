@@ -415,23 +415,18 @@ def route(
     if event_type == "pull_request" and action == "synchronize":
         if not pr_review_enabled:
             return RouteDecision("skip", None, repo, None, "PR review disabled")
+        if pr_review_trigger == "vouched_label":
+            # The vouch workflow does not run on synchronize, and the
+            # synchronize payload carries no trusted signal that the
+            # configured `vouch_review_labeler` applied the current vouch
+            # label — the PR `labels` array only carries label names, not
+            # who applied them.  A stale or maintainer-added label must not
+            # bypass the gate, so defer to the vouch label route.  The next
+            # push after a fresh gate check produces a `labeled` event, not
+            # a synchronize, which is the only trusted review trigger.
+            return RouteDecision("skip", None, repo, None, "deferred to vouch label")
         if not on_synchronize:
             return RouteDecision("skip", None, repo, None, "pull_request.synchronize ignored")
-        if pr_review_trigger == "vouched_label":
-            # The vouch workflow does not run on synchronize, so we cannot
-            # re-validate the author here.  Preserve the vouch gate by
-            # requiring the current PR payload to still carry the configured
-            # vouch label — a since-denounced author (label removed) must not
-            # slip through on a force-push.  Default (no opt-in) still skips.
-            pr = payload.get("pull_request") or {}
-            labels = pr.get("labels")
-            label_names = (
-                {str(lbl.get("name") or "").lower() for lbl in labels if isinstance(lbl, Mapping)}
-                if isinstance(labels, list)
-                else set()
-            )
-            if vouch_review_label.lower() not in label_names:
-                return RouteDecision("skip", None, repo, None, "synchronize without vouch label")
         return _pr_review_pr(
             payload.get("pull_request") or {},
             repo,

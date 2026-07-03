@@ -268,12 +268,14 @@ def test_route_pull_request_synchronize_skips_unless_opted_in() -> None:
     assert enabled_decision.synchronize_review is True
 
 
-def test_route_pull_request_synchronize_vouched_label_requires_vouch_label() -> None:
-    """In vouched_label mode, synchronize must preserve the vouch gate.
+def test_route_pull_request_synchronize_vouched_label_always_defers() -> None:
+    """In vouched_label mode, synchronize must always defer to the vouch gate.
 
-    The vouch workflow does not run on synchronize, so we cannot re-validate
-    the author.  Require the current PR payload to still carry the vouch
-    label — a since-denounced author (label removed) must not slip through.
+    The synchronize payload carries no trusted signal that the configured
+    `vouch_review_labeler` applied the current vouch label — the PR `labels`
+    array only carries label names, not who applied them.  A stale or
+    maintainer-added label must not bypass the gate, so synchronize always
+    defers regardless of `on_synchronize` or label presence.
     """
     labeled_payload = {
         "action": "synchronize",
@@ -294,7 +296,7 @@ def test_route_pull_request_synchronize_vouched_label_requires_vouch_label() -> 
         "repository": {"full_name": "octo/widget"},
     }
 
-    # Opted-in + vouch label present → queue re-review.
+    # Opted-in + vouch label present → still skip (label name is not trusted).
     opted_in_labeled = route(
         "pull_request",
         labeled_payload,
@@ -303,11 +305,8 @@ def test_route_pull_request_synchronize_vouched_label_requires_vouch_label() -> 
         pr_review_trigger="vouched_label",
         on_synchronize=True,
     )
-    assert opted_in_labeled.should_queue
-    assert opted_in_labeled.task == "review_pr"
-    assert opted_in_labeled.issue_key == "octo/widget#9"
-    assert opted_in_labeled.bypass_once_guard is True
-    assert opted_in_labeled.synchronize_review is True
+    assert not opted_in_labeled.should_queue
+    assert opted_in_labeled.reason == "deferred to vouch label"
 
     # Opted-in but vouch label absent → skip (gate preserved).
     opted_in_unlabeled = route(
@@ -319,9 +318,9 @@ def test_route_pull_request_synchronize_vouched_label_requires_vouch_label() -> 
         on_synchronize=True,
     )
     assert not opted_in_unlabeled.should_queue
-    assert opted_in_unlabeled.reason == "synchronize without vouch label"
+    assert opted_in_unlabeled.reason == "deferred to vouch label"
 
-    # Default (no opt-in) stays conservative: skip even with vouch label.
+    # Default (no opt-in) also skips.
     default_decision = route(
         "pull_request",
         labeled_payload,
@@ -330,11 +329,16 @@ def test_route_pull_request_synchronize_vouched_label_requires_vouch_label() -> 
         pr_review_trigger="vouched_label",
     )
     assert not default_decision.should_queue
-    assert default_decision.reason == "pull_request.synchronize ignored"
+    assert default_decision.reason == "deferred to vouch label"
 
 
-def test_route_pull_request_synchronize_vouched_label_case_insensitive() -> None:
-    """The vouch label check is case-insensitive on both sides."""
+def test_route_pull_request_synchronize_vouched_label_skips_even_with_stale_label() -> None:
+    """A maintainer-added or stale vouch label must not trigger sync review.
+
+    Unlike the `labeled` handler which validates `sender` against
+    `vouch_review_labeler`, the synchronize branch has no trusted labeler
+    signal, so it must never queue — even when the label is present.
+    """
     payload = {
         "action": "synchronize",
         "pull_request": {
@@ -353,8 +357,8 @@ def test_route_pull_request_synchronize_vouched_label_case_insensitive() -> None
         vouch_review_label="VOUCHED",
         on_synchronize=True,
     )
-    assert decision.should_queue
-    assert decision.task == "review_pr"
+    assert not decision.should_queue
+    assert decision.reason == "deferred to vouch label"
 
 
 def test_route_incoming_pr_comment_directive_routes_on_re_review() -> None:
