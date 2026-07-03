@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS issues (
   pr_number      INTEGER,
   state          TEXT NOT NULL,
   classification TEXT,         -- bug|enhancement|question|proposal|documentation|invalid|duplicate
+  head_refreshed_delivery TEXT, -- delivery_id of the last delivery whose checkout reset succeeded
   updated_at     TEXT NOT NULL
 );
 
@@ -156,6 +157,7 @@ class IssueRow:
     state: IssueState
     updated_at: str
     classification: str | None = None
+    head_refreshed_delivery: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -247,6 +249,8 @@ class Database:
         issue_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
         if "classification" not in issue_cols:
             self._conn.execute("ALTER TABLE issues ADD COLUMN classification TEXT")
+        if "head_refreshed_delivery" not in issue_cols:
+            self._conn.execute("ALTER TABLE issues ADD COLUMN head_refreshed_delivery TEXT")
         event_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
         if "model" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
@@ -743,10 +747,24 @@ class Database:
                 (branch, _utcnow(), key),
             )
 
+    def set_issue_head_refreshed_delivery(self, key: str, delivery_id: str) -> None:
+        """Record that the checkout for `delivery_id` was refreshed/reset successfully.
+
+        A retry of the same delivery reads this flag to decide whether to
+        refresh again (reset never succeeded) or resume the session (reset
+        already done). A new delivery overwrites it so a genuine re-review
+        still refreshes.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE issues SET head_refreshed_delivery=?, updated_at=? WHERE key=?",
+                (delivery_id, _utcnow(), key),
+            )
+
     def get_issue(self, key: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE key=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues WHERE key=?",
                 (key,),
             ).fetchone()
         if row is None:
@@ -761,12 +779,13 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def find_issue_by_pr(self, repo: str, pr_number: int) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE repo=? AND pr_number=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues WHERE repo=? AND pr_number=?",
                 (repo, pr_number),
             ).fetchone()
         if row is None:
@@ -781,13 +800,14 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def find_issue_by_branch(self, repo: str, branch: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at
+                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at
                 FROM issues
                 WHERE repo=? AND branch=?
                 ORDER BY updated_at DESC
@@ -807,12 +827,13 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def list_issues(self, limit: int = 100) -> list[IssueRow]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
@@ -826,6 +847,7 @@ class Database:
                 state=r["state"],
                 updated_at=r["updated_at"],
                 classification=r["classification"],
+                head_refreshed_delivery=r["head_refreshed_delivery"],
             )
             for r in rows
         ]

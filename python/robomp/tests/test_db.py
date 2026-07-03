@@ -416,6 +416,25 @@ def test_classification_roundtrip(db: Database) -> None:
     assert any(r.key == key and r.classification == "question" for r in items)
 
 
+def test_head_refreshed_delivery_roundtrip(db: Database) -> None:
+    key = issue_key("octo/widget", 7)
+    db.upsert_issue(key=key, repo="octo/widget", number=7, state="new", pr_number=7)
+    row = db.get_issue(key)
+    assert row is not None and row.head_refreshed_delivery is None
+    db.set_issue_head_refreshed_delivery(key, "d-abc")
+    row = db.get_issue(key)
+    assert row is not None and row.head_refreshed_delivery == "d-abc"
+    # Round-trip via list_issues too.
+    items = db.list_issues()
+    assert any(r.key == key and r.head_refreshed_delivery == "d-abc" for r in items)
+    # find_issue_by_pr and find_issue_by_branch carry the field as well.
+    by_pr = db.find_issue_by_pr("octo/widget", 7)
+    assert by_pr is not None and by_pr.head_refreshed_delivery == "d-abc"
+    db.set_issue_branch(key, "farm/abc/fix")
+    by_branch = db.find_issue_by_branch("octo/widget", "farm/abc/fix")
+    assert by_branch is not None and by_branch.head_refreshed_delivery == "d-abc"
+
+
 def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:
     """Open a DB without the classification column and verify the migration."""
     import sqlite3

@@ -2312,11 +2312,13 @@ async def test_review_pr_rereview_new_delivery_uses_fresh_session(
     close_database()
 
 
-async def test_review_pr_rereview_retry_resumes_session(
+async def test_review_pr_rereview_retry_refreshes_until_reset_succeeds(
     settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
 ) -> None:
-    """A retry of the same delivery (attempts >= 2) must NOT refresh the
-    workspace — it resumes the existing session so in-progress work survives."""
+    """A retry of the same delivery must keep refreshing the workspace until the
+    checkout reset actually succeeds — even if attempts >= 2. A prior attempt
+    may have failed before the PR head was re-fetched, so the retry must not
+    skip refresh merely because it is not the first attempt."""
     from robomp import tasks
     from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
 
@@ -2382,7 +2384,85 @@ async def test_review_pr_rereview_retry_resumes_session(
     )
 
     assert len(stub_run_task) == 1
-    assert sandbox.ensure_calls[0]["refresh"] is False, "retry must resume session, not refresh"
+    assert sandbox.ensure_calls[0]["refresh"] is True, "retry must keep refreshing until the checkout reset succeeds"
+    close_database()
+
+
+async def test_review_pr_rereview_retry_resumes_session_after_reset_success(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Once the checkout reset has succeeded for a delivery, a later retry of
+    the same delivery must resume the existing session (refresh=False) so
+    in-progress work survives."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    # Simulate a prior successful ensure_workspace(refresh=True) for this delivery.
+    db.upsert_issue(key=key, repo="octo/widget", number=900, state="reviewing", pr_number=900)
+    db.set_issue_head_refreshed_delivery(key, "d-retry-session")
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-retry-session",
+        attempts=2,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is False, "retry after successful reset must resume session, not refresh"
     close_database()
 
 

@@ -455,10 +455,14 @@ async def review_pr(
                 extra={"repo": repo.full_name, "pr": pr_number, "cleared": cleared},
             )
     db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
-    # A new re-review delivery (first attempt) refreshes the workspace so the
-    # review sees the current PR head. A retry of the same delivery resumes the
-    # existing session instead of discarding in-progress work.
-    refresh = bypass_once_guard and attempts < 2
+    # Refresh the workspace so the review sees the current PR head — but only
+    # if the checkout reset has not yet succeeded for *this* delivery. A retry
+    # of the same delivery keeps refreshing until the reset actually completes
+    # (a prior attempt may have failed before the PR head was re-fetched); once
+    # it succeeds, later retries resume the existing session so in-progress
+    # work survives. A new delivery always refreshes.
+    existing = db.get_issue(key)
+    refresh = bypass_once_guard and (existing is None or existing.head_refreshed_delivery != delivery_id)
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
@@ -472,6 +476,8 @@ async def review_pr(
         slot_uid=slot_uid,
         refresh=refresh,
     )
+    if refresh:
+        db.set_issue_head_refreshed_delivery(key, delivery_id)
     db.upsert_issue(
         key=key,
         repo=repo.full_name,
