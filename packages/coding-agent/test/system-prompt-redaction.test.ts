@@ -76,7 +76,7 @@ describe("redactSkillDescriptions", () => {
 		const resultCap = redactSkillDescriptions(singleSkill, {
 			mode: "cap",
 			maxContextShare: 0.1,
-			contextWindow: 10, // very small to force pop to 1 sentence
+			contextWindow: 100, // small enough to pop to 1 sentence, large enough for "One." after framing
 		});
 		expect(resultCap[0].description).toBe("One.");
 		expect(resultCap[0].name).toBe(singleSkill[0].name);
@@ -274,6 +274,50 @@ describe("redactSkillDescriptions", () => {
 			const customFull =
 				'<skills>\n<skill name="skill-one">\nOne. Two. Three.\n</skill>\n<skill name="skill-two">\nShort.\n</skill>\n</skills>';
 			expect(estimateTokens(customFull)).toBeGreaterThan(estimateTokens(defaultFull));
+		});
+		it("Phase 2 subtracts skill framing before residual caps so the rendered estimate fits", () => {
+			// Multiple single-sentence descriptions: Phase 1 cannot pop (all ≤1
+			// sentence), so Phase 2 must trim text. The residual char budget must
+			// account for fixed rendering overhead (wrapper tags + name framing)
+			// rather than giving the whole budget to description text.
+			//
+			// Default render framing (empty descriptions):
+			//   "<skills>\n- skill-a: \n- skill-b: \n- skill-c: \n</skills>"
+			//   = 54 chars → ceil(54/4) = 14 tokens.
+			// Full render:
+			//   "<skills>\n- skill-a: A.\n- skill-b: Beta xyz.\n- skill-c: Gamma xyz.\n</skills>"
+			//   = 75 chars → ceil(75/4) = 19 tokens.
+			//
+			// budget = 16 tokens (contextWindow=160, share=0.1).
+			// Old behavior: residualCharBudget = floor(16*4/3) = 21 ≥ every sentence
+			//   length → no trimming → estimate stays 19 > 16. Exceeds budget.
+			// New behavior: framing = 14 tokens, descriptionTokenBudget = 2,
+			//   residualCharBudget = floor(2*4/3) = 2. "A." (2 chars) survives,
+			//   longer sentences are dropped. Estimate = 14 ≤ 16. Fits.
+			const singleSentenceSkills: Skill[] = [
+				{ name: "skill-a", description: "A.", filePath: "/a", baseDir: "/", source: "test" },
+				{ name: "skill-b", description: "Beta xyz.", filePath: "/b", baseDir: "/", source: "test" },
+				{ name: "skill-c", description: "Gamma xyz.", filePath: "/c", baseDir: "/", source: "test" },
+			];
+			const budgetTokens = 16;
+			const result = redactSkillDescriptions(singleSentenceSkills, {
+				mode: "cap",
+				maxContextShare: 0.1,
+				contextWindow: 160, // 160 * 0.1 = 16 tokens
+			});
+
+			// All names survive.
+			expect(result.length).toBe(3);
+			expect(result[0].name).toBe("skill-a");
+			expect(result[1].name).toBe("skill-b");
+			expect(result[2].name).toBe("skill-c");
+
+			// The rendered estimate of the result must fit within the budget.
+			const rendered = `<skills>\n${result.map(s => `- ${s.name}: ${s.description}`).join("\n")}\n</skills>`;
+			expect(estimateTokens(rendered)).toBeLessThanOrEqual(budgetTokens);
+
+			// The shortest description survives; longer ones are trimmed.
+			expect(result[0].description).toBe("A.");
 		});
 	});
 });

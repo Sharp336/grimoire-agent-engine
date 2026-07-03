@@ -99,15 +99,35 @@ function applyCapMode(
 	}
 
 	// Phase 2: if still over budget (every remaining entry is ≤1 sentence), trim
-	// each description's text down to a residual per-entry char budget. Skill
-	// names are never touched — only the description text is shortened, so the
-	// entry list and names always survive even when the budget is unsplittable.
+	// each description's text down to a residual per-entry char budget. The
+	// residual must account for the fixed rendering overhead — wrapper tags
+	// (<skills>/</skills>) and per-entry name framing — so the budget is not
+	// given entirely to description text. Descriptions are iteratively shortened
+	// until the rendered estimate fits the token budget. Skill names are never
+	// touched, so the entry list and names always survive even when the budget
+	// is unsplittable.
 	if (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
-		const residualCharBudget = Math.max(0, Math.floor((budgetTokens * 4) / skills.length));
-		for (const entry of redacted) {
-			const text = entry.sentences.join(" ");
-			const trimmed = trimDescriptionToBudget(text, residualCharBudget);
-			entry.sentences = trimmed ? [trimmed] : [];
+		// Estimate the fixed framing overhead by rendering with empty
+		// descriptions; only the remaining budget is available for text.
+		const framingTokens = estimateRenderedSkillsTokens(
+			redacted.map(entry => ({ skill: entry.skill, sentences: [] })),
+			renderFormat,
+		);
+		const descriptionTokenBudget = Math.max(0, budgetTokens - framingTokens);
+		let residualCharBudget = Math.max(0, Math.floor((descriptionTokenBudget * 4) / skills.length));
+
+		// Iteratively trim and re-estimate. If the rendered block still exceeds
+		// the budget, halve the residual cap and retry until it fits or all
+		// descriptions are empty (framing alone exceeds the budget).
+		while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
+			for (const entry of redacted) {
+				const text = entry.sentences.join(" ");
+				const trimmed = trimDescriptionToBudget(text, residualCharBudget);
+				entry.sentences = trimmed ? [trimmed] : [];
+			}
+			if (estimateRenderedSkillsTokens(redacted, renderFormat) <= budgetTokens) break;
+			if (residualCharBudget === 0) break;
+			residualCharBudget = Math.floor(residualCharBudget / 2);
 		}
 	}
 
