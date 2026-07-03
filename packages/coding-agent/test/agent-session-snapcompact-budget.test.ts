@@ -279,4 +279,33 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
+
+	it("runs snapcompact even when internalInstructions are present (no LLM downgrade)", async () => {
+		// Regression for PR #4368 second-pass review: an explicit
+		// `mode: "snapcompact"` must not fall through to LLM compaction when
+		// `internalInstructions` (host-only guidance, not user focus text) is
+		// supplied. Previously the snapcompact gate checked `!summaryInstructions`
+		// which merged `internalInstructions`, silently downgrading the request.
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, {
+			mode: "snapcompact",
+			internalInstructions: "plan-mode compaction guidance",
+		});
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
 });

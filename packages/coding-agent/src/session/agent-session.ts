@@ -9499,12 +9499,15 @@ export class AgentSession {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
-			// Strategy honored on manual /compact too. Custom/internal instructions imply a
-			// directed LLM summary; a text-only model cannot read snapcompact frames.
+			// Strategy honored on manual /compact too. User focus instructions
+			// (customInstructions) imply a directed LLM summary; a text-only model
+			// cannot read snapcompact frames. Host-only `internalInstructions` is
+			// guidance for the compaction engine, not user focus text, and must NOT
+			// downgrade an explicit `mode: "snapcompact"` to an LLM summary.
 			// When snapcompact itself was requested, fail locally instead of silently
 			// converting the "no LLM call" path into a provider-backed summary.
 			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !summaryInstructions;
+				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
