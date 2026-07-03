@@ -281,6 +281,38 @@ This is a test skill.
 		// The function form receives the default prompt (with <skills>) and
 		// appends to it, so the skills block is still present.
 		expect(session.skills.length).toBeGreaterThan(0);
-		expect(session.promptSkills.length).toBeGreaterThan(0);
+	});
+
+	it("clears promptSkills when a function-based systemPrompt override returns a full replacement", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: () => "You are a custom agent with no skills block.",
+		});
+
+		// session.skills should still contain discovered skills
+		expect(session.skills.length).toBeGreaterThan(0);
+		// A function-based override that returns a full replacement (no
+		// <skills> block) must clear promptSkills — /context and compaction
+		// must not charge skills the provider never receives, the same as
+		// a string/array full override.
+		expect(session.promptSkills).toEqual([]);
+	});
+
+	it("clears promptSkills when a function-based systemPrompt override returns an array without skills block", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: () => ["Part one.", "Part two without skills."],
+		});
+
+		expect(session.skills.length).toBeGreaterThan(0);
+		expect(session.promptSkills).toEqual([]);
 	});
 });

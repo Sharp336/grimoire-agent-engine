@@ -2286,6 +2286,16 @@ export class AgentSession {
 		// the latest settings win.
 		this.#unsubscribeSkillsRedaction = onSkillsRedactionChanged(() => {
 			const epoch = ++this.#redactionRefreshEpoch;
+			// Invalidate any in-flight prompt build so a stale rebuild that
+			// started before this signal cannot apply its result after the
+			// await completes. The epoch guard above only checks before
+			// refreshBaseSystemPrompt() is called; a second signal arriving
+			// during that await would otherwise let the older rebuild apply a
+			// prompt built from stale redaction settings. Incrementing the
+			// build version here makes the in-flight build's captured version
+			// mismatch, so it discards its result — only the queued newer
+			// refresh's prompt wins.
+			++this.#promptBuildVersion;
 			this.#redactionRefreshChain = this.#redactionRefreshChain
 				.catch(() => {})
 				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt() : undefined))
@@ -3398,8 +3408,15 @@ export class AgentSession {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens: this.#pendingContextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this),
 				};
+				// Only clear the rebase flag when a durable usage anchor is
+				// recorded. An aborted/errored assistant message or one without
+				// usage is NOT a durable anchor — getContextBreakdown() will
+				// not treat it as one — so clearing the flag here would clamp
+				// negative non-message deltas to zero and hide a prompt-shrinking
+				// refresh (e.g. enabling skill redaction) until a later
+				// successful usage-bearing response.
+				this.#promptRebasedSinceLastAnchor = false;
 			}
-			this.#promptRebasedSinceLastAnchor = false;
 		}
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&
@@ -6309,7 +6326,18 @@ export class AgentSession {
 				// another tool-set change) may have started while we awaited.
 				// If so, discard our stale result — the newer build's prompt
 				// is the correct one.
-				if (this.#promptBuildVersion !== buildVersion) return;
+				if (this.#promptBuildVersion !== buildVersion) {
+					// A concurrent rebuild (redaction refresh, model switch, or
+					// another tool-set change) completed while we awaited. Discard
+					// the stale prompt result, but still persist the MCP tool
+					// selection — setTools() above changed the live tool set, and
+					// failing to record it means switching/resuming the session
+					// can silently lose the activated tools.
+					if (options?.persistMCPSelection !== false) {
+						this.#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames);
+					}
+					return;
+				}
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 				this.agent.setSystemPrompt(this.#baseSystemPrompt);

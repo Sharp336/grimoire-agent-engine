@@ -854,12 +854,14 @@ describe("AgentSession redaction refresh serialization", () => {
 		settings.set("skills.redaction.maxContextShare", 0.1);
 		await flushMicrotasks();
 
-		// Resolve the first rebuild — it applies "result-1", then the chain
-		// continues to the second refresh which overwrites with "result-2".
+		// Resolve the first rebuild — the build-version increment from the
+		// second signal invalidates it, so the stale "result-1" is discarded.
+		// The chain then continues to the second refresh which applies "result-2".
 		resolveFirstRebuild?.();
 		await flushMicrotasks();
 
-		// Both rebuilds ran, but the latest (second) won.
+		// Both rebuilds ran, but the latest (second) won — the stale first
+		// result was discarded, not applied.
 		expect(rebuildCount).toBe(2);
 		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
 	});
@@ -1274,4 +1276,378 @@ describe("AgentSession refreshBaseSystemPrompt discards stale result when build 
 			rebuildSystemPrompt: async () => rebuild(),
 		});
 	}
+});
+
+describe("AgentSession rebase flag survives aborted assistant message without usage", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-rebase-aborted-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("does not clear rebase flag when an aborted assistant message is persisted", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const largePrompt = [`You are a helpful assistant. ${"x".repeat(2000)}`];
+		const smallPrompt = ["You are a helpful assistant."];
+
+		let promptToEmit = largePrompt;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: largePrompt, tools: [], messages: [] },
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		// Seed a durable anchor with the large prompt.
+		const largeNonMessageTokens = computeNonMessageTokens(session);
+		const anchorMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: 1000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManager.appendMessage(anchorMsg);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const beforeRefresh = session.getContextBreakdown();
+		expect(beforeRefresh?.anchored).toBe(true);
+
+		// Rebuild with the smaller prompt — rebase flag is set.
+		promptToEmit = smallPrompt;
+		await session.refreshBaseSystemPrompt();
+		const afterRefresh = session.getContextBreakdown();
+		expect(afterRefresh?.anchored).toBe(true);
+
+		// Persist an aborted assistant message (no usage). This must NOT clear
+		// the rebase flag — an aborted message is not a durable anchor.
+		const abortedMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "partial" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "aborted",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "again", timestamp: 1500 } as Message);
+		sessionManager.appendMessage(abortedMsg);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		// The rebase flag must still be active — the breakdown must still
+		// show the reduced usage from the redacted prompt, not clamped back
+		// to the old anchor. The value is not exactly rebasedUsed because
+		// the appended user + aborted messages add tail tokens, but it must
+		// remain well below the anchor's promptTokens (100) — if the rebase
+		// flag were cleared, the negative non-message delta would be clamped
+		// to zero and usedTokens would be ~100 + tail, not negative.
+		const afterAborted = session.getContextBreakdown();
+		expect(afterAborted?.anchored).toBe(true);
+		expect(afterAborted?.usedTokens).toBeLessThan(0);
+		expect(afterAborted?.usedTokens).toBeLessThan(beforeRefresh!.usedTokens);
+	});
+
+	it("does not clear rebase flag when an errored assistant message is persisted", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const largePrompt = [`You are a helpful assistant. ${"x".repeat(2000)}`];
+		const smallPrompt = ["You are a helpful assistant."];
+
+		let promptToEmit = largePrompt;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: largePrompt, tools: [], messages: [] },
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		const largeNonMessageTokens = computeNonMessageTokens(session);
+		const anchorMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: 1000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManager.appendMessage(anchorMsg);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const beforeRefresh = session.getContextBreakdown();
+		expect(beforeRefresh?.anchored).toBe(true);
+
+		promptToEmit = smallPrompt;
+		await session.refreshBaseSystemPrompt();
+
+		// Persist an errored assistant message (no usage).
+		const erroredMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "error",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "again", timestamp: 1500 } as Message);
+		sessionManager.appendMessage(erroredMsg);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const afterError = session.getContextBreakdown();
+		expect(afterError?.anchored).toBe(true);
+		expect(afterError?.usedTokens).toBeLessThan(0);
+		expect(afterError?.usedTokens).toBeLessThan(beforeRefresh!.usedTokens);
+	});
+});
+
+describe("AgentSession redaction signal invalidates in-flight rebuild mid-await", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-mid-await-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("discards stale rebuild when a second signal arrives during the first rebuild's await", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Fire first signal — starts a slow rebuild via the redaction chain.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Fire second signal while the first rebuild is still pending. The
+		// signal increments #promptBuildVersion, invalidating the in-flight
+		// build so it will be discarded when it completes.
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		await flushMicrotasks();
+
+		// Resolve the first rebuild — it must detect the build-version
+		// mismatch and discard its stale result. The prompt must NOT become
+		// "result-1"; it stays "initial" until the second refresh applies.
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// The second refresh has now run and applied "result-2".
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
+});
+
+describe("AgentSession applyActiveToolsByName persists MCP selection on stale build discard", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-mcp-persist-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("persists MCP tool names even when a stale prompt build is discarded", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		// Track appendMCPToolSelection calls by wrapping the session manager.
+		const baseSm = SessionManager.inMemory();
+		const mcpSelectionCalls: string[][] = [];
+		const wrappedSm = new Proxy(baseSm, {
+			get(target, prop) {
+				if (prop === "appendMCPToolSelection") {
+					return (names: string[]) => {
+						mcpSelectionCalls.push([...names]);
+						return target.appendMCPToolSelection(names);
+					};
+				}
+				const value = Reflect.get(target, prop);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+
+		// Create a minimal MCP tool for the registry.
+		const mcpTool = {
+			name: "mcp__test__tool",
+			label: "Test MCP Tool",
+			description: "A test MCP tool",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpTool>([["mcp__test__tool", mcpTool]]);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: wrappedSm,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start setActiveToolsByName with the MCP tool — triggers
+		// #applyActiveToolsByName which starts a slow rebuild (build 1).
+		const setActivePromise = session.setActiveToolsByName(["mcp__test__tool"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+
+		// While the first rebuild is pending, call refreshBaseSystemPrompt
+		// — this increments #promptBuildVersion, making build 1 stale.
+		await session.refreshBaseSystemPrompt();
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+
+		// Resolve the first rebuild — it detects the stale build version
+		// and discards the prompt result, but must still persist the MCP
+		// tool selection before returning.
+		resolveFirstRebuild?.();
+		await setActivePromise;
+
+		// The MCP tool selection must have been persisted despite the stale
+		// build discard — appendMCPToolSelection was called with the MCP
+		// tool name.
+		const allPersisted = mcpSelectionCalls.flat();
+		expect(allPersisted).toContain("mcp__test__tool");
+		expect(session.getSelectedMCPToolNames()).toContain("mcp__test__tool");
+	});
 });

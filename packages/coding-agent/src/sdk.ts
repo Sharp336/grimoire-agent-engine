@@ -2307,12 +2307,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (typeof options.systemPrompt === "function") {
 				// A function-based override receives the default prompt
 				// (including its <skills> block) as input and commonly keeps
-				// or appends it, so preserve the default's promptSkills for
-				// context accounting.
+				// or appends it. Preserve the default's promptSkills for
+				// context accounting only when the returned prompt actually
+				// contains the default <skills> block; a full replacement
+				// (e.g. `() => "custom"`) drops the skills block, so /context
+				// and compaction must not charge skills the provider never
+				// receives — the same full-control case handled for string/array
+				// overrides below.
 				const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+				const customPromptParts = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
+				const keepsDefaultSkills = customPromptParts.some(part => part.includes("<skills>"));
 				return {
-					systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
-					promptSkills: defaultPrompt.promptSkills,
+					systemPrompt: customPromptParts,
+					promptSkills: keepsDefaultSkills ? defaultPrompt.promptSkills : [],
 				};
 			}
 			// A full string/array prompt override replaces the entire system
