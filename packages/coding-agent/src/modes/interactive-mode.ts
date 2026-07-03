@@ -2696,12 +2696,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			// The abort's #drainStrandedQueuedMessages may schedule a queued-message
 			// drain that auto-resumes a turn with the stranded compaction-flush messages
 			// (steers/follow-ups delivered by flushCompactionQueue's #deliverQueuedMessage
-			// loop), racing the retry below with another AgentBusyError. Clear the queue
-			// so the drain's hasQueuedMessages() gate is false; the approved plan takes
-			// priority over messages typed during compaction. The fire-and-forget flush
-			// prompt's own .catch(restoreQueue) will still re-queue the original messages
-			// into compactionQueuedMessages for the user to re-send later.
-			this.session.clearQueue();
+			// loop), racing the retry below with another AgentBusyError. Drain the live
+			// agent queues so the drain's hasQueuedMessages() gate is false, but preserve
+			// every user-restorable message in compactionQueuedMessages for the pending
+			// queue UI and Alt+Up restore path; aborting the flush prompt resolves as an
+			// aborted assistant message rather than rejecting its fire-and-forget promise.
+			const queuedForRestore = this.session.clearQueue();
+			this.compactionQueuedMessages = [
+				...queuedForRestore.steering.map(message => ({
+					text: message.text,
+					mode: "steer" as const,
+					images: message.images,
+				})),
+				...this.compactionQueuedMessages,
+				...queuedForRestore.followUp.map(message => ({
+					text: message.text,
+					mode: "followUp" as const,
+					images: message.images,
+				})),
+			];
+			this.updatePendingMessagesDisplay();
 			await this.session.prompt(planModePrompt, { synthetic: true });
 		}
 	}

@@ -704,7 +704,9 @@ describe("InteractiveMode plan review rendering", () => {
 			await Promise.resolve();
 			streaming = false;
 		});
-		const clearQueueSpy = vi.spyOn(session, "clearQueue").mockReturnValue({ steering: [], followUp: [] });
+		const clearQueueSpy = vi
+			.spyOn(session, "clearQueue")
+			.mockReturnValue({ steering: [{ text: "queued steer" }], followUp: [{ text: "queued follow-up" }] });
 		let promptCallCount = 0;
 		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async _text => {
 			promptCallCount++;
@@ -736,18 +738,23 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(abortSpy).toHaveBeenCalledTimes(2);
 		// clearQueue was called once: by the catch block, after the abort, to
 		// suppress stranded compaction-flush queued-message drains that would
-		// race the retry prompt.
+		// race the retry prompt. Its user-restorable messages must be preserved
+		// for the pending queue instead of dropped.
 		expect(clearQueueSpy).toHaveBeenCalledTimes(1);
+		expect(mode.compactionQueuedMessages).toEqual([
+			{ text: "queued steer", mode: "steer", images: undefined },
+			{ text: "queued follow-up", mode: "followUp", images: undefined },
+		]);
 	});
 
-	it("clears stranded queued messages before retrying the approved-plan prompt after abort", async () => {
-		// Regression for PRRT_kwDOQxs0bc6OKssj: abort()'s #drainStrandedQueuedMessages
-		// may schedule a queued-message drain that auto-resumes a turn with the
-		// stranded compaction-flush messages (steers/follow-ups delivered by
-		// flushCompactionQueue's #deliverQueuedMessage loop). Without clearing the
-		// queue, the drain races the retry prompt and surfaces another
-		// AgentBusyError. clearQueue() must run after the abort and before the
-		// retry to neutralize the drain.
+	it("preserves stranded queued messages before retrying the approved-plan prompt after abort", async () => {
+		// Regression for PRRT_kwDOQxs0bc6OKssj / PRRT_kwDOQxs0bc6OLwj8:
+		// abort()'s #drainStrandedQueuedMessages may schedule a queued-message
+		// drain that auto-resumes a turn with the stranded compaction-flush
+		// messages. clearQueue() must run after the abort and before the retry
+		// to neutralize that drain, but the returned user messages must be
+		// preserved in compactionQueuedMessages because the aborted flush prompt
+		// resolves instead of rejecting through restoreQueue().
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -766,7 +773,7 @@ describe("InteractiveMode plan review rendering", () => {
 			await Promise.resolve();
 			streaming = false;
 		});
-		const clearQueueSpy = vi.spyOn(session, "clearQueue").mockReturnValue({ steering: [], followUp: [] });
+		const clearQueueSpy = vi.spyOn(session, "clearQueue");
 		const callOrder: string[] = [];
 		abortSpy.mockImplementation(async () => {
 			callOrder.push("abort");
@@ -774,7 +781,10 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		clearQueueSpy.mockImplementation(() => {
 			callOrder.push("clearQueue");
-			return { steering: [], followUp: [] };
+			return {
+				steering: [{ text: "queued steer" }],
+				followUp: [{ text: "queued follow-up" }],
+			};
 		});
 		let promptCallCount = 0;
 		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async _text => {
@@ -800,6 +810,10 @@ describe("InteractiveMode plan review rendering", () => {
 		const retryIdx = callOrder.indexOf("prompt-2");
 		expect(abortIdx).toBeLessThan(clearIdx);
 		expect(clearIdx).toBeLessThan(retryIdx);
+		expect(mode.compactionQueuedMessages).toEqual([
+			{ text: "queued steer", mode: "steer", images: undefined },
+			{ text: "queued follow-up", mode: "followUp", images: undefined },
+		]);
 	});
 
 	it("keeps the existing approve-and-execute path clearing the session", async () => {
