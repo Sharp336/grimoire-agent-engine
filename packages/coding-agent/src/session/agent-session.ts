@@ -5961,10 +5961,14 @@ export class AgentSession {
 	/** Resolve effective discovery mode from the current registry size. */
 	#resolveEffectiveDiscoveryMode(): "off" | "mcp-only" | "all" {
 		const mcpTools = Array.from(this.#toolRegistry.values()).filter(tool => isMCPToolName(tool.name));
-		const mode = resolveEffectiveToolDiscoveryMode(this.settings, countToolsForAutoDiscovery(this.#toolRegistry.keys()), {
-			mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
-			contextWindow: this.model?.contextWindow ?? 0,
-		});
+		const mode = resolveEffectiveToolDiscoveryMode(
+			this.settings,
+			countToolsForAutoDiscovery(this.#toolRegistry.keys()),
+			{
+				mcpSchemaTokens: estimateMcpToolSchemaTokens(mcpTools),
+				contextWindow: this.model?.contextWindow ?? 0,
+			},
+		);
 		if (mode !== "off") return mode;
 		return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";
 	}
