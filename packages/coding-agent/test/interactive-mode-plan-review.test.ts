@@ -1209,11 +1209,15 @@ describe("InteractiveMode plan review rendering", () => {
 		const compactCall = compactSpy.mock.calls[0];
 		expect(compactCall).toBeDefined();
 		if (!compactCall) throw new Error("Expected compact call");
-		const [compactOptions] = compactCall;
+		const [compactOptions, compactMode] = compactCall;
 		expect(typeof compactOptions).toBe("object");
 		expect(compactOptions).toMatchObject({
 			internalInstructions: expect.stringContaining(planFilePath),
 		});
+		// Force plan-guided compaction off snapcompact: the plan-approval path
+		// must pass `"soft"` so a snapcompact default can't archive the transcript
+		// to images and silently drop the internalInstructions summary guidance.
+		expect(compactMode).toBe("soft");
 
 		// Plan-approved synthetic prompt was dispatched.
 		const planApprovedIdx = promptSpy.mock.calls.findIndex(isPlanApprovedCall);

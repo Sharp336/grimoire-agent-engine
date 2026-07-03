@@ -2606,9 +2606,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				// the try/finally is idempotent and kept for the !compactBeforeExecute
 				// branch.
 				this.session.setPlanReferencePath(options.planFilePath);
+				// Force context-full (`"soft"`) so a snapcompact default can't archive
+				// the transcript to images and silently drop the plan-compact guidance.
 				compactOutcome = await this.handleCompactCommand(
 					{ internalInstructions: compactionPrompt },
-					undefined,
+					"soft",
 					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
 				);
 			}
