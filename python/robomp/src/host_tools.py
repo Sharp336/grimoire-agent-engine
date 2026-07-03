@@ -1376,10 +1376,38 @@ def _build_classify_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         if isinstance(provider, str) and provider.strip() and provider.startswith("provider:"):
             labels.append("providers")
             labels.append(provider)
+
+        # Re-review replaces any stale review:p* rank label before applying the
+        # new one. PRs are issues in the GitHub API, so get_issue carries the
+        # current label set (PullRequestInfo does not). Removal is best-effort:
+        # tolerate 404 (label already gone) and degrade to additive-only if the
+        # fetch itself fails.
+        pr_number = bindings.default_comment_number
+        stale: list[str] = []
+        try:
+            current = _run_coro(bindings.loop, bindings.github.get_issue(bindings.repo.full_name, pr_number))
+            stale = [lbl for lbl in current.labels if lbl in _PR_RANKS and lbl != str(rank)]
+        except GitHubError as exc:
+            _audit(bindings, "classify_pr", args, error=f"fetch current labels failed: {exc.status} {exc.message}")
+        for old in stale:
+            try:
+                _run_coro(
+                    bindings.loop,
+                    bindings.github.remove_issue_label(bindings.repo.full_name, pr_number, old),
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    _audit(
+                        bindings,
+                        "classify_pr",
+                        args,
+                        error=f"remove stale label {old!r} failed: {exc.status} {exc.message}",
+                    )
+
         try:
             applied = _run_coro(
                 bindings.loop,
-                bindings.github.add_issue_labels(bindings.repo.full_name, bindings.default_comment_number, labels),
+                bindings.github.add_issue_labels(bindings.repo.full_name, pr_number, labels),
             )
         except GitHubError as exc:
             _audit(bindings, "classify_pr", args, error=str(exc))

@@ -268,22 +268,39 @@ def test_route_pull_request_synchronize_skips_unless_opted_in() -> None:
     assert enabled_decision.synchronize_review is True
 
 
-def test_route_pull_request_synchronize_defers_to_vouch_label_gate() -> None:
-    decision = route(
+def test_route_pull_request_synchronize_vouched_label_honors_opt_in() -> None:
+    payload = {
+        "action": "synchronize",
+        "pull_request": {"number": 9, "user": {"login": "alice"}},
+        "repository": {"full_name": "octo/widget"},
+    }
+
+    # The vouch workflow does not run on synchronize, so vouched_label mode
+    # cannot gate this event — an explicit opt-in still queues a re-review.
+    opted_in = route(
         "pull_request",
-        {
-            "action": "synchronize",
-            "pull_request": {"number": 9, "user": {"login": "alice"}},
-            "repository": {"full_name": "octo/widget"},
-        },
+        payload,
         allowlist=ALLOWLIST,
         bot_login=BOT,
         pr_review_trigger="vouched_label",
         on_synchronize=True,
     )
+    assert opted_in.should_queue
+    assert opted_in.task == "review_pr"
+    assert opted_in.issue_key == "octo/widget#9"
+    assert opted_in.bypass_once_guard is True
+    assert opted_in.synchronize_review is True
 
-    assert not decision.should_queue
-    assert decision.reason == "deferred to vouch label"
+    # Default (no opt-in) stays conservative: skip even under vouched_label.
+    default_decision = route(
+        "pull_request",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_trigger="vouched_label",
+    )
+    assert not default_decision.should_queue
+    assert default_decision.reason == "pull_request.synchronize ignored"
 
 
 def test_route_incoming_pr_comment_directive_routes_on_re_review() -> None:

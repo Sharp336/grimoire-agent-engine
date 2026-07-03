@@ -415,8 +415,9 @@ def route(
     if event_type == "pull_request" and action == "synchronize":
         if not pr_review_enabled:
             return RouteDecision("skip", None, repo, None, "PR review disabled")
-        if pr_review_trigger == "vouched_label":
-            return RouteDecision("skip", None, repo, None, "deferred to vouch label")
+        # The vouch workflow does not run on synchronize, so vouched_label mode
+        # cannot gate this event — honor the explicit opt-in instead. Default
+        # (no opt-in) stays conservative: skip.
         if not on_synchronize:
             return RouteDecision("skip", None, repo, None, "pull_request.synchronize ignored")
         return _pr_review_pr(
