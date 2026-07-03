@@ -896,6 +896,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.userMessageStyle": {
+		type: "enum",
+		values: ["default", "claude-strip"] as const,
+		default: "default",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "User Message Style",
+			description: "How submitted user prompts are rendered in the transcript",
+			options: [
+				{
+					value: "default",
+					label: "Default",
+					description: "OMP's standard padded user-message block",
+				},
+				{
+					value: "claude-strip",
+					label: "Claude Strip",
+					description: "Claude Code-style prompt strip with a leading chevron and full-width grey row",
+				},
+			],
+		},
+	},
+
 	"display.showTokenUsage": {
 		type: "boolean",
 		default: false,

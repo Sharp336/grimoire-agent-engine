@@ -1,4 +1,5 @@
 import { Container, Markdown } from "@oh-my-pi/pi-tui";
+import { isSettingsInitialized, settings } from "../../config/settings";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { imageReferenceHyperlink, renderPlaceholders } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
@@ -23,6 +24,11 @@ export class UserMessageComponent extends Container {
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
+		const useClaudeStrip =
+			!synthetic && isSettingsInitialized() && settings.get("display.userMessageStyle") === "claude-strip";
+		const displayText = useClaudeStrip && text.trim() !== "" ? `\\> ${text}` : text;
+		const horizontalPadding = useClaudeStrip ? 0 : 1;
+		const verticalPadding = useClaudeStrip ? 0 : 1;
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		// Paint the magic keywords ("ultrathink"/"orchestrate"/"workflowz") inside the rendered
 		// bubble too — matching the live editor glow. The Markdown component routes code spans and
@@ -42,7 +48,7 @@ export class UserMessageComponent extends Container {
 						? imageReferenceHyperlink(label, index, imageLinks, imageLabel)
 						: theme.fg("accent", `\x1b[1m${label}\x1b[22m`),
 			});
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+		const md = new Markdown(displayText, horizontalPadding, verticalPadding, getMarkdownTheme(), {
 			bgColor,
 			color,
 		});
