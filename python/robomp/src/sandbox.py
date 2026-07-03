@@ -844,6 +844,17 @@ class SandboxManager:
                     )
                     if clean.returncode != 0:
                         raise GitCommandError(clean.args, clean.returncode, clean.stdout, clean.stderr)
+                    # A new delivery (synchronize or re-review) must not
+                    # resume the previous review's transcript.  Clear stale
+                    # JSONL session files so worker._has_prior_session()
+                    # returns False and the agent starts fresh; same-delivery
+                    # retries skip this block (refresh=False) and keep
+                    # --continue for in-progress work.
+                    for _stale in session_dir.glob("*.jsonl"):
+                        try:
+                            _stale.unlink()
+                        except OSError as exc:
+                            log.warning("failed to remove stale session transcript %s: %s", _stale, exc)
             if not repo_exists:
                 if pr_head is not None:
                     self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)

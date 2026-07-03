@@ -741,6 +741,104 @@ def test_ensure_workspace_refresh_cleans_ignored_artifacts(tmp_path: Path, upstr
     assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
 
 
+def test_ensure_workspace_refresh_clears_stale_session_transcripts(tmp_path: Path, upstream_repo: Path) -> None:
+    """A new re-review delivery must not resume the previous review's transcript.
+
+    `ensure_workspace` with ``refresh=True`` re-fetches the PR head and resets
+    the checkout, but without clearing ``.omp-session/*.jsonl`` the worker's
+    ``_has_prior_session`` would still pass ``--continue`` and the agent would
+    review the new PR head inside the stale transcript.  The refresh path must
+    remove old JSONL transcripts so the next run starts fresh; a same-delivery
+    retry (``refresh=False``) preserves them.
+    """
+    import os
+    import subprocess
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    # Simulate a prior review run leaving a session transcript behind.
+    transcript = ws1.session_dir / "turn-abc.jsonl"
+    transcript.write_text('{"role":"user"}\n', encoding="utf-8")
+    assert transcript.is_file()
+
+    # Push a new commit to the PR head so refresh actually runs.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    # A new delivery (refresh=True) must clear the stale transcript.
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+    assert not transcript.exists(), "stale session transcript survived refresh"
+    # The session dir itself still exists (ensure_workspace re-creates it).
+    assert ws_refreshed.session_dir.is_dir()
+    # The refreshed content is the new PR head.
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+    # A same-delivery retry (refresh=False) must preserve the session.
+    retry_transcript = ws_refreshed.session_dir / "turn-retry.jsonl"
+    retry_transcript.write_text('{"role":"assistant"}\n', encoding="utf-8")
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=False,
+    )
+    assert retry_transcript.is_file(), "session transcript was cleared on non-refresh retry"
+
+
 def test_chown_workspace_noops_when_not_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], bool]] = []
 
