@@ -389,7 +389,10 @@ def _build_prompt(
             )
         return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
     if task_kind == "review_pr":
-        assert pr is not None
+        if directive is not None:
+            return persona.kickoff_pr_review_directive(
+                repo=inputs.repo, pr=pr, workspace=inputs.workspace, directive=directive
+            )
         return persona.kickoff_pr_review(repo=inputs.repo, pr=pr, workspace=inputs.workspace)
     if task_kind == "handle_comment":
         assert comment is not None
@@ -661,9 +664,7 @@ def _run_rpc_blocking(
                 stop_reason = turn.assistant_message.get("stopReason")
                 if stop_reason == "error":
                     error_msg = turn.assistant_message.get("errorMessage") or "model returned error"
-                    raise RuntimeError(
-                        f"omp agent error (stopReason=error): {error_msg}"
-                    )
+                    raise RuntimeError(f"omp agent error (stopReason=error): {error_msg}")
             log.info(
                 "rpc_done",
                 extra={

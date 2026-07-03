@@ -150,6 +150,32 @@ def kickoff_pr_review(*, repo: RepoInfo, pr: PullRequestInfo, workspace: Workspa
     return render(_load("kickoff_pr_review.md"), {"repo": repo, "pr": pr, "workspace": workspace})
 
 
+def kickoff_pr_review_directive(
+    *,
+    repo: RepoInfo,
+    pr: PullRequestInfo,
+    workspace: Workspace,
+    directive: Any,
+) -> str:
+    """Kickoff for a PR review triggered by a maintainer directive.
+
+    `directive` is duck-typed to anything with `body`, `author`, and `thread`
+    attributes (see `worker.DirectiveInfo`). The directive body and the prior
+    conversation thread are injected so the agent honors maintainer pragmas
+    and instructions during the review.
+    """
+    return render(
+        _load("kickoff_pr_review_directive.md"),
+        {
+            "repo": repo,
+            "pr": pr,
+            "workspace": workspace,
+            "directive": {"body": directive.body, "author": directive.author},
+            "thread": _render_thread(getattr(directive, "thread", ()) or ()),
+        },
+    )
+
+
 def resume_triage(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
     """Resume prompt for a `triage_issue` task whose omp session already exists."""
     return render(_load("resume_triage.md"), {"repo": repo, "issue": issue, "workspace": workspace})
@@ -396,6 +422,7 @@ __all__ = [
     "kickoff",
     "kickoff_directive",
     "kickoff_pr_review",
+    "kickoff_pr_review_directive",
     "render",
     "completion_reminder",
     "review_completion_reminder",

@@ -402,6 +402,13 @@ async def review_pr(
         log.warning("review_pr fetch failed", extra={"repo": repo_full, "pr": pr_number, "err": str(exc)})
         return
 
+    if pr.draft:
+        log.info("skip: draft PR", extra={"repo": repo.full_name, "pr": pr_number})
+        return
+
+    directive = _directive_from_payload(payload)
+    directive = await _attach_thread(github, directive, repo.full_name, pr_number, is_pr=True)
+
     key = issue_key(repo.full_name, pr_number)
     _, max_reviews_per_pr = _review_config(settings)
     successful_reviews = db.count_successful_tool_calls(key, "submit_pr_review")
@@ -460,7 +467,7 @@ async def review_pr(
         slot_uid=slot_uid,
         natives_cache=sandbox.natives_cache,
     )
-    await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr)
+    await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr, directive=directive)
     return
 
 

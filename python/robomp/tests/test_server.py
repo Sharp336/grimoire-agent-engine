@@ -2228,7 +2228,91 @@ async def test_review_pr_bypasses_once_guard_on_re_review_directive(
     # Since it bypassed the once-guard, it should run
     assert len(stub_run_task) == 1
     assert stub_run_task[0]["task_kind"] == "review_pr"
+    # The directive must be hydrated and passed into run_task so maintainer
+    # instructions/pragmas are honored during the review.
+    directive = stub_run_task[0].get("directive")
+    assert directive is not None
+    assert directive.body == "please re-review"
+    assert directive.author == "can1357"
     assert len(sandbox.ensure_calls) >= 1
+    close_database()
+
+
+async def test_review_pr_skips_draft_pr_on_re_review_comment(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Comment-triggered re-review must not queue for draft PRs (task-boundary guard).
+
+    The issue_comment webhook payload has no `draft` field, so routing can't
+    skip draft PRs the way pull_request events do. The guard lives at the
+    task boundary after `get_pull_request` returns the real PR state.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+        draft=True,
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-draft-skip",
+    )
+
+    assert stub_run_task == []
+    assert sandbox.ensure_calls == []
     close_database()
 
 
