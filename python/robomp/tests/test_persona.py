@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from robomp import persona
+from robomp.github_client import CommentInfo
 from robomp.worker import DirectiveInfo, ThreadMessage
 
 
@@ -226,3 +227,35 @@ def test_system_append_pr_review_renders_configured_bot_login() -> None:
     )
     assert "You are **@Svitter**" in out
     assert "**robomp**" not in out
+
+
+def test_prompts_warn_against_duplicate_pr() -> None:
+    # 1. Test kickoff prompt
+    out_kickoff = persona.kickoff(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+    )
+    assert "duplicate PR" in out_kickoff or "existing fix" in out_kickoff
+
+    # 2. Test kickoff_directive prompt
+    thread = (ThreadMessage(kind="issue_body", author="alice", body="broken parser", created_at=""),)
+    out_dir = persona.kickoff_directive(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+        directive=DirectiveInfo(body="fix it", author="can1357", thread=thread),
+    )
+    assert "duplicate PR" in out_dir or "existing fix" in out_dir
+
+    # 3. Test followup_comment prompt
+    comment = CommentInfo(id=1, author="bob", body="any update?", created_at="")
+    out_followup = persona.followup_comment(
+        repo=_Repo(),
+        issue=_Issue(is_pull_request=True),
+        comment=comment,
+        workspace=_Workspace(),
+        thread=thread,
+        pr_status="staged",
+    )
+    assert "duplicate PR" in out_followup or "existing fix" in out_followup

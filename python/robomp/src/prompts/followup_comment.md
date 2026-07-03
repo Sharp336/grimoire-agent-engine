@@ -16,6 +16,7 @@ Thread context: {{origin.description}}. PR state: `{{state.pr_status}}`.
 
 Decide what to do:
 
+- **Existing fix already present?** If the thread shows a linked/open PR, concrete patch, or maintainer note that a fix is in flight, do NOT open a duplicate PR. Reply with one `gh_post_comment` referencing the existing fix.
 - **New repro info?** Re-run via `repro_record`, then `gh_post_comment` with the outcome.
 - **PR change requested?** Amend `{{workspace.branch}}` and push only for an already-open PR / authorized implementation; NEVER open a second PR, and NEVER open the first PR for an unauthorized enhancement/proposal. Reply with a short `gh_post_comment` naming what changed.
 - **Confirmation or unrelated question?** Reply with one `gh_post_comment`. Leave code untouched.
