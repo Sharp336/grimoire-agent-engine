@@ -423,6 +423,13 @@ class WorkerPool:
                 slot_uid=slot_uid,
             )
         elif event == "pull_request" and action == "synchronize":
+            # Mirror `github_events.route`: under `vouched_label` the only
+            # trusted synchronize review trigger is the `labeled` event the
+            # vouch workflow emits after a fresh gate check, never the
+            # synchronize itself. A stored/retried synchronize row must not
+            # bypass that gate and reach `review_pr` on dispatch.
+            if self.settings.pr_review_trigger == "vouched_label":
+                return
             if not getattr(self.settings.review, "on_synchronize", False):
                 return
             await tasks.review_pr(

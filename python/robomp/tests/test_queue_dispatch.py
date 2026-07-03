@@ -106,6 +106,39 @@ async def test_dispatch_pr_synchronize_respects_settings_gate(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_pr_synchronize_skipped_under_vouched_label_trigger(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored/retried synchronize row must not bypass the vouch gate.
+
+    `github_events.route` defers synchronize to the `labeled` event under
+    `vouched_label`; `_dispatch` must enforce the same gate so a retried
+    row never reaches `review_pr` even when `on_synchronize` is True.
+    """
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    monkeypatch.setitem(settings.__dict__, "pr_review_trigger", "vouched_label")
+
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-vouched"))  # noqa: SLF001
+    assert seen == []
+
+    # Under the default `open` trigger the same row is admitted.
+    monkeypatch.setitem(settings.__dict__, "pr_review_trigger", "open")
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-open"))  # noqa: SLF001
+    assert seen == ["synchronize"]
+
+
+@pytest.mark.asyncio
 async def test_pr_comment_rereview_delegates_to_review_pr(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
