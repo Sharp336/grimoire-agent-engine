@@ -119,6 +119,25 @@ describe("redactSkillDescriptions", () => {
 			expect(result[0].description).toBe("One.");
 		});
 
+		it("preserves leading CJK sentences when trimming to a token budget", () => {
+			const firstSentence = "最初の説明です。";
+			const cjkSkill: Skill = {
+				name: "cjk-skill",
+				description: `${firstSentence}これは予算を超える追加説明です。`,
+				filePath: "/path/to/cjk",
+				baseDir: "/path/to",
+				source: "test",
+			};
+
+			const result = redactSkillDescriptions([cjkSkill], {
+				mode: "trim",
+				maxContextShare: 1,
+				contextWindow: countTokens(firstSentence),
+			});
+
+			expect(result[0].description).toBe(firstSentence);
+		});
+
 		it("allows zero kept sentences when a single sentence exceeds the per-skill budget", () => {
 			const singleSentenceSkill: Skill[] = [
 				{
@@ -178,6 +197,26 @@ describe("redactSkillDescriptions", () => {
 				contextWindow: 160,
 			});
 			expect(result[0].description).toBe("One. Two.");
+		});
+
+		it("preserves leading CJK sentences when capping rendered skills", () => {
+			const firstSentence = "最初の説明です。";
+			const cjkSkill: Skill = {
+				name: "cjk-skill",
+				description: `${firstSentence}これは予算を超える追加説明です。`,
+				filePath: "/path/to/cjk",
+				baseDir: "/path/to",
+				source: "test",
+			};
+			const renderedFirstSentenceTokens = countTokens(`<skills>\n- cjk-skill: ${firstSentence}\n</skills>`);
+
+			const result = redactSkillDescriptions([cjkSkill], {
+				mode: "cap",
+				maxContextShare: 1,
+				contextWindow: renderedFirstSentenceTokens,
+			});
+
+			expect(result[0].description).toBe(firstSentence);
 		});
 
 		it("never drops a skill entry even when budget is unsplittable", () => {

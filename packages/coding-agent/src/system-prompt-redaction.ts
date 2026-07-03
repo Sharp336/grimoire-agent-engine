@@ -15,10 +15,14 @@ export interface SkillDescriptionRedactionOptions {
 	renderFormat?: "default" | "custom";
 }
 
+const CJK_SENTENCE_TERMINATOR_RE = /([。！？])(?=\S)/gu;
+const SENTENCE_BOUNDARY_RE = /(?<=[.!?。！？])\s+/u;
+
 function splitSentences(description: string): string[] {
 	const trimmed = description.trim();
 	if (!trimmed) return [""];
-	return trimmed.split(/(?<=[.!?])\s+/).filter(sentence => sentence.length > 0);
+	const normalized = trimmed.replace(CJK_SENTENCE_TERMINATOR_RE, "$1 ");
+	return normalized.split(SENTENCE_BOUNDARY_RE).filter(sentence => sentence.length > 0);
 }
 
 function trimDescriptionToTokenBudget(description: string, tokenBudget: number): string {
