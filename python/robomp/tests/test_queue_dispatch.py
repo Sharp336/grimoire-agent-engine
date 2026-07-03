@@ -127,15 +127,90 @@ async def test_dispatch_pr_synchronize_skipped_under_vouched_label_trigger(
         max_reviews_per_pr = 3
 
     monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
-    monkeypatch.setitem(settings.__dict__, "pr_review_trigger", "vouched_label")
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
 
     await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-vouched"))  # noqa: SLF001
     assert seen == []
 
     # Under the default `open` trigger the same row is admitted.
-    monkeypatch.setitem(settings.__dict__, "pr_review_trigger", "open")
+    monkeypatch.setattr(settings, "pr_review_trigger", "open")
     await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-open"))  # noqa: SLF001
     assert seen == ["synchronize"]
+
+
+@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review", "labeled"])
+@pytest.mark.asyncio
+async def test_dispatch_pr_review_actions_respect_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    await _make_pool(settings, db)._dispatch(_pr_row(action, delivery=f"disabled-{action}"))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_synchronize_respects_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-kill-switch"))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_comment_rereview_respects_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    row = EventRow(
+        delivery_id="comment-kill-switch",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": "created",
+            "repository": {"full_name": "octo/widget"},
+            "issue": {"number": 7, "pull_request": {"url": "https://api.github.test/pulls/7"}},
+            "comment": {"user": {"login": "can1357"}, "body": "@robomp-bot please re-review"},
+            "_robomp_review": {"bypass_once_guard": True},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert seen == []
 
 
 @pytest.mark.asyncio

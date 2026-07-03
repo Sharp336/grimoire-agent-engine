@@ -353,6 +353,16 @@ class WorkerPool:
                 "recovered": row.attempts >= 2,
             },
         )
+
+        def pr_review_allowed() -> bool:
+            if self.settings.pr_review_enabled:
+                return True
+            log.info(
+                "skip: PR review disabled (kill switch)",
+                extra={"event": event, "action": action, "delivery": row.delivery_id, "key": row.issue_key},
+            )
+            return False
+
         if event == "issues" and action == "opened":
             await tasks.triage_issue(
                 settings=self.settings,
@@ -370,6 +380,8 @@ class WorkerPool:
             if "pull_request" in issue:
                 review = row.payload.get("_robomp_review")
                 if isinstance(review, dict) and review.get("bypass_once_guard"):
+                    if not pr_review_allowed():
+                        return
                     await tasks.review_pr(
                         settings=self.settings,
                         db=self.db,
@@ -411,6 +423,8 @@ class WorkerPool:
             "ready_for_review",
             "labeled",
         ):
+            if not pr_review_allowed():
+                return
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,
@@ -423,6 +437,8 @@ class WorkerPool:
                 slot_uid=slot_uid,
             )
         elif event == "pull_request" and action == "synchronize":
+            if not pr_review_allowed():
+                return
             # Mirror `github_events.route`: under `vouched_label` the only
             # trusted synchronize review trigger is the `labeled` event the
             # vouch workflow emits after a fresh gate check, never the
