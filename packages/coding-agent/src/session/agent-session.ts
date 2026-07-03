@@ -1729,6 +1729,15 @@ export class AgentSession {
 	 * the provider receives, not the unredacted `session.skills`.
 	 */
 	#promptSkills: readonly Skill[] = [];
+	/**
+	 * True when the system prompt has been rebuilt (by redaction refresh, model
+	 * switch, or tool-set change) since the last provider-usage anchor was
+	 * recorded. When set, `getContextBreakdown()` allows negative non-message
+	 * deltas so a prompt-shrinking refresh (e.g. enabling skill redaction)
+	 * immediately reduces reported usage instead of staying clamped to the old
+	 * anchor until the next provider response clears the flag.
+	 */
+	#promptRebasedSinceLastAnchor = false;
 	#mcpDiscoveryEnabled = false;
 	#discoverableMCPTools = new Map<string, DiscoverableTool>();
 	#selectedMCPToolNames = new Set<string>();
@@ -3360,6 +3369,7 @@ export class AgentSession {
 					nonMessageTokens: this.#pendingContextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this),
 				};
 			}
+			this.#promptRebasedSinceLastAnchor = false;
 		}
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&
@@ -6271,6 +6281,7 @@ export class AgentSession {
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptModelContextWindow = this.model?.contextWindow;
 				this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
+				this.#promptRebasedSinceLastAnchor = true;
 			}
 		}
 		if (options?.persistMCPSelection !== false) {
@@ -6357,6 +6368,7 @@ export class AgentSession {
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptModelContextWindow = this.model?.contextWindow;
 		this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
+		this.#promptRebasedSinceLastAnchor = true;
 		// Refresh the cached signature so a subsequent `#applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
 		// just performed (and conversely, a different set forces a fresh rebuild).
@@ -14334,6 +14346,7 @@ export class AgentSession {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
 		const previousPromptSkills = this.#promptSkills;
 		const previousPromptModelContextWindow = this.#promptModelContextWindow;
+		const previousPromptRebasedSinceLastAnchor = this.#promptRebasedSinceLastAnchor;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousFallbackSelectedMCPToolNames = previousSessionFile
 			? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
@@ -14514,6 +14527,7 @@ export class AgentSession {
 			this.#baseSystemPromptBeforeMemoryPromotion = previousBaseSystemPromptBeforeMemoryPromotion;
 			this.#promptSkills = previousPromptSkills;
 			this.#promptModelContextWindow = previousPromptModelContextWindow;
+			this.#promptRebasedSinceLastAnchor = previousPromptRebasedSinceLastAnchor;
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
@@ -15020,6 +15034,15 @@ export class AgentSession {
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(this);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
 		const currentNonMessageTokens = computeNonMessageTokens(this);
+		// When the system prompt has been rebuilt (e.g. by skill-redaction
+		// refresh) since the last provider anchor, allow negative non-message
+		// deltas so a prompt-shrinking refresh immediately reduces reported
+		// usage instead of staying clamped to the old anchor until the next
+		// provider response clears the flag.
+		const nonMessageDelta = (anchored: number) =>
+			this.#promptRebasedSinceLastAnchor
+				? currentNonMessageTokens - anchored
+				: Math.max(0, currentNonMessageTokens - anchored);
 
 		const branchEntries = this.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
@@ -15084,7 +15107,7 @@ export class AgentSession {
 			}
 			usedTokens =
 				promptTokens +
-				Math.max(0, currentNonMessageTokens - nonMessageTokens) +
+				nonMessageDelta(nonMessageTokens) +
 				tailTokens +
 				pendingMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
 		} else if (pending) {
@@ -15097,7 +15120,7 @@ export class AgentSession {
 			}
 			usedTokens =
 				pending.promptTokens +
-				Math.max(0, currentNonMessageTokens - pending.nonMessageTokens) +
+				nonMessageDelta(pending.nonMessageTokens) +
 				tailTokens +
 				pendingMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
 		}
@@ -15117,7 +15140,7 @@ export class AgentSession {
 
 					usedTokens =
 						promptTokens +
-						Math.max(0, currentNonMessageTokens - nonMessageTokens) +
+						nonMessageDelta(nonMessageTokens) +
 						tailTokens +
 						pendingMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
 					anchored = true;
@@ -15173,6 +15196,7 @@ export class AgentSession {
 		snapshot: { promptTokens: number; nonMessageTokens: number; cutoffCount: number } | undefined,
 	): void {
 		this.#pendingContextSnapshot = snapshot;
+		if (snapshot) this.#promptRebasedSinceLastAnchor = false;
 		this.#contextUsageRevision++;
 	}
 

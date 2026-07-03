@@ -3,11 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { computeNonMessageBreakdown } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import {
+	computeNonMessageBreakdown,
+	computeNonMessageTokens,
+} from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -555,5 +558,171 @@ describe("AgentSession switchSession restores prompt with model context window",
 			];
 		}
 		return [first, second];
+	}
+});
+
+describe("AgentSession context usage rebases after redaction-driven prompt refresh", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-rebase-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("reduces reported usedTokens after a prompt-shrinking redaction refresh, without a provider response", async () => {
+		// Build a session with a large (unredacted) system prompt, record an
+		// assistant usage anchor against it, then rebuild a smaller (redacted)
+		// prompt. getContextBreakdown() must reflect the smaller prompt
+		// immediately — the negative non-message delta is allowed because the
+		// prompt was rebased since the last anchor.
+		const [model] = pickTwoModelsForRebaseTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const largePrompt = [`You are a helpful assistant. ${"x".repeat(2000)}`];
+		const smallPrompt = ["You are a helpful assistant."];
+
+		let promptToEmit = largePrompt;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: largePrompt, tools: [], messages: [] },
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		// Seed an assistant usage anchor with a contextSnapshot whose
+		// nonMessageTokens matches the large prompt. This simulates a prior
+		// provider response that billed the unredacted prompt.
+		const largeNonMessageTokens = computeNonMessageTokens(session);
+		const anchorTimestamp = 1000;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: anchorTimestamp,
+		};
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManager.appendMessage(assistantMessage);
+		// Sync the agent's messages so getContextBreakdown sees the anchor.
+		const ctx = session.buildDisplaySessionContext();
+		agent.replaceMessages(ctx.messages);
+
+		// Before the refresh, the breakdown is anchored to the large prompt.
+		const beforeRefresh = session.getContextBreakdown();
+		expect(beforeRefresh?.anchored).toBe(true);
+		const beforeUsed = beforeRefresh?.usedTokens ?? 0;
+
+		// Rebuild with the smaller (redacted) prompt.
+		promptToEmit = smallPrompt;
+		await session.refreshBaseSystemPrompt();
+
+		// After the refresh, the reported usage must drop — the negative
+		// non-message delta is no longer clamped to zero.
+		const afterRefresh = session.getContextBreakdown();
+		expect(afterRefresh?.anchored).toBe(true);
+		const afterUsed = afterRefresh?.usedTokens ?? 0;
+		expect(afterUsed).toBeLessThan(beforeUsed);
+
+		// The drop must be at least the token difference between the two prompts.
+		const smallNonMessageTokens = computeNonMessageTokens(session);
+		const promptDelta = largeNonMessageTokens - smallNonMessageTokens;
+		expect(promptDelta).toBeGreaterThan(0);
+		expect(beforeUsed - afterUsed).toBeGreaterThanOrEqual(promptDelta);
+	});
+
+	it("does not rebase when no refresh has occurred since the last anchor", () => {
+		// After a provider response sets the context snapshot, the normal clamp
+		// (Math.max(0, delta)) must remain in effect — a redaction refresh is
+		// required to allow negative deltas.
+		const [model] = pickTwoModelsForRebaseTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const prompt = ["You are a helpful assistant."];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: prompt, tools: [], messages: [] },
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: prompt }),
+		});
+
+		// Seed the anchor with a nonMessageTokens larger than the current
+		// prompt's non-message tokens. Without a refresh since the anchor, the
+		// negative delta (currentNonMessage - anchorNonMessage) must be clamped
+		// to zero — usedTokens stays at the anchor's promptTokens, not below.
+		const currentNonMessageTokens = computeNonMessageTokens(session);
+		const inflatedAnchorNonMessage = currentNonMessageTokens + 500;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: inflatedAnchorNonMessage },
+			timestamp: 1000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManager.appendMessage(assistantMessage);
+		const ctx = session.buildDisplaySessionContext();
+		agent.replaceMessages(ctx.messages);
+
+		// No refresh since the anchor → the negative delta is clamped to zero,
+		// so usedTokens equals the anchor's promptTokens (no tail messages).
+		const breakdown = session.getContextBreakdown();
+		expect(breakdown?.anchored).toBe(true);
+		expect(breakdown?.usedTokens).toBe(100);
+	});
+
+	function pickTwoModelsForRebaseTest(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		return [first, all[1] ?? first];
 	}
 });
