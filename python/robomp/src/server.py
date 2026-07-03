@@ -344,6 +344,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pr_review_trigger=cfg.pr_review_trigger,
             vouch_review_label=cfg.vouch_review_label,
             vouch_review_labeler=cfg.vouch_review_labeler,
+            on_synchronize=cfg.review.on_synchronize,
             resolve_issue_from_pr=_resolve,
         )
 
@@ -374,16 +375,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         },
                     )
 
-        # Persist directive metadata on the stored payload so the durable
-        # queue (and any replay) carries the maintainer signal forward.
-        if decision.directive:
+        # `_robomp_*` metadata is server-owned. Signed webhook bodies are still
+        # attacker-controlled GitHub event JSON, so strip any client-supplied
+        # robomp fields before stamping validated directive/review metadata.
+        payload = {key: value for key, value in payload.items() if not str(key).startswith("_robomp_")}
+
+        # Persist directive/re-review metadata on the stored payload so the
+        # durable queue (and any replay) carries the maintainer signal forward.
+        if decision.directive or decision.bypass_once_guard or decision.synchronize_review:
             payload = dict(payload)
-            payload["_robomp_directive"] = {
-                "body": decision.directive_body,
-                "author": decision.directive_author,
-                "pragmas": [list(item) for item in decision.directive_pragmas],
-                "authorizes_impl": decision.directive_authorizes_impl,
-            }
+            if decision.directive:
+                payload["_robomp_directive"] = {
+                    "body": decision.directive_body,
+                    "author": decision.directive_author,
+                    "pragmas": [list(item) for item in decision.directive_pragmas],
+                    "authorizes_impl": decision.directive_authorizes_impl,
+                }
+            if decision.bypass_once_guard or decision.synchronize_review:
+                payload["_robomp_review"] = {
+                    "bypass_once_guard": decision.bypass_once_guard,
+                    "synchronize": decision.synchronize_review,
+                }
+                if "pull_request" not in payload:
+                    issue = payload.get("issue") or {}
+                    if isinstance(issue, Mapping):
+                        number = issue.get("number")
+                        if isinstance(number, int):
+                            payload["pull_request"] = {"number": number}
 
         if not decision.should_queue:
             log.info("skip", extra={"event": x_github_event, "reason": decision.reason})
@@ -656,7 +674,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if event is None:
             raise HTTPException(404, f"unknown delivery {delivery_id}")
         if event.state != "running":
-            raise HTTPException(409, f"delivery {delivery_id} is {event.state}; only running deliveries can be cancelled")
+            raise HTTPException(
+                409, f"delivery {delivery_id} is {event.state}; only running deliveries can be cancelled"
+            )
 
         pool: WorkerPool = bag["pool"]
         fired = await pool.cancel_event(delivery_id)

@@ -368,17 +368,31 @@ class WorkerPool:
         elif event == "issue_comment" and action == "created":
             issue = row.payload.get("issue") or {}
             if "pull_request" in issue:
-                await tasks.handle_pr_conversation(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
+                review = row.payload.get("_robomp_review")
+                if isinstance(review, dict) and review.get("bypass_once_guard"):
+                    await tasks.review_pr(
+                        settings=self.settings,
+                        db=self.db,
+                        github=self.github,
+                        sandbox=self.sandbox,
+                        git_transport=self.git_transport,
+                        payload=row.payload,
+                        delivery_id=row.delivery_id,
+                        attempts=row.attempts,
+                        slot_uid=slot_uid,
+                    )
+                else:
+                    await tasks.handle_pr_conversation(
+                        settings=self.settings,
+                        db=self.db,
+                        github=self.github,
+                        sandbox=self.sandbox,
+                        git_transport=self.git_transport,
+                        payload=row.payload,
+                        delivery_id=row.delivery_id,
+                        attempts=row.attempts,
+                        slot_uid=slot_uid,
+                    )
             else:
                 await tasks.handle_comment(
                     settings=self.settings,
@@ -391,7 +405,26 @@ class WorkerPool:
                     attempts=row.attempts,
                     slot_uid=slot_uid,
                 )
-        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
+        elif event == "pull_request" and action in (
+            "opened",
+            "reopened",
+            "ready_for_review",
+            "labeled",
+        ):
+            await tasks.review_pr(
+                settings=self.settings,
+                db=self.db,
+                github=self.github,
+                sandbox=self.sandbox,
+                git_transport=self.git_transport,
+                payload=row.payload,
+                delivery_id=row.delivery_id,
+                attempts=row.attempts,
+                slot_uid=slot_uid,
+            )
+        elif event == "pull_request" and action == "synchronize":
+            if not getattr(self.settings.review, "on_synchronize", False):
+                return
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,

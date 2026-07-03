@@ -98,6 +98,28 @@ request review comments*. GitHub's `ping` should produce
 See `.env.example` for the authoritative variable list. The shipped
 `docker-compose.yml` uses per-service `environment:` allowlists rather
 than `env_file:`, so `GITHUB_TOKEN` only reaches the gh-proxy container.
+PR synchronize re-review is off by default; enable `ROBOMP_PR_REVIEW_ON_SYNCHRONIZE=true`
+and bound it with `ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR` (default 3). Submission rate-limit
+precedence is: `ROBOMP_RATE_LIMIT_UNLIMITED` > trusted GitHub association
+(OWNER/MEMBER/COLLABORATOR) > `ROBOMP_RATE_LIMIT_CONTRIBUTOR` > `ROBOMP_RATE_LIMIT_DEFAULT`.
+
+PR review is conservative by default. `ROBOMP_PR_REVIEW_ENABLED` gates the
+whole incoming-PR review flow. `ROBOMP_PR_REVIEW_TRIGGER=open` reviews on
+`opened`/`reopened`/`ready_for_review`; `vouched_label` waits for the
+configured vouch label and labeler. `ROBOMP_PR_REVIEW_ON_SYNCHRONIZE=false`
+keeps pushed commits from automatically triggering another review unless you
+opt in; when enabled, `ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR` caps automated
+successful synchronize reviews per PR (default `3`). An authorized maintainer
+or configured reviewer-bot directive on an incoming PR comment can still force
+a re-review.
+
+Per-submitter rate limiting is also configurable. The rolling window is
+`ROBOMP_RATE_LIMIT_WINDOW_SECONDS`; unknown/first-time submitters use
+`ROBOMP_RATE_LIMIT_DEFAULT`, `CONTRIBUTOR` associations use
+`ROBOMP_RATE_LIMIT_CONTRIBUTOR`, explicit logins in
+`ROBOMP_RATE_LIMIT_UNLIMITED` bypass the limiter, and OWNER/MEMBER/
+COLLABORATOR associations bypass it automatically. Maintainer logins also
+bypass the limiter so directive comments are never throttled.
 
 ## CLI
 

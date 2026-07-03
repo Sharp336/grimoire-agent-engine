@@ -1,10 +1,10 @@
 """Dispatch action -> task mapping in WorkerPool._dispatch.
 
-Regression guard for the route<->dispatch contract: `github_events.route`
-queues a `pull_request.labeled` event as a `review_pr` task in `vouched_label`
-mode, so `_dispatch` MUST invoke `tasks.review_pr` for that action. It
-previously only handled `opened/reopened/ready_for_review`, so every vouched
-PR fell through to the no-op branch and was silently marked `done`.
+Regression guard for the route<->dispatch contract: every always-admitted PR
+action that `github_events.route` can queue as `review_pr` must reach
+`tasks.review_pr`. `pull_request.synchronize` is admitted only behind the
+settings gate in `_dispatch`; missed actions fall through to the no-op branch
+and get silently marked `done`.
 """
 
 from __future__ import annotations
@@ -62,7 +62,8 @@ async def test_dispatch_routes_pr_review_actions_to_review_pr(
 ) -> None:
     """Every PR action `route` can queue for review MUST reach `tasks.review_pr`.
 
-    `labeled` is the vouched-label trigger; the others are the `open` trigger.
+    `labeled` is the vouched-label trigger, `synchronize` is config-gated in
+    `route`, and the others are the `open` trigger.
     """
     seen: list[str] = []
 
@@ -77,18 +78,63 @@ async def test_dispatch_routes_pr_review_actions_to_review_pr(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_pr_synchronize_is_noop(
+async def test_dispatch_pr_synchronize_respects_settings_gate(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Actions `route` never queues for review must NOT spawn a review task."""
-    called = False
+    seen: list[str] = []
 
-    async def fake_review_pr(**_kwargs) -> None:
-        nonlocal called
-        called = True
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
 
     monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
 
-    await _make_pool(settings, db)._dispatch(_pr_row("synchronize"))  # noqa: SLF001
+    class DisabledReviewSettings:
+        on_synchronize = False
+        max_reviews_per_pr = 3
 
-    assert called is False
+    monkeypatch.setitem(settings.__dict__, "review", DisabledReviewSettings())
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-disabled"))  # noqa: SLF001
+    assert seen == []
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-enabled"))  # noqa: SLF001
+    assert seen == ["synchronize"]
+
+
+@pytest.mark.asyncio
+async def test_pr_comment_rereview_delegates_to_review_pr(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_review_pr(**kwargs) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+
+    payload = {
+        "action": "created",
+        "repository": {"full_name": "octo/widget"},
+        "issue": {"number": 7, "pull_request": {"url": "https://api.github.test/pulls/7"}},
+        "comment": {"user": {"login": "can1357"}, "body": "@robomp-bot please re-review"},
+        "_robomp_review": {"bypass_once_guard": True},
+    }
+
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=_StubGitHub(),  # type: ignore[arg-type]
+        sandbox=_StubSandbox(),  # type: ignore[arg-type]
+        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        payload=payload,
+        delivery_id="d-rereview",
+    )
+
+    delegated_payload = seen["payload"]
+    assert isinstance(delegated_payload, dict)
+    assert delegated_payload["pull_request"] == {"number": 7}
+    assert delegated_payload["_robomp_review"] == {"bypass_once_guard": True}

@@ -32,6 +32,8 @@ class RouteDecision:
     directive_author: str | None = None
     directive_pragmas: tuple[tuple[str, str], ...] = ()
     directive_authorizes_impl: bool = False
+    bypass_once_guard: bool = False
+    synchronize_review: bool = False
 
     @property
     def should_queue(self) -> bool:
@@ -193,7 +195,27 @@ def is_implementation_authorizer(
     return False
 
 
-def _pr_review_pr(pr: Mapping[str, Any], repo: str, action: str, bot_login: str) -> RouteDecision:
+_REVIEW_INTENT_RE = re.compile(
+    r"\b(?:re[-\s]?review|review\s+again|review\s+this|please\s+review|another\s+review|second\s+review)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_review_intent(body: str | None) -> bool:
+    if not isinstance(body, str):
+        return False
+    return _REVIEW_INTENT_RE.search(body) is not None
+
+
+def _pr_review_pr(
+    pr: Mapping[str, Any],
+    repo: str,
+    action: str,
+    bot_login: str,
+    *,
+    bypass_once_guard: bool = False,
+    synchronize_review: bool = False,
+) -> RouteDecision:
     """Build a `review_pr` decision for an incoming PR, or the matching skip."""
     if str(pr.get("state") or "open") != "open":
         return RouteDecision("skip", None, repo, None, "PR not open")
@@ -206,7 +228,15 @@ def _pr_review_pr(pr: Mapping[str, Any], repo: str, action: str, bot_login: str)
         return RouteDecision("skip", None, repo, None, "PR missing number")
     login, assoc = _submitter_info(pr)
     return RouteDecision(
-        "queue", "review_pr", repo, issue_key(repo, number), f"pull_request.{action}", submitter=login, association=assoc
+        "queue",
+        "review_pr",
+        repo,
+        issue_key(repo, number),
+        f"pull_request.{action}",
+        submitter=login,
+        association=assoc,
+        bypass_once_guard=bypass_once_guard,
+        synchronize_review=synchronize_review,
     )
 
 
@@ -223,6 +253,7 @@ def route(
     pr_review_trigger: str = "open",
     vouch_review_label: str = "vouched",
     vouch_review_labeler: str = "github-actions[bot]",
+    on_synchronize: bool = False,
 ) -> RouteDecision:
     """Decide whether and how to handle a webhook event.
 
@@ -317,15 +348,15 @@ def route(
         if not isinstance(number, int):
             return RouteDecision("skip", None, repo, None, "comment missing issue number")
         if "pull_request" in issue:
-            # Conversation comments on incoming contributor PRs are intentionally
-            # ignored for now: the one-shot review runs on open, and re-review
-            # directives are not wired yet. Only bot-authored PRs resume a live
-            # amend-and-push workflow.
+            # Conversation comments on incoming contributor PRs are ignored unless
+            # an authorized maintainer explicitly asks for another PR review.
+            # Bot-authored PRs still resume the live amend-and-push workflow.
             key = _resolve_pr_key(number)
             login, assoc = _submitter_info(comment)
             assoc = _effective_association(login, assoc, payload.get("repository"), repo)
             issue_user_raw = issue.get("user")
             issue_user = issue_user_raw if isinstance(issue_user_raw, Mapping) else {}
+            directive_kwargs = _directive_kwargs(comment, login, assoc)
             if _login_matches_bot(str(issue_user.get("login") or ""), bot_login):
                 return RouteDecision(
                     "queue",
@@ -335,7 +366,19 @@ def route(
                     f"issue_comment.created on PR #{number}",
                     submitter=login,
                     association=assoc,
-                    **_directive_kwargs(comment, login, assoc),
+                    **directive_kwargs,
+                )
+            if directive_kwargs and _has_review_intent(directive_kwargs.get("directive_body")):
+                return RouteDecision(
+                    "queue",
+                    "review_pr",
+                    repo,
+                    issue_key(repo, number),
+                    f"issue_comment.created re-review on PR #{number}",
+                    submitter=login,
+                    association=assoc,
+                    bypass_once_guard=True,
+                    **directive_kwargs,
                 )
             return RouteDecision("skip", None, repo, issue_key(repo, number), "incoming PR comments ignored")
         key = issue_key(repo, number)
@@ -364,6 +407,22 @@ def route(
             # slip through on reopen.
             return RouteDecision("skip", None, repo, None, "deferred to vouch label")
         return _pr_review_pr(pr, repo, action, bot_login)
+
+    if event_type == "pull_request" and action == "synchronize":
+        if not pr_review_enabled:
+            return RouteDecision("skip", None, repo, None, "PR review disabled")
+        if pr_review_trigger == "vouched_label":
+            return RouteDecision("skip", None, repo, None, "deferred to vouch label")
+        if not on_synchronize:
+            return RouteDecision("skip", None, repo, None, "pull_request.synchronize ignored")
+        return _pr_review_pr(
+            payload.get("pull_request") or {},
+            repo,
+            action,
+            bot_login,
+            bypass_once_guard=True,
+            synchronize_review=True,
+        )
 
     if event_type == "pull_request" and action == "labeled" and pr_review_trigger == "vouched_label":
         if not pr_review_enabled:

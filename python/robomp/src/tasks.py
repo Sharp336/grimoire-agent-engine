@@ -101,6 +101,36 @@ def _directive_from_payload(payload: Mapping[str, Any]) -> DirectiveInfo | None:
     )
 
 
+def _review_config(settings: Settings) -> tuple[bool, int]:
+    review = getattr(settings, "review", None)
+    on_synchronize = bool(getattr(review, "on_synchronize", False))
+    max_reviews = int(getattr(review, "max_reviews_per_pr", getattr(settings, "pr_review_max_reviews_per_pr", 3)))
+    return on_synchronize, max(1, max_reviews)
+
+
+def _review_metadata(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = payload.get("_robomp_review")
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _payload_requests_pr_rereview(payload: Mapping[str, Any]) -> bool:
+    metadata = _review_metadata(payload)
+    if bool(metadata.get("bypass_once_guard")):
+        return True
+    directive = _directive_from_payload(payload)
+    if directive is None:
+        return False
+    return "review" in directive.body.lower()
+
+
+def _payload_requests_synchronize_review(payload: Mapping[str, Any], settings: Settings) -> bool:
+    metadata = _review_metadata(payload)
+    if bool(metadata.get("synchronize")):
+        return True
+    on_synchronize, _ = _review_config(settings)
+    return str(payload.get("action") or "") == "synchronize" and on_synchronize
+
+
 async def _fetch_thread(
     github: GitHubBackend,
     repo: str,
@@ -360,6 +390,10 @@ async def review_pr(
     if pr_number <= 0 or not repo_full:
         log.info("skip: review_pr missing repo/number")
         return
+    synchronize_review = _payload_requests_synchronize_review(payload, settings)
+    if str(payload.get("action") or "") == "synchronize" and not synchronize_review:
+        log.info("skip: PR synchronize review disabled", extra={"repo": repo_full, "pr": pr_number})
+        return
     try:
         repo = await github.get_repo(repo_full)
         issue = await github.get_issue(repo_full, pr_number)
@@ -368,12 +402,22 @@ async def review_pr(
         log.warning("review_pr fetch failed", extra={"repo": repo_full, "pr": pr_number, "err": str(exc)})
         return
 
-    labels = {label.lower() for label in issue.labels}
     key = issue_key(repo.full_name, pr_number)
-    review_labeled = "triaged" in labels or any(label.startswith("review:") for label in labels)
-    if db.has_successful_tool_call(key, "submit_pr_review"):
-        log.info("skip: PR review already submitted", extra={"repo": repo_full, "pr": pr_number})
+    _, max_reviews_per_pr = _review_config(settings)
+    successful_reviews = db.count_successful_tool_calls(key, "submit_pr_review")
+    if synchronize_review and successful_reviews >= max_reviews_per_pr:
+        log.info(
+            "skip: PR review cap reached",
+            extra={"repo": repo.full_name, "pr": pr_number, "reviews": successful_reviews, "cap": max_reviews_per_pr},
+        )
         return
+    bypass_once_guard = _payload_requests_pr_rereview(payload) or synchronize_review
+    if successful_reviews and not bypass_once_guard:
+        log.info("skip: PR review already submitted", extra={"repo": repo.full_name, "pr": pr_number})
+        return
+
+    labels = {label.lower() for label in issue.labels}
+    review_labeled = "triaged" in labels or any(label.startswith("review:") for label in labels)
     if review_labeled:
         log.info(
             "review labels present without submitted review; retrying",
@@ -679,8 +723,9 @@ async def handle_pr_conversation(
     """Handle a regular (non-review) comment on a bot-authored PR.
 
     The `issue_comment.created` payload's `issue.number` IS the PR number on
-    these events; we resolve back to the originating issue via the DB and
-    drive `handle_comment` so the agent works on the same session/branch.
+    these events; re-review directives on incoming PRs delegate to `review_pr`,
+    while bot-authored PR conversations resolve back to the originating issue
+    via the DB and drive `handle_comment` on the same session/branch.
     """
     repo_payload = payload.get("repository") or {}
     repo_full = str(repo_payload.get("full_name") or "")
@@ -688,6 +733,21 @@ async def handle_pr_conversation(
     pr_number = issue_payload.get("number")
     if not repo_full or not isinstance(pr_number, int):
         log.info("skip: pr-conversation missing repo/number")
+        return
+    if bool(_review_metadata(payload).get("bypass_once_guard")):
+        review_payload = dict(payload)
+        review_payload["pull_request"] = {"number": pr_number}
+        await review_pr(
+            settings=settings,
+            db=db,
+            github=github,
+            sandbox=sandbox,
+            git_transport=git_transport,
+            payload=review_payload,
+            delivery_id=delivery_id,
+            attempts=attempts,
+            slot_uid=slot_uid,
+        )
         return
     issue_row, pr_info = await _resolve_issue_row_for_pr(
         db=db,

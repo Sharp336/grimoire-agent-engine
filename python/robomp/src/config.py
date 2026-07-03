@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Literal
@@ -11,6 +12,12 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewSettings:
+    on_synchronize: bool
+    max_reviews_per_pr: int
 
 
 class Settings(BaseSettings):
@@ -38,12 +45,15 @@ class Settings(BaseSettings):
     git_author_email: str = Field(..., alias="ROBOMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
-    # PR review trigger. "open" (default) reviews incoming PRs on
-    # opened/reopened/ready_for_review. "vouched_label" DEFERS review until the
-    # vouch GitHub Action labels the PR `vouch_review_label`, so robomp reviews
-    # only PRs that survive the vouch gate. `pr_review_enabled` remains the
-    # master switch (False disables review under either trigger).
+    # PR review trigger. `open` (default) reviews incoming PRs on
+    # opened/reopened/ready_for_review. `vouched_label` DEFERS review until the
+    # GitHub Action labels the PR `vouch_review_label`, so robomp reviews only
+    # PRs that survive the vouch gate. `pr_review_enabled` remains the master
+    # switch (False disables review under either trigger).
     pr_review_trigger: Literal["open", "vouched_label"] = Field("open", alias="ROBOMP_PR_REVIEW_TRIGGER")
+    # Conservative by default: synchronize re-review is opt-in and capped per PR.
+    pr_review_on_synchronize: bool = Field(False, alias="ROBOMP_PR_REVIEW_ON_SYNCHRONIZE")
+    pr_review_max_reviews_per_pr: int = Field(3, ge=1, alias="ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR")
     vouch_review_label: str = Field("vouched", alias="ROBOMP_VOUCH_REVIEW_LABEL")
     # In vouched_label mode, only `labeled` events from this actor trigger a
     # review, so a manual label by a triage/maintainer cannot bypass the gate.
@@ -304,10 +314,21 @@ class Settings(BaseSettings):
         return frozenset(item for item in items if item)
 
     @property
+    def review(self) -> ReviewSettings:
+        override = self.__dict__.get("review")
+        if override is not None:
+            on_synchronize = bool(getattr(override, "on_synchronize", False))
+            max_reviews = int(getattr(override, "max_reviews_per_pr", self.pr_review_max_reviews_per_pr))
+            return ReviewSettings(on_synchronize=on_synchronize, max_reviews_per_pr=max(1, max_reviews))
+        return ReviewSettings(
+            on_synchronize=self.pr_review_on_synchronize,
+            max_reviews_per_pr=self.pr_review_max_reviews_per_pr,
+        )
+
+    @property
     def maintainer_logins(self) -> frozenset[str]:
         items = [
-            piece.strip().lstrip("@").lower().removesuffix("[bot]")
-            for piece in self.maintainer_logins_raw.split(",")
+            piece.strip().lstrip("@").lower().removesuffix("[bot]") for piece in self.maintainer_logins_raw.split(",")
         ]
         return frozenset(item for item in items if item)
 
