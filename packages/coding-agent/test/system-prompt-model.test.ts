@@ -1472,9 +1472,137 @@ describe("AgentSession rebase flag survives aborted assistant message without us
 	});
 });
 
-describe("AgentSession redaction signal invalidates in-flight rebuild mid-await", () => {
+describe("AgentSession rebase flag is set on cold-restore switchSession", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-cold-restore-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("allows negative non-message delta after switching to a session whose anchor predates a prompt shrink", async () => {
+		// OONQE: cold-restored sessions after redaction enable/tighten need
+		// prompt rebase accounting so old larger nonMessageTokens anchors do
+		// not clamp away prompt savings. switchSession to a different session
+		// sets #promptRebasedSinceLastAnchor = true so /context reflects the
+		// now-smaller prompt instead of clamping to the stale anchor.
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const largePrompt = [`You are a helpful assistant. ${"x".repeat(2000)}`];
+		const smallPrompt = ["You are a helpful assistant."];
+
+		// Build session A with a large prompt and a durable anchor.
+		let promptToEmit = largePrompt;
+		const sessionADir = path.join(tempDir, `session-a-${Bun.nanoseconds()}`);
+		const sessionManagerA = SessionManager.create(sessionADir, sessionADir);
+		const agentA = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: largePrompt, tools: [], messages: [] },
+		});
+		const sessionA = new AgentSession({
+			agent: agentA,
+			sessionManager: sessionManagerA,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		// Seed a durable assistant usage anchor with the large prompt's
+		// nonMessageTokens. This simulates a prior provider response that
+		// billed the unredacted prompt.
+		const largeNonMessageTokens = computeNonMessageTokens(sessionA);
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: 1000,
+		};
+		sessionManagerA.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManagerA.appendMessage(assistantMessage);
+		agentA.replaceMessages(sessionA.buildDisplaySessionContext().messages);
+
+		// Verify the large-prompt anchor is in place.
+		const beforeShrink = sessionA.getContextBreakdown();
+		expect(beforeShrink?.anchored).toBe(true);
+		const beforeUsed = beforeShrink?.usedTokens ?? 0;
+
+		// Shrink the prompt in session A (simulates redaction enabled after
+		// the durable anchor was recorded). This sets the rebase flag in
+		// session A, but we persist and cold-restore via switchSession below.
+		promptToEmit = smallPrompt;
+		await sessionA.refreshBaseSystemPrompt();
+
+		// Dispose session A so its state is only on disk.
+		await sessionA.dispose();
+
+		// Create session B (a fresh session) and switchSession to session A
+		// from B. This simulates cold-restore: the target session's last
+		// durable anchor predates the prompt shrink. switchSession must set
+		// the rebase flag so the negative delta is allowed WITHOUT any
+		// additional refreshBaseSystemPrompt() call.
+		const sessionBDir = path.join(tempDir, `session-b-${Bun.nanoseconds()}`);
+		fs.mkdirSync(sessionBDir, { recursive: true });
+		const sessionBFile = path.join(sessionBDir, "active.jsonl");
+		const sessionManagerB = SessionManager.create(sessionBDir, sessionBFile);
+		const agentB = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: smallPrompt, tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent: agentB,
+			sessionManager: sessionManagerB,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		// Switch to session A (cold-restore). The rebase flag must be set
+		// by switchSession alone — no refreshBaseSystemPrompt() call here.
+		const sessionAFilePath = sessionManagerA.getSessionFile();
+		if (!sessionAFilePath) throw new Error("Session A file was not created");
+		await session.switchSession(sessionAFilePath);
+
+		// Immediately check the breakdown. The cold-restore rebase flag
+		// allows the negative non-message delta against the stale large-prompt
+		// anchor, so usedTokens must be lower than before the shrink.
+		const afterSwitch = session.getContextBreakdown();
+		expect(afterSwitch?.anchored).toBe(true);
+		expect(afterSwitch?.usedTokens).toBeLessThan(beforeUsed);
+	});
+});
+
+describe("AgentSession redaction signal invalidates in-flight rebuild mid-await", () => {
+	let modelRegistry: ModelRegistry;
+	let authStorage: AuthStorage;
 	let tempDir: string;
 	let session: AgentSession | undefined;
 

@@ -176,6 +176,37 @@ describe("redactSkillDescriptions", () => {
 			});
 			expect(result[0].description).toBe("One.");
 		});
+		it("enforces aggregate token budget when many skills exceed total budget", () => {
+			// OONQH: with many skills, the per-skill floor (≥1 token) can cause
+			// the aggregate rendered block to exceed the total token budget.
+			// trim mode must enforce the aggregate ceiling like cap mode does.
+			//
+			// 100 skills, contextWindow=10, maxContextShare=0.05 → budget = 1 token.
+			// Per-skill floor = max(1, floor(1/100)) = 1 token each.
+			// Without aggregate enforcement: 100 skills × 1 token = 100 tokens » 1.
+			// With Phase 2: framing alone (100 name lines + wrapper) exceeds 1,
+			// so all descriptions are trimmed to "" and only names survive.
+			const manySkills: Skill[] = Array.from({ length: 100 }, (_, i) => ({
+				name: `skill-${i}`,
+				description: `Description ${i}.`,
+				filePath: `/path/to/skill-${i}`,
+				baseDir: "/path/to",
+				source: "test",
+			}));
+			const result = redactSkillDescriptions(manySkills, {
+				mode: "trim",
+				maxContextShare: 0.05,
+				contextWindow: 10,
+			});
+			expect(result.length).toBe(100);
+			// Every entry name survives.
+			for (let i = 0; i < 100; i++) {
+				expect(result[i].name).toBe(`skill-${i}`);
+			}
+			// When framing alone exceeds the budget, Phase 2 trims all
+			// descriptions to empty (best effort) — names always survive.
+			expect(result.every(s => s.description === "")).toBe(true);
+		});
 	});
 
 	describe("cap mode", () => {

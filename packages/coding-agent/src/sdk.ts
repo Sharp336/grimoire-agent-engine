@@ -130,6 +130,7 @@ import {
 	buildSystemPromptToolMetadata,
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
+import { renderSkillsBlock } from "./system-prompt-redaction";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import {
@@ -2309,23 +2310,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// (including its <skills> block) as input and commonly keeps
 				// or appends it. Preserve the default's promptSkills for
 				// context accounting only when the returned prompt actually
-				// contains the default <skills> block — not just the literal
-				// "<skills>" tag, which could appear in unrelated user content
-				// (e.g. instructions or examples). A full replacement
-				// (e.g. `() => "custom"`) drops the skills block, so /context
-				// and compaction must not charge skills the provider never
-				// receives — the same full-control case handled for string/array
-				// overrides below.
+				// contains the *generated* skills block — not just any literal
+				// `<skills>` tag, which could appear in unrelated user content
+				// (e.g. instructions, examples, or a custom prompt body that
+				// itself wraps text in `<skills>...</skills>`). The previous
+				// regex `/<skills>[\s\S]*?<\/skills>/` matched the FIRST
+				// occurrence in each prompt part, which under a custom prompt
+				// could grab a user-authored block instead of the generated one.
+				// Build the exact block the template rendered from promptSkills
+				// and check for that substring instead.
 				const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 				const customPromptParts = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
-				const defaultSkillsBlock = defaultPrompt.systemPrompt
-					.map(part => part.match(/<skills>[\s\S]*?<\/skills>/)?.[0])
-					.find(block => block !== undefined);
-				const keepsDefaultSkills =
-					!!defaultSkillsBlock && customPromptParts.some(part => part.includes(defaultSkillsBlock));
+				const promptSkills = defaultPrompt.promptSkills ?? [];
+				if (promptSkills.length === 0) {
+					return { systemPrompt: customPromptParts, promptSkills: [] };
+				}
+				const renderFormat = options.customSystemPrompt ? "custom" : "default";
+				const generatedSkillsBlock = renderSkillsBlock(promptSkills, renderFormat);
+				const keepsDefaultSkills = customPromptParts.some(part => part.includes(generatedSkillsBlock));
 				return {
 					systemPrompt: customPromptParts,
-					promptSkills: keepsDefaultSkills ? defaultPrompt.promptSkills : [],
+					promptSkills: keepsDefaultSkills ? promptSkills : [],
 				};
 			}
 			// A full string/array prompt override replaces the entire system

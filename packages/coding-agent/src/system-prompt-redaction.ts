@@ -39,6 +39,29 @@ function trimDescriptionToTokenBudget(description: string, tokenBudget: number):
 	return kept.join(" ");
 }
 
+/**
+ * Render the exact `<skills>` block text that the system prompt template
+ * emits for the given skills. Exposed so callers (e.g. sdk.ts skills-block
+ * detection) can compare against the *generated* block rather than the first
+ * literal `<skills>` wrapper in user content.
+ */
+export function renderSkillsBlock(skills: readonly Skill[], renderFormat: "default" | "custom" = "default"): string {
+	const lines = ["<skills>"];
+	for (const skill of skills) {
+		if (renderFormat === "custom") {
+			// Matches custom-system-prompt.md: <skill name="{{name}}">\n{{description}}\n</skill>
+			lines.push(`<skill name="${skill.name}">`);
+			lines.push(skill.description);
+			lines.push("</skill>");
+		} else {
+			// Matches system-prompt.md: - {{name}}: {{description}}
+			lines.push(`- ${skill.name}: ${skill.description}`);
+		}
+	}
+	lines.push("</skills>");
+	return lines.join("\n");
+}
+
 function estimateRenderedSkillsTokens(
 	entries: readonly { skill: Skill; sentences: string[] }[],
 	renderFormat: "default" | "custom" = "default",
@@ -60,14 +83,61 @@ function estimateRenderedSkillsTokens(
 	return countTokens(lines.join("\n"));
 }
 
-function applyTrimMode(skills: Skill[], contextWindow: number, maxContextShare: number): Skill[] {
+function applyTrimMode(
+	skills: Skill[],
+	contextWindow: number,
+	maxContextShare: number,
+	renderFormat: "default" | "custom",
+): Skill[] {
 	if (skills.length === 0) return [];
 
-	const totalTokenBudget = Math.max(1, Math.floor(contextWindow * maxContextShare));
-	const perSkillTokenBudget = Math.max(1, Math.floor(totalTokenBudget / skills.length));
+	const budgetTokens = Math.max(1, Math.floor(contextWindow * maxContextShare));
+	const perSkillTokenBudget = Math.max(1, Math.floor(budgetTokens / skills.length));
 
-	return skills.map(skill => {
+	// Phase 1: trim each description to a per-skill token budget. With many
+	// skills the per-skill floor (≥1 token) can cause the aggregate rendered
+	// block to exceed the total budget, so this is a first pass only.
+	const redacted = skills.map(skill => {
 		const description = trimDescriptionToTokenBudget(skill.description, perSkillTokenBudget);
+		return { skill, sentences: splitSentences(description) };
+	});
+
+	// Phase 2: only when the per-skill floor (≥1 token) caused the aggregate
+	// to exceed the budget — i.e. when there are more skills than budget
+	// tokens. For small skill counts the per-skill budget already accounts for
+	// the total, and framing overhead alone may exceed a tiny budget without
+	// the per-skill floor being at fault. Iteratively trim description text
+	// down to a residual per-entry budget that accounts for fixed rendering
+	// overhead. Mirrors cap mode Phase 2 so both modes enforce the same
+	// aggregate ceiling. Skill names are never touched, so the entry list and
+	// names always survive even when the budget is unsplittable.
+	if (skills.length > budgetTokens && estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
+		const framingTokens = estimateRenderedSkillsTokens(
+			redacted.map(entry => ({ skill: entry.skill, sentences: [] })),
+			renderFormat,
+		);
+		// Only trim descriptions further when there is budget left after
+		// framing. When framing alone exceeds the budget (tiny budget, few
+		// skills), description trimming cannot help — keep Phase 1 results.
+		if (framingTokens < budgetTokens) {
+			const descriptionTokenBudget = Math.max(0, budgetTokens - framingTokens);
+			let residualTokenBudget = Math.max(0, Math.floor(descriptionTokenBudget / skills.length));
+
+			while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
+				for (const entry of redacted) {
+					const text = entry.sentences.join(" ");
+					const trimmed = trimDescriptionToTokenBudget(text, residualTokenBudget);
+					entry.sentences = trimmed ? [trimmed] : [];
+				}
+				if (estimateRenderedSkillsTokens(redacted, renderFormat) <= budgetTokens) break;
+				if (residualTokenBudget === 0) break;
+				residualTokenBudget = Math.floor(residualTokenBudget / 2);
+			}
+		}
+	}
+
+	return redacted.map(({ skill, sentences }) => {
+		const description = sentences.join(" ");
 		return description === skill.description ? skill : { ...skill, description };
 	});
 }
@@ -154,6 +224,6 @@ export function redactSkillDescriptions(skills: Skill[], options: SkillDescripti
 
 	const renderFormat = options.renderFormat ?? "default";
 
-	if (options.mode === "trim") return applyTrimMode(skills, contextWindow, maxContextShare);
+	if (options.mode === "trim") return applyTrimMode(skills, contextWindow, maxContextShare, renderFormat);
 	return applyCapMode(skills, contextWindow, maxContextShare, renderFormat);
 }
