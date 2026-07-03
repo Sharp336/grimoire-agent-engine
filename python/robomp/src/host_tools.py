@@ -1063,6 +1063,11 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         skip = bool(args.get("skip_checks", False))
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
+        # Recheck for duplicate PRs immediately before pushing/opening. A
+        # competing PR may have been opened (or the bot's own PR recorded)
+        # while the pre-publish fix/check ran; refuse here so we do not push
+        # a duplicate branch or open a second PR.
+        _refuse_if_duplicate_fix_pr(bindings, args)
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
         base = args.get("base") or bindings.repo.default_branch

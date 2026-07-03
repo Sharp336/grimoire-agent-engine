@@ -243,6 +243,23 @@ def test_completion_reminder_tells_agent_to_discard_duplicate_work_before_refere
     assert "uncommitted" in out.lower()
 
 
+def test_completion_reminder_does_not_suggest_separate_push_before_open_pr() -> None:
+    """PRRT_kwDOQxs0bc6OGZF3: the reminder must not tell the agent to push
+    separately before calling gh_open_pr. gh_open_pr pushes the branch
+    itself, so a separate gh_push_branch call is redundant and can create
+    a duplicate-PR hazard."""
+    out = persona.completion_reminder(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+    )
+    # The "drafted fix" instruction must say to commit then call gh_open_pr,
+    # not "commit, push, and open the PR".
+    assert "commit it and call `gh_open_pr`" in out
+    # Must NOT instruct a separate push before opening.
+    assert "commit, push, and open" not in out
+
+
 def test_followup_comment_handles_new_repro_before_existing_fix_fallback() -> None:
     """PRRT_kwDOQxs0bc6OFzii: new repro info must be handled before the existing-fix
     fallback; an open PR must not suppress a reporter's new reproduction details."""

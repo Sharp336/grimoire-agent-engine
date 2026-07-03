@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -3841,6 +3842,82 @@ def test_gh_open_pr_guard_fails_open_on_transport_error(
 
     assert "opened #99" in result
     assert timeline_hits >= 1, "guard must have attempted the timeline lookup before failing open"
+
+
+def test_gh_open_pr_rechecks_duplicate_after_pre_publish_checks(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OGZF6: the duplicate-PR guard must run a second time
+    after the pre-publish fix/check and immediately before the push. A
+    competing PR that appears while `bun run fix` / `bun check` are running
+    must be caught before the branch is pushed or a second PR is opened."""
+    timeline_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_calls
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            timeline_calls += 1
+            # First call (pre-check guard): no closing PRs → passes.
+            # Second call (post-check recheck): a competing PR #88 appeared.
+            if timeline_calls == 1:
+                return httpx.Response(200, json=[])
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": 88,
+                            "state": "open",
+                            "pull_request": {},
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    # Stub out the pre-publish fix/check so they don't touch the filesystem.
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *_a, **_kw: None)
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *_a, **_kw: None)
+    push_calls: list[tuple[str, str]] = []
+
+    def _fake_push(_b: ToolBindings, _a: Mapping[str, object], tool_name: str, _branch: str) -> str:
+        push_calls.append((tool_name, _branch))
+        return "abc123def456"
+
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", _fake_push)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#88" in msg
+    assert "already linked to open PR" in msg
+    assert "gh_post_reference_comment" in msg
+    # The guard must have queried the timeline twice: once before the
+    # pre-publish checks and once during the post-check recheck.
+    assert timeline_calls == 2, "guard must recheck after pre-publish checks"
+    # The push must never have happened — the recheck refused before it.
+    assert push_calls == [], "push must not run when the recheck refuses"
 
 
 def test_gh_post_reference_comment_posts_and_does_not_mutate_state(db: Database, tmp_path: Path) -> None:
