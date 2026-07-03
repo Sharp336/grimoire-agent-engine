@@ -5,7 +5,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import { MCPManager } from "../src/mcp/manager";
-import { executeServerTool, hasServerTool, inMemoryToolCache, lazyConfig, makeWorkDir, TOOL_DEF } from "./mcp-lifecycle-harness";
+import {
+	executeServerTool,
+	hasServerTool,
+	inMemoryToolCache,
+	lazyConfig,
+	makeWorkDir,
+	TOOL_DEF,
+} from "./mcp-lifecycle-harness";
 
 describe("MCP lazy lifecycle: on-demand connect failure", () => {
 	let workDir: string;

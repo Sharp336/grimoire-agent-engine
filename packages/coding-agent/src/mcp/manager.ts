@@ -217,7 +217,7 @@ export class MCPManager {
 	/** Timestamp (ms) of the last tool-call activity per server. */
 	#lastActivityAt = new Map<string, number>();
 	/** Pending idle-disconnect timers per lazy server. */
-	#idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	#idleTimers = new Map<string, Timer>();
 
 	constructor(
 		private cwd: string,

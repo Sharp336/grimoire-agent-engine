@@ -6,7 +6,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { MCPManager } from "../src/mcp/manager";
 import {
 	executeServerTool,

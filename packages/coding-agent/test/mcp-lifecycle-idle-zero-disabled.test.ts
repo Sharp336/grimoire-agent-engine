@@ -35,6 +35,7 @@ describe("MCP lazy lifecycle: idleTimeout 0 disables reaping", () => {
 
 		const manager = new MCPManager(workDir, cache);
 		try {
+			await manager.connectServers({ lazy: config }, {});
 			expect(resultText(await executeServerTool(manager, "lazy"))).toBe("pong");
 			expect(manager.getConnectionStatus("lazy")).toBe("connected");
 

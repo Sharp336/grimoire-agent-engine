@@ -9,7 +9,15 @@ import * as path from "node:path";
 import type { MCPServer } from "../src/capability/mcp";
 import { convertToLegacyConfig } from "../src/mcp/config";
 import { MCPManager } from "../src/mcp/manager";
-import { hasServerTool, inMemoryToolCache, lazyConfig, makeWorkDir, spawnCount, TOOL_DEF, waitFor } from "./mcp-lifecycle-harness";
+import {
+	hasServerTool,
+	inMemoryToolCache,
+	lazyConfig,
+	makeWorkDir,
+	spawnCount,
+	TOOL_DEF,
+	waitFor,
+} from "./mcp-lifecycle-harness";
 
 describe("MCP lifecycle precedence: per-server overrides the default", () => {
 	let workDir: string;

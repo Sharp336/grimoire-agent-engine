@@ -6,7 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { MCPManager } from "../src/mcp/manager";
-import { hasServerTool, inMemoryToolCache, lazyConfig, makeWorkDir, spawnCount, waitFor } from "./mcp-lifecycle-harness";
+import {
+	hasServerTool,
+	inMemoryToolCache,
+	lazyConfig,
+	makeWorkDir,
+	spawnCount,
+	waitFor,
+} from "./mcp-lifecycle-harness";
 
 describe("MCP eager lifecycle: connects at startup", () => {
 	let workDir: string;

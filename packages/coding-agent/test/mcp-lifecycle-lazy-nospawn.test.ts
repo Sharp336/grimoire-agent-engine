@@ -7,7 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { MCPManager } from "../src/mcp/manager";
-import { hasServerTool, inMemoryToolCache, lazyConfig, makeWorkDir, spawnCount, TOOL_DEF } from "./mcp-lifecycle-harness";
+import {
+	hasServerTool,
+	inMemoryToolCache,
+	lazyConfig,
+	makeWorkDir,
+	spawnCount,
+	TOOL_DEF,
+} from "./mcp-lifecycle-harness";
 
 describe("MCP lazy lifecycle: warm cache does not spawn", () => {
 	let workDir: string;

@@ -75,6 +75,18 @@ export const mcpCapability = defineCapability<MCPServer>({
 			return "http/sse transport requires url field";
 		}
 
+		// Validate lifecycle policy so a typo (e.g. "lazyy") surfaces as a config
+		// error instead of silently falling through every === "lazy" check as eager.
+		if (server.lifecycle !== undefined && server.lifecycle !== "eager" && server.lifecycle !== "lazy") {
+			return `Invalid lifecycle "${server.lifecycle}" (expected "eager" or "lazy")`;
+		}
+		if (
+			server.idleTimeout !== undefined &&
+			(typeof server.idleTimeout !== "number" || !Number.isFinite(server.idleTimeout) || server.idleTimeout < 0)
+		) {
+			return "idleTimeout must be a non-negative number of milliseconds";
+		}
+
 		return undefined;
 	},
 });

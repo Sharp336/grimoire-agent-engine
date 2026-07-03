@@ -3881,7 +3881,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Discovery & MCP",
 			label: "MCP Idle Disconnect (ms)",
-			description: "Idle timeout in milliseconds before a lazy MCP server is disconnected. 0 disables idle disconnect.",
+			description:
+				"Idle timeout in milliseconds before a lazy MCP server is disconnected. 0 disables idle disconnect.",
 		},
 	},
 
