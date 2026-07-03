@@ -2286,16 +2286,16 @@ export class AgentSession {
 		// the latest settings win.
 		this.#unsubscribeSkillsRedaction = onSkillsRedactionChanged(() => {
 			const epoch = ++this.#redactionRefreshEpoch;
-			// Invalidate any in-flight prompt build so a stale rebuild that
-			// started before this signal cannot apply its result after the
-			// await completes. The epoch guard above only checks before
-			// refreshBaseSystemPrompt() is called; a second signal arriving
-			// during that await would otherwise let the older rebuild apply a
-			// prompt built from stale redaction settings. Incrementing the
-			// build version here makes the in-flight build's captured version
-			// mismatch, so it discards its result — only the queued newer
-			// refresh's prompt wins.
-			++this.#promptBuildVersion;
+			// Do NOT eagerly increment #promptBuildVersion here. Doing so
+			// invalidates an in-flight tool rebuild (in #applyActiveToolsByName)
+			// before the redaction refresh's own rebuild has succeeded. If the
+			// redaction rebuild then throws, the tool rebuild's result is
+			// discarded and we are left with tools changed but prompt inventory
+			// old. Instead, let the serialized refreshBaseSystemPrompt() on the
+			// chain increment the build version when it actually starts — by
+			// then any earlier tool rebuild has either applied (and will be
+			// overwritten by the redaction rebuild) or is invalidated only when
+			// the replacement is genuinely under way.
 			this.#redactionRefreshChain = this.#redactionRefreshChain
 				.catch(() => {})
 				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt() : undefined))
@@ -3408,14 +3408,20 @@ export class AgentSession {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens: this.#pendingContextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this),
 				};
-				// Only clear the rebase flag when a durable usage anchor is
-				// recorded. An aborted/errored assistant message or one without
-				// usage is NOT a durable anchor — getContextBreakdown() will
-				// not treat it as one — so clearing the flag here would clamp
-				// negative non-message deltas to zero and hide a prompt-shrinking
-				// refresh (e.g. enabling skill redaction) until a later
-				// successful usage-bearing response.
-				this.#promptRebasedSinceLastAnchor = false;
+				// Only clear the rebase flag when the durable anchor's non-message
+				// snapshot matches the current prompt state. If a redaction refresh
+				// (or other rebuild) changed the prompt after the pending snapshot
+				// was captured, the anchor's nonMessageTokens are stale — clearing
+				// the flag would clamp the negative non-message delta to zero and
+				// hide the prompt-shrinking refresh until the next successful
+				// usage-bearing response. When there is no pending snapshot the
+				// anchor is set to the current non-message tokens, so the values
+				// always match and the flag is cleared as before.
+				const anchorNonMessageTokens =
+					this.#pendingContextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this);
+				if (anchorNonMessageTokens === computeNonMessageTokens(this)) {
+					this.#promptRebasedSinceLastAnchor = false;
+				}
 			}
 		}
 		const skipPersistedRewindResult =
@@ -6431,7 +6437,21 @@ export class AgentSession {
 		// while we await, our captured version will no longer match and we
 		// discard the stale result — the newer build's prompt wins.
 		const buildVersion = ++this.#promptBuildVersion;
-		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
+		let built: BuildSystemPromptResult;
+		try {
+			built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
+		} catch (error) {
+			// If the rebuild throws, roll back the build version so an
+			// in-flight tool rebuild (in #applyActiveToolsByName) that captured
+			// the previous version can still apply its result. Without this
+			// rollback, the tool rebuild would see a mismatched version and
+			// discard its result — leaving tools changed while the prompt
+			// inventory stays old.
+			if (this.#promptBuildVersion === buildVersion) {
+				this.#promptBuildVersion = buildVersion - 1;
+			}
+			throw error;
+		}
 		// A concurrent rebuild may have started and completed while we awaited.
 		// If so, discard our stale result — the newer build's prompt is correct.
 		if (this.#promptBuildVersion !== buildVersion) return;
@@ -14419,6 +14439,7 @@ export class AgentSession {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
 		const previousPromptSkills = this.#promptSkills;
 		const previousPromptModelContextWindow = this.#promptModelContextWindow;
+		const previousPromptModelKey = this.#promptModelKey;
 		const previousPromptRebasedSinceLastAnchor = this.#promptRebasedSinceLastAnchor;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousFallbackSelectedMCPToolNames = previousSessionFile
@@ -14598,8 +14619,8 @@ export class AgentSession {
 			}
 			this.#baseSystemPrompt = previousBaseSystemPrompt;
 			this.#baseSystemPromptBeforeMemoryPromotion = previousBaseSystemPromptBeforeMemoryPromotion;
-			this.#promptSkills = previousPromptSkills;
 			this.#promptModelContextWindow = previousPromptModelContextWindow;
+			this.#promptModelKey = previousPromptModelKey;
 			this.#promptRebasedSinceLastAnchor = previousPromptRebasedSinceLastAnchor;
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
