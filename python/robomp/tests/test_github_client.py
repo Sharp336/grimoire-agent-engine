@@ -1042,3 +1042,107 @@ def test_close_issue_propagates_error() -> None:
     with pytest.raises(GitHubError) as exc:
         _run_async(client.close_issue("octo/widget", 42))
     assert exc.value.status == 404
+
+
+# ---------- PRRT_kwDOQxs0bc6OPEiD: closing-keyword URL host restriction ----------
+
+
+def test_closing_keyword_url_rejects_non_github_host() -> None:
+    """PRRT_kwDOQxs0bc6OPEiD: the URL form must only accept github.com issue
+    URLs, not arbitrary hosts that happen to have an owner/repo/issues/N path."""
+    # Non-github host with matching path → must NOT match.
+    assert _closing_keyword_for("Fixes https://gitlab.com/octo/widget/issues/42", 42, "octo/widget") is False
+    assert _closing_keyword_for("Fixes https://example.com/octo/widget/issues/42", 42, "octo/widget") is False
+    # www.github.com is accepted.
+    assert _closing_keyword_for("Fixes https://www.github.com/octo/widget/issues/42", 42, "octo/widget") is True
+    # Real github.com URL still works.
+    assert _closing_keyword_for("Fixes https://github.com/octo/widget/issues/42", 42, "octo/widget") is True
+    # Non-github host with a different repo path → also rejected (no match at all).
+    assert _closing_keyword_for("Fixes https://gitlab.com/other/repo/issues/42", 42, "octo/widget") is False
+
+
+def test_list_closing_pull_requests_ignores_non_github_url_cross_ref() -> None:
+    """PRRT_kwDOQxs0bc6OPEiD: a cross-referenced PR whose body uses a
+    non-github URL (``Fixes https://gitlab.com/.../issues/42``) must NOT
+    be treated as a closing link for this issue."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 950,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes https://gitlab.com/octo/widget/issues/42",
+                    "repository_url": "https://api.github.com/repos/octo/widget",
+                }
+            },
+        },
+    ]
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=timeline)))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert prs == ()
+
+
+# ---------- PRRT_kwDOQxs0bc6OPEh-: page 2+ transport fail-open ----------
+
+
+def test_list_closing_pull_requests_fails_open_on_page2_transport_error() -> None:
+    """PRRT_kwDOQxs0bc6OPEh-: a transport error on page 2+ must fail open
+    (return partial results from page 1) rather than crashing direct-PAT
+    triage with an uncaught ConnectError/TimeoutException."""
+    filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(99)]
+    page1 = filler + [
+        # PR #100 connected on page 1 → should appear in partial results
+        {
+            "event": "connected",
+            "source": {"issue": {"number": 100, "state": "open", "pull_request": {}}},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        if page == 1:
+            return httpx.Response(200, json=page1)
+        raise httpx.ConnectError("connection reset", request=request)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    # Page 1 had exactly 100 entries, so page 2 is fetched. The transport
+    # error on page 2 fails open → partial results from page 1.
+    assert _pr_nums(prs) == (("octo/widget", 100),)
+
+
+def test_list_closing_pull_requests_propagates_page1_transport_error() -> None:
+    """PRRT_kwDOQxs0bc6OPEh-: a transport error on page 1 must still
+    propagate — a total timeline fetch failure is a real error, not a
+    partial-result situation."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.ConnectError):
+        _run_async(client.list_closing_pull_requests("octo/widget", 42))
+
+
+def test_list_closing_pull_requests_fails_open_on_page2_timeout() -> None:
+    """PRRT_kwDOQxs0bc6OPEh-: a timeout on page 2+ also fails open."""
+    filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(99)]
+    page1 = filler + [
+        {
+            "event": "connected",
+            "source": {"issue": {"number": 200, "state": "open", "pull_request": {}}},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        if page == 1:
+            return httpx.Response(200, json=page1)
+        raise httpx.TimeoutException("read timeout", request=request)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert _pr_nums(prs) == (("octo/widget", 200),)

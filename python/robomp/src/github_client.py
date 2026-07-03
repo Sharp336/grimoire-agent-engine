@@ -164,7 +164,7 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 _CLOSING_KEYWORD_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)"
     r"(?:#(?P<num>\d+)"
-    r"|https?://[^/]+/(?P<url_repo>[\w.+-]+/[\w.+-]+)/issues/(?P<url_num>\d+)"
+    r"|https?://(?:www\.)?github\.com/(?P<url_repo>[\w.+-]+/[\w.+-]+)/issues/(?P<url_num>\d+)"
     r"|(?P<repo>[\w.+-]+/[\w.+-]+)#(?P<repo_num>\d+))",
     re.IGNORECASE,
 )
@@ -382,11 +382,25 @@ class GitHubClient:
         source_defaults: dict[str, str] = {}
         page = 1
         while True:
-            data = await self.request(
-                "GET",
-                f"/repos/{repo}/issues/{number}/timeline",
-                params={"per_page": 100, "page": page},
-            )
+            try:
+                data = await self.request(
+                    "GET",
+                    f"/repos/{repo}/issues/{number}/timeline",
+                    params={"per_page": 100, "page": page},
+                )
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                if page == 1:
+                    raise
+                # Page 2+ transport failure: fail open with what we have
+                # so a network hiccup mid-pagination doesn't crash
+                # direct-PAT triage. Page 1 failures still propagate (a
+                # total timeline fetch failure is a real error).
+                log.warning(
+                    "timeline page %d transport error; returning partial results",
+                    page,
+                    extra={"repo": repo, "number": number, "page": page, "error": str(exc)},
+                )
+                break
             batch = data or []
             for event in batch:
                 if not isinstance(event, Mapping):
@@ -450,13 +464,14 @@ class GitHubClient:
                 elif ev == "disconnected":
                     linked.pop(key, None)
             if len(batch) < 100:
-                return tuple(
-                    sorted(
-                        (v for k, v in linked.items() if states.get(k, "open") == "open"),
-                        key=lambda lpr: (lpr.repo, lpr.number),
-                    )
-                )
+                break
             page += 1
+        return tuple(
+            sorted(
+                (v for k, v in linked.items() if states.get(k, "open") == "open"),
+                key=lambda lpr: (lpr.repo, lpr.number),
+            )
+        )
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self.request("GET", f"/repos/{repo}/pulls/{number}")
