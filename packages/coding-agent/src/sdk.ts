@@ -2304,18 +2304,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (options.systemPrompt === undefined) {
 				return defaultPrompt;
 			}
-			const customPrompt =
-				typeof options.systemPrompt === "function"
-					? options.systemPrompt(defaultPrompt.systemPrompt)
-					: options.systemPrompt;
-			// A full prompt override replaces the entire system prompt, so the
-			// default <skills> block may not be present. Return an empty skills
-			// list so /context accounting does not count skills the provider
-			// never receives. If the override incorporates the default prompt
-			// (e.g. via the function form), the caller is responsible for any
-			// skill content — we cannot parse the result to determine that.
+			if (typeof options.systemPrompt === "function") {
+				// A function-based override receives the default prompt
+				// (including its <skills> block) as input and commonly keeps
+				// or appends it, so preserve the default's promptSkills for
+				// context accounting.
+				const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+				return {
+					systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+					promptSkills: defaultPrompt.promptSkills,
+				};
+			}
+			// A full string/array prompt override replaces the entire system
+			// prompt, so the default <skills> block is not present — return an
+			// empty skills list so /context accounting does not count skills
+			// the provider never receives.
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt,
 				promptSkills: [],
 			};
 		};

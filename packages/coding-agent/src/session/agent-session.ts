@@ -1544,6 +1544,19 @@ export class AgentSession {
 	 *  it; a refresh whose epoch no longer matches is discarded so only the
 	 *  latest settings win. */
 	#redactionRefreshEpoch = 0;
+	/**
+	 * Monotonic generation counter for system prompt builds. Every call that
+	 * starts an async `#rebuildSystemPrompt` (redaction refresh, model switch,
+	 * tool-set change) increments this and captures the value before the await.
+	 * When the build is ready to apply, it checks whether a newer build has
+	 * started (`#promptBuildVersion !== capturedVersion`); if so, the stale
+	 * result is discarded so only the latest build's prompt wins. This covers
+	 * both the redaction-vs-tool-rebuild race and the old-model-vs-new-model
+	 * race with a single counter — no live model key or context window needed
+	 * in the snapshot, since any change that triggers a rebuild also
+	 * increments the counter.
+	 */
+	#promptBuildVersion = 0;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -6290,7 +6303,13 @@ export class AgentSession {
 		if (this.#rebuildSystemPrompt) {
 			const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 			if (signature !== this.#lastAppliedToolSignature) {
+				const buildVersion = ++this.#promptBuildVersion;
 				const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
+				// A concurrent rebuild (redaction refresh, model switch, or
+				// another tool-set change) may have started while we awaited.
+				// If so, discard our stale result — the newer build's prompt
+				// is the correct one.
+				if (this.#promptBuildVersion !== buildVersion) return;
 				this.#baseSystemPrompt = built.systemPrompt;
 				this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 				this.agent.setSystemPrompt(this.#baseSystemPrompt);
@@ -6378,17 +6397,16 @@ export class AgentSession {
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
-		// Capture the tool signature before the async build so we can detect if
-		// a concurrent tool-set change (#applyActiveToolsByName) ran a competing
-		// rebuild while we were awaiting #rebuildSystemPrompt. If the signature
-		// changed, our result is stale — the tool rebuild already applied the
-		// correct prompt and we must not overwrite it.
-		const signatureBefore = this.#lastAppliedToolSignature;
+		// Capture the build version before the async build. Every call that
+		// starts a rebuild increments #promptBuildVersion, so if a concurrent
+		// rebuild (redaction refresh, model switch, tool-set change) starts
+		// while we await, our captured version will no longer match and we
+		// discard the stale result — the newer build's prompt wins.
+		const buildVersion = ++this.#promptBuildVersion;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
-		// A concurrent #applyActiveToolsByName may have changed the tool set and
-		// rebuilt the prompt while we were awaiting. If so, discard our stale
-		// result — the tool rebuild's prompt is the correct one.
-		if (this.#lastAppliedToolSignature !== signatureBefore) return;
+		// A concurrent rebuild may have started and completed while we awaited.
+		// If so, discard our stale result — the newer build's prompt is correct.
+		if (this.#promptBuildVersion !== buildVersion) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		this.agent.setSystemPrompt(this.#baseSystemPrompt);

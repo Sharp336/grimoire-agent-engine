@@ -836,9 +836,9 @@ describe("AgentSession redaction refresh serialization", () => {
 			const current = rebuildCount;
 			if (current === 1) {
 				// First rebuild is slow — controlled by a promise we resolve later.
-				await new Promise<void>(resolve => {
-					resolveFirstRebuild = resolve;
-				});
+				const blocker = Promise.withResolvers<void>();
+				resolveFirstRebuild = blocker.resolve;
+				await blocker.promise;
 			}
 			return { systemPrompt: [`result-${current}`] };
 		});
@@ -1073,7 +1073,7 @@ describe("Settings fireAllHooks fires cwd-dependent Hindsight hooks on cwd move 
 	});
 });
 
-describe("AgentSession refreshBaseSystemPrompt discards stale result when tool signature changes during async build", () => {
+describe("AgentSession refreshBaseSystemPrompt discards stale result when build version changes during async build", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let tempDir: string;
@@ -1094,7 +1094,7 @@ describe("AgentSession refreshBaseSystemPrompt discards stale result when tool s
 		removeSyncWithRetries(tempDir);
 	});
 
-	it("discards redaction refresh result when a concurrent refreshBaseSystemPrompt changes the signature", async () => {
+	it("discards redaction refresh result when a concurrent refreshBaseSystemPrompt increments the build version", async () => {
 		const [model] = pickTwoModelsForToolRaceTest();
 		authStorage.setRuntimeApiKey(model.provider, "key-a");
 
@@ -1107,11 +1107,11 @@ describe("AgentSession refreshBaseSystemPrompt discards stale result when tool s
 			if (current === 1) {
 				// First rebuild (redaction refresh) is slow — controlled by a
 				// promise we resolve later. While it's pending, a concurrent
-				// refreshBaseSystemPrompt call will complete and change
-				// #lastAppliedToolSignature.
-				await new Promise<void>(resolve => {
-					resolveFirstRebuild = resolve;
-				});
+				// refreshBaseSystemPrompt call will complete and increment
+				// #promptBuildVersion.
+				const blocker = Promise.withResolvers<void>();
+				resolveFirstRebuild = blocker.resolve;
+				await blocker.promise;
 			}
 			return { systemPrompt: [`result-${current}`] };
 		});
@@ -1125,19 +1125,127 @@ describe("AgentSession refreshBaseSystemPrompt discards stale result when tool s
 
 		// While the redaction rebuild is blocked, directly call
 		// refreshBaseSystemPrompt — this bypasses the redaction chain and
-		// completes immediately, setting #lastAppliedToolSignature.
+		// completes immediately, incrementing #promptBuildVersion.
 		await session.refreshBaseSystemPrompt();
 		expect(rebuildCount).toBe(2);
 		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
 
 		// Now resolve the first (redaction) rebuild. It should detect that
-		// #lastAppliedToolSignature changed during its await and discard its
+		// #promptBuildVersion changed during its await and discard its
 		// stale result — the prompt must remain "result-2", not "result-1".
 		resolveFirstRebuild?.();
 		await flushMicrotasks();
 
 		// The redaction refresh's result was discarded — prompt is still
 		// from the concurrent call, not overwritten by the stale rebuild.
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
+
+	it("discards stale old-model rebuild when a model switch triggers a newer build via syncAfterModelChange", async () => {
+		const [modelA, modelB] = pickTwoModelsForToolRaceTest();
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: modelA, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// First rebuild (for modelA) is slow — controlled by a
+					// promise we resolve later. While it's pending, a model
+					// switch to modelB triggers #syncAfterModelChange, which
+					// calls refreshBaseSystemPrompt and increments
+					// #promptBuildVersion.
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start a slow rebuild for modelA (build version 1) without awaiting.
+		void session.refreshBaseSystemPrompt();
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Switch to modelB via setModelTemporary — this calls
+		// #syncAfterModelChange, which detects the model key change and
+		// calls refreshBaseSystemPrompt, starting a newer build (build
+		// version 2) that completes immediately with "result-2".
+		await session.setModelTemporary(modelB);
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+
+		// Now resolve the first (old-model) rebuild. It should detect that
+		// #promptBuildVersion changed during its await and discard its
+		// stale result — the prompt must remain "result-2", not "result-1".
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// The old-model rebuild's result was discarded.
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
+
+	it("discards stale tool rebuild when a redaction signal starts a newer build during its await", async () => {
+		const [model] = pickTwoModelsForToolRaceTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = newAgentSessionForToolRaceTest(model, settings, async () => {
+			rebuildCount++;
+			const current = rebuildCount;
+			if (current === 1) {
+				// First rebuild (tool rebuild via direct refreshBaseSystemPrompt)
+				// is slow — controlled by a promise we resolve later. While
+				// it's pending, a redaction signal fires and starts a newer
+				// build via the redaction chain, incrementing
+				// #promptBuildVersion.
+				const blocker = Promise.withResolvers<void>();
+				resolveFirstRebuild = blocker.resolve;
+				await blocker.promise;
+			}
+			return { systemPrompt: [`result-${current}`] };
+		});
+
+		// Start a slow tool rebuild (build version 1) without awaiting.
+		void session.refreshBaseSystemPrompt();
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Fire a redaction signal — this starts a newer build (build version 2)
+		// via the redaction chain. The chain is serialized, but the slow
+		// direct refresh is NOT on the chain, so the redaction refresh runs
+		// concurrently and completes immediately with "result-2".
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+
+		// Now resolve the first (tool) rebuild. It should detect that
+		// #promptBuildVersion changed during its await and discard its
+		// stale result — the prompt must remain "result-2", not "result-1".
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// The older tool rebuild's result was discarded — the newer
+		// redaction refresh's prompt is preserved.
 		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
 	});
 

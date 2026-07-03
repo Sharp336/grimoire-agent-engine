@@ -173,7 +173,7 @@ Loaded via symbolic link.
 	});
 });
 
-describe("createAgentSession systemPrompt override does not seed promptSkills", () => {
+describe("createAgentSession systemPrompt override promptSkills handling", () => {
 	let tempDir: string;
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
@@ -246,6 +246,40 @@ This is a test skill.
 
 		// Without a full override, the default <skills> block is used and
 		// promptSkills should reflect the discovered skills.
+		expect(session.skills.length).toBeGreaterThan(0);
+		expect(session.promptSkills.length).toBeGreaterThan(0);
+	});
+
+	it("preserves promptSkills when a function-based systemPrompt override keeps the default prompt", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: (defaultPrompt: string[]) => [...defaultPrompt, "\n\nCustom appendix."],
+		});
+
+		// session.skills should still contain discovered skills
+		expect(session.skills.length).toBeGreaterThan(0);
+		// A function-based override that keeps/appends the default prompt
+		// preserves the default <skills> block, so promptSkills should
+		// reflect the discovered skills for /context accounting.
+		expect(session.promptSkills.length).toBeGreaterThan(0);
+	});
+
+	it("preserves promptSkills when a function-based systemPrompt override appends to the default prompt", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: (defaultPrompt: string[]) => `${defaultPrompt.join("\n\n")}\n\nAppended.`,
+		});
+
+		// The function form receives the default prompt (with <skills>) and
+		// appends to it, so the skills block is still present.
 		expect(session.skills.length).toBeGreaterThan(0);
 		expect(session.promptSkills.length).toBeGreaterThan(0);
 	});
