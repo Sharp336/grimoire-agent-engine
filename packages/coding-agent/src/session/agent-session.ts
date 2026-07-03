@@ -2146,15 +2146,22 @@ export class AgentSession {
 		this.#defaultSelectedMCPToolNames = new Set(config.defaultSelectedMCPToolNames ?? []);
 		this.#pruneSelectedMCPToolNames();
 		const persistedSelectedMCPToolNames = this.buildDisplaySessionContext().selectedMCPToolNames;
-		const currentSelectedMCPToolNames = this.getSelectedMCPToolNames();
+		// Persist only truly-explicit MCP selections (from `options.toolNames`),
+		// not registry-default server tools. Defaults are re-derived from
+		// `mcp.discoveryDefaultServers` on every session start, so freezing them
+		// into the persisted selection would make them immune to setting changes.
+		const explicitMCPToolNames = [...(this.#requestedToolNames ?? [])].filter(
+			name => isMCPToolName(name) && this.#toolRegistry.has(name),
+		);
 		const persistInitialMCPToolSelection =
 			config.persistInitialMCPToolSelection ?? this.sessionManager.getBranch().length === 0;
 		if (
 			this.#mcpDiscoveryEnabled &&
 			persistInitialMCPToolSelection &&
-			!this.#selectedMCPToolNamesMatch(persistedSelectedMCPToolNames, currentSelectedMCPToolNames)
+			explicitMCPToolNames.length > 0 &&
+			!this.#selectedMCPToolNamesMatch(persistedSelectedMCPToolNames, explicitMCPToolNames)
 		) {
-			this.sessionManager.appendMCPToolSelection(currentSelectedMCPToolNames);
+			this.sessionManager.appendMCPToolSelection(explicitMCPToolNames);
 		}
 		this.#rememberSessionDefaultSelectedMCPToolNames(
 			this.sessionManager.getSessionFile(),
@@ -6575,13 +6582,21 @@ export class AgentSession {
 
 		const discoveryUpgraded = this.#enableMCPDiscoveryIfContextBudgetRequiresIt();
 		if (discoveryUpgraded) {
+			// Preserve explicit MCP selections that were active before the
+			// refresh. When discovery was off, `previousSelectedMCPToolNames`
+			// captured ALL active MCP names — only the explicit subset (from
+			// `#requestedToolNames`) should survive the upgrade, not tools that
+			// were merely active because discovery hadn't engaged yet. Mirrors
+			// #syncDiscoveryModeAfterModelChange (line 5955-5973).
 			const ctx = this.buildDisplaySessionContext();
-			if (ctx.hasPersistedMCPToolSelection) {
-				this.#selectedMCPToolNames = new Set([
-					...this.#selectedMCPToolNames,
-					...this.#filterSelectableMCPToolNames(ctx.selectedMCPToolNames),
-				]);
-			}
+			const explicitMCPNames = [...(this.#requestedToolNames ?? [])].filter(
+				name => isMCPToolName(name) && this.#toolRegistry.has(name),
+			);
+			this.#selectedMCPToolNames = new Set([
+				...this.#selectedMCPToolNames,
+				...this.#filterSelectableMCPToolNames(explicitMCPNames),
+				...(ctx.hasPersistedMCPToolSelection ? this.#filterSelectableMCPToolNames(ctx.selectedMCPToolNames) : []),
+			]);
 		} else if (this.#mcpDiscoveryEnabled && this.#selectedMCPToolNames.size === 0) {
 			// Discovery was enabled externally (e.g. deferred startup called
 			// enableMCPDiscovery() before refreshMCPTools). #selectedMCPToolNames

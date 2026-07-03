@@ -863,8 +863,11 @@ describe("AgentSession MCP discovery", () => {
 			]),
 		]);
 
-		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search"]);
-		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);
+		// PRRT_kwDOQxs0bc6OL1Nr: registry-default tools are NOT persisted as
+		// explicit selections, so after refresh both defaults re-derive (the
+		// outage resolved — both are now available, both are defaults).
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search", "mcp__slack_send_message"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search", "mcp__slack_send_message"]);
 
 		await session.newSession();
 
@@ -1395,7 +1398,127 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getActiveToolNames()).toContain("mcp__server__other");
 		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
 	});
+	it("persists only explicit MCP toolNames, not registry defaults", async () => {
+		// PRRT_kwDOQxs0bc6OL1Nr: when a session starts with both explicit
+		// `--tools mcp__explicit_tool` and registry-default server tools, only
+		// the explicit tool should be persisted. The default remains
+		// re-derivable from the setting.
+		const readTool = createBasicTool("read", "Read");
+		const explicitTool = createMcpTool("mcp__explicit_tool", "explicit", "tool", "Explicit tool", ["query"]);
+		const defaultTool = createMcpTool("mcp__default_tool", "default", "tool", "Default tool", ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[explicitTool.name, explicitTool],
+			[defaultTool.name, defaultTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			defaultSelectedMCPServerNames: ["default"],
+			requestedToolNames: new Set(["read", "mcp__explicit_tool"]),
+			// Simulate what the SDK passes: initialSelectedMCPToolNames includes
+			// both explicit and default tools so both are active at startup.
+			initialSelectedMCPToolNames: ["mcp__explicit_tool", "mcp__default_tool"],
+			defaultSelectedMCPToolNames: ["mcp__default_tool"],
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+		});
+		sessions.push(session);
 
+		// Both explicit and default tools are active at startup.
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__explicit_tool", "mcp__default_tool"]);
+
+		// But only the explicit tool is persisted — defaults are re-derivable
+		// from the setting and must NOT be frozen into the persisted selection.
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(true);
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual(["mcp__explicit_tool"]);
+	});
+
+	it("preserves explicit MCP selections when refreshMCPTools upgrades discovery", async () => {
+		// PRRT_kwDOQxs0bc6OL1Nx: when refreshMCPTools first upgrades discovery
+		// (from off to on), the explicit/current MCP selections from
+		// `previousSelectedMCPToolNames` must be preserved — not only persisted
+		// selections. A session with discovery off has active MCP tools that
+		// were explicitly requested; the upgrade must not drop them.
+		const model = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const explicitTool = createMcpTool("mcp__server__explicit", "server", "explicit", "Explicit tool", ["query"]);
+		const verboseTool = createMcpTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]);
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[explicitTool.name, explicitTool],
+			[verboseTool.name, verboseTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["initial"],
+				tools: [readTool, explicitTool, verboseTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			requestedToolNames: new Set(["read", "mcp__server__explicit"]),
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Pre-refresh: discovery off, both MCP tools active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(false);
+		expect(session.getActiveToolNames()).toContain("mcp__server__explicit");
+		expect(session.getActiveToolNames()).toContain("mcp__server__verbose");
+
+		// Refresh with large-schema tools that triggers discovery upgrade.
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp__server__explicit", "server", "explicit", "Explicit tool", ["query"]),
+			createMcpCustomTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]),
+		]);
+
+		// Post-refresh: discovery upgraded. The verbose tool is hidden behind
+		// search, but the explicit tool survives because
+		// `previousSelectedMCPToolNames` (captured before the refresh) is
+		// unioned into #selectedMCPToolNames — not only persisted selections.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).toContain("mcp__server__explicit");
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
 	it("preserves explicit MCP selections on model-switch discovery upgrade", async () => {
 		// PRRT_kwDOQxs0bc6OKqnN: when a session starts with discovery off on a
 		// large-context model but has an explicit MCP tool selected via

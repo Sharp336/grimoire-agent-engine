@@ -2386,12 +2386,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const restoredSelectedMCPToolNames = existingSession.selectedMCPToolNames
 				.map(normalizeRenamedBuiltinToolName)
 				.filter(name => toolRegistry.has(name));
-			defaultSelectedMCPToolNames = [
-				...new Set([...discoveryDefaultServerToolNames, ...explicitlyRequestedMCPToolNames]),
-			];
+			// Registry-default server tools (from `mcp.discoveryDefaultServers`) are
+			// defaults — re-derived on every session start from the setting, so they
+			// must NOT be frozen into the persisted selection. Only truly-explicit
+			// `options.toolNames` MCP names should persist. Keep them separate here so
+			// `defaultSelectedMCPToolNames` feeds only the re-derivable defaults.
+			defaultSelectedMCPToolNames = [...new Set(discoveryDefaultServerToolNames)];
 			initialSelectedMCPToolNames = existingSession.hasPersistedMCPToolSelection
 				? restoredSelectedMCPToolNames
-				: [...new Set([...restoredSelectedMCPToolNames, ...defaultSelectedMCPToolNames])];
+				: [
+						...new Set([
+							...restoredSelectedMCPToolNames,
+							...explicitlyRequestedMCPToolNames,
+							...defaultSelectedMCPToolNames,
+						]),
+					];
 			initialToolNames = [
 				...new Set([
 					...initialRequestedActiveToolNames.filter(name => !name.startsWith("mcp__")),
