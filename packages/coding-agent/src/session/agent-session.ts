@@ -13232,6 +13232,7 @@ export class AgentSession {
 		const currentThinkingLevel = this.configuredThinkingLevel();
 		const nextThinkingLevel = selector.thinkingLevel ?? currentThinkingLevel;
 		const candidateSelector = formatModelStringWithRouting(candidate);
+		const previousEditMode = this.#resolveActiveEditMode();
 		this.#setModelWithProviderSessionReset(candidate);
 		this.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(candidateSelector);
@@ -13254,6 +13255,10 @@ export class AgentSession {
 			to: selector.raw,
 			role,
 		});
+		// A fallback model may have a different context window, which changes the
+		// skill-description redaction budget. Sync the prompt so #promptModelContextWindow
+		// and #promptSkills reflect the fallback model, just like the normal model-switch paths.
+		await this.#syncAfterModelChange(previousEditMode);
 	}
 
 	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
@@ -13319,6 +13324,7 @@ export class AgentSession {
 		const apiKey = await this.#modelRegistry.getApiKey(baseModel, this.sessionId);
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		const previousEditMode = this.#resolveActiveEditMode();
 		this.#setModelWithProviderSessionReset(baseModel);
 		this.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(baseSelector);
@@ -13328,6 +13334,9 @@ export class AgentSession {
 			to: baseSelector,
 			role: "fireworks-fast",
 		});
+		// The base (Standard) model may have a different context window than the
+		// Fast variant, which changes the skill-description redaction budget.
+		await this.#syncAfterModelChange(previousEditMode);
 		return true;
 	}
 
@@ -13369,11 +13378,16 @@ export class AgentSession {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
+		const previousEditMode = this.#resolveActiveEditMode();
 		this.#setModelWithProviderSessionReset(primaryModel);
 		this.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.setThinkingLevel(thinkingToApply);
 		this.#clearActiveRetryFallback();
+		// Restoring the primary model may change the context window back, which
+		// changes the skill-description redaction budget. Sync the prompt so
+		// #promptModelContextWindow and #promptSkills reflect the primary model.
+		await this.#syncAfterModelChange(previousEditMode);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
@@ -14560,6 +14574,16 @@ export class AgentSession {
 			// budget. Sync the prompt (model key, context window, edit mode) so
 			// #promptModelContextWindow and #promptSkills reflect the restored model.
 			await this.#syncAfterModelChange(previousEditModeBeforeRestore);
+			// When switching to a different session, the target session's last
+			// durable usage anchor may predate a prompt-shrinking refresh (e.g.
+			// skill redaction enabled in a prior visit). #syncAfterModelChange above
+			// may be a no-op when the model window and tools are unchanged, leaving
+			// the flag inherited from the previous session. Reset it so /context
+			// and pre-prompt compaction do not clamp away the now-smaller prompt
+			// delta for the target session until it gets a fresh successful response.
+			if (switchingToDifferentSession) {
+				this.#promptRebasedSinceLastAnchor = true;
+			}
 
 			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager
