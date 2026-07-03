@@ -1201,4 +1201,198 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
 		expect(session.getActiveToolNames()).not.toContain("mcp__server__verbose");
 	});
+
+	it("does not re-expose MCP tools via activateAll when discovery is already enabled", async () => {
+		// PRRT_kwDOQxs0bc6OET8b: activateAll must be gated on current session
+		// discovery state, not only per-call upgrade. When discovery is already
+		// on (from a prior model switch or deferred discovery), a subsequent
+		// refreshMCPTools({ activateAll: true }) must NOT force-activate every
+		// MCP tool — they should stay hidden behind search_tool_bm25.
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const docsTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[searchTool.name, searchTool],
+			[docsTool.name, docsTool],
+		]);
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool, searchTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+		});
+		sessions.push(session);
+
+		// Discovery is already on; no MCP tools are active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("mcp__docs_search");
+
+		// refreshMCPTools with activateAll: true must NOT re-expose MCP tools.
+		await session.refreshMCPTools(
+			[createMcpCustomTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"])],
+			{ activateAll: true },
+		);
+
+		expect(session.getActiveToolNames()).not.toContain("mcp__docs_search");
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
+
+	it("preserves persisted MCP selections when model-switch upgrades discovery", async () => {
+		// PRRT_kwDOQxs0bc6OET8e: when discovery upgrades after a model switch,
+		// active MCP names should come from the persisted selection, not only
+		// configured defaults.
+		const largeModel = buildModel({
+			id: "large-ctx",
+			name: "large-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 2048,
+		});
+		const smallModel = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		const bigDescTool = createMcpTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]);
+		const otherTool = createMcpTool("mcp__server__other", "server", "other", "Other tool", ["query"]);
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[bigDescTool.name, bigDescTool],
+			[otherTool.name, otherTool],
+			[searchTool.name, searchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model: largeModel,
+				systemPrompt: ["initial"],
+				tools: [readTool, bigDescTool, otherTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {
+				hasConfiguredAuth: () => true,
+				refreshSelectedModelMetadata: async (m: Model) => m,
+				getApiKey: async () => "key",
+				getAvailable: () => [largeModel, smallModel],
+				find: (provider: string, id: string) =>
+					[largeModel, smallModel].find(m => m.provider === provider && m.id === id),
+			} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Pre-switch: discovery off, both MCP tools active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(false);
+		expect(session.getActiveToolNames()).toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).toContain("mcp__server__other");
+
+		// Persist a selection that includes only "other" (not "verbose").
+		sessionManager.appendMCPToolSelection(["mcp__server__other"]);
+
+		// Switch to small-context model: discovery upgrades.
+		await session.setModel(smallModel);
+
+		// Post-switch: discovery on, only the persisted selection is active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).toContain("mcp__server__other");
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
+
+	it("preserves persisted MCP selections when refreshMCPTools upgrades discovery", async () => {
+		// PRRT_kwDOQxs0bc6OET8e (refresh path): when discovery upgrades during
+		// refreshMCPTools and a persisted selection exists, seed
+		// #selectedMCPToolNames from the persisted selection instead of leaving
+		// it empty (which would fall back to configured defaults).
+		const model = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const toolRegistry = new Map<string, AgentTool>([[readTool.name, readTool]]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Persist a selection that includes only "other" (not "verbose").
+		sessionManager.appendMCPToolSelection(["mcp__server__other"]);
+
+		// Refresh with a large-schema MCP tool that triggers discovery upgrade.
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]),
+			createMcpCustomTool("mcp__server__other", "server", "other", "Other tool", ["query"]),
+		]);
+
+		// Discovery upgraded: verbose is hidden, but the persisted "other" is restored.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).toContain("mcp__server__other");
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
 });

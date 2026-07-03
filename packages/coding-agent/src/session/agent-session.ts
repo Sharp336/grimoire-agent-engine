@@ -5944,10 +5944,14 @@ export class AgentSession {
 		// registered) + default-selected MCP tools. This removes MCP tools that
 		// were force-activated when discovery was off, replacing them with the
 		// discovery-aware selection.
+		const sessionContext = this.buildDisplaySessionContext();
+		const upgradedMcpNames = sessionContext.hasPersistedMCPToolSelection
+			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
+			: this.#filterSelectableMCPToolNames(this.#getConfiguredDefaultSelectedMCPToolNames());
 		const nextActive = [
 			...this.#getActiveNonMCPToolNames(),
 			...(this.#toolRegistry.has("search_tool_bm25") ? ["search_tool_bm25"] : []),
-			...this.#filterSelectableMCPToolNames(this.#getConfiguredDefaultSelectedMCPToolNames()),
+			...upgradedMcpNames,
 		];
 		await this.#applyActiveToolsByName(nextActive);
 	}
@@ -6031,6 +6035,14 @@ export class AgentSession {
 
 	isToolDiscoveryEnabled(): boolean {
 		return this.#resolveEffectiveDiscoveryMode() !== "off";
+	}
+
+	/** Effective discovery mode from the current registry + session state.
+	 *  Exposed so the `rebuildSystemPrompt` closure in `sdk.ts` can read live
+	 *  state after a model switch upgrades discovery, instead of stale
+	 *  closure-captured bindings. */
+	getEffectiveToolDiscoveryMode(): "off" | "mcp-only" | "all" {
+		return this.#resolveEffectiveDiscoveryMode();
 	}
 
 	getDiscoverableTools(filter?: { source?: DiscoverableTool["source"] }): DiscoverableTool[] {
@@ -6546,7 +6558,16 @@ export class AgentSession {
 		);
 
 		const discoveryUpgraded = this.#enableMCPDiscoveryIfContextBudgetRequiresIt();
-		if (options?.activateAll && !discoveryUpgraded) {
+		if (discoveryUpgraded) {
+			const ctx = this.buildDisplaySessionContext();
+			if (ctx.hasPersistedMCPToolSelection) {
+				this.#selectedMCPToolNames = new Set([
+					...this.#selectedMCPToolNames,
+					...this.#filterSelectableMCPToolNames(ctx.selectedMCPToolNames),
+				]);
+			}
+		}
+		if (options?.activateAll && !this.#mcpDiscoveryEnabled) {
 			// Force-activate every newly registered MCP tool. This path is used
 			// when an ACP client provisions MCP servers for a session where MCP
 			// discovery is disabled — without it, getSelectedMCPToolNames()

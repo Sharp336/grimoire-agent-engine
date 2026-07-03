@@ -2214,12 +2214,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: Map<string, AgentTool>,
 		): Promise<BuildSystemPromptResult> => {
 			toolContextStore.setToolNames(toolNames);
-			const discoverableMCPTools: DiscoverableTool[] = mcpDiscoveryEnabled
+			// Read live discovery state from the session when available; the
+			// closure-captured `mcpDiscoveryEnabled`/`effectiveDiscoveryMode` are
+			// stale after a model switch upgrades discovery session-side.
+			const liveMcpDiscoveryEnabled = hasSession ? session.isMCPDiscoveryEnabled() : mcpDiscoveryEnabled;
+			const liveDiscoveryMode = hasSession ? session.getEffectiveToolDiscoveryMode() : effectiveDiscoveryMode;
+			const discoverableMCPTools: DiscoverableTool[] = liveMcpDiscoveryEnabled
 				? filterBySource(collectDiscoverableTools(tools.values()), "mcp")
 				: [];
 			const activeToolNames = new Set(toolNames);
 			const discoverableBuiltinTools: DiscoverableTool[] =
-				effectiveDiscoveryMode === "all"
+				liveDiscoveryMode === "all"
 					? collectDiscoverableTools(
 							Array.from(tools.values()).filter(
 								tool => tool.loadMode === "discoverable" && !activeToolNames.has(tool.name),
@@ -2230,7 +2235,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools, ...discoverableMCPTools];
 			const discoverableToolSummary = summarizeDiscoverableTools(discoverableToolsForDesc);
 			const hasDiscoverableTools =
-				mcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableToolsForDesc.length > 0;
+				liveMcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableToolsForDesc.length > 0;
 			const promptTools = buildSystemPromptToolMetadata(tools, {
 				search_tool_bm25: { description: renderSearchToolBm25Description(discoverableToolsForDesc) },
 			});
