@@ -1,9 +1,8 @@
 """Minimal typed GitHub REST client (PAT auth, httpx)."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -148,6 +147,21 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
     return None
 
 
+_CLOSING_KEYWORD_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:#(\d+)|https?://\S+/issues/(\d+))",
+    re.IGNORECASE,
+)
+
+
+def _closing_keyword_for(body: str, issue_number: int) -> bool:
+    """True iff *body* contains a closing keyword referencing *issue_number*."""
+    for match in _CLOSING_KEYWORD_RE.finditer(body):
+        num = match.group(1) or match.group(2)
+        if num and int(num) == issue_number:
+            return True
+    return False
+
+
 class GitHubClient:
     """Async + sync facades over a small slice of the GitHub REST API."""
 
@@ -259,13 +273,17 @@ class GitHubClient:
 
         Walks ``GET /repos/{repo}/issues/{N}/timeline`` and computes net
         ``connected`` − ``disconnected`` events for sources that are pull
-        requests. Only PRs whose timeline source carries ``state == "open"``
-        are returned — a merged or closed PR no longer needs the bot's work.
+        requests. ``cross-referenced`` events are also considered when the
+        source PR body contains a closing keyword (``Fixes #N`` /
+        ``Closes #N``) for this issue, because GitHub does not always emit a
+        matching ``connected`` event for closing-keyword links. Only PRs
+        whose timeline source carries ``state == "open"`` are returned — a
+        merged or closed PR no longer needs the bot's work.
 
         The timeline is paginated (``per_page=100``) because by the time the
         duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
         well over 100 events (comments, commits, cross-refs); a ``connected``
-        link can land on any page.
+        or ``cross-referenced`` link can land on any page.
         """
         linked: set[int] = set()
         states: dict[int, str] = {}
@@ -291,6 +309,16 @@ class GitHubClient:
                 states[pr_number] = str(src_issue.get("state") or "open")
                 if ev == "connected":
                     linked.add(pr_number)
+                elif ev == "cross-referenced":
+                    # GitHub exposes ``Fixes #N`` / ``Closes #N`` PR-body links
+                    # as ``cross-referenced`` events, not always as
+                    # ``connected``. Only treat the cross-ref as a closing
+                    # link when the PR body contains a closing keyword for
+                    # this issue number, so mere mentions don't trigger
+                    # false-positive duplicate guards.
+                    pr_body = src_issue.get("body") or ""
+                    if _closing_keyword_for(pr_body, number):
+                        linked.add(pr_number)
                 elif ev == "disconnected":
                     linked.discard(pr_number)
             if len(batch) < 100:

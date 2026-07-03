@@ -251,10 +251,31 @@ def test_list_closing_pull_requests_filters_disconnected_and_closed() -> None:
             "event": "connected",
             "source": {"issue": {"number": 300, "state": "closed", "pull_request": {"url": "..."}}},
         },
-        # Cross-referenced (not connected) — not a closing link → excluded
+        # Cross-referenced with a closing keyword in the PR body → included
+        # (GitHub exposes Fixes/Closes/Resolves PR-body links as
+        # cross-referenced events, not always as connected events)
         {
             "event": "cross-referenced",
-            "source": {"issue": {"number": 400, "state": "open", "pull_request": {"url": "..."}}},
+            "source": {
+                "issue": {
+                    "number": 400,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes #42",
+                }
+            },
+        },
+        # Cross-referenced without a closing keyword (mere mention) → excluded
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 450,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Related to #42",
+                }
+            },
         },
         # Plain issue cross-ref (no pull_request) → excluded
         {
@@ -272,7 +293,7 @@ def test_list_closing_pull_requests_filters_disconnected_and_closed() -> None:
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (100,)
+    assert prs == (100, 400)
     assert captured["path"] == "/repos/octo/widget/issues/42/timeline"
     assert captured["per_page"] == "100"
 

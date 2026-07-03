@@ -3953,3 +3953,179 @@ def test_gh_post_reference_comment_posts_and_does_not_mutate_state(db: Database,
     row_after = db.get_issue(bindings.issue_key)
     assert row_after is not None
     assert row_after.state == state_before
+
+
+def test_gh_post_reference_comment_validates_body(db: Database, tmp_path: Path) -> None:
+    """PRRT_kwDOQxs0bc6OKbT5: blank/missing body must surface RpcCommandError
+    with no comment or audit side effects (AGENTS.md requires a validation-
+    failure path for every new host tool)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"validation failure must not hit GitHub: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": ""}, _ctx())
+        assert "non-empty" in str(exc.value)
+    finally:
+        _stop_loop(loop, t)
+
+    # No audit row should have been written for this tool — the call failed
+    # before any side effect.
+    with db._lock:  # noqa: SLF001 - test-only inspection
+        row = db._conn.execute(  # noqa: SLF001
+            "SELECT tool FROM tool_calls WHERE issue_key=? AND tool=?",
+            (bindings.issue_key, "gh_post_reference_comment"),
+        ).fetchone()
+    assert row is None, "no audit row should exist for a rejected validation"
+
+
+def test_gh_post_reference_comment_refuses_with_unpushed_commits(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OKbT7: when the duplicate-PR guard refuses gh_open_pr
+    after the agent has already committed a fix, gh_post_reference_comment
+    must refuse so the worker's dirty-state reminder does not route the agent
+    to gh_push_branch (which has no duplicate guard)."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=0, unpushed=1, summary="Unpushed commits (1):\nabc fix"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "unpushed commit" in msg
+        assert "git reset --hard" in msg
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_gh_open_pr_rechecks_duplicate_after_push(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OKreC: a competing PR that links the issue while the
+    network push is in progress must be caught after the push and before
+    open_pull_request, so the just-pushed branch does not become a second
+    open PR."""
+    timeline_calls = 0
+    pr_created = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_calls, pr_created
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            timeline_calls += 1
+            # Calls 1 & 2 (pre-check + post-check recheck): no closing PRs.
+            # Call 3 (post-push recheck): a competing PR #88 appeared during push.
+            if timeline_calls <= 2:
+                return httpx.Response(200, json=[])
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": 88,
+                            "state": "open",
+                            "pull_request": {},
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "POST" and "/pulls" in url:
+            pr_created = True
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *_a, **_kw: None)
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *_a, **_kw: None)
+    push_calls: list[str] = []
+
+    def _fake_push(_b: ToolBindings, _a: Mapping[str, object], _tool: str, _branch: str) -> str:
+        push_calls.append(_branch)
+        return "abc123def456"
+
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", _fake_push)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#88" in msg
+    # The push happened (the branch was pushed before the post-push recheck),
+    # but the PR must never have been created.
+    assert push_calls == [bindings.workspace.branch], "push must happen before the post-push recheck"
+    assert pr_created is False, "PR must not be created when the post-push recheck refuses"
+    assert timeline_calls == 3, "guard must run three times: pre-check, post-check, post-push"
+
+
+def test_gh_open_pr_refuses_on_cross_referenced_closing_pr(db: Database, tmp_path: Path) -> None:
+    """PRRT_kwDOQxs0bc6OKbTz: a cross-referenced event whose source PR body
+    contains a closing keyword (Fixes #42) must be treated as a linked PR,
+    even when no connected event exists."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            events = [
+                {
+                    "event": "cross-referenced",
+                    "source": {
+                        "issue": {
+                            "number": 77,
+                            "state": "open",
+                            "pull_request": {},
+                            "body": "This PR fixes the crash. Fixes #42",
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201, json={"number": 99, "html_url": "x", "head": {"ref": "b"}, "base": {"ref": "main"}}
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#77" in msg
+    assert "already linked to open PR" in msg

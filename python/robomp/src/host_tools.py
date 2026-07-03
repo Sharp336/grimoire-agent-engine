@@ -25,7 +25,7 @@ from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 from robomp import persona
 from robomp.config import Settings
 from robomp.db import Database, IssueState, issue_key
-from robomp.git_ops import GitCommandError, HeadDriftError
+from robomp.git_ops import DirtyState, GitCommandError, HeadDriftError, inspect_dirty_state
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import GitHubError, IssueInfo, PullRequestFileInfo, RepoInfo
 from robomp.sandbox import (
@@ -646,6 +646,32 @@ def _build_post_reference_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body = args.get("body")
         if not isinstance(body, str) or not body.strip():
             _raise_command("gh_post_reference_comment requires a non-empty 'body'.")
+        # Refuse if the worktree has unpushed commits. The duplicate-PR
+        # guard refuses gh_open_pr, so the agent reaches this terminal
+        # tool with a drafted fix still committed. If we let the comment
+        # through, the worker's dirty-state reminder fires on the next
+        # turn and routes the agent to gh_push_branch — which has no
+        # duplicate guard and would publish the redundant branch. Force
+        # the agent to reset/discard the work first.
+        try:
+            dirty = inspect_dirty_state(
+                bindings.workspace.repo_dir,
+                slot_uid=bindings.slot_uid,
+                safe_directory=bindings.workspace.repo_dir,
+            )
+        except Exception:
+            dirty = DirtyState(uncommitted=0, unpushed=0, summary="")
+        if dirty.unpushed > 0:
+            msg = (
+                "refusing to post reference comment: the worktree has "
+                f"{dirty.unpushed} unpushed commit(s). The duplicate-PR guard "
+                f"refused `gh_open_pr`, so this commit is redundant work. Discard "
+                f"it first with "
+                f"`git reset --hard origin/{bindings.repo.default_branch}`, then "
+                "call `gh_post_reference_comment` again."
+            )
+            _audit(bindings, "gh_post_reference_comment", args, error=msg)
+            _raise_command(msg)
         target_number = bindings.default_comment_number
         try:
             comment = _run_coro(
@@ -1070,6 +1096,11 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         _refuse_if_duplicate_fix_pr(bindings, args)
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
+        # Final duplicate recheck after the push but before opening the PR.
+        # A competing PR may have linked the issue while the network push
+        # was in progress; refuse here so the just-pushed branch does not
+        # become a second open PR for the same issue.
+        _refuse_if_duplicate_fix_pr(bindings, args)
         base = args.get("base") or bindings.repo.default_branch
         was_needs_info = _issue_needs_info(bindings)
         try:
