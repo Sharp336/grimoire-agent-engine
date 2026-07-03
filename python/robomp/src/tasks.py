@@ -436,6 +436,7 @@ async def review_pr(
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
         slot_uid=slot_uid,
+        refresh=bypass_once_guard,
     )
     db.upsert_issue(
         key=key,

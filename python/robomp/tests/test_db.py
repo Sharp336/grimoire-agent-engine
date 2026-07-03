@@ -264,6 +264,23 @@ def test_log_tool_call(db: Database) -> None:
     assert row_id > 0
 
 
+def test_count_successful_tool_calls(db: Database) -> None:
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="new")
+    # No rows yet → 0
+    assert db.count_successful_tool_calls("octo/widget#1", "submit_pr_review") == 0
+    # Two successful calls
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 1})
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 2})
+    # One errored call — must not be counted
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, error="boom")
+    assert db.count_successful_tool_calls("octo/widget#1", "submit_pr_review") == 2
+    # Different tool is isolated
+    db.log_tool_call(issue_key="octo/widget#1", tool="gh_post_comment", args={}, result={"ok": True})
+    assert db.count_successful_tool_calls("octo/widget#1", "gh_post_comment") == 1
+    # Different issue_key is isolated
+    assert db.count_successful_tool_calls("octo/widget#2", "submit_pr_review") == 0
+
+
 def test_pr_review_comment_staging_round_trip(db: Database) -> None:
     first = db.stage_review_comment(
         issue_key="octo/widget#9",

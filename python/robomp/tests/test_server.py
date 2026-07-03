@@ -1696,6 +1696,7 @@ class _RecordingSandbox:
         author_name: str = "",
         author_email: str = "",
         slot_uid: int | None = None,
+        refresh: bool = False,
     ):
         self.ensure_calls.append(
             {
@@ -1706,6 +1707,7 @@ class _RecordingSandbox:
                 "existing_branch": existing_branch,
                 "pr_head": pr_head,
                 "slot_uid": slot_uid,
+                "refresh": refresh,
             }
         )
         # Mimic Workspace shape — only the attributes ensure_workspace's

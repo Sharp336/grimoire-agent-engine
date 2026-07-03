@@ -369,6 +369,10 @@ def route(
                     **directive_kwargs,
                 )
             if directive_kwargs and _has_review_intent(directive_kwargs.get("directive_body")):
+                if not pr_review_enabled:
+                    return RouteDecision("skip", None, repo, None, "PR review disabled")
+                if str(issue.get("state") or "open") != "open":
+                    return RouteDecision("skip", None, repo, None, "PR not open")
                 return RouteDecision(
                     "queue",
                     "review_pr",

@@ -474,6 +474,104 @@ def test_ensure_workspace_pr_head_uses_detached_pr_ref(tmp_path: Path, upstream_
     assert pushurl.returncode != 0
 
 
+def test_ensure_workspace_refresh_refetches_pr_head_on_existing_workspace(tmp_path: Path, upstream_repo: Path) -> None:
+    """A synchronize/re-review on an existing PR workspace must re-fetch the
+    PR head and reset the detached checkout so the review sees new commits."""
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head_v1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws1.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Push a new commit to the PR head.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    # Without refresh, the existing workspace stays at the old HEAD.
+    ws_stale = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head_stale = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws_stale.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_stale == head_v1
+
+    # With refresh=True, the workspace resets to the new PR head.
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+    head_refreshed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws_refreshed.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_refreshed != head_v1
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+
 def test_chown_workspace_noops_when_not_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], bool]] = []
 
@@ -1110,7 +1208,9 @@ def test_remove_workspace(tmp_path: Path, upstream_repo: Path) -> None:
     assert not ws.root.exists()
 
 
-def test_remove_workspace_prunes_pool_after_failed_worktree_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remove_workspace_prunes_pool_after_failed_worktree_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     # Create a real repo_dir on disk so `repo_dir.exists()` is True on entry.
     ws_root = mgr.workspace_root("o/r", 7)
@@ -1184,6 +1284,7 @@ def test_remove_workspace_prunes_when_failed_remove_already_deleted_checkout(
     )
     prune_idx = next(i for i, (c, _) in enumerate(calls) if c == ["git", "worktree", "prune"])
     assert calls[prune_idx][1] == pool, "prune did not run in the repo's pool dir"
+
 
 def test_redact_credentials_strips_userinfo() -> None:
     from robomp.sandbox import redact_credentials
@@ -1911,7 +2012,9 @@ def test_run_timeout_raises_git_command_error_124(monkeypatch: pytest.MonkeyPatc
     assert seen["timeout"] == s._DEFAULT_SANDBOX_SUBPROCESS_TIMEOUT
 
 
-def test_ensure_workspace_raises_when_local_branch_probe_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_workspace_raises_when_local_branch_probe_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
     mgr.transport = SimpleNamespace(
@@ -1946,7 +2049,9 @@ def test_ensure_workspace_raises_when_local_branch_probe_times_out(tmp_path: Pat
         )
 
 
-def test_ensure_workspace_raises_when_remote_branch_probe_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_workspace_raises_when_remote_branch_probe_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
     mgr.transport = SimpleNamespace(

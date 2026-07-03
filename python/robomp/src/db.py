@@ -881,6 +881,18 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def count_successful_tool_calls(self, issue_key: str, tool: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM tool_calls
+                WHERE issue_key=? AND tool=? AND error IS NULL
+                """,
+                (issue_key, tool),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     # ---- PR review comment staging ----
     def stage_review_comment(
         self,

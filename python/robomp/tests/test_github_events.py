@@ -345,6 +345,52 @@ def test_route_incoming_pr_comment_directive_routes_on_re_review() -> None:
     assert decision_unauth.reason == "incoming PR comments ignored"
 
 
+def test_route_comment_re_review_skips_when_pr_review_disabled() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "can1357"},
+                "author_association": "OWNER",
+                "body": "@robomp-bot please re-review",
+            },
+            "issue": {"number": 9, "user": {"login": "contributor"}, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_enabled=False,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "PR review disabled"
+
+
+def test_route_comment_re_review_skips_closed_pr() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "can1357"},
+                "author_association": "OWNER",
+                "body": "@robomp-bot please re-review",
+            },
+            "issue": {
+                "number": 9,
+                "state": "closed",
+                "user": {"login": "contributor"},
+                "pull_request": {"url": "x"},
+            },
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "PR not open"
+
+
 def test_route_review_only_for_bot_authored_pr() -> None:
     decision = route(
         "pull_request_review_comment",
