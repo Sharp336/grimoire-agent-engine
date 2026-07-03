@@ -330,7 +330,7 @@ export interface InteractiveModeContext {
 	handleSSHCommand(text: string): Promise<void>;
 	handleCompactCommand(customInstructions?: string, mode?: CompactMode): Promise<CompactionOutcome>;
 	handleHandoffCommand(customInstructions?: string): Promise<void>;
-	handleShakeCommand(mode: ShakeMode): Promise<void>;
+	handleShakeCommand(mode: ShakeMode): Promise<boolean>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;

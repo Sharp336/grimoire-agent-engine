@@ -1238,7 +1238,7 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
-		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue();
+		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue(true);
 		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		await mode.handlePlanApproval({
@@ -1281,6 +1281,7 @@ describe("InteractiveMode plan review rendering", () => {
 		let planRefSetWhenShakeRan = false;
 		vi.spyOn(mode, "handleShakeCommand").mockImplementation(async () => {
 			planRefSetWhenShakeRan = setPlanRefSpy.mock.calls.some(call => call[0] === planFilePath);
+			return true;
 		});
 
 		await mode.handlePlanApproval({
@@ -1324,7 +1325,7 @@ describe("InteractiveMode plan review rendering", () => {
 			streaming = true;
 			return "Approve and shake context";
 		});
-		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue();
+		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue(true);
 		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		await mode.handlePlanApproval({
@@ -1357,6 +1358,76 @@ describe("InteractiveMode plan review rendering", () => {
 		// Flag is cleared by the finally.
 		expect(session.isPlanInternalAbortPending).toBe(false);
 	});
+	it("Approve and shake context: shake failure skips plan-approved dispatch", async () => {
+		// PR #4369 review: if handleShakeCommand returns false (refused by the
+		// streaming guard or failed with an error), the plan-approved synthetic
+		// prompt must NOT be dispatched. Mirrors the compact "cancelled" branch:
+		// show a warning, leave markPlanReferenceSent unset, and return.
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
+		vi.spyOn(mode, "handleShakeCommand").mockResolvedValue(false);
+		const showWarningSpy = vi.spyOn(mode, "showWarning");
+		const markSentSpy = vi.spyOn(session, "markPlanReferenceSent");
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "PLAN",
+		});
+
+		// Shake was attempted …
+		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
+		expect(markSentSpy).not.toHaveBeenCalled();
+		expect(showWarningSpy).toHaveBeenCalledWith(expect.stringContaining("shake failed"));
+	});
+
+	it("Approve and shake context: does not abort when the session is idle at shake time", async () => {
+		// PR #4369 review: the shake-branch abort is gated on isStreaming so it
+		// does not kill unrelated idle tool work. Only the pre-approval abort
+		// (handlePlanApproval's own, before showPlanReview) should fire.
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+
+		// Session is idle throughout — isStreaming stays false.
+		Object.defineProperty(session, "isStreaming", {
+			configurable: true,
+			get: () => false,
+		});
+		const abortSpy = vi.spyOn(session, "abort").mockResolvedValue(undefined);
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
+		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue(true);
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "PLAN",
+		});
+
+		// Only the pre-approval abort fires — the shake-branch abort is skipped
+		// because isStreaming is false.
+		expect(abortSpy).toHaveBeenCalledTimes(1);
+		expect(shakeSpy).toHaveBeenCalledWith("elide");
+		// Dispatch still proceeds.
+		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(true);
+	});
+
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {
 		// Mock `handleCompactCommand` to surface the "cancelled" outcome directly.
 		// (Testing the consumer — `#approvePlan`'s outcome handling — at the

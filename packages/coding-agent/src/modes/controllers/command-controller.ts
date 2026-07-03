@@ -1147,12 +1147,12 @@ export class CommandController {
 	 * surface a warning and let the operator stop the turn explicitly instead of
 	 * silently aborting their work.
 	 */
-	async handleShakeCommand(mode: ShakeMode): Promise<void> {
+	async handleShakeCommand(mode: ShakeMode): Promise<boolean> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning(
 				"Shake is not available while a turn is streaming. Press Esc to stop the current turn first.",
 			);
-			return;
+			return false;
 		}
 
 		let result: ShakeResult;
@@ -1160,18 +1160,19 @@ export class CommandController {
 			result = await this.ctx.session.shake(mode);
 		} catch (error) {
 			this.ctx.showError(`Shake failed: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+			return false;
 		}
 
 		const dropped = result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0);
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
-			return;
+			return true;
 		}
 		this.ctx.rebuildChatFromMessages();
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 		this.ctx.showStatus(formatShakeSummary(result));
+		return true;
 	}
 
 	async executeCompaction(

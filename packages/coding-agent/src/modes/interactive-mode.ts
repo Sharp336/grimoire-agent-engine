@@ -2574,6 +2574,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.markPlanInternalAbortPending();
 		}
 		let compactOutcome: CompactionOutcome | undefined;
+		let shakeOk = true;
 		try {
 			await this.#exitPlanMode({
 				silent: true,
@@ -2618,10 +2619,14 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.setPlanReferencePath(options.planFilePath);
 				// A queued steer/followUp/IRC aside can start a fresh streaming turn
 				// while the approval overlay was open; abort it so the shake actually
-				// runs. Otherwise handleShakeCommand swallows the refusal and dispatch
-				// proceeds unshaken (PR #4369).
-				await this.#abortPlanApprovalTurnSilently();
-				await this.handleShakeCommand("elide");
+				// runs. Otherwise handleShakeCommand refuses (streaming guard) and
+				// returns false, so dispatch would proceed unshaken (PR #4369).
+				// Gate on isStreaming: a broad abort when the session is idle would
+				// kill unrelated idle tool work (PR #4369 review).
+				if (this.session.isStreaming) {
+					await this.#abortPlanApprovalTurnSilently();
+				}
+				shakeOk = await this.handleShakeCommand("elide");
 			}
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
@@ -2661,6 +2666,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning(
 				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
 			);
+			return;
+		}
+
+		if (options.mode === "shake" && !shakeOk) {
+			// Shake refused (streaming guard) or failed (session.shake threw).
+			// `handleShakeCommand` already surfaced the warning/error; we add the
+			// deferred-dispatch warning and exit without dispatching the synthetic
+			// plan-approved prompt. `markPlanReferenceSent` stays unset so
+			// `AgentSession.#buildPlanReferenceMessage` injects the plan reference
+			// on the operator's next `prompt()` call (PR #4369 review).
+			this.showWarning("Plan approved, but shake failed — execution not dispatched. Submit a turn to continue.");
 			return;
 		}
 
@@ -3939,7 +3955,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleHandoffCommand(customInstructions);
 	}
 
-	handleShakeCommand(mode: ShakeMode): Promise<void> {
+	handleShakeCommand(mode: ShakeMode): Promise<boolean> {
 		return this.#commandController.handleShakeCommand(mode);
 	}
 
