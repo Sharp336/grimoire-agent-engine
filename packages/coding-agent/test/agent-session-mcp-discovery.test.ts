@@ -1069,4 +1069,85 @@ describe("AgentSession MCP discovery", () => {
 		expect(meta?.truncation).toBeDefined();
 		expect(meta?.truncation?.artifactId).toBeUndefined();
 	});
+
+	it("enables MCP discovery after model switch shrinks context window past the schema-cost threshold", async () => {
+		// Start on a large-context model where MCP schemas are below the
+		// discoveryContextShare threshold → discovery stays off, all MCP tools
+		// are active.
+		const largeModel = buildModel({
+			id: "large-ctx",
+			name: "large-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 2048,
+		});
+		const smallModel = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		// MCP tool with a large description so its schema cost exceeds the
+		// threshold on the small model but not the large one.
+		const bigDescTool = createMcpTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]);
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[bigDescTool.name, bigDescTool],
+			[searchTool.name, searchTool],
+		]);
+		const agent = new Agent({
+			initialState: {
+				model: largeModel,
+				systemPrompt: ["initial"],
+				tools: [readTool, bigDescTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {
+				hasConfiguredAuth: () => true,
+				refreshSelectedModelMetadata: async (m: Model) => m,
+				getApiKey: async () => "key",
+				getAvailable: () => [largeModel, smallModel],
+				find: (provider: string, id: string) =>
+					[largeModel, smallModel].find(m => m.provider === provider && m.id === id),
+			} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Pre-switch: discovery is off, MCP tool is active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(false);
+		expect(session.getActiveToolNames()).toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).not.toContain("search_tool_bm25");
+
+		// Switch to the small-context model: schema cost now exceeds 0.1 * 5000 = 500.
+		await session.setModel(smallModel);
+
+		// Post-switch: discovery should be enabled, MCP tool hidden, search tool active.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("mcp__server__verbose");
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
 });

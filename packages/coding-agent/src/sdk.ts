@@ -2745,6 +2745,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			reloadSshTool,
+			registerSearchTool: () => {
+				const searchTool: Tool = new SearchToolBm25Tool(toolSession);
+				const wrapped = new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool;
+				return wrapped;
+			},
 			requestedToolNames: requestedToolNameSet,
 			getMcpServerInstructions: mcpManager
 				? () => {

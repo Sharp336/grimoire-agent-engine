@@ -13,14 +13,25 @@ export interface ToolDiscoveryContextEstimate {
 	contextWindow: number;
 }
 
-export function estimateMcpToolSchemaTokens(tools: Iterable<{ parameters?: unknown }>): number {
+export function estimateMcpToolSchemaTokens(
+	tools: Iterable<{ name?: string; description?: string; parameters?: unknown }>,
+): number {
 	let total = 0;
 	for (const tool of tools) {
+		// The provider receives each tool's full definition (name, description,
+		// parameters) as part of the tool schema, so the cost estimate must cover
+		// all three — not parameters alone. A few MCP tools with large
+		// descriptions but tiny parameter objects would otherwise stay near zero
+		// and evade the discoveryContextShare auto-hide threshold.
+		const name = tool.name ?? "";
+		const description = tool.description ?? "";
+		let parametersJson: string;
 		try {
-			total += estimateTokens(JSON.stringify(tool.parameters ?? {}) ?? "{}");
+			parametersJson = JSON.stringify(tool.parameters ?? {}) ?? "{}";
 		} catch {
-			total += estimateTokens("{}");
+			parametersJson = "{}";
 		}
+		total += estimateTokens(`${name}${description}${parametersJson}`);
 	}
 	return total;
 }

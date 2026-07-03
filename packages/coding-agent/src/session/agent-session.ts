@@ -716,6 +716,14 @@ export interface AgentSessionConfig {
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
 	/** Rebuild the SSH tool from current capability discovery results. */
 	reloadSshTool?: () => Promise<AgentTool | null>;
+	/**
+	 * Lazily create and register the `search_tool_bm25` tool when tool
+	 * discovery upgrades mid-session (e.g. after a model switch shrinks the
+	 * context window so MCP schemas now exceed `tools.discoveryContextShare`).
+	 * Returns the fully wrapped tool ready for the registry, or null if the
+	 * tool cannot be created. Mirrors the `reloadSshTool` pattern.
+	 */
+	registerSearchTool?: () => AgentTool | null;
 	requestedToolNames?: ReadonlySet<string>;
 	/**
 	 * Optional accessor for live MCP server instructions. Read by the session's
@@ -1680,6 +1688,8 @@ export class AgentSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#sideStreamFn: StreamFn;
+	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
+	#registerSearchTool: (() => AgentTool | null) | undefined;
 	#advisorStreamFn: StreamFn | undefined;
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -1687,7 +1697,6 @@ export class AgentSession {
 		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>)
 		| undefined;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
-	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -2126,6 +2135,7 @@ export class AgentSession {
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
 		this.#reloadSshTool = config.reloadSshTool;
+		this.#registerSearchTool = config.registerSearchTool;
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
@@ -5911,6 +5921,47 @@ export class AgentSession {
 		if (editModeChanged || modelChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
+		// Re-evaluate tool-discovery auto mode: a model switch can change the
+		// context window so that MCP schemas that were below the
+		// `tools.discoveryContextShare` threshold on the old model now exceed it.
+		// Without this, every MCP tool stays active and its schema keeps being
+		// sent despite the active context now requiring auto-hide.
+		await this.#syncDiscoveryModeAfterModelChange();
+	}
+
+	/**
+	 * Recompute the effective tool-discovery mode after a model switch and
+	 * apply it if the mode upgraded from "off" to "mcp-only"/"all". This hides
+	 * MCP tool schemas (replacing them with `search_tool_bm25`) so the active
+	 * model's context budget is respected. Downgrade is intentionally NOT
+	 * performed: once discovery is enabled, `#mcpDiscoveryEnabled` keeps it on
+	 * for the session lifetime (consistent with the deferred-discovery upgrade
+	 * path in `createAgentSession`).
+	 */
+	async #syncDiscoveryModeAfterModelChange(): Promise<void> {
+		if (this.#mcpDiscoveryEnabled) return; // already active — mode is lazy-recomputed
+		const mode = this.#resolveEffectiveDiscoveryMode();
+		if (mode === "off") return;
+		// Discovery upgraded: enable it and register the search tool so MCP
+		// schemas can be hidden behind BM25 discovery.
+		this.#mcpDiscoveryEnabled = true;
+		if (!this.#toolRegistry.has("search_tool_bm25") && this.#registerSearchTool) {
+			const searchTool = this.#registerSearchTool();
+			if (searchTool) {
+				this.#toolRegistry.set(searchTool.name, searchTool);
+				this.#builtInToolNames.add(searchTool.name);
+			}
+		}
+		// Re-apply the active tool set: non-MCP tools + search_tool_bm25 (if
+		// registered) + default-selected MCP tools. This removes MCP tools that
+		// were force-activated when discovery was off, replacing them with the
+		// discovery-aware selection.
+		const nextActive = [
+			...this.#getActiveNonMCPToolNames(),
+			...(this.#toolRegistry.has("search_tool_bm25") ? ["search_tool_bm25"] : []),
+			...this.#filterSelectableMCPToolNames(this.#getConfiguredDefaultSelectedMCPToolNames()),
+		];
+		await this.#applyActiveToolsByName(nextActive);
 	}
 
 	isMCPDiscoveryEnabled(): boolean {
