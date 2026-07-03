@@ -405,6 +405,9 @@ async def review_pr(
     if pr.draft:
         log.info("skip: draft PR", extra={"repo": repo.full_name, "pr": pr_number})
         return
+    if pr.state != "open":
+        log.info("skip: PR not open", extra={"repo": repo.full_name, "pr": pr_number, "state": pr.state})
+        return
 
     directive = _directive_from_payload(payload)
     directive = await _attach_thread(github, directive, repo.full_name, pr_number, is_pr=True)
@@ -441,6 +444,13 @@ async def review_pr(
             extra={"repo": repo_full, "pr": pr_number, "labels": sorted(labels)},
         )
 
+    if bypass_once_guard:
+        cleared = db.clear_staged_review_comments(key)
+        if cleared:
+            log.info(
+                "cleared stale staged review comments for re-review",
+                extra={"repo": repo.full_name, "pr": pr_number, "cleared": cleared},
+            )
     db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,

@@ -655,6 +655,92 @@ def test_ensure_workspace_refresh_cleans_untracked_files(tmp_path: Path, upstrea
     assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
 
 
+def test_ensure_workspace_refresh_cleans_ignored_artifacts(tmp_path: Path, upstream_repo: Path) -> None:
+    """The refresh path must clean ignored files too, not just untracked ones.
+
+    `git clean -fd` preserves ignored files (dist/, coverage/, build caches).
+    A prior review may have produced ignored artifacts that are not in the
+    current PR head; `git clean -fdx` removes them so the refreshed review
+    sees only the new PR head's tree.
+    """
+    import os
+    import subprocess
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    # Add a .gitignore so dist/ and coverage/ are ignored.
+    (contributor / ".gitignore").write_text("dist/\ncoverage/\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md", ".gitignore"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    # Simulate a prior review run leaving ignored artifacts behind.
+    ignored_dir = ws1.repo_dir / "dist"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    (ignored_dir / "bundle.js").write_text("stale build output\n", encoding="utf-8")
+    ignored_file = ws1.repo_dir / "coverage.dat"
+    ignored_file.write_text("stale coverage\n", encoding="utf-8")
+    assert ignored_dir.exists()
+    assert ignored_file.exists()
+
+    # Push a new commit to the PR head so refresh actually runs.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+
+    # The ignored artifacts from the prior run must be gone.
+    assert not ignored_dir.exists(), "ignored directory survived refresh"
+    assert not ignored_file.exists(), "ignored file survived refresh"
+    # The refreshed content is the new PR head.
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+
 def test_chown_workspace_noops_when_not_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], bool]] = []
 

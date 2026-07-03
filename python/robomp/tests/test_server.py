@@ -3454,3 +3454,166 @@ async def test_review_pr_synchronize_respects_cap(
     assert len(stub_run_task) == 0
     assert sandbox.ensure_calls == []
     close_database()
+
+
+async def test_review_pr_skips_closed_pr_on_re_review_comment(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Comment-triggered re-review must not run on a closed PR (task-boundary guard).
+
+    The payload-time state is stale: a PR can close between webhook delivery and
+    worker execution. The guard checks the live `pr.state` after
+    `get_pull_request` returns the real PR state.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="closed",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-closed-skip",
+    )
+
+    assert stub_run_task == []
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_bypass_clears_stale_staged_comments(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A bypass re-review must clear stale staged comments from a prior failed run.
+
+    If an earlier review staged inline comments with `pr_review_comment` but
+    crashed before `submit_pr_review`, those rows are still keyed by issue_key.
+    The next bypass re-review on a different head must not flush them alongside
+    the new review.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    # Simulate stale staged comments from a prior failed review.
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=10, side="RIGHT", body="stale comment")
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=20, side="RIGHT", body="another stale")
+    assert len(db.list_staged_review_comments(key)) == 2
+
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-clear-stale",
+    )
+
+    # The bypass re-review ran.
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    # Stale staged comments from the prior failed run must be cleared.
+    assert db.list_staged_review_comments(key) == [], "stale staged comments survived bypass re-review"
+    close_database()

@@ -830,13 +830,14 @@ class SandboxManager:
                     )
                     if reset.returncode != 0:
                         raise GitCommandError(reset.args, reset.returncode, reset.stdout, reset.stderr)
-                    # `git reset --hard` does not touch untracked files. A
-                    # prior review run may have left stray artifacts (build
-                    # output, temp files) that would shadow the fresh checkout.
-                    # Clean untracked files and directories so the refreshed
+                    # `git reset --hard` does not touch untracked or ignored
+                    # files. A prior review run may have left stray artifacts
+                    # (build output, temp files, ignored dirs like dist/ or
+                    # coverage/) that would shadow the fresh checkout. Clean
+                    # untracked AND ignored files/dirs (-fdx) so the refreshed
                     # review sees only the new PR head's tree.
                     clean = _safe_run(
-                        ["git", "clean", "-fd"],
+                        ["git", "clean", "-fdx"],
                         cwd=repo_dir,
                         env=_git_env_for_repo(repo_dir),
                         **slot_git_kwargs,
