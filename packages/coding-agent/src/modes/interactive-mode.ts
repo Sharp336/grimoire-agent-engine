@@ -282,7 +282,6 @@ function formatHudNoteMarker(count: number): string {
 type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
 type PlanApprovalMode = "execute" | "compact" | "shake" | "keep";
 
-
 const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 3;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
@@ -3129,7 +3128,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choice = await this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", "Approve and shake context", keepContextLabel, "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and shake context",
+				keepContextLabel,
+				"Refine plan",
+			],
 			{
 				helpText,
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),

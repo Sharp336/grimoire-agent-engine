@@ -586,7 +586,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(selector).toHaveBeenCalledWith(
 			expect.any(String),
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", "Approve and shake context", "Approve and keep context", "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and shake context",
+				"Approve and keep context",
+				"Refine plan",
+			],
 			expect.any(Object),
 			expect.any(Object),
 		);
