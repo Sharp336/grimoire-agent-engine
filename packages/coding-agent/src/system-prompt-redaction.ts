@@ -7,6 +7,12 @@ export interface SkillDescriptionRedactionOptions {
 	mode: SkillDescriptionRedactionMode;
 	maxContextShare: number;
 	contextWindow?: number | null;
+	/**
+	 * Which prompt-template rendering shape the redacted skills will be inlined
+	 * into. Cap mode estimates tokens against this shape so the budget matches
+	 * what the provider actually receives. Defaults to `"default"`.
+	 */
+	renderFormat?: "default" | "custom";
 }
 
 function splitSentences(description: string): string[] {
@@ -29,10 +35,22 @@ function trimDescriptionToBudget(description: string, charBudget: number): strin
 	return kept.join(" ");
 }
 
-function estimateRenderedSkillsTokens(entries: readonly { skill: Skill; sentences: string[] }[]): number {
+function estimateRenderedSkillsTokens(
+	entries: readonly { skill: Skill; sentences: string[] }[],
+	renderFormat: "default" | "custom" = "default",
+): number {
 	const lines = ["<skills>"];
 	for (const { skill, sentences } of entries) {
-		lines.push(`- ${skill.name}: ${sentences.join(" ")}`);
+		const description = sentences.join(" ");
+		if (renderFormat === "custom") {
+			// Matches custom-system-prompt.md: <skill name="{{name}}">\n{{description}}\n</skill>
+			lines.push(`<skill name="${skill.name}">`);
+			lines.push(description);
+			lines.push("</skill>");
+		} else {
+			// Matches system-prompt.md: - {{name}}: {{description}}
+			lines.push(`- ${skill.name}: ${description}`);
+		}
 	}
 	lines.push("</skills>");
 	return estimateTokens(lines.join("\n"));
@@ -50,7 +68,12 @@ function applyTrimMode(skills: Skill[], contextWindow: number, maxContextShare: 
 	});
 }
 
-function applyCapMode(skills: Skill[], contextWindow: number, maxContextShare: number): Skill[] {
+function applyCapMode(
+	skills: Skill[],
+	contextWindow: number,
+	maxContextShare: number,
+	renderFormat: "default" | "custom",
+): Skill[] {
 	if (skills.length === 0) return [];
 
 	const budgetTokens = Math.max(1, Math.floor(contextWindow * maxContextShare));
@@ -58,7 +81,7 @@ function applyCapMode(skills: Skill[], contextWindow: number, maxContextShare: n
 
 	// Phase 1: pop sentences from the longest multi-sentence descriptions until
 	// the rendered block fits the token budget.
-	while (estimateRenderedSkillsTokens(redacted) > budgetTokens) {
+	while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
 		let longestIndex = -1;
 		let longestLength = -1;
 
@@ -79,7 +102,7 @@ function applyCapMode(skills: Skill[], contextWindow: number, maxContextShare: n
 	// each description's text down to a residual per-entry char budget. Skill
 	// names are never touched — only the description text is shortened, so the
 	// entry list and names always survive even when the budget is unsplittable.
-	if (estimateRenderedSkillsTokens(redacted) > budgetTokens) {
+	if (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
 		const residualCharBudget = Math.max(0, Math.floor((budgetTokens * 4) / skills.length));
 		for (const entry of redacted) {
 			const text = entry.sentences.join(" ");
@@ -105,6 +128,8 @@ export function redactSkillDescriptions(skills: Skill[], options: SkillDescripti
 		Number.isFinite(options.maxContextShare) && options.maxContextShare > 0 ? options.maxContextShare : null;
 	if (contextWindow === null || maxContextShare === null) return skills;
 
+	const renderFormat = options.renderFormat ?? "default";
+
 	if (options.mode === "trim") return applyTrimMode(skills, contextWindow, maxContextShare);
-	return applyCapMode(skills, contextWindow, maxContextShare);
+	return applyCapMode(skills, contextWindow, maxContextShare, renderFormat);
 }

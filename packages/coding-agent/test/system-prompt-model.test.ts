@@ -286,6 +286,56 @@ describe("AgentSession context accounting uses redacted prompt skills", () => {
 		expect(redactedTokens).toBeLessThan(fullBreakdown.skillsTokens);
 	});
 
+	it("promptSkills is seeded from initialPromptSkills at construction before any refresh", () => {
+		const [model] = pickTwoModelsForContextTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const longSkill: Skill = {
+			name: "verbose-skill",
+			description: "This is a very long description. It has multiple sentences. Each one adds tokens.",
+			filePath: "/path/to/verbose",
+			baseDir: "/path/to",
+			source: "test",
+		};
+		const shortSkill: Skill = {
+			name: "short-skill",
+			description: "Brief.",
+			filePath: "/path/to/short",
+			baseDir: "/path/to",
+			source: "test",
+		};
+
+		// The redacted set that the initial prompt build would produce.
+		const redactedLong: Skill = { ...longSkill, description: "This is a very long description." };
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			skills: [longSkill, shortSkill],
+			initialPromptSkills: [redactedLong, shortSkill],
+			rebuildSystemPrompt: async () => ({
+				systemPrompt: ["rebuilt"],
+				promptSkills: [redactedLong, shortSkill],
+			}),
+		});
+
+		// /context accounting must match the first provider prompt immediately,
+		// before any refreshBaseSystemPrompt or #applyActiveToolsByName call.
+		expect(session.promptSkills.length).toBe(2);
+		expect(session.promptSkills[0].description).toBe("This is a very long description.");
+		expect(session.promptSkills[1].description).toBe("Brief.");
+
+		// session.skills remains unredacted for skill:// resolution.
+		expect(session.skills[0].description).toBe(longSkill.description);
+	});
+
 	function pickTwoModelsForContextTest(): [Model, Model] {
 		const all = modelRegistry.getAll();
 		const first = all[0];

@@ -662,6 +662,13 @@ export interface AgentSessionConfig {
 	extensionRunner?: ExtensionRunner;
 	/** Loaded skills (already discovered by SDK) */
 	skills?: Skill[];
+	/**
+	 * Skills rendered into the initial system prompt after redaction (cap/trim
+	 * mode). Seeded from the first `rebuildSystemPrompt` call so `/context`
+	 * accounting matches the first provider prompt before any later refresh.
+	 * Falls back to the unhidden `skills` subset when omitted.
+	 */
+	initialPromptSkills?: readonly Skill[];
 	/** Skill loading warnings (already captured by SDK) */
 	skillWarnings?: SkillWarning[];
 	/** Custom commands (TypeScript slash commands) */
@@ -2140,7 +2147,7 @@ export class AgentSession {
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptModelContextWindow = this.model?.contextWindow;
-		this.#promptSkills = this.#skills.filter(skill => skill.hide !== true);
+		this.#promptSkills = config.initialPromptSkills ?? this.#skills.filter(skill => skill.hide !== true);
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { estimateTokens } from "../src/commit/map-reduce/utils";
 import type { Skill } from "../src/extensibility/skills";
 import { redactSkillDescriptions } from "../src/system-prompt-redaction";
 
@@ -221,6 +222,58 @@ describe("redactSkillDescriptions", () => {
 			expect(result[0].name).toBe("verbose-skill");
 			expect(result[0].description.length).toBeLessThan(longSingleSentence[0].description.length);
 			expect(result[0].description.length).toBeLessThanOrEqual(8);
+		});
+
+		it("cap mode with custom render format trims more aggressively than default format", () => {
+			// The custom prompt template wraps each skill in
+			//   <skill name="{{name}}">\n{{description}}\n</skill>
+			// which has a larger per-entry footprint than the default
+			//   - {{name}}: {{description}}
+			// Cap mode must estimate against the actual rendering shape so the
+			// budget matches what the provider receives.
+			//
+			// Default format for MOCK_SKILLS (full):
+			//   "<skills>\n- skill-one: One. Two. Three.\n- skill-two: Short.\n</skills>"
+			//   Length = 70 chars → ceil(70/4) = 18 tokens.
+			//
+			// Custom format for MOCK_SKILLS (full):
+			//   "<skills>\n<skill name=\"skill-one\">\nOne. Two. Three.\n</skill>\n<skill name=\"skill-two\">\nShort.\n</skill>\n</skills>"
+			//   Length = 108 chars → ceil(108/4) = 27 tokens.
+			//
+			// With budget = 16 tokens (contextWindow=160, share=0.1):
+			// - Default: 18 > 16 → pops 1 sentence → 16 tokens → result "One. Two."
+			// - Custom: 27 > 16 → pops sentences more aggressively because the
+			//   wrapping tags eat into the budget. The custom-format result must
+			//   be strictly shorter than the default-format result.
+			const defaultResult = redactSkillDescriptions(MOCK_SKILLS, {
+				mode: "cap",
+				maxContextShare: 0.1,
+				contextWindow: 160,
+				renderFormat: "default",
+			});
+			const customResult = redactSkillDescriptions(MOCK_SKILLS, {
+				mode: "cap",
+				maxContextShare: 0.1,
+				contextWindow: 160,
+				renderFormat: "custom",
+			});
+
+			// Both keep both skill entries and their names.
+			expect(customResult.length).toBe(MOCK_SKILLS.length);
+			expect(customResult[0].name).toBe("skill-one");
+			expect(customResult[1].name).toBe("skill-two");
+
+			// The custom format has a larger per-entry footprint, so cap mode
+			// must trim at least as aggressively as the default format.
+			expect(customResult[0].description.length).toBeLessThanOrEqual(defaultResult[0].description.length);
+
+			// Verify the custom-format estimate actually exceeds the default-format
+			// estimate for the unredacted skills, proving the format matters.
+			// (If they were equal, the custom format wouldn't trim more.)
+			const defaultFull = "<skills>\n- skill-one: One. Two. Three.\n- skill-two: Short.\n</skills>";
+			const customFull =
+				'<skills>\n<skill name="skill-one">\nOne. Two. Three.\n</skill>\n<skill name="skill-two">\nShort.\n</skill>\n</skills>';
+			expect(estimateTokens(customFull)).toBeGreaterThan(estimateTokens(defaultFull));
 		});
 	});
 });

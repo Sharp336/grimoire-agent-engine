@@ -738,6 +738,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		mode: skillDescriptionRedactionMode,
 		maxContextShare: skillDescriptionRedactionMaxContextShare,
 		contextWindow,
+		renderFormat: resolvedCustomPrompt ? "custom" : "default",
 	});
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [

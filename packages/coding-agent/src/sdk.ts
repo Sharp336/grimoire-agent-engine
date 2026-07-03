@@ -2444,7 +2444,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasRegistered = true;
 
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, promptSkills: initialPromptSkills } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -2722,6 +2722,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionRunner,
 			customCommands: customCommandsResult.commands,
 			skills,
+			initialPromptSkills,
 			skillWarnings,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
