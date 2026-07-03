@@ -1630,4 +1630,39 @@ describe("InteractiveMode plan review rendering", () => {
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
 		});
 	});
+
+	describe("handleShakeCommand streaming guard", () => {
+		it("refuses to shake while a turn is streaming and does not call session.shake", async () => {
+			Object.defineProperty(session, "isStreaming", {
+				configurable: true,
+				get: () => true,
+			});
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 0,
+				blocksDropped: 0,
+				tokensFreed: 0,
+			});
+			const warnSpy = vi.spyOn(mode, "showWarning");
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("not available while a turn is streaming"));
+		});
+
+		it("shakes normally when the session is idle", async () => {
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 2,
+				blocksDropped: 1,
+				tokensFreed: 500,
+			});
+			vi.spyOn(mode, "rebuildChatFromMessages").mockImplementation(() => {});
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide");
+		});
+	});
 });
