@@ -1,4 +1,4 @@
-import { estimateTokens } from "./commit/map-reduce/utils";
+import { countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Skill } from "./extensibility/skills";
 
 export type SkillDescriptionRedactionMode = "off" | "trim" | "cap";
@@ -21,14 +21,14 @@ function splitSentences(description: string): string[] {
 	return trimmed.split(/(?<=[.!?])\s+/).filter(sentence => sentence.length > 0);
 }
 
-function trimDescriptionToBudget(description: string, charBudget: number): string {
-	const sentences = splitSentences(description);
-	if (description.length <= charBudget) return description;
+function trimDescriptionToTokenBudget(description: string, tokenBudget: number): string {
+	if (countTokens(description) <= tokenBudget) return description;
 
+	const sentences = splitSentences(description);
 	const kept: string[] = [];
 	for (const sentence of sentences) {
 		const candidate = [...kept, sentence].join(" ");
-		if (candidate.length > charBudget) break;
+		if (countTokens(candidate) > tokenBudget) break;
 		kept.push(sentence);
 	}
 
@@ -53,17 +53,17 @@ function estimateRenderedSkillsTokens(
 		}
 	}
 	lines.push("</skills>");
-	return estimateTokens(lines.join("\n"));
+	return countTokens(lines.join("\n"));
 }
 
 function applyTrimMode(skills: Skill[], contextWindow: number, maxContextShare: number): Skill[] {
 	if (skills.length === 0) return [];
 
-	const totalCharBudget = Math.floor(contextWindow * maxContextShare * 4);
-	const perSkillCharBudget = Math.max(1, Math.floor(totalCharBudget / skills.length));
+	const totalTokenBudget = Math.max(1, Math.floor(contextWindow * maxContextShare));
+	const perSkillTokenBudget = Math.max(1, Math.floor(totalTokenBudget / skills.length));
 
 	return skills.map(skill => {
-		const description = trimDescriptionToBudget(skill.description, perSkillCharBudget);
+		const description = trimDescriptionToTokenBudget(skill.description, perSkillTokenBudget);
 		return description === skill.description ? skill : { ...skill, description };
 	});
 }
@@ -99,7 +99,7 @@ function applyCapMode(
 	}
 
 	// Phase 2: if still over budget (every remaining entry is ≤1 sentence), trim
-	// each description's text down to a residual per-entry char budget. The
+	// each description's text down to a residual per-entry token budget. The
 	// residual must account for the fixed rendering overhead — wrapper tags
 	// (<skills>/</skills>) and per-entry name framing — so the budget is not
 	// given entirely to description text. Descriptions are iteratively shortened
@@ -114,7 +114,7 @@ function applyCapMode(
 			renderFormat,
 		);
 		const descriptionTokenBudget = Math.max(0, budgetTokens - framingTokens);
-		let residualCharBudget = Math.max(0, Math.floor((descriptionTokenBudget * 4) / skills.length));
+		let residualTokenBudget = Math.max(0, Math.floor(descriptionTokenBudget / skills.length));
 
 		// Iteratively trim and re-estimate. If the rendered block still exceeds
 		// the budget, halve the residual cap and retry until it fits or all
@@ -122,12 +122,12 @@ function applyCapMode(
 		while (estimateRenderedSkillsTokens(redacted, renderFormat) > budgetTokens) {
 			for (const entry of redacted) {
 				const text = entry.sentences.join(" ");
-				const trimmed = trimDescriptionToBudget(text, residualCharBudget);
+				const trimmed = trimDescriptionToTokenBudget(text, residualTokenBudget);
 				entry.sentences = trimmed ? [trimmed] : [];
 			}
 			if (estimateRenderedSkillsTokens(redacted, renderFormat) <= budgetTokens) break;
-			if (residualCharBudget === 0) break;
-			residualCharBudget = Math.floor(residualCharBudget / 2);
+			if (residualTokenBudget === 0) break;
+			residualTokenBudget = Math.floor(residualTokenBudget / 2);
 		}
 	}
 

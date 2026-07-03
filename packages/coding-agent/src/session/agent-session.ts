@@ -177,7 +177,12 @@ import { MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import { getDefault, onAppendOnlyModeChanged, validateProviderMaxInFlightRequests } from "../config/settings";
+import {
+	getDefault,
+	onAppendOnlyModeChanged,
+	onSkillsRedactionChanged,
+	validateProviderMaxInFlightRequests,
+} from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -1531,6 +1536,7 @@ export class AgentSession {
 	#cancelExitRecorder?: () => void;
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
+	#unsubscribeSkillsRedaction?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -2241,6 +2247,13 @@ export class AgentSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
+		// Rebuild the system prompt when skill-description redaction settings change
+		// at runtime so the redaction budget/window reflects the new configuration.
+		this.#unsubscribeSkillsRedaction = onSkillsRedactionChanged(() => {
+			void this.refreshBaseSystemPrompt().catch(err => {
+				logger.warn("Skills redaction prompt refresh failed", { error: String(err) });
+			});
+		});
 	}
 	// -------------------------------------------------------------------------
 	// Advisor runtime lifecycle
@@ -5679,6 +5692,10 @@ export class AgentSession {
 			this.#unsubscribeAppendOnly();
 			this.#unsubscribeAppendOnly = undefined;
 		}
+		if (this.#unsubscribeSkillsRedaction) {
+			this.#unsubscribeSkillsRedaction();
+			this.#unsubscribeSkillsRedaction = undefined;
+		}
 		this.#eventListeners = [];
 	}
 
@@ -8292,6 +8309,13 @@ export class AgentSession {
 	 */
 	get promptSkills(): readonly Skill[] {
 		return this.#promptSkills;
+	}
+
+	/** Context window of the model currently rendered into the system prompt.
+	 * Used by redaction budget estimation and context accounting so `/context`
+	 * reflects the same window the provider receives. */
+	get promptModelContextWindow(): number | null | undefined {
+		return this.#promptModelContextWindow;
 	}
 
 	/** Skill loading warnings captured by SDK */
@@ -14363,6 +14387,9 @@ export class AgentSession {
 				this.#closeAllProviderSessions("session reload");
 			}
 
+			// Capture the edit mode before the model restore so #syncAfterModelChange
+			// can detect an edit-mode change caused by the restored model.
+			const previousEditModeBeforeRestore = this.#resolveActiveEditMode();
 			// Restore model if saved
 			const targetModelStrings = getRestorableSessionModels(
 				sessionContext.models,
@@ -14394,6 +14421,11 @@ export class AgentSession {
 					}
 				}
 			}
+			// A restored model may have a different context window than the
+			// previously active one, which changes the skill-description redaction
+			// budget. Sync the prompt (model key, context window, edit mode) so
+			// #promptModelContextWindow and #promptSkills reflect the restored model.
+			await this.#syncAfterModelChange(previousEditModeBeforeRestore);
 
 			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager

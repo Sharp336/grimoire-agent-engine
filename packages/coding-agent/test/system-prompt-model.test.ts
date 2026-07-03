@@ -15,6 +15,12 @@ import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
+/** Flush enough microtask ticks for a fire-and-forget async chain (signal →
+ * async rebuild → sync prompt set) to complete. Deterministic — no real timers. */
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
 const EMPTY_TREE = {
 	rootPath: "",
 	rendered: "",
@@ -358,5 +364,196 @@ describe("AgentSession context accounting uses redacted prompt skills", () => {
 		const result = computeNonMessageBreakdown(proxy);
 		void original;
 		return result;
+	}
+});
+
+describe("AgentSession skills.redaction settings signal", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-signal-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("rebuilds the prompt when skills.redaction.mode changes at runtime", async () => {
+		const [model] = pickTwoModelsForSignalTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = newAgentSessionForSignal(model, settings, async () => {
+			rebuildCount++;
+			return { systemPrompt: [`rebuilt-${rebuildCount}`] };
+		});
+
+		// Initial prompt is set at construction; no rebuild yet.
+		expect(rebuildCount).toBe(0);
+
+		// Changing skills.redaction.mode fires the signal → refreshBaseSystemPrompt.
+		// The signal callback is fire-and-forget (void ... .catch), so flush
+		// microtasks to let the async rebuild chain complete deterministically.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["rebuilt-1"]);
+
+		// Changing maxContextShare also fires the signal.
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["rebuilt-2"]);
+	});
+
+	function pickTwoModelsForSignalTest(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		return [first, all[1] ?? first];
+	}
+
+	function newAgentSessionForSignal(
+		model: Model,
+		settings: Settings,
+		rebuild: () => Promise<{ systemPrompt: string[] }>,
+	): AgentSession {
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		return new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => rebuild(),
+		});
+	}
+});
+
+describe("AgentSession switchSession restores prompt with model context window", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-restore-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("refreshes prompt model context window after restoring a saved model with a different context window", async () => {
+		// Create a session with model A (context window W_a), then switch to
+		// a session that was saved with model B (context window W_b). After
+		// switchSession, #promptModelContextWindow must reflect model B's
+		// context window so the redaction budget is correct.
+		const [modelA, modelB] = pickTwoModelsWithDifferentContextWindowForRestore();
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		let rebuildContextWindow: number | null | undefined;
+		let rebuildCount = 0;
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			includeModelInPrompt: false,
+		});
+
+		// Write session B's session file with a model_change entry for model B.
+		const sessionBFile = path.join(tempDir, `session-b-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionBFile,
+			`${[
+				{ type: "session", version: 3, id: "session-b", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "model-b",
+					parentId: null,
+					timestamp,
+					model: `${modelB.provider}/${modelB.id}`,
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		// Create session with model A using a file-based SessionManager.
+		const sessionADir = path.join(tempDir, `session-a-${Bun.nanoseconds()}`);
+		fs.mkdirSync(sessionADir, { recursive: true });
+		const sessionAFile = path.join(sessionADir, "active.jsonl");
+		const sessionManager = SessionManager.create(sessionADir, sessionAFile);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: modelA, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				rebuildContextWindow = session?.model?.contextWindow;
+				return { systemPrompt: [`rebuilt-${rebuildCount}`] };
+			},
+		});
+
+		// The initial prompt context window matches model A.
+		expect(session.promptModelContextWindow).toBe(modelA.contextWindow);
+
+		// Switch to session B (which has model B saved).
+		await session.switchSession(sessionBFile);
+
+		// After restore, the model should be B and the prompt context window
+		// must be refreshed to match B's context window.
+		expect(session.model?.id).toBe(modelB.id);
+		expect(session.promptModelContextWindow).toBe(modelB.contextWindow);
+		// The sync must have triggered at least one rebuild.
+		expect(rebuildCount).toBeGreaterThan(0);
+		// The rebuild saw model B's context window.
+		expect(rebuildContextWindow).toBe(modelB.contextWindow);
+	});
+
+	function pickTwoModelsWithDifferentContextWindowForRestore(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		const second = all.find(
+			m => (m.provider !== first.provider || m.id !== first.id) && m.contextWindow !== first.contextWindow,
+		);
+		if (!second) {
+			// Construct a mock model with a different context window.
+			const baseWindow = first.contextWindow ?? 128000;
+			return [
+				{ ...first, contextWindow: baseWindow },
+				{ ...first, id: `${first.id}-wide`, contextWindow: baseWindow * 2 },
+			];
+		}
+		return [first, second];
 	}
 });

@@ -1435,6 +1435,8 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
+	"skills.redaction.mode": () => skillsRedactionSignal.fire(),
+	"skills.redaction.maxContextShare": () => skillsRedactionSignal.fire(),
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -1480,6 +1482,17 @@ const hindsightScopeSignal = new SettingSignal("hindsight scope");
  * caller is expected to re-read the relevant settings via `Settings.get`.
  */
 export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.on(cb);
+
+/** Fires when `skills.redaction.mode` or `skills.redaction.maxContextShare` changes. */
+const skillsRedactionSignal = new SettingSignal("skills.redaction");
+
+/**
+ * Subscribe to skill-description redaction setting changes. The caller should
+ * rebuild the system prompt (which re-derives the redaction budget from the
+ * current `skills.redaction.*` settings and model context window) in the
+ * callback. Returns an unsubscribe function.
+ */
+export const onSkillsRedactionChanged = (cb: () => void) => skillsRedactionSignal.on(cb);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Singleton
