@@ -315,4 +315,24 @@ This is a test skill.
 		expect(session.skills.length).toBeGreaterThan(0);
 		expect(session.promptSkills).toEqual([]);
 	});
+
+	it("clears promptSkills when a function override contains literal <skills> tag but not the actual default skills block", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: () => "You are a helpful agent. Remember to use <skills> tags when describing abilities.",
+		});
+
+		// session.skills should still contain discovered skills
+		expect(session.skills.length).toBeGreaterThan(0);
+		// The returned prompt contains the literal "<skills>" tag in
+		// unrelated instruction text, but NOT the actual default skills
+		// block. promptSkills must be cleared — the provider never receives
+		// the real skills descriptions, so /context and compaction must not
+		// charge them.
+		expect(session.promptSkills).toEqual([]);
+	});
 });

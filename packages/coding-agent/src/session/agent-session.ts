@@ -2298,7 +2298,7 @@ export class AgentSession {
 			// the replacement is genuinely under way.
 			this.#redactionRefreshChain = this.#redactionRefreshChain
 				.catch(() => {})
-				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt() : undefined))
+				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt(epoch) : undefined))
 				.catch(err => {
 					logger.warn("Skills redaction prompt refresh failed", { error: String(err) });
 				});
@@ -6327,7 +6327,22 @@ export class AgentSession {
 			const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 			if (signature !== this.#lastAppliedToolSignature) {
 				const buildVersion = ++this.#promptBuildVersion;
-				const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
+				let built: BuildSystemPromptResult;
+				try {
+					built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
+				} catch (error) {
+					// Roll back the build version so an in-flight
+					// refreshBaseSystemPrompt that captured the previous version
+					// can still apply its result — mirroring the same rollback
+					// refreshBaseSystemPrompt performs on its own throw. Without
+					// this, the refresh would see a mismatched version and
+					// discard its result, leaving tools changed but prompt
+					// inventory old.
+					if (this.#promptBuildVersion === buildVersion) {
+						this.#promptBuildVersion = buildVersion - 1;
+					}
+					throw error;
+				}
 				// A concurrent rebuild (redaction refresh, model switch, or
 				// another tool-set change) may have started while we awaited.
 				// If so, discard our stale result — the newer build's prompt
@@ -6427,8 +6442,13 @@ export class AgentSession {
 			persistMCPSelection: false,
 		});
 	}
-	/** Rebuild the base system prompt using the current active tool set. */
-	async refreshBaseSystemPrompt(): Promise<void> {
+	/** Rebuild the base system prompt using the current active tool set.
+	 *
+	 * When `expectedEpoch` is provided (redaction-driven refresh), the epoch
+	 * is rechecked after the async build completes. If a newer redaction
+	 * signal fired during the await, the stale result is discarded so only
+	 * the latest settings win. */
+	async refreshBaseSystemPrompt(expectedEpoch?: number): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
 		// Capture the build version before the async build. Every call that
@@ -6455,6 +6475,13 @@ export class AgentSession {
 		// A concurrent rebuild may have started and completed while we awaited.
 		// If so, discard our stale result — the newer build's prompt is correct.
 		if (this.#promptBuildVersion !== buildVersion) return;
+		// A newer redaction signal may have fired during the await, queuing a
+		// fresher refresh on the serialized chain. Recheck the epoch so an
+		// in-flight stale rebuild does not apply before the newer one runs —
+		// #promptBuildVersion does not cover this because the redaction signal
+		// handler deliberately does NOT increment it (to avoid invalidating an
+		// in-flight tool rebuild whose result is still valid).
+		if (expectedEpoch !== undefined && expectedEpoch !== this.#redactionRefreshEpoch) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		this.agent.setSystemPrompt(this.#baseSystemPrompt);

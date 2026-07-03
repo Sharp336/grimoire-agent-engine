@@ -2309,14 +2309,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// (including its <skills> block) as input and commonly keeps
 				// or appends it. Preserve the default's promptSkills for
 				// context accounting only when the returned prompt actually
-				// contains the default <skills> block; a full replacement
+				// contains the default <skills> block — not just the literal
+				// "<skills>" tag, which could appear in unrelated user content
+				// (e.g. instructions or examples). A full replacement
 				// (e.g. `() => "custom"`) drops the skills block, so /context
 				// and compaction must not charge skills the provider never
 				// receives — the same full-control case handled for string/array
 				// overrides below.
 				const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 				const customPromptParts = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
-				const keepsDefaultSkills = customPromptParts.some(part => part.includes("<skills>"));
+				const defaultSkillsBlock = defaultPrompt.systemPrompt
+					.map(part => part.match(/<skills>[\s\S]*?<\/skills>/)?.[0])
+					.find(block => block !== undefined);
+				const keepsDefaultSkills =
+					!!defaultSkillsBlock && customPromptParts.some(part => part.includes(defaultSkillsBlock));
 				return {
 					systemPrompt: customPromptParts,
 					promptSkills: keepsDefaultSkills ? defaultPrompt.promptSkills : [],

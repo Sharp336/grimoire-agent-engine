@@ -1545,6 +1545,77 @@ describe("AgentSession redaction signal invalidates in-flight rebuild mid-await"
 		expect(rebuildCount).toBe(2);
 		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
 	});
+
+	it("rechecks epoch after async rebuild so stale result is not applied before newer refresh", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		let resolveSecondRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// First rebuild is slow — controlled by a promise we resolve later.
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+				}
+				if (current === 2) {
+					// Second rebuild is also slow — so we can observe the prompt
+					// state between the first rebuild's completion and the second's.
+					const blocker = Promise.withResolvers<void>();
+					resolveSecondRebuild = blocker.resolve;
+					await blocker.promise;
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Fire first signal — starts a slow rebuild (epoch=1, buildVersion=1).
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Fire second signal while the first rebuild is still pending.
+		// The epoch increments to 2, but #promptBuildVersion is NOT incremented
+		// (the redaction handler deliberately avoids it). Without the epoch
+		// recheck inside refreshBaseSystemPrompt, the first rebuild would apply
+		// "result-1" when it completes, because #promptBuildVersion still matches.
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		await flushMicrotasks();
+
+		// Resolve the first rebuild. With the epoch recheck fix, the stale
+		// result-1 is discarded — the prompt must stay "initial".
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// The first rebuild completed but its stale result was NOT applied.
+		// The second rebuild has started but is blocked — so the prompt is
+		// still "initial", proving the stale rebuild was discarded, not
+		// briefly applied.
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Resolve the second rebuild — it applies "result-2".
+		resolveSecondRebuild?.();
+		await flushMicrotasks();
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
 });
 
 describe("AgentSession applyActiveToolsByName persists MCP selection on stale build discard", () => {
@@ -1843,6 +1914,97 @@ describe("AgentSession redaction refresh preserves in-flight tool rebuild when r
 		// A subsequent rebuild must work (build version not permanently stuck).
 		await session.refreshBaseSystemPrompt();
 		expect(session.agent.state.systemPrompt).toEqual(["result-3"]);
+	});
+});
+
+describe("AgentSession applyActiveToolsByName rolls back build version when rebuild throws", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-tool-throw-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("rolls back promptBuildVersion so an in-flight refresh can still apply its result", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model in the registry");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const mcpTool = {
+			name: "mcp__test__tool",
+			label: "Test MCP Tool",
+			description: "A test MCP tool",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpTool>([["mcp__test__tool", mcpTool]]);
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// First rebuild (via refreshBaseSystemPrompt) is slow.
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["refresh-result"] };
+				}
+				// Second rebuild (via setActiveToolsByName) throws.
+				throw new Error("tool rebuild failure");
+			},
+		});
+
+		// Start a slow refresh (build version 1) — store the promise so it
+		// can be awaited before teardown.
+		const refreshPromise = session.refreshBaseSystemPrompt();
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// While the first rebuild is pending, change the tool set — this
+		// triggers #applyActiveToolsByName which increments build version to 2
+		// and calls rebuildSystemPrompt. The rebuild throws, so the catch
+		// must roll back build version to 1.
+		await expect(session.setActiveToolsByName(["mcp__test__tool"])).rejects.toThrow("tool rebuild failure");
+
+		// The tool rebuild threw and build version was rolled back to 1.
+		// Now resolve the first rebuild — it must see build version 1 === 1
+		// and apply its result.
+		resolveFirstRebuild?.();
+		await refreshPromise;
+
+		// The refresh's result was applied — the prompt is NOT stuck at
+		// "initial". Without the rollback, the tool rebuild's increment
+		// (version 2) would still be live, causing the refresh to discard
+		// its result, leaving tools changed but prompt inventory old.
+		expect(session.agent.state.systemPrompt).toEqual(["refresh-result"]);
 	});
 });
 
