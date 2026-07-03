@@ -189,7 +189,7 @@ def test_completion_reminder_limits_mark_unable_to_reporter_details() -> None:
         issue=_Issue(),
         workspace=_Workspace(),
     )
-    assert "reporter-provided reproduction details" in out
+    assert "gh_post_reference_comment" in out
     assert "maintainer input" not in out
 
 

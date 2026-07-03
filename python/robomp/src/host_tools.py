@@ -953,11 +953,15 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
 
     Two checks, in order:
 
-    1. If the bot has already recorded an open PR for this issue
-       (``row.pr_number``), refuse immediately — opening a second PR for the
-       same issue is itself a duplicate. The legitimate "amend existing PR"
-       path goes through ``gh_push_branch`` (push to the same branch), not
-       ``gh_open_pr`` (create a new PR).
+    1. If the bot has already recorded a PR for this issue
+       (``row.pr_number``), verify that PR is still **open** on GitHub.
+       A closed/merged recorded PR is stale — reopened replacement work
+       must not be blocked by it. If the PR is open, refuse immediately;
+       opening a second PR for the same issue is itself a duplicate. The
+       legitimate "amend existing PR" path goes through ``gh_push_branch``
+       (push to the same branch), not ``gh_open_pr`` (create a new PR).
+       A transient fetch error fails open (fall through to the timeline
+       check) so a GitHub hiccup doesn't block a legitimate PR.
     2. Otherwise consult ``list_closing_pull_requests`` (timeline /
        Development-panel links) so the guard sees linked PRs from other
        authors even when no issue comment mentions them.
@@ -968,17 +972,35 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
     row = bindings.db.get_issue(bindings.issue_key)
     own_pr = row.pr_number if row is not None else None
     if own_pr is not None:
-        msg = (
-            f"refusing to open PR: issue #{bindings.issue.number} already has "
-            f"an open PR #{own_pr} recorded for this issue. Do NOT open a "
-            "second PR. To amend the existing PR, push to its branch with "
-            "`gh_push_branch`; to discard your unpushed commit run "
-            f"`git reset --hard origin/{bindings.repo.default_branch}`. "
-            "If the existing fix is sufficient, call `gh_post_reference_comment` "
-            "with a body referencing it — this ends the task cleanly."
-        )
-        _audit(bindings, "gh_open_pr", args, error=msg)
-        _raise_command(msg)
+        try:
+            own_pr_info = _run_coro(
+                bindings.loop,
+                bindings.github.get_pull_request(bindings.repo.full_name, own_pr),
+            )
+        except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
+            log.warning(
+                "recorded-PR guard: fetch failed; falling through to timeline check",
+                extra={"issue": bindings.issue_key, "pr": own_pr, "err": str(exc)},
+            )
+        else:
+            if own_pr_info.state == "open":
+                msg = (
+                    f"refusing to open PR: issue #{bindings.issue.number} already has "
+                    f"an open PR #{own_pr} recorded for this issue. Do NOT open a "
+                    "second PR. To amend the existing PR, push to its branch with "
+                    "`gh_push_branch`; to discard your unpushed commit run "
+                    f"`git reset --hard origin/{bindings.repo.default_branch}`. "
+                    "If the existing fix is sufficient, call `gh_post_reference_comment` "
+                    "with a body referencing it — this ends the task cleanly."
+                )
+                _audit(bindings, "gh_open_pr", args, error=msg)
+                _raise_command(msg)
+            # PR is closed/merged → stale record; fall through to the
+            # timeline check so a reopened replacement PR is not blocked.
+            log.info(
+                "recorded-PR guard: recorded PR is no longer open; proceeding",
+                extra={"issue": bindings.issue_key, "pr": own_pr, "state": own_pr_info.state},
+            )
     try:
         closing_prs = _run_coro(
             bindings.loop,

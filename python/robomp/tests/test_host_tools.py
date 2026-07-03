@@ -3614,11 +3614,22 @@ def test_gh_post_comment_skips_suffix_when_feature_disabled(db: Database, tmp_pa
 # ---------- gh_open_pr: duplicate closing-PR guard ----------
 
 
-def _timeline_handler(closing_prs: tuple[int, ...], *, timeline_status: int = 200) -> httpx.MockTransport:
-    """MockTransport that returns timeline events linking ``closing_prs`` to issue #42."""
+def _timeline_handler(
+    closing_prs: tuple[int, ...] = (),
+    *,
+    timeline_status: int = 200,
+    recorded_pr_state: str | None = None,
+) -> httpx.MockTransport:
+    """MockTransport for the duplicate-PR guard.
+
+    - ``closing_prs``: timeline events linking these PR numbers to issue #42.
+    - ``recorded_pr_state``: when set, GET ``/pulls/{n}`` returns a PR with
+      this ``state`` (used by the recorded-PR branch of the guard).
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/issues/42/timeline" in str(request.url) and request.method == "GET":
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
             if timeline_status != 200:
                 return httpx.Response(timeline_status, json={"message": "server error"})
             events = [
@@ -3635,8 +3646,22 @@ def _timeline_handler(closing_prs: tuple[int, ...], *, timeline_status: int = 20
                 for pr in closing_prs
             ]
             return httpx.Response(200, json=events)
+        # get_pull_request: GET /repos/{repo}/pulls/{n} — only handle when
+        # the test explicitly expects this call path.
+        if recorded_pr_state is not None and request.method == "GET" and "/pulls/" in url:
+            pr_num = int(url.rsplit("/", 1)[-1])
+            return httpx.Response(
+                200,
+                json={
+                    "number": pr_num,
+                    "html_url": f"https://github.com/octo/widget/pull/{pr_num}",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                    "state": recorded_pr_state,
+                },
+            )
         # PR creation endpoint — return a fake PR if we get this far.
-        if request.method == "POST" and "/pulls" in str(request.url):
+        if request.method == "POST" and "/pulls" in url:
             return httpx.Response(
                 201,
                 json={
@@ -3679,7 +3704,7 @@ def test_gh_open_pr_refuses_when_bot_own_pr_already_recorded(
     """gh_open_pr refuses when the bot has already recorded an open PR for this
     issue — opening a second PR is itself a duplicate. The legitimate amend
     path goes through gh_push_branch (push to the same branch), not gh_open_pr."""
-    transport = _timeline_handler(closing_prs=(77,))
+    transport = _timeline_handler(closing_prs=(), recorded_pr_state="open")
     bindings, loop, t = _bindings(db, tmp_path, transport)
     db.set_issue_classification(bindings.issue_key, "bug")
     db.set_issue_pr(bindings.issue_key, 77)
@@ -3697,6 +3722,66 @@ def test_gh_open_pr_refuses_when_bot_own_pr_already_recorded(
     assert "already has an open PR #77" in msg
     assert "gh_push_branch" in msg
     assert "gh_post_reference_comment" in msg
+
+
+def test_gh_open_pr_allows_when_recorded_pr_is_closed(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed recorded PR is stale — reopened replacement work must not be
+    blocked. The guard verifies the recorded PR's state on GitHub and falls
+    through to the timeline check when it is no longer open."""
+    transport = _timeline_handler(closing_prs=(), recorded_pr_state="closed")
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_open_pr_recorded_pr_guard_fails_open_on_fetch_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient get_pull_request failure for the recorded PR must fail open
+    (fall through to the timeline check), not block a legitimate PR."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.method == "GET" and "/pulls/77" in url:
+            raise httpx.ConnectError("connection refused", request=request)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
 
 
 def test_gh_open_pr_guard_fails_open_on_timeline_error(
