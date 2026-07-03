@@ -2238,6 +2238,154 @@ async def test_review_pr_bypasses_once_guard_on_re_review_directive(
     close_database()
 
 
+async def test_review_pr_rereview_new_delivery_uses_fresh_session(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A new re-review delivery (first attempt) must refresh the workspace
+    so the review sees the current PR head."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-fresh-session",
+        attempts=1,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is True, "new delivery must refresh workspace"
+    close_database()
+
+
+async def test_review_pr_rereview_retry_resumes_session(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A retry of the same delivery (attempts >= 2) must NOT refresh the
+    workspace — it resumes the existing session so in-progress work survives."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-retry-session",
+        attempts=2,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is False, "retry must resume session, not refresh"
+    close_database()
+
+
 async def test_review_pr_rereview_retry_idempotent_after_successful_submit(
     settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
 ) -> None:
@@ -3616,4 +3764,93 @@ async def test_review_pr_bypass_clears_stale_staged_comments(
     assert stub_run_task[0]["task_kind"] == "review_pr"
     # Stale staged comments from the prior failed run must be cleared.
     assert db.list_staged_review_comments(key) == [], "stale staged comments survived bypass re-review"
+    close_database()
+
+
+async def test_review_pr_bypass_preserves_same_delivery_staged_comments(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A retry of the same delivery must NOT clear comments staged during that delivery.
+
+    Only stale comments from earlier deliveries (or head comments with no
+    delivery tag) are cleared; same-delivery comments survive so the retry
+    can resume the in-progress review.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    delivery = "d-retry-same"
+    # Stale comment from an earlier delivery (no delivery_id → head comment).
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=10, body="stale from prior run")
+    # In-progress comment from the current delivery (retry must preserve it).
+    db.stage_review_comment(issue_key=key, path="src/new.ts", line=5, body="in-progress", delivery_id=delivery)
+    assert len(db.list_staged_review_comments(key)) == 2
+
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id=delivery,
+    )
+
+    assert len(stub_run_task) == 1
+    # The stale head comment must be cleared; the same-delivery comment preserved.
+    remaining = db.list_staged_review_comments(key)
+    assert len(remaining) == 1, f"expected 1 same-delivery comment, got {len(remaining)}"
+    assert remaining[0].path == "src/new.ts"
+    assert remaining[0].body == "in-progress"
+    assert remaining[0].delivery_id == delivery
     close_database()

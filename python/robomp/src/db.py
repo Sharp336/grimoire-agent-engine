@@ -79,15 +79,16 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS tool_calls_issue ON tool_calls(issue_key, ts);
 
 CREATE TABLE IF NOT EXISTS pr_review_comments (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  issue_key   TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  line        INTEGER NOT NULL,
-  side        TEXT NOT NULL DEFAULT 'RIGHT',
-  start_line  INTEGER,
-  start_side  TEXT,
-  body        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_key    TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  line         INTEGER NOT NULL,
+  side         TEXT NOT NULL DEFAULT 'RIGHT',
+  start_line   INTEGER,
+  start_side   TEXT,
+  body         TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  delivery_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pr_review_comments_key
   ON pr_review_comments(issue_key);
@@ -168,6 +169,7 @@ class StagedReviewComment:
     created_at: str
     start_line: int | None = None
     start_side: str | None = None
+    delivery_id: str | None = None
 
 
 def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
@@ -254,6 +256,9 @@ class Database:
         if "delivery_id" not in tool_cols:
             self._conn.execute("ALTER TABLE tool_calls ADD COLUMN delivery_id TEXT")
         self._conn.execute("CREATE INDEX IF NOT EXISTS tool_calls_delivery ON tool_calls(delivery_id, tool)")
+        pr_review_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(pr_review_comments)").fetchall()}
+        if "delivery_id" not in pr_review_cols:
+            self._conn.execute("ALTER TABLE pr_review_comments ADD COLUMN delivery_id TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -932,19 +937,20 @@ class Database:
         side: str = "RIGHT",
         start_line: int | None = None,
         start_side: str | None = None,
+        delivery_id: str | None = None,
     ) -> StagedReviewComment:
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO pr_review_comments
-                  (issue_key, path, line, side, start_line, start_side, body, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (issue_key, path, line, side, start_line, start_side, body, _utcnow()),
+                (issue_key, path, line, side, start_line, start_side, body, _utcnow(), delivery_id),
             )
             row = self._conn.execute(
                 """
-                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id
                 FROM pr_review_comments
                 WHERE id=?
                 """,
@@ -961,13 +967,14 @@ class Database:
             created_at=row["created_at"],
             start_line=int(row["start_line"]) if row["start_line"] is not None else None,
             start_side=row["start_side"],
+            delivery_id=row["delivery_id"] if row["delivery_id"] is not None else None,
         )
 
     def list_staged_review_comments(self, issue_key: str) -> list[StagedReviewComment]:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id
                 FROM pr_review_comments
                 WHERE issue_key=?
                 ORDER BY id
@@ -985,13 +992,28 @@ class Database:
                 created_at=row["created_at"],
                 start_line=int(row["start_line"]) if row["start_line"] is not None else None,
                 start_side=row["start_side"],
+                delivery_id=row["delivery_id"] if row["delivery_id"] is not None else None,
             )
             for row in rows
         ]
 
-    def clear_staged_review_comments(self, issue_key: str) -> int:
+    def clear_staged_review_comments(self, issue_key: str, *, exclude_delivery_id: str | None = None) -> int:
+        """Delete staged review comments for ``issue_key``.
+
+        When ``exclude_delivery_id`` is set, comments staged during that
+        delivery are preserved — a retry of the same delivery must not lose
+        its own in-progress comments. Only stale comments from earlier
+        deliveries (or head comments with no delivery association) are
+        cleared.
+        """
         with self._lock:
-            cur = self._conn.execute("DELETE FROM pr_review_comments WHERE issue_key=?", (issue_key,))
+            if exclude_delivery_id is not None:
+                cur = self._conn.execute(
+                    "DELETE FROM pr_review_comments WHERE issue_key=? AND (delivery_id IS NULL OR delivery_id != ?)",
+                    (issue_key, exclude_delivery_id),
+                )
+            else:
+                cur = self._conn.execute("DELETE FROM pr_review_comments WHERE issue_key=?", (issue_key,))
             return int(cur.rowcount or 0)
 
     # ---- submissions (per-user rate limiting) ----

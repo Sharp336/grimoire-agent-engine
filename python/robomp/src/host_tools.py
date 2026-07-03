@@ -1525,6 +1525,7 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             start_line=start_line,
             start_side=start_side,
             body=body.strip(),
+            delivery_id=bindings.delivery_id,
         )
         count = len(bindings.db.list_staged_review_comments(bindings.issue_key))
         _audit(bindings, "pr_review_comment", args, result={"id": staged.id, "staged": count})

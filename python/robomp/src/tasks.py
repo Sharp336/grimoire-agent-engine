@@ -445,13 +445,20 @@ async def review_pr(
         )
 
     if bypass_once_guard:
-        cleared = db.clear_staged_review_comments(key)
+        # Preserve staged comments from the current delivery (a retry must
+        # not lose its own in-progress comments); clear only stale comments
+        # from earlier deliveries or head comments with no delivery tag.
+        cleared = db.clear_staged_review_comments(key, exclude_delivery_id=delivery_id)
         if cleared:
             log.info(
                 "cleared stale staged review comments for re-review",
                 extra={"repo": repo.full_name, "pr": pr_number, "cleared": cleared},
             )
     db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
+    # A new re-review delivery (first attempt) refreshes the workspace so the
+    # review sees the current PR head. A retry of the same delivery resumes the
+    # existing session instead of discarding in-progress work.
+    refresh = bypass_once_guard and attempts < 2
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
@@ -463,7 +470,7 @@ async def review_pr(
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
         slot_uid=slot_uid,
-        refresh=bypass_once_guard,
+        refresh=refresh,
     )
     db.upsert_issue(
         key=key,

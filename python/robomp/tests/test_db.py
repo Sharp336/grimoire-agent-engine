@@ -343,6 +343,34 @@ def test_pr_review_comment_staging_round_trip(db: Database) -> None:
     assert len(db.list_staged_review_comments("octo/widget#10")) == 1
 
 
+def test_clear_staged_review_comments_preserves_same_delivery(db: Database) -> None:
+    """clear_staged_review_comments(exclude_delivery_id=...) preserves comments
+    from the named delivery while clearing stale earlier/head comments."""
+    # Stale comment with no delivery_id (head comment from a prior run).
+    db.stage_review_comment(issue_key="octo/widget#9", path="src/old.py", line=1, body="stale head")
+    # Stale comment from an earlier delivery.
+    db.stage_review_comment(
+        issue_key="octo/widget#9", path="src/old2.py", line=2, body="stale prior", delivery_id="d-old"
+    )
+    # In-progress comment from the current delivery.
+    current = db.stage_review_comment(
+        issue_key="octo/widget#9", path="src/new.py", line=3, body="in-progress", delivery_id="d-current"
+    )
+    assert len(db.list_staged_review_comments("octo/widget#9")) == 3
+
+    cleared = db.clear_staged_review_comments("octo/widget#9", exclude_delivery_id="d-current")
+    assert cleared == 2, "should clear stale head + prior delivery comments"
+
+    remaining = db.list_staged_review_comments("octo/widget#9")
+    assert len(remaining) == 1
+    assert remaining[0].id == current.id
+    assert remaining[0].delivery_id == "d-current"
+
+    # Without exclude_delivery_id, all are cleared (backward-compatible).
+    assert db.clear_staged_review_comments("octo/widget#9") == 1
+    assert db.list_staged_review_comments("octo/widget#9") == []
+
+
 def test_processed_issue_keys_returns_only_known(db: Database) -> None:
     db.upsert_issue(key=issue_key("octo/widget", 1), repo="octo/widget", number=1, state="new")
     db.upsert_issue(key=issue_key("octo/widget", 2), repo="octo/widget", number=2, state="reproducing")
