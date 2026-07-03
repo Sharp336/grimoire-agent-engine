@@ -226,3 +226,48 @@ def test_system_append_pr_review_renders_configured_bot_login() -> None:
     )
     assert "You are **@Svitter**" in out
     assert "**robomp**" not in out
+
+
+def test_completion_reminder_tells_agent_to_discard_duplicate_work_before_reference_comment() -> None:
+    """PRRT_kwDOQxs0bc6OFzih: the reference-comment path must instruct the agent
+    to reset/discard drafted duplicate work before calling gh_post_reference_comment."""
+    out = persona.completion_reminder(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+    )
+    assert "gh_post_reference_comment" in out
+    # The agent must clean up drafted duplicate work so the worktree reflects
+    # the existing fix, not leave stale duplicate edits behind.
+    assert "discard" in out.lower()
+    assert "uncommitted" in out.lower()
+
+
+def test_followup_comment_handles_new_repro_before_existing_fix_fallback() -> None:
+    """PRRT_kwDOQxs0bc6OFzii: new repro info must be handled before the existing-fix
+    fallback; an open PR must not suppress a reporter's new reproduction details."""
+    thread = (
+        ThreadMessage(kind="issue_body", author="alice", body="orig report", created_at=""),
+        ThreadMessage(
+            kind="comment", author="bob", body="opened PR #42 to fix this", created_at="2026-05-01T10:00:00Z"
+        ),
+    )
+    out = persona.followup_comment(
+        repo=_Repo(),
+        issue=_Issue(),
+        comment=_Comment(body="happens on python 3.11 too, traceback: ValueError at line 42"),
+        workspace=_Workspace(),
+        pr_status="PR #42 is open",
+        pr_number=42,
+        thread=thread,
+    )
+    # New repro info must appear BEFORE the existing-fix fallback in the decision list.
+    repro_pos = out.lower().find("new repro info")
+    existing_fix_pos = out.lower().find("existing fix already present")
+    assert repro_pos != -1, "followup prompt must mention new repro info"
+    assert existing_fix_pos != -1, "followup prompt must mention existing-fix fallback"
+    assert repro_pos < existing_fix_pos, "new repro info must come before existing-fix fallback"
+    # The existing-fix branch must be gated on absence of new repro info.
+    assert "only when there is no new repro info" in out.lower()
+    # The prompt must not let an open PR suppress new reproduction details.
+    assert "even if the thread already references an open PR" in out
