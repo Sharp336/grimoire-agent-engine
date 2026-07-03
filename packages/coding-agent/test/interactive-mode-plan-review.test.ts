@@ -704,6 +704,7 @@ describe("InteractiveMode plan review rendering", () => {
 			await Promise.resolve();
 			streaming = false;
 		});
+		const clearQueueSpy = vi.spyOn(session, "clearQueue").mockReturnValue({ steering: [], followUp: [] });
 		let promptCallCount = 0;
 		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async _text => {
 			promptCallCount++;
@@ -731,9 +732,74 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(isPlanApprovedCall(promptSpy.mock.calls[0] as unknown[])).toBe(true);
 		expect(isPlanApprovedCall(promptSpy.mock.calls[1] as unknown[])).toBe(true);
 		// abort was called twice: first by handlePlanApproval's pre-overlay
-		// abort (line 3090), then by the catch block's fire-and-forget race
-		// recovery (line 2695).
+		// abort, then by the catch block's fire-and-forget race recovery.
 		expect(abortSpy).toHaveBeenCalledTimes(2);
+		// clearQueue was called once: by the catch block, after the abort, to
+		// suppress stranded compaction-flush queued-message drains that would
+		// race the retry prompt.
+		expect(clearQueueSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears stranded queued messages before retrying the approved-plan prompt after abort", async () => {
+		// Regression for PRRT_kwDOQxs0bc6OKssj: abort()'s #drainStrandedQueuedMessages
+		// may schedule a queued-message drain that auto-resumes a turn with the
+		// stranded compaction-flush messages (steers/follow-ups delivered by
+		// flushCompactionQueue's #deliverQueuedMessage loop). Without clearing the
+		// queue, the drain races the retry prompt and surfaces another
+		// AgentBusyError. clearQueue() must run after the abort and before the
+		// retry to neutralize the drain.
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+
+		let streaming = false;
+		Object.defineProperty(session, "isStreaming", {
+			configurable: true,
+			get: () => streaming,
+		});
+		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
+			await Promise.resolve();
+			streaming = false;
+		});
+		const clearQueueSpy = vi.spyOn(session, "clearQueue").mockReturnValue({ steering: [], followUp: [] });
+		const callOrder: string[] = [];
+		abortSpy.mockImplementation(async () => {
+			callOrder.push("abort");
+			streaming = false;
+		});
+		clearQueueSpy.mockImplementation(() => {
+			callOrder.push("clearQueue");
+			return { steering: [], followUp: [] };
+		});
+		let promptCallCount = 0;
+		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async _text => {
+			promptCallCount++;
+			callOrder.push(`prompt-${promptCallCount}`);
+			if (promptCallCount === 1) {
+				streaming = true;
+				throw new AgentBusyError();
+			}
+			return true;
+		});
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, options) => {
+			return options[2];
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(promptSpy).toHaveBeenCalledTimes(2);
+		// clearQueue must run AFTER abort (the abort triggers the drain) and
+		// BEFORE the retry prompt (to neutralize the drain before it fires).
+		const abortIdx = callOrder.indexOf("abort");
+		const clearIdx = callOrder.indexOf("clearQueue");
+		const retryIdx = callOrder.indexOf("prompt-2");
+		expect(abortIdx).toBeLessThan(clearIdx);
+		expect(clearIdx).toBeLessThan(retryIdx);
 	});
 
 	it("keeps the existing approve-and-execute path clearing the session", async () => {

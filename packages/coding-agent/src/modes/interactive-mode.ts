@@ -2693,6 +2693,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			if (!(error instanceof AgentBusyError)) throw error;
 			await this.#abortPlanApprovalTurnSilently();
+			// The abort's #drainStrandedQueuedMessages may schedule a queued-message
+			// drain that auto-resumes a turn with the stranded compaction-flush messages
+			// (steers/follow-ups delivered by flushCompactionQueue's #deliverQueuedMessage
+			// loop), racing the retry below with another AgentBusyError. Clear the queue
+			// so the drain's hasQueuedMessages() gate is false; the approved plan takes
+			// priority over messages typed during compaction. The fire-and-forget flush
+			// prompt's own .catch(restoreQueue) will still re-queue the original messages
+			// into compactionQueuedMessages for the user to re-send later.
+			this.session.clearQueue();
 			await this.session.prompt(planModePrompt, { synthetic: true });
 		}
 	}

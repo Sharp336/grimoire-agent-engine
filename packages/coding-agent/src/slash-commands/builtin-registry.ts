@@ -1427,6 +1427,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handle: async (command, runtime) => {
 			const mode = parseShakeMode(command.args);
 			if (typeof mode !== "string") return usage(mode.error, runtime);
+			// Guard mirrors handleShakeCommand's TUI check: shake() rewrites persisted
+			// entries and calls agent.replaceMessages(), which races the active loop's
+			// in-flight message appends. The ACP/RPC text-command path has no Esc to
+			// offer, so surface the busy state as a usage message instead.
+			if (runtime.session.isStreaming)
+				return usage("Shake is not available while a turn is streaming. Stop the current turn first.", runtime);
 			const result = await runtime.session.shake(mode);
 			await runtime.output(formatShakeSummary(result));
 			return commandConsumed();

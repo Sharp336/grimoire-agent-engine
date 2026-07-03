@@ -48,6 +48,7 @@ interface FakeAcpBuiltinSession {
 	refreshSshTool(options?: { activateIfAvailable?: boolean }): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
+	shake(mode: string): Promise<unknown>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	setModel(model: unknown): Promise<void>;
@@ -149,6 +150,9 @@ function createRuntime() {
 		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
+		async shake(_mode: string) {
+			return { mode: _mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		},
 		getContextUsage: () => undefined,
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		async setModel(_model: unknown) {},
@@ -1134,5 +1138,62 @@ describe("wave 5 — adapters and polish", () => {
 		} finally {
 			discoverSpy.mockRestore();
 		}
+	});
+});
+
+describe("/shake ACP streaming guard", () => {
+	it("refuses to shake via ACP while a turn is streaming and does not call session.shake", async () => {
+		// Regression for PRRT_kwDOQxs0bc6OKsso: the TUI handleShakeCommand guard
+		// was missing from the ACP/RPC text-command path. shake() rewrites
+		// persisted entries and calls agent.replaceMessages(), which races the
+		// active loop's in-flight message appends.
+		const { output, runtime, session } = createRuntime();
+		session.isStreaming = true;
+		const shakeSpy = spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/shake", runtime);
+
+		expect(shakeSpy).not.toHaveBeenCalled();
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("not available while a turn is streaming");
+	});
+
+	it("shakes normally via ACP when the session is idle", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.isStreaming = false;
+		const shakeSpy = spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 2,
+			blocksDropped: 1,
+			tokensFreed: 500,
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/shake elide", runtime);
+
+		expect(shakeSpy).toHaveBeenCalledWith("elide");
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Shook");
+	});
+
+	it("refuses to shake via ACP with /shake images while streaming", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.isStreaming = true;
+		const shakeSpy = spyOn(session, "shake").mockResolvedValue({
+			mode: "images",
+			toolResultsDropped: 0,
+			blocksDropped: 0,
+			tokensFreed: 0,
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/shake images", runtime);
+
+		expect(shakeSpy).not.toHaveBeenCalled();
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("not available while a turn is streaming");
 	});
 });
