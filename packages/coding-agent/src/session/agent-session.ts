@@ -5939,19 +5939,32 @@ export class AgentSession {
 	 * path in `createAgentSession`).
 	 */
 	async #syncDiscoveryModeAfterModelChange(): Promise<void> {
+		// Capture explicitly requested MCP tools before the upgrade flips
+		// #mcpDiscoveryEnabled. Explicit --tools/subagent selections are not
+		// persisted when discovery is off at construction time; after the flip
+		// they would be absent from #selectedMCPToolNames and hidden behind
+		// search. The startup and deferred-discovery paths both preserve
+		// explicit selections, so this upgrade path must too.
+		const explicitMCPNames = [...(this.#requestedToolNames ?? [])].filter(
+			name => isMCPToolName(name) && this.#toolRegistry.has(name),
+		);
 		if (!this.#enableMCPDiscoveryIfContextBudgetRequiresIt()) return;
 		// Re-apply the active tool set: non-MCP tools + search_tool_bm25 (if
-		// registered) + default-selected MCP tools. This removes MCP tools that
-		// were force-activated when discovery was off, replacing them with the
-		// discovery-aware selection.
+		// registered) + persisted/default-selected MCP tools. This removes MCP
+		// tools that were force-activated when discovery was off, replacing them
+		// with the discovery-aware selection.
 		const sessionContext = this.buildDisplaySessionContext();
 		const upgradedMcpNames = sessionContext.hasPersistedMCPToolSelection
 			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
 			: this.#filterSelectableMCPToolNames(this.#getConfiguredDefaultSelectedMCPToolNames());
+		// Union persisted/default selections with explicitly requested MCP
+		// tools so explicit selections survive the discovery upgrade instead
+		// of being dropped and hidden behind search.
+		const mcpNames = [...new Set([...upgradedMcpNames, ...this.#filterSelectableMCPToolNames(explicitMCPNames)])];
 		const nextActive = [
 			...this.#getActiveNonMCPToolNames(),
 			...(this.#toolRegistry.has("search_tool_bm25") ? ["search_tool_bm25"] : []),
-			...upgradedMcpNames,
+			...mcpNames,
 		];
 		await this.#applyActiveToolsByName(nextActive);
 	}
@@ -5960,16 +5973,19 @@ export class AgentSession {
 		if (this.#mcpDiscoveryEnabled) return false;
 		const mode = this.#resolveEffectiveDiscoveryMode();
 		if (mode === "off") return false;
-		// Discovery upgraded: enable it and register the search tool so MCP
-		// schemas can be hidden behind BM25 discovery.
-		this.#mcpDiscoveryEnabled = true;
-		if (!this.#toolRegistry.has("search_tool_bm25") && this.#registerSearchTool) {
+		// Register the search tool BEFORE flipping discovery on. Without
+		// search_tool_bm25 there is no way to rediscover hidden MCP tools, so
+		// a session constructed without a registerSearchTool callback (or one
+		// whose registration fails) must keep discovery off and leave MCP
+		// schemas visible.
+		if (!this.#toolRegistry.has("search_tool_bm25")) {
+			if (!this.#registerSearchTool) return false;
 			const searchTool = this.#registerSearchTool();
-			if (searchTool) {
-				this.#toolRegistry.set(searchTool.name, searchTool);
-				this.#builtInToolNames.add(searchTool.name);
-			}
+			if (!searchTool) return false;
+			this.#toolRegistry.set(searchTool.name, searchTool);
+			this.#builtInToolNames.add(searchTool.name);
 		}
+		this.#mcpDiscoveryEnabled = true;
 		return true;
 	}
 
@@ -6565,6 +6581,16 @@ export class AgentSession {
 					...this.#selectedMCPToolNames,
 					...this.#filterSelectableMCPToolNames(ctx.selectedMCPToolNames),
 				]);
+			}
+		} else if (this.#mcpDiscoveryEnabled && this.#selectedMCPToolNames.size === 0) {
+			// Discovery was enabled externally (e.g. deferred startup called
+			// enableMCPDiscovery() before refreshMCPTools). #selectedMCPToolNames
+			// was never seeded from the persisted selection — restore it now that
+			// the real MCP tools are in the registry, or a resumed session with a
+			// persisted MCP selection would hide that selected tool.
+			const ctx = this.buildDisplaySessionContext();
+			if (ctx.hasPersistedMCPToolSelection) {
+				this.#selectedMCPToolNames = new Set(this.#filterSelectableMCPToolNames(ctx.selectedMCPToolNames));
 			}
 		}
 		if (options?.activateAll && !this.#mcpDiscoveryEnabled) {
