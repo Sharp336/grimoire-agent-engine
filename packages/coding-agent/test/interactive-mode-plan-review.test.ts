@@ -1294,6 +1294,69 @@ describe("InteractiveMode plan review rendering", () => {
 		// protection covers the approved `local://my-task-plan.md` during elision.
 		expect(planRefSetWhenShakeRan).toBe(true);
 	});
+	it("Approve and shake context: aborts an in-flight turn before shake so it is not silently swallowed", async () => {
+		// Regression for PR #4369: a queued steer/followUp/IRC aside can start a
+		// fresh streaming turn while the approval overlay was open. Without
+		// aborting it first, handleShakeCommand refuses (streaming guard) and
+		// swallows the refusal, so dispatch proceeds unshaken. The fix calls
+		// #abortPlanApprovalTurnSilently before handleShakeCommand.
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+
+		let streaming = false;
+		Object.defineProperty(session, "isStreaming", {
+			configurable: true,
+			get: () => streaming,
+		});
+		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
+			await Promise.resolve();
+			streaming = false;
+		});
+		// Simulate a re-stream landing during the overlay, then pick shake.
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async () => {
+			streaming = true;
+			return "Approve and shake context";
+		});
+		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue();
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "PLAN",
+		});
+
+		// The contract: abort runs BEFORE shake so the streaming guard inside
+		// handleShakeCommand does not refuse and swallow the call.
+		expect(abortSpy).toHaveBeenCalledTimes(2);
+		expect(shakeSpy).toHaveBeenCalledWith("elide");
+		// The first abort is handlePlanApproval's own pre-approval abort (line
+		// 3090, before showPlanReview); the second is the shake-branch abort
+		// added by PR #4369. The contract: the shake-branch abort (the LAST
+		// abort call) runs BEFORE shake so the streaming guard inside
+		// handleShakeCommand does not refuse and swallow the call.
+		const abortOrder = abortSpy.mock.invocationCallOrder[1];
+		const shakeOrder = shakeSpy.mock.invocationCallOrder[0];
+		expect(abortOrder).toBeDefined();
+		expect(shakeOrder).toBeDefined();
+		if (abortOrder === undefined || shakeOrder === undefined) throw new Error("Expected abort and shake calls");
+		expect(abortOrder).toBeLessThan(shakeOrder);
+		const planApprovedIdx = promptSpy.mock.calls.findIndex(isPlanApprovedCall);
+		expect(planApprovedIdx).toBeGreaterThanOrEqual(0);
+		const promptOrder = promptSpy.mock.invocationCallOrder[planApprovedIdx];
+		expect(promptOrder).toBeDefined();
+		if (promptOrder === undefined) throw new Error("Expected plan-approved prompt call");
+		expect(shakeOrder).toBeLessThan(promptOrder);
+		// Flag is cleared by the finally.
+		expect(session.isPlanInternalAbortPending).toBe(false);
+	});
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {
 		// Mock `handleCompactCommand` to surface the "cancelled" outcome directly.
 		// (Testing the consumer — `#approvePlan`'s outcome handling — at the

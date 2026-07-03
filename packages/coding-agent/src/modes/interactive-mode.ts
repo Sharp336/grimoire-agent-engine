@@ -2616,6 +2616,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				// covers the approved `local://...` path during the elision pass.
 				// Reassignment after the try/finally is idempotent.
 				this.session.setPlanReferencePath(options.planFilePath);
+				// A queued steer/followUp/IRC aside can start a fresh streaming turn
+				// while the approval overlay was open; abort it so the shake actually
+				// runs. Otherwise handleShakeCommand swallows the refusal and dispatch
+				// proceeds unshaken (PR #4369).
+				await this.#abortPlanApprovalTurnSilently();
 				await this.handleShakeCommand("elide");
 			}
 		} finally {
