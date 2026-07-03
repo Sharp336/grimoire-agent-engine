@@ -1,7 +1,5 @@
-import { bareModelId, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { getDialectDefinition } from "./factory";
-
-const CLAUDE_FABLE_ID = /(?:^|[./])claude[-.]fable(?:[-.]|$)/i;
 
 /**
  * Wrap a prior-turn reasoning string for demotion into native conversation
@@ -10,12 +8,13 @@ const CLAUDE_FABLE_ID = /(?:^|[./])claude[-.]fable(?:[-.]|$)/i;
  * replayed unsigned `thought` part is schema-accepted but silently discarded —
  * neither recalled nor influencing generation).
  *
- * Fable is the exception: Anthropic's `reasoning_extraction` classifier blocks
+ * The Anthropic dialect (all Claude models: Opus, Sonnet, Haiku, Fable, Mythos,
+ * etc.) is an exception: Anthropic's `reasoning_extraction` classifier blocks
  * requests that replay prior reasoning inside `<thinking>` / `antml:thinking`
  * tags OR the older `_Hmm. …_` italic envelope — it reads the wrapped
  * chain-of-thought as an attempt to duplicate model outputs and refuses the
- * whole turn. Fable therefore receives prior reasoning as bare assistant prose:
- * no tag, no `_Hmm.` wrapper, no trailing newline.
+ * whole turn. Claude models therefore always receive prior reasoning as bare
+ * assistant prose: no tag, no `_Hmm.` wrapper, no trailing newline.
  * Heat is cumulative (block count and early-conversation position also raise
  * it), so this lowers per-block signal but does not license unbounded replay.
  * Harmony and Gemma are also exceptions: their `renderThinking` emits
@@ -33,9 +32,8 @@ const CLAUDE_FABLE_ID = /(?:^|[./])claude[-.]fable(?:[-.]|$)/i;
 export function renderDemotedThinking(modelId: string, text: string): string {
 	if (!text) return "";
 	text = text.toWellFormed();
-	const canonicalId = bareModelId(modelId);
 	const dialect = preferredDialect(modelId);
-	if (CLAUDE_FABLE_ID.test(canonicalId)) return text;
+	if (dialect === "anthropic") return text;
 	if (dialect === "harmony" || dialect === "gemma") return `<think>\n${text}\n</think>`;
 	return getDialectDefinition(dialect).renderThinking(text);
 }
