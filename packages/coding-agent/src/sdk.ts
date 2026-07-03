@@ -2262,7 +2262,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			// Owned/in-band tool dialects (non-native) require the catalog as `# Tool:`
 			// sections; native tool calling lets the compact name list suffice.
-			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
+			const activePromptModel = agent?.state.model ?? model;
+			const nativeTools = resolveDialect(settings.get("tools.format"), activePromptModel) === undefined;
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt
 					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
@@ -2279,6 +2280,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: settings.getGroup("skills"),
+				skillDescriptionRedactionMode: settings.get("skills.redaction.mode"),
+				skillDescriptionRedactionMaxContextShare: settings.get("skills.redaction.maxContextShare"),
 				inlineToolDescriptors,
 				nativeTools,
 				intentField,
@@ -2292,6 +2295,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				includeWorkspaceTree,
 				memoryRootEnabled: memoryBackend.id === "local",
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
+				contextWindow: activePromptModel?.contextWindow,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
@@ -2306,6 +2310,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: options.systemPrompt;
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				promptSkills: defaultPrompt.promptSkills,
 			};
 		};
 
@@ -2439,7 +2444,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasRegistered = true;
 
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, promptSkills: initialPromptSkills } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -2717,6 +2722,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionRunner,
 			customCommands: customCommandsResult.commands,
 			skills,
+			initialPromptSkills,
 			skillWarnings,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,

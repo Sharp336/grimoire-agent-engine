@@ -22,6 +22,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import { redactSkillDescriptions, type SkillDescriptionRedactionMode } from "./system-prompt-redaction";
 import { shortenPath } from "./tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
@@ -480,6 +481,12 @@ export interface BuildSystemPromptOptions {
 	memoryRootEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced to the agent. */
 	model?: string;
+	/** Skill-description redaction mode for the rendered `<skills>` block. Default: "off" */
+	skillDescriptionRedactionMode?: SkillDescriptionRedactionMode;
+	/** Maximum context-window share used as the skill-description redaction budget. Default: 0.05 */
+	skillDescriptionRedactionMaxContextShare?: number;
+	/** Active model context window in tokens, when known. */
+	contextWindow?: number | null;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
 	/** Whether to include the workspace directory tree in the system prompt. Default: false */
@@ -494,12 +501,18 @@ export interface BuildSystemPromptOptions {
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/**
+	 * Skills rendered into the system prompt after redaction (cap/trim mode).
+	 * Context accounting reads these so `/context` reflects the same skill list
+	 * the provider receives, not the unredacted `session.skills`.
+	 */
+	promptSkills?: Skill[];
 }
 
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return { systemPrompt: [], promptSkills: [] };
 	}
 
 	const {
@@ -527,6 +540,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
 		model,
+		skillDescriptionRedactionMode = "off",
+		skillDescriptionRedactionMaxContextShare = 0.05,
+		contextWindow,
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
@@ -718,6 +734,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
 	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const promptSkills = redactSkillDescriptions(filteredSkills, {
+		mode: skillDescriptionRedactionMode,
+		maxContextShare: skillDescriptionRedactionMaxContextShare,
+		contextWindow,
+		renderFormat: resolvedCustomPrompt ? "custom" : "default",
+	});
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -747,7 +769,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
-		skills: filteredSkills,
+		skills: promptSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,
@@ -783,5 +805,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	return { systemPrompt };
+	return { systemPrompt, promptSkills };
 }
