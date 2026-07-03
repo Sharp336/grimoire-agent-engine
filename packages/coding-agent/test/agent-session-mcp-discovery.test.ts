@@ -15,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { estimateMcpToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/tool-discovery/mode";
 import type { OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
@@ -1741,5 +1742,254 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getActiveToolNames()).toContain("mcp__server__selected");
 		expect(session.getActiveToolNames()).not.toContain("mcp__server__other");
 		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+	});
+
+	// ── PRRT_kwDOQxs0bc6OMvim: suppress persistence of default MCP selections ──
+	it("does not persist re-derivable default MCP selections on model-switch auto-upgrade", async () => {
+		// PRRT_kwDOQxs0bc6OMvim: when a session has mcp.discoveryDefaultServers
+		// but no persisted MCP selection, a context-share upgrade after a model
+		// switch must NOT write an mcp_tool_selection entry containing
+		// re-derivable defaults. Only truly-explicit selections (from
+		// --tools) should persist.
+		const largeModel = buildModel({
+			id: "large-ctx",
+			name: "large-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 2048,
+		});
+		const smallModel = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		const verboseTool = createMcpTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]);
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[verboseTool.name, verboseTool],
+			[searchTool.name, searchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model: largeModel,
+				systemPrompt: ["initial"],
+				tools: [readTool, verboseTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {
+				hasConfiguredAuth: () => true,
+				refreshSelectedModelMetadata: async (m: Model) => m,
+				getApiKey: async () => "key",
+				getAvailable: () => [largeModel, smallModel],
+				find: (provider: string, id: string) =>
+					[largeModel, smallModel].find(m => m.provider === provider && m.id === id),
+			} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			defaultSelectedMCPServerNames: ["server"],
+			defaultSelectedMCPToolNames: ["mcp__server__verbose"],
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Pre-switch: no persisted selection, discovery off.
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+
+		// Switch to small-context model: discovery upgrades from defaults.
+		await session.setModel(smallModel);
+
+		// Post-switch: discovery is on, the default tool is active (re-derived
+		// from the setting), but NO mcp_tool_selection entry was persisted.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+	});
+
+	it("does not persist re-derivable default MCP selections on refreshMCPTools upgrade", async () => {
+		// PRRT_kwDOQxs0bc6OMvim (refresh path): same as model-switch but through
+		// refreshMCPTools. When discovery upgrades during a refresh and no
+		// persisted selection existed, defaults must not be frozen.
+		const model = buildModel({
+			id: "small-ctx",
+			name: "small-ctx",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 5_000,
+			maxTokens: 2048,
+		});
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = createBasicTool("search_tool_bm25", "Search BM25");
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[searchTool.name, searchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: false,
+			defaultSelectedMCPServerNames: ["server"],
+			defaultSelectedMCPToolNames: [],
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+			registerSearchTool: () => searchTool,
+		});
+		sessions.push(session);
+
+		// Pre-refresh: no persisted selection.
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+
+		// Refresh with a large-description MCP tool that triggers the upgrade.
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp__server__verbose", "server", "verbose", "V".repeat(4000), ["query"]),
+		]);
+
+		// Post-refresh: discovery on, default tool active, but no persisted entry.
+		expect(session.isMCPDiscoveryEnabled()).toBe(true);
+		expect(session.getActiveToolNames()).toContain("search_tool_bm25");
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+	});
+
+	// ── PRRT_kwDOQxs0bc6OMvis: keep explicit MCP tools across fresh sessions ──
+	it("preserves explicit MCP tools across /new when discovery is enabled", async () => {
+		// PRRT_kwDOQxs0bc6OMvis: when discovery is enabled and a session was
+		// started with an explicit MCP tool in options.toolNames, /new must
+		// preserve that tool in the next session. The non-persisted default
+		// list (#defaultSelectedMCPToolNames) only contains registry defaults;
+		// the explicit subset from #requestedToolNames must also seed the new
+		// session.
+		const readTool = createBasicTool("read", "Read");
+		const explicitTool = createMcpTool("mcp__explicit_tool", "explicit", "tool", "Explicit tool", ["query"]);
+		const defaultTool = createMcpTool("mcp__default_tool", "default", "tool", "Default tool", ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[explicitTool.name, explicitTool],
+			[defaultTool.name, defaultTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			defaultSelectedMCPServerNames: ["default"],
+			requestedToolNames: new Set(["read", "mcp__explicit_tool"]),
+			initialSelectedMCPToolNames: ["mcp__explicit_tool", "mcp__default_tool"],
+			defaultSelectedMCPToolNames: ["mcp__default_tool"],
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+		});
+		sessions.push(session);
+
+		// Both explicit and default tools are active at startup.
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__explicit_tool", "mcp__default_tool"]);
+
+		// Start a fresh session: explicit tool must survive.
+		await session.newSession();
+
+		expect(session.getSelectedMCPToolNames()).toContain("mcp__explicit_tool");
+		expect(session.getSelectedMCPToolNames()).toContain("mcp__default_tool");
+		expect(session.getActiveToolNames()).toContain("mcp__explicit_tool");
+		expect(session.getActiveToolNames()).toContain("mcp__default_tool");
+	});
+});
+
+// ── PRRT_kwDOQxs0bc6OMvip: token accounting for MCP schema estimates ──────
+describe("estimateMcpToolSchemaTokens", () => {
+	it("uses byte-based token counting, not UTF-16 char length / 4", () => {
+		// PRRT_kwDOQxs0bc6OMvip: the estimator must use the same token
+		// accounting as the context-usage path (countTokens, which divides
+		// UTF-8 byte length by 4), not the old estimateTokens helper (which
+		// divided UTF-16 char length by 4). For CJK text, UTF-8 uses 3 bytes
+		// per character vs 1 UTF-16 code unit, so the old heuristic
+		// undercounted by roughly 3x.
+		const cjkDescription = "データベースを検索するツール".repeat(50);
+		const tool = {
+			name: "mcp__server__search",
+			description: cjkDescription,
+			parameters: { type: "object", properties: {} },
+		};
+		const tokens = estimateMcpToolSchemaTokens([tool]);
+		// countTokens uses (Buffer.byteLength(text, "utf-8") + 3) >> 2.
+		// The old estimateTokens used Math.ceil(text.length / 4).
+		// For CJK: byteLength ≈ 3 × charLength, so the new estimate should
+		// be roughly 3x the old one. Verify it's at least 2x the old
+		// heuristic to confirm byte-based counting is in use.
+		const oldHeuristic = Math.ceil(`${tool.name}${cjkDescription}{"type":"object","properties":{}}`.length / 4);
+		expect(tokens).toBeGreaterThan(oldHeuristic * 2);
+	});
+
+	it("counts name, description, and parameters in the schema cost", () => {
+		// Verify the estimator covers all three parts of the tool definition
+		// by isolating each contribution: name < name+description < name+description+parameters.
+		const nameOnlyTool = {
+			name: "mcp__server__tool",
+			description: "",
+			parameters: {},
+		};
+		const describedTool = {
+			...nameOnlyTool,
+			description: "A".repeat(100),
+		};
+		const parameterizedTool = {
+			...describedTool,
+			parameters: { type: "object", properties: { query: { type: "string" }, filter: { type: "string" } } },
+		};
+		const nameTokens = estimateMcpToolSchemaTokens([nameOnlyTool]);
+		const descTokens = estimateMcpToolSchemaTokens([describedTool]);
+		const paramTokens = estimateMcpToolSchemaTokens([parameterizedTool]);
+		expect(nameTokens).toBeGreaterThan(0);
+		expect(descTokens).toBeGreaterThan(nameTokens);
+		expect(paramTokens).toBeGreaterThan(descTokens);
 	});
 });

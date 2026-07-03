@@ -1,4 +1,4 @@
-import { estimateTokens } from "../commit/map-reduce/utils";
+import { countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
 import type { SettingValue } from "../config/settings-schema";
 
@@ -31,7 +31,7 @@ export function estimateMcpToolSchemaTokens(
 		} catch {
 			parametersJson = "{}";
 		}
-		total += estimateTokens(`${name}${description}${parametersJson}`);
+		total += countTokens(`${name}${description}${parametersJson}`);
 	}
 	return total;
 }
