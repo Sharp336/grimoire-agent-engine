@@ -5939,19 +5939,7 @@ export class AgentSession {
 	 * path in `createAgentSession`).
 	 */
 	async #syncDiscoveryModeAfterModelChange(): Promise<void> {
-		if (this.#mcpDiscoveryEnabled) return; // already active — mode is lazy-recomputed
-		const mode = this.#resolveEffectiveDiscoveryMode();
-		if (mode === "off") return;
-		// Discovery upgraded: enable it and register the search tool so MCP
-		// schemas can be hidden behind BM25 discovery.
-		this.#mcpDiscoveryEnabled = true;
-		if (!this.#toolRegistry.has("search_tool_bm25") && this.#registerSearchTool) {
-			const searchTool = this.#registerSearchTool();
-			if (searchTool) {
-				this.#toolRegistry.set(searchTool.name, searchTool);
-				this.#builtInToolNames.add(searchTool.name);
-			}
-		}
+		if (!this.#enableMCPDiscoveryIfContextBudgetRequiresIt()) return;
 		// Re-apply the active tool set: non-MCP tools + search_tool_bm25 (if
 		// registered) + default-selected MCP tools. This removes MCP tools that
 		// were force-activated when discovery was off, replacing them with the
@@ -5962,6 +5950,23 @@ export class AgentSession {
 			...this.#filterSelectableMCPToolNames(this.#getConfiguredDefaultSelectedMCPToolNames()),
 		];
 		await this.#applyActiveToolsByName(nextActive);
+	}
+
+	#enableMCPDiscoveryIfContextBudgetRequiresIt(): boolean {
+		if (this.#mcpDiscoveryEnabled) return false;
+		const mode = this.#resolveEffectiveDiscoveryMode();
+		if (mode === "off") return false;
+		// Discovery upgraded: enable it and register the search tool so MCP
+		// schemas can be hidden behind BM25 discovery.
+		this.#mcpDiscoveryEnabled = true;
+		if (!this.#toolRegistry.has("search_tool_bm25") && this.#registerSearchTool) {
+			const searchTool = this.#registerSearchTool();
+			if (searchTool) {
+				this.#toolRegistry.set(searchTool.name, searchTool);
+				this.#builtInToolNames.add(searchTool.name);
+			}
+		}
+		return true;
 	}
 
 	isMCPDiscoveryEnabled(): boolean {
@@ -6540,7 +6545,8 @@ export class AgentSession {
 			this.#getConfiguredDefaultSelectedMCPToolNames(),
 		);
 
-		if (options?.activateAll) {
+		const discoveryUpgraded = this.#enableMCPDiscoveryIfContextBudgetRequiresIt();
+		if (options?.activateAll && !discoveryUpgraded) {
 			// Force-activate every newly registered MCP tool. This path is used
 			// when an ACP client provisions MCP servers for a session where MCP
 			// discovery is disabled — without it, getSelectedMCPToolNames()
@@ -6552,7 +6558,11 @@ export class AgentSession {
 			return;
 		}
 
-		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
+		const nextActive = [
+			...this.#getActiveNonMCPToolNames(),
+			...(discoveryUpgraded && this.#toolRegistry.has("search_tool_bm25") ? ["search_tool_bm25"] : []),
+			...this.getSelectedMCPToolNames(),
+		];
 		await this.#applyActiveToolsByName(nextActive, { previousSelectedMCPToolNames });
 	}
 
