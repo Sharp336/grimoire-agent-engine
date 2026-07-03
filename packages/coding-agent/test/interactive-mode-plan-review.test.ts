@@ -1261,6 +1261,39 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(promptText).toContain("Context preserved.");
 	});
 
+	it("Approve and shake context: setPlanReferencePath is pinned BEFORE shake runs", async () => {
+		// Regression for PR #4369 second-pass review: approve-and-shake must set
+		// the plan reference path before calling shake so plan-read protection
+		// covers the approved `local://...` path during the elision pass.
+		const planFilePath = "local://my-task-plan.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		const setPlanRefSpy = vi.spyOn(session, "setPlanReferencePath");
+		let planRefSetWhenShakeRan = false;
+		vi.spyOn(mode, "handleShakeCommand").mockImplementation(async () => {
+			planRefSetWhenShakeRan = setPlanRefSpy.mock.calls.some(call => call[0] === planFilePath);
+		});
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "my-task",
+		});
+
+		// The contract: by the time handleShakeCommand runs, setPlanReferencePath
+		// has already pinned the approved (non-default) plan path, so plan-read
+		// protection covers the approved `local://my-task-plan.md` during elision.
+		expect(planRefSetWhenShakeRan).toBe(true);
+	});
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {
 		// Mock `handleCompactCommand` to surface the "cancelled" outcome directly.
 		// (Testing the consumer — `#approvePlan`'s outcome handling — at the

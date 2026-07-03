@@ -2612,6 +2612,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
 				);
 			} else if (options.mode === "shake") {
+				// Pin the plan reference path BEFORE shake so plan-read protection
+				// covers the approved `local://...` path during the elision pass.
+				// Reassignment after the try/finally is idempotent.
+				this.session.setPlanReferencePath(options.planFilePath);
 				await this.handleShakeCommand("elide");
 			}
 		} finally {
