@@ -5,7 +5,7 @@ Branch: `{{workspace.branch}}`
 
 You classified this issue and reproduced the bug, but did NOT reach a turn-ending action. Acceptable turn-ending actions for a `bug` / `documentation` issue are exactly one of:
 
-1. `gh_push_branch` + `gh_open_pr` — you committed the fix, pushed the branch, and opened a PR.
+1. `gh_open_pr` — you committed the fix; `gh_open_pr` pushes the branch, runs the duplicate-PR guard, and opens the PR (do NOT call `gh_push_branch` separately first).
 2. `mark_unable_to_reproduce` — you genuinely cannot reproduce after a real attempt and need reporter-provided reproduction details.
 3. `abort_task` — unrecoverable environment failure.
 

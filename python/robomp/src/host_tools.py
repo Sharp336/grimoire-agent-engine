@@ -949,14 +949,36 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any]) -> None:
-    """Refuse ``gh_open_pr`` when another open PR already closes this issue.
+    """Refuse ``gh_open_pr`` when an open PR already closes this issue.
 
-    Consults ``list_closing_pull_requests`` (timeline / Development-panel
-    links) so the guard sees linked PRs even when no issue comment mentions
-    them. The bot's own previously-recorded PR is excluded — re-publishing or
-    amending that PR is legitimate. A transient timeline fetch fails open so
-    a GitHub hiccup doesn't block a legitimate PR.
+    Two checks, in order:
+
+    1. If the bot has already recorded an open PR for this issue
+       (``row.pr_number``), refuse immediately — opening a second PR for the
+       same issue is itself a duplicate. The legitimate "amend existing PR"
+       path goes through ``gh_push_branch`` (push to the same branch), not
+       ``gh_open_pr`` (create a new PR).
+    2. Otherwise consult ``list_closing_pull_requests`` (timeline /
+       Development-panel links) so the guard sees linked PRs from other
+       authors even when no issue comment mentions them.
+
+    A transient timeline fetch fails open so a GitHub hiccup doesn't block a
+    legitimate PR.
     """
+    row = bindings.db.get_issue(bindings.issue_key)
+    own_pr = row.pr_number if row is not None else None
+    if own_pr is not None:
+        msg = (
+            f"refusing to open PR: issue #{bindings.issue.number} already has "
+            f"an open PR #{own_pr} recorded for this issue. Do NOT open a "
+            "second PR. To amend the existing PR, push to its branch with "
+            "`gh_push_branch`; to discard your unpushed commit run "
+            f"`git reset --hard origin/{bindings.repo.default_branch}`. "
+            "If the existing fix is sufficient, call `gh_post_reference_comment` "
+            "with a body referencing it — this ends the task cleanly."
+        )
+        _audit(bindings, "gh_open_pr", args, error=msg)
+        _raise_command(msg)
     try:
         closing_prs = _run_coro(
             bindings.loop,
@@ -970,9 +992,7 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
         return
     if not closing_prs:
         return
-    row = bindings.db.get_issue(bindings.issue_key)
-    own_pr = row.pr_number if row is not None else None
-    duplicates = tuple(p for p in closing_prs if p != own_pr)
+    duplicates = tuple(closing_prs)
     if not duplicates:
         return
     msg = (

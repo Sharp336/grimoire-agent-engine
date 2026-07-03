@@ -262,34 +262,40 @@ class GitHubClient:
         requests. Only PRs whose timeline source carries ``state == "open"``
         are returned — a merged or closed PR no longer needs the bot's work.
 
-        Pagination intentionally skipped: a just-opened issue has at most a
-        handful of timeline entries, and the bot only consults this on
-        ``issues.opened`` triage.
+        The timeline is paginated (``per_page=100``) because by the time the
+        duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
+        well over 100 events (comments, commits, cross-refs); a ``connected``
+        link can land on any page.
         """
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues/{number}/timeline",
-            params={"per_page": 100},
-        )
         linked: set[int] = set()
         states: dict[int, str] = {}
-        for event in data or []:
-            if not isinstance(event, Mapping):
-                continue
-            ev = event.get("event")
-            source = event.get("source") or {}
-            src_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
-                continue
-            pr_number = src_issue.get("number")
-            if not isinstance(pr_number, int):
-                continue
-            states[pr_number] = str(src_issue.get("state") or "open")
-            if ev == "connected":
-                linked.add(pr_number)
-            elif ev == "disconnected":
-                linked.discard(pr_number)
-        return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
+        page = 1
+        while True:
+            data = await self.request(
+                "GET",
+                f"/repos/{repo}/issues/{number}/timeline",
+                params={"per_page": 100, "page": page},
+            )
+            batch = data or []
+            for event in batch:
+                if not isinstance(event, Mapping):
+                    continue
+                ev = event.get("event")
+                source = event.get("source") or {}
+                src_issue = source.get("issue") if isinstance(source, Mapping) else None
+                if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
+                    continue
+                pr_number = src_issue.get("number")
+                if not isinstance(pr_number, int):
+                    continue
+                states[pr_number] = str(src_issue.get("state") or "open")
+                if ev == "connected":
+                    linked.add(pr_number)
+                elif ev == "disconnected":
+                    linked.discard(pr_number)
+            if len(batch) < 100:
+                return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
+            page += 1
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self.request("GET", f"/repos/{repo}/pulls/{number}")

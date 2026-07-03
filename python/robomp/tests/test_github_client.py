@@ -283,6 +283,44 @@ def test_list_closing_pull_requests_empty_timeline() -> None:
     assert _run_async(client.list_closing_pull_requests("octo/widget", 7)) == ()
 
 
+def test_list_closing_pull_requests_paginates_timeline() -> None:
+    """A ``connected`` event on page 2 (after 100 filler events) is still found."""
+    pages: set[int] = set()
+
+    filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(100)]
+    page1 = filler
+    page2 = [
+        # PR #200 connected then disconnected on page 2 → excluded
+        {
+            "event": "connected",
+            "source": {"issue": {"number": 200, "state": "open", "pull_request": {}}},
+        },
+        {
+            "event": "disconnected",
+            "source": {"issue": {"number": 200, "state": "open", "pull_request": {}}},
+        },
+        # PR #300 connected on page 2 → included (this is the key assertion)
+        {
+            "event": "connected",
+            "source": {"issue": {"number": 300, "state": "open", "pull_request": {}}},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        pages.add(page)
+        if page == 1:
+            return httpx.Response(200, json=page1)
+        if page == 2:
+            return httpx.Response(200, json=page2)
+        return httpx.Response(200, json=[])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert prs == (300,)
+    assert 1 in pages and 2 in pages, "must have fetched both pages"
+
+
 def test_list_comment_reactions_filters_to_thumbs_down() -> None:
     captured: dict[str, str] = {}
 

@@ -2307,15 +2307,21 @@ def test_gh_push_branch_runs_fix_and_check_before_pushing(
     # Both gates ran, and fix preceded check (both have one call recorded).
     assert fix_calls.read_text() == "called"
     assert check_calls.read_text() == "called"
-    # The formatter's diff was committed by the bot as a `style: bun run fix` commit.
+    # The formatter's diff was amended into the bot-authored HEAD commit.
     log = subprocess.run(
-        ["git", "-C", str(ws.repo_dir), "log", "--format=%an <%ae> %s", "-n", "2"],
+        ["git", "-C", str(ws.repo_dir), "log", "--format=%an <%ae> %s", "-1"],
         capture_output=True,
         text=True,
         check=True,
     )
-    lines = log.stdout.strip().splitlines()
-    assert lines[0].startswith("robomp-bot <robomp-bot@example.invalid> style: bun run fix"), lines
+    assert log.stdout.strip() == "robomp-bot <robomp-bot@example.invalid> feat: follow-up"
+    formatted = subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "show", "HEAD:src.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert formatted.stdout == "formatted\n"
     # And the branch ended up on the remote at the new head.
     assert result.startswith(f"pushed {ws.branch} ")
     refs = subprocess.run(
@@ -3083,16 +3089,21 @@ def test_gh_open_pr_runs_fix_then_check_and_commits_fixup(
     # Both bun stages ran, and fix preceded check.
     assert fix_calls.read_text() == "called"
     assert check_calls.read_text() == "called"
-    # The formatter diff was committed by the bot as a "style:" commit.
+    # The formatter diff was amended into the bot-authored HEAD commit.
     log = subprocess.run(
-        ["git", "-C", str(ws.repo_dir), "log", "--format=%an|%ae|%s", "-2"],
+        ["git", "-C", str(ws.repo_dir), "log", "--format=%an|%ae|%s", "-1"],
         capture_output=True,
         text=True,
         check=True,
     )
-    lines = log.stdout.strip().splitlines()
-    assert lines[0] == "robomp-bot|robomp-bot@example.invalid|style: bun run fix"
-    assert lines[1].endswith("|feat: initial change")
+    assert log.stdout.strip() == "robomp-bot|robomp-bot@example.invalid|feat: initial change"
+    formatted = subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "show", "HEAD:src.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert formatted.stdout == "formatted\n"
     # Worktree is clean again (gate before push would have rejected otherwise).
     status = subprocess.run(
         ["git", "-C", str(ws.repo_dir), "status", "--porcelain"],
@@ -3118,8 +3129,8 @@ def test_gh_open_pr_refuses_dirty_worktree_before_fix(
 ) -> None:
     """A pre-existing uncommitted edit MUST cause gh_open_pr (and gh_push_branch)
     to refuse BEFORE `bun run fix` runs — otherwise `git add -A` after fix
-    would silently fold the unrelated edit into the `style: bun run fix`
-    commit and ship it in the PR."""
+    would silently fold the unrelated edit into the bot-authored HEAD commit
+    and ship it in the PR."""
     import os
     import subprocess
 
@@ -3662,10 +3673,12 @@ def test_gh_open_pr_refuses_when_closing_pr_exists(db: Database, tmp_path: Path)
     assert "git reset --hard" in msg
 
 
-def test_gh_open_pr_allows_when_closing_pr_is_bot_own(
+def test_gh_open_pr_refuses_when_bot_own_pr_already_recorded(
     db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bot's own previously-recorded PR is excluded from the duplicate guard."""
+    """gh_open_pr refuses when the bot has already recorded an open PR for this
+    issue — opening a second PR is itself a duplicate. The legitimate amend
+    path goes through gh_push_branch (push to the same branch), not gh_open_pr."""
     transport = _timeline_handler(closing_prs=(77,))
     bindings, loop, t = _bindings(db, tmp_path, transport)
     db.set_issue_classification(bindings.issue_key, "bug")
@@ -3674,11 +3687,16 @@ def test_gh_open_pr_allows_when_closing_pr_is_bot_own(
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
         body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
-        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
     finally:
         _stop_loop(loop, t)
 
-    assert "opened #99" in result
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "already has an open PR #77" in msg
+    assert "gh_push_branch" in msg
+    assert "gh_post_reference_comment" in msg
 
 
 def test_gh_open_pr_guard_fails_open_on_timeline_error(
