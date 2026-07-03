@@ -148,28 +148,66 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 
 
 _CLOSING_KEYWORD_RE = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)"
     r"(?:#(?P<num>\d+)"
-    r"|https?://\S+/issues/(?P<url_num>\d+)"
+    r"|https?://[^/]+/(?P<url_repo>[\w.+-]+/[\w.+-]+)/issues/(?P<url_num>\d+)"
     r"|(?P<repo>[\w.+-]+/[\w.+-]+)#(?P<repo_num>\d+))",
     re.IGNORECASE,
 )
 
 
-def _closing_keyword_for(body: str, issue_number: int, repo: str = "") -> bool:
+def _repo_from_url(url: object) -> str:
+    """Extract ``owner/repo`` from a GitHub API ``repository_url``, or ``""``."""
+    if not isinstance(url, str) or not url:
+        return ""
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return ""
+
+
+def _closing_keyword_for(body: str, issue_number: int, repo: str = "", *, source_repo: str = "") -> bool:
     """True iff *body* contains a closing keyword referencing *issue_number*.
 
     Recognizes the three GitHub closing-reference forms: bare ``#N``,
     a full URL ending in ``/issues/N``, and the ``owner/repo#N`` shorthand
     (e.g. ``Fixes octo/widget#42``) GitHub accepts for cross-repo links.
+    Also accepts the colon-form ``Closes: #N``.
+
     For the ``owner/repo#N`` form the prefix must match *repo* (the issue's
     own repository) so an unrelated cross-repo reference like
     ``Fixes other/repo#42`` does not trip the duplicate guard on issue #42
     of a different repository.
+
+    For the URL form the repo path in the URL must match *repo* when *repo*
+    is provided, so ``Fixes https://github.com/other/repo/issues/42`` does
+    not falsely match issue #42 of a different repository.
+
+    For the bare ``#N`` form, when *source_repo* is provided (the repo the
+    referencing PR lives in), it must match *repo* — a bare ``#42`` in a
+    cross-repo PR refers to that PR's own issue #42, not this repo's.
     """
     for match in _CLOSING_KEYWORD_RE.finditer(body):
-        num = match.group("num") or match.group("url_num")
-        if not num and match.group("repo_num"):
+        num = match.group("num")
+        if num:
+            # Bare #N — only trust when the source PR is in the same repo
+            # as the issue. A cross-repo PR's bare #N refers to its own
+            # repo's issue, not ours.
+            if source_repo and repo and source_repo.lower() != repo.lower():
+                continue
+            if int(num) == issue_number:
+                return True
+            continue
+        url_num = match.group("url_num")
+        if url_num:
+            # URL form — the repo in the URL path must match our repo.
+            if repo and (match.group("url_repo") or "").lower() != repo.lower():
+                continue
+            if int(url_num) == issue_number:
+                return True
+            continue
+        repo_num = match.group("repo_num")
+        if repo_num:
             # owner/repo#N — a fully-qualified cross-repo shorthand. Only
             # count it when we know our own repo AND the prefix matches;
             # without a repo context we cannot confirm it targets THIS
@@ -177,9 +215,8 @@ def _closing_keyword_for(body: str, issue_number: int, repo: str = "") -> bool:
             # duplicate-PR refuse gate.
             if not repo or (match.group("repo") or "").lower() != repo.lower():
                 continue
-            num = match.group("repo_num")
-        if num and int(num) == issue_number:
-            return True
+            if int(repo_num) == issue_number:
+                return True
     return False
 
 
@@ -288,7 +325,7 @@ class GitHubClient:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}")
         return _issue_from_payload(repo, data)
 
-    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+    async def list_closing_pull_requests(self, repo: str, number: int, *, default_branch: str = "") -> tuple[int, ...]:
         """Return PR numbers currently linked to issue ``number`` via "Closes"/"Fixes"
         keywords or the Development panel.
 
@@ -300,6 +337,15 @@ class GitHubClient:
         matching ``connected`` event for closing-keyword links. Only PRs
         whose timeline source carries ``state == "open"`` are returned — a
         merged or closed PR no longer needs the bot's work.
+
+        When *default_branch* is provided, cross-referenced PRs whose body
+        contains a closing keyword are additionally verified to target the
+        default branch — a same-repo PR targeting a feature branch does
+        not block the guard. Cross-repo PRs (verified via the
+        ``owner/repo#N`` prefix) are not base-ref-checked because their
+        base belongs to a different repository. PRs whose base ref cannot
+        be fetched are skipped (fail open) so a GitHub hiccup doesn't
+        block a legitimate PR.
 
         The timeline is paginated (``per_page=100``) because by the time the
         duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
@@ -338,8 +384,20 @@ class GitHubClient:
                     # this issue number, so mere mentions don't trigger
                     # false-positive duplicate guards.
                     pr_body = src_issue.get("body") or ""
-                    if _closing_keyword_for(pr_body, number, repo):
-                        linked.add(pr_number)
+                    source_repo = _repo_from_url(src_issue.get("repository_url"))
+                    if not _closing_keyword_for(pr_body, number, repo, source_repo=source_repo):
+                        continue
+                    if default_branch and (not source_repo or source_repo.lower() == repo.lower()):
+                        # Same-repo PR: verify it targets the default
+                        # branch — a PR targeting a feature branch should
+                        # not block the guard. Fail open on fetch errors.
+                        try:
+                            pr_info = await self.get_pull_request(repo, pr_number)
+                        except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
+                            continue
+                        if pr_info.base_ref != default_branch:
+                            continue
+                    linked.add(pr_number)
                 elif ev == "disconnected":
                     linked.discard(pr_number)
             if len(batch) < 100:

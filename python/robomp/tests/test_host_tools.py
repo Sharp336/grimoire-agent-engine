@@ -4161,11 +4161,26 @@ def test_gh_open_pr_refuses_on_cross_referenced_closing_pr(db: Database, tmp_pat
                             "state": "open",
                             "pull_request": {},
                             "body": "This PR fixes the crash. Fixes #42",
+                            "repository_url": "https://api.github.com/repos/octo/widget",
                         }
                     },
                 }
             ]
             return httpx.Response(200, json=events)
+        if request.method == "GET" and "/pulls/77" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "number": 77,
+                    "html_url": "https://github.com/octo/widget/pull/77",
+                    "state": "open",
+                    "head": {"ref": "fix/crash", "repo": {"full_name": "octo/widget"}},
+                    "base": {"ref": "main"},
+                    "user": {"login": "alice"},
+                    "title": "fix: crash",
+                    "body": "This PR fixes the crash. Fixes #42",
+                },
+            )
         if request.method == "POST" and "/pulls" in url:
             return httpx.Response(
                 201, json={"number": 99, "html_url": "x", "head": {"ref": "b"}, "base": {"ref": "main"}}

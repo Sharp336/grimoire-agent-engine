@@ -1037,7 +1037,9 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
     try:
         closing_prs = _run_coro(
             bindings.loop,
-            bindings.github.list_closing_pull_requests(bindings.repo.full_name, bindings.issue.number),
+            bindings.github.list_closing_pull_requests(
+                bindings.repo.full_name, bindings.issue.number, default_branch=bindings.repo.default_branch
+            ),
         )
     except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
         log.warning(
@@ -1430,7 +1432,7 @@ _FUNCTIONAL = ("agent", "tool", "tui", "cli", "prompting", "sdk", "auth", "setup
 _PLATFORMS = ("platform:linux", "platform:macos", "platform:windows", "platform:wsl")
 _PR_RANKS = ("review:p0", "review:p1", "review:p2", "review:p3")
 _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "build")
-_CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE)
+_CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)#(\d+)", re.IGNORECASE)
 
 
 def _enforce_impl_authorization(

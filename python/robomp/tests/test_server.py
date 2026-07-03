@@ -1531,7 +1531,10 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None
         row = get_database(cfg.sqlite_path).get_event("dir-1")
     close_database()
     assert row is not None
-    assert row.state == "queued"
+    # TestClient starts the worker pool; it may claim the row before the
+    # assertion reads it. The webhook contract is the 202/queued response above;
+    # this test defends the durable directive metadata on the stored event.
+    assert row.state in {"queued", "running"}
     directive = row.payload.get("_robomp_directive")
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
 
@@ -2465,7 +2468,7 @@ class _StubGithubForTriage:
         self._closing_prs = closing_prs
         self.calls: list[tuple[str, int]] = []
 
-    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+    async def list_closing_pull_requests(self, repo: str, number: int, *, default_branch: str = "") -> tuple[int, ...]:
         self.calls.append((repo, number))
         if isinstance(self._closing_prs, Exception):
             raise self._closing_prs

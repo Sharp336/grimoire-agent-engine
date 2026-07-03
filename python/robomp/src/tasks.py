@@ -289,7 +289,9 @@ async def triage_issue(
         # a follow-up because by then the bot has already committed
         # resources (workspace, omp session) to this issue.
         try:
-            closing_prs = await github.list_closing_pull_requests(repo.full_name, issue.number)
+            closing_prs = await github.list_closing_pull_requests(
+                repo.full_name, issue.number, default_branch=repo.default_branch
+            )
         except GitHubError as exc:
             # Fail-open: a transient timeline fetch failure shouldn't
             # block legitimate triage. Worst case we do redundant work.
