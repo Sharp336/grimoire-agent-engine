@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed plan-mode context compaction leaking internal guidance into extension hook custom instructions ([#4359](https://github.com/can1357/oh-my-pi/issues/4359)).
+
 ## [16.3.3] - 2026-07-02
 
 ### Breaking Changes
