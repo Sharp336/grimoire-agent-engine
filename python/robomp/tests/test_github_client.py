@@ -1085,24 +1085,27 @@ def test_list_closing_pull_requests_ignores_non_github_url_cross_ref() -> None:
     assert prs == ()
 
 
-# ---------- PRRT_kwDOQxs0bc6OPEh-: page 2+ transport fail-open ----------
+# ---------- PRRT_kwDOQxs0bc6OR9C2: page 2+ fetch failure discards partials ----------
 
 
-def test_list_closing_pull_requests_fails_open_on_page2_transport_error() -> None:
-    """PRRT_kwDOQxs0bc6OPEh-: a transport error on page 2+ must fail open
-    (return partial results from page 1) rather than crashing direct-PAT
-    triage with an uncaught ConnectError/TimeoutException."""
+def test_list_closing_pull_requests_discards_partials_on_page2_transport_error() -> None:
+    """PRRT_kwDOQxs0bc6OR9C2: a transport error on page 2+ must discard
+    partial positives from page 1 and return ``()`` — a later page could
+    carry a ``disconnected`` event that cancels them, so returning partials
+    risks a false "already covered" skip."""
     filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(99)]
     page1 = filler + [
-        # PR #100 connected on page 1 → should appear in partial results
+        # PR #100 connected on page 1 → must be DISCARDED, not returned
         {
             "event": "connected",
             "source": {"issue": {"number": 100, "state": "open", "pull_request": {}}},
         },
     ]
+    seen_pages: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params.get("page", "1"))
+        seen_pages.append(page)
         if page == 1:
             return httpx.Response(200, json=page1)
         raise httpx.ConnectError("connection reset", request=request)
@@ -1110,12 +1113,13 @@ def test_list_closing_pull_requests_fails_open_on_page2_transport_error() -> Non
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
     # Page 1 had exactly 100 entries, so page 2 is fetched. The transport
-    # error on page 2 fails open → partial results from page 1.
-    assert _pr_nums(prs) == (("octo/widget", 100),)
+    # error on page 2 discards partials → empty result.
+    assert 2 in seen_pages, "page 2 must have been fetched"
+    assert prs == ()
 
 
 def test_list_closing_pull_requests_propagates_page1_transport_error() -> None:
-    """PRRT_kwDOQxs0bc6OPEh-: a transport error on page 1 must still
+    """PRRT_kwDOQxs0bc6OR9C2: a transport error on page 1 must still
     propagate — a total timeline fetch failure is a real error, not a
     partial-result situation."""
 
@@ -1127,8 +1131,8 @@ def test_list_closing_pull_requests_propagates_page1_transport_error() -> None:
         _run_async(client.list_closing_pull_requests("octo/widget", 42))
 
 
-def test_list_closing_pull_requests_fails_open_on_page2_timeout() -> None:
-    """PRRT_kwDOQxs0bc6OPEh-: a timeout on page 2+ also fails open."""
+def test_list_closing_pull_requests_discards_partials_on_page2_timeout() -> None:
+    """PRRT_kwDOQxs0bc6OR9C2: a timeout on page 2+ also discards partials."""
     filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(99)]
     page1 = filler + [
         {
@@ -1136,13 +1140,42 @@ def test_list_closing_pull_requests_fails_open_on_page2_timeout() -> None:
             "source": {"issue": {"number": 200, "state": "open", "pull_request": {}}},
         },
     ]
+    seen_pages: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params.get("page", "1"))
+        seen_pages.append(page)
         if page == 1:
             return httpx.Response(200, json=page1)
         raise httpx.TimeoutException("read timeout", request=request)
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert _pr_nums(prs) == (("octo/widget", 200),)
+    assert 2 in seen_pages, "page 2 must have been fetched"
+    assert prs == ()
+
+
+def test_list_closing_pull_requests_discards_partials_on_page2_github_error() -> None:
+    """PRRT_kwDOQxs0bc6OR9C2: a GitHub API error (e.g. 503) on page 2+ must
+    also discard partials — the staleness risk is the same as for transport
+    errors."""
+    filler = [{"event": "labeled", "label": {"name": "bug"}} for _ in range(99)]
+    page1 = filler + [
+        {
+            "event": "connected",
+            "source": {"issue": {"number": 300, "state": "open", "pull_request": {}}},
+        },
+    ]
+    seen_pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        seen_pages.append(page)
+        if page == 1:
+            return httpx.Response(200, json=page1)
+        return httpx.Response(503, json={"message": "server error"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert 2 in seen_pages, "page 2 must have been fetched"
+    assert prs == ()

@@ -3,6 +3,7 @@ import logging
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from robomp import tasks
@@ -167,3 +168,123 @@ async def test_run_workspace_op_logs_worker_exception_on_concurrent_cancel(caplo
     assert any(r.exc_info and r.exc_info[1] is boom for r in warnings), (
         "the worker's exception was not attached to the warning"
     )
+
+
+async def test_triage_issue_fails_open_on_transport_error(db, settings, monkeypatch, tmp_path):
+    """PRRT_kwDOQxs0bc6OR9C1: triage_issue must proceed when
+    list_closing_pull_requests raises httpx.ConnectError."""
+
+    async def _resolve_repo_and_issue(_github, _payload):
+        repo = RepoInfo(
+            full_name="octo/widget",
+            default_branch="main",
+            clone_url="https://x/octo/widget.git",
+            private=False,
+        )
+        issue = IssueInfo(
+            repo="octo/widget",
+            number=2,
+            title="bug",
+            body="b",
+            state="open",
+            author="alice",
+            labels=(),
+            is_pull_request=False,
+        )
+        return repo, issue
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve_repo_and_issue)
+
+    async def _transport_error(*a, **k):
+        raise httpx.ConnectError("connection refused")
+
+    github = SimpleNamespace(list_closing_pull_requests=_transport_error)
+
+    proceeded = threading.Event()
+
+    def _fast_ensure(**_kwargs):
+        proceeded.set()
+        return SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "sess"))
+
+    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_fast_ensure)
+
+    async def _noop_run_task(**_kwargs):
+        return None
+
+    monkeypatch.setattr(tasks, "run_task", _noop_run_task)
+
+    await asyncio.wait_for(
+        tasks.triage_issue(
+            settings=settings,
+            db=db,
+            github=github,
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload={},
+            delivery_id="d-transport",
+        ),
+        timeout=3.0,
+    )
+
+    assert proceeded.is_set(), "triage did not proceed past the closing-PR check"
+    assert db.get_issue("octo/widget#2") is not None, "issue row was not created"
+
+
+async def test_triage_issue_fails_open_on_timeout_error(db, settings, monkeypatch, tmp_path):
+    """PRRT_kwDOQxs0bc6OR9C1: triage_issue must proceed when
+    list_closing_pull_requests raises httpx.TimeoutException."""
+
+    async def _resolve_repo_and_issue(_github, _payload):
+        repo = RepoInfo(
+            full_name="octo/widget",
+            default_branch="main",
+            clone_url="https://x/octo/widget.git",
+            private=False,
+        )
+        issue = IssueInfo(
+            repo="octo/widget",
+            number=3,
+            title="bug",
+            body="b",
+            state="open",
+            author="alice",
+            labels=(),
+            is_pull_request=False,
+        )
+        return repo, issue
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve_repo_and_issue)
+
+    async def _timeout_error(*a, **k):
+        raise httpx.TimeoutException("read timeout")
+
+    github = SimpleNamespace(list_closing_pull_requests=_timeout_error)
+
+    proceeded = threading.Event()
+
+    def _fast_ensure(**_kwargs):
+        proceeded.set()
+        return SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "sess"))
+
+    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_fast_ensure)
+
+    async def _noop_run_task(**_kwargs):
+        return None
+
+    monkeypatch.setattr(tasks, "run_task", _noop_run_task)
+
+    await asyncio.wait_for(
+        tasks.triage_issue(
+            settings=settings,
+            db=db,
+            github=github,
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload={},
+            delivery_id="d-timeout",
+        ),
+        timeout=3.0,
+    )
+
+    assert proceeded.is_set(), "triage did not proceed past the closing-PR check"
+    assert db.get_issue("octo/widget#3") is not None, "issue row was not created"

@@ -7,6 +7,8 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
+import httpx
+
 from robomp import persona
 from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
@@ -292,9 +294,10 @@ async def triage_issue(
             closing_prs = await github.list_closing_pull_requests(
                 repo.full_name, issue.number, default_branch=repo.default_branch
             )
-        except GitHubError as exc:
-            # Fail-open: a transient timeline fetch failure shouldn't
-            # block legitimate triage. Worst case we do redundant work.
+        except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
+            # Fail-open: a transient timeline fetch failure (API error,
+            # connection reset, or timeout after retries) shouldn't block
+            # legitimate triage. Worst case we do redundant work.
             log.warning(
                 "closing-PR check failed; proceeding with triage",
                 extra={"key": key, "err": str(exc)},

@@ -371,7 +371,12 @@ class GitHubClient:
         The timeline is paginated (``per_page=100``) because by the time the
         duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
         well over 100 events (comments, commits, cross-refs); a ``connected``
-        or ``cross-referenced`` link can land on any page.
+        or ``cross-referenced`` link can land on any page. On a page-2+ fetch
+        failure (API error, connection reset, or timeout after retries) all
+        partial positives from earlier pages are **discarded** (``return ()``):
+        a later page could carry a ``disconnected`` event that cancels an
+        earlier ``connected`` link, so returning partials risks a false
+        "already covered" skip. Page-1 failures still propagate to the caller.
         """
         # Keyed by (repo, number) so two repos' PRs sharing a number
         # don't collide.
@@ -388,19 +393,23 @@ class GitHubClient:
                     f"/repos/{repo}/issues/{number}/timeline",
                     params={"per_page": 100, "page": page},
                 )
-            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
                 if page == 1:
                     raise
-                # Page 2+ transport failure: fail open with what we have
-                # so a network hiccup mid-pagination doesn't crash
-                # direct-PAT triage. Page 1 failures still propagate (a
-                # total timeline fetch failure is a real error).
+                # Page 2+ failure: discard partial positives. A later page
+                # could carry a ``disconnected`` event that cancels a
+                # ``connected`` link seen on an earlier page, so returning
+                # partials risks a false "already covered" skip that blocks
+                # legitimate triage. Fail open to an empty tuple instead —
+                # worst case the bot does redundant work. Page 1 failures
+                # still propagate (a total timeline fetch failure is a
+                # real error).
                 log.warning(
-                    "timeline page %d transport error; returning partial results",
+                    "timeline page %d fetch failed; discarding partial closing-PR results",
                     page,
                     extra={"repo": repo, "number": number, "page": page, "error": str(exc)},
                 )
-                break
+                return ()
             batch = data or []
             for event in batch:
                 if not isinstance(event, Mapping):
