@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed queued follow-up rows leaking into native scrollback during live TUI repaints ([#4362](https://github.com/can1357/oh-my-pi/issues/4362)).
+
 ## [16.3.3] - 2026-07-02
 
 ### Breaking Changes
