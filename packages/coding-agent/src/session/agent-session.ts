@@ -1557,6 +1557,17 @@ export class AgentSession {
 	 * increments the counter.
 	 */
 	#promptBuildVersion = 0;
+	/** A successful tool-rebuild result that was discarded because a newer build
+	 *  (redaction refresh, model switch) was in flight. If that newer build throws
+	 *  and rolls back #promptBuildVersion, this result is re-applied so the prompt
+	 *  reflects the last successful build rather than staying stale with a changed
+	 *  tool set. Only set from #applyActiveToolsByName — refresh results are not
+	 *  buffered because they reflect the pre-change tool set. */
+	#pendingSuccessfulBuild?: {
+		buildVersion: number;
+		result: BuildSystemPromptResult;
+		toolSignature: string;
+	};
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -6340,6 +6351,12 @@ export class AgentSession {
 					// inventory old.
 					if (this.#promptBuildVersion === buildVersion) {
 						this.#promptBuildVersion = buildVersion - 1;
+						// Re-apply a previously discarded successful tool-rebuild
+						// whose version matches the rolled-back counter — the
+						// newer build that invalidated it has failed, and the
+						// prompt should reflect the last successful build rather
+						// than staying stale with a changed tool set.
+						this.#applyPendingSuccessfulBuild();
 					}
 					throw error;
 				}
@@ -6350,23 +6367,21 @@ export class AgentSession {
 				if (this.#promptBuildVersion !== buildVersion) {
 					// A concurrent rebuild (redaction refresh, model switch, or
 					// another tool-set change) completed while we awaited. Discard
-					// the stale prompt result, but still persist the MCP tool
-					// selection — setTools() above changed the live tool set, and
-					// failing to record it means switching/resuming the session
-					// can silently lose the activated tools.
+					// the stale prompt result, but buffer it first — if the newer
+					// build that invalidated this one throws and rolls back
+					// #promptBuildVersion, this result is re-applied so the prompt
+					// reflects the new tool set rather than staying stale.
+					this.#pendingSuccessfulBuild = { buildVersion, result: built, toolSignature: signature };
+					// Still persist the MCP tool selection — setTools() above
+					// changed the live tool set, and failing to record it means
+					// switching/resuming the session can silently lose the
+					// activated tools.
 					if (options?.persistMCPSelection !== false) {
 						this.#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames);
 					}
 					return;
 				}
-				this.#baseSystemPrompt = built.systemPrompt;
-				this.#baseSystemPromptBeforeMemoryPromotion = undefined;
-				this.agent.setSystemPrompt(this.#baseSystemPrompt);
-				this.#lastAppliedToolSignature = signature;
-				this.#promptModelKey = this.#currentPromptModelKey();
-				this.#promptModelContextWindow = this.model?.contextWindow;
-				this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
-				this.#promptRebasedSinceLastAnchor = true;
+				this.#applyBuiltPrompt(built, signature);
 			}
 		}
 		if (options?.persistMCPSelection !== false) {
@@ -6469,6 +6484,12 @@ export class AgentSession {
 			// inventory stays old.
 			if (this.#promptBuildVersion === buildVersion) {
 				this.#promptBuildVersion = buildVersion - 1;
+				// Re-apply a previously discarded successful tool-rebuild
+				// whose version matches the rolled-back counter — the newer
+				// build that invalidated it has failed, and the prompt should
+				// reflect the last successful build rather than staying stale
+				// with a changed tool set.
+				this.#applyPendingSuccessfulBuild();
 			}
 			throw error;
 		}
@@ -6482,20 +6503,7 @@ export class AgentSession {
 		// handler deliberately does NOT increment it (to avoid invalidating an
 		// in-flight tool rebuild whose result is still valid).
 		if (expectedEpoch !== undefined && expectedEpoch !== this.#redactionRefreshEpoch) return;
-		this.#baseSystemPrompt = built.systemPrompt;
-		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
-		this.agent.setSystemPrompt(this.#baseSystemPrompt);
-		this.#promptModelKey = this.#currentPromptModelKey();
-		this.#promptModelContextWindow = this.model?.contextWindow;
-		this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
-		this.#promptRebasedSinceLastAnchor = true;
-		// Refresh the cached signature so a subsequent `#applyActiveToolsByName` with
-		// the same tool set does not re-rebuild on top of the explicit refresh we
-		// just performed (and conversely, a different set forces a fresh rebuild).
-		const activeTools = activeToolNames
-			.map(name => this.#toolRegistry.get(name))
-			.filter((tool): tool is AgentTool => tool != null);
-		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
+		this.#applyBuiltPrompt(built);
 	}
 
 	async #buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
@@ -6608,6 +6616,56 @@ export class AgentSession {
 		}
 		const date = new Date().toISOString().slice(0, 10);
 		return `${nameSegment}\u0003${descriptionSegment}\u0005${registrySegment}\u0007${instructionsSegment}|${date}`;
+	}
+
+	/**
+	 * Apply a successful build result to the session's prompt state. Shared by
+	 * #applyActiveToolsByName, refreshBaseSystemPrompt, and the rollback path
+	 * that re-applies a previously discarded successful build.
+	 */
+	#applyBuiltPrompt(built: BuildSystemPromptResult, toolSignature?: string): void {
+		this.#baseSystemPrompt = built.systemPrompt;
+		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
+		this.agent.setSystemPrompt(this.#baseSystemPrompt);
+		this.#promptModelKey = this.#currentPromptModelKey();
+		this.#promptModelContextWindow = this.model?.contextWindow;
+		this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
+		this.#promptRebasedSinceLastAnchor = true;
+		if (toolSignature !== undefined) {
+			this.#lastAppliedToolSignature = toolSignature;
+		} else {
+			const activeToolNames = this.getActiveToolNames();
+			const activeTools = activeToolNames
+				.map(name => this.#toolRegistry.get(name))
+				.filter((tool): tool is AgentTool => tool != null);
+			this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
+		}
+		// A newer build has been successfully applied — any previously discarded
+		// successful build is now stale.
+		this.#pendingSuccessfulBuild = undefined;
+	}
+
+	/**
+	 * After a rebuild throws and rolls back #promptBuildVersion, re-apply a
+	 * previously discarded successful tool-rebuild result if its version matches
+	 * the rolled-back counter and the live tool set still matches its signature.
+	 * This prevents the "tools changed but prompt inventory stays old" state when
+	 * a newer rebuild (redaction refresh, model switch) invalidates a successful
+	 * tool-rebuild and then fails.
+	 */
+	#applyPendingSuccessfulBuild(): void {
+		const pending = this.#pendingSuccessfulBuild;
+		if (!pending) return;
+		this.#pendingSuccessfulBuild = undefined;
+		if (pending.buildVersion !== this.#promptBuildVersion) return;
+		// Verify the tool set hasn't changed since the buffered build — if it
+		// has, the buffered prompt is stale and must not be applied.
+		const activeToolNames = this.getActiveToolNames();
+		const activeTools = activeToolNames
+			.map(name => this.#toolRegistry.get(name))
+			.filter((tool): tool is AgentTool => tool != null);
+		if (this.#computeAppliedToolSignature(activeToolNames, activeTools) !== pending.toolSignature) return;
+		this.#applyBuiltPrompt(pending.result, pending.toolSignature);
 	}
 
 	/**

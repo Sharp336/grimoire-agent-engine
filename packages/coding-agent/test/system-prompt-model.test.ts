@@ -2255,3 +2255,204 @@ describe("AgentSession rebase flag not cleared by stale-snapshot durable anchor"
 		expect(afterAnchor?.usedTokens ?? 0).toBeLessThanOrEqual(50 + smallNonMessageTokens);
 	});
 });
+
+describe("AgentSession discarded tool rebuild re-applied when newer refresh throws", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-reapply-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("re-applies discarded successful tool rebuild when redaction refresh throws and rolls back", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const mcpTool = {
+			name: "mcp__test__tool",
+			label: "Test MCP Tool",
+			description: "A test MCP tool",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpTool>([["mcp__test__tool", mcpTool]]);
+
+		let rebuildCount = 0;
+		let resolveToolRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// Tool rebuild — slow, succeeds with the new tool set.
+					const blocker = Promise.withResolvers<void>();
+					resolveToolRebuild = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["tool-result"] };
+				}
+				if (current === 2) {
+					// Redaction rebuild — throws immediately.
+					throw new Error("redaction rebuild failure");
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start a slow tool rebuild (build version 1) via setActiveToolsByName.
+		// setTools() changes the live tool set immediately; the rebuild is pending.
+		const setActivePromise = session.setActiveToolsByName(["mcp__test__tool"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// While the tool rebuild is pending, fire a redaction signal. The
+		// serialized chain runs refreshBaseSystemPrompt (build version 2),
+		// which throws. The catch rolls back build version to 1.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+
+		// The redaction rebuild threw (rebuildCount=2), but the tool rebuild
+		// is still pending. The redaction chain's catch swallows the error
+		// (logs a warning), so setActiveToolsByName is still awaiting.
+		expect(rebuildCount).toBe(2);
+
+		// Resolve the tool rebuild. It checks build version 1 === 1 (rolled
+		// back) → applies. Without the fix, the tool rebuild would see
+		// version 1 !== 2 (the redaction increment was not yet rolled back
+		// when it was discarded) and discard its result, leaving tools
+		// changed but prompt stuck at "initial".
+		resolveToolRebuild?.();
+		await setActivePromise;
+
+		// The tool rebuild's result must be the active prompt — it was
+		// buffered when discarded and re-applied after the redaction
+		// rebuild's rollback, OR applied directly because the version
+		// matched after rollback. Either way, the prompt must NOT be
+		// stuck at "initial".
+		expect(session.agent.state.systemPrompt).toEqual(["tool-result"]);
+
+		// A subsequent rebuild must work (build version not permanently stuck).
+		await session.refreshBaseSystemPrompt();
+		expect(session.agent.state.systemPrompt).toEqual(["result-3"]);
+	});
+
+	it("does not re-apply buffered build when tool set has changed since discard", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const mcpToolA = {
+			name: "mcp__test__a",
+			label: "Tool A",
+			description: "Tool A description",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const mcpToolB = {
+			name: "mcp__test__b",
+			label: "Tool B",
+			description: "Tool B description",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpToolA>([
+			["mcp__test__a", mcpToolA],
+			["mcp__test__b", mcpToolB],
+		]);
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		let resolveSecondRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// First tool rebuild (tool A) — slow, succeeds.
+					const blocker = Promise.withResolvers<void>();
+					resolveFirstRebuild = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["tool-a-result"] };
+				}
+				if (current === 2) {
+					// Second tool rebuild (tool B) — also slow, then throws.
+					// Must be blocked so the first rebuild can complete and
+					// be buffered (version 1≠2) before this one throws.
+					const blocker = Promise.withResolvers<void>();
+					resolveSecondRebuild = blocker.resolve;
+					await blocker.promise;
+					throw new Error("tool B rebuild failure");
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start a slow tool rebuild with tool A (build version 1).
+		const setActivePromiseA = session.setActiveToolsByName(["mcp__test__a"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+
+		// While the first rebuild is pending, start a second tool rebuild
+		// with tool B (build version 2). This changes the live tool set
+		// to tool B. The second rebuild is also blocked.
+		const setActivePromiseB = session.setActiveToolsByName(["mcp__test__b"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+
+		// Resolve the first rebuild — it sees version 1≠2 and buffers
+		// {version:1, sig:A}. It does NOT apply because the version
+		// mismatch causes it to take the discard path.
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// Resolve the second rebuild — it throws, rolls back build version
+		// to 1, and calls #applyPendingSuccessfulBuild. The pending build
+		// has version 1===1, but the live tool set is now tool B while the
+		// buffered signature is for tool A → mismatch → not applied.
+		resolveSecondRebuild?.();
+		await expect(setActivePromiseB).rejects.toThrow("tool B rebuild failure");
+		await setActivePromiseA;
+
+		// The prompt must NOT be "tool-a-result" — the signature mismatch
+		// prevented the stale buffered build from being applied. The prompt
+		// stays at "initial" because the only successful rebuild (tool A)
+		// was discarded and the signature check correctly rejected it.
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+	});
+});
