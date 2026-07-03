@@ -148,15 +148,36 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 
 
 _CLOSING_KEYWORD_RE = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:#(\d+)|https?://\S+/issues/(\d+))",
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+    r"(?:#(?P<num>\d+)"
+    r"|https?://\S+/issues/(?P<url_num>\d+)"
+    r"|(?P<repo>[\w.+-]+/[\w.+-]+)#(?P<repo_num>\d+))",
     re.IGNORECASE,
 )
 
 
-def _closing_keyword_for(body: str, issue_number: int) -> bool:
-    """True iff *body* contains a closing keyword referencing *issue_number*."""
+def _closing_keyword_for(body: str, issue_number: int, repo: str = "") -> bool:
+    """True iff *body* contains a closing keyword referencing *issue_number*.
+
+    Recognizes the three GitHub closing-reference forms: bare ``#N``,
+    a full URL ending in ``/issues/N``, and the ``owner/repo#N`` shorthand
+    (e.g. ``Fixes octo/widget#42``) GitHub accepts for cross-repo links.
+    For the ``owner/repo#N`` form the prefix must match *repo* (the issue's
+    own repository) so an unrelated cross-repo reference like
+    ``Fixes other/repo#42`` does not trip the duplicate guard on issue #42
+    of a different repository.
+    """
     for match in _CLOSING_KEYWORD_RE.finditer(body):
-        num = match.group(1) or match.group(2)
+        num = match.group("num") or match.group("url_num")
+        if not num and match.group("repo_num"):
+            # owner/repo#N — a fully-qualified cross-repo shorthand. Only
+            # count it when we know our own repo AND the prefix matches;
+            # without a repo context we cannot confirm it targets THIS
+            # issue, so skip it rather than risk a false positive on the
+            # duplicate-PR refuse gate.
+            if not repo or (match.group("repo") or "").lower() != repo.lower():
+                continue
+            num = match.group("repo_num")
         if num and int(num) == issue_number:
             return True
     return False
@@ -317,7 +338,7 @@ class GitHubClient:
                     # this issue number, so mere mentions don't trigger
                     # false-positive duplicate guards.
                     pr_body = src_issue.get("body") or ""
-                    if _closing_keyword_for(pr_body, number):
+                    if _closing_keyword_for(pr_body, number, repo):
                         linked.add(pr_number)
                 elif ev == "disconnected":
                     linked.discard(pr_number)

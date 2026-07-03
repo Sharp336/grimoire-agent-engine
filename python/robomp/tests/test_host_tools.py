@@ -4011,6 +4011,64 @@ def test_gh_post_reference_comment_refuses_with_unpushed_commits(
         _stop_loop(loop, t)
 
 
+def test_gh_post_reference_comment_refuses_with_uncommitted_changes(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OL1l7: gh_post_reference_comment must reject uncommitted
+    duplicate work too, not only unpushed commits — a clean worktree is
+    required before the terminal reference comment posts. Otherwise the
+    worker's dirty-state reminder routes the agent to gh_push_branch (no
+    duplicate guard) and the redundant edit ships."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=3, unpushed=0, summary="Uncommitted changes (3):\nM a.py"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "uncommitted change" in msg
+        assert "git clean -fd" in msg
+        # No comment must have reached GitHub.
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_gh_post_reference_comment_refuses_with_both_uncommitted_and_unpushed(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both uncommitted changes AND unpushed commits are reported together so
+    the agent knows the full scope of redundant work to discard."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=2, unpushed=1, summary="Uncommitted (2)\nUnpushed (1)"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "unpushed commit" in msg
+        assert "uncommitted change" in msg
+    finally:
+        _stop_loop(loop, t)
+
+
 def test_gh_open_pr_rechecks_duplicate_after_push(
     db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

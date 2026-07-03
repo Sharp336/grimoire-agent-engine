@@ -646,9 +646,10 @@ def _build_post_reference_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body = args.get("body")
         if not isinstance(body, str) or not body.strip():
             _raise_command("gh_post_reference_comment requires a non-empty 'body'.")
-        # Refuse if the worktree has unpushed commits. The duplicate-PR
-        # guard refuses gh_open_pr, so the agent reaches this terminal
-        # tool with a drafted fix still committed. If we let the comment
+        # Refuse unless the worktree is clean. The duplicate-PR guard
+        # refuses gh_open_pr, so the agent reaches this terminal tool
+        # with drafted duplicate work — either committed (unpushed) or
+        # still uncommitted in the working tree. If we let the comment
         # through, the worker's dirty-state reminder fires on the next
         # turn and routes the agent to gh_push_branch — which has no
         # duplicate guard and would publish the redundant branch. Force
@@ -661,14 +662,20 @@ def _build_post_reference_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
         except Exception:
             dirty = DirtyState(uncommitted=0, unpushed=0, summary="")
-        if dirty.unpushed > 0:
+        if dirty.unpushed > 0 or dirty.uncommitted > 0:
+            parts = []
+            if dirty.unpushed > 0:
+                parts.append(f"{dirty.unpushed} unpushed commit(s)")
+            if dirty.uncommitted > 0:
+                parts.append(f"{dirty.uncommitted} uncommitted change(s)")
+            dirty_desc = " and ".join(parts)
             msg = (
                 "refusing to post reference comment: the worktree has "
-                f"{dirty.unpushed} unpushed commit(s). The duplicate-PR guard "
-                f"refused `gh_open_pr`, so this commit is redundant work. Discard "
-                f"it first with "
-                f"`git reset --hard origin/{bindings.repo.default_branch}`, then "
-                "call `gh_post_reference_comment` again."
+                f"{dirty_desc}. The duplicate-PR guard refused `gh_open_pr`, "
+                "so this work is redundant. Discard it first with "
+                f"`git reset --hard origin/{bindings.repo.default_branch}`"
+                " (and `git clean -fd` for uncommitted files), then call "
+                "`gh_post_reference_comment` again."
             )
             _audit(bindings, "gh_post_reference_comment", args, error=msg)
             _raise_command(msg)

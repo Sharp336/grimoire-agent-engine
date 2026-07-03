@@ -7,7 +7,7 @@ import asyncio
 import httpx
 import pytest
 
-from robomp.github_client import GitHubClient, GitHubError
+from robomp.github_client import GitHubClient, GitHubError, _closing_keyword_for
 
 
 def _run_async(coro):
@@ -340,6 +340,75 @@ def test_list_closing_pull_requests_paginates_timeline() -> None:
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
     assert prs == (300,)
     assert 1 in pages and 2 in pages, "must have fetched both pages"
+
+
+def test_closing_keyword_recognizes_owner_repo_shorthand() -> None:
+    """PRRT_kwDOQxs0bc6OL1l6: the duplicate guard must recognize the
+    ``owner/repo#N`` closing-reference shorthand (e.g. ``Fixes octo/widget#42``)
+    GitHub accepts for cross-repo links, not just bare ``#N`` and URLs."""
+    assert _closing_keyword_for("Fixes octo/widget#42", 42, "octo/widget") is True
+    assert _closing_keyword_for("closes octo/widget#42", 42, "octo/widget") is True
+    assert _closing_keyword_for("Resolves octo/widget#42", 42, "octo/widget") is True
+    # Bare #N and URL forms still work.
+    assert _closing_keyword_for("Fixes #42", 42, "octo/widget") is True
+    assert _closing_keyword_for("Fixes https://github.com/octo/widget/issues/42", 42, "octo/widget") is True
+
+
+def test_closing_keyword_owner_repo_shorthand_ignores_other_repo() -> None:
+    """An ``owner/repo#N`` reference to a DIFFERENT repo must NOT trip the
+    duplicate guard on this issue number — otherwise ``Fixes other/repo#42``
+    would falsely block issue #42 of ``octo/widget``."""
+    assert _closing_keyword_for("Fixes other/repo#42", 42, "octo/widget") is False
+    # Without a repo context the shorthand form is not trusted (matches the
+    # bare-number behavior only for the legacy ``#N`` / URL forms).
+    assert _closing_keyword_for("Fixes octo/widget#42", 42) is False
+    # Wrong number → no match.
+    assert _closing_keyword_for("Fixes octo/widget#7", 42, "octo/widget") is False
+
+
+def test_list_closing_pull_requests_recognizes_owner_repo_shorthand_cross_ref() -> None:
+    """A cross-referenced PR whose body uses ``Fixes octo/widget#42`` is
+    included as a closing PR when the timeline repo matches the prefix."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 600,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                }
+            },
+        },
+    ]
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=timeline)))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert prs == (600,)
+
+
+def test_list_closing_pull_requests_ignores_cross_repo_owner_repo_reference() -> None:
+    """A cross-referenced PR whose body references a DIFFERENT repo via
+    ``Fixes other/repo#42`` must NOT be treated as closing issue #42 of
+    ``octo/widget``."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 700,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes other/repo#42",
+                }
+            },
+        },
+    ]
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=timeline)))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
+    assert prs == ()
 
 
 def test_list_comment_reactions_filters_to_thumbs_down() -> None:
