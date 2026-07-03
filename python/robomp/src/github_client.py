@@ -79,6 +79,20 @@ class PullRequestFileInfo:
 
 
 @dataclass(slots=True, frozen=True)
+class LinkedPullRequest:
+    """A PR linked to an issue via closing keywords or the Development panel.
+
+    Carries the PR's own source repo and html_url so cross-repo linked PRs
+    can be reported with their full identity (``owner/repo#N``) rather than
+    a bare ``#N`` that is ambiguous across repositories.
+    """
+
+    repo: str
+    number: int
+    html_url: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class ReviewCommentInfo:
     """In-line PR review comment (attached to a file/line)."""
 
@@ -325,8 +339,10 @@ class GitHubClient:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}")
         return _issue_from_payload(repo, data)
 
-    async def list_closing_pull_requests(self, repo: str, number: int, *, default_branch: str = "") -> tuple[int, ...]:
-        """Return PR numbers currently linked to issue ``number`` via "Closes"/"Fixes"
+    async def list_closing_pull_requests(
+        self, repo: str, number: int, *, default_branch: str = ""
+    ) -> tuple[LinkedPullRequest, ...]:
+        """Return PRs currently linked to issue ``number`` via "Closes"/"Fixes"
         keywords or the Development panel.
 
         Walks ``GET /repos/{repo}/issues/{N}/timeline`` and computes net
@@ -340,20 +356,30 @@ class GitHubClient:
 
         When *default_branch* is provided, cross-referenced PRs whose body
         contains a closing keyword are additionally verified to target the
-        default branch — a same-repo PR targeting a feature branch does
-        not block the guard. Cross-repo PRs (verified via the
-        ``owner/repo#N`` prefix) are not base-ref-checked because their
-        base belongs to a different repository. PRs whose base ref cannot
-        be fetched are skipped (fail open) so a GitHub hiccup doesn't
-        block a legitimate PR.
+        default branch of their **own** repository:
+
+        - A **same-repo** PR targeting a feature branch does not block the
+          guard.
+        - A **cross-repo** PR (``source_repo`` differs from *repo*) is
+          fetched from its own source repository and its base ref is
+          compared against that repo's default branch. This prevents a
+          cross-repo PR targeting a feature branch from blocking a valid
+          fix. PRs whose base ref or default branch cannot be fetched are
+          skipped (fail open) so a GitHub hiccup doesn't block a legitimate
+          PR.
 
         The timeline is paginated (``per_page=100``) because by the time the
         duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
         well over 100 events (comments, commits, cross-refs); a ``connected``
         or ``cross-referenced`` link can land on any page.
         """
-        linked: set[int] = set()
-        states: dict[int, str] = {}
+        # Keyed by (repo, number) so two repos' PRs sharing a number
+        # don't collide.
+        linked: dict[tuple[str, int], LinkedPullRequest] = {}
+        states: dict[tuple[str, int], str] = {}
+        # Cache source_repo → default_branch to avoid re-fetching across
+        # multiple cross-repo cross-refs from the same source repo.
+        source_defaults: dict[str, str] = {}
         page = 1
         while True:
             data = await self.request(
@@ -373,9 +399,12 @@ class GitHubClient:
                 pr_number = src_issue.get("number")
                 if not isinstance(pr_number, int):
                     continue
-                states[pr_number] = str(src_issue.get("state") or "open")
+                source_repo = _repo_from_url(src_issue.get("repository_url")) or repo
+                key = (source_repo, pr_number)
+                states[key] = str(src_issue.get("state") or "open")
+                html_url = str(src_issue.get("html_url") or "")
                 if ev == "connected":
-                    linked.add(pr_number)
+                    linked[key] = LinkedPullRequest(repo=source_repo, number=pr_number, html_url=html_url)
                 elif ev == "cross-referenced":
                     # GitHub exposes ``Fixes #N`` / ``Closes #N`` PR-body links
                     # as ``cross-referenced`` events, not always as
@@ -384,24 +413,49 @@ class GitHubClient:
                     # this issue number, so mere mentions don't trigger
                     # false-positive duplicate guards.
                     pr_body = src_issue.get("body") or ""
-                    source_repo = _repo_from_url(src_issue.get("repository_url"))
                     if not _closing_keyword_for(pr_body, number, repo, source_repo=source_repo):
                         continue
-                    if default_branch and (not source_repo or source_repo.lower() == repo.lower()):
-                        # Same-repo PR: verify it targets the default
-                        # branch — a PR targeting a feature branch should
-                        # not block the guard. Fail open on fetch errors.
-                        try:
-                            pr_info = await self.get_pull_request(repo, pr_number)
-                        except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
-                            continue
-                        if pr_info.base_ref != default_branch:
-                            continue
-                    linked.add(pr_number)
+                    if default_branch:
+                        if source_repo.lower() == repo.lower():
+                            # Same-repo PR: verify it targets the default
+                            # branch — a PR targeting a feature branch should
+                            # not block the guard. Fail open on fetch errors.
+                            try:
+                                pr_info = await self.get_pull_request(repo, pr_number)
+                            except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
+                                continue
+                            if pr_info.base_ref != default_branch:
+                                continue
+                        else:
+                            # Cross-repo PR: verify it targets the default
+                            # branch of its OWN source repo. Fetch the
+                            # source repo's default branch (cached) and the
+                            # PR from the source repo. Fail open on any
+                            # fetch error so a GitHub hiccup or an
+                            # inaccessible private repo doesn't block a
+                            # valid fix.
+                            try:
+                                src_default = source_defaults.get(source_repo)
+                                if src_default is None:
+                                    src_repo_info = await self.get_repo(source_repo)
+                                    src_default = src_repo_info.default_branch
+                                    source_defaults[source_repo] = src_default
+                                pr_info = await self.get_pull_request(source_repo, pr_number)
+                            except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
+                                continue
+                            if pr_info.base_ref != src_default:
+                                continue
+                            html_url = pr_info.html_url or html_url
+                    linked[key] = LinkedPullRequest(repo=source_repo, number=pr_number, html_url=html_url)
                 elif ev == "disconnected":
-                    linked.discard(pr_number)
+                    linked.pop(key, None)
             if len(batch) < 100:
-                return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
+                return tuple(
+                    sorted(
+                        (v for k, v in linked.items() if states.get(k, "open") == "open"),
+                        key=lambda lpr: (lpr.repo, lpr.number),
+                    )
+                )
             page += 1
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
@@ -752,6 +806,7 @@ __all__ = [
     "GitHubError",
     "IssueInfo",
     "IssueSummary",
+    "LinkedPullRequest",
     "PullRequestFileInfo",
     "PullRequestInfo",
     "PullRequestReviewInfo",

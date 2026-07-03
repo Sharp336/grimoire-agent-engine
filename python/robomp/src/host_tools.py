@@ -1052,9 +1052,20 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
     duplicates = tuple(closing_prs)
     if not duplicates:
         return
+    # Format each duplicate with its source repo so cross-repo linked PRs
+    # are reported as ``owner/repo#N`` (or a clickable URL) rather than a
+    # bare ``#N`` that is ambiguous across repositories.
+    pr_labels: list[str] = []
+    for lpr in duplicates:
+        if lpr.html_url:
+            pr_labels.append(lpr.html_url)
+        elif lpr.repo and lpr.repo.lower() != bindings.repo.full_name.lower():
+            pr_labels.append(f"{lpr.repo}#{lpr.number}")
+        else:
+            pr_labels.append(f"#{lpr.number}")
     msg = (
         f"refusing to open PR: issue #{bindings.issue.number} is already linked to "
-        f"open PR(s) {', '.join(f'#{p}' for p in duplicates)} via Closes/Fixes/Resolves "
+        f"open PR(s) {', '.join(pr_labels)} via Closes/Fixes/Resolves "
         "or the Development panel. Do NOT open a duplicate PR. First discard your "
         f"unpushed commit (`git reset --hard origin/{bindings.repo.default_branch}`) so the "
         "worktree is clean, then call `gh_post_reference_comment` with a body referencing "

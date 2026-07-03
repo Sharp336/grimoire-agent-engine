@@ -3641,13 +3641,13 @@ def _timeline_handler(
                             "number": pr,
                             "state": "open",
                             "pull_request": {},
+                            "html_url": f"https://github.com/octo/widget/pull/{pr}",
                         }
                     },
                 }
                 for pr in closing_prs
             ]
             return httpx.Response(200, json=events)
-        # get_pull_request: GET /repos/{repo}/pulls/{n} — only handle when
         # the test explicitly expects this call path.
         if recorded_pr_state is not None and request.method == "GET" and "/pulls/" in url:
             pr_num = int(url.rsplit("/", 1)[-1])
@@ -3692,7 +3692,7 @@ def test_gh_open_pr_refuses_when_closing_pr_exists(db: Database, tmp_path: Path)
 
     msg = str(exc.value)
     assert "refusing to open PR" in msg
-    assert "#77" in msg
+    assert "https://github.com/octo/widget/pull/77" in msg
     assert "already linked to open PR" in msg
     assert "gh_post_reference_comment" in msg
     assert "`gh_post_comment`" not in msg

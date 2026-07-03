@@ -7,11 +7,16 @@ import asyncio
 import httpx
 import pytest
 
-from robomp.github_client import GitHubClient, GitHubError, _closing_keyword_for
+from robomp.github_client import GitHubClient, GitHubError, LinkedPullRequest, _closing_keyword_for
 
 
 def _run_async(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _pr_nums(prs: tuple[LinkedPullRequest, ...]) -> tuple[tuple[str, int], ...]:
+    """Extract (repo, number) tuples from LinkedPullRequest results for assertions."""
+    return tuple((p.repo, p.number) for p in prs)
 
 
 def test_4xx_maps_to_github_error_with_message() -> None:
@@ -293,7 +298,7 @@ def test_list_closing_pull_requests_filters_disconnected_and_closed() -> None:
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (100, 400)
+    assert _pr_nums(prs) == (("octo/widget", 100), ("octo/widget", 400))
     assert captured["path"] == "/repos/octo/widget/issues/42/timeline"
     assert captured["per_page"] == "100"
 
@@ -338,7 +343,7 @@ def test_list_closing_pull_requests_paginates_timeline() -> None:
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (300,)
+    assert _pr_nums(prs) == (("octo/widget", 300),)
     assert 1 in pages and 2 in pages, "must have fetched both pages"
 
 
@@ -385,7 +390,7 @@ def test_list_closing_pull_requests_recognizes_owner_repo_shorthand_cross_ref() 
 
     client = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=timeline)))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (600,)
+    assert _pr_nums(prs) == (("octo/widget", 600),)
 
 
 def test_list_closing_pull_requests_ignores_cross_repo_owner_repo_reference() -> None:
@@ -463,7 +468,7 @@ def test_list_closing_pull_requests_recognizes_colon_form_cross_ref() -> None:
 
     client = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=timeline)))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (800,)
+    assert _pr_nums(prs) == (("octo/widget", 800),)
 
 
 # ---------- PRRT_kwDOQxs0bc6OM0Hq: cross-repo bare/URL references ----------
@@ -628,7 +633,7 @@ def test_list_closing_pull_requests_includes_cross_ref_pr_targeting_default_bran
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
-    assert prs == (77,)
+    assert _pr_nums(prs) == (("octo/widget", 77),)
 
 
 def test_list_closing_pull_requests_base_ref_fail_open_on_fetch_error() -> None:
@@ -705,8 +710,288 @@ def test_list_closing_pull_requests_no_default_branch_skips_base_ref_check() -> 
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     prs = _run_async(client.list_closing_pull_requests("octo/widget", 42))
-    assert prs == (77,)
+    assert _pr_nums(prs) == (("octo/widget", 77),)
     assert not pr_fetched, "PR must not be fetched when default_branch is empty"
+
+
+# ---------- PRRT_kwDOQxs0bc6ON_2F: cross-repo base-ref verification ----------
+
+
+def test_list_closing_pull_requests_includes_cross_repo_pr_targeting_source_default_branch() -> None:
+    """PRRT_kwDOQxs0bc6ON_2F: a cross-referenced cross-repo PR whose body
+    contains a closing keyword (``Fixes octo/widget#42``) must be verified
+    against its OWN source repo's default branch, not the issue repo's.
+    When it targets the source repo's default, it is included."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 55,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=timeline)
+        # get_repo for source repo
+        if url == "https://api.github.com/repos/other/repo" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "full_name": "other/repo",
+                    "default_branch": "trunk",
+                    "clone_url": "https://github.com/other/repo.git",
+                    "private": False,
+                },
+            )
+        # get_pull_request from source repo
+        if "/repos/other/repo/pulls/55" in url and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 55,
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "state": "open",
+                    "head": {"ref": "feature/fix", "repo": {"full_name": "other/repo"}},
+                    "base": {"ref": "trunk"},
+                    "user": {"login": "bob"},
+                    "title": "fix: cross-repo",
+                    "body": "Fixes octo/widget#42",
+                },
+            )
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
+    assert _pr_nums(prs) == (("other/repo", 55),)
+    # html_url must be preserved from the PR fetch for cross-repo messaging.
+    assert prs[0].html_url == "https://github.com/other/repo/pull/55"
+
+
+def test_list_closing_pull_requests_skips_cross_repo_pr_not_targeting_source_default_branch() -> None:
+    """PRRT_kwDOQxs0bc6ON_2F: a cross-referenced cross-repo PR that targets
+    a feature branch in its OWN source repo must NOT block the guard."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 55,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=timeline)
+        if url == "https://api.github.com/repos/other/repo" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "full_name": "other/repo",
+                    "default_branch": "trunk",
+                    "clone_url": "https://github.com/other/repo.git",
+                    "private": False,
+                },
+            )
+        if "/repos/other/repo/pulls/55" in url and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 55,
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "state": "open",
+                    "head": {"ref": "feature/fix", "repo": {"full_name": "other/repo"}},
+                    "base": {"ref": "develop"},
+                    "user": {"login": "bob"},
+                    "title": "fix: cross-repo",
+                    "body": "Fixes octo/widget#42",
+                },
+            )
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
+    assert _pr_nums(prs) == ()
+
+
+def test_list_closing_pull_requests_cross_repo_pr_fail_open_on_repo_fetch_error() -> None:
+    """PRRT_kwDOQxs0bc6ON_2F: when the source repo fetch fails (e.g. private
+    repo, 404), the cross-repo PR is skipped (fail open) rather than blocking."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 55,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=timeline)
+        if url == "https://api.github.com/repos/other/repo" and request.method == "GET":
+            return httpx.Response(404, json={"message": "not found"})
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
+    assert _pr_nums(prs) == ()
+
+
+def test_list_closing_pull_requests_cross_repo_pr_fail_open_on_pr_fetch_error() -> None:
+    """PRRT_kwDOQxs0bc6ON_2F: when the cross-repo PR fetch fails, the guard
+    must fail open (skip the PR) rather than blocking."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 55,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=timeline)
+        if url == "https://api.github.com/repos/other/repo" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "full_name": "other/repo",
+                    "default_branch": "trunk",
+                    "clone_url": "https://github.com/other/repo.git",
+                    "private": False,
+                },
+            )
+        if "/repos/other/repo/pulls/55" in url and request.method == "GET":
+            return httpx.Response(500, json={"message": "server error"})
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
+    assert _pr_nums(prs) == ()
+
+
+def test_list_closing_pull_requests_cross_repo_pr_caches_source_default_branch() -> None:
+    """PRRT_kwDOQxs0bc6ON_2F: when multiple cross-repo PRs share the same
+    source repo, the source repo's default branch is fetched only once."""
+    timeline = [
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 55,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+        {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 56,
+                    "state": "open",
+                    "pull_request": {"url": "..."},
+                    "body": "Fixes octo/widget#42",
+                    "html_url": "https://github.com/other/repo/pull/56",
+                    "repository_url": "https://api.github.com/repos/other/repo",
+                }
+            },
+        },
+    ]
+
+    repo_fetch_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal repo_fetch_count
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=timeline)
+        if url == "https://api.github.com/repos/other/repo" and request.method == "GET":
+            repo_fetch_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "full_name": "other/repo",
+                    "default_branch": "trunk",
+                    "clone_url": "https://github.com/other/repo.git",
+                    "private": False,
+                },
+            )
+        if "/repos/other/repo/pulls/55" in url and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 55,
+                    "html_url": "https://github.com/other/repo/pull/55",
+                    "state": "open",
+                    "head": {"ref": "feature/fix", "repo": {"full_name": "other/repo"}},
+                    "base": {"ref": "trunk"},
+                    "user": {"login": "bob"},
+                    "title": "fix: cross-repo 55",
+                    "body": "Fixes octo/widget#42",
+                },
+            )
+        if "/repos/other/repo/pulls/56" in url and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 56,
+                    "html_url": "https://github.com/other/repo/pull/56",
+                    "state": "open",
+                    "head": {"ref": "feature/fix2", "repo": {"full_name": "other/repo"}},
+                    "base": {"ref": "trunk"},
+                    "user": {"login": "bob"},
+                    "title": "fix: cross-repo 56",
+                    "body": "Fixes octo/widget#42",
+                },
+            )
+        return httpx.Response(404, json={"message": "not found"})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    prs = _run_async(client.list_closing_pull_requests("octo/widget", 42, default_branch="main"))
+    assert _pr_nums(prs) == (
+        ("other/repo", 55),
+        ("other/repo", 56),
+    )
+    assert repo_fetch_count == 1, "source repo default branch must be cached"
 
 
 def test_list_comment_reactions_filters_to_thumbs_down() -> None:

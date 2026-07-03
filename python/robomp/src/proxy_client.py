@@ -27,6 +27,7 @@ from robomp.github_client import (
     GitHubError,
     IssueInfo,
     IssueSummary,
+    LinkedPullRequest,
     PullRequestFileInfo,
     PullRequestInfo,
     PullRequestReviewInfo,
@@ -173,14 +174,16 @@ class GitHubProxyClient:
         data = await self._request("GET", "/gh/v1/issue", params={"repo": repo, "number": number})
         return _issue_from(data)
 
-    async def list_closing_pull_requests(self, repo: str, number: int, *, default_branch: str = "") -> tuple[int, ...]:
+    async def list_closing_pull_requests(
+        self, repo: str, number: int, *, default_branch: str = ""
+    ) -> tuple[LinkedPullRequest, ...]:
         data = await self._request(
             "GET",
             "/gh/v1/closing_prs",
             params={"repo": repo, "number": number, "default_branch": default_branch},
         )
-        items = data.get("pr_numbers") if isinstance(data, dict) else None
-        return tuple(int(n) for n in items or () if isinstance(n, int))
+        items = data.get("closing_prs") if isinstance(data, dict) else None
+        return tuple(_linked_pr_from(item) for item in items or () if isinstance(item, dict))
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self._request("GET", "/gh/v1/pull_request", params={"repo": repo, "number": number})
@@ -469,6 +472,16 @@ def _repo_from(data: Any) -> RepoInfo:
         default_branch=str(data["default_branch"]),
         clone_url=str(data["clone_url"]),
         private=bool(data.get("private", False)),
+    )
+
+
+def _linked_pr_from(data: object) -> LinkedPullRequest:
+    if not isinstance(data, dict):
+        raise GitHubError(500, "proxy returned malformed closing-pr payload")
+    return LinkedPullRequest(
+        repo=str(data["repo"]),
+        number=int(data["number"]),
+        html_url=str(data.get("html_url") or ""),
     )
 
 
