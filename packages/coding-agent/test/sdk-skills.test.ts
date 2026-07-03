@@ -335,4 +335,39 @@ This is a test skill.
 		// charge them.
 		expect(session.promptSkills).toEqual([]);
 	});
+
+	it("preserves promptSkills when function override keeps default prompt with empty-description skills", async () => {
+		// Create a skill with an empty description to trigger the post-format
+		// difference: renderSkillsBlock produces "- name: " (trailing space)
+		// but prompt.format trims it to "- name:" (no trailing space). Without
+		// applying prompt.format to the generated block, the includes() check
+		// would fail and promptSkills would be incorrectly cleared.
+		const emptyDescSkillDir = path.join(tempDir, ".omp", "skills", "empty-desc-skill");
+		fs.mkdirSync(emptyDescSkillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(emptyDescSkillDir, "SKILL.md"),
+			`---
+name: empty-desc-skill
+description: ""
+---
+
+# Empty Desc Skill
+`,
+		);
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+			systemPrompt: (defaultPrompt: string[]) => [...defaultPrompt],
+		});
+
+		// The function override returns the default prompt unchanged (which
+		// includes the formatted skills block). promptSkills must be preserved
+		// because the provider receives the default skills block.
+		expect(session.skills.length).toBeGreaterThan(0);
+		expect(session.promptSkills.length).toBeGreaterThan(0);
+	});
 });

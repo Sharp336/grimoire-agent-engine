@@ -1567,6 +1567,17 @@ export class AgentSession {
 		buildVersion: number;
 		result: BuildSystemPromptResult;
 		toolSignature: string;
+		/** Model key (provider/id via #currentPromptModelKey) captured when the
+		 * build was buffered. A model switch between buffering and reapply
+		 * invalidates the buffered prompt — applying a model-A prompt while
+		 * this.model is already B would stamp the prompt model key as B and
+		 * skip future model-sync rebuilds, leaving the provider with the
+		 * wrong model text or redaction budget. */
+		modelKey: string | undefined;
+		/** Context window captured when the build was buffered. A model switch
+		 * that changes the context window (and thus the redaction budget)
+		 * invalidates the buffered prompt. */
+		modelContextWindow: number | null | undefined;
 	};
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
@@ -2197,6 +2208,17 @@ export class AgentSession {
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptModelContextWindow = this.model?.contextWindow;
 		this.#promptSkills = config.initialPromptSkills ?? this.#skills.filter(skill => skill.hide !== true);
+		// When resuming an existing session (--continue/auto-resume), the
+		// constructor seeds the redacted initialPromptSkills but switchSession()
+		// is never called for that path. The restored branch's latest usage
+		// anchor may predate the redaction refresh that shrank the prompt, so
+		// mark the prompt as rebased to prevent /context and pre-prompt
+		// compaction from clamping the now-negative non-message delta to zero
+		// until a fresh usage-bearing response lands. A new session has an
+		// empty branch, so the flag is harmless (no prior anchor to rebase).
+		if (config.initialPromptSkills && this.sessionManager.getBranch().length > 0) {
+			this.#promptRebasedSinceLastAnchor = true;
+		}
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
@@ -6338,6 +6360,13 @@ export class AgentSession {
 			const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 			if (signature !== this.#lastAppliedToolSignature) {
 				const buildVersion = ++this.#promptBuildVersion;
+				// Capture the model key/context window BEFORE the async build —
+				// a concurrent model switch can change this.model during the await,
+				// and the buffered build must remember which model it was built for
+				// so #applyPendingSuccessfulBuild can reject it if the model has
+				// changed by the time the newer rebuild throws and rolls back.
+				const buildModelKey = this.#currentPromptModelKey();
+				const buildModelContextWindow = this.model?.contextWindow;
 				let built: BuildSystemPromptResult;
 				try {
 					built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
@@ -6371,7 +6400,13 @@ export class AgentSession {
 					// build that invalidated this one throws and rolls back
 					// #promptBuildVersion, this result is re-applied so the prompt
 					// reflects the new tool set rather than staying stale.
-					this.#pendingSuccessfulBuild = { buildVersion, result: built, toolSignature: signature };
+					this.#pendingSuccessfulBuild = {
+						buildVersion,
+						result: built,
+						toolSignature: signature,
+						modelKey: buildModelKey,
+						modelContextWindow: buildModelContextWindow,
+					};
 					// Still persist the MCP tool selection — setTools() above
 					// changed the live tool set, and failing to record it means
 					// switching/resuming the session can silently lose the
@@ -6502,7 +6537,20 @@ export class AgentSession {
 		// #promptBuildVersion does not cover this because the redaction signal
 		// handler deliberately does NOT increment it (to avoid invalidating an
 		// in-flight tool rebuild whose result is still valid).
-		if (expectedEpoch !== undefined && expectedEpoch !== this.#redactionRefreshEpoch) return;
+		if (expectedEpoch !== undefined && expectedEpoch !== this.#redactionRefreshEpoch) {
+			// A newer redaction signal fired during the await, so this stale
+			// rebuild must not apply. Roll back the build version that was
+			// incremented at the start of this call — without rolling back, a
+			// tool activation buffered behind this stale refresh would see a
+			// version mismatch after the queued newer refresh throws and rolls
+			// back, skipping the buffered tool prompt and leaving tools changed
+			// while the system prompt advertises the old inventory.
+			if (this.#promptBuildVersion === buildVersion) {
+				this.#promptBuildVersion = buildVersion - 1;
+				this.#applyPendingSuccessfulBuild();
+			}
+			return;
+		}
 		this.#applyBuiltPrompt(built);
 	}
 
@@ -6665,6 +6713,14 @@ export class AgentSession {
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
 		if (this.#computeAppliedToolSignature(activeToolNames, activeTools) !== pending.toolSignature) return;
+		// Verify the model hasn't changed since the buffered build — if it has,
+		// the buffered prompt was built for a different model (different model
+		// text, redaction budget, or context window) and must not be applied.
+		// Applying it would stamp #promptModelKey/#promptModelContextWindow as
+		// the current model's via #applyBuiltPrompt, causing future model-sync
+		// checks to skip the rebuild and leave the provider with the wrong prompt.
+		if (this.#currentPromptModelKey() !== pending.modelKey) return;
+		if (this.model?.contextWindow !== pending.modelContextWindow) return;
 		this.#applyBuiltPrompt(pending.result, pending.toolSignature);
 	}
 

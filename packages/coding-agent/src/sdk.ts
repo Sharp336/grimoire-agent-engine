@@ -2326,7 +2326,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					return { systemPrompt: customPromptParts, promptSkills: [] };
 				}
 				const renderFormat = options.customSystemPrompt ? "custom" : "default";
-				const generatedSkillsBlock = renderSkillsBlock(promptSkills, renderFormat);
+				const generatedSkillsBlock = prompt.format(renderSkillsBlock(promptSkills, renderFormat));
 				const keepsDefaultSkills = customPromptParts.some(part => part.includes(generatedSkillsBlock));
 				return {
 					systemPrompt: customPromptParts,

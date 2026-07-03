@@ -2456,3 +2456,370 @@ describe("AgentSession discarded tool rebuild re-applied when newer refresh thro
 		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
 	});
 });
+
+describe("AgentSession cold-start rebase for resumed redacted sessions", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cold-rebase-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("marks promptRebasedSinceLastAnchor when cold-starting with redacted initialPromptSkills and existing branch", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const longSkill: Skill = {
+			name: "verbose-skill",
+			description: "This is a very long description. It has multiple sentences. Each one adds tokens.",
+			filePath: "/path/to/verbose",
+			baseDir: "/path/to",
+			source: "test",
+		};
+		const redactedLong: Skill = { ...longSkill, description: "This is a very long description." };
+
+		const smallPrompt = ["You are a helpful assistant."];
+
+		// Use an in-memory session manager and pre-populate the branch so
+		// the constructor sees getBranch().length > 0 (simulates
+		// --continue/auto-resume startup, which does NOT call switchSession).
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: smallPrompt, tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			skills: [longSkill],
+			initialPromptSkills: [redactedLong],
+			rebuildSystemPrompt: async () => ({ systemPrompt: smallPrompt, promptSkills: [redactedLong] }),
+		});
+
+		// Seed a durable anchor with nonMessageTokens larger than the
+		// current (small/redacted) prompt, simulating a prior provider
+		// response that billed the old unredacted prompt.
+		const smallNonMessageTokens = computeNonMessageTokens(session);
+		const largeNonMessageTokens = smallNonMessageTokens + 500;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: 1000,
+		};
+		sessionManager.appendMessage(assistantMessage);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		// The rebase flag must be set at construction time (before any
+		// refreshBaseSystemPrompt or switchSession call) so /context does
+		// not clamp the negative non-message delta to zero for the resumed
+		// session's old usage anchor. With the flag set, usedTokens must
+		// be below the old anchor's promptTokens (100), reflecting the
+		// smaller redacted prompt instead of clamping to the stale anchor.
+		const breakdown = session.getContextBreakdown();
+		expect(breakdown?.anchored).toBe(true);
+		expect(breakdown?.usedTokens ?? 0).toBeLessThan(100);
+	});
+
+	it("does not mark rebase for a new session with empty branch", () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const skill: Skill = {
+			name: "test-skill",
+			description: "Brief.",
+			filePath: "/path/to",
+			baseDir: "/path",
+			source: "test",
+		};
+
+		// In-memory session manager has an empty branch → new session.
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			skills: [skill],
+			initialPromptSkills: [skill],
+			rebuildSystemPrompt: async () => ({ systemPrompt: ["rebuilt"], promptSkills: [skill] }),
+		});
+
+		// New session: promptSkills is seeded but rebase flag should not
+		// matter (no prior anchor). Verify promptSkills is correct.
+		expect(session.promptSkills.length).toBe(1);
+		expect(session.promptSkills[0].description).toBe("Brief.");
+	});
+});
+
+describe("AgentSession buffered build validates model before reapply", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-buffered-model-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("does not reapply buffered tool build when model has changed since discard", async () => {
+		const all = modelRegistry.getAll();
+		const modelA = all[0];
+		if (!modelA) throw new Error("Expected at least one model");
+		// Pick a model B with a different context window to ensure the
+		// model validation catches the change.
+		const modelB = all.find(
+			m => (m.provider !== modelA.provider || m.id !== modelA.id) && m.contextWindow !== modelA.contextWindow,
+		) ?? { ...modelA, id: `${modelA.id}-wide`, contextWindow: (modelA.contextWindow ?? 128000) * 2 };
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		const mcpTool = {
+			name: "mcp__test__tool",
+			label: "Test MCP Tool",
+			description: "A test MCP tool",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpTool>([["mcp__test__tool", mcpTool]]);
+
+		let rebuildCount = 0;
+		let resolveToolRebuild: (() => void) | undefined;
+		let resolveModelRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: true });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: modelA, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// Tool rebuild under model A — slow, succeeds.
+					const blocker = Promise.withResolvers<void>();
+					resolveToolRebuild = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["tool-result-model-a"] };
+				}
+				if (current === 2) {
+					// Model-switch rebuild for model B — also slow, then throws.
+					// Must be blocked so the tool rebuild can complete and
+					// buffer first (version 1≠2).
+					const blocker = Promise.withResolvers<void>();
+					resolveModelRebuild = blocker.resolve;
+					await blocker.promise;
+					throw new Error("model B rebuild failure");
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start a slow tool rebuild under model A (build version 1).
+		const setActivePromise = session.setActiveToolsByName(["mcp__test__tool"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+
+		// While the tool rebuild is pending, switch to model B without
+		// awaiting. This triggers #syncAfterModelChange → refreshBaseSystemPrompt
+		// (build version 2), which is also blocked.
+		const setModelPromise = session.setModel(modelB);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+
+		// Resolve the tool rebuild first — it sees version 1≠2 and buffers
+		// itself with model A's key/context window.
+		resolveToolRebuild?.();
+		await flushMicrotasks();
+
+		// Now resolve the model-switch rebuild — it throws, rolls back
+		// build version to 1, and calls #applyPendingSuccessfulBuild.
+		// The pending build has version 1===1 and tool signature matches,
+		// but the model has changed from A to B → must NOT apply.
+		resolveModelRebuild?.();
+		await expect(setModelPromise).rejects.toThrow("model B rebuild failure");
+		await setActivePromise;
+
+		// The buffered model-A prompt must NOT be the active prompt.
+		// The prompt stays at "initial" because the model check rejected
+		// the stale buffered build.
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+	});
+});
+
+describe("AgentSession stale redaction epoch rolls back build version", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-epoch-rollback-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("rolls back build version when stale redaction epoch exits, so buffered tool build can reapply", async () => {
+		const [model] = modelRegistry.getAll();
+		if (!model) throw new Error("Expected at least one model");
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const mcpTool = {
+			name: "mcp__test__tool",
+			label: "Test MCP Tool",
+			description: "A test MCP tool",
+			parameters: { type: "object" as const, properties: {} },
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, typeof mcpTool>([["mcp__test__tool", mcpTool]]);
+
+		let rebuildCount = 0;
+		let resolveToolRebuild: (() => void) | undefined;
+		let resolveStaleRefresh: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async () => {
+				rebuildCount++;
+				const current = rebuildCount;
+				if (current === 1) {
+					// Tool rebuild — slow, succeeds with the new tool set.
+					const blocker = Promise.withResolvers<void>();
+					resolveToolRebuild = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["tool-result"] };
+				}
+				if (current === 2) {
+					// First redaction refresh (stale epoch) — slow, will be
+					// superseded by a second redaction signal before it finishes.
+					const blocker = Promise.withResolvers<void>();
+					resolveStaleRefresh = blocker.resolve;
+					await blocker.promise;
+					return { systemPrompt: ["stale-refresh-result"] };
+				}
+				if (current === 3) {
+					// Second redaction refresh (newer epoch) — throws.
+					throw new Error("newer refresh failure");
+				}
+				return { systemPrompt: [`result-${current}`] };
+			},
+		});
+
+		// Start a slow tool rebuild (build version 1).
+		const setActivePromise = session.setActiveToolsByName(["mcp__test__tool"]);
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+
+		// While the tool rebuild is pending, fire a redaction signal.
+		// This starts a serialized refreshBaseSystemPrompt (build version 2).
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(2);
+
+		// While the first redaction refresh is still pending, fire a
+		// second redaction signal. This bumps the epoch but the first
+		// refresh is still awaiting (build version 2).
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		await flushMicrotasks();
+		// The second signal queues a newer refresh on the serialized chain.
+		// It hasn't started yet (rebuild count still 2) because the first
+		// refresh is still pending.
+		expect(rebuildCount).toBe(2);
+
+		// Resolve the first (stale) redaction refresh. It checks the epoch,
+		// sees a newer signal fired, and exits without applying. Without
+		// the fix, it would NOT roll back build version 2, leaving it
+		// incremented. The tool rebuild (version 1) would then be buffered
+		// with version 1≠2.
+		resolveStaleRefresh?.();
+		await flushMicrotasks();
+
+		// The second (newer) redaction refresh now runs (build version 3)
+		// and throws. The catch rolls back to version 2. Without the fix,
+		// version 2 was never rolled back by the stale exit, so the
+		// rollback lands on 2, and #applyPendingSuccessfulBuild checks
+		// version 1≠2 → skips the buffered tool build.
+		// With the fix, the stale exit rolled back to 1, then the newer
+		// refresh incremented to 2 and threw, rolling back to 1 again.
+		// The buffered tool build (version 1===1) can now reapply.
+		expect(rebuildCount).toBe(3);
+
+		// Resolve the tool rebuild — it should see version 1===1 and apply.
+		resolveToolRebuild?.();
+		await setActivePromise;
+
+		// The tool rebuild's result must be the active prompt.
+		expect(session.agent.state.systemPrompt).toEqual(["tool-result"]);
+	});
+});
