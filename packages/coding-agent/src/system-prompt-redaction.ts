@@ -56,6 +56,8 @@ function applyCapMode(skills: Skill[], contextWindow: number, maxContextShare: n
 	const budgetTokens = Math.max(1, Math.floor(contextWindow * maxContextShare));
 	const redacted = skills.map(skill => ({ skill, sentences: splitSentences(skill.description) }));
 
+	// Phase 1: pop sentences from the longest multi-sentence descriptions until
+	// the rendered block fits the token budget.
 	while (estimateRenderedSkillsTokens(redacted) > budgetTokens) {
 		let longestIndex = -1;
 		let longestLength = -1;
@@ -71,6 +73,19 @@ function applyCapMode(skills: Skill[], contextWindow: number, maxContextShare: n
 
 		if (longestIndex < 0) break;
 		redacted[longestIndex]?.sentences.pop();
+	}
+
+	// Phase 2: if still over budget (every remaining entry is ≤1 sentence), trim
+	// each description's text down to a residual per-entry char budget. Skill
+	// names are never touched — only the description text is shortened, so the
+	// entry list and names always survive even when the budget is unsplittable.
+	if (estimateRenderedSkillsTokens(redacted) > budgetTokens) {
+		const residualCharBudget = Math.max(0, Math.floor((budgetTokens * 4) / skills.length));
+		for (const entry of redacted) {
+			const text = entry.sentences.join(" ");
+			const trimmed = trimDescriptionToBudget(text, residualCharBudget);
+			entry.sentences = trimmed ? [trimmed] : [];
+		}
 	}
 
 	return redacted.map(({ skill, sentences }) => {

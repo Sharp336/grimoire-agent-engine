@@ -271,6 +271,7 @@ import {
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
+import type { BuildSystemPromptResult } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -709,7 +710,7 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. Returns ordered provider-facing blocks. */
-	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<BuildSystemPromptResult>;
 	/** Rebuild the SSH tool from current capability discovery results. */
 	reloadSshTool?: () => Promise<AgentTool | null>;
 	requestedToolNames?: ReadonlySet<string>;
@@ -1680,7 +1681,7 @@ export class AgentSession {
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#rebuildSystemPrompt:
-		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>)
+		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<BuildSystemPromptResult>)
 		| undefined;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
@@ -1702,6 +1703,19 @@ export class AgentSession {
 	 * to decide whether the cached prompt is stale.
 	 */
 	#promptModelKey: string | undefined;
+	/**
+	 * Context window of the model for which `#baseSystemPrompt` was last built.
+	 * Skill-description redaction budgets against this value, so a model switch
+	 * that changes the context window must trigger a rebuild even when the model
+	 * name is not rendered into the prompt (`includeModelInPrompt=false`).
+	 */
+	#promptModelContextWindow: number | null | undefined;
+	/**
+	 * Skills rendered into the system prompt after redaction (cap/trim mode).
+	 * Context accounting reads these so `/context` reflects the same skill list
+	 * the provider receives, not the unredacted `session.skills`.
+	 */
+	#promptSkills: readonly Skill[] = [];
 	#mcpDiscoveryEnabled = false;
 	#discoverableMCPTools = new Map<string, DiscoverableTool>();
 	#selectedMCPToolNames = new Set<string>();
@@ -2125,6 +2139,8 @@ export class AgentSession {
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
+		this.#promptModelContextWindow = this.model?.contextWindow;
+		this.#promptSkills = this.#skills.filter(skill => skill.hide !== true);
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
@@ -5904,7 +5920,11 @@ export class AgentSession {
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt may surface the active model; a switch makes the cached prompt stale.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged) {
+		// Skill-description redaction budgets against the model's context window,
+		// so a context-window change must trigger a rebuild even when the model
+		// name is not rendered into the prompt (`includeModelInPrompt=false`).
+		const contextWindowChanged = this.model?.contextWindow !== this.#promptModelContextWindow;
+		if (editModeChanged || modelChanged || contextWindowChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -6225,6 +6245,8 @@ export class AgentSession {
 				this.agent.setSystemPrompt(this.#baseSystemPrompt);
 				this.#lastAppliedToolSignature = signature;
 				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptModelContextWindow = this.model?.contextWindow;
+				this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
 			}
 		}
 		if (options?.persistMCPSelection !== false) {
@@ -6309,6 +6331,8 @@ export class AgentSession {
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		this.agent.setSystemPrompt(this.#baseSystemPrompt);
 		this.#promptModelKey = this.#currentPromptModelKey();
+		this.#promptModelContextWindow = this.model?.contextWindow;
+		this.#promptSkills = built.promptSkills ?? this.#skills.filter(s => s.hide !== true);
 		// Refresh the cached signature so a subsequent `#applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
 		// just performed (and conversely, a different set forces a fresh rebuild).
@@ -8252,6 +8276,15 @@ export class AgentSession {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#skills;
+	}
+
+	/**
+	 * Skills rendered into the system prompt after redaction (cap/trim mode).
+	 * Context accounting reads these so `/context` reflects the same skill list
+	 * the provider receives, not the unredacted `session.skills`.
+	 */
+	get promptSkills(): readonly Skill[] {
+		return this.#promptSkills;
 	}
 
 	/** Skill loading warnings captured by SDK */
@@ -14268,6 +14301,8 @@ export class AgentSession {
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
+		const previousPromptSkills = this.#promptSkills;
+		const previousPromptModelContextWindow = this.#promptModelContextWindow;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousFallbackSelectedMCPToolNames = previousSessionFile
 			? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
@@ -14438,6 +14473,8 @@ export class AgentSession {
 			}
 			this.#baseSystemPrompt = previousBaseSystemPrompt;
 			this.#baseSystemPromptBeforeMemoryPromotion = previousBaseSystemPromptBeforeMemoryPromotion;
+			this.#promptSkills = previousPromptSkills;
+			this.#promptModelContextWindow = previousPromptModelContextWindow;
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);

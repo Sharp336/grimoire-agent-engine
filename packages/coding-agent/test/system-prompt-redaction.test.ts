@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { redactSkillDescriptions } from "../src/system-prompt-redaction";
 import type { Skill } from "../src/extensibility/skills";
+import { redactSkillDescriptions } from "../src/system-prompt-redaction";
 
 const MOCK_SKILLS: Skill[] = [
 	{
@@ -179,16 +179,48 @@ describe("redactSkillDescriptions", () => {
 			expect(result[0].description).toBe("One. Two.");
 		});
 
-		it("never drops a skill entry and retains at least one sentence even if budget is exceeded", () => {
-			// Let's set an extremely small context window / budget, e.g., contextWindow = 10, maxContextShare = 0.1 -> budget = 1 token.
-			// It should keep the first sentence of both skills.
+		it("never drops a skill entry even when budget is unsplittable", () => {
+			// With an extremely small budget (contextWindow = 10, maxContextShare = 0.1 → 1 token),
+			// every entry is ≤1 sentence after Phase 1, so Phase 2 trims description text
+			// down to a residual char budget. Skill entries and names must survive.
 			const result = redactSkillDescriptions(MOCK_SKILLS, {
 				mode: "cap",
 				maxContextShare: 0.1,
 				contextWindow: 10,
 			});
-			expect(result[0].description).toBe("One.");
-			expect(result[1].description).toBe("Short.");
+			expect(result.length).toBe(MOCK_SKILLS.length);
+			expect(result[0].name).toBe("skill-one");
+			expect(result[1].name).toBe("skill-two");
+			// Descriptions are strictly shortened by Phase 2 char-level trim.
+			// Residual char budget = floor(1 * 4 / 2) = 2 chars per entry.
+			expect(result[0].description.length).toBeLessThan(MOCK_SKILLS[0].description.length);
+			expect(result[1].description.length).toBeLessThan(MOCK_SKILLS[1].description.length);
+		});
+
+		it("shortens unsplittable single-sentence descriptions when over budget", () => {
+			// A single long sentence with no sentence boundaries cannot be popped.
+			// Phase 2 must trim the description text itself to fit the residual budget.
+			const longSingleSentence: Skill[] = [
+				{
+					name: "verbose-skill",
+					description:
+						"This is a very long single sentence with no internal sentence breaks that cannot be split by the sentence popper",
+					filePath: "/path/to/verbose",
+					baseDir: "/path/to",
+					source: "test",
+				},
+			];
+			// contextWindow = 20, maxContextShare = 0.1 → budget = 2 tokens → 8 chars.
+			// The description is 91 chars; Phase 2 must trim it to ≤ 8 chars.
+			const result = redactSkillDescriptions(longSingleSentence, {
+				mode: "cap",
+				maxContextShare: 0.1,
+				contextWindow: 20,
+			});
+			expect(result.length).toBe(1);
+			expect(result[0].name).toBe("verbose-skill");
+			expect(result[0].description.length).toBeLessThan(longSingleSentence[0].description.length);
+			expect(result[0].description.length).toBeLessThanOrEqual(8);
 		});
 	});
 });

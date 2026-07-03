@@ -2310,6 +2310,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: options.systemPrompt;
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				promptSkills: defaultPrompt.promptSkills,
 			};
 		};
 

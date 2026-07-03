@@ -14,10 +14,6 @@ import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
-import {
-	type SkillDescriptionRedactionMode,
-	redactSkillDescriptions,
-} from "./system-prompt-redaction";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -26,6 +22,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import { redactSkillDescriptions, type SkillDescriptionRedactionMode } from "./system-prompt-redaction";
 import { shortenPath } from "./tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
@@ -504,12 +501,18 @@ export interface BuildSystemPromptOptions {
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/**
+	 * Skills rendered into the system prompt after redaction (cap/trim mode).
+	 * Context accounting reads these so `/context` reflects the same skill list
+	 * the provider receives, not the unredacted `session.skills`.
+	 */
+	promptSkills?: Skill[];
 }
 
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return { systemPrompt: [], promptSkills: [] };
 	}
 
 	const {
@@ -801,5 +804,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	return { systemPrompt };
+	return { systemPrompt, promptSkills };
 }

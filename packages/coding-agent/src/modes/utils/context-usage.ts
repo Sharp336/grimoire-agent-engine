@@ -104,7 +104,7 @@ export function computeNonMessageBreakdown(session: AgentSession): {
 	systemContextTokens: number;
 	systemPromptTokens: number;
 } {
-	const skillsTokens = estimateSkillsTokens(session.skills ?? []);
+	const skillsTokens = estimateSkillsTokens(session.promptSkills ?? session.skills ?? []);
 	const toolsTokens = estimateToolSchemaTokens(session.agent?.state?.tools ?? []);
 	const systemPromptParts = session.systemPrompt ?? [];
 	const systemContextTokens = countTokens(systemPromptParts.slice(1));
