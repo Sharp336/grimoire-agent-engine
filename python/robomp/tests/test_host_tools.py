@@ -1302,7 +1302,9 @@ def test_impl_gate_allows_later_authorized_event_to_reach_repo_commands(
     assert calls
 
 
-def test_impl_gate_ignores_skipped_authorized_event(db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_impl_gate_ignores_skipped_authorized_event(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[list[str] | tuple[str, ...]] = []
 
     def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
@@ -1782,9 +1784,10 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
 
     opened_pr = False
 
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal opened_pr
-        opened_pr = True
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/pulls" in str(request.url):
+            nonlocal opened_pr
+            opened_pr = True
         return httpx.Response(
             201,
             json={
@@ -1992,9 +1995,10 @@ def test_gh_open_pr_refuses_failed_bun_check_before_push_or_pr(
 
     opened_pr = False
 
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal opened_pr
-        opened_pr = True
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/pulls" in str(request.url):
+            nonlocal opened_pr
+            opened_pr = True
         return httpx.Response(
             201,
             json={
@@ -3025,7 +3029,8 @@ def test_gh_open_pr_runs_fix_then_check_and_commits_fixup(
     opened_pr: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        opened_pr["url"] = str(request.url)
+        if request.method == "POST" and "/pulls" in str(request.url):
+            opened_pr["url"] = str(request.url)
         return httpx.Response(
             201,
             json={
@@ -3593,3 +3598,134 @@ def test_gh_post_comment_skips_suffix_when_feature_disabled(db: Database, tmp_pa
 
     assert captured["body"] == {"body": "Here's the answer"}
     assert db.get_pending_closure(bindings.issue_key) is None
+
+
+# ---------- gh_open_pr: duplicate closing-PR guard ----------
+
+
+def _timeline_handler(closing_prs: tuple[int, ...], *, timeline_status: int = 200) -> httpx.MockTransport:
+    """MockTransport that returns timeline events linking ``closing_prs`` to issue #42."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/issues/42/timeline" in str(request.url) and request.method == "GET":
+            if timeline_status != 200:
+                return httpx.Response(timeline_status, json={"message": "server error"})
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": pr,
+                            "state": "open",
+                            "pull_request": {},
+                        }
+                    },
+                }
+                for pr in closing_prs
+            ]
+            return httpx.Response(200, json=events)
+        # PR creation endpoint — return a fake PR if we get this far.
+        if request.method == "POST" and "/pulls" in str(request.url):
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    return httpx.MockTransport(handler)
+
+
+def test_gh_open_pr_refuses_when_closing_pr_exists(db: Database, tmp_path: Path) -> None:
+    """gh_open_pr refuses if another open PR already closes this issue via timeline links."""
+    transport = _timeline_handler(closing_prs=(77,))
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#77" in msg
+    assert "already linked to open PR" in msg
+
+
+def test_gh_open_pr_allows_when_closing_pr_is_bot_own(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bot's own previously-recorded PR is excluded from the duplicate guard."""
+    transport = _timeline_handler(closing_prs=(77,))
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_open_pr_guard_fails_open_on_timeline_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient timeline fetch failure must not block a legitimate PR."""
+    transport = _timeline_handler(closing_prs=(), timeline_status=500)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_post_reference_comment_posts_and_does_not_mutate_state(db: Database, tmp_path: Path) -> None:
+    """gh_post_reference_comment posts a comment and is terminal for triage
+    without mutating the issue state (unlike abort_task → 'abandoned')."""
+    from robomp.worker import _TERMINAL_TRIAGE_TOOLS
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={"id": 555, "user": {"login": "robomp-bot"}, "body": "x", "created_at": "t"},
+        )
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    db.set_issue_classification(bindings.issue_key, "bug")
+    row_before = db.get_issue(bindings.issue_key)
+    assert row_before is not None
+    state_before = row_before.state
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        result = tool.execute({"body": "See #77 — already in flight."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "reference comment posted: id=555" in result
+    assert captured["body"] == {"body": "See #77 — already in flight."}
+    # The tool is in the terminal triage set so reminders don't fire.
+    assert "gh_post_reference_comment" in _TERMINAL_TRIAGE_TOOLS
+    # Issue state must be unchanged — the issue stays resumable.
+    row_after = db.get_issue(bindings.issue_key)
+    assert row_after is not None
+    assert row_after.state == state_before

@@ -22,8 +22,9 @@ the classification calls for code. Drive the todo list to completion:
 
 2. **Before any PR work, check for an existing fix.** Scan the issue thread for
    a linked/open PR, concrete patch, or maintainer note that a fix is in flight.
-   If one applies, do NOT open a duplicate PR; reply with one `gh_post_comment`
-   referencing the existing fix instead.
+   If one applies, call `gh_post_reference_comment` with a body referencing the
+   existing fix; this ends the task cleanly without mutating the issue state.
+   Do NOT open a duplicate PR.
 
 3. **Follow the workflow branch** the classification dictates — see the system
    prompt for the full per-type behavior:

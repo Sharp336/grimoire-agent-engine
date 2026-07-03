@@ -34,7 +34,7 @@ Maintainer **@{{directive.author}}** tagged you. Their directive is authoritativ
 
 1. **Classify first.** You MUST call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)` before any other side effect, even if the directive states the answer. Labels are how the rest of the org sees triage.
 
-2. **Before any PR work, check for an existing fix.** Scan the issue thread for a linked/open PR, concrete patch, or maintainer note that a fix is in flight. If one applies, do NOT open a duplicate PR; reply with one `gh_post_comment` referencing the existing fix instead.
+2. **Before any PR work, check for an existing fix.** Scan the issue thread for a linked/open PR, concrete patch, or maintainer note that a fix is in flight. If one applies, call `gh_post_reference_comment` with a body referencing the existing fix; this ends the task cleanly without mutating the issue state. Do NOT open a duplicate PR.
 
 3. **Execute the directive** in the same session on `{{workspace.branch}}`:
    - **Code change** → commit on `{{workspace.branch}}`, then `gh_push_branch` + `gh_open_pr`. Both run `bun run fix` then `bun check` against the worktree; if `bun check` fails, fix the cause and call again. PR body uses the four-section template verbatim: `## Repro` / `## Cause` / `## Fix` / `## Verification`. Reply with a single `gh_post_comment` linking the PR.

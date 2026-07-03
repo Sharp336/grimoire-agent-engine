@@ -639,6 +639,47 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# ---------- gh_post_reference_comment ----------
+def _build_post_reference_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip():
+            _raise_command("gh_post_reference_comment requires a non-empty 'body'.")
+        target_number = bindings.default_comment_number
+        try:
+            comment = _run_coro(
+                bindings.loop,
+                bindings.github.post_comment(bindings.repo.full_name, target_number, body),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "gh_post_reference_comment", args, error=str(exc))
+            _raise_command(f"GitHub rejected comment: {exc.status} {exc.message}")
+        _audit(
+            bindings,
+            "gh_post_reference_comment",
+            args,
+            result={"comment_id": comment.id},
+        )
+        return f"reference comment posted: id={comment.id}"
+
+    return host_tool(
+        name="gh_post_reference_comment",
+        description=persona.host_tool_description("gh_post_reference_comment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_post_reference_comment", "body"),
+                },
+            },
+            "required": ["body"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
 def _repair_message_escapes(message: str) -> str | None:
     """Convert shell-literal ``\\n`` escapes in a commit message to newlines.
 
@@ -906,6 +947,43 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any]) -> None:
+    """Refuse ``gh_open_pr`` when another open PR already closes this issue.
+
+    Consults ``list_closing_pull_requests`` (timeline / Development-panel
+    links) so the guard sees linked PRs even when no issue comment mentions
+    them. The bot's own previously-recorded PR is excluded — re-publishing or
+    amending that PR is legitimate. A transient timeline fetch fails open so
+    a GitHub hiccup doesn't block a legitimate PR.
+    """
+    try:
+        closing_prs = _run_coro(
+            bindings.loop,
+            bindings.github.list_closing_pull_requests(bindings.repo.full_name, bindings.issue.number),
+        )
+    except GitHubError as exc:
+        log.warning(
+            "closing-PR guard failed; proceeding with open PR",
+            extra={"issue": bindings.issue_key, "err": str(exc)},
+        )
+        return
+    if not closing_prs:
+        return
+    row = bindings.db.get_issue(bindings.issue_key)
+    own_pr = row.pr_number if row is not None else None
+    duplicates = tuple(p for p in closing_prs if p != own_pr)
+    if not duplicates:
+        return
+    msg = (
+        f"refusing to open PR: issue #{bindings.issue.number} is already linked to "
+        f"open PR(s) {', '.join(f'#{p}' for p in duplicates)} via Closes/Fixes/Resolves "
+        "or the Development panel. Do NOT open a duplicate PR; reply with a "
+        "`gh_post_comment` referencing the existing fix instead."
+    )
+    _audit(bindings, "gh_open_pr", args, error=msg)
+    _raise_command(msg)
+
+
 # ---------- gh_open_pr ----------
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
@@ -936,6 +1014,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        _refuse_if_duplicate_fix_pr(bindings, args)
         skip = bool(args.get("skip_checks", False))
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
@@ -1828,6 +1907,7 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         _build_pr_review_comment(bindings),
         _build_submit_pr_review(bindings),
         _build_post_comment(bindings),
+        _build_post_reference_comment(bindings),
         _build_push_branch(bindings),
         _build_open_pr(bindings),
         _build_request_review(bindings),

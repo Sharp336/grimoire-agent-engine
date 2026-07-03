@@ -36,6 +36,12 @@ description = "Post a comment on the inbound thread (PR for PR conversations/rev
 body = "Markdown comment body."
 number = "Optional issue/PR override. Defaults to the inbound thread."
 
+[gh_post_reference_comment]
+description = "Post a comment referencing an existing fix (linked PR, patch, or maintainer note) and end the task cleanly. Terminal for triage: no further reminders fire after this call. Does NOT mutate issue state — the issue stays open and resumable so future comments are still processed. Use when you would open a duplicate PR but an existing fix already covers the issue."
+
+[gh_post_reference_comment.parameters]
+body = "Markdown comment body referencing the existing fix (PR link, patch, or maintainer note)."
+
 [gh_push_branch]
 description = "Push the workspace branch to origin. Pre-publish gate (when the repo defines them): `bun run fix` → amend any formatter diff into your HEAD commit → `bun check`. On `bun check` failure, fix the cause and retry. Pre-existing breakage on `main` against the same paths NOT caused by your diff → retry with `skip_checks=true` and document the bypass in the follow-up comment. Dirty-tree gate runs unconditionally. Commit messages carrying shell-literal `\\n` escapes are rewritten to real newlines before the push."
 

@@ -190,7 +190,9 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     return env
 
 
-_TERMINAL_TRIAGE_TOOLS: frozenset[str] = frozenset({"gh_open_pr", "mark_unable_to_reproduce", "abort_task"})
+_TERMINAL_TRIAGE_TOOLS: frozenset[str] = frozenset(
+    {"gh_open_pr", "mark_unable_to_reproduce", "abort_task", "gh_post_reference_comment"}
+)
 _TERMINAL_REVIEW_TOOLS: frozenset[str] = frozenset({"submit_pr_review", "abort_task"})
 _PR_REQUIRING_CLASSIFICATIONS: frozenset[str] = frozenset({"bug", "documentation"})
 
@@ -661,9 +663,7 @@ def _run_rpc_blocking(
                 stop_reason = turn.assistant_message.get("stopReason")
                 if stop_reason == "error":
                     error_msg = turn.assistant_message.get("errorMessage") or "model returned error"
-                    raise RuntimeError(
-                        f"omp agent error (stopReason=error): {error_msg}"
-                    )
+                    raise RuntimeError(f"omp agent error (stopReason=error): {error_msg}")
             log.info(
                 "rpc_done",
                 extra={
