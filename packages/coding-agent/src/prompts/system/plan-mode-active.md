@@ -101,9 +101,10 @@ Cut anything that removes no decision: restated invariants, unaffected behavior,
 On approval the user picks one execution mode:
 - **Approve and execute** — execution starts in fresh context (session cleared).
 - **Approve and compact context** — distills this discussion into a summary, then executes here.
+- **Approve and shake context** — mechanically elides bulky tool outputs, then executes here.
 - **Approve and keep context** — executes here, preserving exploration history.
 
-All three rely on the file being self-contained.
+All four rely on the file being self-contained.
 </caution>
 
 <critical>

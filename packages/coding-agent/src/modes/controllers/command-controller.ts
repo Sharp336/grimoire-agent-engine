@@ -1139,8 +1139,22 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content and
 	 * `images` strips image blocks. Rebuilds the chat and reports counts.
+	 *
+	 * Refuses to shake while a turn is streaming: `AgentSession.shake()` rewrites
+	 * persisted entries and calls `agent.replaceMessages()`, which races the
+	 * active loop's in-flight message appends and can corrupt or drop history.
+	 * `compact()` aborts first; shake is lighter-weight and user-initiated, so we
+	 * surface a warning and let the operator stop the turn explicitly instead of
+	 * silently aborting their work.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning(
+				"Shake is not available while a turn is streaming. Press Esc to stop the current turn first.",
+			);
+			return;
+		}
+
 		let result: ShakeResult;
 		try {
 			result = await this.ctx.session.shake(mode);

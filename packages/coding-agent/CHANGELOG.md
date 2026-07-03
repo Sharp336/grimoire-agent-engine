@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Approve and shake context plan-approval option ([#4360](https://github.com/can1357/oh-my-pi/issues/4360)).
+
 ## [16.3.3] - 2026-07-02
 
 ### Breaking Changes

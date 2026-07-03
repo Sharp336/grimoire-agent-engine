@@ -430,6 +430,7 @@ describe("InteractiveMode plan review rendering", () => {
 			[
 				"Approve and execute",
 				"Approve and compact context",
+				"Approve and shake context",
 				"Approve and keep context (~7.3k / 10k)",
 				"Refine plan",
 			],
@@ -504,6 +505,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(selector.mock.calls[0]?.[2]).toEqual([
 			"Approve and execute",
 			"Approve and compact context",
+			"Approve and shake context",
 			`Approve and keep context (~${compactNumber(tokens)} / ${compactNumber(executionModel.contextWindow)})`,
 			"Refine plan",
 		]);
@@ -530,7 +532,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		expect(selector.mock.calls[0]?.[3]).toEqual(
 			expect.objectContaining({
-				disabledIndices: [2],
+				disabledIndices: [3],
 			}),
 		);
 	});
@@ -584,7 +586,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(selector).toHaveBeenCalledWith(
 			expect.any(String),
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", "Approve and keep context", "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and shake context",
+				"Approve and keep context",
+				"Refine plan",
+			],
 			expect.any(Object),
 			expect.any(Object),
 		);
@@ -1219,6 +1227,73 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(markSentSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("Approve and shake context: shakes before dispatching the approved plan", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
+		const shakeSpy = vi.spyOn(mode, "handleShakeCommand").mockResolvedValue();
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "PLAN",
+		});
+
+		expect(shakeSpy).toHaveBeenCalledWith("elide");
+		const planApprovedIdx = promptSpy.mock.calls.findIndex(isPlanApprovedCall);
+		expect(planApprovedIdx).toBeGreaterThanOrEqual(0);
+		const shakeOrder = shakeSpy.mock.invocationCallOrder[0];
+		const promptOrder = promptSpy.mock.invocationCallOrder[planApprovedIdx];
+		expect(shakeOrder).toBeDefined();
+		expect(promptOrder).toBeDefined();
+		if (shakeOrder === undefined || promptOrder === undefined) throw new Error("Expected shake and prompt calls");
+		expect(shakeOrder).toBeLessThan(promptOrder);
+		const promptText = promptSpy.mock.calls[planApprovedIdx]?.[0];
+		if (typeof promptText !== "string") throw new Error("Expected plan-approved prompt text");
+		expect(promptText).toContain("Context preserved.");
+	});
+
+	it("Approve and shake context: setPlanReferencePath is pinned BEFORE shake runs", async () => {
+		// Regression for PR #4369 second-pass review: approve-and-shake must set
+		// the plan reference path before calling shake so plan-read protection
+		// covers the approved `local://...` path during the elision pass.
+		const planFilePath = "local://my-task-plan.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nShake and execute.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and shake context");
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		const setPlanRefSpy = vi.spyOn(session, "setPlanReferencePath");
+		let planRefSetWhenShakeRan = false;
+		vi.spyOn(mode, "handleShakeCommand").mockImplementation(async () => {
+			planRefSetWhenShakeRan = setPlanRefSpy.mock.calls.some(call => call[0] === planFilePath);
+		});
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "my-task",
+		});
+
+		// The contract: by the time handleShakeCommand runs, setPlanReferencePath
+		// has already pinned the approved (non-default) plan path, so plan-read
+		// protection covers the approved `local://my-task-plan.md` during elision.
+		expect(planRefSetWhenShakeRan).toBe(true);
+	});
 	it("Approve and compact context: cancelled outcome skips plan-approved dispatch", async () => {
 		// Mock `handleCompactCommand` to surface the "cancelled" outcome directly.
 		// (Testing the consumer — `#approvePlan`'s outcome handling — at the
@@ -1586,6 +1661,41 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(approval).not.toHaveBeenCalled();
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
+		});
+	});
+
+	describe("handleShakeCommand streaming guard", () => {
+		it("refuses to shake while a turn is streaming and does not call session.shake", async () => {
+			Object.defineProperty(session, "isStreaming", {
+				configurable: true,
+				get: () => true,
+			});
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 0,
+				blocksDropped: 0,
+				tokensFreed: 0,
+			});
+			const warnSpy = vi.spyOn(mode, "showWarning");
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("not available while a turn is streaming"));
+		});
+
+		it("shakes normally when the session is idle", async () => {
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 2,
+				blocksDropped: 1,
+				tokensFreed: 500,
+			});
+			vi.spyOn(mode, "rebuildChatFromMessages").mockImplementation(() => {});
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide");
 		});
 	});
 });

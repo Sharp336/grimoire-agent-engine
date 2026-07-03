@@ -280,9 +280,10 @@ function formatHudNoteMarker(count: number): string {
 }
 
 type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type PlanApprovalMode = "execute" | "compact" | "shake" | "keep";
 
 const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
-const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
+const PLAN_KEEP_CONTEXT_OPTION_INDEX = 3;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 
 function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
@@ -2555,8 +2556,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		options: {
 			planFilePath: string;
 			title: string;
-			preserveContext?: boolean;
-			compactBeforeExecute?: boolean;
+			mode: PlanApprovalMode;
 			executionModel?: ResolvedRoleModel;
 		},
 	): Promise<void> {
@@ -2568,7 +2568,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// throw) so a leaked flag cannot silence a later unrelated abort.
 		// Branchless mark+clear when !compactBeforeExecute: mark is gated; clear
 		// is unconditional and idempotent.
-		if (options.compactBeforeExecute) {
+		const compactBeforeExecute = options.mode === "compact";
+		const preserveContext = options.mode !== "execute";
+		if (compactBeforeExecute) {
 			this.session.markPlanInternalAbortPending();
 		}
 		let compactOutcome: CompactionOutcome | undefined;
@@ -2576,10 +2578,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#exitPlanMode({
 				silent: true,
 				paused: false,
-				deferModelRestore: options.compactBeforeExecute === true,
+				deferModelRestore: compactBeforeExecute,
 			});
 
-			if (!options.preserveContext) {
+			if (!preserveContext) {
 				await this.handleClearCommand();
 				// The new session has a fresh local:// root — persist the approved plan there
 				// so `local://<slug>-plan.md` resolves correctly in the execution session.
@@ -2588,7 +2590,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					getSessionId: () => this.sessionManager.getSessionId(),
 				});
 				await Bun.write(newLocalPath, planContent);
-			} else if (options.compactBeforeExecute) {
+			} else if (options.mode === "compact") {
 				// Distill the plan-mode transcript before the execution turn is queued so
 				// the plan-approved synthetic prompt lands as a fresh cache anchor.
 				// Outcome is consumed after tool-restoration and plan-reference-path
@@ -2609,6 +2611,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				compactOutcome = await this.handleCompactCommand(compactionPrompt, undefined, outcome =>
 					this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
 				);
+			} else if (options.mode === "shake") {
+				// Pin the plan reference path BEFORE shake so plan-read protection
+				// covers the approved `local://...` path during the elision pass.
+				// Reassignment after the try/finally is idempotent.
+				this.session.setPlanReferencePath(options.planFilePath);
+				await this.handleShakeCommand("elide");
 			}
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
@@ -2632,7 +2640,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// aborted only the compaction, not the approval — so the next turn no longer
 		// lands on the plan model. "failed" stays on the plan model (context
 		// intact) and dispatches best-effort.
-		if (options.compactBeforeExecute) {
+		if (compactBeforeExecute) {
 			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
 		} else {
 			await this.#applyPlanExecutionModel(options.executionModel);
@@ -2670,7 +2678,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.markPlanReferenceSent();
 		const planModePrompt = prompt.render(planModeApprovedPrompt, {
 			planFilePath: options.planFilePath,
-			contextPreserved: options.preserveContext === true,
+			contextPreserved: preserveContext,
 		});
 		// The executor's first turn must start on an idle session. The agent may still
 		// be streaming the post-`resolve` continuation (Agent.#emit is fire-and-forget)
@@ -3124,7 +3132,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choice = await this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", keepContextLabel, "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and shake context",
+				keepContextLabel,
+				"Refine plan",
+			],
 			{
 				helpText,
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
@@ -3140,7 +3154,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			{ slider },
 		);
 
-		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
+		if (
+			choice === "Approve and execute" ||
+			choice === "Approve and compact context" ||
+			choice === "Approve and shake context" ||
+			choice === keepContextLabel
+		) {
 			try {
 				// Prefer in-overlay edits (already in memory) over a disk re-read. The
 				// overlay mirrors edits as they happen, and approval awaits one final
@@ -3181,11 +3200,18 @@ export class InteractiveMode implements InteractiveModeContext {
 						: -1;
 				const executionModel =
 					slider && cycle && selectedTierIndex !== restoredIndex ? cycle.models[selectedTierIndex] : undefined;
+				const mode: PlanApprovalMode =
+					choice === "Approve and execute"
+						? "execute"
+						: choice === "Approve and compact context"
+							? "compact"
+							: choice === "Approve and shake context"
+								? "shake"
+								: "keep";
 				await this.#approvePlan(latestPlanContent, {
 					planFilePath,
 					title: details.title,
-					preserveContext: choice !== "Approve and execute",
-					compactBeforeExecute: choice === "Approve and compact context",
+					mode,
 					executionModel,
 				});
 			} catch (error) {
