@@ -2254,7 +2254,7 @@ function createSkippedToolResult(): AgentToolResult<any> {
 		content: [
 			{
 				type: "text",
-				text: "Skipped due to queued user message. Do not count this skipped result as completed work or verification. After the queued message is handled on the next step, retry the skipped tool if it is still needed.",
+				text: "Skipped due to a queued steering message. Do not count this skipped result as completed work or verification. After the queued message is handled on the next step, retry the skipped tool if it is still needed.",
 			},
 		],
 		details: {},

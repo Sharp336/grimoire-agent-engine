@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Skipped-tool results no longer claim a "queued user message" caused the skip. The steering queue also carries agent-authored messages (advisor notes, IRC/extension asides), and the loop only peeks a boolean, so the text now says "queued steering message" — previously the model would relay the misattribution to users who had queued nothing.
+
 ## [16.3.3] - 2026-07-02
 
 ### Changed
