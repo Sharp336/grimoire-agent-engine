@@ -872,13 +872,16 @@ describe("AgentSession MCP discovery", () => {
 
 		await session.newSession();
 
+		// PRRT_kwDOQxs0bc6ON-xX: re-derivable default MCP selections are NOT
+		// persisted during /new — only truly-explicit selections (from
+		// options.toolNames) persist. The defaults remain active (re-derived
+		// from #defaultSelectedMCPToolNames), but no mcp_tool_selection entry
+		// is written, so later changes to mcp.discoveryDefaultServers still
+		// apply to this session.
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search", "mcp__slack_send_message"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search", "mcp__slack_send_message"]);
 		expect(session.systemPrompt).toEqual(["tools:read,mcp__docs_search,mcp__slack_send_message"]);
-		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual([
-			"mcp__docs_search",
-			"mcp__slack_send_message",
-		]);
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
 	});
 
 	it("clears discovered MCP selections when starting a brand-new session", async () => {
@@ -1430,6 +1433,7 @@ describe("AgentSession MCP discovery", () => {
 			mcpDiscoveryEnabled: true,
 			defaultSelectedMCPServerNames: ["default"],
 			requestedToolNames: new Set(["read", "mcp__explicit_tool"]),
+			explicitlyRequestedMCPToolNames: ["mcp__explicit_tool"],
 			// Simulate what the SDK passes: initialSelectedMCPToolNames includes
 			// both explicit and default tools so both are active at startup.
 			initialSelectedMCPToolNames: ["mcp__explicit_tool", "mcp__default_tool"],
@@ -1491,8 +1495,8 @@ describe("AgentSession MCP discovery", () => {
 			settings: Settings.isolated({ "tools.discoveryContextShare": 0.1 }),
 			modelRegistry: {} as never,
 			toolRegistry,
-			mcpDiscoveryEnabled: false,
 			requestedToolNames: new Set(["read", "mcp__server__explicit"]),
+			explicitlyRequestedMCPToolNames: ["mcp__server__explicit"],
 			rebuildSystemPrompt: async toolNames => ({
 				systemPrompt: [`tools:${toolNames.join(",")}`],
 			}),
@@ -1582,6 +1586,7 @@ describe("AgentSession MCP discovery", () => {
 			toolRegistry,
 			mcpDiscoveryEnabled: false,
 			requestedToolNames: new Set(["read", "mcp__server__explicit"]),
+			explicitlyRequestedMCPToolNames: ["mcp__server__explicit"],
 			rebuildSystemPrompt: async toolNames => ({
 				systemPrompt: [`tools:${toolNames.join(",")}`],
 			}),
@@ -1923,6 +1928,7 @@ describe("AgentSession MCP discovery", () => {
 			mcpDiscoveryEnabled: true,
 			defaultSelectedMCPServerNames: ["default"],
 			requestedToolNames: new Set(["read", "mcp__explicit_tool"]),
+			explicitlyRequestedMCPToolNames: ["mcp__explicit_tool"],
 			initialSelectedMCPToolNames: ["mcp__explicit_tool", "mcp__default_tool"],
 			defaultSelectedMCPToolNames: ["mcp__default_tool"],
 			rebuildSystemPrompt: async toolNames => ({

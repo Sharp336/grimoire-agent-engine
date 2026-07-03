@@ -1743,7 +1743,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									]);
 								}
 							}
-							await liveSession.refreshMCPTools(mcpResult.tools, { activateAll });
+							// PRRT_kwDOQxs0bc6ON-xd: when the deferred context-share
+							// estimate flips discovery on mid-flight, refreshMCPTools must
+							// treat it as an upgrade so re-derivable default-server
+							// selections are not frozen into mcp_tool_selection.
+							const discoveryUpgradedExternally = discoveryEnabled && !activation.mcpDiscoveryEnabled;
+							await liveSession.refreshMCPTools(mcpResult.tools, {
+								activateAll,
+								discoveryUpgradedExternally,
+							});
 							if (activation.explicitlyRequestedMCPToolNames.length > 0) {
 								if (discoveryEnabled && !activation.mcpDiscoveryEnabled) {
 									// Discovery flipped on mid-flight: route the explicit request
@@ -2765,6 +2773,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return wrapped;
 			},
 			requestedToolNames: requestedToolNameSet,
+			explicitlyRequestedMCPToolNames,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();

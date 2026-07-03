@@ -726,6 +726,15 @@ export interface AgentSessionConfig {
 	registerSearchTool?: () => AgentTool | null;
 	requestedToolNames?: ReadonlySet<string>;
 	/**
+	 * MCP tool names that were truly explicitly requested via `options.toolNames`
+	 * (NOT registry defaults). When `options.toolNames` is omitted this is empty,
+	 * so discovery upgrade/persistence paths do not treat every registry MCP tool
+	 * as an explicit selection. Defaults are re-derived from
+	 * `mcp.discoveryDefaultServers` on every session start and must never be
+	 * frozen into the persisted `mcp_tool_selection`.
+	 */
+	explicitlyRequestedMCPToolNames?: string[];
+	/**
 	 * Optional accessor for live MCP server instructions. Read by the session's
 	 * `rebuildSystemPrompt`-skip optimization to detect server-side instruction
 	 * changes (e.g. an MCP server upgrade) that would otherwise pass the tool-set
@@ -1699,6 +1708,7 @@ export class AgentSession {
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
+	#explicitlyRequestedMCPToolNames: string[] = [];
 	#baseSystemPrompt: string[];
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
 	/**
@@ -2038,6 +2048,7 @@ export class AgentSession {
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#builtInToolNames = new Set(config.builtInToolNames ?? []);
 		this.#requestedToolNames = config.requestedToolNames;
+		this.#explicitlyRequestedMCPToolNames = config.explicitlyRequestedMCPToolNames ?? [];
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#transformProviderContext = config.transformProviderContext;
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
@@ -2150,9 +2161,7 @@ export class AgentSession {
 		// not registry-default server tools. Defaults are re-derived from
 		// `mcp.discoveryDefaultServers` on every session start, so freezing them
 		// into the persisted selection would make them immune to setting changes.
-		const explicitMCPToolNames = [...(this.#requestedToolNames ?? [])].filter(
-			name => isMCPToolName(name) && this.#toolRegistry.has(name),
-		);
+		const explicitMCPToolNames = this.#getExplicitMCPToolNames();
 		const persistInitialMCPToolSelection =
 			config.persistInitialMCPToolSelection ?? this.sessionManager.getBranch().length === 0;
 		if (
@@ -5821,6 +5830,14 @@ export class AgentSession {
 		return Array.from(toolNames).filter(name => this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name));
 	}
 
+	/** Truly-explicit MCP tool names from `options.toolNames` (NOT registry defaults),
+	 *  filtered to names currently in the registry. When no `options.toolNames` was
+	 *  passed this is empty, so upgrade/persistence paths never treat the whole
+	 *  registry as explicit. */
+	#getExplicitMCPToolNames(): string[] {
+		return this.#explicitlyRequestedMCPToolNames.filter(name => this.#toolRegistry.has(name));
+	}
+
 	#getConfiguredDefaultSelectedMCPToolNames(): string[] {
 		return this.#filterSelectableMCPToolNames([
 			...this.#defaultSelectedMCPToolNames,
@@ -5952,9 +5969,7 @@ export class AgentSession {
 		// they would be absent from #selectedMCPToolNames and hidden behind
 		// search. The startup and deferred-discovery paths both preserve
 		// explicit selections, so this upgrade path must too.
-		const explicitMCPNames = [...(this.#requestedToolNames ?? [])].filter(
-			name => isMCPToolName(name) && this.#toolRegistry.has(name),
-		);
+		const explicitMCPNames = this.#getExplicitMCPToolNames();
 		if (!this.#enableMCPDiscoveryIfContextBudgetRequiresIt()) return;
 		// Re-apply the active tool set: non-MCP tools + search_tool_bm25 (if
 		// registered) + persisted/default-selected MCP tools. This removes MCP
@@ -5980,7 +5995,7 @@ export class AgentSession {
 		// mcp_tool_selection, making later changes to
 		// mcp.discoveryDefaultServers ineffective. Suppress persistence for
 		// this automatic upgrade path; only truly-explicit selections (from
-		// #requestedToolNames) should persist, and those were already persisted
+		// #getExplicitMCPToolNames) should persist, and those were already persisted
 		// at construction when discovery was on. When discovery was off at
 		// construction, persist only the explicit subset so it survives
 		// without freezing defaults.
@@ -6559,7 +6574,10 @@ export class AgentSession {
 	 *   regardless of prior selection state. Used when an ACP client provisions MCP servers
 	 *   for a session where MCP discovery is disabled.
 	 */
-	async refreshMCPTools(mcpTools: CustomTool[], options?: { activateAll?: boolean }): Promise<void> {
+	async refreshMCPTools(
+		mcpTools: CustomTool[],
+		options?: { activateAll?: boolean; discoveryUpgradedExternally?: boolean },
+	): Promise<void> {
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
@@ -6601,18 +6619,17 @@ export class AgentSession {
 			this.#getConfiguredDefaultSelectedMCPToolNames(),
 		);
 
-		const discoveryUpgraded = this.#enableMCPDiscoveryIfContextBudgetRequiresIt();
+		const discoveryUpgraded =
+			this.#enableMCPDiscoveryIfContextBudgetRequiresIt() || (options?.discoveryUpgradedExternally ?? false);
 		if (discoveryUpgraded) {
 			// Preserve explicit MCP selections that were active before the
 			// refresh. When discovery was off, `previousSelectedMCPToolNames`
 			// captured ALL active MCP names — only the explicit subset (from
-			// `#requestedToolNames`) should survive the upgrade, not tools that
+			// `#getExplicitMCPToolNames`) should survive the upgrade, not tools that
 			// were merely active because discovery hadn't engaged yet. Mirrors
 			// #syncDiscoveryModeAfterModelChange (line 5955-5973).
 			const ctx = this.buildDisplaySessionContext();
-			const explicitMCPNames = [...(this.#requestedToolNames ?? [])].filter(
-				name => isMCPToolName(name) && this.#toolRegistry.has(name),
-			);
+			const explicitMCPNames = this.#getExplicitMCPToolNames();
 			this.#selectedMCPToolNames = new Set([
 				...this.#selectedMCPToolNames,
 				...this.#filterSelectableMCPToolNames(explicitMCPNames),
@@ -6651,9 +6668,7 @@ export class AgentSession {
 		// registry defaults. Suppress persistence so those defaults are not
 		// frozen into mcp_tool_selection; persist only the explicit subset.
 		if (discoveryUpgraded && !hadPersistedSelection) {
-			const explicitMCPNames = this.#filterSelectableMCPToolNames(
-				[...(this.#requestedToolNames ?? [])].filter(name => isMCPToolName(name) && this.#toolRegistry.has(name)),
-			);
+			const explicitMCPNames = this.#filterSelectableMCPToolNames(this.#getExplicitMCPToolNames());
 			await this.#applyActiveToolsByName(nextActive, {
 				previousSelectedMCPToolNames,
 				persistMCPSelection: false,
@@ -8641,15 +8656,13 @@ export class AgentSession {
 					...this.#getActiveNonMCPToolNames(),
 					// PRRT_kwDOQxs0bc6OMvis: seed the next session with both
 					// the re-derivable registry defaults (#defaultSelectedMCPToolNames)
-					// and the per-session explicit MCP tools from #requestedToolNames.
+					// and the per-session explicit MCP tools from #getExplicitMCPToolNames.
 					// Without the explicit subset, /new drops tools the user
 					// requested via --tools even though the same CLI filter is
 					// still in effect.
 					...this.#filterSelectableMCPToolNames([
 						...this.#defaultSelectedMCPToolNames,
-						...[...(this.#requestedToolNames ?? [])].filter(
-							name => isMCPToolName(name) && this.#toolRegistry.has(name),
-						),
+						...this.#getExplicitMCPToolNames(),
 					]),
 				]
 			: undefined;
@@ -8705,8 +8718,13 @@ export class AgentSession {
 		this.sessionManager.appendServiceTierChange(this.#serviceTierEntry());
 		if (nextDiscoverySessionToolNames) {
 			await this.#applyActiveToolsByName(nextDiscoverySessionToolNames, { persistMCPSelection: false });
-			if (this.getSelectedMCPToolNames().length > 0) {
-				this.sessionManager.appendMCPToolSelection(this.getSelectedMCPToolNames());
+			// PRRT_kwDOQxs0bc6ON-xX: persist only truly-explicit MCP selections
+			// (from `options.toolNames`), not re-derivable `mcp.discoveryDefaultServers`
+			// defaults. Freezing defaults into mcp_tool_selection would make later
+			// changes to the default-server setting ineffective on this session.
+			const explicitMCPNames = this.#filterSelectableMCPToolNames(this.#getExplicitMCPToolNames());
+			if (explicitMCPNames.length > 0) {
+				this.sessionManager.appendMCPToolSelection(explicitMCPNames);
 			}
 		}
 		this.#rememberSessionDefaultSelectedMCPToolNames(
