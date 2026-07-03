@@ -3657,6 +3657,9 @@ def test_gh_open_pr_refuses_when_closing_pr_exists(db: Database, tmp_path: Path)
     assert "refusing to open PR" in msg
     assert "#77" in msg
     assert "already linked to open PR" in msg
+    assert "gh_post_reference_comment" in msg
+    assert "`gh_post_comment`" not in msg
+    assert "git reset --hard" in msg
 
 
 def test_gh_open_pr_allows_when_closing_pr_is_bot_own(
@@ -3694,6 +3697,47 @@ def test_gh_open_pr_guard_fails_open_on_timeline_error(
         _stop_loop(loop, t)
 
     assert "opened #99" in result
+
+
+def test_gh_open_pr_guard_fails_open_on_transport_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A network/transport failure during the closing-PR lookup must fail open
+    (not block a legitimate PR) — the guard catches httpx.ConnectError /
+    httpx.TimeoutException, not just GitHubError."""
+
+    timeline_hits = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_hits
+        if "/issues/42/timeline" in str(request.url) and request.method == "GET":
+            timeline_hits += 1
+            raise httpx.ConnectError("connection refused", request=request)
+        if request.method == "POST" and "/pulls" in str(request.url):
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+    assert timeline_hits >= 1, "guard must have attempted the timeline lookup before failing open"
 
 
 def test_gh_post_reference_comment_posts_and_does_not_mutate_state(db: Database, tmp_path: Path) -> None:

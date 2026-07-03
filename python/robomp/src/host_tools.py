@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
+import httpx
 from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 
 from robomp import persona
@@ -961,7 +962,7 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
             bindings.loop,
             bindings.github.list_closing_pull_requests(bindings.repo.full_name, bindings.issue.number),
         )
-    except GitHubError as exc:
+    except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
         log.warning(
             "closing-PR guard failed; proceeding with open PR",
             extra={"issue": bindings.issue_key, "err": str(exc)},
@@ -977,8 +978,10 @@ def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any])
     msg = (
         f"refusing to open PR: issue #{bindings.issue.number} is already linked to "
         f"open PR(s) {', '.join(f'#{p}' for p in duplicates)} via Closes/Fixes/Resolves "
-        "or the Development panel. Do NOT open a duplicate PR; reply with a "
-        "`gh_post_comment` referencing the existing fix instead."
+        "or the Development panel. Do NOT open a duplicate PR. First discard your "
+        f"unpushed commit (`git reset --hard origin/{bindings.repo.default_branch}`) so the "
+        "worktree is clean, then call `gh_post_reference_comment` with a body referencing "
+        "the existing fix — this ends the task cleanly without a dirty-state reminder loop."
     )
     _audit(bindings, "gh_open_pr", args, error=msg)
     _raise_command(msg)
