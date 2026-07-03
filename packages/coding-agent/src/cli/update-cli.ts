@@ -11,7 +11,6 @@ import { pipeline } from "node:stream/promises";
 import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
-import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 const REPO = "can1357/oh-my-pi";
@@ -580,6 +579,34 @@ function resolveOmpPath(): string | undefined {
 }
 
 /**
+ * On Windows, detect other running `omp` processes that may hold a lock on the
+ * native `.node` addon in `node_modules`, which would prevent `bun install -g`
+ * from overwriting it during update. Warns the user to close them first.
+ * No-op on non-Windows (no file-lock problem).
+ */
+async function checkOtherOmpProcesses(): Promise<void> {
+	if (process.platform !== "win32") return;
+	try {
+		const result = await $`tasklist /FI "IMAGENAME eq omp.exe" /NH`.quiet().nothrow();
+		if (result.exitCode !== 0) return;
+		const lines = result.text().split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+		// tasklist output includes a header line; count = lines with "omp.exe" minus header
+		const ompProcesses = lines.filter(l => l.toLowerCase().includes("omp.exe")).length;
+		if (ompProcesses > 1) {
+			console.log(
+				chalk.yellow(
+					`⚠ Detected ${ompProcesses} running omp processes.\n` +
+					`  Windows locks the native addon (.node) while omp is running, which may\n` +
+					`  cause the update to fail. Please close other omp instances and retry.`,
+				),
+			);
+		}
+	} catch {
+		// Best-effort detection; proceed even if tasklist fails.
+	}
+}
+
+/**
  * Run the resolved omp binary and check if it reports the expected version.
  */
 async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
@@ -598,7 +625,8 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 	}
 }
 
-function printVerifiedVersion(expectedVersion: string): void {
+async function printVerifiedVersion(expectedVersion: string): Promise<void> {
+	const { theme } = await import("../modes/theme/theme");
 	console.log(chalk.green(`\n${theme.status.success} Updated to ${expectedVersion}`));
 }
 
@@ -615,7 +643,7 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 async function printVerification(expectedVersion: string): Promise<void> {
 	const result = await verifyInstalledVersion(expectedVersion);
 	if (result.ok) {
-		printVerifiedVersion(expectedVersion);
+		await printVerifiedVersion(expectedVersion);
 		return;
 	}
 	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
@@ -873,8 +901,8 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 		verifyInstalledVersion,
 	});
 	// Reclaim backups from earlier updates whose owning process has since exited.
+	await printVerifiedVersion(expectedVersion);
 	await sweepStaleBackups(targetPath);
-	printVerifiedVersion(expectedVersion);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -896,6 +924,7 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	const comparison = compareVersions(release.version, VERSION);
 
 	if (comparison <= 0 && !opts.force) {
+		const { theme } = await import("../modes/theme/theme");
 		console.log(chalk.green(`${theme.status.success} Already up to date`));
 		return;
 	}
@@ -910,6 +939,9 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		// Just check, don't install
 		return;
 	}
+
+	// Windows: check for other running omp processes that may lock the native addon
+	await checkOtherOmpProcesses();
 
 	// Choose update method based on the prioritized omp binary in PATH
 	try {

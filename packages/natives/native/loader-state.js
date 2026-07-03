@@ -103,40 +103,11 @@ export function getAddonFilenames({ tag, arch, variant }) {
 	return [baselineFilename, defaultFilename];
 }
 
-/**
- * Decide whether the loader should mirror the package's `native/<filename>.node`
- * into the per-version cache directory (`~/.omp/natives/<version>/`) before loading.
- *
- * Windows-only safety net for `bun install -g` updates: when a previous `omp`
- * process is running, bun cannot overwrite the locked `.node` inside
- * `node_modules/@oh-my-pi/pi-natives/native/`, leaving an old binary next to a
- * newer `index.js` and producing `<sym> is not a function` crashes on the next
- * launch. Staging into the version-pinned cache:
- *   1. Gives every package version its own filesystem path, so concurrent omp
- *      processes never collide on the same file.
- *   2. Makes the running process keep its handle on the cache copy, freeing bun
- *      to overwrite the `node_modules` copy on subsequent updates.
- * Disabled on non-Windows (no file-lock problem), in workspace dev (`nativeDir`
- * is not inside a `node_modules` segment), and for compiled binaries (handled
- * by `maybeExtractEmbeddedAddon`).
- *
- * @param {{ platform: NodeJS.Platform | string; isCompiledBinary: boolean; nativeDir: string }} input
- * @returns {boolean}
- */
-export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, nativeDir }) {
-	if (platform !== "win32") return false;
-	if (isCompiledBinary) return false;
-	// Check both separators independently of the host's `path.sep`: this helper
-	// is shared by the loader (running on Windows with `\`) and the test suite
-	// (typically running on POSIX hosts when CI executes the regression test).
-	return nativeDir.includes("\\node_modules\\") || nativeDir.includes("/node_modules/");
-}
 
 /**
  * @param {{
  *   addonFilenames: string[];
  *   isCompiledBinary: boolean;
- *   stageFromNodeModules?: boolean;
  *   nativeDir: string;
  *   leafPackageDir?: string | null;
  *   execDir: string;
@@ -148,7 +119,6 @@ export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, native
 export function resolveLoaderCandidates({
 	addonFilenames,
 	isCompiledBinary,
-	stageFromNodeModules = false,
 	nativeDir,
 	leafPackageDir = null,
 	execDir,
@@ -164,12 +134,9 @@ export function resolveLoaderCandidates({
 		path.join(versionedDir, filename),
 		path.join(userDataDir, filename),
 	]);
-	const stagedCandidates = stageFromNodeModules ? addonFilenames.map(filename => path.join(versionedDir, filename)) : [];
 	let releaseCandidates;
 	if (isCompiledBinary) {
 		releaseCandidates = [...compiledCandidates, ...baseReleaseCandidates];
-	} else if (stageFromNodeModules) {
-		releaseCandidates = [...stagedCandidates, ...leafCandidates, ...baseReleaseCandidates];
 	} else {
 		releaseCandidates = [...leafCandidates, ...baseReleaseCandidates];
 	}
@@ -541,47 +508,6 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 	}
 }
 
-/**
- * Mirror `leafPackageDir ?? nativeDir` addon binaries to
- * `versionedDir/<filename>.node` on Windows installs so the running process
- * cache path, never on the `node_modules` copy that bun must overwrite on
- * update. No-op on non-Windows, in workspace dev, and for compiled binaries —
- * see `shouldStageNodeModulesAddon` for the gating rules.
- */
-function maybeStageNodeModulesAddon(ctx, errors) {
-	if (!ctx.stageFromNodeModules) return null;
-
-	let stagedPath = null;
-	for (const filename of ctx.addonFilenames) {
-		const sourcePath = path.join(ctx.leafPackageDir ?? ctx.nativeDir, filename);
-		const targetPath = path.join(ctx.versionedDir, filename);
-
-		if (fs.existsSync(targetPath)) {
-			stagedPath = stagedPath || targetPath;
-			continue;
-		}
-		if (!fs.existsSync(sourcePath)) continue;
-
-		try {
-			fs.mkdirSync(ctx.versionedDir, { recursive: true });
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			errors.push(`staged addon dir: ${message}`);
-			continue;
-		}
-
-		try {
-			// `copyFileSync` is atomic on Windows (CopyFileW) and avoids holding
-			// two large buffers in JS for the read/write dance.
-			fs.copyFileSync(sourcePath, targetPath);
-			stagedPath = stagedPath || targetPath;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			errors.push(`staged addon copy (${filename}): ${message}`);
-		}
-	}
-	return stagedPath;
-}
 
 function validateLoadedBindings(ctx, bindings, candidate) {
 	// In workspace dev (running out of `packages/natives/native/` rather than a
@@ -664,11 +590,6 @@ function initLoaderContext() {
 		importMetaUrl: import.meta.url,
 	});
 	const leafPackageDir = isCompiledBinary ? null : resolveLeafPackageDir(platformTag);
-	const stageFromNodeModules = shouldStageNodeModulesAddon({
-		platform: process.platform,
-		isCompiledBinary,
-		nativeDir,
-	});
 
 	const selectedVariant = resolveCpuVariant(getVariantOverride());
 	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
@@ -677,7 +598,6 @@ function initLoaderContext() {
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
 		isCompiledBinary,
-		stageFromNodeModules,
 		nativeDir,
 		leafPackageDir,
 		execDir,
@@ -703,7 +623,6 @@ function initLoaderContext() {
 		leafPackageDir,
 		versionedDir,
 		isCompiledBinary,
-		stageFromNodeModules,
 		selectedVariant,
 		addonFilenames,
 		addonLabel,
@@ -721,9 +640,7 @@ export function loadNative() {
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
-	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
-	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
-	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
+	const runtimeCandidates = embeddedCandidate ? [embeddedCandidate, ...ctx.candidates] : ctx.candidates;
 
 	for (const candidate of runtimeCandidates) {
 		try {

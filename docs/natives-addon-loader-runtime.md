@@ -17,7 +17,7 @@ The loader is intentionally narrow:
 - Build a platform/CPU-aware candidate list for addon filenames and directories.
 - Treat an embedded-addon manifest as a compiled-binary signal when present.
 - Optionally materialize embedded addon archive contents into a versioned per-user cache directory.
-- On Windows `node_modules` installs, stage addon files into the versioned cache to avoid locked-DLL update failures.
+- On Windows `node_modules` installs, mirror addon files into the versioned cache to avoid locked-DLL update failures (removed; `omp update` now warns the user to close other processes instead).
 - Attempt candidates in deterministic order and return the first addon that `require(...)` loads and validates.
 
 For install and compiled-binary paths, the loader verifies a release sentinel export named from `package.json#version` (for example `__piNativesV16_0_3`). Workspace-dev loads skip this validation so a local checkout can rebuild after a pull. The loader does not validate the full export surface; stale same-version or incomplete binaries still surface as missing members or native errors at use sites.
@@ -43,7 +43,6 @@ At module initialization, `native/index.js` computes:
   - embedded-addon manifest is non-null,
   - `PI_COMPILED` env var is set,
   - `import.meta.url` contains Bun embedded markers (`$bunfs`, `~BUN`, `%7EBUN`).
-- **Windows staging mode** (`shouldStageNodeModulesAddon`): true only on Windows, in non-compiled mode, when `nativeDir` is inside `node_modules`.
 - **Variant override**: `PI_NATIVE_VARIANT` (`modern`/`baseline` only; invalid values ignored).
 - **Selected variant**: explicit override, otherwise runtime AVX2 detection on x64 (`modern` if AVX2, else `baseline`).
 
@@ -102,7 +101,6 @@ Candidates are grouped by directory class, in order:
 
 The leaf package dir comes first so the optional-dependency binary published with the release is preferred over any `.node` left in the core package's `native/` (e.g. a stale local-dev build).
 
-On Windows installs where `nativeDir` is inside a `node_modules` segment (`shouldStageNodeModulesAddon`), `<versionedDir>/<filename>` staging candidates are prepended ahead of the leaf candidates so a locked `node_modules` binary can be sidestepped during `bun install -g` updates. The staged file is copied from `leafPackageDir ?? nativeDir` before probing.
 
 ### Compiled runtime
 
@@ -110,8 +108,7 @@ Candidates are grouped, in order:
 
 1. `<versionedDir>/<filename>` then `<userDataDir>/<filename>`, per filename
 2. `<nativeDir>/<filename>` then `<execDir>/<filename>`, per filename
-
-At load time, an extracted embedded candidate, or a staged Windows candidate when no embedded candidate exists, is prepended ahead of these de-duplicated candidates.
+At load time, an extracted embedded candidate is prepended ahead of these de-duplicated candidates.
 
 ## Embedded addon extraction lifecycle
 
@@ -155,9 +152,6 @@ Init
   -> (compiled + embedded manifest matches?)
        yes -> extract archive to versionedDir when needed (record errors, continue)
        no  -> skip extraction
-  -> (Windows non-compiled node_modules install and no embedded candidate?)
-       yes -> stage leaf/core addon to versionedDir (record errors, continue)
-       no  -> skip staging
   -> For each runtime candidate in order:
        require(candidate)
        -> sentinel validation passes or is workspace-dev: return addon exports (READY)
