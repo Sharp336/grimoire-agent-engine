@@ -676,6 +676,66 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(abortSpy).toHaveBeenCalled();
 	});
 
+	it("retries the approved-plan prompt after a fire-and-forget flush race surfaces AgentBusyError", async () => {
+		// Regression for PR #4369 comment 3: flushCompactionQueue dispatches the
+		// first queued user message as a fire-and-forget session.prompt() that
+		// may not have reached #beginInFlight() (and thus set isStreaming) by the
+		// time #approvePlan checks the guard. The first prompt() call throws
+		// AgentBusyError; the catch block must abort the now-streaming flushed
+		// turn and retry the approved-plan prompt.
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+
+		// isStreaming is false at the guard check, but the first prompt() call
+		// throws AgentBusyError because the fire-and-forget flush started
+		// streaming between the check and the call.
+		let streaming = false;
+		Object.defineProperty(session, "isStreaming", {
+			configurable: true,
+			get: () => streaming,
+		});
+		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
+			await Promise.resolve();
+			streaming = false;
+		});
+		let promptCallCount = 0;
+		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async _text => {
+			promptCallCount++;
+			if (promptCallCount === 1) {
+				// First call: the fire-and-forget flush race — isStreaming was
+				// false at the guard but is now true inside prompt().
+				streaming = true;
+				throw new AgentBusyError();
+			}
+			// Second call (retry after abort): succeeds.
+			return true;
+		});
+		// Keep-context path (options[2]) skips clear/compact so `this.session`
+		// stays the instance the spies are on.
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, options) => {
+			return options[2];
+		});
+		const errorSpy = vi.spyOn(mode, "showError");
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Failed to finalize approved plan"));
+		// prompt was called twice: first threw AgentBusyError, second succeeded.
+		expect(promptSpy).toHaveBeenCalledTimes(2);
+		expect(isPlanApprovedCall(promptSpy.mock.calls[0] as unknown[])).toBe(true);
+		expect(isPlanApprovedCall(promptSpy.mock.calls[1] as unknown[])).toBe(true);
+		// abort was called twice: first by handlePlanApproval's pre-overlay
+		// abort (line 3090), then by the catch block's fire-and-forget race
+		// recovery (line 2695).
+		expect(abortSpy).toHaveBeenCalledTimes(2);
+	});
+
 	it("keeps the existing approve-and-execute path clearing the session", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
@@ -1596,6 +1656,42 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(approval).not.toHaveBeenCalled();
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
+		});
+	});
+
+	describe("handleShakeCommand streaming guard", () => {
+		it("refuses to shake while a turn is streaming and does not call session.shake", async () => {
+			const streaming = true;
+			Object.defineProperty(session, "isStreaming", {
+				configurable: true,
+				get: () => streaming,
+			});
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 0,
+				blocksDropped: 0,
+				tokensFreed: 0,
+			});
+			const warnSpy = vi.spyOn(mode, "showWarning");
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("not available while a turn is streaming"));
+		});
+
+		it("shakes normally when the session is idle", async () => {
+			const shakeSpy = vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 2,
+				blocksDropped: 1,
+				tokensFreed: 500,
+			});
+			vi.spyOn(mode, "rebuildChatFromMessages").mockImplementation(() => {});
+
+			await mode.handleShakeCommand("elide");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide");
 		});
 	});
 });

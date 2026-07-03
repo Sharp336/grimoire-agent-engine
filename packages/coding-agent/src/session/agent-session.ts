@@ -9498,12 +9498,29 @@ export class AgentSession {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
-			// Strategy honored on manual /compact too. Custom instructions imply a
-			// directed LLM summary; a text-only model cannot read snapcompact frames.
-			// When snapcompact itself was requested, fail locally instead of silently
-			// converting the "no LLM call" path into a provider-backed summary.
-			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
+			// Strategy honored on manual /compact too. Snapcompact is a no-LLM
+			// archival strategy — custom instructions guide an LLM summary and are
+			// irrelevant to snapcompact, so we honor the configured strategy even
+			// when a programmatic caller (e.g. plan-approval compaction) passes
+			// instructions. The explicit `/compact snapcompact <instructions>` path
+			// is already rejected by the rejectsFocus guard above; this covers the
+			// configured-strategy case where no explicit mode was requested.
+			// A text-only model cannot read snapcompact frames — fail locally
+			// instead of silently converting the "no LLM call" path into a
+			// provider-backed summary.
+			if (
+				effectiveSettings.strategy === "snapcompact" &&
+				compactionPrep.kind !== "fromHook" &&
+				customInstructions &&
+				!compactMode
+			) {
+				this.emitNotice(
+					"warning",
+					"snapcompact strategy does not use custom compaction instructions; running no-LLM snapcompact instead.",
+					"compaction",
+				);
+			}
+			const wantsSnapcompact = compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact";
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;

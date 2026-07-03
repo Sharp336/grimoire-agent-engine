@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type Agent,
+	AgentBusyError,
 	type AgentMessage,
 	type AgentToolResult,
 	EventLoopKeepalive,
@@ -2681,7 +2682,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isStreaming) {
 			await this.#abortPlanApprovalTurnSilently();
 		}
-		await this.session.prompt(planModePrompt, { synthetic: true });
+		// The compact path's flushCompactionQueue dispatches the first queued user
+		// message as a fire-and-forget session.prompt() that may not have reached
+		// #beginInFlight() (and thus set isStreaming) by the time we check above.
+		// Catch the resulting AgentBusyError, abort the now-streaming flushed turn,
+		// and retry — the approved plan takes priority over a message typed during
+		// compaction, matching the isStreaming-true branch's abort semantics.
+		try {
+			await this.session.prompt(planModePrompt, { synthetic: true });
+		} catch (error) {
+			if (!(error instanceof AgentBusyError)) throw error;
+			await this.#abortPlanApprovalTurnSilently();
+			await this.session.prompt(planModePrompt, { synthetic: true });
+		}
 	}
 	async #abortPlanApprovalTurnSilently(): Promise<void> {
 		this.session.markPlanInternalAbortPending();

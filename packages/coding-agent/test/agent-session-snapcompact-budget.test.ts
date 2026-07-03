@@ -280,3 +280,141 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 });
+
+describe("AgentSession snapcompact no-LLM contract with custom instructions", () => {
+	let tempDir: TempDir;
+	let session: AgentSession;
+	let sessionManager: SessionManager;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-snapcompact-no-llm-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled claude-sonnet-4-5 model");
+		expect(model.input).toContain("image");
+
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+
+		// Seed enough turns for prepareCompaction to split the branch.
+		const filler = "the quick brown fox jumps over the lazy dog. ".repeat(64);
+		for (let i = 0; i < 8; i++) {
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: `turn ${i}: ${filler}` }],
+				timestamp: Date.now() - (8 - i) * 1000,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `reply ${i}: ${filler}` }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 1000,
+					output: 1000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now() - (8 - i) * 1000 + 100,
+			});
+		}
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.strategy": "snapcompact",
+				"compaction.autoContinue": false,
+				"compaction.keepRecentTokens": 4000,
+			}),
+			modelRegistry,
+		});
+	});
+
+	afterEach(async () => {
+		try {
+			await session?.dispose();
+		} finally {
+			authStorage?.close();
+			await tempDir?.remove();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("runs snapcompact (no LLM) even when custom instructions are provided", async () => {
+		// Regression: when compaction.strategy === "snapcompact" and a caller
+		// passes customInstructions (e.g. plan-approval compaction prompt), the
+		// old `!customInstructions` guard disabled snapcompact and fell through
+		// to #compactWithFallbackModel, silently issuing an LLM summary. The
+		// fix honors the configured no-LLM strategy regardless of instructions.
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		// Pass custom instructions — the plan-approval compaction path does this.
+		const result = await session.compact("Focus on the plan's auth flow");
+
+		// Snapcompact MUST run; the LLM fallback must NOT.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(result.summary).toBe("stubbed snapcompact");
+	});
+
+	it("emits a notice when custom instructions are ignored for snapcompact strategy", async () => {
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+
+		vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "compaction") notices.push(event.message);
+		});
+
+		await session.compact("Focus on the plan's auth flow");
+
+		expect(notices).toContain(
+			"snapcompact strategy does not use custom compaction instructions; running no-LLM snapcompact instead.",
+		);
+	});
+
+	it("still rejects custom instructions for explicit /compact snapcompact mode", async () => {
+		// The rejectsFocus guard at the top of compact() must still throw for
+		// the explicit mode override — only the configured-strategy path
+		// silently ignores instructions.
+		await expect(session.compact("instructions", { mode: "snapcompact" })).rejects.toThrow(
+			"/compact snapcompact does not take focus instructions.",
+		);
+	});
+});
