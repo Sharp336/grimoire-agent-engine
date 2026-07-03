@@ -422,6 +422,16 @@ async def review_pr(
     if successful_reviews and not bypass_once_guard:
         log.info("skip: PR review already submitted", extra={"repo": repo.full_name, "pr": pr_number})
         return
+    if (
+        bypass_once_guard
+        and delivery_id
+        and db.has_successful_tool_call_for_delivery(key, "submit_pr_review", delivery_id)
+    ):
+        log.info(
+            "skip: re-review already submitted for this delivery",
+            extra={"repo": repo.full_name, "pr": pr_number, "delivery_id": delivery_id},
+        )
+        return
 
     labels = {label.lower() for label in issue.labels}
     review_labeled = "triaged" in labels or any(label.startswith("review:") for label in labels)

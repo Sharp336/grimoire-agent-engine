@@ -1079,6 +1079,58 @@ def test_classify_pr_replaces_stale_rank_label_on_re_review(db: Database, tmp_pa
     assert row is not None and row.classification == "review:p1"
 
 
+def test_classify_pr_replaces_stale_type_label_on_re_review(db: Database, tmp_path: Path) -> None:
+    """Re-review must remove stale _PR_TYPES labels (e.g. 'feat') when the new
+    classification picks a different type (e.g. 'fix'), not just stale rank labels."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/repos/octo/widget/issues/99":
+            # PR carries a stale 'feat' type from a prior review plus a stale rank.
+            return httpx.Response(
+                200,
+                json={
+                    "number": 99,
+                    "labels": [{"name": "triaged"}, {"name": "review:p2"}, {"name": "feat"}],
+                    "user": {"login": "alice"},
+                },
+            )
+        if request.method == "DELETE":
+            label = path.rsplit("/", 1)[-1]
+            calls.append(("DELETE", label))
+            return httpx.Response(200, json=[{"name": "triaged"}])
+        if request.method == "POST" and path.endswith("/issues/99/labels"):
+            body = json.loads(request.content)
+            calls.append(("POST", ",".join(body["labels"])))
+            return httpx.Response(200, json=[{"name": lbl} for lbl in body["labels"]])
+        return httpx.Response(404, json={"message": "unrouted"})
+
+    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_pr")
+        result = tool.execute(
+            {"rank": "review:p1", "type": "fix", "rationale": "re-review reclassifies from feat to fix"},
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "review:p1" in result
+    # Both stale 'review:p2' and stale 'feat' must be removed before the POST.
+    deleted = [c[1] for c in calls if c[0] == "DELETE"]
+    assert "review:p2" in deleted
+    assert "feat" in deleted
+    post_calls = [c for c in calls if c[0] == "POST"]
+    assert len(post_calls) == 1
+    assert "review:p1" in post_calls[0][1]
+    assert "fix" in post_calls[0][1]
+    assert "feat" not in post_calls[0][1]
+    assert "review:p2" not in post_calls[0][1]
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "review:p1"
+
+
 def test_classify_pr_rejects_bad_rank(db: Database, tmp_path: Path) -> None:
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
     try:

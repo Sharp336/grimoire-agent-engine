@@ -830,6 +830,19 @@ class SandboxManager:
                     )
                     if reset.returncode != 0:
                         raise GitCommandError(reset.args, reset.returncode, reset.stdout, reset.stderr)
+                    # `git reset --hard` does not touch untracked files. A
+                    # prior review run may have left stray artifacts (build
+                    # output, temp files) that would shadow the fresh checkout.
+                    # Clean untracked files and directories so the refreshed
+                    # review sees only the new PR head's tree.
+                    clean = _safe_run(
+                        ["git", "clean", "-fd"],
+                        cwd=repo_dir,
+                        env=_git_env_for_repo(repo_dir),
+                        **slot_git_kwargs,
+                    )
+                    if clean.returncode != 0:
+                        raise GitCommandError(clean.args, clean.returncode, clean.stdout, clean.stderr)
             if not repo_exists:
                 if pr_head is not None:
                     self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)

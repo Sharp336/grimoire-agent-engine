@@ -281,6 +281,38 @@ def test_count_successful_tool_calls(db: Database) -> None:
     assert db.count_successful_tool_calls("octo/widget#2", "submit_pr_review") == 0
 
 
+def test_has_successful_tool_call_for_delivery(db: Database) -> None:
+    """Delivery-scoped idempotency check for the re-review bypass_once_guard."""
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="new")
+    # No rows yet → False
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-1") is False
+    # Successful call for delivery d-1
+    db.log_tool_call(
+        issue_key="octo/widget#1",
+        tool="submit_pr_review",
+        args={},
+        result={"review_id": 1},
+        delivery_id="d-1",
+    )
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-1") is True
+    # Different delivery_id → False (retry of a different delivery)
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-2") is False
+    # Errored call for delivery d-2 → still False
+    db.log_tool_call(
+        issue_key="octo/widget#1",
+        tool="submit_pr_review",
+        args={},
+        error="boom",
+        delivery_id="d-2",
+    )
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-2") is False
+    # Different tool for same delivery → False
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "gh_post_comment", "d-1") is False
+    # No delivery_id stamped (legacy row) → False for any delivery_id
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 2})
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-3") is False
+
+
 def test_pr_review_comment_staging_round_trip(db: Database) -> None:
     first = db.stage_review_comment(
         issue_key="octo/widget#9",

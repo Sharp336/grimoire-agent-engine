@@ -709,6 +709,7 @@ async def run_task(
         review_mode=review_mode,
         impl_authorized=bool(directive is not None and directive.authorizes_impl),
         slot_uid=inputs.slot_uid,
+        delivery_id=inputs.delivery_id,
         abort=AbortController(),
     )
     resuming = _has_prior_session(inputs.workspace.session_dir)

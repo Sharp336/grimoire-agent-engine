@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   args_json     TEXT NOT NULL,
   result_json   TEXT,
   error         TEXT,
-  ts            TEXT NOT NULL
+  ts            TEXT NOT NULL,
+  delivery_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_issue ON tool_calls(issue_key, ts);
 
@@ -249,6 +250,10 @@ class Database:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
         if "available_at" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN available_at TEXT")
+        tool_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
+        if "delivery_id" not in tool_cols:
+            self._conn.execute("ALTER TABLE tool_calls ADD COLUMN delivery_id TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS tool_calls_delivery ON tool_calls(delivery_id, tool)")
 
     def close(self) -> None:
         with self._lock:
@@ -852,10 +857,12 @@ class Database:
         args: Mapping[str, Any],
         result: Mapping[str, Any] | None = None,
         error: str | None = None,
+        delivery_id: str | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO tool_calls (issue_key, tool, args_json, result_json, error, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tool_calls (issue_key, tool, args_json, result_json, error, ts, delivery_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     issue_key,
                     tool,
@@ -863,6 +870,7 @@ class Database:
                     json.dumps(result, separators=(",", ":"), default=str) if result is not None else None,
                     error,
                     _utcnow(),
+                    delivery_id,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -878,6 +886,26 @@ class Database:
                 LIMIT 1
                 """,
                 (issue_key, tool),
+            ).fetchone()
+        return row is not None
+
+    def has_successful_tool_call_for_delivery(self, issue_key: str, tool: str, delivery_id: str) -> bool:
+        """Return True iff a successful (error IS NULL) tool call exists for
+        the given (issue_key, tool, delivery_id) triple.
+
+        Used by the re-review bypass_once_guard to preserve retry idempotency:
+        once a submit_pr_review has succeeded for a delivery, a retry of that
+        same delivery must NOT re-review.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM tool_calls
+                WHERE issue_key=? AND tool=? AND delivery_id=? AND error IS NULL
+                LIMIT 1
+                """,
+                (issue_key, tool, delivery_id),
             ).fetchone()
         return row is not None
 
