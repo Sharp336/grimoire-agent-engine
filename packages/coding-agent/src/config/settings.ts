@@ -239,6 +239,12 @@ export class Settings {
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
+	/** Last effective value fired for each hooked setting. `#fireAllHooks`
+	 *  skips hooks whose value is unchanged since the last fire so that
+	 *  clone/replay (cloneForCwd, reloadForCwd) does not broadcast spurious
+	 *  change signals — e.g. redaction prompt refreshes — when the effective
+	 *  value is identical. */
+	#lastHookedValues = new Map<SettingPath, unknown>();
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -385,6 +391,7 @@ export class Settings {
 		if (hook) {
 			hook(next, prev);
 		}
+		this.#lastHookedValues.set(path, next);
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
@@ -452,6 +459,15 @@ export class Settings {
 		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
 		cloned.#overrides = structuredClone(this.#overrides);
+		cloned.#lastHookedValues = new Map(this.#lastHookedValues);
+		// Seed missing entries with the original's current values so
+		// #fireAllHooks on the clone fires hooks only for values that
+		// differ from the original — not for every never-set hook.
+		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
+			if (!cloned.#lastHookedValues.has(key)) {
+				cloned.#lastHookedValues.set(key, this.get(key));
+			}
+		}
 		cloned.#rebuildMerged();
 		cloned.#fireAllHooks();
 		return cloned;
@@ -473,10 +489,25 @@ export class Settings {
 		const normalized = path.normalize(cwd);
 		if (normalized === this.#cwd) return;
 		this.#cwd = normalized;
+		// Snapshot pre-reload hooked values so #fireAllHooks fires hooks only
+		// for values that actually changed, not for every never-set hook.
+		const preReloadHookedValues = new Map<SettingPath, unknown>();
+		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
+			if (!this.#lastHookedValues.has(key)) {
+				preReloadHookedValues.set(key, this.get(key));
+			}
+		}
 		if (this.#persist) {
 			this.#project = await this.#loadProjectSettings();
 		}
 		this.#rebuildMerged();
+		// Seed missing entries with the pre-reload values so hooks fire only
+		// for values that actually changed during the reload.
+		for (const [key, value] of preReloadHookedValues) {
+			if (!this.#lastHookedValues.has(key)) {
+				this.#lastHookedValues.set(key, value);
+			}
+		}
 		this.#fireAllHooks();
 	}
 
@@ -1322,10 +1353,15 @@ export class Settings {
 	#fireAllHooks(): void {
 		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
 			const hook = SETTING_HOOKS[key];
-			if (hook) {
-				const value = this.get(key);
-				hook(value, value);
-			}
+			if (!hook) continue;
+			const value = this.get(key);
+			const last = this.#lastHookedValues.get(key);
+			this.#lastHookedValues.set(key, value);
+			// Skip when the effective value is unchanged since the last fire.
+			// This prevents spurious change broadcasts (e.g. redaction prompt
+			// refreshes) during clone/replay when values are identical.
+			if (last !== undefined && Object.is(value, last)) continue;
+			hook(value, last ?? value);
 		}
 	}
 

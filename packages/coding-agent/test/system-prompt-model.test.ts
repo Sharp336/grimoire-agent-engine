@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { onSkillsRedactionChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	computeNonMessageBreakdown,
@@ -720,6 +720,301 @@ describe("AgentSession context usage rebases after redaction-driven prompt refre
 	});
 
 	function pickTwoModelsForRebaseTest(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		return [first, all[1] ?? first];
+	}
+});
+
+describe("Settings fireAllHooks skips unchanged redaction values during clone/replay", () => {
+	it("does not broadcast redaction changes during cloneForCwd when values are unchanged", async () => {
+		let signalFireCount = 0;
+		const unsubscribe = onSkillsRedactionChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			const settings = Settings.isolated({ "compaction.enabled": false });
+			// Fire the hook by setting a value — this populates #lastHookedValues.
+			settings.set("skills.redaction.mode", "trim");
+			const firesAfterSet = signalFireCount;
+			expect(firesAfterSet).toBeGreaterThan(0);
+
+			// Clone for a different cwd — redaction values haven't changed,
+			// so the signal must NOT fire.
+			await settings.cloneForCwd("/tmp/different-cwd-for-clone-test");
+			expect(signalFireCount).toBe(firesAfterSet);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("does not broadcast redaction changes during reloadForCwd when values are unchanged", async () => {
+		let signalFireCount = 0;
+		const unsubscribe = onSkillsRedactionChanged(() => {
+			signalFireCount++;
+		});
+
+		try {
+			const settings = Settings.isolated({ "compaction.enabled": false });
+			// Set a value to populate #lastHookedValues via the hook.
+			settings.set("skills.redaction.mode", "cap");
+			const firesAfterSet = signalFireCount;
+			expect(firesAfterSet).toBeGreaterThan(0);
+
+			// reloadForCwd to a different directory — redaction settings are
+			// not path-scoped, so the effective value is unchanged and the
+			// signal must NOT fire.
+			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-reload-"));
+			try {
+				await settings.reloadForCwd(tempDir);
+				expect(signalFireCount).toBe(firesAfterSet);
+			} finally {
+				removeSyncWithRetries(tempDir);
+			}
+		} finally {
+			unsubscribe();
+		}
+	});
+});
+
+describe("AgentSession redaction refresh serialization", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-serial-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("discards stale refreshes when multiple signals fire synchronously", async () => {
+		const [model] = pickTwoModelsForSerializationTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = newAgentSessionForSerialization(model, settings, async () => {
+			rebuildCount++;
+			return { systemPrompt: [`result-${rebuildCount}`] };
+		});
+
+		// Fire three signals synchronously — only the latest (epoch=3) should
+		// trigger a refresh. The two stale refreshes are discarded by the
+		// epoch guard before refreshBaseSystemPrompt is called.
+		settings.set("skills.redaction.mode", "trim");
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		settings.set("skills.redaction.maxContextShare", 0.2);
+		await flushMicrotasks();
+
+		// Only one rebuild ran — the two stale refreshes were discarded.
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["result-1"]);
+	});
+
+	it("serializes async refreshes so the latest settings win after a slow rebuild", async () => {
+		const [model] = pickTwoModelsForSerializationTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		let rebuildCount = 0;
+		let resolveFirstRebuild: (() => void) | undefined;
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = newAgentSessionForSerialization(model, settings, async () => {
+			rebuildCount++;
+			const current = rebuildCount;
+			if (current === 1) {
+				// First rebuild is slow — controlled by a promise we resolve later.
+				await new Promise<void>(resolve => {
+					resolveFirstRebuild = resolve;
+				});
+			}
+			return { systemPrompt: [`result-${current}`] };
+		});
+
+		// Fire first signal — starts a slow rebuild that blocks the chain.
+		settings.set("skills.redaction.mode", "trim");
+		await flushMicrotasks();
+		expect(rebuildCount).toBe(1);
+		// The slow rebuild hasn't applied yet.
+		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+
+		// Fire second signal while the first rebuild is still pending.
+		settings.set("skills.redaction.maxContextShare", 0.1);
+		await flushMicrotasks();
+
+		// Resolve the first rebuild — it applies "result-1", then the chain
+		// continues to the second refresh which overwrites with "result-2".
+		resolveFirstRebuild?.();
+		await flushMicrotasks();
+
+		// Both rebuilds ran, but the latest (second) won.
+		expect(rebuildCount).toBe(2);
+		expect(session.agent.state.systemPrompt).toEqual(["result-2"]);
+	});
+
+	function pickTwoModelsForSerializationTest(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		if (!first) throw new Error("Expected at least one model in the registry");
+		return [first, all[1] ?? first];
+	}
+
+	function newAgentSessionForSerialization(
+		model: Model,
+		settings: Settings,
+		rebuild: () => Promise<{ systemPrompt: string[] }>,
+	): AgentSession {
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+		});
+		return new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => rebuild(),
+		});
+	}
+});
+
+describe("AgentSession rebase flag persists through pending snapshot until durable anchor", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let tempDir: string;
+	let session: AgentSession | undefined;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-redaction-rebase-pending-"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.close();
+		removeSyncWithRetries(tempDir);
+	});
+
+	it("keeps rebase active until a durable assistant usage anchor clears it", async () => {
+		const [model] = pickTwoModelsForRebasePendingTest();
+		authStorage.setRuntimeApiKey(model.provider, "key-a");
+
+		const largePrompt = [`You are a helpful assistant. ${"x".repeat(2000)}`];
+		const smallPrompt = ["You are a helpful assistant."];
+
+		let promptToEmit = largePrompt;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: largePrompt, tools: [], messages: [] },
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: promptToEmit }),
+		});
+
+		// Seed a durable anchor with the large prompt's nonMessageTokens.
+		const largeNonMessageTokens = computeNonMessageTokens(session);
+		const anchorTimestamp = 1000;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
+			timestamp: anchorTimestamp,
+		};
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 500 } as Message);
+		sessionManager.appendMessage(assistantMessage);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const beforeRefresh = session.getContextBreakdown();
+		expect(beforeRefresh?.anchored).toBe(true);
+
+		// Rebuild with the smaller (redacted) prompt — rebase flag is set.
+		promptToEmit = smallPrompt;
+		await session.refreshBaseSystemPrompt();
+
+		// The rebase is active: usage drops because negative non-message
+		// deltas are allowed (currentNonMessage - anchorNonMessage < 0).
+		const afterRefresh = session.getContextBreakdown();
+		expect(afterRefresh?.anchored).toBe(true);
+		expect(afterRefresh?.usedTokens).toBeLessThan(beforeRefresh?.usedTokens ?? 0);
+
+		// The rebase flag must persist — it is NOT cleared by a pending
+		// context snapshot (in-flight estimate). Repeated breakdown calls
+		// must continue to show the reduced usage.
+		const stillRebased = session.getContextBreakdown();
+		expect(stillRebased?.usedTokens).toBe(afterRefresh?.usedTokens);
+
+		// Now persist a durable assistant message with usage — this IS the
+		// durable anchor that clears the rebase flag.
+		const smallNonMessageTokens = computeNonMessageTokens(session);
+		const newAnchor: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "response 2" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 50,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 55,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 50, nonMessageTokens: smallNonMessageTokens },
+			timestamp: 2000,
+		};
+		sessionManager.appendMessage({ role: "user", content: "again", timestamp: 1500 } as Message);
+		sessionManager.appendMessage(newAnchor);
+		agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		// After the durable anchor, the rebase is cleared. The breakdown
+		// uses the new anchor's promptTokens (50) with no negative delta
+		// (currentNonMessage ≈ anchorNonMessage since both reflect the
+		// small prompt).
+		const afterAnchor = session.getContextBreakdown();
+		expect(afterAnchor?.anchored).toBe(true);
+		// The new anchor's promptTokens (50) is much smaller than the
+		// pre-refresh anchor (100), confirming the durable anchor took effect.
+		expect(afterAnchor?.usedTokens).toBeLessThan(beforeRefresh?.usedTokens ?? 0);
+	});
+
+	function pickTwoModelsForRebasePendingTest(): [Model, Model] {
 		const all = modelRegistry.getAll();
 		const first = all[0];
 		if (!first) throw new Error("Expected at least one model in the registry");

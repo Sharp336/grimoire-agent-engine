@@ -1537,6 +1537,13 @@ export class AgentSession {
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeSkillsRedaction?: () => void;
+	/** Promise chain that serializes async redaction-driven prompt refreshes
+	 *  so a stale rebuild cannot overwrite the result of a newer one. */
+	#redactionRefreshChain: Promise<void> = Promise.resolve();
+	/** Monotonic epoch for redaction refreshes. Each signal callback increments
+	 *  it; a refresh whose epoch no longer matches is discarded so only the
+	 *  latest settings win. */
+	#redactionRefreshEpoch = 0;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -1731,11 +1738,14 @@ export class AgentSession {
 	#promptSkills: readonly Skill[] = [];
 	/**
 	 * True when the system prompt has been rebuilt (by redaction refresh, model
-	 * switch, or tool-set change) since the last provider-usage anchor was
-	 * recorded. When set, `getContextBreakdown()` allows negative non-message
-	 * deltas so a prompt-shrinking refresh (e.g. enabling skill redaction)
-	 * immediately reduces reported usage instead of staying clamped to the old
-	 * anchor until the next provider response clears the flag.
+	 * switch, or tool-set change) since the last durable assistant-usage anchor
+	 * was persisted. When set, `getContextBreakdown()` allows negative
+	 * non-message deltas so a prompt-shrinking refresh (e.g. enabling skill
+	 * redaction) immediately reduces reported usage instead of staying clamped
+	 * to the old anchor until the next provider response clears the flag. The
+	 * flag stays active across pending context snapshots (in-flight estimates)
+	 * and is cleared only when a durable assistant message with usage is
+	 * recorded in `#persistSessionMessageIfMissing`.
 	 */
 	#promptRebasedSinceLastAnchor = false;
 	#mcpDiscoveryEnabled = false;
@@ -2258,10 +2268,17 @@ export class AgentSession {
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
 		// Rebuild the system prompt when skill-description redaction settings change
 		// at runtime so the redaction budget/window reflects the new configuration.
+		// Refreshes are serialized via a promise chain and guarded by an epoch so
+		// a stale async rebuild cannot overwrite the result of a newer one — only
+		// the latest settings win.
 		this.#unsubscribeSkillsRedaction = onSkillsRedactionChanged(() => {
-			void this.refreshBaseSystemPrompt().catch(err => {
-				logger.warn("Skills redaction prompt refresh failed", { error: String(err) });
-			});
+			const epoch = ++this.#redactionRefreshEpoch;
+			this.#redactionRefreshChain = this.#redactionRefreshChain
+				.catch(() => {})
+				.then(() => (epoch === this.#redactionRefreshEpoch ? this.refreshBaseSystemPrompt() : undefined))
+				.catch(err => {
+					logger.warn("Skills redaction prompt refresh failed", { error: String(err) });
+				});
 		});
 	}
 	// -------------------------------------------------------------------------
@@ -15196,7 +15213,12 @@ export class AgentSession {
 		snapshot: { promptTokens: number; nonMessageTokens: number; cutoffCount: number } | undefined,
 	): void {
 		this.#pendingContextSnapshot = snapshot;
-		if (snapshot) this.#promptRebasedSinceLastAnchor = false;
+		// Do NOT clear #promptRebasedSinceLastAnchor here. The pending snapshot
+		// is an in-flight estimate, not a durable provider-reported usage anchor.
+		// Clearing the rebase flag prematurely would clamp negative non-message
+		// deltas to zero, hiding a prompt-shrinking refresh (e.g. enabling skill
+		// redaction) until the next provider response. The flag is cleared only
+		// when a durable assistant usage anchor is persisted (#persistSessionMessageIfMissing).
 		this.#contextUsageRevision++;
 	}
 
