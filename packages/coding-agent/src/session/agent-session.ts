@@ -14619,6 +14619,7 @@ export class AgentSession {
 			}
 			this.#baseSystemPrompt = previousBaseSystemPrompt;
 			this.#baseSystemPromptBeforeMemoryPromotion = previousBaseSystemPromptBeforeMemoryPromotion;
+			this.#promptSkills = previousPromptSkills;
 			this.#promptModelContextWindow = previousPromptModelContextWindow;
 			this.#promptModelKey = previousPromptModelKey;
 			this.#promptRebasedSinceLastAnchor = previousPromptRebasedSinceLastAnchor;

@@ -1677,12 +1677,9 @@ describe("AgentSession switchSession rollback restores promptModelKey", () => {
 		const all = modelRegistry.getAll();
 		const modelA = all[0];
 		if (!modelA) throw new Error("Expected at least one model");
-		const modelB =
-			all.find(
-				m =>
-					(m.provider !== modelA.provider || m.id !== modelA.id) &&
-					m.contextWindow === modelA.contextWindow,
-			) ?? { ...modelA, id: `${modelA.id}-alt`, provider: modelA.provider };
+		const modelB = all.find(
+			m => (m.provider !== modelA.provider || m.id !== modelA.id) && m.contextWindow === modelA.contextWindow,
+		) ?? { ...modelA, id: `${modelA.id}-alt`, provider: modelA.provider };
 		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
 		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
 
@@ -1903,7 +1900,11 @@ describe("AgentSession rebase flag not cleared by stale-snapshot durable anchor"
 			model: model.id,
 			stopReason: "stop",
 			usage: {
-				input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110,
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			contextSnapshot: { promptTokens: 100, nonMessageTokens: largeNonMessageTokens },
@@ -1941,7 +1942,11 @@ describe("AgentSession rebase flag not cleared by stale-snapshot durable anchor"
 			model: model.id,
 			stopReason: "stop",
 			usage: {
-				input: 50, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 55,
+				input: 50,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 55,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			timestamp: 2000,
