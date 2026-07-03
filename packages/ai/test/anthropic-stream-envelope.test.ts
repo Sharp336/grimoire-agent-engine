@@ -642,9 +642,22 @@ describe("anthropic stream envelope handling", () => {
 			false,
 		);
 		const replayAssistant = replayParams.find(param => param.role === "assistant");
-		expect(replayAssistant?.content).toEqual([
-			{ type: "text", text: "<thinking>\nCheck logs before accepting container health.\n</thinking>" },
-		]);
+		const replayContent = replayAssistant?.content;
+		// Exactly two shapes are allowed here, depending on which reasoning_extraction fix is
+		// present:
+		//  - demotion-only (PR #4429, this branch alone): the block survives as a single
+		//    bare-prose text block with no <thinking> tag anywhere.
+		//  - demotion + guard-drop combined (PR #4427 cherry-picked on top): the widened guard
+		//    strips the block before it ever reaches demotion, so nothing is left to replay and
+		//    the assistant message is dropped entirely.
+		// Anything else — an empty content array, extra/non-text blocks, or a tag-wrapped text
+		// block — is the regression this test guards against, so assert the allowed states
+		// explicitly rather than a loose substring check.
+		if (replayAssistant === undefined) {
+			expect(replayContent).toBeUndefined();
+		} else {
+			expect(replayContent).toEqual([{ type: "text", text: "Check logs before accepting container health." }]);
+		}
 	});
 	it("preserves signed thinking bytes when no literal thinking envelope is present", async () => {
 		const signedThinking = "\nCheck logs before accepting container health.\n";

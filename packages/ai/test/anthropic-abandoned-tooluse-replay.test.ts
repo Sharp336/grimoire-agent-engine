@@ -156,8 +156,21 @@ describe("Anthropic abandoned/aborted tool-use replay", () => {
 		expectNoUnsignedThinking(blocks);
 		expect(blocks.some(b => b.type === "thinking" && b.signature === "sig_done")).toBe(true);
 		expect(blocks.some(b => b.type === "thinking" && b.signature === "trunc")).toBe(false);
-		expect(blocks.some(b => b.type === "text" && b.text === "<thinking>\nnow decide\n</thinking>")).toBe(true);
 		expect(blocks.some(b => b.type === "tool_use")).toBe(true);
+		// Exactly two shapes are allowed for the signature-stripped "now decide" block, depending
+		// on which reasoning_extraction fix is present:
+		//  - demotion-only (PR #4429, this branch alone): it survives as a single bare-prose text
+		//    block equal to the original thinking text, with no <thinking> tag anywhere.
+		//  - demotion + guard-drop combined (PR #4427 also applied): the widened guard drops the
+		//    block entirely before it reaches demotion, so no text block exists for it at all.
+		// Anything else — a tag-wrapped text block, a truncated/altered text value, or multiple
+		// stray text blocks — is the regression this test guards against.
+		const textBlocks = blocks.filter(b => b.type === "text");
+		if (textBlocks.length === 0) {
+			expect(textBlocks).toEqual([]);
+		} else {
+			expect(textBlocks).toEqual([{ type: "text", text: "now decide" }]);
+		}
 	});
 
 	it("replays completed signed thinking when an aborted turn is interrupted during output behind a gateway baseUrl", () => {
