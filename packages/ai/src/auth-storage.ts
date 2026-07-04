@@ -4565,6 +4565,7 @@ export class AuthStorage {
 				throw error;
 			}
 			const updated: OAuthCredential = {
+				...attempted,
 				type: "oauth",
 				access: refreshed.access,
 				refresh: refreshed.refresh,

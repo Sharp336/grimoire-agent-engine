@@ -11,6 +11,7 @@ import type { MCPAuthConfig, MCPServerConfig } from "./types";
 
 export interface MCPOAuthCredentialLookup {
 	credentialId: string;
+	rowId?: number;
 	credential: MCPStoredOAuthCredential;
 }
 
@@ -46,14 +47,18 @@ export function lookupMcpOAuthCredentialForServer(
 	) {
 		const credential = authStorage.get(auth.credentialId);
 		if (credential?.type === "oauth") {
-			return { credentialId: auth.credentialId, credential };
+			const rowId = authStorage
+				.listStoredCredentials(auth.credentialId)
+				.find(row => row.credential.type === "oauth")?.id;
+			return { credentialId: auth.credentialId, rowId, credential };
 		}
 	}
 	if (options.allowUrlKeyedFallback === false) return undefined;
 	for (const credentialId of urlKeyedCredentialIds) {
 		const credential = authStorage.get(credentialId);
 		if (credential?.type === "oauth") {
-			return { credentialId, credential };
+			const rowId = authStorage.listStoredCredentials(credentialId).find(row => row.credential.type === "oauth")?.id;
+			return { credentialId, rowId, credential };
 		}
 	}
 	return undefined;

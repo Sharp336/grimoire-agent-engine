@@ -11,7 +11,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import type { AuthStorage } from "../session/auth-storage";
+import { type AuthStorage, REMOTE_REFRESH_SENTINEL } from "../session/auth-storage";
 import {
 	connectToServer,
 	disconnectServer,
@@ -1252,26 +1252,45 @@ export class MCPManager {
 					opts?.forceRefresh || (credential.expires && Date.now() >= credential.expires - REFRESH_BUFFER_MS);
 				if (shouldRefresh && credential.refresh && tokenUrl) {
 					try {
-						const refreshed = await refreshMCPOAuthToken(
-							tokenUrl,
-							credential.refresh,
-							clientId,
-							clientSecret,
-							resource,
-							{ authorizationUrl, stripSameOriginResource: resourceIsFallback },
-						);
-						// Spread the old credential first so embedded refresh material survives rotation.
-						const refreshedCredential: MCPStoredOAuthCredential = {
-							...credential,
-							...refreshed,
-							tokenUrl,
-							clientId,
-							clientSecret,
-							resource: resourceIsFallback ? undefined : resource,
-							authorizationUrl,
-						};
-						await this.#authStorage.set(credentialId, refreshedCredential);
-						credential = refreshedCredential;
+						if (credential.refresh === REMOTE_REFRESH_SENTINEL) {
+							if (lookup.rowId === undefined) {
+								throw new Error(`Broker-backed MCP OAuth credential '${credentialId}' has no stored row id`);
+							}
+							const refreshedEntry = await this.#authStorage.forceRefreshCredentialById(lookup.rowId);
+							if (refreshedEntry.credential.type !== "oauth") {
+								throw new Error(`Broker refresh returned non-OAuth credential for '${credentialId}'`);
+							}
+							credential = {
+								...credential,
+								...refreshedEntry.credential,
+								tokenUrl,
+								clientId,
+								clientSecret,
+								resource: resourceIsFallback ? undefined : resource,
+								authorizationUrl,
+							};
+						} else {
+							const refreshed = await refreshMCPOAuthToken(
+								tokenUrl,
+								credential.refresh,
+								clientId,
+								clientSecret,
+								resource,
+								{ authorizationUrl, stripSameOriginResource: resourceIsFallback },
+							);
+							// Spread the old credential first so embedded refresh material survives rotation.
+							const refreshedCredential: MCPStoredOAuthCredential = {
+								...credential,
+								...refreshed,
+								tokenUrl,
+								clientId,
+								clientSecret,
+								resource: resourceIsFallback ? undefined : resource,
+								authorizationUrl,
+							};
+							await this.#authStorage.set(credentialId, refreshedCredential);
+							credential = refreshedCredential;
+						}
 					} catch (refreshError) {
 						const errorMsg = refreshError instanceof Error ? refreshError.message : String(refreshError);
 						if (isDefinitiveOAuthFailure(errorMsg)) {
