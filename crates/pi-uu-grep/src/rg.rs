@@ -934,7 +934,8 @@ fn search_dir<W: Write>(
 }
 
 fn collect_filtered_files(cli: &RgCli, root: &Path) -> Result<Vec<PathBuf>, String> {
-	let walk = pi_grep_core::build_walk(&walk_spec(cli), root)?;
+	let walk =
+		pi_grep_core::build_walk(&walk_spec(cli), root).map_err(|err| format!("rg: {err}"))?;
 	match walk.collect_files(pi_uutils_ctx::is_cancelled) {
 		Ok(files) => Ok(files),
 		Err(pi_walker::WalkError::Interrupted(_)) if pi_uutils_ctx::is_cancelled() => {
