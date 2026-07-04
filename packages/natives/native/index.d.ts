@@ -1723,7 +1723,12 @@ export interface PsRunOptions {
   command: string
   /** Location to set before running (persists into the runspace). */
   cwd?: string
-  /** Environment variables to set before running. */
+  /**
+   * Environment variables to set before running. Process-scoped and never
+   * unset — once applied they persist for the host's lifetime. (Plumbed but
+   * not currently supplied by the coding-agent tool, which documents
+   * inline `$env:` assignment instead.)
+   */
   env?: Record<string, string>
   /** Render width passed to `Out-String`. Defaults to `120`. */
   width?: number
@@ -1735,7 +1740,11 @@ export interface PsRunOptions {
 
 /** Result of running a command on the host. */
 export interface PsRunResult {
-  /** `$LASTEXITCODE` after the command, when set. */
+  /**
+   * Exit code of a native command run by this invocation, when one ran.
+   * `$LASTEXITCODE` itself persists in the runspace, but a stale value from
+   * an earlier call is never attributed here.
+   */
   exitCode?: number
   /** Whether the command wrote to the error stream or set `HadErrors`. */
   hadErrors: boolean

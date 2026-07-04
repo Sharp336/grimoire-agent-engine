@@ -1,6 +1,3 @@
-import { PsHost } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
-
 /**
  * Session-keyed pool of persistent PowerShell hosts, plus tracking for
  * ephemeral (single-call, never pooled) hosts.
@@ -23,6 +20,9 @@ import { logger } from "@oh-my-pi/pi-utils";
  *   disposeAllPsHosts} is the graceful path for an orderly shutdown.
  */
 
+import { PsHost } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
+
 interface HostEntry {
 	host: PsHost;
 	lastUsed: number;
@@ -31,6 +31,8 @@ interface HostEntry {
 }
 
 const HOSTS = new Map<string, HostEntry>();
+/** In-flight spawns, so concurrent acquires for one session share one host. */
+const SPAWNING = new Map<string, Promise<HostEntry>>();
 /** Live ephemeral hosts, tracked only so orderly shutdown can reap them. */
 const EPHEMERAL_HOSTS = new Set<PsHost>();
 
@@ -84,8 +86,24 @@ export async function acquirePsHost(options: AcquirePsHostOptions): Promise<PsHo
 
 	let entry = HOSTS.get(options.sessionId);
 	if (!entry) {
-		entry = { host: await spawnHost(options), lastUsed: Date.now(), activeRuns: 0 };
-		HOSTS.set(options.sessionId, entry);
+		// Single-flight the spawn: without this, concurrent acquires for the
+		// same session would each see an empty slot, spawn their own host, and
+		// leak every loser untracked. The tool's exclusive concurrency makes
+		// that unlikely today, but the pool must be safe on its own terms.
+		let spawning = SPAWNING.get(options.sessionId);
+		if (!spawning) {
+			spawning = spawnHost(options)
+				.then(host => {
+					const created: HostEntry = { host, lastUsed: Date.now(), activeRuns: 0 };
+					HOSTS.set(options.sessionId, created);
+					return created;
+				})
+				.finally(() => {
+					SPAWNING.delete(options.sessionId);
+				});
+			SPAWNING.set(options.sessionId, spawning);
+		}
+		entry = await spawning;
 	}
 
 	entry.lastUsed = Date.now();
@@ -134,6 +152,11 @@ export async function disposeAllPsHosts(): Promise<void> {
 	await Promise.allSettled(hosts.map(host => safeDispose(host)));
 }
 
+/**
+ * Evict hosts idle beyond the TTL. The acquiring session's own host (`keep`)
+ * is exempt — it is about to be used, so evicting and respawning it would only
+ * discard warm state — as is any host with a run still in flight.
+ */
 function sweepIdle(ttlMs: number, keep: string): void {
 	if (ttlMs <= 0) return;
 	const now = Date.now();

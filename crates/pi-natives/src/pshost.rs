@@ -1,11 +1,12 @@
 //! Persistent PowerShell host sidecar exported via N-API.
 //!
 //! # Overview
-//! A single long-lived `pwsh` process owns one shared runspace; every tool call
-//! runs in it, so variables, imported modules, `$LASTEXITCODE`, and the live
-//! result objects in `$global:__omp` persist across calls and stay inspectable
-//! with `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid
-//! once per session; per-call cost is one runspace pipeline over the warm host.
+//! A single long-lived `pwsh` process owns one shared runspace; every `run()`
+//! on this host executes in it, so variables, imported modules,
+//! `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist
+//! across calls and stay inspectable with `Enter-PSHostProcess -Id <pid>`. The
+//! expensive process spawn is paid once per session; per-call cost is one
+//! runspace pipeline over the warm host.
 //!
 //! The host loop is [`pshost_bootstrap.ps1`], embedded at build time and
 //! written to a content-addressed temp file on first use. Communication is
@@ -146,7 +147,10 @@ pub struct PsRunOptions<'env> {
 	pub command:    String,
 	/// Location to set before running (persists into the runspace).
 	pub cwd:        Option<String>,
-	/// Environment variables to set before running.
+	/// Environment variables to set before running. Process-scoped and never
+	/// unset — once applied they persist for the host's lifetime. (Plumbed but
+	/// not currently supplied by the coding-agent tool, which documents
+	/// inline `$env:` assignment instead.)
 	pub env:        Option<HashMap<String, String>>,
 	/// Render width passed to `Out-String`. Defaults to `120`.
 	pub width:      Option<u32>,
@@ -159,7 +163,9 @@ pub struct PsRunOptions<'env> {
 /// Result of running a command on the host.
 #[napi(object)]
 pub struct PsRunResult {
-	/// `$LASTEXITCODE` after the command, when set.
+	/// Exit code of a native command run by this invocation, when one ran.
+	/// `$LASTEXITCODE` itself persists in the runspace, but a stale value from
+	/// an earlier call is never attributed here.
 	pub exit_code:  Option<i32>,
 	/// Whether the command wrote to the error stream or set `HadErrors`.
 	pub had_errors: bool,
@@ -234,8 +240,15 @@ impl HostCore {
 		cancel: task::CancelToken,
 		chunk_tx: mpsc::UnboundedSender<String>,
 	) -> Result<PsRunResult> {
+		// A run issued before start() would otherwise park on done_rx until the
+		// caller's timeout: nothing consumes req_tx until supervise() spawns.
+		if !self.started.load(Ordering::SeqCst) {
+			return Err(Error::from_reason("PowerShell host has not been started"));
+		}
 		// One pipeline at a time on the shared runspace.
 		let _guard = self.exec_lock.lock().await;
+		// Ids start at 1: `current_id == 0` is the "nothing in flight" sentinel
+		// read by abort(), hence the double increment.
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
 
 		let (done_tx, mut done_rx) = oneshot::channel::<DoneInfo>();
@@ -317,34 +330,58 @@ fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
 	Ok(frame)
 }
 
-/// Materialize the embedded bootstrap to a content-addressed temp file. Written
-/// once via a unique temp file + atomic rename, then shared (read-only) across
-/// hosts, so a host that finds the file present never reads a partially written
-/// script — even when several processes first-write the same new hash at once
-/// (e.g. `test:ts` and `test:rs` running in parallel after a bootstrap change).
+/// True when `path` is a regular file (not a symlink) whose bytes hash to
+/// `hash`. The bootstrap lives in a shared temp dir under a predictable name,
+/// so pre-existing content must never be trusted: a planted file would
+/// otherwise be handed to `pwsh -File` verbatim.
+fn bootstrap_is_valid(path: &std::path::Path, hash: u64) -> bool {
+	let Ok(meta) = std::fs::symlink_metadata(path) else {
+		return false;
+	};
+	if !meta.is_file() {
+		return false;
+	}
+	let Ok(bytes) = std::fs::read(path) else {
+		return false;
+	};
+	xxhash_rust::xxh64::xxh64(&bytes, 0) == hash
+}
+
+/// Materialize the embedded bootstrap to a content-addressed temp file. The
+/// bytes are verified (hash + regular-file check) before the path is ever
+/// returned — existence alone is not trusted, so a file planted at the
+/// predictable name is replaced rather than executed. Publication is a unique
+/// temp file + atomic rename, so a host that reads a valid file never sees a
+/// partial write, even when several processes first-write the same new hash at
+/// once (e.g. `test:ts` and `test:rs` running in parallel after a bootstrap
+/// change). A racing writer that wins leaves identical bytes.
 fn ensure_bootstrap() -> Result<PathBuf> {
 	static TMP_NONCE: AtomicU32 = AtomicU32::new(0);
 	let dir = std::env::temp_dir();
 	let hash = xxhash_rust::xxh64::xxh64(BOOTSTRAP.as_bytes(), 0);
 	let path = dir.join(format!("omp-pshost-{hash:016x}.ps1"));
-	if !path.exists() {
-		// pid + nonce: two hosts first-created concurrently in one process must
-		// not write/truncate the same temp file before the rename publishes it.
-		let tmp = dir.join(format!(
-			"omp-pshost-{hash:016x}.{}.{}.tmp",
-			std::process::id(),
-			TMP_NONCE.fetch_add(1, Ordering::Relaxed)
-		));
-		std::fs::write(&tmp, BOOTSTRAP).map_err(|err| {
-			Error::from_reason(format!("Failed to write PowerShell host script: {err}"))
-		})?;
-		// Atomic publish; content is hash-addressed, so a racing writer that won
-		// leaves identical bytes. Clean up our temp if the rename lost.
+	if bootstrap_is_valid(&path, hash) {
+		return Ok(path);
+	}
+	// pid + nonce: two hosts first-created concurrently in one process must
+	// not write/truncate the same temp file before the rename publishes it.
+	let tmp = dir.join(format!(
+		"omp-pshost-{hash:016x}.{}.{}.tmp",
+		std::process::id(),
+		TMP_NONCE.fetch_add(1, Ordering::Relaxed)
+	));
+	std::fs::write(&tmp, BOOTSTRAP).map_err(|err| {
+		Error::from_reason(format!("Failed to write PowerShell host script: {err}"))
+	})?;
+	if std::fs::rename(&tmp, &path).is_err() {
+		// Windows rename fails onto an existing dest: drop the stale/invalid
+		// file and retry once; clean up our temp if we still lost the race.
+		let _ = std::fs::remove_file(&path);
 		if std::fs::rename(&tmp, &path).is_err() {
 			let _ = std::fs::remove_file(&tmp);
 		}
 	}
-	if !path.exists() {
+	if !bootstrap_is_valid(&path, hash) {
 		return Err(Error::from_reason("Failed to install PowerShell host script"));
 	}
 	Ok(path)

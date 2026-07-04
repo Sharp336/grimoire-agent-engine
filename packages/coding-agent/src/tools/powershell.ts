@@ -81,6 +81,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		const params = args as Partial<PowerShellToolParams>;
 		const command = typeof params.command === "string" ? params.command : "(missing)";
 		const lines = [`Command: ${truncateForPrompt(command)}`];
+		if (typeof params.cwd === "string" && params.cwd.length > 0) lines.push(`Directory: ${params.cwd}`);
 		if (params.host && params.host !== "session") lines.push(`Host: ${params.host}`);
 		return lines;
 	};
@@ -89,8 +90,11 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 	readonly loadMode = "discoverable";
 	readonly label = "PowerShell";
 	readonly parameters = powershellSchema;
-	/** Ephemeral runs share nothing (own process, own runspace, never pooled),
-	 * so they may run alongside other tools; session-host runs stay exclusive. */
+	// Ephemeral runs share nothing (own process, own runspace, never pooled),
+	// so they may run alongside other tools. Session-host runs stay exclusive
+	// not for runspace safety — the native exec_lock and the bootstrap's
+	// in-flight rejection already serialize the runspace — but so a session
+	// command's streaming output is never interleaved with sibling tools.
 	readonly concurrency = (args: Partial<PowerShellToolParams>): "shared" | "exclusive" =>
 		args.host === "ephemeral" ? "shared" : "exclusive";
 	readonly strict = true;
@@ -116,9 +120,12 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			historyDepth: settings.get("powershell.historyDepth"),
 		};
 
-		// Teardown is awaited before the result is built: for an ephemeral host,
-		// "the call returned" must mean "the process is gone" — loaded assemblies
-		// and file locks are state, and releasing them is the point of the mode.
+		// Teardown is awaited before the result is built, and means different
+		// things per mode: for an ephemeral host it kills the process — "the
+		// call returned" must mean "the process is gone", because loaded
+		// assemblies and file locks are state and releasing them is the point
+		// of the mode. For a session host it only returns the lease to the
+		// pool (refreshing the idle clock); nothing is disposed.
 		let host: PsHost;
 		let teardown: () => void | Promise<void>;
 		if (hostMode === "ephemeral") {
@@ -127,10 +134,12 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			teardown = lease.dispose;
 		} else {
 			const sessionKey = psHostPoolKey(this.session);
-			// new-session: fully kill the old host before spawning the replacement,
-			// so the poisoned runspace's locks are provably gone when the command
-			// runs. Spawn failure leaves the session hostless; the next call
-			// re-spawns lazily, exactly like a first call.
+			// new-session: fully kill the old host before the acquire below, so
+			// the poisoned runspace's locks are provably gone when the command
+			// runs. The acquire then spawns the replacement — the pool entry is
+			// gone, and acquirePsHost lazy-spawns on a missing entry. Spawn
+			// failure leaves the session hostless; the next call re-spawns
+			// lazily, exactly like a first call.
 			if (hostMode === "new-session") await disposePsHostSession(sessionKey);
 			const lease = await acquirePsHost({
 				...spawnOptions,
@@ -241,7 +250,7 @@ function formatPowerShellCommandLines(command: string, uiTheme: Theme): string[]
 }
 
 export const powershellToolRenderer = {
-	renderCall(args: PowerShellRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
+	renderCall(args: PowerShellRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const command = args.command ?? "";
 		const header = renderStatusLine({ icon: "pending", title: powershellTitle(args), description: "" }, uiTheme);
 		const cmdLines = formatPowerShellCommandLines(command, uiTheme);
@@ -252,7 +261,7 @@ export const powershellToolRenderer = {
 					{
 						header,
 						state: "pending",
-						sections: [{ lines: capPreviewLines(cmdLines, uiTheme, { expanded: _options.expanded }) }],
+						sections: [{ lines: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
 						width,
 					},
 					uiTheme,
@@ -302,6 +311,9 @@ export const powershellToolRenderer = {
 								),
 							);
 						}
+						// Warning/error chunks arrive pre-colored by the host's SGR
+						// labeling (see Format-AnsiText in pshost_bootstrap.ps1);
+						// re-tinting them would clobber that color.
 						const styledVisual = visualLines.map(line =>
 							line.includes("\x1b[") ? replaceTabs(line) : uiTheme.fg("toolOutput", replaceTabs(line)),
 						);

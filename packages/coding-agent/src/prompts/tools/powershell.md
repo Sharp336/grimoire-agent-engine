@@ -31,6 +31,6 @@ Variables you set persist too: `$data = Get-Process` in one call, then `$data | 
 ## Notes
 
 - All PowerShell output streams are captured. Success output and `Write-Host`/`Write-Information` are returned as-is; `Write-Warning`, `Write-Verbose` (with `-Verbose`), and `Write-Debug` (with `-Debug`) are returned with their `WARNING:`/`VERBOSE:`/`DEBUG:` labels; the error stream is surfaced too. Warnings, verbose, debug, and errors are color-coded like the PowerShell console.
-- A non-zero `$LASTEXITCODE` or any error-stream write marks the result as failed (warnings do not); the command's output is still returned.
+- A non-zero exit code from a native command run in this call, or any error-stream write, marks the result as failed (warnings do not); a stale `$LASTEXITCODE` persisting from an earlier call never does. The command's output is still returned.
 - The session host runs one pipeline at a time; session-host calls are serialized. `host: "ephemeral"` calls are independent processes and may run in parallel with other tool calls.
 - For live debugging, the result carries the host PID — attach with `Enter-PSHostProcess -Id <pid>` then `Debug-Runspace`. (Not applicable to ephemeral hosts: their process is already gone when the result arrives.)

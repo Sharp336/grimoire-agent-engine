@@ -4,7 +4,7 @@ import { $which } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
 import { loadPowerShellTool, type PowerShellToolDetails } from "../../src/tools/powershell";
-import { disposeAllPsHosts } from "../../src/tools/pshost-manager";
+import { acquirePsHost, disposeAllPsHosts } from "../../src/tools/pshost-manager";
 
 const hasPwsh = Boolean(await $which("pwsh"));
 const settings = await Settings.init();
@@ -102,6 +102,20 @@ suite("PowerShellTool (persistent host)", () => {
 		const persisted = await tool.execute("m5", { command: "$z = 1; $z" });
 		expect(textOf(persisted).trim()).toBe("1");
 		expect(persisted.details?.pid).toBe(freshPid);
+	});
+
+	test("concurrent acquires for one session converge on a single host", async () => {
+		const opts = { sessionId: "ps-race-test", cwd: process.cwd(), historyDepth: 5, idleTtlMs: 0 };
+		// Without single-flight spawning, both acquires would see an empty pool
+		// slot and spawn their own sidecar, silently leaking one.
+		const [a, b] = await Promise.all([acquirePsHost(opts), acquirePsHost(opts)]);
+		try {
+			expect(a.host.pid).toBeGreaterThan(0);
+			expect(a.host.pid).toBe(b.host.pid);
+		} finally {
+			a.release();
+			b.release();
+		}
 	});
 
 	test("captures non-success streams (Write-Host, Write-Warning)", async () => {

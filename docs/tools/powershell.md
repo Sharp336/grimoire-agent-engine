@@ -40,14 +40,14 @@ Failure behavior:
 
 - Timeout → thrown `ToolError` (output preserved); the runspace and all retained state survive — only the in-flight pipeline is stopped.
 - Abort signal → thrown `ToolAbortError`.
-- Non-zero `$LASTEXITCODE` or error-stream writes → non-thrown `isError` result with output preserved.
+- Non-zero exit code from a native command run by this call, or error-stream writes → non-thrown `isError` result with output preserved. A stale `$LASTEXITCODE` persisting from an earlier call is never attributed to the current one.
 
 ## Flow
 1. `loadPowerShellTool()` returns `null` unless a `pwsh` (or configured `powershell.shellPath`) executable resolves via `$which`, so the tool is unregistered when PowerShell is absent.
 2. On execute, `clampTimeout("powershell", timeout)` applies the `1..3600` second clamp.
 3. Host selection: `host: "ephemeral"` spawns a throwaway host via `spawnEphemeralPsHost()` (never pooled; disposed — awaited — when the run completes). `host: "new-session"` first awaits `disposePsHostSession()` for the session key, then acquires as normal. Otherwise `acquirePsHost()` in `pshost-manager.ts` leases the session's warm host (keyed by `session.getSessionId()`, or a per-`ToolSession` generated key when absent), spawning one on first use and evicting hosts idle beyond `powershell.idleTtlMs`; hosts with an in-flight run are never evicted, and the lease is released when the run completes.
 4. A fresh host constructs `PsHost` with `parentPid = process.pid`, the session cwd, and `powershell.historyDepth`, then `start()` spawns the sidecar and waits for the ready handshake.
-5. The native writes `pshost_bootstrap.ps1` to a content-addressed temp file and launches `pwsh -NoLogo -NoProfile -NonInteractive -File <bootstrap> -ParentPid <pid>`.
+5. The native writes `pshost_bootstrap.ps1` to a content-addressed temp file and launches `pwsh -NoLogo -NoProfile -NonInteractive -File <bootstrap> -ParentPid <pid> -HistoryDepth <powershell.historyDepth>`.
 6. The bootstrap opens one shared runspace and an `$global:__omp` store, then serves length-prefixed JSON frames over stdio.
 7. Each `run()` sends an `exec` frame; the bootstrap runs the command at top scope, retaining its live output objects in `$global:__omp.Last`/`.History`, renders them with `Out-String -Width`, and streams the text back as `chunk` frames terminated by `done`. All PowerShell streams are captured: Success and Information (`Write-Host`) verbatim, and Warning/Verbose/Debug/Error labeled and ANSI color-coded (yellow/red) like the console. Each `chunk` frame carries a `stream` tag (`output`/`information`/`warning`/`verbose`/`debug`/`error`).
 8. The tool pushes chunks into an `OutputSink` (tail + artifact spill), then `sink.dump()` yields the truncation summary used by the result.
@@ -93,11 +93,11 @@ Failure behavior:
 - Host startup failure or handshake timeout → thrown `ToolError` from `start()` ("PowerShell host startup timed out" / spawn error).
 - Timeout → `ToolError` with preserved output and `Command timed out after N seconds`.
 - Abort → `ToolAbortError`.
-- Non-zero native exit / error-stream writes → non-thrown `isError` result.
+- Non-zero exit from a native command run by this call / error-stream writes → non-thrown `isError` result.
 
 ## Notes
 - The process spawn (~1s) is paid once per session; warm per-call cost is ~20–30 ms.
 - The bootstrap runs commands at top scope (via an array-subexpression assignment, not a child scope), so `$x = 1` in one call is visible in the next.
 - `$env:` assignments persist for the session (process-wide in the sidecar), matching shell-session semantics.
-- The tool exposes `command`, `cwd`, and `timeout`; there is no separate `env` field — set `$env:` inline.
+- The tool exposes `command`, `cwd`, `timeout`, and `host`; there is no separate `env` field — set `$env:` inline.
 - For simple POSIX-style commands prefer `bash`; for file reads/search/edits use `read`/`search`/`edit`.
