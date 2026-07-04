@@ -974,14 +974,13 @@ fn build_regex_matcher(
 	// Fast path (preserved from upstream): when not multiline, first try a
 	// matcher whose line terminator is `\n` (faster anchor matching); fall
 	// back to the default (no terminator) if that build fails.
-	let owned = pattern.to_owned();
-	let patterns = std::slice::from_ref(&owned);
 	let spec = |line_terminated: bool| pi_grep_core::MatcherSpec {
 		case_insensitive: ignore_case,
 		multi_line: multiline,
 		line_terminator: line_terminated.then_some(b'\n'),
 		..pi_grep_core::MatcherSpec::default()
 	};
+	let patterns = std::slice::from_ref(&pattern);
 	if !multiline
 		&& let Ok(matcher) = pi_grep_core::build_matcher(patterns, &spec(true))
 	{
