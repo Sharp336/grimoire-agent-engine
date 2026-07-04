@@ -222,6 +222,15 @@ const OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS: LazyStreamLimits = {
 	openAIIdleEnvFloorsFirstEvent: true,
 };
 
+/**
+ * Cursor exec-server tool calls can run local OMP tools (grep, bash, read, …)
+ * without upstream gRPC frames for several minutes. Keep a generous idle floor
+ * so the lazy watchdog does not abort healthy exec gaps (issue #4574).
+ */
+const CURSOR_LAZY_STREAM_LIMITS: LazyStreamLimits = {
+	defaultIdleTimeoutMs: 600_000,
+};
+
 function forwardStream<TApi extends Api>(
 	target: EventStreamImpl,
 	source: AsyncIterable<AssistantMessageEvent>,
@@ -468,7 +477,7 @@ export const streamOpenAIResponses = createLazyStream(
 	loadOpenAIResponsesProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
-export const streamCursor = createLazyStream(loadCursorProviderModule);
+export const streamCursor = createLazyStream(loadCursorProviderModule, CURSOR_LAZY_STREAM_LIMITS);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 

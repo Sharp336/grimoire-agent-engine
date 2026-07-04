@@ -783,6 +783,7 @@ async function handleShellStreamArgs(
 	h2Request: http2.ClientHttp2Stream,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
+	keepalive: CursorExecKeepaliveContext,
 ): Promise<void> {
 	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
@@ -905,6 +906,7 @@ async function handleShellStreamArgs(
 			buildShellRejectedResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, reason),
 		error =>
 			buildShellFailureResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, error),
+		keepalive,
 	);
 
 	// When using the batch handler (no shellStream), send buffered stdout/stderr
@@ -1087,6 +1089,7 @@ async function handleExecServerMessage(
 				toolResult => buildReadResultFromToolResult(args.path, toolResult),
 				reason => buildReadRejectedResult(args.path, reason),
 				error => buildReadErrorResult(args.path, error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "readResult", execResult);
 			return;
@@ -1105,6 +1108,7 @@ async function handleExecServerMessage(
 				toolResult => buildLsResultFromToolResult(args.path, toolResult),
 				reason => buildLsRejectedResult(args.path, reason),
 				error => buildLsErrorResult(args.path, error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "lsResult", execResult);
 			return;
@@ -1128,6 +1132,7 @@ async function handleExecServerMessage(
 				toolResult => buildGrepResultFromToolResult(args, toolResult),
 				reason => buildGrepErrorResult(reason),
 				error => buildGrepErrorResult(error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "grepResult", execResult);
 			return;
@@ -1157,6 +1162,7 @@ async function handleExecServerMessage(
 					),
 				reason => buildWriteRejectedResult(args.path, reason),
 				error => buildWriteErrorResult(args.path, error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "writeResult", execResult);
 			return;
@@ -1172,6 +1178,7 @@ async function handleExecServerMessage(
 				toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
 				reason => buildDeleteRejectedResult(args.path, reason),
 				error => buildDeleteErrorResult(args.path, error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "deleteResult", execResult);
 			return;
@@ -1195,6 +1202,7 @@ async function handleExecServerMessage(
 				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
 				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
 				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
+				{ stream, output },
 			);
 			const sanitizedExecResult = sanitizeShellExecResult(execResult);
 			sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
@@ -1209,7 +1217,7 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: shellStreamTimeout,
 			});
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult);
+			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult, { stream, output });
 			return;
 		}
 		case "backgroundShellSpawnArgs": {
@@ -1270,6 +1278,7 @@ async function handleExecServerMessage(
 				toolResult => buildDiagnosticsResultFromToolResult(args.path, toolResult),
 				reason => buildDiagnosticsRejectedResult(args.path, reason),
 				error => buildDiagnosticsErrorResult(args.path, error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", execResult);
 			return;
@@ -1284,6 +1293,7 @@ async function handleExecServerMessage(
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
 				_reason => buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
+				{ stream, output },
 			);
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
 			return;
@@ -1366,6 +1376,52 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
 	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
 }
 
+/** Interval for exec-side stream keepalives while local OMP tools run. */
+const CURSOR_EXEC_KEEPALIVE_INTERVAL_MS = 30_000;
+
+export type CursorExecKeepaliveContext = {
+	stream: AssistantMessageEventStream;
+	output: AssistantMessage;
+};
+
+/** Push a no-op stream event so lazy-stream idle watchdogs stay fresh during exec gaps. */
+export function pushCursorExecStreamKeepalive(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+): void {
+	const idx = output.content.length - 1;
+	if (idx < 0) {
+		return;
+	}
+	const block = output.content[idx];
+	if (block.type === "toolCall") {
+		stream.push({ type: "toolcall_delta", contentIndex: idx, delta: "", partial: output });
+		return;
+	}
+	if (block.type === "text") {
+		stream.push({ type: "text_delta", contentIndex: idx, delta: "", partial: output });
+		return;
+	}
+	if (block.type === "thinking") {
+		stream.push({ type: "thinking_delta", contentIndex: idx, delta: "", partial: output });
+	}
+}
+
+export async function awaitWithCursorExecKeepalive<T>(
+	promise: Promise<T>,
+	keepalive: CursorExecKeepaliveContext,
+): Promise<T> {
+	const timer = setInterval(
+		() => pushCursorExecStreamKeepalive(keepalive.output, keepalive.stream),
+		CURSOR_EXEC_KEEPALIVE_INTERVAL_MS,
+	);
+	try {
+		return await promise;
+	} finally {
+		clearInterval(timer);
+	}
+}
+
 /** Exported for tests: verifies handler is invoked with correct `this` when passed as bound. */
 export async function resolveExecHandler<TArgs, TResult>(
 	args: TArgs,
@@ -1374,13 +1430,16 @@ export async function resolveExecHandler<TArgs, TResult>(
 	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
 	buildRejected: (reason: string) => TResult,
 	buildError: (error: string) => TResult,
+	keepalive?: CursorExecKeepaliveContext,
 ): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
 	if (!handler) {
 		return { execResult: buildRejected("Tool not available") };
 	}
 
 	try {
-		const handlerResult = await handler(args);
+		const handlerResult = keepalive
+			? await awaitWithCursorExecKeepalive(handler(args), keepalive)
+			: await handler(args);
 		const { execResult, toolResult } = splitExecHandlerResult(handlerResult);
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 
