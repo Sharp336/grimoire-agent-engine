@@ -38,7 +38,7 @@ Current capability groups in the generated API include:
 
 ## Loader layer
 
-`packages/natives/native/index.js` owns runtime addon selection and optional embedded extraction.
+`packages/natives/native/index.js` is the package entrypoint; it calls `loadNative()` from `loader-state.js`, which owns runtime addon selection and optional embedded extraction.
 
 ### Candidate resolution model
 
@@ -107,6 +107,7 @@ Loader failures are explicit:
 - `ast`
 - `block`
 - `clipboard`
+- `crash_handler`
 - `fd`
 - `fs_cache`
 - `glob`
@@ -123,6 +124,7 @@ Loader failures are explicit:
 - `pty`
 - `shell`
 - `sixel`
+- `snapcompact`
 - `summary`
 - `task`
 - `text`
@@ -148,6 +150,8 @@ N-API exports are generated from Rust `#[napi]` functions/classes/objects/enums.
   - user-facing policy and fallbacks that are not built into the native API
   - higher-level rendering, artifact, shell-session, and command behavior
 
+For the contributor-facing crate map covering `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-walker`, `pi_uu_grep`, `pi-uutils-ctx`, and the vendored `brush-*` crates, see [`native-crates.md`](./native-crates.md). The root-docs inclusion policy that keeps internal Rust crates under native architecture docs unless promoted as user-facing also lives in [`user-facing-packages.md`](./user-facing-packages.md).
+
 ## Runtime flow (high level)
 
 1. Consumer imports from `@oh-my-pi/pi-natives`.
@@ -164,6 +168,6 @@ N-API exports are generated from Rust `#[napi]` functions/classes/objects/enums.
 - **Platform leaf package**: Per-platform npm package `@oh-my-pi/pi-natives-<tag>` that carries one platform's prebuilt `.node`. The core depends on every leaf via `optionalDependencies`; the package manager installs only the host-matching one (`os`/`cpu`).
 - **Variant**: x64 CPU-specific build flavor (`modern` AVX2, `baseline` fallback).
 - **Generated binding declaration**: `native/index.d.ts` emitted by napi-rs during `build-native.ts`.
-- **Version sentinel**: Rust export named from the package version (for example `__piNativesV15_7_2`) that lets the loader reject a `.node` from a different release.
+- **Version sentinel**: Rust export named from the package version (for example `__piNativesV16_0_3`) that lets the loader reject a `.node` from a different release.
 - **Compiled binary mode**: Runtime mode where the CLI is bundled and native addons are resolved from embedded/cache paths before package-local paths.
 - **Embedded addon**: Build artifact metadata and archive reference generated into `native/embedded-addon.js` so compiled binaries can extract matching `.node` payloads.

@@ -2,6 +2,8 @@
  * Anthropic OAuth flow (Claude Pro/Max)
  */
 
+import * as AIError from "../../error";
+import { claudeCodeVersion } from "../../providers/anthropic";
 import type { FetchImpl } from "../../types";
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
@@ -13,7 +15,7 @@ const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap";
 const CLAUDE_CODE_BOOTSTRAP_MODEL = "claude-opus-4-8";
-const CLAUDE_CODE_BOOTSTRAP_USER_AGENT = "claude-code/2.1.160";
+const CLAUDE_CODE_BOOTSTRAP_USER_AGENT = `claude-code/${claudeCodeVersion}`;
 const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
 // Scopes required for direct OAuth-token inference (user:inference) plus account/session management.
@@ -58,7 +60,10 @@ async function postJson(
 
 	const responseBody = await response.text();
 	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+		throw new AIError.ProviderHttpError(
+			`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`,
+			response.status,
+		);
 	}
 	return responseBody;
 }
@@ -87,8 +92,9 @@ function parseOAuthTokenResponse(responseBody: string, operation: string): Anthr
 	try {
 		return JSON.parse(responseBody) as AnthropicTokenResponse;
 	} catch (error) {
-		throw new Error(
+		throw new AIError.OAuthError(
 			`Anthropic ${operation} returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
+			{ kind: "validation", provider: "anthropic", cause: error },
 		);
 	}
 }
@@ -130,14 +136,18 @@ async function fetchBootstrapIdentity(
 	});
 	const responseBody = await response.text();
 	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+		throw new AIError.ProviderHttpError(
+			`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`,
+			response.status,
+		);
 	}
 	let data: AnthropicBootstrapResponse;
 	try {
 		data = JSON.parse(responseBody) as AnthropicBootstrapResponse;
 	} catch (error) {
-		throw new Error(
+		throw new AIError.OAuthError(
 			`Anthropic bootstrap returned invalid JSON. url=${url}; body=${responseBody}; details=${formatErrorDetails(error)}`,
+			{ kind: "validation", provider: "anthropic", cause: error },
 		);
 	}
 	const accountUuid = data.oauth_account?.account_uuid;
@@ -226,8 +236,9 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 				this.#fetch,
 			);
 		} catch (error) {
-			throw new Error(
+			throw new AIError.OAuthError(
 				`Token exchange request failed. url=${TOKEN_URL}; redirect_uri=${redirectUri}; response_type=authorization_code; details=${formatErrorDetails(error)}`,
+				{ kind: "token-exchange", provider: "anthropic", cause: error },
 			);
 		}
 
@@ -277,7 +288,14 @@ export async function refreshAnthropicToken(
 			},
 		);
 	} catch (error) {
-		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
+		throw new AIError.OAuthError(
+			`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`,
+			{
+				kind: "token-refresh",
+				provider: "anthropic",
+				cause: error,
+			},
+		);
 	}
 
 	const data = parseOAuthTokenResponse(responseBody, "token refresh");

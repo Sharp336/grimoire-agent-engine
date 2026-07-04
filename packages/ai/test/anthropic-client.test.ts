@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import {
-	AnthropicApiError,
-	AnthropicConnectionTimeoutError,
-	AnthropicMessagesClient,
-} from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParamsStreaming } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -47,8 +44,8 @@ describe("AnthropicMessagesClient error mapping", () => {
 				err => err,
 			);
 
-		expect(error).toBeInstanceOf(AnthropicApiError);
-		const apiError = error as AnthropicApiError;
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		const apiError = error as AIError.AnthropicApiError;
 		// Downstream classification reads `.status` (extractHttpStatusFromError) and
 		// regex-matches the message body (isAnthropicStrictGrammarTooLargeError).
 		expect(apiError.status).toBe(400);
@@ -69,8 +66,27 @@ describe("AnthropicMessagesClient error mapping", () => {
 			.asResponse()
 			.catch(err => err);
 
-		expect(error).toBeInstanceOf(AnthropicApiError);
-		expect((error as AnthropicApiError).message).toBe("500 status code (no body)");
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		expect((error as AIError.AnthropicApiError).message).toBe("500 status code (no body)");
+	});
+
+	it("does not let fetchOptions override core request fields", async () => {
+		const { calls, fetch } = createFetchMock([new Response(null, { status: 200 })]);
+		const preAborted = AbortSignal.abort();
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch,
+			fetchOptions: { method: "GET", signal: preAborted },
+		});
+
+		const response = await client.messages.create(params).asResponse();
+
+		// fetchOptions exists for transport extras (tls); a caller-supplied signal
+		// or method must not disconnect the timeout controller or break the POST.
+		expect(response.status).toBe(200);
+		expect(calls[0]?.init.method).toBe("POST");
+		expect(calls[0]?.init.signal?.aborted).toBe(false);
 	});
 });
 
@@ -99,8 +115,8 @@ describe("AnthropicMessagesClient retries", () => {
 			.asResponse()
 			.catch(err => err);
 
-		expect(error).toBeInstanceOf(AnthropicApiError);
-		expect((error as AnthropicApiError).status).toBe(503);
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		expect((error as AIError.AnthropicApiError).status).toBe(503);
 		expect(calls.length).toBe(1);
 	});
 
@@ -115,7 +131,7 @@ describe("AnthropicMessagesClient retries", () => {
 			.asResponse()
 			.catch(err => err);
 
-		expect(error).toBeInstanceOf(AnthropicApiError);
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
 		expect(calls.length).toBe(3); // initial attempt + 2 retries
 	});
 });
@@ -134,7 +150,7 @@ describe("AnthropicMessagesClient timeout and abort", () => {
 			.asResponse()
 			.catch(err => err);
 
-		expect(error).toBeInstanceOf(AnthropicConnectionTimeoutError);
+		expect(error).toBeInstanceOf(AIError.AnthropicConnectionTimeoutError);
 		// isRetryableError() keys off "timed out"/"timeout" phrasing.
 		expect((error as Error).message).toMatch(/timed out/i);
 	});

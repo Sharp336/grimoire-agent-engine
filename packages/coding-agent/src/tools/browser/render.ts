@@ -23,7 +23,7 @@ interface BrowserRenderArgs {
 	code?: string;
 	all?: boolean;
 	kill?: boolean;
-	app?: { path?: string; cdp_url?: string; target?: string };
+	app?: { path?: string; cdp_url?: string; target?: string; cmux?: boolean; surface?: string };
 	viewport?: { width: number; height: number; scale?: number };
 	timeout?: number;
 }
@@ -36,6 +36,9 @@ interface BrowserRenderContext {
 function describeBrowser(args: BrowserRenderArgs, details: BrowserToolDetails | undefined): string | undefined {
 	if (args.app?.cdp_url) return `connected ${args.app.cdp_url}`;
 	if (args.app?.path) return `spawned ${shortenPath(args.app.path)}`;
+	if (args.app?.cmux !== false && (args.app?.cmux === true || args.app?.surface)) {
+		return args.app.surface ? `cmux ${args.app.surface}` : "cmux";
+	}
 	switch (details?.browser) {
 		case "headless":
 			return "headless";
@@ -43,6 +46,8 @@ function describeBrowser(args: BrowserRenderArgs, details: BrowserToolDetails | 
 			return "spawned";
 		case "connected":
 			return "connected";
+		case "cmux":
+			return "cmux";
 		default:
 			return undefined;
 	}
@@ -66,7 +71,7 @@ function dropTrailingBlankLines(text: string): string {
 function appendLine(component: Component, line: string | undefined): Component {
 	if (!line) return component;
 	const wrapped = {
-		render: (width: number): string[] => {
+		render: (width: number): readonly string[] => {
 			const base = component.render(width);
 			return [...base, line];
 		},
@@ -95,7 +100,7 @@ function renderRunCell(
 
 	let cached: { key: bigint; width: number; lines: string[] } | undefined;
 	return markFramedBlockComponent({
-		render: (width: number): string[] => {
+		render: (width: number): readonly string[] => {
 			const expanded = options.renderContext?.expanded ?? options.expanded;
 			const previewLines = options.renderContext?.previewLines ?? BROWSER_DEFAULT_PREVIEW_LINES;
 			const key = new Hasher()
@@ -182,6 +187,8 @@ function extractTextOutput(content: Array<{ type: string; text?: string }> | und
 }
 
 export const browserToolRenderer = {
+	animatedPendingPreview: (args: unknown) => (args as BrowserRenderArgs).action === "run",
+	animatedPartialResult: (args: unknown) => (args as BrowserRenderArgs).action === "run",
 	renderCall(args: BrowserRenderArgs, options: RenderResultOptions, theme: Theme): Component {
 		const action = args.action;
 		if (action === "run") {

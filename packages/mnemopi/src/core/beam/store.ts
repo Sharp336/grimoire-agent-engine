@@ -1,12 +1,14 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { logger } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
+import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { extractFactsSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeFactStrings } from "./consolidate";
-import { scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
+import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
 	BeamMemoryState,
@@ -34,6 +36,8 @@ type StoreRememberOptions = RememberOptions & {
 	author_type?: string | null;
 	extractEntities?: boolean;
 	extract_entities?: boolean;
+	extract_text?: string;
+	embed_text?: string;
 	channelId?: string | null;
 	channel_id?: string | null;
 };
@@ -84,6 +88,14 @@ function isSqlBinding(value: unknown): value is SQLQueryBindings {
 
 function sqlBinding(value: unknown, fallback: SQLQueryBindings): SQLQueryBindings {
 	return isSqlBinding(value) ? value : fallback;
+}
+
+function embeddingText(content: string, options: { embedText?: string; embed_text?: string }): string {
+	return options.embedText ?? options.embed_text ?? content;
+}
+
+function storedEmbeddingText(content: string, embedText: string): string | null {
+	return embedText === content ? null : embedText;
 }
 
 function clampVeracity(value: unknown): Veracity {
@@ -185,13 +197,18 @@ function addTemporalAnnotations(beam: BeamMemoryState, memoryId: string, timesta
 	}
 }
 
+function proactiveLinkingAllowed(beam: BeamMemoryState): boolean {
+	const override = process.env.MNEMOPI_PROACTIVE_LINKING;
+	return override === undefined ? beam.config.proactiveLinking === true : override === "1";
+}
+
 function proactiveLinkIfEnabled(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string,
 	extractEntities: boolean,
 ): void {
-	if (process.env.MNEMOPI_PROACTIVE_LINKING !== "1") return;
+	if (!proactiveLinkingAllowed(beam)) return;
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -248,6 +265,96 @@ function rowToDict(row: Row): Row {
 	return { ...row };
 }
 
+/** Re-embedding batch size for a model-change rebuild — bounds each background
+ *  embedding request instead of embedding the whole corpus in one call. */
+const EMBED_REBUILD_BATCH = 128;
+
+/**
+ * Reconcile stored embeddings against the active embedding model at store open.
+ *
+ * Every `memory_embeddings` row is stamped with the model that produced it (see
+ * `runEmbedding` in `helpers.ts`). When the configured embedding model changes,
+ * its vector dimension changes too, so the previously-stored vectors are no
+ * longer comparable. On a mismatch we wipe every stored vector — the
+ * `memory_embeddings` table, the `episodic_memory.binary_vector` column, and the
+ * sqlite-vec `vec_episodes` index — then enqueue all live memories for
+ * background re-embedding under the new model via `scheduleEmbedding`.
+ *
+ * Runs once per store open; a fresh store (no embeddings) or an already-current
+ * store is a no-op. The destructive wipe is skipped whenever it could not be
+ * rebuilt — embeddings disabled via the runtime option OR the
+ * `MNEMOPI_NO_EMBEDDINGS` env, or an unresolved (empty) active model — so a
+ * stale-but-valid corpus is never destroyed without a replacement. MUST run
+ * inside the active runtime-options scope so `currentEmbeddingModel()` /
+ * `embeddingsDisabled()` reflect the per-instance configuration.
+ */
+export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
+	if (embeddingsDisabled()) return;
+	const active = currentEmbeddingModel().trim();
+	if (active === "") return;
+
+	// Re-embed in bounded batches so a corpus-wide rebuild never issues one giant
+	// embedding request; each batch is its own tracked background task.
+	const rebuild = (items: readonly EmbedItem[]): void => {
+		for (let offset = 0; offset < items.length; offset += EMBED_REBUILD_BATCH) {
+			scheduleEmbedding(beam, items.slice(offset, offset + EMBED_REBUILD_BATCH));
+		}
+	};
+
+	// Stop at the first row whose stamped model differs from the active one
+	// (NULL/unstamped counts as a mismatch via `IS NOT`).
+	const mismatch = beam.db.query("SELECT 1 FROM memory_embeddings WHERE model IS NOT ? LIMIT 1").get(active);
+	if (mismatch) {
+		const staleModels = beam.db
+			.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
+			.all(active) as { model: string | null }[];
+		const live = beam.db
+			.query(`
+				SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
+				UNION ALL
+				SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
+			`)
+			.all() as EmbedItem[];
+
+		transaction(beam.db, () => {
+			beam.db.prepare("DELETE FROM memory_embeddings").run();
+			beam.db.prepare("UPDATE episodic_memory SET binary_vector = NULL").run();
+			if (vecAvailable(beam.db)) {
+				try {
+					beam.db.prepare("DELETE FROM vec_episodes").run();
+				} catch {
+					// sqlite-vec cleanup is best-effort; rebuild correctness takes precedence.
+				}
+			}
+		});
+
+		logger.info("mnemopi: embedding model changed, rebuilding", {
+			from: staleModels.map(row => row.model ?? "(unstamped)"),
+			to: active,
+			count: live.length,
+		});
+		rebuild(live);
+		return;
+	}
+
+	// No stale embeddings, but a previously-interrupted rebuild (a failed embed or a process
+	// exit after the wipe) can leave live memories with no active-model embedding. Treating an
+	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
+	// row still missing an active-model embedding.
+	const missing = beam.db
+		.query(`
+			SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory
+			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+			UNION ALL
+			SELECT id AS memoryId, content FROM episodic_memory
+			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+		`)
+		.all(active, active) as EmbedItem[];
+	if (missing.length === 0) return;
+	logger.info("mnemopi: resuming interrupted embedding rebuild", { to: active, count: missing.length });
+	rebuild(missing);
+}
+
 export function remember(beam: BeamMemoryState, content: string, options: StoreRememberOptions = {}): string {
 	const source = options.source ?? "conversation";
 	const importance = options.importance ?? 0.5;
@@ -261,6 +368,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
 	const metadata = options.metadata ?? null;
+	const embedText = embeddingText(content, options);
 
 	const existingId = findDuplicate(beam, content);
 	if (existingId !== null) {
@@ -276,6 +384,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 					memory_type = COALESCE(?, memory_type),
 					veracity = CASE WHEN ? != 'unknown' THEN ? ELSE veracity END,
 					trust_tier = COALESCE(?, trust_tier),
+					embed_text = COALESCE(?, embed_text),
 					consolidated_at = NULL
 				WHERE id = ? AND session_id = ?
 			`)
@@ -292,6 +401,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				veracity,
 				veracity,
 				trustTier,
+				storedEmbeddingText(content, embedText),
 				existingId,
 				beam.sessionId,
 			);
@@ -302,6 +412,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			importance,
 			metadata: metadata ?? undefined,
 		});
+		if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
 		invalidateCaches(beam);
 		return existingId;
 	}
@@ -310,13 +421,14 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	beam.db
 		.prepare(`
 			INSERT INTO working_memory
-			(id, content, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
 			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`)
 		.run(
 			memoryId,
 			content,
+			storedEmbeddingText(content, embedText),
 			source,
 			timestamp,
 			beam.sessionId,
@@ -332,7 +444,16 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			trustTier,
 		);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
-	proactiveLinkIfEnabled(beam, memoryId, content, Boolean(options.extractEntities ?? options.extract_entities));
+	// `extractText` lets a caller decouple "what gets stored" from "what facts are
+	// mined". coding-agent retains full multi-author transcripts but wants
+	// fact/entity heuristics to read only the user-authored turns (issue #3372).
+	const extractionSource = options.extractText ?? options.extract_text ?? content;
+	proactiveLinkIfEnabled(
+		beam,
+		memoryId,
+		extractionSource,
+		Boolean(options.extractEntities ?? options.extract_entities),
+	);
 	trimWorkingMemory(beam);
 	emitEvent(beam, "MEMORY_ADDED", {
 		memoryId,
@@ -341,8 +462,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		importance,
 		metadata: metadata ?? undefined,
 	});
-	scheduleEmbedding(beam, [{ memoryId, content }]);
-	if (options.extract === true) scheduleFactExtraction(beam, memoryId, content);
+	scheduleEmbedding(beam, [{ memoryId, content: embedText }]);
+	if (options.extract === true) scheduleFactExtraction(beam, memoryId, extractionSource);
 	invalidateCaches(beam);
 	return memoryId;
 }
@@ -362,9 +483,9 @@ export function rememberBatch(
 	transaction(beam.db, () => {
 		const statement = beam.db.prepare(`
 			INSERT INTO working_memory
-			(id, content, source, timestamp, session_id, importance, metadata_json,
+			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json,
 			 author_id, author_type, channel_id, memory_type, veracity, trust_tier, scope)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		for (const item of items) {
 			const itemTimestamp = item.timestamp ?? timestamp;
@@ -372,6 +493,7 @@ export function rememberBatch(
 			ids.push(memoryId);
 			const source = item.source ?? "conversation";
 			const storeItem = item as StoreRememberOptions;
+			const embedText = embeddingText(item.content, storeItem);
 			const itemVeracity = forceVeracity
 				? defaultVeracity
 				: item.veracity !== undefined
@@ -380,6 +502,7 @@ export function rememberBatch(
 			statement.run(
 				memoryId,
 				item.content,
+				storedEmbeddingText(item.content, embedText),
 				source,
 				itemTimestamp,
 				beam.sessionId,
@@ -409,7 +532,7 @@ export function rememberBatch(
 	items.forEach((item, index) => {
 		const id = ids[index];
 		if (id === undefined) return;
-		embeddingItems.push({ memoryId: id, content: item.content });
+		embeddingItems.push({ memoryId: id, content: embeddingText(item.content, item as StoreRememberOptions) });
 	});
 	scheduleEmbedding(beam, embeddingItems);
 	items.forEach((item, index) => {
@@ -504,7 +627,7 @@ export function updateWorking(
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
 	if (content !== null) {
-		assignments.push("content = ?");
+		assignments.push("content = ?", "embed_text = NULL");
 		params.push(content);
 	}
 	if (importance !== null) {
@@ -603,6 +726,7 @@ export function exportToDict(beam: BeamMemoryState): Record<string, unknown> {
 		working_memory: db
 			.prepare(`
 				SELECT id, content, source, timestamp, session_id, importance,
+					   embed_text,
 					   metadata_json, valid_until, superseded_by, scope,
 					   recall_count, last_recalled, created_at, veracity, consolidated_at,
 					   memory_type, author_id, author_type, channel_id, trust_tier,
@@ -670,9 +794,9 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 				INSERT INTO working_memory
 				(id, content, source, timestamp, session_id, importance, metadata_json,
 				 valid_until, superseded_by, scope, recall_count, last_recalled, created_at,
-				 veracity, consolidated_at, memory_type, author_id, author_type, channel_id,
+				 veracity, consolidated_at, memory_type, embed_text, author_id, author_type, channel_id,
 				 trust_tier, event_date, event_date_precision, temporal_tags)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`).run(
 				id,
 				sqlBinding(item.content, ""),
@@ -690,6 +814,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 				clampVeracity(item.veracity),
 				sqlBinding(item.consolidated_at, null),
 				sqlBinding(item.memory_type, "unknown"),
+				sqlBinding(item.embed_text, null),
 				sqlBinding(item.author_id, null),
 				sqlBinding(item.author_type, null),
 				sqlBinding(item.channel_id, null),

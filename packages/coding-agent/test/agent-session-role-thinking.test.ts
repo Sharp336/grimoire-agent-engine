@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { Effort, getBundledModel } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -107,6 +108,25 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(thirdSwitch?.model.id).toBe(slowModel.id);
 		expect(thirdSwitch?.thinkingLevel).toBe("off");
 		expect(session.thinkingLevel).toBe("off");
+	});
+
+	it("activates auto thinking when cycling into a role whose value carries an explicit :auto suffix", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}:auto`,
+			},
+		});
+
+		const toSmol = await session.cycleRoleModels(["default", "smol"]);
+		expect(toSmol?.role).toBe("smol");
+		expect(toSmol?.model.id).toBe(smolModel.id);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
 	it("preserves current thinking when switching into default/no-suffix role", async () => {
@@ -238,9 +258,11 @@ describe("AgentSession role model thinking behavior", () => {
 
 		expect(session.cycleThinkingLevel()).toBe("off");
 		expect(session.thinkingLevel).toBe("off");
+		expect(agent.state.disableReasoning).toBe(true);
 		expect(session.cycleThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.thinkingLevel).toBe(resolveProvisionalAutoLevel(model));
+		expect(agent.state.disableReasoning).toBe(false);
 		expect(session.cycleThinkingLevel()).toBe(Effort.Minimal);
 		expect(session.thinkingLevel).toBe(Effort.Minimal);
 	});
@@ -269,7 +291,7 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
-	it("restores the last resolved auto effort instead of pending auto on resume", async () => {
+	it("keeps auto active on resume (pending until the next turn reclassifies)", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const agent = new Agent({
 			initialState: {
@@ -308,10 +330,106 @@ describe("AgentSession role model thinking behavior", () => {
 		await session.sessionManager.flush();
 
 		expect(await session.switchSession(sessionFile!)).toBe(true);
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		// Resumes in auto and pending — not frozen to the last resolved level, and
+		// not pre-seeded; the next user turn reclassifies.
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("keeps a manual concrete pin (not auto) on resume even when the global default is auto", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model),
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-manual-resume.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-manual-resume.yml"));
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		// User pins a concrete level mid-session; it must survive resume as-is and
+		// must not be reinterpreted as `auto` just because the global default is auto.
+		session.setThinkingLevel(Effort.Low);
+		expect(session.isAutoThinking).toBe(false);
+		await session.prompt("Pinned concrete turn");
+		expect(classifierSpy).not.toHaveBeenCalled();
+		session.sessionManager.appendMessage(createAssistantMessage("done"));
+
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionFile!)).toBe(true);
+		expect(session.isAutoThinking).toBe(false);
+		expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("persists a concrete pin that matches the auto-resolved effort so resume stays concrete", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model),
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-pin-eq.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-pin-eq.yml"));
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		// Auto resolves to medium.
+		await session.prompt("Implement a focused parser fix");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+
+		// User then pins the *same* effort: selector changes auto -> medium even though
+		// the effort is unchanged, so it must persist as a concrete pin (entry +
+		// defaultThinkingLevel), not silently stay `configured: "auto"`.
+		session.setThinkingLevel(Effort.Medium, true);
+		expect(session.isAutoThinking).toBe(false);
+		expect(sessionSettings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+		session.sessionManager.appendMessage(createAssistantMessage("done"));
+
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionFile!)).toBe(true);
 		expect(session.isAutoThinking).toBe(false);
 		expect(session.configuredThinkingLevel()).toBe(Effort.Medium);
-		expect(session.thinkingLevel).toBe(Effort.Medium);
-		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
 	it("falls back to a concrete auto level when classification fails", async () => {
@@ -411,5 +529,44 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBeUndefined();
 		expect(session.agent.state.thinkingLevel).toBeUndefined();
 		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("ignores a stale recorded role and cycles from the active model", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}`,
+				slow: `${slowModel.provider}/${slowModel.id}`,
+			},
+		});
+
+		// Record a model_change for the "slow" role WITHOUT switching the
+		// active model — the session still runs the default model. This is the
+		// stale state left behind when the model is changed through another
+		// surface (alt+m, temporary model, /model) after a role cycle.
+		session.sessionManager.appendModelChange(`${slowModel.provider}/${slowModel.id}`, "slow");
+		expect(session.sessionManager.getLastModelChangeRole()).toBe("slow");
+		expect(session.model?.id).toBe(defaultModel.id);
+
+		// The recorded role's resolved model (4-6) no longer equals the active
+		// model (4-5), so the cycle position must fall back to model equality
+		// and point at "default" — not trust the stale "slow" slot.
+		const cycle = session.getRoleModelCycle(["default", "slow"]);
+		if (!cycle) throw new Error("Expected a resolved role model cycle");
+		expect(cycle.models.map(entry => entry.role)).toEqual(["default", "slow"]);
+		expect(cycle.currentIndex).toBe(0);
+		expect(cycle.models[cycle.currentIndex]?.role).toBe("default");
+
+		// Cycling advances from the ACTIVE model's position: default → slow.
+		// With the stale slot trusted, the cycle would compute slow → default
+		// and "switch" right back onto the model already running.
+		const result = await session.cycleRoleModels(["default", "slow"]);
+		expect(result?.role).toBe("slow");
+		expect(result?.model.id).toBe(slowModel.id);
+		expect(session.model?.id).toBe(slowModel.id);
 	});
 });

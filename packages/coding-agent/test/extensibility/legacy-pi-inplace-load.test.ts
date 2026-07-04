@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import {
+	__rewriteLegacyExtensionSourceForTests,
+	loadLegacyPiModule,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Issue #1674: legacy Pi extensions load browser-UI assets (HTML/CSS) at module
 // init via `readFileSync(join(__dirname, "ui.html"))`. The compat layer must run
@@ -16,7 +20,7 @@ const tempRoots: string[] = [];
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 });
 
@@ -101,6 +105,197 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		// bundled Zod-backed shim.
 		expect(mod.depValue).toBe("cjs-native");
 		expect(mod.hasZod).toBe(true);
+	});
+
+	it("exposes legacy root tool factories used by pi-lean-ctx", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-tool-factory-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { Text } from "@earendil-works/pi-tui";',
+				"import {",
+				"  createBashToolDefinition,",
+				"  createFindToolDefinition,",
+				"  createGrepToolDefinition,",
+				"  createLsToolDefinition,",
+				"  createReadToolDefinition,",
+				"  DEFAULT_MAX_LINES,",
+				"  getLanguageFromPath,",
+				"  highlightCode,",
+				"  truncateHead,",
+				'} from "@earendil-works/pi-coding-agent";',
+				"const cwd = process.cwd();",
+				"const definitions = [",
+				"  createBashToolDefinition(cwd),",
+				"  createReadToolDefinition(cwd),",
+				"  createGrepToolDefinition(cwd),",
+				"  createFindToolDefinition(cwd),",
+				"  createLsToolDefinition(cwd),",
+				"];",
+				"const fakeTheme = { fg: (_color, text) => text, bold: text => text };",
+				"const fakeContext = { lastComponent: new Text('', 0, 0) };",
+				"for (const definition of definitions) {",
+				"  if (typeof definition.renderCall === 'function') definition.renderCall({ command: 'echo ok', path: '.', pattern: '*.ts' }, fakeTheme, fakeContext);",
+				"}",
+				"export const toolNames = definitions.map(definition => definition.name);",
+				"export const helperValues = {",
+				"  maxLines: DEFAULT_MAX_LINES,",
+				"  language: getLanguageFromPath('src/example.ts'),",
+				"  highlighted: highlightCode('const x = 1;', 'ts').length,",
+				"  truncated: truncateHead('a\\nb', { maxLines: 1 }).truncated,",
+				"};",
+				"export default function (pi) { for (const definition of definitions) pi.registerTool(definition); }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			toolNames: string[];
+			helperValues: { maxLines: number; language: string; highlighted: number; truncated: boolean };
+		};
+
+		expect(mod.toolNames).toEqual(["bash", "read", "grep", "find", "ls"]);
+		expect(mod.helperValues).toEqual({
+			maxLines: 3000,
+			language: "typescript",
+			highlighted: 1,
+			truncated: true,
+		});
+	});
+
+	it("honors legacy bash operations overrides", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-bash-ops-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";',
+				"const updates = [];",
+				"let captured;",
+				"const tool = createBashToolDefinition(process.cwd(), {",
+				"  operations: {",
+				"    async exec(command, cwd, options) {",
+				"      captured = { command, cwd, timeout: options.timeout, envValue: options.env.SENTINEL };",
+				"      options.onData(Buffer.from('remote output'));",
+				"      return { exitCode: 0 };",
+				"    },",
+				"  },",
+				"  spawnHook(context) {",
+				"    return { ...context, command: 'remote:' + context.command, cwd: '/remote', env: { ...context.env, SENTINEL: 'yes' } };",
+				"  },",
+				"});",
+				"const result = await tool.execute('call-1', { command: 'whoami', timeout: 7 }, undefined, update => {",
+				"  const text = update.content.find(block => block.type === 'text')?.text;",
+				"  if (text) updates.push(text);",
+				"});",
+				"export const observed = {",
+				"  captured,",
+				"  text: result.content.find(block => block.type === 'text')?.text,",
+				"  updates,",
+				"};",
+				"export default function (pi) { pi.registerTool(tool); }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			observed: {
+				captured: { command: string; cwd: string; timeout: number; envValue: string };
+				text: string;
+				updates: string[];
+			};
+		};
+
+		expect(mod.observed.captured).toEqual({
+			command: "remote:whoami",
+			cwd: "/remote",
+			timeout: 7,
+			envValue: "yes",
+		});
+		expect(mod.observed.text).toBe("remote output");
+		expect(mod.observed.updates).toEqual(["remote output"]);
+	});
+
+	it("preserves relative paths from legacy find operations", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-find-ops-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { createFindToolDefinition } from "@earendil-works/pi-coding-agent";',
+				"const tool = createFindToolDefinition('/remote/project', {",
+				"  operations: {",
+				"    exists: () => true,",
+				"    glob: () => ['src/a.ts', '/remote/project/src/b.ts'],",
+				"  },",
+				"});",
+				"const result = await tool.execute('call-1', { pattern: '**/*.ts', path: '.' });",
+				"const text = result.content.find(block => block.type === 'text')?.text ?? '';",
+				"export const lines = text.split('\\n');",
+				"export default function (pi) { pi.registerTool(tool); }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { lines: string[] };
+
+		expect(mod.lines).toEqual(["src/a.ts", "src/b.ts"]);
+	});
+
+	it("rewrites extension bare deps to file URLs for compiled-binary loading", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "compiled-dep-ext", version: "1.0.0" }),
+			"node_modules/esmdep/package.json": JSON.stringify({
+				name: "esmdep",
+				version: "1.0.0",
+				type: "module",
+				exports: { "./value": "./value.js" },
+			}),
+			"node_modules/rootdep/package.json": JSON.stringify({
+				name: "rootdep",
+				version: "1.0.0",
+				type: "module",
+				exports: "./dist/index.js",
+			}),
+			"node_modules/rootdep/dist/index.js": "export const rootValue = 2;",
+			"node_modules/esmdep/value.js": "export const value = 1;",
+			"index.ts": "",
+		});
+		const importer = path.join(dir, "index.ts");
+		const rewritten = await __rewriteLegacyExtensionSourceForTests(
+			[
+				'import * as path from "node:path";',
+				'import { value } from "esmdep/value";',
+				'import { rootValue } from "rootdep";',
+				"export const loaded = value + rootValue;",
+			].join("\n"),
+			importer,
+		);
+
+		const expectedEsmDepUrls = [
+			path.join(dir, "node_modules/esmdep/value.js"),
+			await fs.realpath(path.join(dir, "node_modules/esmdep/value.js")),
+		].map(p => url.pathToFileURL(p).href);
+		const expectedRootDepUrls = [
+			path.join(dir, "node_modules/rootdep/dist/index.js"),
+			await fs.realpath(path.join(dir, "node_modules/rootdep/dist/index.js")),
+		].map(p => url.pathToFileURL(p).href);
+		expect(expectedEsmDepUrls.some(expected => rewritten.includes(expected))).toBe(true);
+		expect(expectedRootDepUrls.some(expected => rewritten.includes(expected))).toBe(true);
+		expect(rewritten).toContain('from "node:path"');
+	});
+
+	it("remaps legacy pi-ai utils/oauth subpaths to registry OAuth exports", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-oauth-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { registerOAuthProvider } from "@mariozechner/pi-ai/utils/oauth";',
+				'import { refreshAnthropicToken } from "@mariozechner/pi-ai/utils/oauth/anthropic";',
+				'export const hasRegisterOAuthProvider = typeof registerOAuthProvider === "function";',
+				'export const hasRefreshAnthropicToken = typeof refreshAnthropicToken === "function";',
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			hasRegisterOAuthProvider: boolean;
+			hasRefreshAnthropicToken: boolean;
+		};
+
+		expect(mod.hasRegisterOAuthProvider).toBe(true);
+		expect(mod.hasRefreshAnthropicToken).toBe(true);
 	});
 
 	it("rewrites legacy imports in ../src modules reached through relative imports", async () => {

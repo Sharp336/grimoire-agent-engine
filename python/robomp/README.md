@@ -148,9 +148,12 @@ The integration test spawns a real `omp --mode rpc` against an
 - Pre-push gates (`gh_push_branch`): branch matches the workspace
   branch, working tree clean, every commit on
   `origin/<default>..HEAD` carries `ROBOMP_GIT_AUTHOR_NAME` +
-  `ROBOMP_GIT_AUTHOR_EMAIL`.
+  `ROBOMP_GIT_AUTHOR_EMAIL`. Commit messages carrying shell-literal
+  `\n` escapes (agents quoting `git commit -m 'a\n\nb'`) are rewritten
+  to real newlines — message-only, trees/identities/dates preserved.
 - Pre-PR gates (`gh_open_pr`): when the repo defines them, `bun run fix`
-  runs first (any diff auto-committed as `style: bun run fix`) and then
+  runs first (any diff amended into the agent's HEAD commit — no
+  standalone `style:` noise commits) and then
   `bun check`. A failing `bun check` returns to the agent as
   `RpcCommandError` for iteration.
 - `gh_open_pr` validates `## Repro` / `## Cause` / `## Fix` /
@@ -162,8 +165,8 @@ The integration test spawns a real `omp --mode rpc` against an
 - **One PR per issue.** Follow-up events push amendments to the same
   `farm/<hex>/<slug>` branch.
 - **No PR without a recorded repro.** Persona prompt requires
-  `repro_record`; `mark_unable_to_reproduce` closes the loop when
-  reproduction genuinely fails.
+  `repro_record`; `mark_unable_to_reproduce` asks for missing details,
+  marks the row `needs_info`, and resumes the same session on the next reply.
 - **Crash recovery.** On startup, `db.reset_stuck_running()` flips
   `running` rows back to `queued`. Existing `<session_dir>/*.jsonl`
   triggers `--continue`. Drain bounded by
@@ -182,7 +185,7 @@ The integration test spawns a real `omp --mode rpc` against an
 |---|---|
 | `401 invalid signature` | `GITHUB_WEBHOOK_SECRET` mismatch with the repo webhook config. |
 | Container exits with `PI_ROOT … missing` | `/work/pi` mount empty inside the container; on the host either run `docker compose` from `python/robomp/` so `PI_ROOT` defaults to `../..`, or export `PI_ROOT` to a valid oh-my-pi checkout. |
-| `git push: Authentication required` | Bot PAT lacks push, or `ROBOMP_BOT_LOGIN` ≠ PAT's account. |
+| `git push: Authentication required` | Bot PAT lacks push, or `ROBOMP_BOT_LOGIN` does not identify the PAT account's mention handle (production: `roboomp`, no `@`/`[bot]`). |
 | `refusing to push: commit author identity mismatch` | Some commit not authored as `ROBOMP_GIT_AUTHOR_*`. The error lists the offending shas; `git commit --amend --reset-author --no-edit`. |
 | `refusing to push: working tree is dirty` | Uncommitted agent edits. Or just call `gh_open_pr`, which auto-commits `bun run fix` output. |
 | `bun check failed before PR creation` | Fix the reported failure and retry `gh_open_pr`. |

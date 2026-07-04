@@ -1,17 +1,17 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, Effort, getBundledModel, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	EPHEMERAL_MODEL_CHANGE_ROLE,
-	getRestorableSessionModels,
-	SessionManager,
-} from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -186,6 +186,29 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(nextModel, "default", { persist: true });
 
+		expect(created.session.model?.id).toBe(nextModel.id);
+		expect(created.settings.getModelRole("default")).toBe(modelValue(nextModel));
+	});
+
+	it("switches the active model even when the live context is over the target window", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+		});
+
+		const targetWindow = nextModel.contextWindow ?? 0;
+		expect(targetWindow).toBeGreaterThan(0);
+		const overflowTokens = targetWindow + 1;
+
+		const result = await created.session.setModel(nextModel, "default", {
+			persist: true,
+			currentContextTokens: overflowTokens,
+		});
+
+		expect(result).toEqual({ switched: true });
 		expect(created.session.model?.id).toBe(nextModel.id);
 		expect(created.settings.getModelRole("default")).toBe(modelValue(nextModel));
 	});
@@ -384,6 +407,22 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
 		expect(result.session.model?.id).toBe(temporaryModel.id);
+	});
+
+	it("activates auto thinking on startup resume when modelRoles.default carries an explicit :auto suffix", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeRoleModelSession(
+			modelValue(defaultModel),
+			modelValue(defaultModel),
+			"default",
+		);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", `${modelValue(defaultModel)}:auto`);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(defaultModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
 	it("lists restorable temporary model before the default fallback", () => {

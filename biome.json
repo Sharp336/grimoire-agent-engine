@@ -9,7 +9,7 @@
 		"enabled": true,
 		"includes": ["**"],
 		"rules": {
-			"recommended": true,
+			"preset": "recommended",
 			"a11y": "off",
 			"correctness": {
 				"noUnusedImports": "error",
@@ -56,13 +56,13 @@
 			"packages/*/examples/**/*.ts",
 			"packages/*/scripts/**/*.ts",
 			"packages/*/*.ts",
+			"scripts/**/*.ts",
 			"!packages/natives/native/index.d.ts",
 			"!**/vendor/**/*",
 			"!**/node_modules/**/*",
 			"!**/test-sessions.ts",
-			"!**/template.generated.ts",
-			"!**/docs-index.generated.ts",
-			"!**/gen/agent_pb.ts",
+			"!**/agent_pb.ts",
+			"!**/devin-gen/**/*",
 			"!.worktrees/**/*",
 			"!.wt/**/*"
 		]

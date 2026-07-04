@@ -4,7 +4,9 @@
  * Normalizes Copilot quota usage into the shared UsageReport schema.
  */
 
-import { OPENCODE_HEADERS } from "../registry/oauth/github-copilot";
+import { toBoolean, toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { OPENCODE_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import * as AIError from "../error";
 import type {
 	UsageAmount,
 	UsageFetchContext,
@@ -15,7 +17,7 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
-import { isRecord, toBoolean, toNumber } from "../utils";
+import { isRecord } from "../utils";
 
 type CopilotQuotaDetail = {
 	entitlement: number;
@@ -141,7 +143,7 @@ async function fetchJson(ctx: UsageFetchContext, url: string, init: RequestInit)
 	const response = await ctx.fetch(url, init);
 	if (!response.ok) {
 		const text = await response.text();
-		throw new Error(`${response.status} ${response.statusText}: ${text}`);
+		throw new AIError.ProviderHttpError(`${response.status} ${response.statusText}: ${text}`, response.status);
 	}
 	return response.json();
 }
@@ -181,7 +183,7 @@ async function fetchInternalUsage(
 		...OPENCODE_HEADERS,
 	};
 	const data = await fetchJson(ctx, `${githubApiBaseUrl}/copilot_internal/user`, { headers, signal });
-	if (!isRecord(data)) throw new Error("Invalid Copilot usage response");
+	if (!isRecord(data)) throw new AIError.ProviderHttpError("Invalid Copilot usage response", 200);
 	return data as CopilotUsageResponse;
 }
 
@@ -205,7 +207,7 @@ async function fetchBillingUsage(
 		},
 	);
 
-	if (!isRecord(data)) throw new Error("Invalid Copilot billing usage response");
+	if (!isRecord(data)) throw new AIError.ProviderHttpError("Invalid Copilot billing usage response", 200);
 	return data as BillingUsageResponse;
 }
 

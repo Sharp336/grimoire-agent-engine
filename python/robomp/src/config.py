@@ -38,6 +38,18 @@ class Settings(BaseSettings):
     git_author_email: str = Field(..., alias="ROBOMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
+    # PR review trigger. "open" (default) reviews incoming PRs on
+    # opened/reopened/ready_for_review. "vouched_label" DEFERS review until the
+    # vouch GitHub Action labels the PR `vouch_review_label`, so robomp reviews
+    # only PRs that survive the vouch gate. `pr_review_enabled` remains the
+    # master switch (False disables review under either trigger).
+    pr_review_trigger: Literal["open", "vouched_label"] = Field("open", alias="ROBOMP_PR_REVIEW_TRIGGER")
+    vouch_review_label: str = Field("vouched", alias="ROBOMP_VOUCH_REVIEW_LABEL")
+    # In vouched_label mode, only `labeled` events from this actor trigger a
+    # review, so a manual label by a triage/maintainer cannot bypass the gate.
+    # Default is the actor for the stock GITHUB_TOKEN; set to your App's bot
+    # login (e.g. "vouch-bot[bot]") if the vouch workflow labels via an App.
+    vouch_review_labeler: str = Field("github-actions[bot]", alias="ROBOMP_VOUCH_REVIEW_LABELER")
 
     # gh-proxy. Set BOTH to route GitHub through the proxy; leave both empty
     # to keep PAT-on-orchestrator behavior. Mixing the two (PAT + proxy) is
@@ -67,6 +79,17 @@ class Settings(BaseSettings):
     task_timeout_seconds: float = Field(2400.0, alias="ROBOMP_TASK_TIMEOUT_SECONDS")
     task_timeout_hard_grace_seconds: float = Field(60.0, alias="ROBOMP_TASK_TIMEOUT_HARD_GRACE_SECONDS")
     request_timeout_seconds: float = Field(120.0, alias="ROBOMP_REQUEST_TIMEOUT_SECONDS")
+
+    # Automatic retry of transiently-failed events. When an event handler
+    # raises (and it isn't an operator cancel or a shutdown interrupt), the
+    # dispatcher re-queues the delivery with escalating backoff instead of
+    # giving up, so ephemeral failures (git fetch timeouts, upstream 5xx/429,
+    # flaky RPC startup) self-heal. After `event_max_retries` retries the row
+    # stays `failed`. `event_retry_delays_seconds` is a comma-separated backoff
+    # schedule: the Nth retry waits the Nth value (last value repeats), jittered.
+    # Set `event_max_retries=0` to restore fail-fast behavior.
+    event_max_retries: int = Field(3, alias="ROBOMP_EVENT_MAX_RETRIES")
+    event_retry_delays_raw: str = Field("30,120,600", alias="ROBOMP_EVENT_RETRY_DELAYS_SECONDS")
     # Premature-end reminder. When a `triage_issue` turn ends without the
     # agent having reached a terminal tool (`gh_open_pr`,
     # `mark_unable_to_reproduce`, `abort_task`) for a `bug`/`documentation`
@@ -106,7 +129,7 @@ class Settings(BaseSettings):
     rate_limit_default: int = Field(3, alias="ROBOMP_RATE_LIMIT_DEFAULT")
     rate_limit_contributor: int = Field(10, alias="ROBOMP_RATE_LIMIT_CONTRIBUTOR")
     rate_limit_unlimited_raw: str = Field("", alias="ROBOMP_RATE_LIMIT_UNLIMITED")
-    # Logins (comma-separated, `@` prefix optional) whose `@bot_login`
+    # Logins (comma-separated, `@` prefix optional, case-insensitive) whose `@bot_login`
     # mentions are treated as authoritative directives. These accounts also
     # bypass rate limiting regardless of `author_association`.
     maintainer_logins_raw: str = Field("", alias="ROBOMP_MAINTAINER_LOGINS")
@@ -140,7 +163,9 @@ class Settings(BaseSettings):
     @field_validator("bot_login", mode="after")
     @classmethod
     def _require_bot_login(cls, value: str) -> str:
-        cleaned = value.strip()
+        cleaned = value.strip().removeprefix("@").lower()
+        if cleaned.endswith("[bot]"):
+            cleaned = cleaned[:-5]
         if not cleaned:
             raise ValueError("ROBOMP_BOT_LOGIN must be a non-empty GitHub login")
         return cleaned
@@ -280,7 +305,10 @@ class Settings(BaseSettings):
 
     @property
     def maintainer_logins(self) -> frozenset[str]:
-        items = [piece.strip().lstrip("@").lower() for piece in self.maintainer_logins_raw.split(",")]
+        items = [
+            piece.strip().lstrip("@").lower().removesuffix("[bot]")
+            for piece in self.maintainer_logins_raw.split(",")
+        ]
         return frozenset(item for item in items if item)
 
     def allows(self, full_name: str) -> bool:
@@ -296,6 +324,41 @@ class Settings(BaseSettings):
     def pick_model(self) -> str:
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
+
+    @field_validator("event_retry_delays_raw", mode="before")
+    @classmethod
+    def _coerce_retry_delays(cls, v: object) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(item) for item in v)
+        return str(v)
+
+    @property
+    def event_retry_delays(self) -> tuple[float, ...]:
+        """Parsed backoff schedule in seconds; always non-empty."""
+        vals: list[float] = []
+        for piece in self.event_retry_delays_raw.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                seconds = float(piece)
+            except ValueError:
+                continue
+            if seconds >= 0:
+                vals.append(seconds)
+        return tuple(vals) or (30.0,)
+
+    def retry_delay_seconds(self, retry_index: int) -> float:
+        """Backoff before the `retry_index`-th retry (1-based), with jitter.
+
+        Clamps to the last configured delay; applies ±20% jitter so a
+        fleet-wide outage doesn't replay every event in lockstep.
+        """
+        delays = self.event_retry_delays
+        idx = min(max(retry_index, 1), len(delays)) - 1
+        return delays[idx] * (0.8 + random.random() * 0.4)
 
     @property
     def resolved_author_name(self) -> str:

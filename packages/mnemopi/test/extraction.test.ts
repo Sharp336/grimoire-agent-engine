@@ -52,6 +52,13 @@ describe("structured extraction", () => {
 		expect(parseFacts("NO_FACTS")).toEqual([]);
 	});
 
+	it("treats a valid empty structured extraction as no facts", () => {
+		expect(parseFacts('{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}')).toEqual([]);
+		expect(
+			parseFacts('```json\n{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}\n```'),
+		).toEqual([]);
+	});
+
 	it("uses deterministic heuristic extraction when no LLM is configured", async () => {
 		process.env.MNEMOPI_LLM_ENABLED = "false";
 		const facts = await extractFactsSafe("My name is Ada. I work at Example Corp and I prefer dark mode.");
@@ -118,5 +125,22 @@ describe("structured extraction", () => {
 			"The user lives in Berlin",
 			"The user uses TypeScript",
 		]);
+	});
+
+	it("captures `Instruction:` facts only when a subject precedes always/never", () => {
+		// Subject-led imperatives are still captured.
+		expect(heuristicExtractFacts("I never use semicolons and you always wrap lines at 100.")).toEqual([
+			"Instruction: never use semicolons",
+			"Instruction: always wrap lines at 100",
+		]);
+	});
+
+	it("ignores subjectless always/never sentences (issue #3372)", () => {
+		// Pre-fix this would have produced `Instruction: never activates` and
+		// `Instruction: never populates …` from assistant narrative prose.
+		const transcript =
+			"[role: assistant]\nso reorder never activates and the panel never populates (because pointer events fire before the drop handler binds).\n[assistant:end]";
+		const facts = heuristicExtractFacts(transcript);
+		expect(facts.some(f => f.startsWith("Instruction:"))).toBe(false);
 	});
 });

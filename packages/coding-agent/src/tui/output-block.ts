@@ -13,7 +13,7 @@ export interface OutputBlockOptions {
 	header?: string;
 	headerMeta?: string;
 	state?: State;
-	sections?: Array<{ label?: string; lines: string[]; separator?: boolean }>;
+	sections?: Array<{ label?: string; lines: readonly string[]; separator?: boolean }>;
 	width: number;
 	applyBg?: boolean;
 	contentPaddingLeft?: number;
@@ -46,10 +46,21 @@ function normalizeContentPaddingLeft(value: number | undefined): number {
 	return Math.max(0, Math.floor(value));
 }
 
+/**
+ * Inner content width that {@link renderOutputBlock} wraps its body to, for a
+ * given outer `width`: both vertical borders (1 cell each) plus the left
+ * content padding. Renderers that size a tail window MUST budget visual rows
+ * against this, not the outer width — otherwise the block re-wraps their lines
+ * into more rows than they counted and the box overflows its intended height.
+ */
+export function outputBlockContentWidth(width: number, contentPaddingLeft?: number): number {
+	return Math.max(1, width - 2 - normalizeContentPaddingLeft(contentPaddingLeft));
+}
+
 export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
 	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
-	const h = theme.boxSharp.horizontal;
-	const v = theme.boxSharp.vertical;
+	const h = theme.boxRound.horizontal;
+	const v = theme.boxRound.vertical;
 	const cap = h.repeat(3);
 	const lineWidth = Math.max(0, width);
 	// Border colors: running/pending use accent, success uses dim (gray), error/warning keep their colors
@@ -84,8 +95,8 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 	const rows: BlockRow[] = [];
 	rows.push({
 		kind: "bar",
-		leftChar: theme.boxSharp.topLeft,
-		rightChar: theme.boxSharp.topRight,
+		leftChar: theme.boxRound.topLeft,
+		rightChar: theme.boxRound.topRight,
 		label: header,
 		meta: headerMeta,
 	});
@@ -99,15 +110,15 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		if (section.label) {
 			rows.push({
 				kind: "bar",
-				leftChar: theme.boxSharp.teeRight,
-				rightChar: theme.boxSharp.teeLeft,
+				leftChar: theme.boxRound.teeRight,
+				rightChar: theme.boxRound.teeLeft,
 				label: section.label,
 			});
 		} else if (section.separator && sectionIndex > 0) {
 			rows.push({
 				kind: "bar",
-				leftChar: theme.boxSharp.teeRight,
-				rightChar: theme.boxSharp.teeLeft,
+				leftChar: theme.boxRound.teeRight,
+				rightChar: theme.boxRound.teeLeft,
 			});
 		}
 		const allLines = section.lines.flatMap(l => l.split("\n"));
@@ -126,7 +137,7 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		}
 	}
 
-	rows.push({ kind: "bottom", leftChar: theme.boxSharp.bottomLeft, rightChar: theme.boxSharp.bottomRight });
+	rows.push({ kind: "bottom", leftChar: theme.boxRound.bottomLeft, rightChar: theme.boxRound.bottomRight });
 
 	const H = rows.length;
 
@@ -186,8 +197,8 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 export class CachedOutputBlock {
 	#cache?: RenderCache;
 
-	/** Render with caching. Returns cached result if options haven't changed. */
-	render(options: OutputBlockOptions, theme: Theme): string[] {
+	/** Render with caching. Returns the cached (shared, caller-immutable) lines if options haven't changed. */
+	render(options: OutputBlockOptions, theme: Theme): readonly string[] {
 		const key = this.#buildKey(options);
 		if (this.#cache?.key === key) return this.#cache.lines;
 		const lines = renderOutputBlock(options, theme);
@@ -234,7 +245,7 @@ export function framedBlock(theme: Theme, build: (width: number) => OutputBlockO
 	// flush, no extra padding/background) the same way `markFramedBlockComponent`
 	// blocks are treated.
 	return markFramedBlockComponent({
-		render: (width: number): string[] => block.render(build(width), theme),
+		render: (width: number): readonly string[] => block.render(build(width), theme),
 		invalidate: () => block.invalidate(),
 	});
 }

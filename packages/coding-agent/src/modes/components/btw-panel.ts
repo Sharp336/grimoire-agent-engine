@@ -16,6 +16,7 @@ export class BtwPanelComponent extends Container {
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
+	#visibleAnswer = "";
 	#closed = false;
 
 	constructor(options: BtwPanelComponentOptions) {
@@ -28,12 +29,14 @@ export class BtwPanelComponent extends Container {
 	appendText(delta: string): void {
 		if (!delta || this.#closed) return;
 		this.#answer += delta;
+		this.#visibleAnswer = replaceTabs(this.#answer).trim();
 		this.#rebuild();
 	}
 
 	setAnswer(text: string): void {
 		if (this.#closed) return;
 		this.#answer = text;
+		this.#visibleAnswer = replaceTabs(text).trim();
 		this.#rebuild();
 	}
 
@@ -58,6 +61,19 @@ export class BtwPanelComponent extends Container {
 		this.#rebuild();
 	}
 
+	isBranchable(): boolean {
+		return this.isCopyable();
+	}
+
+	isCopyable(): boolean {
+		return this.#state === "complete" && this.#visibleAnswer.length > 0;
+	}
+
+	getCopyText(): string | undefined {
+		if (!this.isCopyable()) return undefined;
+		return this.#visibleAnswer;
+	}
+
 	close(): void {
 		this.#closed = true;
 	}
@@ -73,7 +89,11 @@ export class BtwPanelComponent extends Container {
 		this.addChild(new Text(this.#footerLine(), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
-		this.#tui.requestRender();
+		// Component-scoped: a rebuild replaces only this panel's own children
+		// (streaming deltas arrive per token, and a full compose would re-walk
+		// the whole transcript each time). Before the panel is mounted the TUI
+		// cannot resolve it and falls back to a full compose on its own.
+		this.#tui.requestComponentRender(this);
 	}
 
 	#footerLine(): string {
@@ -81,7 +101,7 @@ export class BtwPanelComponent extends Container {
 			case "running":
 				return theme.fg("muted", "Esc cancel /btw");
 			case "complete":
-				return theme.fg("muted", "Esc dismiss");
+				return theme.fg("muted", this.isCopyable() ? "c copy · b branch to chat · Esc dismiss" : "Esc dismiss");
 			case "aborted":
 				return theme.fg("warning", `${theme.status.warning} Cancelled · Esc dismiss`);
 			case "error":
@@ -93,7 +113,7 @@ export class BtwPanelComponent extends Container {
 		if (this.#state === "error") {
 			return new Text(theme.fg("error", replaceTabs(this.#errorMessage ?? "Unknown error")), 1, 0);
 		}
-		const text = replaceTabs(this.#answer).trim();
+		const text = this.#visibleAnswer;
 		if (!text) {
 			const waiting =
 				this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";

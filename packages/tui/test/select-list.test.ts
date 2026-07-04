@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
+import type { SgrMouseEvent } from "@oh-my-pi/pi-tui/mouse";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 const testTheme = {
@@ -224,5 +225,216 @@ describe("SelectList", () => {
 		const list = new SelectList(items, 5, testTheme);
 
 		expect(list.render(40).join("\n")).not.toContain("█");
+	});
+
+	describe("wrapDescription", () => {
+		const longDescription =
+			"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems, restructure modules, or change interfaces across multiple files.";
+
+		it("keeps short descriptions on a single row", () => {
+			const items = [{ value: "short", label: "short", description: "fits easily" }];
+			const list = new SelectList(items, 5, testTheme, { wrapDescription: true });
+
+			const rendered = list.render(80);
+
+			expect(rendered).toHaveLength(1);
+			expect(rendered[0]).toContain("fits easily");
+		});
+
+		it("wraps long descriptions under the description column", () => {
+			const items = [{ value: "long", label: "long-skill-name", description: longDescription }];
+			const list = new SelectList(items, 5, testTheme, {
+				minPrimaryColumnWidth: 12,
+				maxPrimaryColumnWidth: 32,
+				wrapDescription: true,
+			});
+
+			const rendered = list.render(80);
+
+			// Long description must materialize as multiple rows; truncation would
+			// silently drop the tail (the issue).
+			expect(rendered.length).toBeGreaterThan(1);
+			// Every visual row must fit within the picker width.
+			for (const row of rendered) {
+				expect(visibleWidth(row)).toBeLessThanOrEqual(80);
+			}
+			// The first row carries the primary label and the wrapped tail must
+			// reach the closing words of the description.
+			expect(rendered[0]).toContain("long-skill-name");
+			expect(rendered.join("\n")).toContain("across multiple files.");
+			// Continuation rows align under the description column. The cursor
+			// column on the first row is occupied; continuation rows lead with
+			// spaces up to the same offset where the description starts.
+			const descStart = visibleIndexOf(rendered[0], "Plan");
+			for (let i = 1; i < rendered.length; i++) {
+				expect(rendered[i].slice(0, descStart)).toBe(" ".repeat(descStart));
+			}
+		});
+
+		it("falls back to the no-description layout at narrow widths", () => {
+			const items = [{ value: "long", label: "long", description: longDescription }];
+			const list = new SelectList(items, 5, testTheme, { wrapDescription: true });
+
+			// width <= 40 trips the existing primary-only fallback.
+			const rendered = list.render(40);
+
+			expect(rendered).toHaveLength(1);
+			expect(rendered[0]).not.toContain("Plan and execute");
+		});
+
+		it("advances selection by one item even when items wrap", () => {
+			const items = [
+				{ value: "a", label: "a", description: longDescription },
+				{ value: "b", label: "b", description: "short" },
+			];
+			const list = new SelectList(items, 5, testTheme, { wrapDescription: true });
+
+			expect(list.getSelectedItem()?.value).toBe("a");
+			// Press Down once → second item, regardless of how many visual rows
+			// the first item spans.
+			list.handleInput("\x1b[B");
+			expect(list.getSelectedItem()?.value).toBe("b");
+		});
+
+		it("renders the scrollbar when wrapped items overflow the visible window", () => {
+			const items = Array.from({ length: 6 }, (_, i) => ({
+				value: `v${i}`,
+				label: `Item ${i}`,
+				description: longDescription,
+			}));
+			const list = new SelectList(items, 3, testTheme, { wrapDescription: true });
+
+			const rendered = list.render(80).join("\n");
+			expect(rendered).toContain("█");
+		});
+
+		it("caps the popup height at maxVisible rows even when items wrap", () => {
+			// Three matching items, each wraps to ~5 rows, fits within maxVisible=5
+			// budget but the popup must NOT grow to 15 rows.
+			const items = Array.from({ length: 3 }, (_, i) => ({
+				value: `v${i}`,
+				label: `Item ${i}`,
+				description: longDescription,
+			}));
+			const maxVisible = 5;
+			const list = new SelectList(items, maxVisible, testTheme, {
+				minPrimaryColumnWidth: 12,
+				maxPrimaryColumnWidth: 32,
+				wrapDescription: true,
+			});
+
+			const rendered = list.render(80);
+			// Status status line is gated on overflow (#shouldRenderSearchStatus),
+			// so the picker proper occupies up to `maxVisible` rows.
+			expect(rendered.length).toBeLessThanOrEqual(maxVisible);
+			// Scrollbar must appear since visual rows exceed the budget.
+			expect(rendered.join("\n")).toContain("█");
+		});
+
+		it("keeps the selected item visible when navigation shifts the window past the budget", () => {
+			const items = Array.from({ length: 4 }, (_, i) => ({
+				value: `v${i}`,
+				label: `Item ${i}`,
+				description: longDescription,
+			}));
+			const maxVisible = 5;
+			const list = new SelectList(items, maxVisible, testTheme, {
+				minPrimaryColumnWidth: 12,
+				maxPrimaryColumnWidth: 32,
+				wrapDescription: true,
+			});
+
+			// Down to the last item.
+			list.handleInput("\x1b[B");
+			list.handleInput("\x1b[B");
+			list.handleInput("\x1b[B");
+			expect(list.getSelectedItem()?.value).toBe("v3");
+
+			const rendered = list.render(80);
+			expect(rendered.length).toBeLessThanOrEqual(maxVisible);
+			// The selected item's label must appear on screen.
+			expect(rendered.some(row => row.includes("Item 3"))).toBe(true);
+		});
+
+		it("clips a single oversize wrapped item so the popup never exceeds maxVisible rows", () => {
+			const items = [{ value: "huge", label: "huge", description: longDescription }];
+			const maxVisible = 3;
+			const list = new SelectList(items, maxVisible, testTheme, {
+				minPrimaryColumnWidth: 12,
+				maxPrimaryColumnWidth: 32,
+				wrapDescription: true,
+			});
+
+			const rendered = list.render(80);
+			expect(rendered.length).toBeLessThanOrEqual(maxVisible);
+			// Scrollbar reflects the offscreen tail.
+			expect(rendered.join("\n")).toContain("█");
+			// The first wrapped line (with the primary label) is still visible.
+			expect(rendered.some(row => row.includes("huge"))).toBe(true);
+		});
+	});
+});
+
+describe("SelectList.routeMouse", () => {
+	const hoverTheme = {
+		...testTheme,
+		hovered: (text: string) => `<hover>${text}</hover>`,
+		selectedText: (text: string) => `<selected>${text}</selected>`,
+	};
+
+	const baseEvent: SgrMouseEvent = {
+		button: 0,
+		col: 0,
+		row: 0,
+		release: false,
+		wheel: null,
+		motion: false,
+		leftClick: false,
+	};
+
+	function makeList() {
+		const items = [
+			{ value: "a", label: "a" },
+			{ value: "b", label: "b" },
+			{ value: "c", label: "c" },
+		];
+		return new SelectList(items, 5, hoverTheme);
+	}
+
+	it("advances selection on a wheel notch", () => {
+		const list = makeList();
+		let changed: string | undefined;
+		list.onSelectionChange = item => {
+			changed = item.value;
+		};
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, wheel: 1 }, 0, 0);
+
+		expect(changed).toBe("b");
+	});
+
+	it("hovers the row under the pointer on motion", () => {
+		const list = makeList();
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, motion: true }, 1, 0);
+		const rendered = list.render(80).join("\n");
+
+		expect(rendered).toContain("<hover>");
+		expect(rendered).not.toContain("<hover><selected>");
+	});
+
+	it("confirms the clicked row", () => {
+		const list = makeList();
+		let selected: string | undefined;
+		list.onSelect = item => {
+			selected = item.value;
+		};
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, leftClick: true }, 2, 0);
+
+		expect(selected).toBe("c");
 	});
 });

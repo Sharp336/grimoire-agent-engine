@@ -11,7 +11,10 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { $env, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { $env, isRecord, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { reset as resetCapabilities } from "../../capability";
+import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
@@ -19,11 +22,18 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
+import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -31,10 +41,14 @@ import type {
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
+	RpcHostToolResult,
+	RpcHostToolUpdate,
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
+	RpcHostUriResult,
 	RpcResponse,
 	RpcSessionState,
+	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -55,6 +69,334 @@ type RpcOutput = (
 		| RpcHostUriCancelRequest
 		| object,
 ) => void;
+
+export type RpcSessionChangeCommand = Extract<
+	RpcCommand,
+	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
+>;
+
+export type RpcSessionChangeResult =
+	| { type: "new_session"; data: { cancelled: boolean } }
+	| { type: "switch_session"; data: { cancelled: boolean } }
+	| { type: "branch"; data: { text: string; cancelled: boolean } };
+
+export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
+
+export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+export type RpcSkillCommandResult = { agentInvoked: true };
+
+export async function tryRunRpcSkillCommand(
+	session: RpcSkillCommandSession,
+	text: string,
+): Promise<RpcSkillCommandResult | false> {
+	if (!session.skillsSettings?.enableSkillCommands) return false;
+	const parsed = parseSkillInvocation(text);
+	if (!parsed) return false;
+	const skill = session.skills.find(candidate => candidate.name === parsed.name);
+	if (!skill) return false;
+	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
+	await session.promptCustomMessage({
+		customType: SKILL_PROMPT_MESSAGE_TYPE,
+		content: built.message,
+		display: true,
+		details: built.details,
+		attribution: "user",
+	});
+	return { agentInvoked: true };
+}
+
+export function reportLocalOnlyPromptResult(input: {
+	id: string | undefined;
+	prompt: Promise<boolean>;
+	output: (obj: object) => void;
+	onError: (error: Error) => void;
+	hasExtensionAgentMessageTask?: () => boolean;
+	waitForExtensionAgentMessageTasks?: () => Promise<void>;
+}): void {
+	void input.prompt
+		.then(async agentInvoked => {
+			if (agentInvoked) return;
+			await input.waitForExtensionAgentMessageTasks?.();
+			if (!input.hasExtensionAgentMessageTask?.()) {
+				input.output({ type: "prompt_result", id: input.id, agentInvoked: false });
+			}
+		})
+		.catch(error => {
+			input.onError(error instanceof Error ? error : new Error(String(error)));
+		});
+}
+
+type RpcExtensionUserMessageScope = {
+	hasAgentMessageTask: boolean;
+	pendingAgentMessageTasks: Set<Promise<void>>;
+};
+
+/**
+ * Tracks extension-originated messages while an RPC prompt is executing.
+ * A slash command can resolve the outer prompt as local-only while also
+ * scheduling agent work through pi.sendUserMessage() or pi.sendMessage()
+ * with triggerTurn; that prompt must not report agentInvoked:false to the host.
+ */
+export class RpcExtensionUserMessageTracker {
+	#activePromptScopes = new Set<RpcExtensionUserMessageScope>();
+
+	markAgentMessageTask(): void {
+		for (const scope of this.#activePromptScopes) {
+			scope.hasAgentMessageTask = true;
+		}
+	}
+
+	trackAgentMessageTask(task: Promise<unknown>): void {
+		for (const scope of this.#activePromptScopes) {
+			this.#trackAgentMessageTaskForScope(scope, task);
+		}
+	}
+
+	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
+		const scopedTask = task.then(
+			() => {
+				scope.hasAgentMessageTask = true;
+			},
+			() => {},
+		);
+		scope.pendingAgentMessageTasks.add(scopedTask);
+		void scopedTask.finally(() => {
+			scope.pendingAgentMessageTasks.delete(scopedTask);
+		});
+	}
+
+	async #waitForAgentMessageTasks(scope: RpcExtensionUserMessageScope): Promise<void> {
+		while (scope.pendingAgentMessageTasks.size > 0) {
+			await Promise.allSettled(Array.from(scope.pendingAgentMessageTasks));
+		}
+	}
+
+	watchPrompt<T>(startPrompt: () => Promise<T>): {
+		prompt: Promise<T>;
+		hasAgentMessageTask: () => boolean;
+		waitForAgentMessageTasks: () => Promise<void>;
+	} {
+		const scope: RpcExtensionUserMessageScope = {
+			hasAgentMessageTask: false,
+			pendingAgentMessageTasks: new Set(),
+		};
+		this.#activePromptScopes.add(scope);
+		let prompt: Promise<T>;
+		try {
+			prompt = startPrompt();
+		} catch (error) {
+			this.#activePromptScopes.delete(scope);
+			throw error;
+		}
+		return {
+			prompt: prompt.finally(() => {
+				this.#activePromptScopes.delete(scope);
+			}),
+			hasAgentMessageTask: () => scope.hasAgentMessageTask,
+			waitForAgentMessageTasks: () => this.#waitForAgentMessageTasks(scope),
+		};
+	}
+}
+
+export function watchAndReportLocalOnlyPromptResult(input: {
+	id: string | undefined;
+	startPrompt: () => Promise<boolean>;
+	output: (obj: object) => void;
+	onError: (error: Error) => void;
+	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+}): void {
+	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
+	reportLocalOnlyPromptResult({
+		id: input.id,
+		prompt: trackedPrompt.prompt,
+		output: input.output,
+		onError: input.onError,
+		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+	});
+}
+
+/**
+ * Dependencies for {@link dispatchRpcInputFrame}. Provided by the RPC mode
+ * entrypoint; broken out so tests can drive the input loop with stubs.
+ */
+export interface RpcInputFrameDeps {
+	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
+	output: RpcOutput;
+	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	trackBackgroundTask?: (task: Promise<void>) => void;
+	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
+	onHostToolResult: (frame: RpcHostToolResult) => void;
+	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
+	onHostUriResult: (frame: RpcHostUriResult) => void;
+}
+
+/**
+ * Structural guard for a well-formed extension UI response frame. Mirrors the
+ * shape declared in {@link RpcExtensionUIResponse} — a truthy record with
+ * `type === "extension_ui_response"` and a string `id`. Payload variants (value,
+ * confirmed, cancelled) are validated at the read site.
+ */
+function isRpcExtensionUIResponse(value: unknown): value is RpcExtensionUIResponse {
+	if (!isRecord(value)) return false;
+	return value.type === "extension_ui_response" && typeof value.id === "string";
+}
+
+/**
+ * Dispatch a single parsed frame from the RPC input stream.
+ *
+ * Bash commands are dispatched in the background so the caller (the stdin loop
+ * in {@link runRpcMode}) can keep reading subsequent frames while a shell
+ * command is still running. This lets a client send `abort_bash` (or any other
+ * command) while a long-running `bash` is in flight. Response correlation is
+ * preserved via each command's `id`; ordering across concurrent commands is
+ * not guaranteed and clients MUST match on `id`.
+ *
+ * @returns `undefined` when the frame was routed to a side-channel handler
+ *   (extension UI response, host tool/URI frames) or dispatched in the
+ *   background (`bash`). Otherwise a promise that resolves once the response
+ *   for the command has been emitted via `output`. Errors from `handleCommand`
+ *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ */
+export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
+	// Side-channel: extension UI responses resolve a pending dialog promise.
+	if (isRpcExtensionUIResponse(parsed)) {
+		const pending = deps.pendingExtensionRequests.get(parsed.id);
+		if (pending) pending.resolve(parsed);
+		return undefined;
+	}
+
+	if (isRpcHostToolResult(parsed)) {
+		deps.onHostToolResult(parsed);
+		return undefined;
+	}
+
+	if (isRpcHostToolUpdate(parsed)) {
+		deps.onHostToolUpdate(parsed);
+		return undefined;
+	}
+
+	if (isRpcHostUriResult(parsed)) {
+		deps.onHostUriResult(parsed);
+		return undefined;
+	}
+
+	// Regular RPC command. The transport contract states each remaining frame
+	// is an {@link RpcCommand}; `handleCommand`'s `default` arm surfaces
+	// unknown discriminants as an error response, so we do not shape-check
+	// the union here.
+	const command = parsed as RpcCommand;
+
+	// `bash` can run for a long time. Dispatch it in the background so a
+	// subsequent `abort_bash` frame can be read and handled without waiting
+	// for the shell command to finish on its own. The response is emitted
+	// when `handleCommand` resolves; clients correlate via `command.id`.
+	if (command.type === "bash") {
+		const task = (async () => {
+			try {
+				deps.output(await deps.handleCommand(command));
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				deps.output(deps.errorResponse(command.id, "bash", message));
+			}
+		})();
+		deps.trackBackgroundTask?.(task);
+		return undefined;
+	}
+
+	return (async () => {
+		deps.output(await deps.handleCommand(command));
+	})();
+}
+
+/**
+ * Coordinates deferred shutdown with in-flight background input tasks.
+ *
+ * `pi.shutdown()` from an extension only *requests* shutdown; the process must
+ * not exit while a background-dispatched command (`bash`, see
+ * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
+ * coordinator tracks those tasks, re-checks the shutdown request whenever one
+ * settles (covering a shutdown requested mid-bash with no follow-up client
+ * frame), and drains every tracked task before invoking `performShutdown`.
+ * The shutdown sequence is latched so concurrent triggers (input loop and
+ * settling tasks) run it exactly once.
+ */
+export class RpcShutdownCoordinator {
+	#tasks = new Set<Promise<void>>();
+	#shutdown: Promise<void> | undefined;
+	readonly #isShutdownRequested: () => boolean;
+	readonly #performShutdown: () => Promise<void>;
+
+	constructor(options: { isShutdownRequested: () => boolean; performShutdown: () => Promise<void> }) {
+		this.#isShutdownRequested = options.isShutdownRequested;
+		this.#performShutdown = options.performShutdown;
+	}
+
+	/**
+	 * Track a background input task. When it settles it is untracked and the
+	 * shutdown request is re-checked, so a deferred shutdown fires even when
+	 * no further client frames arrive.
+	 */
+	track(task: Promise<void>): void {
+		this.#tasks.add(task);
+		void task.finally(() => {
+			this.#tasks.delete(task);
+			// Fire-and-forget: performShutdown ends the process. Rejections are
+			// not expected — hook errors are caught inside extensionRunner.emit,
+			// and background tasks catch their own dispatch errors.
+			void this.checkShutdownRequested();
+		});
+	}
+
+	/** Await every tracked task, including tasks tracked while draining. */
+	async drain(): Promise<void> {
+		while (this.#tasks.size > 0) {
+			await Promise.allSettled(Array.from(this.#tasks));
+		}
+	}
+
+	/**
+	 * If shutdown was requested, drain background tasks (so every owed
+	 * response frame is written) before running the shutdown sequence.
+	 */
+	checkShutdownRequested(): Promise<void> {
+		if (!this.#shutdown) {
+			if (!this.#isShutdownRequested()) return Promise.resolve();
+			this.#shutdown = this.drain().then(() => this.#performShutdown());
+		}
+		return this.#shutdown;
+	}
+}
+
+export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
+
+export async function handleRpcSessionChange(
+	session: RpcSessionChangeSession,
+	command: RpcSessionChangeCommand,
+	subagentRegistry?: RpcSubagentResetRegistry,
+): Promise<RpcSessionChangeResult> {
+	switch (command.type) {
+		case "new_session": {
+			const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+			const cancelled = !(await session.newSession(options));
+			if (!cancelled) subagentRegistry?.clear();
+			return { type: "new_session", data: { cancelled } };
+		}
+
+		case "switch_session": {
+			const cancelled = !(await session.switchSession(command.sessionPath));
+			if (!cancelled) subagentRegistry?.clear();
+			return { type: "switch_session", data: { cancelled } };
+		}
+
+		case "branch": {
+			const result = await session.branch(command.entryId);
+			if (!result.cancelled) subagentRegistry?.clear();
+			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
+		}
+	}
+	throw new Error("Unsupported RPC session change command");
+}
 
 function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
 	return tools.map((tool, index) => {
@@ -97,6 +439,10 @@ function shouldEmitRpcTitles(): boolean {
 	if (!raw) return false;
 	const normalized = raw.trim().toLowerCase();
 	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
+	return value === "off" || value === "progress" || value === "events";
 }
 
 export function requestRpcEditor(
@@ -169,6 +515,7 @@ export function requestRpcEditor(
 export async function runRpcMode(
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
+	eventBus?: EventBus,
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -198,9 +545,12 @@ export async function runRpcMode(
 		return { id, type: "response", command, success: false, error: message };
 	};
 
+	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
+
 	const pendingExtensionRequests = new Map<string, PendingExtensionRequest>();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
+	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -453,6 +803,9 @@ export async function runRpcMode(
 		onShutdown: () => {
 			shutdownState.requested = true;
 		},
+		trackAgentInvokingMessage: task => {
+			extensionUserMessageTracker.trackAgentMessageTask(task);
+		},
 		uiContext: rpcUiContext,
 	});
 
@@ -460,6 +813,24 @@ export async function runRpcMode(
 	session.subscribe(event => {
 		output(event);
 	});
+
+	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const reloadPluginState = async () => {
+		const cwd = session.sessionManager.getCwd();
+		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		resetCapabilities();
+		session.setSlashCommands(await loadSlashCommands({ cwd }));
+		await session.refreshSshTool({ activateIfAvailable: true });
+		await emitAvailableCommandsUpdate();
+	};
+	const emitAvailableCommandsUpdate = async () => {
+		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	};
+	session.subscribeCommandMetadataChanged(() => {
+		void emitAvailableCommandsUpdate();
+	});
+	await emitAvailableCommandsUpdate();
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
@@ -471,15 +842,53 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				const skillResult = await tryRunRpcSkillCommand(session, command.message);
+				if (skillResult) {
+					return success(id, "prompt", skillResult);
+				}
+				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+					session,
+					sessionManager: session.sessionManager,
+					settings: session.settings,
+					cwd: session.sessionManager.getCwd(),
+					output: text => output({ type: "command_output", text }),
+					refreshCommands: emitAvailableCommandsUpdate,
+					reloadPlugins: reloadPluginState,
+					notifyTitleChanged: async () => {
+						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+					},
+					notifyConfigChanged: async () => {
+						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+					},
+				});
+				if (builtinResult !== false) {
+					if ("prompt" in builtinResult) {
+						watchAndReportLocalOnlyPromptResult({
+							id,
+							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							output,
+							onError: promptError => output(error(id, "prompt", promptError.message)),
+							extensionUserMessageTracker,
+						});
+						return success(id, "prompt");
+					}
+					return success(id, "prompt", { agentInvoked: false });
+				}
+
 				// Don't await - events will stream
 				// Extension commands are executed immediately, file prompt templates are expanded
 				// If streaming and streamingBehavior specified, queues via steer/followUp
-				session
-					.prompt(command.message, {
-						images: command.images,
-						streamingBehavior: command.streamingBehavior,
-					})
-					.catch(e => output(error(id, "prompt", e.message)));
+				watchAndReportLocalOnlyPromptResult({
+					id,
+					startPrompt: () =>
+						session.prompt(command.message, {
+							images: command.images,
+							streamingBehavior: command.streamingBehavior,
+						}),
+					output,
+					onError: promptError => output(error(id, "prompt", promptError.message)),
+					extensionUserMessageTracker,
+				});
 				return success(id, "prompt");
 			}
 
@@ -494,22 +903,24 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				await session.abort();
+				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
 
 			case "abort_and_prompt": {
-				await session.abort();
+				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				session
 					.prompt(command.message, { images: command.images })
 					.catch(e => output(error(id, "abort_and_prompt", e.message)));
 				return success(id, "abort_and_prompt");
 			}
 
-			case "new_session": {
-				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
-				const cancelled = !(await session.newSession(options));
-				return success(id, "new_session", { cancelled });
+			case "new_session":
+			case "switch_session":
+			case "branch": {
+				const result = await handleRpcSessionChange(session, command, subagentRegistry);
+				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+				return success(id, result.type, result.data);
 			}
 
 			// =================================================================
@@ -536,11 +947,16 @@ export async function runRpcMode(
 					dumpTools: session.agent.state.tools.map(tool => ({
 						name: tool.name,
 						description: tool.description,
-						parameters: tool.parameters,
+						parameters: isZodSchema(tool.parameters) ? zodToWireSchema(tool.parameters) : tool.parameters,
+						examples: tool.examples,
 					})),
 					contextUsage: session.getContextUsage(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "get_available_commands": {
+				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}
 
 			case "set_todos": {
@@ -561,6 +977,44 @@ export async function runRpcMode(
 					return success(id, "set_host_uri_schemes", { schemes });
 				} catch (err) {
 					return error(id, "set_host_uri_schemes", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "set_subagent_subscription": {
+				if (!subagentRegistry) {
+					return error(id, "set_subagent_subscription", "Subagent event bus is unavailable");
+				}
+				if (!isSubagentSubscriptionLevel(command.level)) {
+					return error(
+						id,
+						"set_subagent_subscription",
+						`Invalid subagent subscription level: ${String(command.level)}`,
+					);
+				}
+				subagentRegistry.setSubscriptionLevel(command.level);
+				return success(id, "set_subagent_subscription", { level: subagentRegistry.getSubscriptionLevel() });
+			}
+
+			case "get_subagents": {
+				if (!subagentRegistry) {
+					return error(id, "get_subagents", "Subagent event bus is unavailable");
+				}
+				return success(id, "get_subagents", { subagents: subagentRegistry.getSubagents() });
+			}
+
+			case "get_subagent_messages": {
+				if (!subagentRegistry) {
+					return error(id, "get_subagent_messages", "Subagent event bus is unavailable");
+				}
+				try {
+					if (command.fromByte !== undefined && !Number.isFinite(command.fromByte)) {
+						return error(id, "get_subagent_messages", "fromByte must be a finite number");
+					}
+					const sessionFile = subagentRegistry.resolveSessionFile(command);
+					const transcript = await readRpcSubagentTranscript(sessionFile, command.fromByte);
+					return success(id, "get_subagent_messages", transcript);
+				} catch (err) {
+					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
 				}
 			}
 
@@ -683,16 +1137,6 @@ export async function runRpcMode(
 				return success(id, "export_html", { path });
 			}
 
-			case "switch_session": {
-				const cancelled = !(await session.switchSession(command.sessionPath));
-				return success(id, "switch_session", { cancelled });
-			}
-
-			case "branch": {
-				const result = await session.branch(command.entryId);
-				return success(id, "branch", { text: result.selectedText, cancelled: result.cancelled });
-			}
-
 			case "get_branch_messages": {
 				const messages = session.getUserMessagesForBranching();
 				return success(id, "get_branch_messages", { messages });
@@ -716,6 +1160,12 @@ export async function runRpcMode(
 			}
 
 			case "handoff": {
+				// Resetting the agent mid-stream lets the live turn keep emitting into a
+				// session that handoff has already torn down. Refuse while a prompt is in
+				// flight (mirrors the TUI /handoff guard).
+				if (session.isStreaming) {
+					return error(id, "handoff", "Cannot hand off while a response is in progress");
+				}
 				const result = await session.handoff(command.customInstructions);
 				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
 			}
@@ -763,6 +1213,7 @@ export async function runRpcMode(
 								id: Snowflake.next() as string,
 								method: "open_url",
 								url: info.url,
+								launchUrl: info.launchUrl,
 								instructions: info.instructions,
 							} as RpcExtensionUIRequest);
 						},
@@ -801,62 +1252,60 @@ export async function runRpcMode(
 		}
 	};
 
-	/**
-	 * Check if shutdown was requested and perform shutdown if so.
-	 * Called after handling each command when waiting for the next command.
-	 */
-	async function checkShutdownRequested(): Promise<void> {
-		if (!shutdownState.requested) return;
+	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
+	// process while a background-dispatched bash still owes the client its
+	// response frame. The coordinator drains tracked tasks before exiting and
+	// re-checks the request as each task settles.
+	const shutdownCoordinator = new RpcShutdownCoordinator({
+		isShutdownRequested: () => shutdownState.requested,
+		performShutdown: async () => {
+			if (session.extensionRunner?.hasHandlers("session_shutdown")) {
+				await session.extensionRunner.emit({ type: "session_shutdown" });
+			}
+			process.exit(0);
+		},
+	});
 
-		if (session.extensionRunner?.hasHandlers("session_shutdown")) {
-			await session.extensionRunner.emit({ type: "session_shutdown" });
-		}
+	const dispatchFrameDeps: RpcInputFrameDeps = {
+		handleCommand,
+		output,
+		errorResponse: error,
+		trackBackgroundTask: task => shutdownCoordinator.track(task),
+		pendingExtensionRequests,
+		onHostToolResult: frame => hostToolBridge.handleResult(frame),
+		onHostToolUpdate: frame => hostToolBridge.handleUpdate(frame),
+		onHostUriResult: frame => hostUriBridge.handleResult(frame),
+	};
 
-		process.exit(0);
-	}
-
-	// Listen for JSON input using Bun's stdin
+	// Listen for JSON input using Bun's stdin. Frame dispatch lives in
+	// dispatchRpcInputFrame so it can be exercised directly by tests; see the
+	// helper's docstring for the concurrency contract.
 	for await (const parsed of readJsonl(Bun.stdin.stream())) {
 		try {
-			// Handle extension UI responses
-			if ((parsed as RpcExtensionUIResponse).type === "extension_ui_response") {
-				const response = parsed as RpcExtensionUIResponse;
-				const pending = pendingExtensionRequests.get(response.id);
-				if (pending) {
-					pending.resolve(response);
-				}
-				continue;
+			const awaited = dispatchRpcInputFrame(parsed, dispatchFrameDeps);
+			if (awaited) {
+				await awaited;
+				// Check for deferred shutdown request (idle between commands).
+				// Background-dispatched bash frames skip this check so a later
+				// abort_bash can still be read; the coordinator re-checks when
+				// each tracked task settles, so a shutdown requested mid-bash
+				// fires once the response frame is written even if no further
+				// client frames arrive.
+				await shutdownCoordinator.checkShutdownRequested();
 			}
-
-			if (isRpcHostToolResult(parsed)) {
-				hostToolBridge.handleResult(parsed);
-				continue;
-			}
-
-			if (isRpcHostToolUpdate(parsed)) {
-				hostToolBridge.handleUpdate(parsed);
-				continue;
-			}
-
-			if (isRpcHostUriResult(parsed)) {
-				hostUriBridge.handleResult(parsed);
-				continue;
-			}
-
-			// Handle regular commands
-			const command = parsed as RpcCommand;
-			const response = await handleCommand(command);
-			output(response);
-
-			// Check for deferred shutdown request (idle between commands)
-			await checkShutdownRequested();
-		} catch (e: any) {
-			output(error(undefined, "parse", `Failed to parse command: ${e.message}`));
+		} catch (e: unknown) {
+			const message = e instanceof Error ? e.message : String(e);
+			output(error(undefined, "parse", `Failed to parse command: ${message}`));
 		}
 	}
+
+	// Background bash tasks may still owe response frames; drain them before
+	// tearing down (stdin EOF ends the frame stream, not in-flight work).
+	await shutdownCoordinator.drain();
 
 	// stdin closed — RPC client is gone, exit cleanly
 	hostToolBridge.rejectAllPending("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	subagentRegistry?.dispose();
 	process.exit(0);
 }

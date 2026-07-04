@@ -1,6 +1,6 @@
-import { vllmModelManagerOptions } from "../provider-models/openai-compat";
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks, OAuthProvider } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 const PROVIDER_ID: OAuthProvider = "vllm";
 const AUTH_URL = "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html";
@@ -9,7 +9,7 @@ const DEFAULT_LOCAL_TOKEN = "vllm-local";
 
 export async function loginVllm(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error(`${PROVIDER_ID} login requires onPrompt callback`);
+		throw new AIError.OnPromptRequiredError(PROVIDER_ID);
 	}
 	options.onAuth?.({
 		url: AUTH_URL,
@@ -21,7 +21,7 @@ export async function loginVllm(options: OAuthController): Promise<string> {
 		allowEmpty: true,
 	});
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 	const trimmed = apiKey.trim();
 	return trimmed || DEFAULT_LOCAL_TOKEN;
@@ -30,9 +30,5 @@ export async function loginVllm(options: OAuthController): Promise<string> {
 export const vllmProvider = {
 	id: "vllm",
 	name: "vLLM (Local OpenAI-compatible)",
-	defaultModel: "gpt-oss-20b",
-	createModelManagerOptions: (config: ModelManagerConfig) => vllmModelManagerOptions(config),
-	catalogDiscovery: { label: "vLLM", envVars: ["VLLM_API_KEY"], allowUnauthenticated: true },
-	envKeys: "VLLM_API_KEY",
 	login: (cb: OAuthLoginCallbacks) => loginVllm(cb),
 } as const satisfies ProviderDefinition;

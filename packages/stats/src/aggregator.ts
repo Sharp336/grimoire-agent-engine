@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { isCompiledBinary } from "@oh-my-pi/pi-utils";
+import { workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
@@ -13,27 +13,28 @@ import {
 	getModelPerformanceSeries,
 	getModelTimeSeries,
 	getOverallStats,
+	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
 	getTimeSeries,
+	getToolStats,
+	getToolStatsByModel,
+	getToolTimeSeries,
 	initDb,
 	insertMessageStats,
+	insertToolCalls,
 	insertUserMessageStats,
 	setFileOffset,
+	updateToolResults,
 	updateUserMessageLinks,
 } from "./db";
-import { getSessionEntry, listAllSessionFiles, type ParseSessionResult } from "./parser";
+import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
-// Worker entry. Bun's `--compile` bundler statically discovers the string
-// literal in `new Worker("./packages/stats/src/sync-worker.ts", …)` below and
-// emits the worker as an additional entrypoint (registered in
-// `packages/coding-agent/scripts/build-binary.ts`). In dev runs we resolve
-// the same source file through `import.meta.url`, so the literal only has to
-// be valid relative to the `--root` directory (repo root). Importing the
-// source as `with { type: "file" }` is NOT sufficient — that copies the file
-// as a raw asset and does not bundle the worker's relative imports, so the
-// worker would crash on first `import` (issue #1011, PR #1027).
-import type { BehaviorDashboardStats, DashboardStats, MessageStats, RequestDetails } from "./types";
+// Coding-agent binary/bundle workers route through the CLI entrypoint with a
+// hidden argv mode, so the compiled binary and npm bundle only need one
+// JavaScript entry. Standalone source `omp-stats` keeps using this package's
+// own sync-worker source file.
+import type { BehaviorDashboardStats, DashboardStats, MessageStats, RequestDetails, ToolDashboardStats } from "./types";
 
 /**
  * Apply a freshly parsed result to the database. Runs entirely on the
@@ -43,6 +44,8 @@ function applyParseResult(sessionFile: string, lastModified: number, result: Par
 	if (result.stats.length > 0) insertMessageStats(result.stats);
 	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
+	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
 	setFileOffset(sessionFile, result.newOffset, lastModified);
 	return result.stats.length + result.userStats.length;
 }
@@ -72,6 +75,9 @@ export interface SyncOptions {
 }
 
 function defaultWorkerCount(): number {
+	// Bun 1.3.x can abort the macOS process when stats sync workers re-enter
+	// the compiled `omp` binary. Keep macOS on the documented serial path.
+	if (process.platform === "darwin") return 1;
 	// `navigator.hardwareConcurrency` is the portable answer in Bun; fall
 	// back to a small fixed pool if it's somehow unavailable.
 	const hw = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 0) : 0;
@@ -89,17 +95,18 @@ interface WorkerHandle {
 }
 
 /**
- * Create a fresh sync worker. In a `--compile` binary the literal-string
- * specifier is what Bun's static analyzer needs (the file is also listed as
- * an additional `--compile` entrypoint in
- * `packages/coding-agent/scripts/build-binary.ts`). In dev runs we resolve
- * the source URL via `import.meta.url` so the worker survives `cwd` changes
- * by callers.
+ * Create a fresh sync worker. When the process was started from a
+ * self-dispatching CLI entry (omp in source, npm-bundle, or compiled form),
+ * re-enter that entry with a worker argv selector; otherwise (standalone
+ * omp-stats, bun test, SDK embedding) load the worker module directly, so this
+ * package keeps zero runtime dependency on `@oh-my-pi/pi-coding-agent`.
  */
 function createSyncWorker(): Worker {
-	return isCompiledBinary()
-		? new Worker("./packages/stats/src/sync-worker.ts", { type: "module" })
-		: new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
+	const hostEntry = workerHostEntry();
+	if (hostEntry) {
+		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_sync"] });
+	}
+	return new Worker(new URL("./sync-worker.ts", import.meta.url).href, { type: "module" });
 }
 
 function spawnWorker(): WorkerHandle {
@@ -152,10 +159,16 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
  * spawn path on a fresh install (no session files = early return), so a
  * dedicated probe is the only reliable signal.
  *
- * Resolves with the worker's `import.meta.url` (caller-visible diagnostics);
- * rejects on transport error, error response, or timeout.
+ * No-op on darwin: `syncAllSessions` keeps macOS on the serial parser path
+ * (see {@link defaultWorkerCount}) so the worker spawn surface is unreachable
+ * from the CLI, and probing it under the hardened runtime in
+ * `scripts/ci-macos-sign.sh` would re-enter the Bun-worker abort surface that
+ * motivated the darwin serial default in the first place.
+ *
+ * Rejects on transport error, error response, or timeout.
  */
 export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+	if (process.platform === "darwin") return;
 	const worker = createSyncWorker();
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	const timer = setTimeout(() => reject(new Error(`sync worker did not pong within ${timeoutMs}ms`)), timeoutMs);
@@ -186,11 +199,11 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 /**
  * Sync all session files to the database.
  *
- * Parsing fans out across a worker pool (one in-flight job per worker)
- * while DB writes and offset bookkeeping stay on the calling thread so the
- * single SQLite handle stays uncontended. `onProgress` fires once per
- * completed file (skipped files included so the bar walks at a steady
- * rate).
+ * `workers: 1` parses inline. Larger pools fan parsing out across workers
+ * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
+ * the calling thread so the single SQLite handle stays uncontended.
+ * `onProgress` fires once per completed file (skipped files included so the
+ * bar walks at a steady rate).
  */
 export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
 	await initDb();
@@ -203,10 +216,6 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 	let completed = 0;
 	let cursor = 0;
 
-	const poolSize = Math.max(1, Math.min(files.length, opts?.workers ?? defaultWorkerCount()));
-	const handles: WorkerHandle[] = [];
-	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
-
 	const report = (sessionFile: string) => {
 		completed++;
 		opts?.onProgress?.({
@@ -217,34 +226,53 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 		});
 	};
 
+	const processFile = async (
+		sessionFile: string,
+		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
+	): Promise<void> => {
+		let fileStats: fs.Stats;
+		try {
+			fileStats = await fs.promises.stat(sessionFile);
+		} catch {
+			report(sessionFile);
+			return;
+		}
+		const lastModified = fileStats.mtimeMs;
+		const stored = getFileOffset(sessionFile);
+		if (stored && stored.lastModified >= lastModified) {
+			report(sessionFile);
+			return;
+		}
+
+		const fromOffset = stored?.offset ?? 0;
+		const result = await parse(sessionFile, fromOffset);
+		const inserted = applyParseResult(sessionFile, lastModified, result);
+		if (inserted > 0) {
+			totalProcessed += inserted;
+			filesProcessed++;
+		}
+		report(sessionFile);
+	};
+
+	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
+	if (requestedWorkers === 1) {
+		for (const sessionFile of files) {
+			await processFile(sessionFile, parseSessionFile);
+		}
+		return { processed: totalProcessed, files: filesProcessed };
+	}
+
+	const poolSize = Math.min(files.length, requestedWorkers);
+
+	const handles: WorkerHandle[] = [];
+	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
+
 	async function drain(handle: WorkerHandle): Promise<void> {
 		while (true) {
 			const idx = cursor++;
 			if (idx >= files.length) return;
 			const sessionFile = files[idx];
-
-			let fileStats: fs.Stats;
-			try {
-				fileStats = await fs.promises.stat(sessionFile);
-			} catch {
-				report(sessionFile);
-				continue;
-			}
-			const lastModified = fileStats.mtimeMs;
-			const stored = getFileOffset(sessionFile);
-			if (stored && stored.lastModified >= lastModified) {
-				report(sessionFile);
-				continue;
-			}
-
-			const fromOffset = stored?.offset ?? 0;
-			const result = await dispatch(handle, { sessionFile, fromOffset });
-			const inserted = applyParseResult(sessionFile, lastModified, result);
-			if (inserted > 0) {
-				totalProcessed += inserted;
-				filesProcessed++;
-			}
-			report(sessionFile);
+			await processFile(sessionFile, (file, fromOffset) => dispatch(handle, { sessionFile: file, fromOffset }));
 		}
 	}
 
@@ -259,6 +287,7 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const FIVE_MIN_MS = 5 * 60 * 1000;
 
 type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
@@ -278,11 +307,11 @@ const DEFAULT_TIME_RANGE: TimeRange = "24h";
 const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
 	"1h": {
 		timeSeriesHours: 1,
-		timeSeriesBucketMs: HOUR_MS,
+		timeSeriesBucketMs: FIVE_MIN_MS,
 		modelSeriesDays: 1,
-		modelSeriesBucketMs: HOUR_MS,
+		modelSeriesBucketMs: FIVE_MIN_MS,
 		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: HOUR_MS,
+		modelPerformanceBucketMs: FIVE_MIN_MS,
 		costSeriesDays: 1,
 	},
 	"24h": {
@@ -332,7 +361,7 @@ const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> =
 	},
 };
 
-function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
+export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
 	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
 	const config = TIME_RANGE_TO_CONFIG[normalized as TimeRange];
 	if (config) {
@@ -367,6 +396,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		overall: getOverallStats(cutoff ?? undefined),
 		byModel: getStatsByModel(cutoff ?? undefined),
 		byFolder: getStatsByFolder(cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(cutoff ?? undefined),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
 		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
@@ -374,12 +404,15 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 	};
 }
 
-export async function getOverviewStats(range?: string | null): Promise<Pick<DashboardStats, "overall" | "timeSeries">> {
+export async function getOverviewStats(
+	range?: string | null,
+): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
 	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
 
 	return {
 		overall: getOverallStats(cutoff ?? undefined),
+		byAgentType: getStatsByAgentType(cutoff ?? undefined),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 	};
 }
@@ -450,5 +483,19 @@ export async function getBehaviorDashboardStats(range?: string | null): Promise<
 		overall: getBehaviorOverall(cutoff),
 		byModel: getBehaviorByModel(cutoff),
 		behaviorSeries: getBehaviorTimeSeries(cutoff),
+	};
+}
+
+/**
+ * Get the tools dashboard payload: per-tool totals, per-(tool, model)
+ * breakdown, and the call time series (bucketed like the model series).
+ */
+export async function getToolDashboardStats(range?: string | null): Promise<ToolDashboardStats> {
+	await initDb();
+	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	return {
+		byTool: getToolStats(cutoff ?? undefined),
+		byToolModel: getToolStatsByModel(cutoff ?? undefined),
+		series: getToolTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
 	};
 }

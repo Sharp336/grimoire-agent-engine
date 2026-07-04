@@ -8,9 +8,8 @@
  * - Collapsible/expandable views
  */
 import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
-import { type HighlightColors, highlightCode as nativeHighlightCode, supportsLanguage } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
+import { getLanguageFromPath, highlightCode as highlightThemeCode, type Theme } from "../modes/theme/theme";
 import {
 	formatExpandHint,
 	formatMoreItems,
@@ -139,7 +138,7 @@ export function renderResult(
 	const outputBlock = new CachedOutputBlock();
 
 	return markFramedBlockComponent({
-		render(width: number): string[] {
+		render(width: number): readonly string[] {
 			// Read mutable state at render time
 			const { expanded, isPartial, spinnerFrame } = options;
 
@@ -219,15 +218,15 @@ function renderHover(
 	const beforeCode = fullText.slice(0, codeStart).trimEnd();
 	const afterCode = fullText.slice(fullText.indexOf("```", 3) + 3).trim();
 
-	const codeLines = highlightCode(code, lang, theme);
+	const codeLines = highlightThemeCode(code, lang, theme);
 	const icon = theme.styledSymbol("status.info", "accent");
 	const langLabel = lang ? theme.fg("mdCodeBlockBorder", ` ${lang}`) : "";
 
 	if (expanded) {
-		const h = theme.boxSharp.horizontal;
-		const v = theme.boxSharp.vertical;
-		const top = `${theme.boxSharp.topLeft}${h.repeat(3)}`;
-		const bottom = `${theme.boxSharp.bottomLeft}${h.repeat(3)}`;
+		const h = theme.boxRound.horizontal;
+		const v = theme.boxRound.vertical;
+		const top = `${theme.boxRound.topLeft}${h.repeat(3)}`;
+		const bottom = `${theme.boxRound.bottomLeft}${h.repeat(3)}`;
 		let output = `${icon}${langLabel}`;
 		if (beforeCode) {
 			for (const line of beforeCode.split("\n")) {
@@ -255,9 +254,9 @@ function renderHover(
 		const preview = truncateToWidth(beforeCode, TRUNCATE_LENGTHS.TITLE);
 		output += `\n ${theme.fg("dim", theme.tree.branch)} ${theme.fg("muted", preview)}`;
 	}
-	const h = theme.boxSharp.horizontal;
-	const v = theme.boxSharp.vertical;
-	const bottom = `${theme.boxSharp.bottomLeft}${h.repeat(3)}`;
+	const h = theme.boxRound.horizontal;
+	const v = theme.boxRound.vertical;
+	const bottom = `${theme.boxRound.bottomLeft}${h.repeat(3)}`;
 	output += `\n ${theme.fg("mdCodeBlockBorder", v)} ${firstCodeLine}`;
 
 	if (codeLines.length > 1) {
@@ -272,31 +271,6 @@ function renderHover(
 	}
 
 	return output.split("\n");
-}
-
-/**
- * Syntax highlight code using native highlighter.
- */
-function highlightCode(codeText: string, language: string, theme: Theme): string[] {
-	const validLang = language && supportsLanguage(language) ? language : undefined;
-	try {
-		const colors: HighlightColors = {
-			comment: theme.getFgAnsi("syntaxComment"),
-			keyword: theme.getFgAnsi("syntaxKeyword"),
-			function: theme.getFgAnsi("syntaxFunction"),
-			variable: theme.getFgAnsi("syntaxVariable"),
-			string: theme.getFgAnsi("syntaxString"),
-			number: theme.getFgAnsi("syntaxNumber"),
-			type: theme.getFgAnsi("syntaxType"),
-			operator: theme.getFgAnsi("syntaxOperator"),
-			punctuation: theme.getFgAnsi("syntaxPunctuation"),
-			inserted: theme.getFgAnsi("toolDiffAdded"),
-			deleted: theme.getFgAnsi("toolDiffRemoved"),
-		};
-		return nativeHighlightCode(codeText, validLang, colors).split("\n");
-	} catch {
-		return codeText.split("\n");
-	}
 }
 
 // =============================================================================

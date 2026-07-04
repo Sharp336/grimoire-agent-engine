@@ -17,7 +17,7 @@ Primary implementation: `src/modes/theme/theme.ts`.
 
 ## Theme JSON shape
 
-Theme files are JSON objects validated against the runtime schema in `theme.ts` (`ThemeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
+Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
 
 Top-level fields:
 
@@ -65,7 +65,7 @@ All tokens below are required in `colors`.
 
 `thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, `bashMode`, `pythonMode`
 
-### Status line segment colors (14)
+### Status line segment colors (13)
 
 `statusLineSep`, `statusLineModel`, `statusLinePath`, `statusLineGitClean`, `statusLineGitDirty`, `statusLineContext`, `statusLineSpend`, `statusLineStaged`, `statusLineDirty`, `statusLineUntracked`, `statusLineOutput`, `statusLineCost`, `statusLineSubagents`
 
@@ -95,6 +95,16 @@ Runtime precedence:
 
 Invalid override keys are ignored and logged (`logger.debug`).
 
+#### Box-drawing borders
+
+All outlined chrome — tool-result frames, overlays, code fences, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables are the sole exception and keep the fully sharp `boxSharp.*` set (`┌┐└┘`).
+
+Override behavior follows from that split:
+
+- `boxRound.{topLeft,topRight,bottomLeft,bottomRight,horizontal,vertical}` restyle every border's corners and edges.
+- `boxSharp.{cross,teeDown,teeUp,teeRight,teeLeft}` restyle dividers/junctions everywhere (rounded frames and tables alike).
+- `boxSharp.{topLeft,topRight,bottomLeft,bottomRight}` now affect markdown table corners only.
+
 ## Built-in vs custom theme sources
 
 Theme lookup order (`loadThemeJson`):
@@ -115,7 +125,7 @@ For custom theme files:
 
 1. read JSON
 2. parse JSON
-3. validate against `ThemeJsonSchema`
+3. validate against `themeJsonSchema`
 4. resolve `vars` references recursively
 5. convert resolved values to ANSI by terminal capability mode
 
@@ -233,7 +243,7 @@ Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.d
 1. Create file in custom themes dir, e.g. `~/.omp/agent/themes/my-theme.json`.
 2. Include `name`, optional `vars`, and **all required** `colors` tokens.
 3. Optionally include `symbols` and `export`.
-4. Select the theme in Settings (`Display -> Dark theme` or `Display -> Light theme`) depending on which auto slot you want.
+4. Select the theme in Settings (`Appearance -> Dark Theme` or `Appearance -> Light Theme`) depending on which auto slot you want.
 
 Minimal skeleton:
 

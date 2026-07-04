@@ -30,7 +30,6 @@ import {
 	completeSimple,
 	type Message,
 	type Model,
-	resolveServiceTier,
 	type ServiceTier,
 	type SimpleStreamOptions,
 	type StopReason,
@@ -731,7 +730,7 @@ export interface ChatRequestSnapshot {
 	readonly reasoningEffort?: string;
 	readonly toolChoice?: ToolChoice;
 	readonly tools?: readonly { readonly name: string }[];
-	readonly systemPrompt?: readonly string[];
+	readonly systemPrompt?: string | readonly string[];
 	readonly messages?: readonly Message[];
 }
 
@@ -752,8 +751,7 @@ function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnap
 		attrs[GenAIAttr.RequestStopSequences] = [...request.stopSequences];
 	}
 	if (request.serviceTier && shouldSendServiceTier(request.serviceTier, provider)) {
-		const resolved = resolveServiceTier(request.serviceTier, provider);
-		if (resolved) attrs[OpenAIAttr.RequestServiceTier] = resolved;
+		attrs[OpenAIAttr.RequestServiceTier] = request.serviceTier;
 	}
 	if (request.reasoningEffort) attrs[PiGenAIAttr.RequestReasoningEffort] = request.reasoningEffort;
 	const toolChoice = serializeToolChoice(request.toolChoice);
@@ -796,6 +794,11 @@ function applyContentCaptureForResponse(telemetry: AgentTelemetry, span: Span, m
 	}
 }
 
+function normalizeSystemPromptParts(systemPrompt: string | readonly string[] | undefined): readonly string[] {
+	if (!systemPrompt) return [];
+	return typeof systemPrompt === "string" ? [systemPrompt] : systemPrompt;
+}
+
 function serializeRequestMessagesForTelemetry(
 	telemetry: AgentTelemetry,
 	request: ChatRequestSnapshot,
@@ -803,10 +806,8 @@ function serializeRequestMessagesForTelemetry(
 	const serializer = telemetry.config.contentSerializer?.requestMessages;
 	if (serializer) return callContentSerializer(telemetry, "requestMessages", () => serializer(request));
 	const messages: TelemetryMessageSummary[] = [];
-	if (request.systemPrompt) {
-		for (const text of request.systemPrompt)
-			messages.push({ role: "system", content: summarizeTelemetryValue(text) });
-	}
+	for (const text of normalizeSystemPromptParts(request.systemPrompt))
+		messages.push({ role: "system", content: summarizeTelemetryValue(text) });
 	if (request.messages) {
 		for (const message of request.messages) {
 			messages.push({ role: message.role, content: summarizeTelemetryValue(message.content) });
@@ -874,8 +875,8 @@ interface OtelOutputMessage extends OtelInputMessage {
 }
 
 function serializeFullSystemInstructionsForTelemetry(request: ChatRequestSnapshot): string | undefined {
-	const systemPrompt = request.systemPrompt;
-	if (!systemPrompt || systemPrompt.length === 0) return undefined;
+	const systemPrompt = normalizeSystemPromptParts(request.systemPrompt);
+	if (systemPrompt.length === 0) return undefined;
 	return stringifyJsonAttribute(systemPrompt.map(text => ({ type: "text", content: text }) satisfies OtelMessagePart));
 }
 

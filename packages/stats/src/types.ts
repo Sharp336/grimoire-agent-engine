@@ -1,4 +1,5 @@
-import type { AssistantMessage, ServiceTier, StopReason, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ServiceTier, ServiceTierByFamily, StopReason, Usage } from "@oh-my-pi/pi-ai";
+import type { AgentType } from "./shared-types";
 
 export * from "./shared-types";
 
@@ -32,6 +33,8 @@ export interface MessageStats {
 	errorMessage: string | null;
 	/** Token usage */
 	usage: Usage;
+	/** Which agent produced this message (main agent, task subagent, advisor) */
+	agentType: AgentType;
 }
 
 /**
@@ -69,7 +72,7 @@ export interface SessionServiceTierChangeEntry {
 	id: string;
 	parentId?: string | null;
 	timestamp: string;
-	serviceTier: ServiceTier | null;
+	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
 export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
@@ -122,4 +125,47 @@ export interface UserMessageLink {
 	entryId: string;
 	model: string;
 	provider: string;
+}
+
+/**
+ * One tool call extracted from an assistant message's `toolCall` content
+ * blocks. `callsInTurn` records how many calls that assistant turn contained
+ * so aggregation can split the turn's real provider usage evenly per call.
+ */
+export interface ToolCallStats {
+	/** Session file path */
+	sessionFile: string;
+	/** Assistant-message entry ID that emitted the call */
+	entryId: string;
+	/** Provider-assigned tool call ID (unique within a session) */
+	toolCallId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Tool name */
+	toolName: string;
+	/** Model that emitted the call */
+	model: string;
+	/** Provider name */
+	provider: string;
+	/** Assistant-message timestamp (Unix ms) */
+	timestamp: number;
+	/** Which agent produced the call */
+	agentType: AgentType;
+	/** Total tool calls in the same assistant turn (>= 1) */
+	callsInTurn: number;
+	/** Serialized argument characters */
+	argsChars: number;
+}
+
+/**
+ * Result linkage emitted when the parser sees a `toolResult` message entry.
+ * Applied as an UPDATE on the persisted tool-call row — results can land in a
+ * later incremental sync pass than the call that produced them.
+ */
+export interface ToolResultLink {
+	sessionFile: string;
+	toolCallId: string;
+	/** Text characters fed back into context */
+	resultChars: number;
+	isError: boolean;
 }

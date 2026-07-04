@@ -5,7 +5,8 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
@@ -13,10 +14,10 @@ import { estimateTokens } from "./compaction";
 import type { ReadonlySessionManager, SessionEntry } from "./entries";
 import {
 	type ConvertToLlm,
-	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	defaultConvertToLlm,
 } from "./messages";
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
@@ -27,6 +28,8 @@ import {
 	type FileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
+	stripReadSelector,
+	truncateToolResultForSummary,
 	upsertFileOperations,
 } from "./utils";
 
@@ -70,7 +73,7 @@ export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model;
 	/** API key for the model */
-	apiKey: string;
+	apiKey: ApiKey;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -86,6 +89,17 @@ export interface GenerateBranchSummaryOptions {
 	 * wrapped in an OTEL chat span tagged with `pi.gen_ai.oneshot.kind = "branch_summary"`.
 	 */
 	telemetry?: AgentTelemetry;
+	/**
+	 * Optional completion transport override (same contract as
+	 * {@link SummaryOptions.completeImpl}). Lets the host route the branch
+	 * summary HTTP request through its provider-concurrency limiter instead
+	 * of the default `completeSimple` transport.
+	 */
+	completeImpl?: <TApi extends Api>(
+		model: Model<TApi>,
+		ctx: Context,
+		options: SimpleStreamOptions,
+	) => Promise<AssistantMessage>;
 }
 
 // ============================================================================
@@ -155,8 +169,12 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
-			// Skip tool results - context is in assistant's tool call
-			if (entry.message.role === "toolResult") return undefined;
+			// Useless non-error tool results are dropped by serializeConversation()
+			// downstream. Skip them here so a large useless payload can't eat the
+			// branch-summary token budget and starve older useful entries.
+			if (entry.message.role === "toolResult" && entry.message.useless === true && entry.message.isError !== true) {
+				return undefined;
+			}
 			return entry.message;
 
 		case "custom_message":
@@ -189,6 +207,19 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	}
 }
 
+function estimateBranchSummaryTokens(message: AgentMessage): number {
+	if (message.role !== "toolResult") return estimateTokens(message);
+	const text = message.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map(c => c.text)
+		.join("");
+	if (!text) return 0;
+	return estimateTokens({
+		...message,
+		content: [{ type: "text", text: truncateToolResultForSummary(text) }],
+	});
+}
+
 /**
  * Prepare entries for summarization with token budget.
  *
@@ -214,7 +245,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		if (entry.type === "branch_summary" && !entry.fromExtension && entry.details) {
 			const details = entry.details as BranchSummaryDetails;
 			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
+				for (const f of details.readFiles) fileOps.read.add(stripReadSelector(f));
 			}
 			if (Array.isArray(details.modifiedFiles)) {
 				// Modified files go into both edited and written for proper deduplication
@@ -234,7 +265,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+		const tokens = estimateBranchSummaryTokens(message);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -288,8 +319,8 @@ export async function generateBranchSummary(
 
 	// Transform to LLM-compatible messages, then serialize to text
 	// Serialization prevents the model from treating it as a conversation to continue
-	const llmMessages = (options.convertToLlm ?? convertToLlm)(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const llmMessages = (options.convertToLlm ?? defaultConvertToLlm)(messages);
+	const conversationText = serializeConversation(llmMessages, preferredDialect(model.id));
 
 	// Build prompt
 	const instructions = customInstructions || BRANCH_SUMMARY_PROMPT;
@@ -308,7 +339,7 @@ export async function generateBranchSummary(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
 		{ apiKey, signal, maxTokens: 2048, metadata },
-		{ telemetry: options.telemetry, oneshotKind: "branch_summary" },
+		{ telemetry: options.telemetry, oneshotKind: "branch_summary", completeImpl: options.completeImpl },
 	);
 
 	// Check if aborted or errored
@@ -329,7 +360,7 @@ export async function generateBranchSummary(
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles);
+	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 
 	return {
 		summary: summary || "No summary generated",

@@ -7,6 +7,7 @@ import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { untilAborted } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { SourceMeta } from "../capability/types";
 import type {
 	CustomTool,
@@ -15,6 +16,7 @@ import type {
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
+import type { OutputMeta } from "../tools/output-meta";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
 import { renderMCPCall, renderMCPResult } from "./render";
@@ -57,6 +59,60 @@ function normalizeToolArgs(value: unknown): MCPToolArgs {
 	return value as MCPToolArgs;
 }
 
+function isUnusedOptionalPlaceholder(value: unknown): boolean {
+	return (
+		value === undefined ||
+		value === "" ||
+		(typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0)
+	);
+}
+
+function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
+	const properties = inputSchema.properties;
+	if (!properties) return args;
+
+	let cleaned: MCPToolArgs | undefined;
+	const required = new Set(inputSchema.required ?? []);
+	for (const [key, value] of Object.entries(args)) {
+		if (required.has(key) || !Object.hasOwn(properties, key) || !isUnusedOptionalPlaceholder(value)) {
+			continue;
+		}
+		cleaned ??= { ...args };
+		delete cleaned[key];
+	}
+
+	return cleaned ?? args;
+}
+
+/**
+ * Drop the harness-internal intent field (`INTENT_FIELD`) before forwarding
+ * args to an MCP server. The harness injects `i` into every tool's wire
+ * schema; the direct model tool-call path strips it via `extractIntent`, but
+ * the `eval` `tool.*` bridge and any other in-process caller forwards args
+ * verbatim. Strict-schema servers (Linear, anything with
+ * `additionalProperties:false` / Zod `.strict()`) reject every call that
+ * carries `i`. The MCP boundary is the authoritative guard so callers don't
+ * have to pre-strip.
+ *
+ * Leaves `i` in place when the server's own `inputSchema.properties` declares
+ * it, so a server that legitimately uses `i` as a parameter is unaffected.
+ */
+function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
+	if (!Object.hasOwn(args, INTENT_FIELD)) return args;
+	if (inputSchema.properties && Object.hasOwn(inputSchema.properties, INTENT_FIELD)) return args;
+	const { [INTENT_FIELD]: _intent, ...rest } = args;
+	return rest;
+}
+
+/**
+ * Normalize raw tool params into the outbound `tools/call` arguments: strip
+ * the harness intent field, then drop optional empty placeholders the server
+ * declares but doesn't require.
+ */
+function prepareOutboundArgs(params: unknown, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
+	return omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
+}
+
 /** Details included in MCP tool results for rendering */
 export interface MCPToolDetails {
 	/** Server name */
@@ -71,6 +127,8 @@ export interface MCPToolDetails {
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
 	providerName?: string;
+	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
+	meta?: OutputMeta;
 }
 /**
  * Format MCP content for LLM consumption.
@@ -258,7 +316,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = normalizeToolArgs(params);
+		const args = prepareOutboundArgs(params, this.tool.inputSchema);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 
@@ -357,7 +415,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = normalizeToolArgs(params);
+		const args = prepareOutboundArgs(params, this.tool.inputSchema);
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 

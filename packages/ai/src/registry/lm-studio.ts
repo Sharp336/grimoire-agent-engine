@@ -1,13 +1,13 @@
-import { lmStudioModelManagerOptions } from "../provider-models/openai-compat";
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 const PROVIDER_ID = "lm-studio";
 export const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
 
 export async function loginLmStudio(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error(`${PROVIDER_ID} login requires onPrompt callback`);
+		throw new AIError.OnPromptRequiredError(PROVIDER_ID);
 	}
 
 	const apiKey = await options.onPrompt({
@@ -17,7 +17,7 @@ export async function loginLmStudio(options: OAuthController): Promise<string> {
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
@@ -27,9 +27,5 @@ export async function loginLmStudio(options: OAuthController): Promise<string> {
 export const lmStudioProvider = {
 	id: "lm-studio",
 	name: "LM Studio (Local OpenAI-compatible)",
-	defaultModel: "llama-3-8b",
-	createModelManagerOptions: (config: ModelManagerConfig) => lmStudioModelManagerOptions(config),
-	allowUnauthenticated: true,
-	envKeys: "LM_STUDIO_API_KEY",
 	login: (cb: OAuthLoginCallbacks) => loginLmStudio(cb),
 } as const satisfies ProviderDefinition;

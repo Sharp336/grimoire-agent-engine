@@ -5,6 +5,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
@@ -12,6 +13,8 @@ import {
 	ExtensionRunner,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -602,6 +605,135 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("session_stop", () => {
+		it("invokes handlers with completed main-session messages and returns continuation feedback", async () => {
+			const eventsPath = path.join(tempDir.path(), "session-stop-events.jsonl");
+			const extCode = `
+			import * as fs from "node:fs";
+
+			export default function(pi) {
+				pi.on("session_stop", async (event) => {
+					fs.appendFileSync(
+						${JSON.stringify(eventsPath)},
+						JSON.stringify({
+							type: event.type,
+							messages: event.messages,
+							turn_id: event.turn_id,
+							last_assistant_message: event.last_assistant_message,
+							session_id: event.session_id,
+							session_file: event.session_file,
+							stop_hook_active: event.stop_hook_active,
+						}) + "\\n",
+					);
+					return { continue: true, additionalContext: "Run one more pass." };
+				});
+			}
+		`;
+			await Bun.write(path.join(extensionsDir, "session-stop.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const completedMessage: AgentMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "main session finished" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 123,
+			};
+
+			const stopResult = await runner.emitSessionStop({
+				messages: [completedMessage],
+				turn_id: 2,
+				last_assistant_message: completedMessage,
+				session_id: "session-123",
+				session_file: "/tmp/session.jsonl",
+				stop_hook_active: false,
+			});
+
+			const events = (await Bun.file(eventsPath).text())
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([
+				{
+					type: "session_stop",
+					messages: [completedMessage],
+					turn_id: 2,
+					last_assistant_message: completedMessage,
+					session_id: "session-123",
+					session_file: "/tmp/session.jsonl",
+					stop_hook_active: false,
+				},
+			]);
+			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("continues to later handlers after empty continuation feedback", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "session-stop-empty.ts"),
+				`
+				export default function(pi) {
+					pi.on("session_stop", async () => ({ continue: true }));
+					pi.on("session_stop", async () => ({ decision: "block", reason: "Continue from second handler." }));
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const completedMessage: AgentMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "main session finished" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 123,
+			};
+
+			await expect(
+				runner.emitSessionStop({
+					messages: [completedMessage],
+					turn_id: 0,
+					last_assistant_message: completedMessage,
+					session_id: "session-123",
+					session_file: "/tmp/session.jsonl",
+					stop_hook_active: false,
+				}),
+			).resolves.toEqual({ decision: "block", reason: "Continue from second handler." });
+		});
+	});
+
 	describe("tool_result chaining", () => {
 		it("chains content modifications across handlers", async () => {
 			const extCode1 = `
@@ -771,6 +903,145 @@ describe("ExtensionRunner", () => {
 
 			warnSpy.mockRestore();
 		});
+
+		it("times out tool_call handlers with fail-closed policy so a hung extension cannot indefinitely block tool execution (#3948)", async () => {
+			const hangExtensionPath = path.join(tempDir.path(), "hang-tool-call.ts");
+			fs.writeFileSync(
+				hangExtensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async () => {
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions([hangExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError(err => {
+				errors.push(err);
+			});
+			testSetExtensionHandlerTimeoutMs(10);
+
+			const executeCalls: unknown[] = [];
+			const tool: AgentTool = {
+				name: "sleepy",
+				label: "Sleepy",
+				description: "records execute() invocations",
+				parameters: Type.Object({}),
+				strict: true,
+				execute: async (_id, params) => {
+					executeCalls.push(params);
+					return { content: [{ type: "text", text: "ran" }] };
+				},
+			};
+			const wrapped = new ExtensionToolWrapper(tool, runner);
+
+			const startedAt = performance.now();
+			await expect(wrapped.execute("tool-call-id", {})).rejects.toThrow(
+				`Extension ${hangExtensionPath} timed out after 10ms`,
+			);
+			const elapsedMs = performance.now() - startedAt;
+
+			expect(elapsedMs).toBeGreaterThanOrEqual(8);
+			expect(elapsedMs).toBeLessThan(500);
+			// Fail-closed: the underlying tool MUST NOT run when a gate handler timed out.
+			expect(executeCalls).toEqual([]);
+			expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+				extensionPath: hangExtensionPath,
+				event: "tool_call",
+				timeoutMs: 10,
+			});
+			expect(errors).toEqual([
+				{
+					extensionPath: hangExtensionPath,
+					event: "tool_call",
+					error: "handler timed out after 10ms",
+				},
+			]);
+
+			warnSpy.mockRestore();
+		});
+	});
+
+	describe("memory context", () => {
+		it("exposes the lazy memory runtime after initialization", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", async (_event, ctx) => {
+						globalThis.__ompMemoryStatus = await ctx.memory.status();
+					});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "memory-context.ts");
+			fs.writeFileSync(explicitExtensionPath, extCode);
+			const globalState = globalThis as typeof globalThis & { __ompMemoryStatus?: unknown };
+			delete globalState.__ompMemoryStatus;
+
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				() => ({
+					status: async () => ({
+						backend: "mnemopi",
+						active: true,
+						writable: true,
+						searchable: true,
+					}),
+					search: async query => ({ backend: "mnemopi", query, count: 0, items: [] }),
+					save: async () => ({ backend: "mnemopi", stored: 1 }),
+				}),
+			);
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			await runner.emit({ type: "session_start" });
+
+			expect(globalState.__ompMemoryStatus).toMatchObject({
+				backend: "mnemopi",
+				active: true,
+				searchable: true,
+			});
+			delete globalState.__ompMemoryStatus;
+		});
 	});
 
 	describe("session name API", () => {
@@ -849,6 +1120,468 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("tool approval lifecycle", () => {
+		const initializeRunner = (
+			runner: ExtensionRunner,
+			select: (title: string, options: string[]) => Promise<string | undefined>,
+		) => {
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+				undefined,
+				{
+					select,
+					confirm: async () => false,
+					input: async () => undefined,
+					notify: () => {},
+					onTerminalInput: () => () => {},
+					setStatus: () => {},
+					setWorkingMessage: () => {},
+					setWidget: () => {},
+					setFooter: () => {},
+					setHeader: () => {},
+					setTitle: () => {},
+					custom: async <T>() => undefined as T,
+					pasteToEditor: () => {},
+					setEditorText: () => {},
+					getEditorText: () => "",
+					editor: async () => undefined,
+					setEditorComponent: () => {},
+					get theme() {
+						return {} as never;
+					},
+					getAllThemes: async () => [],
+					getTheme: async () => undefined,
+					setTheme: async () => ({ success: false, error: "not implemented" }),
+					getToolsExpanded: () => false,
+					setToolsExpanded: () => {},
+				},
+			);
+		};
+
+		const approvalTool = {
+			name: "dangerous_tool",
+			label: "Dangerous Tool",
+			description: "Test tool",
+			parameters: {} as never,
+			approval: "exec" as const,
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		};
+
+		it("emits requested before waiting and resolved after approval", async () => {
+			const events: Array<{ type: string; approved?: boolean }> = [];
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_approval_requested", async (event) => {
+						globalThis.__approvalEvents.push({ type: event.type });
+					});
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__approvalEvents.push({ type: event.type, approved: event.approved });
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "approval-events.ts"), extCode);
+			const globalState = globalThis as typeof globalThis & { __approvalEvents?: typeof events };
+			globalState.__approvalEvents = events;
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const select = vi.fn(async () => {
+				events.push({ type: "ui_select" });
+				return "Approve";
+			});
+			initializeRunner(runner, select);
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await (wrapper as ExtensionToolWrapper<any>).execute("call-approval", {}, undefined, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+			});
+
+			expect(events).toEqual([
+				{ type: "tool_approval_requested" },
+				{ type: "ui_select" },
+				{ type: "tool_approval_resolved", approved: true },
+			]);
+			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
+				"Approve",
+				"Deny",
+			]);
+			delete globalState.__approvalEvents;
+		});
+
+		it("emits resolved false when approval is denied", async () => {
+			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_approval_requested", async (event) => {
+						globalThis.__deniedApprovalEvents.push({ type: event.type, reason: event.reason });
+					});
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__deniedApprovalEvents.push({
+							type: event.type,
+							approved: event.approved,
+							reason: event.reason,
+						});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "denied-approval-events.ts"), extCode);
+			const globalState = globalThis as typeof globalThis & { __deniedApprovalEvents?: typeof events };
+			globalState.__deniedApprovalEvents = events;
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(runner, async () => "Deny");
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-denied", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				}),
+			).rejects.toThrow("Tool call denied by user: dangerous_tool");
+
+			expect(events).toEqual([
+				{ type: "tool_approval_requested", reason: undefined },
+				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
+			]);
+			delete globalState.__deniedApprovalEvents;
+		});
+		it("emits resolved false when the approval prompt throws", async () => {
+			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_approval_requested", async (event) => {
+						globalThis.__thrownApprovalEvents.push({ type: event.type, reason: event.reason });
+					});
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__thrownApprovalEvents.push({
+							type: event.type,
+							approved: event.approved,
+							reason: event.reason,
+						});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "thrown-approval-events.ts"), extCode);
+			const globalState = globalThis as typeof globalThis & { __thrownApprovalEvents?: typeof events };
+			globalState.__thrownApprovalEvents = events;
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(runner, async () => {
+				throw new Error("dialog aborted");
+			});
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-thrown", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				}),
+			).rejects.toThrow("dialog aborted");
+
+			expect(events).toEqual([
+				{ type: "tool_approval_requested", reason: undefined },
+				{ type: "tool_approval_resolved", approved: false, reason: "dialog aborted" },
+			]);
+			delete globalState.__thrownApprovalEvents;
+		});
+		it("emits lifecycle events when partial context has no session manager", async () => {
+			const events: Array<{ type: string; approved?: boolean; reason?: string; sessionId?: string }> = [];
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_approval_requested", async (event) => {
+						globalThis.__partialContextApprovalEvents.push({
+							type: event.type,
+							sessionId: event.sessionId,
+							reason: event.reason,
+						});
+					});
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__partialContextApprovalEvents.push({
+							type: event.type,
+							sessionId: event.sessionId,
+							approved: event.approved,
+							reason: event.reason,
+						});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "partial-context-approval-events.ts"), extCode);
+			const globalState = globalThis as typeof globalThis & { __partialContextApprovalEvents?: typeof events };
+			globalState.__partialContextApprovalEvents = events;
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				} as never),
+			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
+
+			expect(events).toEqual([
+				{ type: "tool_approval_requested", sessionId: "", reason: undefined },
+				{
+					type: "tool_approval_resolved",
+					sessionId: "",
+					approved: false,
+					reason: "no interactive UI available",
+				},
+			]);
+			delete globalState.__partialContextApprovalEvents;
+		});
+	});
+
+	describe("tool_call input", () => {
+		function createHashlineEditTool(): AgentTool {
+			return {
+				name: "edit",
+				label: "Edit",
+				description: "Test edit tool",
+				parameters: Type.Object({ input: Type.String() }),
+				strict: true,
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			};
+		}
+
+		it("exposes a single hashline edit path to extension gate handlers", async () => {
+			const eventsPath = path.join(tempDir.path(), "tool-call-events.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "edit") return;
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({ path: event.input.path, paths: event.input.paths }) + "\\n",
+						);
+						if (typeof event.input.path !== "string") {
+							return { block: true, reason: \`Blocked: \${event.input.path}\` };
+						}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-path.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
+
+			const resultMessage = await wrapped.execute("tool-call-id", {
+				input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content",
+			});
+
+			expect(resultMessage.content).toEqual([{ type: "text", text: "ok" }]);
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([
+				{ path: "plans/switch-case-array-syntax.md", paths: ["plans/switch-case-array-syntax.md"] },
+			]);
+		});
+		it("keeps non-tag hash suffixes in hashline edit paths", async () => {
+			const eventsPath = path.join(tempDir.path(), "tool-call-non-tag-path-events.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "edit") return;
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({ path: event.input.path, paths: event.input.paths }) + "\\n",
+						);
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-non-tag-path.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
+
+			await wrapped.execute("tool-call-id", {
+				input: "¶plans/foo.md#notatag\n27 27\n+new content",
+			});
+
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([{ path: "plans/foo.md#notatag", paths: ["plans/foo.md#notatag"] }]);
+		});
+
+		it("ignores _path passthrough when the hashline input names a different target", async () => {
+			const eventsPath = path.join(tempDir.path(), "tool-call-spoof-path-events.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "edit") return;
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({ path: event.input.path, paths: event.input.paths }) + "\\n",
+						);
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-spoof-path.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
+
+			await wrapped.execute("tool-call-id", {
+				_path: "plans/allowed.md",
+				input: "¶src/secret.ts#ABC1\n27 27\n+evil content",
+			});
+
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([{ path: "src/secret.ts", paths: ["src/secret.ts"] }]);
+		});
+
+		it("leaves path unset and reports all targets for multi-file hashline edits", async () => {
+			const eventsPath = path.join(tempDir.path(), "tool-call-multi-path-events.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "edit") return;
+						fs.appendFileSync(
+							${JSON.stringify(eventsPath)},
+							JSON.stringify({ path: event.input.path ?? null, paths: event.input.paths }) + "\\n",
+						);
+						if (typeof event.input.path !== "string") {
+							return { block: true, reason: \`Blocked: \${event.input.path}\` };
+						}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-multi-path.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
+
+			await expect(
+				wrapped.execute("tool-call-id", {
+					input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content\n¶packages/coding-agent/src/main.ts#DEF2\n1 1\n+changed",
+				}),
+			).rejects.toThrow("Blocked: undefined");
+
+			const events = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(events).toEqual([
+				{
+					path: null,
+					paths: ["plans/switch-case-array-syntax.md", "packages/coding-agent/src/main.ts"],
+				},
+			]);
+		});
+	});
 	describe("hasHandlers", () => {
 		it("returns true when handlers exist for event type", async () => {
 			const extCode = `
@@ -869,6 +1602,54 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.hasHandlers("tool_call")).toBe(true);
 			expect(runner.hasHandlers("agent_end")).toBe(false);
+		});
+	});
+
+	describe("zero-handler fast path", () => {
+		it("skips context allocation and handler machinery for an unsubscribed event type, but still fires when subscribed", async () => {
+			// The fast path in ExtensionRunner.emit is event-type agnostic; the hot
+			// streaming events (message_update / tool_execution_*) traverse the same
+			// path. `turn_start` stands in as a subscribed event with a trivial payload.
+			const extCode = `
+				export default function(pi) {
+					pi.on("turn_start", async () => {
+						throw new Error("turn_start handler ran");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "turn-start-handler.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// createContext is the per-event allocation the fast path defers; spying on
+			// it (call-through preserved) proves the slow path is entered only when a
+			// handler exists for the emitted event type.
+			const createContextSpy = vi.spyOn(runner, "createContext");
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError(err => {
+				errors.push({ event: err.event, error: err.error });
+			});
+
+			// No extension subscribes to `agent_start`: no context allocation, and the
+			// handler-timeout machinery is never entered.
+			await runner.emit({ type: "agent_start" });
+			expect(createContextSpy).not.toHaveBeenCalled();
+			expect(errors).toHaveLength(0);
+
+			// `turn_start` has a handler: context is allocated once and the handler runs
+			// (its throw surfaces via onError, proving #runHandlerWithTimeout executed).
+			await runner.emit({ type: "turn_start", turnIndex: 0, timestamp: Date.now() });
+			expect(createContextSpy).toHaveBeenCalledTimes(1);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.event).toBe("turn_start");
+			expect(errors[0]?.error).toContain("turn_start handler ran");
 		});
 	});
 

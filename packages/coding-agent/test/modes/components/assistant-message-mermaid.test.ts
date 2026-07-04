@@ -66,12 +66,85 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 		expect(rendered).not.toContain("flowchart TD");
 	});
 
+	it("aligns box borders for CJK labels in display columns", () => {
+		// Defends the first-party vendored Mermaid ASCII renderer's CJK/East-Asian
+		// display-width handling (packages/utils/src/vendor/mermaid-ascii): Hangul is 2
+		// terminal columns wide, so every row of a single-node diagram must
+		// measure the same display width or the right border drifts.
+		const rendered = renderAssistantMessage("```mermaid\nflowchart TD\n  A[수집 스케줄러]\n```");
+		const displayCols = (line: string): number => {
+			let width = 0;
+			for (const ch of line) {
+				const code = ch.codePointAt(0) ?? 0;
+				const wide =
+					(code >= 0xac00 && code <= 0xd7a3) || // Hangul syllables
+					(code >= 0x2e80 && code <= 0x9fff) || // CJK radicals/ideographs
+					(code >= 0xff00 && code <= 0xff60); // fullwidth forms
+				width += wide ? 2 : 1;
+			}
+			return width;
+		};
+		const boxRows = rendered.split("\n").filter(line => /[┌│└]/.test(line));
+		expect(boxRows.length).toBeGreaterThanOrEqual(3);
+		expect(new Set(boxRows.map(displayCols)).size).toBe(1);
+	});
+
 	it("falls back to the fenced code block when Mermaid rendering fails", () => {
 		const rendered = renderAssistantMessage("```mermaid\nthis is not mermaid\n```");
 
 		expect(TERMINAL.imageProtocol).toBeNull();
 		expect(rendered).toContain("```mermaid");
 		expect(rendered).toContain("this is not mermaid");
+	});
+});
+
+describe("AssistantMessageComponent settled-row commit boundary", () => {
+	function renderStreamingMarkdown(markdown: string): AssistantMessageComponent {
+		const component = new AssistantMessageComponent();
+		component.updateContent(createAssistantMessage(markdown), { transient: true });
+		component.render(80);
+		return component;
+	}
+
+	it("exposes frozen paragraph rows for streaming prose", () => {
+		const component = renderStreamingMarkdown(
+			"First paragraph is already byte-stable.\n\nSecond paragraph is still streaming tokens",
+		);
+
+		expect(component.getTranscriptBlockSettledRows()).toBeGreaterThan(0);
+	});
+
+	it("exposes zero settled rows for Mermaid while streaming", () => {
+		for (const markdown of [
+			"Here is the flow:\n\n```mermaid\nflowchart TD\n  A-->B",
+			"```mermaid\nflowchart TD\n  A-->B\n```",
+		]) {
+			const component = renderStreamingMarkdown(markdown);
+
+			expect(component.getTranscriptBlockSettledRows()).toBe(0);
+		}
+	});
+
+	it("keeps a streaming table in the unsettled tail", () => {
+		const component = renderStreamingMarkdown("Results:\n\n| Name | Score |\n| --- | --- |\n| a | 1 |");
+		const renderedRows = component.render(80);
+		const settledRows = component.getTranscriptBlockSettledRows();
+
+		expect(settledRows).toBeGreaterThan(0);
+		expect(settledRows).toBeLessThan(renderedRows.length);
+		expect(Bun.stripANSI(renderedRows.slice(settledRows).join("\n"))).toContain("Name");
+	});
+
+	it("exposes zero settled rows after a reflowing block finalizes", () => {
+		for (const markdown of [
+			"```mermaid\nflowchart TD\n  A-->B\n```",
+			"| Name | Score |\n| --- | --- |\n| a | 1 |\n| b | 2 |",
+		]) {
+			const component = renderStreamingMarkdown(markdown);
+			component.markTranscriptBlockFinalized();
+
+			expect(component.getTranscriptBlockSettledRows()).toBe(0);
+		}
 	});
 });
 
@@ -179,7 +252,7 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		);
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
-		expect(rendered).toContain("Thinking...");
+		expect(rendered).not.toContain("Thinking...");
 		expect(rendered).not.toContain("I should inspect the input.");
 		expect(rendered).not.toContain("hidden note");
 		expect(rendererCalled).toBe(false);

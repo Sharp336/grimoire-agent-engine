@@ -1,7 +1,6 @@
-import { fireworksModelManagerOptions } from "../provider-models/openai-compat";
 import { createApiKeyLogin } from "./api-key-login";
 import type { OAuthLoginCallbacks } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 export const loginFireworks = createApiKeyLogin({
 	providerLabel: "Fireworks",
@@ -12,16 +11,18 @@ export const loginFireworks = createApiKeyLogin({
 	validation: {
 		kind: "models-endpoint",
 		provider: "Fireworks",
-		modelsUrl: "https://api.fireworks.ai/inference/v1/models",
+		// The OpenAI-compatible inference listing (`/inference/v1/models`) enumerates
+		// the caller's *deployed* models and returns `500 Error listing deployed models`
+		// for accounts without active deployments, which rejected valid `fw_…` keys
+		// during `/login`. The control-plane `List Models` API hits the static
+		// `fireworks` serverless catalog (same endpoint discovery uses) and only
+		// requires the key to authenticate, not to own any deployments.
+		modelsUrl: "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1",
 	},
 });
 
 export const fireworksProvider = {
 	id: "fireworks",
 	name: "Fireworks",
-	defaultModel: "kimi-k2.6",
-	createModelManagerOptions: (config: ModelManagerConfig) => fireworksModelManagerOptions(config),
-	catalogDiscovery: { label: "Fireworks", envVars: ["FIREWORKS_API_KEY"] },
-	envKeys: "FIREWORKS_API_KEY",
 	login: (cb: OAuthLoginCallbacks) => loginFireworks(cb),
 } as const satisfies ProviderDefinition;

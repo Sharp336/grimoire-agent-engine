@@ -4,7 +4,7 @@
  * Branch: `fix/brush-detach-when-embedded`
  * Target commit: b0950f7ed
  *
- * The fix lives in `crates/brush-core-vendored/src/commands.rs` and is
+ * The fix lives in `crates/vendor/brush-core/src/commands.rs` and is
  * verified at the unit level by `pi-natives::shell::tests::child_session_action`
  * (truth-table) and `embedded_external_command_runs_in_its_own_session` (real
  * brush spawn). This test pulls the fix end-to-end through the OMP coding
@@ -42,8 +42,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -51,7 +51,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { BashTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 /** Scripted assistant turn that issues a single `bash` tool call. */
 function bashCall(command: string, callId: string): MockResponse {
@@ -146,7 +146,7 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"todo.enabled": false,
-			"todo.eager": false,
+			"todo.eager": "default",
 			"todo.reminders": false,
 			// BashTool consults these — keep them off so the test path is the simple
 			// synchronous `executeBash` call, not the async-job manager.
@@ -198,7 +198,7 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 		authStorage?.close();
 		authStorage = undefined;
 		if (fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 

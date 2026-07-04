@@ -2,10 +2,12 @@ import { MismatchError as HashlineMismatchError } from "@oh-my-pi/hashline";
 import hashlineGrammar from "@oh-my-pi/hashline/grammar.lark" with { type: "text" };
 import hashlineDescription from "@oh-my-pi/hashline/prompt.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	createLspWritethrough,
 	type FileDiagnosticsResult,
+	flushLspWritethroughBatch,
 	type WritethroughCallback,
 	type WritethroughDeferredHandle,
 	writethroughNoop,
@@ -18,12 +20,13 @@ import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { isInternalUrlPath } from "../tools/path-utils";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
-import { executeHashlineSingle, type HashlineParams, hashlineEditParamsSchema } from "./hashline";
+import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
 import { executePatchSingle, type PatchEditEntry, type PatchParams, patchEditSchema } from "./modes/patch";
 import { executeReplaceSingle, type ReplaceEditEntry, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type LspBatchRequest } from "./renderer";
+import { pruneOversizedEditSnapshots } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 
 export * from "@oh-my-pi/hashline";
@@ -37,6 +40,7 @@ export * from "./modes/patch";
 export * from "./modes/replace";
 export * from "./normalize";
 export * from "./renderer";
+export * from "./snapshot-details";
 export * from "./streaming";
 
 type TInput =
@@ -45,11 +49,14 @@ type TInput =
 	| typeof hashlineEditParamsSchema
 	| typeof applyPatchSchema;
 
+type HashlineParams = typeof hashlineEditParamsSchema.infer;
+
 type EditParams = ReplaceParams | PatchParams | HashlineParams | ApplyPatchParams;
 
 type EditModeDefinition = {
 	description: (session: ToolSession) => string;
 	parameters: TInput;
+	examples?: readonly ToolExample[];
 	execute: (
 		tool: EditTool,
 		params: EditParams,
@@ -123,6 +130,8 @@ async function executeApplyPatchPerFile(
 		run: (batchRequest: LspBatchRequest | undefined) => Promise<AgentToolResult<EditToolDetails>>;
 	}[],
 	outerBatchRequest: LspBatchRequest | undefined,
+	cwd: string,
+	signal: AbortSignal | undefined,
 	onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
 ): Promise<AgentToolResult<EditToolDetails, TInput>> {
 	if (fileEntries.length === 1) {
@@ -132,10 +141,15 @@ async function executeApplyPatchPerFile(
 
 	const perFileResults: EditToolPerFileResult[] = [];
 	const contentTexts: string[] = [];
+	let hasError = false;
 
 	for (let i = 0; i < fileEntries.length; i++) {
 		const { path, run } = fileEntries[i];
 		const isLast = i === fileEntries.length - 1;
+		// Per-file writes join the outer LSP write batch; only the last entry
+		// flushes it, so cross-file writes coalesce into a single
+		// format+diagnostics pass. The failure path below flushes explicitly
+		// when the loop stops early.
 		const batchRequest: LspBatchRequest | undefined = outerBatchRequest
 			? { id: outerBatchRequest.id, flush: isLast && outerBatchRequest.flush }
 			: undefined;
@@ -150,9 +164,11 @@ async function executeApplyPatchPerFile(
 				diagnostics: details?.diagnostics,
 				op: details?.op,
 				move: details?.move,
+				sourcePath: details?.sourcePath,
 				meta: details?.meta,
 				oldText: details?.oldText,
 				newText: details?.newText,
+				snapshotsPruned: details?.snapshotsPruned,
 			});
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
@@ -161,6 +177,36 @@ async function executeApplyPatchPerFile(
 			const displayErrorText = err instanceof HashlineMismatchError ? err.displayMessage : undefined;
 			perFileResults.push({ path, diff: "", isError: true, errorText, displayErrorText });
 			contentTexts.push(`Error editing ${path}: ${errorText}`);
+			hasError = true;
+			// Later entries were authored assuming this file's post-state; a
+			// partial cascade after failure typically compounds damage. Stop
+			// here, report applied vs. skipped, and let the caller re-issue
+			// only the failed and unapplied files. Matches
+			// `executeSinglePathEntries` semantics.
+			if (i > 0) {
+				const appliedPaths = fileEntries
+					.slice(0, i)
+					.map(e => e.path)
+					.join(", ");
+				contentTexts.push(`Files already applied: ${appliedPaths}.`);
+			}
+			if (i + 1 < fileEntries.length) {
+				const skippedPaths = fileEntries
+					.slice(i + 1)
+					.map(e => e.path)
+					.join(", ");
+				contentTexts.push(
+					`Files NOT applied: ${skippedPaths}; re-read the affected files and re-issue only the failed and unapplied files.`,
+				);
+			}
+			// Stopping early skips the last-entry flush above; finalize the
+			// already-written files so an intervening failure cannot leave them
+			// sitting in an unfinalized LSP write batch (mirrors the delete-path
+			// flush in executePatchSingle).
+			if (outerBatchRequest?.flush) {
+				await flushLspWritethroughBatch(outerBatchRequest.id, cwd, signal);
+			}
+			break;
 		}
 
 		// Emit partial result after each file so UI shows progressive completion
@@ -181,14 +227,18 @@ async function executeApplyPatchPerFile(
 
 	return {
 		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: {
+		details: pruneOversizedEditSnapshots({
 			diff: perFileResults
 				.map(r => r.diff)
 				.filter(Boolean)
 				.join("\n"),
 			firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
 			perFileResults,
-		},
+		}),
+		// Any per-file failure marks the aggregate result as an error so the
+		// agent loop and renderer take the error branch instead of treating
+		// a mixed partial application as a successful edit.
+		...(hasError ? { isError: true } : {}),
 	};
 }
 
@@ -196,7 +246,9 @@ async function executeSinglePathEntries(
 	path: string,
 	runs: ((batchRequest: LspBatchRequest | undefined) => Promise<AgentToolResult<EditToolDetails>>)[],
 	outerBatchRequest: LspBatchRequest | undefined,
-	onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+	onUpdate: ((partialResult: AgentToolResult<EditToolDetails, TInput>) => void) | undefined,
+	cwd: string,
+	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<EditToolDetails, TInput>> {
 	if (runs.length === 1) {
 		return runs[0](outerBatchRequest);
@@ -205,12 +257,17 @@ async function executeSinglePathEntries(
 	const contentTexts: string[] = [];
 	const diffTexts: string[] = [];
 	let firstChangedLine: number | undefined;
-	let errorCount = 0;
+	let hasError = false;
 	let metadataPath: string | undefined;
 	let hasFirstOldText = false;
 	let firstOldText: string | undefined;
 	let hasLastNewText = false;
 	let lastNewText: string | undefined;
+	// Any pruned child invalidates the aggregate snapshot: combining a kept
+	// first-entry oldText with a pruned next entry's newText (or vice-versa)
+	// would describe a transition the file never made. Suppress aggregate
+	// snapshots and stamp the marker so ACP/downstream can degrade cleanly.
+	let snapshotsPruned = false;
 
 	for (let i = 0; i < runs.length; i++) {
 		const isLast = i === runs.length - 1;
@@ -234,12 +291,31 @@ async function executeSinglePathEntries(
 				lastNewText = details.newText;
 				hasLastNewText = true;
 			}
+			if (details?.snapshotsPruned) snapshotsPruned = true;
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
-			contentTexts.push(`Error editing ${path}: ${errorText}`);
-			errorCount++;
+			contentTexts.push(`Error editing ${path} (entry ${i + 1} of ${runs.length}): ${errorText}`);
+			if (i > 0) {
+				contentTexts.push(i === 1 ? `Entry 1 was already applied.` : `Entries 1-${i} were already applied.`);
+			}
+			if (i + 1 < runs.length) {
+				contentTexts.push(
+					(i + 2 === runs.length
+						? `Entry ${runs.length} was NOT applied`
+						: `Entries ${i + 2}-${runs.length} were NOT applied`) +
+						`; re-read the file and re-issue only the failed and unapplied entries.`,
+				);
+			}
+			hasError = true;
+			// Stop at the first failure: later entries were authored against
+			// line numbers/content that assumed this entry succeeded, and
+			// applying them after a failure compounds the damage.
+			if (outerBatchRequest?.flush) {
+				await flushLspWritethroughBatch(outerBatchRequest.id, cwd, signal);
+			}
+			break;
 		}
 
 		if (!isLast && onUpdate) {
@@ -249,25 +325,29 @@ async function executeSinglePathEntries(
 					diff: diffTexts.join("\n"),
 					firstChangedLine,
 				},
-				...(errorCount > 0 ? { isError: true } : {}),
+				...(hasError ? { isError: true } : {}),
 			});
 		}
 	}
 
 	return {
 		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: {
+		details: pruneOversizedEditSnapshots({
 			diff: diffTexts.join("\n"),
 			firstChangedLine,
 			path: metadataPath ?? path,
-			...(hasFirstOldText ? { oldText: firstOldText } : {}),
-			...(hasLastNewText ? { newText: lastNewText } : {}),
-		},
+			...(snapshotsPruned
+				? { snapshotsPruned: true as const }
+				: {
+						...(hasFirstOldText ? { oldText: firstOldText } : {}),
+						...(hasLastNewText ? { newText: lastNewText } : {}),
+					}),
+		}),
 		// Any per-entry failure marks the aggregate result as an error so the
 		// renderer takes the error branch instead of falling through to the
 		// streaming-edit preview (which displays the *proposed* diff and looks
 		// indistinguishable from success).
-		...(errorCount > 0 ? { isError: true } : {}),
+		...(hasError ? { isError: true } : {}),
 	};
 }
 
@@ -341,6 +421,10 @@ export class EditTool implements AgentTool<TInput> {
 		return this.#getModeDefinition().parameters;
 	}
 
+	get examples(): readonly ToolExample[] | undefined {
+		return this.#getModeDefinition().examples;
+	}
+
 	/**
 	 * When in `apply_patch` mode, expose the Codex Lark grammar so providers
 	 * that support OpenAI-style custom tools can emit a grammar-constrained
@@ -373,6 +457,27 @@ export class EditTool implements AgentTool<TInput> {
 		return EDIT_MODE_STRATEGIES[this.mode].matcherDigest(args);
 	}
 
+	/**
+	 * Project the streamed args onto their target file paths so path-scoped
+	 * stream matchers (e.g. TTSR `tool:edit(*.ts)` globs) match hashline and
+	 * apply_patch edits even though the path lives in the wire payload (a
+	 * section header / envelope marker) rather than a top-level argument.
+	 */
+	matcherPaths(args: unknown): readonly string[] | undefined {
+		return EDIT_MODE_STRATEGIES[this.mode].matcherPaths(args);
+	}
+
+	/**
+	 * Per-file projection of the streamed args, splitting multi-section
+	 * hashline / multi-hunk apply_patch payloads into one (path, digest) entry
+	 * per touched file. Path-scoped stream matchers (TTSR) then evaluate each
+	 * file in isolation, so a `tool:edit(*.ts)` rule never fires on text that
+	 * actually belongs to a sibling Markdown hunk.
+	 */
+	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
+		return EDIT_MODE_STRATEGIES[this.mode].matcherEntries(args);
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: EditParams,
@@ -389,6 +494,39 @@ export class EditTool implements AgentTool<TInput> {
 			patch: {
 				description: () => prompt.render(patchDescription),
 				parameters: patchEditSchema,
+				examples: [
+					{
+						caption: "Create",
+						call: { path: "hello.txt", edits: [{ op: "create", diff: "Hello\n" }] },
+					},
+					{
+						caption: "Update",
+						call: {
+							path: "src/app.py",
+							edits: [
+								{
+									op: "update",
+									diff: "@@ def greet():\n def greet():\n-print('Hi')\n+print('Hello')\n",
+								},
+							],
+						},
+					},
+					{
+						caption: "Rename",
+						call: {
+							path: "src/app.py",
+							edits: [{ op: "update", rename: "src/main.py", diff: "@@\n …\n" }],
+						},
+					},
+					{
+						caption: "Delete",
+						call: { path: "obsolete.txt", edits: [{ op: "delete" }] },
+					},
+					{
+						caption: "Multiple entries",
+						note: "All entries in one call apply to the top-level `path`; use separate calls for different files.",
+					},
+				] satisfies readonly ToolExample<PatchParams>[],
 				execute: (
 					tool: EditTool,
 					params: EditParams,
@@ -407,16 +545,27 @@ export class EditTool implements AgentTool<TInput> {
 								batchRequest: br,
 								allowFuzzy: tool.#allowFuzzy,
 								fuzzyThreshold: tool.#fuzzyThreshold,
+								// The JSON grammar has no `*** Update File`; its `op: "create"`
+								// doubles as the documented full-file overwrite (patch.md <avoid>).
+								allowCreateOverwrite: true,
 								writethrough: tool.#writethrough,
 								beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
 							}),
 					);
-					return executeSinglePathEntries(path, runs, batchRequest, onUpdate);
+					return executeSinglePathEntries(path, runs, batchRequest, onUpdate, tool.session.cwd, signal);
 				},
 			},
 			apply_patch: {
 				description: () => prompt.render(applyPatchDescription),
 				parameters: applyPatchSchema,
+				examples: [
+					{
+						caption: "Apply a combined patch file",
+						call: {
+							input: '*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print("Hi")\n+print("Hello, world!")\n*** Delete File: obsolete.txt\n*** End Patch\n',
+						},
+					},
+				] satisfies readonly ToolExample<ApplyPatchParams>[],
 				execute: (
 					tool: EditTool,
 					params: EditParams,
@@ -443,7 +592,7 @@ export class EditTool implements AgentTool<TInput> {
 								}),
 						};
 					});
-					return executeApplyPatchPerFile(perFile, batchRequest, onUpdate);
+					return executeApplyPatchPerFile(perFile, batchRequest, tool.session.cwd, signal, onUpdate);
 				},
 			},
 			hashline: {
@@ -492,7 +641,7 @@ export class EditTool implements AgentTool<TInput> {
 								beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
 							}),
 					);
-					return executeSinglePathEntries(path, runs, batchRequest, onUpdate);
+					return executeSinglePathEntries(path, runs, batchRequest, onUpdate, tool.session.cwd, signal);
 				},
 			},
 		}[this.mode];

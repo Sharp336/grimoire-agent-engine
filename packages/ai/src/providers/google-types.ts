@@ -9,7 +9,6 @@
  *   - `POST {generativelanguage,aiplatform}.googleapis.com/.../models/{model}:streamGenerateContent?alt=sse`
  *   - The Cloud Code Assist endpoint used by `google-gemini-cli.ts`
  */
-
 /** Mirror of `@google/genai`'s `FinishReason` string enum. */
 export type FinishReason =
 	| "FINISH_REASON_UNSPECIFIED"
@@ -131,6 +130,11 @@ export interface GenerateContentConfig {
 	safetySettings?: Array<Record<string, unknown>>;
 	cachedContent?: string;
 	thinkingConfig?: ThinkingConfig;
+	/**
+	 * Gemini/Vertex serving tier. Serialized to the request body root as
+	 * `serviceTier` (camelCase) by the transformer in `google-shared.ts`.
+	 */
+	serviceTier?: "auto" | "default" | "flex" | "scale" | "priority";
 	abortSignal?: AbortSignal;
 }
 
@@ -157,11 +161,20 @@ export interface UsageMetadata {
 	cachedContentTokenCount?: number;
 }
 
+/** Prompt-level safety feedback; `blockReason` is set (with no candidates) when the prompt is blocked. */
+export interface PromptFeedback {
+	blockReason?: string;
+	blockReasonMessage?: string;
+	[key: string]: unknown;
+}
+
 /** Single SSE chunk's parsed JSON body. */
 export interface GenerateContentResponse {
 	candidates?: Candidate[];
 	usageMetadata?: UsageMetadata;
 	modelVersion?: string;
 	responseId?: string;
-	promptFeedback?: Record<string, unknown>;
+	promptFeedback?: PromptFeedback;
+	/** In-band stream failure (quota, internal error) delivered as a final JSON event. */
+	error?: { code?: number; message?: string; status?: string };
 }

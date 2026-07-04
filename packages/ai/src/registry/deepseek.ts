@@ -1,7 +1,7 @@
-import { deepseekModelManagerOptions } from "../provider-models/openai-compat";
+import * as AIError from "../error";
 import { createApiKeyLogin } from "./api-key-login";
 import type { OAuthController, OAuthLoginCallbacks, OAuthPrompt } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 const innerLogin = createApiKeyLogin({
 	providerLabel: "DeepSeek",
@@ -23,7 +23,7 @@ export function normalizeDeepSeekApiKey(raw: string): string {
 	}
 	const stripped = trimmed.replace(/^bearer\b\s*/i, "");
 	if (!stripped) {
-		throw new Error("DeepSeek API key is empty after stripping Bearer prefix");
+		throw new AIError.ApiKeyRequiredError("DeepSeek API key is empty after stripping Bearer prefix");
 	}
 	return stripped;
 }
@@ -42,9 +42,5 @@ export const loginDeepSeek = async (options: OAuthController): Promise<string> =
 export const deepseekProvider = {
 	id: "deepseek",
 	name: "DeepSeek",
-	defaultModel: "deepseek-v4-pro",
-	createModelManagerOptions: (config: ModelManagerConfig) => deepseekModelManagerOptions(config),
-	catalogDiscovery: { label: "DeepSeek", envVars: ["DEEPSEEK_API_KEY"] },
-	envKeys: "DEEPSEEK_API_KEY",
 	login: (cb: OAuthLoginCallbacks) => loginDeepSeek(cb),
 } as const satisfies ProviderDefinition;

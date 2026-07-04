@@ -4,12 +4,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-ai/models";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { complete, getEnvApiKey, stream } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
+import { removeWithRetries } from "../../utils/src/temp";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -23,24 +25,22 @@ const oauthTokens = await Promise.all([
 const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 function hasBedrockCredentials(): boolean {
-	const region = Bun.env.AWS_REGION ?? Bun.env.AWS_DEFAULT_REGION;
+	const region = e2eApiKey("AWS_REGION") ?? e2eApiKey("AWS_DEFAULT_REGION");
 	if (!region) return false;
 
 	// Conservative check: Bedrock needs a region plus either explicit env creds or a profile.
-	// (There are other ways to authenticate, but we avoid running E2E tests accidentally.)
+	// Reads go through e2eApiKey so the live test only runs under E2E=1.
+	const awsProfile = e2eApiKey("AWS_PROFILE");
 	return Boolean(
-		(Bun.env.AWS_ACCESS_KEY_ID && Bun.env.AWS_SECRET_ACCESS_KEY) ||
-			(Bun.env.AWS_PROFILE && Bun.env.AWS_PROFILE.length > 0),
+		(e2eApiKey("AWS_ACCESS_KEY_ID") && e2eApiKey("AWS_SECRET_ACCESS_KEY")) || (awsProfile && awsProfile.length > 0),
 	);
 }
 
 // Calculator tool definition (same as examples)
-const calculatorSchema = z.object({
-	a: z.number().describe("First number"),
-	b: z.number().describe("Second number"),
-	operation: z
-		.enum(["add", "subtract", "multiply", "divide"])
-		.describe("The operation to perform. One of 'add', 'subtract', 'multiply', 'divide'."),
+const calculatorSchema = type({
+	a: "number",
+	b: "number",
+	operation: "'add'|'subtract'|'multiply'|'divide'",
 });
 
 const calculatorTool: Tool<typeof calculatorSchema> = {
@@ -309,7 +309,9 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: Options
 				expect(block.id).toBeTruthy();
 				expect(block.arguments).toBeTruthy();
 
-				const { a, b, operation } = block.arguments;
+				const a = Number(block.arguments.a);
+				const b = Number(block.arguments.b);
+				const operation = typeof block.arguments.operation === "string" ? block.arguments.operation : "";
 				let result: number;
 				switch (operation) {
 					case "add":
@@ -566,7 +568,7 @@ describe("Generate E2E Tests", () => {
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(
 				path.join(os.tmpdir(), `vertex-adc-absent-${Date.now()}`),
 			);
-			const model: Model<"anthropic-messages"> = {
+			const model: Model<"anthropic-messages"> = buildModel({
 				id: "claude-sonnet-4@20250514",
 				name: "Claude Sonnet 4",
 				api: "anthropic-messages",
@@ -578,8 +580,13 @@ describe("Generate E2E Tests", () => {
 				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 				contextWindow: 200_000,
 				maxTokens: 64_000,
-			};
-			const captured = Promise.withResolvers<{ url: string; authorization: string | null; body: unknown }>();
+			});
+			const captured = Promise.withResolvers<{
+				url: string;
+				authorization: string | null;
+				betaHeader: string | null;
+				body: unknown;
+			}>();
 
 			try {
 				__resetVertexTokenCache();
@@ -597,6 +604,7 @@ describe("Generate E2E Tests", () => {
 					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
 					{
 						apiKey: "<authenticated>",
+						thinkingEnabled: true,
 						fetch: async (input, init) => {
 							const url = input instanceof Request ? input.url : input.toString();
 							if (
@@ -610,6 +618,7 @@ describe("Generate E2E Tests", () => {
 							captured.resolve({
 								url,
 								authorization: headers.get("authorization"),
+								betaHeader: headers.get("anthropic-beta"),
 								body: JSON.parse(bodyText),
 							});
 							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), { status: 400 });
@@ -631,6 +640,9 @@ describe("Generate E2E Tests", () => {
 					stream: true,
 				});
 				expect((request.body as Record<string, unknown>).model).toBeUndefined();
+				expect((request.body as Record<string, { type?: string }>).thinking?.type).toBe("enabled");
+				expect((request.body as Record<string, unknown>).context_management).toBeUndefined();
+				expect(request.betaHeader ?? "").not.toContain("context-management-2025-06-27");
 			} finally {
 				__resetVertexTokenCache();
 				homedirSpy.mockRestore();
@@ -679,7 +691,7 @@ describe("Generate E2E Tests", () => {
 					delegates: ["projects/-/serviceAccounts/delegate@project.iam.gserviceaccount.com"],
 				}),
 			);
-			const model: Model<"anthropic-messages"> = {
+			const model: Model<"anthropic-messages"> = buildModel({
 				id: "claude-sonnet-4@20250514",
 				name: "Claude Sonnet 4",
 				api: "anthropic-messages",
@@ -691,7 +703,7 @@ describe("Generate E2E Tests", () => {
 				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 				contextWindow: 200_000,
 				maxTokens: 64_000,
-			};
+			});
 			const callOrder: string[] = [];
 			let iamRequest: { url: string; authorization: string | null; body: unknown } | undefined;
 			const captured = Promise.withResolvers<{ url: string; authorization: string | null }>();
@@ -765,7 +777,7 @@ describe("Generate E2E Tests", () => {
 				expect(request.authorization).toBe("Bearer impersonated-token");
 			} finally {
 				__resetVertexTokenCache();
-				await fs.rm(tmpDir, { recursive: true, force: true });
+				await removeWithRetries(tmpDir);
 				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
 				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
 				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;
@@ -787,9 +799,9 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("Google Vertex Provider (gemini-3-flash-preview)", () => {
-		const vertexApiKey = Bun.env.GOOGLE_CLOUD_API_KEY;
-		const vertexProject = Bun.env.GOOGLE_CLOUD_PROJECT || Bun.env.GCLOUD_PROJECT;
-		const vertexLocation = Bun.env.GOOGLE_CLOUD_LOCATION;
+		const vertexApiKey = e2eApiKey("GOOGLE_CLOUD_API_KEY");
+		const vertexProject = e2eApiKey("GOOGLE_CLOUD_PROJECT") || e2eApiKey("GCLOUD_PROJECT");
+		const vertexLocation = e2eApiKey("GOOGLE_CLOUD_LOCATION");
 		const isVertexConfigured = Boolean(vertexProject && vertexLocation);
 		const vertexOptions = { project: vertexProject, location: vertexLocation } as const;
 		const llm = getBundledModel("google-vertex", "gemini-3-flash-preview");
@@ -1824,7 +1836,7 @@ describe("Generate E2E Tests", () => {
 				setTimeout(checkServer, 1000); // Initial delay
 			});
 
-			llm = {
+			llm = buildModel({
 				id: "gpt-oss:20b",
 				api: "openai-completions",
 				provider: "ollama",
@@ -1840,7 +1852,7 @@ describe("Generate E2E Tests", () => {
 					cacheWrite: 0,
 				},
 				name: "Ollama GPT-OSS 20B",
-			};
+			});
 		}, 30000); // 30 second timeout for setup
 
 		afterAll(() => {

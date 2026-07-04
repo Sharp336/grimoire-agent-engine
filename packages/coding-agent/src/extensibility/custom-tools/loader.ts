@@ -7,15 +7,18 @@
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
+import * as zodModule from "zod/v4";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
+import * as PiCodingAgent from "../../index";
 import * as typebox from "../typebox";
-import { createNoOpUIContext, resolvePath } from "../utils";
+import { createNoOpUIContext, resolvePath, withExitGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
 
 /**
@@ -42,14 +45,14 @@ async function loadTool(
 	}
 
 	try {
-		const module = await import(resolvedPath);
+		const module = await withExitGuard(() => import(resolvedPath));
 		const factory = (module.default ?? module) as CustomToolFactory;
 
 		if (typeof factory !== "function") {
 			return { tools: null, error: { path: toolPath, error: "Tool must export a default function", source } };
 		}
 
-		const toolResult = await factory(sharedApi);
+		const toolResult = await withExitGuard(async () => factory(sharedApi));
 		const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
 
 		const loadedTools: LoadedCustomTool[] = toolsArray.map(tool => ({
@@ -66,8 +69,10 @@ async function loadTool(
 	}
 }
 
-/** Tool path with optional source metadata */
-interface ToolPathWithSource {
+/** Tool path with optional source metadata, suitable for forwarding from a
+ * parent session to a subagent so the subagent can re-bind tools to its own
+ * `CustomToolAPI` without redoing the filesystem scan. */
+export interface ToolPathWithSource {
 	path: string;
 	source?: { provider: string; providerName: string; level: "user" | "project" };
 }
@@ -86,7 +91,7 @@ export class CustomToolLoader {
 	#seenNames: Set<string>;
 
 	constructor(
-		pi: typeof import("@oh-my-pi/pi-coding-agent"),
+		pi: typeof PiCodingAgent,
 		cwd: string,
 		builtInToolNames: string[],
 		pushPendingAction?: (action: {
@@ -104,7 +109,8 @@ export class CustomToolLoader {
 			hasUI: false,
 			logger,
 			typebox,
-			zod: z,
+			arktype: type,
+			zod: zodModule,
 			pi,
 			pushPendingAction: action => {
 				if (!pushPendingAction) {
@@ -172,12 +178,7 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
-	const loader = new CustomToolLoader(
-		await import("@oh-my-pi/pi-coding-agent"),
-		cwd,
-		builtInToolNames,
-		pushPendingAction,
-	);
+	const loader = new CustomToolLoader(PiCodingAgent, cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
 		tools: loader.tools,
@@ -189,26 +190,19 @@ export async function loadCustomTools(
 }
 
 /**
- * Discover and load tools from standard locations via capability system:
- * 1. User and project tools discovered by capability providers
- * 2. Installed plugins (~/.omp/plugins/node_modules/*)
- * 3. Explicitly configured paths from settings or CLI
+ * Collect the absolute tool-source paths to load, without importing or
+ * binding factories. Hot path on session startup — the scan walks
+ * `.omp/tools/`, `.claude/tools/`, the plugin tree, and any configured paths.
+ *
+ * Subagents reuse the parent's collected paths via the SDK's
+ * `preloadedCustomToolPaths` option, then call `loadCustomTools` themselves
+ * so each session re-binds factories with its own session-scoped
+ * `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
  *
  * @param configuredPaths - Explicit paths from settings.json and CLI --tool flags
  * @param cwd - Current working directory
- * @param builtInToolNames - Names of built-in tools to check for conflicts
  */
-export async function discoverAndLoadCustomTools(
-	configuredPaths: string[],
-	cwd: string,
-	builtInToolNames: string[],
-	pushPendingAction?: (action: {
-		label: string;
-		sourceToolName: string;
-		apply(reason: string): Promise<AgentToolResult<unknown>>;
-		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
-	}) => void,
-) {
+export async function discoverCustomToolPaths(configuredPaths: string[], cwd: string): Promise<ToolPathWithSource[]> {
 	const allPathsWithSources: ToolPathWithSource[] = [];
 	const seen = new Set<string>();
 
@@ -241,5 +235,34 @@ export async function discoverAndLoadCustomTools(
 		addPath(resolvePath(configPath, cwd), { provider: "config", providerName: "Config", level: "project" });
 	}
 
-	return loadCustomTools(allPathsWithSources, cwd, builtInToolNames, pushPendingAction);
+	return allPathsWithSources;
+}
+
+/**
+ * Discover and load tools from standard locations via capability system:
+ * 1. User and project tools discovered by capability providers
+ * 2. Installed plugins (~/.omp/plugins/node_modules/*)
+ * 3. Explicitly configured paths from settings or CLI
+ *
+ * Composed of {@link discoverCustomToolPaths} (FS scan) + {@link loadCustomTools}
+ * (per-session binding). Subagents skip the first step and just call
+ * `loadCustomTools` against the parent's collected paths.
+ *
+ * @param configuredPaths - Explicit paths from settings.json and CLI --tool flags
+ * @param cwd - Current working directory
+ * @param builtInToolNames - Names of built-in tools to check for conflicts
+ */
+export async function discoverAndLoadCustomTools(
+	configuredPaths: string[],
+	cwd: string,
+	builtInToolNames: string[],
+	pushPendingAction?: (action: {
+		label: string;
+		sourceToolName: string;
+		apply(reason: string): Promise<AgentToolResult<unknown>>;
+		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
+	}) => void,
+) {
+	const pathsWithSources = await discoverCustomToolPaths(configuredPaths, cwd);
+	return loadCustomTools(pathsWithSources, cwd, builtInToolNames, pushPendingAction);
 }

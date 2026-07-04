@@ -11,7 +11,7 @@
  */
 
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { countTokens } from "@oh-my-pi/pi-natives";
+import { countTokens } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import { estimateTokens } from "./compaction";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
@@ -31,6 +31,14 @@ export interface ShakeConfig {
 	protectedTools: ProtectedToolMatcher[];
 	/** Minimum token size for a fenced/XML block to be eligible. */
 	fenceMinTokens: number;
+	/**
+	 * Compaction boundary (`firstKeptEntryId` of the latest compaction). Entries
+	 * before it are summarized away and never sent, so they are skipped — shaking
+	 * them only churns persisted history. Undefined = no compaction (whole branch
+	 * is sent). Note: shake still elides the warm cached prefix at/after the
+	 * boundary — that is its job as a compaction-class reducer.
+	 */
+	keepBoundaryId?: string;
 }
 
 /** Auto-shake config: protects the live tail, conservative thresholds. */
@@ -267,7 +275,9 @@ function scanContentBlocks(
  * Walks the protect-recent window (most recent `protectTokens` of context is
  * kept intact), collects whole tool-result messages (honoring `protectedTools`
  * and skipping already-pruned results) and large fenced/XML blocks inside
- * user/developer/assistant/custom messages. Returns regions in document order.
+ * user/developer/assistant/custom messages. Tool results flagged contextually
+ * useless by their tool bypass the protect window — there is nothing recent
+ * worth keeping in them. Returns regions in document order.
  *
  * `toolCall` blocks are never touched (tool-call/result pairing is preserved)
  * and regions never span a message boundary. When the combined estimated
@@ -287,12 +297,25 @@ export function collectShakeRegions(entries: SessionEntry[], config: ShakeConfig
 
 	const toolCallsById = collectToolCallsById(entries);
 
+	// Entries before the compaction boundary are summarized away and never sent —
+	// shaking them only churns persisted history (no prompt/cache effect).
+	const boundaryIndex =
+		config.keepBoundaryId === undefined
+			? 0
+			: Math.max(
+					0,
+					entries.findIndex(entry => entry.id === config.keepBoundaryId),
+				);
+
 	const regions: ShakeRegion[] = [];
 	for (let i = 0; i < n; i++) {
-		if (accumulatedAfter[i] < config.protectTokens) continue;
 		const entry = entries[i];
-
+		if (i < boundaryIndex) continue;
 		const toolResult = getToolResultMessage(entry);
+		// Useless-flagged results carry no information once consumed; they are
+		// eligible even inside the protect-recent window.
+		const uselessResult = toolResult !== undefined && toolResult.useless === true && toolResult.isError !== true;
+		if (!uselessResult && accumulatedAfter[i] < config.protectTokens) continue;
 		if (toolResult) {
 			if (toolResult.prunedAt !== undefined) continue;
 			if (isProtectedToolResult(toolResult, toolCallsById.get(toolResult.toolCallId), config.protectedTools))

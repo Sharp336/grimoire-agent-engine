@@ -222,7 +222,7 @@ export default function contextFilter(omp: HookAPI): void {
 
     const trimmed = event.messages.map(msg => {
       // Truncate very large tool results to keep context manageable
-      if (msg.role !== "tool") return msg;
+      if (msg.role !== "toolResult") return msg;
       const content = msg.content.map(chunk => {
         if (chunk.type !== "text" || chunk.text.length <= MAX_TOOL_OUTPUT_CHARS) return chunk;
         return {
@@ -255,7 +255,7 @@ export default function contextFilter(omp: HookAPI): void {
 | `custom(factory)` | Render a custom TUI component |
 | `theme` | Current theme object |
 
-Pass `{ promptStyle: true }` as the fourth argument when Enter should submit and Shift+Enter should insert a newline. The default hook editor behavior keeps Enter as newline and Ctrl+Enter as submit.
+Pass `{ promptStyle: true }` as the fourth argument when Enter should submit and Shift+Enter should insert a newline. The default hook editor behavior keeps Enter as newline and submits on the `app.message.followUp` chord (`Ctrl+Q` or `Ctrl+Enter`).
 
 `ctx.hasUI` is `false` in headless/print/subagent mode — always guard interactive calls.
 

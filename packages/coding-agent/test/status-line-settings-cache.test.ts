@@ -1,31 +1,34 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const originalProjectDir = getProjectDir();
-let projectDir: string;
+let settingsState: SettingsTestState | undefined;
+let projectDir = "";
 
-beforeAll(async () => {
+beforeEach(async () => {
+	settingsState = beginSettingsTest();
 	projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-settings-cache-"));
 	setProjectDir(projectDir);
-	resetSettingsForTest();
 	await Settings.init({ inMemory: true, cwd: projectDir });
 	await initTheme();
 });
 
-afterAll(() => {
-	resetSettingsForTest();
-	setProjectDir(originalProjectDir);
+afterEach(() => {
+	restoreSettingsTestState(settingsState);
+	settingsState = undefined;
 	if (projectDir) {
-		fs.rmSync(projectDir, { recursive: true, force: true });
+		removeSyncWithRetries(projectDir);
 	}
+	projectDir = "";
 });
 
 function makeSession(sessionName = "Cache Session") {
@@ -42,6 +45,7 @@ function makeSession(sessionName = "Cache Session") {
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
@@ -57,6 +61,7 @@ function makeSession(sessionName = "Cache Session") {
 				cost: 0,
 			}),
 		},
+		getContextUsage: () => undefined,
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
 }
 
@@ -151,6 +156,16 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0 });
 	});
 
+	it("surfaces active subagents even when custom segments omit subagents", () => {
+		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
+
+		component.setSubagentCount(2);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("2 agents");
+		expect(content).not.toContain("running");
+	});
+
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: ["mode"], rightSegments: [] });
 		const effective = component.getEffectiveSettingsForTest();
@@ -191,5 +206,61 @@ describe("StatusLineComponent effective settings cache", () => {
 		const nextEffective = component.getEffectiveSettingsForTest();
 		expect(nextEffective).not.toBe(effective);
 		expect(component.getEffectiveSettingsForTest()).toBe(nextEffective);
+	});
+	it("skips git probes when git integration is disabled", async () => {
+		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
+		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
+		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		try {
+			Settings.instance.override("git.enabled", false);
+			const component = makeComponent({
+				preset: "custom",
+				leftSegments: ["git", "pr"],
+				rightSegments: [],
+				sessionAccent: false,
+			});
+
+			component.watchBranch(() => {
+				throw new Error("git watcher should not fire while git integration is disabled");
+			});
+			component.getTopBorder(100);
+			await Promise.resolve();
+
+			expect(repoSpy).not.toHaveBeenCalled();
+			expect(headSpy).not.toHaveBeenCalled();
+			expect(statusSpy).not.toHaveBeenCalled();
+		} finally {
+			repoSpy.mockRestore();
+			statusSpy.mockRestore();
+			headSpy.mockRestore();
+		}
+	});
+
+	it("skips git probes when no git-backed segment is visible", async () => {
+		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
+		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
+		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		try {
+			const component = makeComponent({
+				preset: "custom",
+				leftSegments: ["pi"],
+				rightSegments: ["session_name"],
+				sessionAccent: false,
+			});
+
+			component.watchBranch(() => {
+				throw new Error("git watcher should not fire when no git-backed segment is visible");
+			});
+			component.getTopBorder(100);
+			await Promise.resolve();
+
+			expect(repoSpy).not.toHaveBeenCalled();
+			expect(headSpy).not.toHaveBeenCalled();
+			expect(statusSpy).not.toHaveBeenCalled();
+		} finally {
+			repoSpy.mockRestore();
+			statusSpy.mockRestore();
+			headSpy.mockRestore();
+		}
 	});
 });

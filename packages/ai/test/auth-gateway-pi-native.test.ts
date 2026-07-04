@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-ai/effort";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
 	AssistantMessage,
@@ -8,6 +7,7 @@ import type {
 	Context,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -124,6 +124,15 @@ describe("pi-native parseRequest", () => {
 		expect("fetch" in parsed.options).toBe(false);
 		expect("onPayload" in parsed.options).toBe(false);
 		expect("notARealField" in parsed.options).toBe(false);
+	});
+
+	it("preserves loopGuard so the remote cook pass can disable the server-side guard", () => {
+		const parsed = parseRequest({
+			modelId: "x",
+			context: baseContext,
+			options: { loopGuard: { enabled: false } },
+		});
+		expect(parsed.options.loopGuard).toEqual({ enabled: false });
 	});
 
 	it("preserves headers, metadata, sessionId, thinkingBudgets", () => {

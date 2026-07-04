@@ -28,15 +28,36 @@ interface ProgressReporter {
 interface DownloadResult {
 	model: TinyLocalModelKey;
 	ok: boolean;
+	error?: string;
 }
 
 function writeLine(text = ""): void {
 	process.stdout.write(`${text}\n`);
 }
 
-function resolveModels(model: string | undefined): TinyLocalModelKey[] {
+const ACTIONABLE_DOWNLOAD_ERROR_LINE = /PI_TINY_|CUDA|cuDNN|cudnn|libcudnn|tiny-title-runtime|onnxruntime-node/i;
+
+function downloadErrorSummary(error: string | undefined): string | undefined {
+	const lines =
+		error
+			?.split(/\r?\n/)
+			.map(line => line.trim().replace(/^Error:\s*/, ""))
+			.filter(line => line.length > 0) ?? [];
+	const first = lines[0];
+	if (!first) return undefined;
+	const details = lines.slice(1).filter(line => ACTIONABLE_DOWNLOAD_ERROR_LINE.test(line));
+	if (details.length === 0) return first;
+	return [first, ...details].join("\n");
+}
+
+export function resolveModels(model: string | undefined): TinyLocalModelKey[] {
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
-	if (model === "all") return TINY_LOCAL_MODELS.map(spec => spec.key);
+	// `all` is a prefetch convenience: skip models that fail before load (unsupported
+	// runtime), so the bulk download stays green when every *usable* model succeeds.
+	if (model === "all")
+		return TINY_LOCAL_MODELS.filter(spec => !("unsupportedReason" in spec) || !spec.unsupportedReason).map(
+			spec => spec.key,
+		);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");
 		throw new Error(`Unknown tiny local model: ${model}. Expected one of: ${values}, all`);
@@ -96,10 +117,15 @@ async function downloadOne(modelKey: TinyLocalModelKey, json: boolean | undefine
 	const label = getTinyLocalModelSpec(modelKey)?.label ?? modelKey;
 	if (!json && !process.stdout.isTTY) writeLine(`Downloading ${label} (${modelKey})...`);
 	const progress = makeProgressReporter(modelKey, json);
-	const ok = await tinyTitleClient.downloadModel(modelKey, { onProgress: progress.onProgress });
-	progress.finish(ok);
-	if (!json && !process.stdout.isTTY) writeLine(ok ? `Downloaded ${label}.` : `Failed to download ${label}.`);
-	return { model: modelKey, ok };
+	const result = await tinyTitleClient.downloadModel(modelKey, { onProgress: progress.onProgress });
+	progress.finish(result.ok);
+	const error = downloadErrorSummary(result.error);
+	if (!json && !process.stdout.isTTY) {
+		writeLine(result.ok ? `Downloaded ${label}.` : `Failed to download ${label}${error ? `: ${error}` : ""}.`);
+	} else if (!json && !result.ok && error) {
+		writeLine(`${label} failed: ${error}`);
+	}
+	return result.error ? { model: modelKey, ok: result.ok, error: result.error } : { model: modelKey, ok: result.ok };
 }
 
 export async function runTinyModelsCommand(command: TinyModelsCommandArgs): Promise<void> {

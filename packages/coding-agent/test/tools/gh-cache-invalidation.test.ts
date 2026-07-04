@@ -13,6 +13,7 @@ import {
 	putCached,
 	resetForTests as resetCacheForTests,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const REPO = "owner/example";
 
@@ -92,7 +93,7 @@ afterEach(async () => {
 	} else {
 		process.env.OMP_GITHUB_CACHE_DB = originalEnv;
 	}
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeWithRetries(tempDir);
 });
 
 describe("invalidateGithubCacheForBashCommand", () => {
@@ -164,5 +165,27 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		invalidateGithubCacheForBashCommand("gh issue close 60 --repo a/one");
 		expect(getCached("a/one", "issue", 60, true)).toBeNull();
 		expect(getCached("b/two", "issue", 60, true)?.rendered).toBe("issue-b/two-60");
+	});
+
+	it("skips value-taking flag arguments so the positional number wins", () => {
+		seedPr(14);
+		seedPr(3);
+		invalidateGithubCacheForBashCommand("gh pr edit --milestone 3 14");
+		expect(getCached(REPO, "pr", 14, true)).toBeNull();
+		expect(getCached(REPO, "pr", 3, true)?.rendered).toBe(`pr-${REPO}-3`);
+	});
+
+	it("falls back to repo-wide invalidation for current-branch `gh pr merge`", () => {
+		seedPr(7);
+		invalidateGithubCacheForBashCommand("gh pr merge --squash --delete-branch");
+		expect(getCached(REPO, "pr", 7, true)).toBeNull();
+	});
+
+	it("scopes the no-positional fallback to --repo when provided", () => {
+		seedPr(7, "a/one");
+		seedPr(8, "b/two");
+		invalidateGithubCacheForBashCommand("gh pr close --repo a/one");
+		expect(getCached("a/one", "pr", 7, true)).toBeNull();
+		expect(getCached("b/two", "pr", 8, true)?.rendered).toBe("pr-b/two-8");
 	});
 });

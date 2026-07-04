@@ -1,9 +1,5 @@
 Runs commands on remote hosts.
 
-<instruction>
-You MUST build commands from the reference below
-</instruction>
-
 <commands>
 **linux/bash, linux/zsh, macos/bash, macos/zsh** — Unix-like:
 - Files: `ls`, `cat`, `head`, `tail`, `grep`, `find`
@@ -23,13 +19,5 @@ You MUST build commands from the reference below
 
 <critical>
 You MUST verify the shell type from "Available hosts" and use matching commands.
+You SHOULD omit `cwd` unless required. `cwd` MUST be an explicit remote path; NEVER use `~` or `~/…`.
 </critical>
-
-<examples>
-# List files: Linux
-Host: server1 (10.0.0.1) | linux/bash. Command: `ls -la /home/user`
-# Show running processes: Windows cmd
-Host: winbox (192.168.1.5) | windows/cmd. Command: `tasklist /v`
-# Get system info: macOS
-Host: macbook (10.0.0.20) | macos/zsh. Command: `uname -a && sw_vers`
-</examples>

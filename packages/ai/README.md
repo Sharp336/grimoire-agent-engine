@@ -62,13 +62,13 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Hugging Face Inference**
 - **xAI**
 - **Venice** (requires `VENICE_API_KEY`)
-- **Wafer Pass** (requires `WAFER_PASS_API_KEY`; flat-rate subscription, includes GLM-5.1 and Qwen3.5-397B-A17B)
 - **Wafer Serverless** (requires `WAFER_SERVERLESS_API_KEY`; pay-as-you-go)
 - **OpenRouter**
 - **Kilo Gateway** (supports OAuth `/login kilo` or `KILO_API_KEY`)
 - **LiteLLM** (requires `LITELLM_API_KEY`)
 - **zAI** (requires `ZAI_API_KEY`)
-- **MiniMax Coding Plan** (requires `MINIMAX_CODE_API_KEY` or `MINIMAX_CODE_CN_API_KEY`)
+- **Umans AI Coding Plan** (supports `/login umans` or `UMANS_AI_CODING_PLAN_API_KEY`)
+- **MiniMax Token Plan** (requires `MINIMAX_CODE_API_KEY` or `MINIMAX_CODE_CN_API_KEY`)
 - **Xiaomi MiMo** (requires `XIAOMI_API_KEY`)
 - **ZenMux** (requires `ZENMUX_API_KEY`)
 - **Qwen Portal** (supports `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`)
@@ -952,6 +952,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Ollama Cloud   | `OLLAMA_CLOUD_API_KEY`                                                     |
 | Qwen Portal    | `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`                                  |
 | zAI            | `ZAI_API_KEY`                                                                |
+| Umans AI Coding Plan | `UMANS_AI_CODING_PLAN_API_KEY`                                           |
 | MiniMax Code   | `MINIMAX_CODE_API_KEY` (international) or `MINIMAX_CODE_CN_API_KEY` (China) |
 | Xiaomi MiMo    | `XIAOMI_API_KEY`                                                             |
 | ZenMux         | `ZENMUX_API_KEY`                                                             |
@@ -964,7 +965,14 @@ For Cloudflare AI Gateway models, use provider base URL format
 
 For Anthropic Foundry routing, set `CLAUDE_CODE_USE_FOUNDRY=true` plus:
 `FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY`, optional `ANTHROPIC_CUSTOM_HEADERS`,
-and optional mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS`).
+and optional mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`).
+
+`NODE_EXTRA_CA_CERTS` (PEM file path or inline PEM, mirroring Node's contract)
+is honoured on every provider fetch — OpenAI-compatible, Codex, Ollama, Azure
+Responses, Google, and Anthropic alike — for corporate relays or private CA
+bundles. Bun's `fetch` does not consume the env var natively, so omp injects
+the bundle into `RequestInit.tls.ca` and seeds the system root store
+alongside it.
 
 Provider endpoint defaults for the current OpenAI-compatible integrations:
 
@@ -978,6 +986,7 @@ Provider endpoint defaults for the current OpenAI-compatible integrations:
 - Xiaomi MiMo: `https://api.xiaomimimo.com/anthropic`
 - ZenMux (OpenAI): `https://zenmux.ai/api/v1`
 - ZenMux (Anthropic models): `https://zenmux.ai/api/anthropic`
+- Umans AI Coding Plan: `https://api.code.umans.ai`
 - vLLM: `http://127.0.0.1:8000/v1`
 - Ollama: local OpenAI-compatible runtime (`http://127.0.0.1:11434/v1`)
 - Ollama Cloud: native Ollama API host (`https://ollama.com/api`, configured here as base URL `https://ollama.com`)

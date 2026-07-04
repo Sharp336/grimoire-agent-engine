@@ -6,8 +6,8 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
+import { antigravityRankingStrategy, antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 
 const accessTokenFixture = (() => {
 	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -188,6 +188,89 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits.length).toBe(2);
 	});
 
+	it("surfaces named daily and weekly quota windows as separate limits", async () => {
+		const now = Date.now();
+		const dailyReset = new Date(now + 12 * 3600_000).toISOString();
+		const weeklyReset = new Date(now + 6 * 24 * 3600_000).toISOString();
+		const payload = {
+			models: {
+				gemini: {
+					displayName: "Gemini",
+					modelProvider: "MODEL_PROVIDER_GOOGLE",
+					quotaInfo: { remainingFraction: 0.8, resetTime: dailyReset, windowId: "WINDOW_DAILY" },
+					weeklyQuotaInfo: { remainingFraction: 0.4, resetTime: weeklyReset },
+				},
+			},
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(fakeFetch(payload)),
+		);
+
+		const daily = report!.limits.find(limit => limit.scope.windowId === "daily");
+		const weekly = report!.limits.find(limit => limit.scope.windowId === "weekly");
+		expect(report!.limits.length).toBe(2);
+		expect(daily?.label).toBe("Usage (Google)");
+		expect(daily?.window?.label).toBe("Daily");
+		expect(daily?.window?.durationMs).toBe(24 * 60 * 60 * 1000);
+		expect(daily?.amount.remainingFraction).toBe(0.8);
+		expect(weekly?.label).toBe("Usage (Google)");
+		expect(weekly?.window?.label).toBe("Weekly");
+		expect(weekly?.window?.durationMs).toBe(7 * 24 * 60 * 60 * 1000);
+		expect(weekly?.amount.remainingFraction).toBe(0.4);
+	});
+	it("keeps near-reset unlabeled weekly windows separate from daily windows", async () => {
+		const now = Date.now();
+		const dailyReset = new Date(now + 5 * 3600_000).toISOString();
+		const weeklyReset = new Date(now + 23 * 3600_000).toISOString();
+		const payload = {
+			models: {
+				gemini: {
+					displayName: "Gemini",
+					modelProvider: "MODEL_PROVIDER_GOOGLE",
+					quotaInfos: [
+						{ remainingFraction: 0.9, resetTime: dailyReset },
+						{ remainingFraction: 0.3, resetTime: weeklyReset },
+					],
+				},
+			},
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(fakeFetch(payload)),
+		);
+
+		const daily = report!.limits.find(limit => limit.scope.windowId === "daily");
+		const weekly = report!.limits.find(limit => limit.scope.windowId === "weekly");
+		expect(report!.limits).toHaveLength(2);
+		expect(daily?.window?.label).toBe("Daily");
+		expect(daily?.amount.remainingFraction).toBe(0.9);
+		expect(weekly?.window?.label).toBe("Weekly");
+		expect(weekly?.amount.remainingFraction).toBe(0.3);
+	});
+
+	it("normalizes 7 Day window ids to the weekly usage window", async () => {
+		const payload = {
+			models: {
+				gemini: {
+					displayName: "Gemini",
+					modelProvider: "MODEL_PROVIDER_GOOGLE",
+					quotaInfoByWindow: {
+						WINDOW_7_DAY: { remainingFraction: 0.6 },
+					},
+				},
+			},
+		};
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{ provider: "google-antigravity", credential: makeCredential(), signal: undefined },
+			makeCtx(fakeFetch(payload)),
+		);
+
+		expect(report!.limits).toHaveLength(1);
+		expect(report!.limits[0]!.scope.windowId).toBe("weekly");
+		expect(report!.limits[0]!.window?.label).toBe("Weekly");
+	});
+
 	it("includes email and projectId in report metadata", async () => {
 		const payload = { models: { m: makeApiModel("M", { remainingFraction: 1 }) } };
 		const report = await antigravityUsageProvider.fetchUsage!(
@@ -235,5 +318,81 @@ describe("antigravity usage provider", () => {
 			makeCtx(),
 		);
 		expect(report).toBeNull();
+	});
+});
+
+describe("antigravity ranking strategy", () => {
+	function makeLimit(remainingFraction: number, label = "Usage"): UsageLimit {
+		const usedFraction = 1 - remainingFraction;
+		return {
+			id: `google-antigravity:${label.toLowerCase()}`,
+			label,
+			scope: { provider: "google-antigravity" },
+			amount: {
+				unit: "percent",
+				remainingFraction,
+				usedFraction,
+				remaining: remainingFraction * 100,
+				used: usedFraction * 100,
+				limit: 100,
+			},
+			status: remainingFraction <= 0 ? "exhausted" : remainingFraction <= 0.1 ? "warning" : "ok",
+		};
+	}
+
+	it("maps the most-pressured counter to primary and leaves secondary unset", () => {
+		// fetchAntigravityUsage sorts ascending by remainingFraction, so a real
+		// report's limits[0] is always the bottleneck. AuthStorage compares the
+		// secondary ranking metrics before primary; leaving secondary unset makes
+		// every Antigravity candidate tie there, so the bottleneck counter in
+		// primary decides — otherwise [5%, 90%] remaining can beat [40%, 40%]
+		// because the runner-up counter looks healthier.
+		const report = {
+			provider: "google-antigravity" as const,
+			fetchedAt: Date.now(),
+			limits: [makeLimit(0.05, "Anthropic"), makeLimit(0.4, "Google"), makeLimit(0.9, "OpenAI")],
+		};
+		const { primary, secondary } = antigravityRankingStrategy.findWindowLimits(report);
+		expect(primary?.label).toBe("Anthropic");
+		expect(secondary).toBeUndefined();
+	});
+
+	it("lets a weekly Antigravity quota become the ranking bottleneck", () => {
+		const daily = makeLimit(0.8, "Google Daily");
+		const weekly = makeLimit(0.2, "Google Weekly");
+		daily.scope.windowId = "daily";
+		daily.window = { id: "daily", label: "Daily", durationMs: 24 * 60 * 60 * 1000 };
+		weekly.scope.windowId = "weekly";
+		weekly.window = { id: "weekly", label: "Weekly", durationMs: 7 * 24 * 60 * 60 * 1000 };
+		const report = {
+			provider: "google-antigravity" as const,
+			fetchedAt: Date.now(),
+			limits: [weekly, daily],
+		};
+
+		const { primary, secondary } = antigravityRankingStrategy.findWindowLimits(report);
+		expect(primary).toBe(weekly);
+		expect(secondary).toBeUndefined();
+	});
+
+	it("returns undefined windows when the credential has no usage limits", () => {
+		const report = {
+			provider: "google-antigravity" as const,
+			fetchedAt: Date.now(),
+			limits: [],
+		};
+		const { primary, secondary } = antigravityRankingStrategy.findWindowLimits(report);
+		expect(primary).toBeUndefined();
+		expect(secondary).toBeUndefined();
+	});
+
+	it("uses a 24h window default for drain-rate normalisation", () => {
+		// Antigravity's API exposes resetTime but not durationMs, so AuthStorage's
+		// drain-rate calculator falls back to windowDefaults. The constant has to
+		// match the daily quota Antigravity actually applies; if it drifts, two
+		// credentials with identical headroom but different windowIds will be
+		// ranked unfairly.
+		expect(antigravityRankingStrategy.windowDefaults.primaryMs).toBe(24 * 60 * 60 * 1000);
+		expect(antigravityRankingStrategy.windowDefaults.secondaryMs).toBe(24 * 60 * 60 * 1000);
 	});
 });

@@ -21,6 +21,7 @@ function createResult(): SingleResult {
 		truncated: false,
 		durationMs: 1,
 		tokens: 0,
+		requests: 0,
 	};
 }
 
@@ -51,13 +52,15 @@ describe("runEvalAgent", () => {
 			getSessionFile: () => null,
 			mcpManager,
 			localProtocolOptions,
+			getAgentId: () => "BridgeParent",
 		} as unknown as ToolSession;
 
-		await runEvalAgent({ prompt: "do work", agentType: "task" }, { session });
+		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
 
 		expect(runSubprocessSpy).toHaveBeenCalledTimes(1);
 		const options = runSubprocessSpy.mock.calls[0]?.[0];
 		expect(options?.mcpManager).toBe(mcpManager);
 		expect(options?.localProtocolOptions).toBe(localProtocolOptions);
+		expect(options?.parentAgentId).toBe("BridgeParent");
 	});
 });

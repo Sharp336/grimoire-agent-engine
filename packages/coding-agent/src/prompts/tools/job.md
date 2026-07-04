@@ -1,19 +1,11 @@
-Inspects, waits, or cancels async jobs.
+Manages async background tasks (e.g. bash scripts, subagents).
 
-Background job results are delivered automatically when complete. Reach for this tool only when you need to intervene.
+Background tasks deliver their results automatically the moment they finish. You NEVER need to poll to retrieve output. Only use this tool if you need to intervene in the lifecycle of a task.
 
-# Operations
+# Interventions
 
-## `list: true`
-Use to inspect what's running.
-
-## `poll: [id, …]`
-Block until the specified jobs finish or the wait window elapses.
-- Use when you are genuinely blocked on a result and have no other work to do.
-- Returns the current snapshot when the timer elapses; running jobs remain running.
-- Completed jobs include their final output in the returned snapshot.
-
-## `cancel: [id, …]`
-Stop running jobs.
-- Use when a job is stalled, hung, or no longer needed.
-- Returns immediately after cancelling.
+- **Block and wait:** Pass `poll` with specific job IDs when you are completely blocked and cannot do any other work. The call returns as soon as one watched job finishes, the wait window elapses, or an IRC / steering message interrupts the wait — NOT when all jobs finish; re-issue to keep waiting.
+  - To watch EVERY running job, issue a call with NO fields at all (no `poll`, no `cancel`, no `list`). NEVER pass an array of every running ID.
+  - A finished job's output, or the interrupting message and reason, is included in the next turn.
+- **Stop execution:** Pass `cancel` with job IDs to kill jobs that have hung, stalled, or are no longer needed. A cancel-only call returns immediately.
+- **Snapshot:** Pass `list: true` to get the current status of all jobs without waiting.

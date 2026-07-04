@@ -32,7 +32,16 @@ export interface CodeCellOptions {
 	 */
 	codeTail?: boolean;
 	expanded?: boolean;
+	/**
+	 * Prefix the header with the cell's language icon (resolved through the
+	 * active symbol preset: nerd-font devicon, unicode emoji, or ascii
+	 * shorthand). Opt-in so only the eval kernel renderer labels each cell;
+	 * read/write/browser code cells stay icon-free.
+	 */
+	showLanguage?: boolean;
 	width: number;
+	codeStartLine?: number;
+	codeLineNumbers?: Array<number | null>;
 }
 
 function getState(status?: CodeCellOptions["status"]): State | undefined {
@@ -45,8 +54,12 @@ function getState(status?: CodeCellOptions["status"]): State | undefined {
 }
 
 function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; meta?: string } {
-	const { index, total, title, status, spinnerFrame, duration } = options;
+	const { index, total, title, status, spinnerFrame, duration, language, showLanguage } = options;
 	const parts: string[] = [];
+	if (showLanguage && language) {
+		const langIcon = theme.getLangIconStyled(language);
+		if (langIcon) parts.push(langIcon);
+	}
 	if (status) {
 		const icon = formatStatusIcon(
 			status === "complete"
@@ -67,7 +80,7 @@ function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; 
 			parts.push(icon);
 		}
 	}
-	if (index !== undefined && total !== undefined) {
+	if (index !== undefined && total !== undefined && total > 1) {
 		parts.push(theme.fg("accent", `[${index + 1}/${total}]`));
 	}
 	if (title) {
@@ -99,7 +112,17 @@ function collapseCarriageReturns(line: string): string {
 	return idx < 0 ? line : line.slice(idx + 1);
 }
 export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[] {
-	const { code, language, output, expanded = false, outputMaxLines = 6, codeMaxLines = 12, width } = options;
+	const {
+		code,
+		language,
+		output,
+		expanded = false,
+		outputMaxLines = 6,
+		codeMaxLines = 12,
+		width,
+		codeStartLine,
+		codeLineNumbers,
+	} = options;
 	const { title, meta } = formatHeader(options, theme);
 	const state = getState(options.status);
 
@@ -111,16 +134,45 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 	const startIndex = tail ? rawCodeLines.length - maxCodeLines : 0;
 	const visibleCode = rawCodeLines.slice(startIndex, startIndex + maxCodeLines).join("\n");
 	const codeLines = highlightCode(visibleCode, language);
+
+	let visibleLineNumbers: Array<number | null> | undefined;
+	let lineNumberWidth = 0;
+	if (codeLineNumbers) {
+		visibleLineNumbers = codeLineNumbers.slice(startIndex, startIndex + maxCodeLines);
+	} else if (codeStartLine !== undefined) {
+		visibleLineNumbers = Array.from({ length: maxCodeLines }, (_, i) => codeStartLine + startIndex + i);
+	}
+
+	if (visibleLineNumbers) {
+		const validLineNums = visibleLineNumbers.filter((n): n is number => n !== null && n !== undefined);
+		const maxVal = validLineNums.length > 0 ? Math.max(...validLineNums) : 0;
+		if (maxVal > 0) {
+			lineNumberWidth = Math.max(2, String(maxVal).length);
+		}
+	}
+
+	if (lineNumberWidth > 0 && visibleLineNumbers) {
+		for (let i = 0; i < codeLines.length; i++) {
+			const lineNum = visibleLineNumbers[i];
+			const gutter =
+				lineNum !== null && lineNum !== undefined
+					? String(lineNum).padStart(lineNumberWidth, " ")
+					: " ".repeat(lineNumberWidth);
+			codeLines[i] = theme.fg("dim", `${gutter} `) + codeLines[i];
+		}
+	}
+
 	if (hiddenCodeLines > 0) {
 		const hint = formatExpandHint(theme, expanded, hiddenCodeLines > 0);
+		const gutterPad = lineNumberWidth > 0 ? " ".repeat(lineNumberWidth + 1) : "";
 		if (tail) {
 			// Earlier rows scrolled above the live tail window — mark them on top so
 			// the newest streamed line stays pinned to the bottom of the box.
 			const earlier = `… ${hiddenCodeLines} earlier line${hiddenCodeLines === 1 ? "" : "s"}${hint ? ` ${hint}` : ""}`;
-			codeLines.unshift(theme.fg("dim", earlier));
+			codeLines.unshift(theme.fg("dim", gutterPad + earlier));
 		} else {
 			const moreLine = `${formatMoreItems(hiddenCodeLines, "line")}${hint ? ` ${hint}` : ""}`;
-			codeLines.push(theme.fg("dim", moreLine));
+			codeLines.push(theme.fg("dim", gutterPad + moreLine));
 		}
 	}
 

@@ -27,6 +27,14 @@ export interface RequestDebugPayload {
 	protocol?: string;
 }
 
+interface ReservedRequestDebugFile {
+	id: number;
+	requestPath: string;
+	responsePath: string;
+	handle: fs.FileHandle;
+	overwrite: boolean;
+}
+
 export interface RequestDebugResponseLog {
 	write(chunk: Uint8Array | string): void;
 	close(): Promise<void>;
@@ -40,8 +48,12 @@ export interface RequestDebugSession {
 	wrapResponse(response: Response): Promise<Response>;
 }
 
-export function isRequestDebugEnabled(): boolean {
+function isRequestDebugEnvEnabled(): boolean {
 	return Bun.env[REQUEST_DEBUG_ENV] === "1";
+}
+
+export function isRequestDebugEnabled(): boolean {
+	return isRequestDebugEnvEnabled();
 }
 
 export function wrapFetchForRequestDebug(fetchImpl: FetchImpl): FetchImpl {
@@ -51,6 +63,7 @@ export function wrapFetchForRequestDebug(fetchImpl: FetchImpl): FetchImpl {
 
 	const wrapped = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			if (!isRequestDebugEnabled()) return fetchImpl(input, init);
 			const session = await createFetchRequestDebugSession(input, init);
 			const response = await fetchImpl(input, init);
 			return session.wrapResponse(response);
@@ -69,7 +82,7 @@ export function withRequestDebugFetch<T extends { fetch?: FetchImpl } | undefine
 }
 
 export async function createRequestDebugSession(payload: RequestDebugPayload): Promise<RequestDebugSession> {
-	const { id, requestPath, responsePath, handle } = await reserveRequestDebugFile();
+	const { id, requestPath, responsePath, handle, overwrite } = await reserveRequestDebugFile();
 	const requestDump: Record<string, unknown> = {
 		id,
 		protocol: payload.protocol ?? "http",
@@ -89,7 +102,7 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 		await handle.close();
 	}
 
-	return new FileRequestDebugSession(id, requestPath, responsePath);
+	return new FileRequestDebugSession(id, requestPath, responsePath, overwrite);
 }
 
 async function createFetchRequestDebugSession(
@@ -110,15 +123,17 @@ class FileRequestDebugSession implements RequestDebugSession {
 	readonly id: number;
 	readonly requestPath: string;
 	readonly responsePath: string;
+	readonly #overwriteResponseLog: boolean;
 
-	constructor(id: number, requestPath: string, responsePath: string) {
+	constructor(id: number, requestPath: string, responsePath: string, overwriteResponseLog: boolean) {
 		this.id = id;
 		this.requestPath = requestPath;
 		this.responsePath = responsePath;
+		this.#overwriteResponseLog = overwriteResponseLog;
 	}
 
 	async openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog> {
-		const handle = await fs.open(this.responsePath, "wx");
+		const handle = await fs.open(this.responsePath, this.#overwriteResponseLog ? "w" : "wx");
 		const headerBlock = formatResponseHeaderBlock(statusLine, headers);
 		await handle.write(textEncoder.encode(headerBlock));
 		return new FileRequestDebugResponseLog(handle);
@@ -213,18 +228,13 @@ function copyResponseMetadata(target: Response, source: Response): void {
 	}
 }
 
-async function reserveRequestDebugFile(): Promise<{
-	id: number;
-	requestPath: string;
-	responsePath: string;
-	handle: fs.FileHandle;
-}> {
+async function reserveRequestDebugFile(): Promise<ReservedRequestDebugFile> {
 	for (;;) {
 		const id = nextSessionId++;
 		const requestPath = `rr-session-${id}.json`;
 		try {
 			const handle = await fs.open(requestPath, "wx");
-			return { id, requestPath, responsePath: `rr-session-${id}.res.log`, handle };
+			return { id, requestPath, responsePath: `rr-session-${id}.res.log`, handle, overwrite: false };
 		} catch (error) {
 			if (isFileExistsError(error)) continue;
 			throw error;

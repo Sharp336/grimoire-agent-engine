@@ -11,6 +11,7 @@
 import {
 	Container,
 	Input,
+	matchesKey,
 	type SelectItem,
 	SelectList,
 	type SettingItem,
@@ -36,13 +37,18 @@ import { DynamicBorder } from "./dynamic-border";
 
 /**
  * Forwards a keystroke to `input`, but cancels via `onCancel` when the user presses Escape.
+ *
+ * Escape is decoded via `matchesKey` rather than a raw `\x1b` compare: inside the
+ * fullscreen settings overlay the kitty keyboard protocol is active (ghostty/kitty),
+ * where the Escape key arrives as the CSI-u sequence `\x1b[27u`, not a bare `\x1b`.
+ * The literal fallbacks preserve legacy single/double-escape on terminals without it.
  */
 export function handleInputOrEscape(
 	data: string,
 	input: { handleInput(data: string): void },
 	onCancel: () => void,
 ): void {
-	if (data === "\x1b" || data === "\x1b\x1b") {
+	if (data === "\x1b" || data === "\x1b\x1b" || matchesKey(data, "escape")) {
 		onCancel();
 		return;
 	}
@@ -629,11 +635,18 @@ export class PluginSettingsComponent extends Container {
 		this.#currentMarketplacePlugin = null;
 		this.clear();
 
-		// Surface marketplace failures without taking the npm path down with it —
-		// the registry can fail to load (corrupt JSON, missing project root) and
-		// the user still benefits from seeing their npm plugins.
+		// Surface registry failures without taking the whole tab down — either
+		// registry can fail to load (corrupt JSON, missing project root) and the
+		// user still benefits from the other half. An uncaught rejection here
+		// would also leave the tab permanently blank: this method is invoked
+		// fire-and-forget from the constructor, so nothing awaits it.
 		const [npmPlugins, marketplacePlugins] = await Promise.all([
-			this.#manager.list(),
+			this.#manager.list().catch(err => {
+				logger.error("Settings → Plugins: failed to list npm plugins", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return [] as InstalledPlugin[];
+			}),
 			this.#buildMarketplaceManager()
 				.then(mgr => mgr.listInstalledPlugins())
 				.catch(err => {
@@ -717,6 +730,16 @@ export class PluginSettingsComponent extends Container {
 	}
 
 	handleInput(data: string): void {
-		this.#viewComponent?.handleInput(data);
+		if (!this.#viewComponent) {
+			// The list view mounts asynchronously (npm + marketplace listing).
+			// Until it does — or if listing rejected and no view ever mounted —
+			// Escape must still close the panel instead of leaving /settings
+			// non-dismissible.
+			if (data === "\x1b" || data === "\x1b\x1b") {
+				this.callbacks.onClose();
+			}
+			return;
+		}
+		this.#viewComponent.handleInput(data);
 	}
 }

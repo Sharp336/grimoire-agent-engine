@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { CODEX_BASE_URL } from "../providers/openai-codex/constants";
 import type {
 	CredentialRankingStrategy,
 	UsageAmount,
@@ -8,9 +7,12 @@ import type {
 	UsageLimit,
 	UsageProvider,
 	UsageReport,
+	UsageResetCredits,
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
+import { listCodexResetCredits } from "./openai-codex-reset";
 import { toNumber } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
@@ -185,18 +187,18 @@ function parseUsagePayload(payload: unknown): ParsedUsage | null {
 	return parsed;
 }
 
-function normalizeCodexBaseUrl(baseUrl?: string): string {
-	const fallback = CODEX_BASE_URL;
-	const trimmed = baseUrl?.trim() ? baseUrl.trim() : fallback;
-	const base = trimmed.replace(/\/+$/, "");
-	const lower = base.toLowerCase();
-	if (
-		(lower.startsWith("https://chatgpt.com") || lower.startsWith("https://chat.openai.com")) &&
-		!lower.includes("/backend-api")
-	) {
-		return `${base}/backend-api`;
-	}
-	return base;
+/**
+ * Parse the `rate_limit_reset_credits` block from `/wham/usage`. OpenAI Codex
+ * reports the count of saved rate-limit resets the account can redeem here; the
+ * redeem action itself lives in `./openai-codex-reset`.
+ */
+function parseResetCredits(payload: unknown): UsageResetCredits | undefined {
+	if (!isRecord(payload)) return undefined;
+	const block = payload.rate_limit_reset_credits;
+	if (!isRecord(block)) return undefined;
+	const availableCount = toNumber(block.available_count);
+	if (availableCount === undefined) return undefined;
+	return { availableCount: Math.max(0, Math.trunc(availableCount)) };
 }
 
 function buildCodexUsageUrl(baseUrl: string): string {
@@ -454,10 +456,40 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			}
 		}
 
+		const resetCredits = parseResetCredits(payload);
+		if (resetCredits && resetCredits.availableCount > 0) {
+			try {
+				const list = await listCodexResetCredits({
+					accessToken,
+					accountId,
+					baseUrl: params.baseUrl,
+					fetch: ctx.fetch,
+					signal: params.signal,
+				});
+				if (list?.credits.length) {
+					resetCredits.credits = list.credits
+						.filter(c => (c.status ?? "available") === "available")
+						.map(c => ({
+							grantedAt: c.grantedAt,
+							expiresAt: c.expiresAt,
+							status: c.status,
+						}));
+				}
+				// Always sync the live count from the detail endpoint — it may report
+				// fewer or zero available credits after expiry/redeem, even when the
+				// /wham/usage payload still has a stale count.
+				if (list) {
+					resetCredits.availableCount = list.availableCount;
+				}
+			} catch (error) {
+				ctx.logger?.warn("Codex reset credits detail fetch failed", { error: String(error) });
+			}
+		}
 		const report: UsageReport = {
 			provider: "openai-codex",
 			fetchedAt: nowMs,
 			limits,
+			...(resetCredits ? { resetCredits } : {}),
 			metadata: {
 				planType,
 				allowed: parsed?.allowed,

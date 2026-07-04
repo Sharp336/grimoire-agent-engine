@@ -1,10 +1,10 @@
 [workspace]
-members = ["crates/*"]
-exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored"]
+members = ["crates/pi-*", "crates/vendor/*"]
+exclude = ["crates/vendor/brush-core", "crates/vendor/brush-builtins"]
 resolver = "3"
 
 [workspace.package]
-version = "15.10.8"
+version = "16.3.6"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
@@ -12,15 +12,27 @@ homepage = "https://omp.sh/"
 repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
-brush-core = { path = "crates/brush-core-vendored" }
-brush-builtins = { path = "crates/brush-builtins-vendored" }
+brush-core = { path = "crates/vendor/brush-core" }
+brush-builtins = { path = "crates/vendor/brush-builtins" }
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwind (not abort) so panics inside vendored code and native tasks stay
+# recoverable at the appropriate boundary: the uutils boundary
+# (pi-shell coreutils) turns a panic into a failed command, and the
+# `task::blocking` wrapper in `crates/pi-natives/src/task.rs` catches unwinds
+# inside `Blocking::compute` before they cross napi-rs's async-work
+# `extern "C"` callback (napi `src/async_work.rs:109`) so they surface as
+# rejected JS Promises instead of forced process aborts under Rust's C-unwind
+# rules (RFC 2945, stable since 1.81). napi-rs does NOT install its own
+# per-call `catch_unwind` on the `Task`/`AsyncTask` path; the tokio-future
+# path (`env.spawn_future`) is guarded upstream. Recoverable uutils panics
+# are kept out of the crash report by the crash hook
+# (see crates/pi-natives/src/crash_handler.rs).
+panic = "unwind"
 
 [profile.ci]
 inherits = "release"
@@ -166,8 +178,9 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 pi-ast = { path = "crates/pi-ast" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
-brush-core = { path = "crates/brush-core-vendored" }
-brush-builtins = { path = "crates/brush-builtins-vendored" }
+pi-walker = { path = "crates/pi-walker" }
+brush-core = { path = "crates/vendor/brush-core" }
+brush-builtins = { path = "crates/vendor/brush-builtins" }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Async Runtime & Concurrency
@@ -178,10 +191,12 @@ parking_lot = "0.12.5"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
+flume = "0.11"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
+base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -204,6 +219,7 @@ regex = "1"
 similar = "3.1.0"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
+fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
@@ -222,7 +238,7 @@ smallvec = { version = "1.15.1", features = [
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Memory Management & Allocators
+# Memory Mapping
 # ──────────────────────────────────────────────────────────────────────────────
 memmap2 = "0.9"
 
@@ -274,11 +290,13 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
+png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
    "regex-fancy",
+   "yaml-load",
 ] }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -315,7 +333,9 @@ tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
 tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
 tree-sitter-elixir = "0.3"
+tree-sitter-elisp = "1.6.1"
 tree-sitter-erlang = "0.16.0"
+tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
 tree-sitter-graphql = "0.1.0"
 tree-sitter-haskell = "0.23"

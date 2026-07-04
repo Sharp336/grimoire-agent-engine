@@ -9,9 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let tempDir: string;
 let originalEnv: string | undefined;
@@ -41,7 +43,7 @@ afterEach(async () => {
 		process.env.GH_TOKEN = originalGhToken;
 	}
 	vi.restoreAllMocks();
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeWithRetries(tempDir);
 });
 
 function issuePayload(number: number, body: string, commentBodies: string[] = []) {
@@ -171,6 +173,45 @@ describe("issue:// protocol handler", () => {
 		expect(second.notes?.[0]).toMatch(/^Cached:/);
 		// Same key, soft TTL hit — no additional gh invocation.
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("marks soft-expired issue fallback content as stale when live refresh fails", async () => {
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(43, "cached body") as never);
+		const settings = Settings.isolated({
+			"github.cache.softTtlSec": 0,
+			"github.cache.hardTtlSec": 86400,
+		});
+
+		const router = InternalUrlRouter.instance();
+		await router.resolve("issue://owner/example/43");
+		await Bun.sleep(1);
+		spy.mockImplementation(async () => {
+			throw new Error("offline");
+		});
+
+		const resource = await router.resolve("issue://owner/example/43", { settings });
+		expect(resource.content.startsWith("> WARNING: Live GitHub refresh failed")).toBe(true);
+		expect(resource.notes?.[0]).toMatch(/^WARNING: showing cached content/);
+		expect(resource.content).toContain("cached body");
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("retries issue://owner/repo/<n> without stateReason when gh does not support it", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (requestedJsonFields(args).has("stateReason")) {
+				throw new Error('Unknown JSON field: "stateReason"');
+			}
+			return issuePayload(42, "issue body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("issue://owner/example/42");
+
+		expect(resource.content).toContain("# Issue #42: Issue #42");
+		expect(resource.content).not.toContain("State reason");
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(requestedJsonFields(spy.mock.calls[0]?.[1] as string[]).has("stateReason")).toBe(true);
+		expect(requestedJsonFields(spy.mock.calls[1]?.[1] as string[]).has("stateReason")).toBe(false);
 	});
 
 	it("?comments=0 selects a separate cache row with comments suppressed", async () => {
@@ -400,6 +441,7 @@ describe("issue:// / pr:// listing", () => {
 		expect(args[1]).toBe("list");
 		expect(args).toEqual(expect.arrayContaining(["--repo", "owner/example"]));
 		expect(args).toEqual(expect.arrayContaining(["--state", "open"]));
+		expect(requestedJsonFields(args).has("stateReason")).toBe(false);
 	});
 
 	it("pr://owner/repo passes state and limit query params through to gh", async () => {
@@ -418,14 +460,15 @@ describe("issue:// / pr:// listing", () => {
 		expect(args).toEqual(expect.arrayContaining(["--label", "bug"]));
 	});
 
-	it("invalid state falls back to 'open' instead of forwarding garbage to gh", async () => {
+	it("invalid state errors instead of silently falling back to 'open'", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue([] as never);
 
 		const router = InternalUrlRouter.instance();
-		await router.resolve("issue://owner/example?state=banana");
-
-		const args = spy.mock.calls[0]?.[1] as string[];
-		expect(args).toEqual(expect.arrayContaining(["--state", "open"]));
+		await expect(router.resolve("issue://owner/example?state=banana")).rejects.toThrow(
+			/Invalid issue:\/\/ list state 'banana'/,
+		);
+		await expect(router.resolve("pr://owner/example?limit=abc")).rejects.toThrow(/Invalid pr:\/\/ list limit 'abc'/);
+		expect(spy).not.toHaveBeenCalled();
 	});
 
 	it("treats `diff` as a repository name in repo-scoped listing URLs", async () => {

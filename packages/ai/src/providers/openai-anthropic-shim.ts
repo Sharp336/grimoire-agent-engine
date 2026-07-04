@@ -8,8 +8,9 @@
  * here once.
  */
 
-import { ANTHROPIC_THINKING } from "../stream";
-import type { Context, Model, SimpleStreamOptions } from "../types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
+import type { Context, Model, ModelSpec, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { createProviderErrorMessage } from "./error-message";
 import { streamAnthropic, streamOpenAICompletions } from "./register-builtins";
@@ -56,7 +57,7 @@ export function streamOpenAIAnthropicShim(
 			};
 
 			if (format === "anthropic") {
-				const anthropicModel: Model<"anthropic-messages"> = {
+				const anthropicModel = buildModel({
 					id: model.id,
 					name: model.name,
 					api: "anthropic-messages",
@@ -68,10 +69,10 @@ export function streamOpenAIAnthropicShim(
 					reasoning: model.reasoning,
 					input: model.input,
 					cost: model.cost,
-				};
+				} as ModelSpec<"anthropic-messages">);
 
 				const reasoningEffort = options?.reasoning;
-				const thinkingEnabled = !!reasoningEffort && model.reasoning;
+				const thinkingEnabled = !!reasoningEffort && model.reasoning && !options?.disableReasoning;
 				const thinkingBudget = reasoningEffort
 					? (options?.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
 					: undefined;
@@ -84,7 +85,7 @@ export function streamOpenAIAnthropicShim(
 					minP: options?.minP,
 					presencePenalty: options?.presencePenalty,
 					repetitionPenalty: options?.repetitionPenalty,
-					maxTokens: options?.maxTokens ?? model.maxTokens,
+					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					signal: options?.signal,
 					headers: mergedHeaders,
 					sessionId: options?.sessionId,
@@ -94,6 +95,8 @@ export function streamOpenAIAnthropicShim(
 					fetch: options?.fetch,
 					thinkingEnabled,
 					thinkingBudgetTokens: thinkingBudget,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+					serviceTier: options?.serviceTier,
 				});
 
 				for await (const event of innerStream) {
@@ -101,7 +104,12 @@ export function streamOpenAIAnthropicShim(
 				}
 			} else {
 				const openaiModel: Model<"openai-completions"> = config.openaiBaseUrl
-					? { ...model, baseUrl: config.openaiBaseUrl, headers: mergedHeaders }
+					? buildModel({
+							...model,
+							baseUrl: config.openaiBaseUrl,
+							headers: mergedHeaders,
+							compat: model.compatConfig,
+						} as ModelSpec<"openai-completions">)
 					: model;
 
 				const reasoningEffort = options?.reasoning;
@@ -113,7 +121,7 @@ export function streamOpenAIAnthropicShim(
 					minP: options?.minP,
 					presencePenalty: options?.presencePenalty,
 					repetitionPenalty: options?.repetitionPenalty,
-					maxTokens: options?.maxTokens ?? model.maxTokens,
+					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					signal: options?.signal,
 					headers: mergedHeaders,
 					sessionId: options?.sessionId,
@@ -122,6 +130,9 @@ export function streamOpenAIAnthropicShim(
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
 					reasoning: reasoningEffort,
+					toolChoice: options?.toolChoice,
+					serviceTier: options?.serviceTier,
+					disableReasoning: options?.disableReasoning,
 				});
 
 				for await (const event of innerStream) {

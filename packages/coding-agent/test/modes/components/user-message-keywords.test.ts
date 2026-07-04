@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import * as url from "node:url";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
@@ -47,6 +49,13 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		expect(raw).toContain("orchestrate");
 	});
 
+	it("closes OSC 133 prompt zones without opening a command-output zone", () => {
+		const raw = render("first line\nsecond line");
+		expect(raw).toContain("\x1b]133;A\x07");
+		expect(raw).toContain("\x1b]133;B\x07");
+		expect(raw).not.toContain("\x1b]133;C\x07");
+	});
+
 	it("bolds and underlines image references in the rendered message bubble", () => {
 		const raw = render("please inspect [Image #1] before continuing");
 		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
@@ -55,39 +64,45 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 	});
 
 	it("wraps image references in file hyperlinks when a blob path is available", () => {
-		const raw = new UserMessageComponent("please inspect [Image #1]", false, ["/tmp/omp-image.png"])
-			.render(80)
-			.join("\n");
+		const imagePath = path.resolve("/tmp/omp-image.png");
+		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
+		const raw = new UserMessageComponent("please inspect [Image #1]", false, [imagePath]).render(80).join("\n");
 		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
 		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain("file:///tmp/omp-image.png");
+		expect(raw).toContain(imageUri);
 	});
 
 	it("wraps draft editor image references in file hyperlinks when a blob path is available", () => {
 		const editor = new CustomEditor(getEditorTheme());
-		editor.imageLinks = ["/tmp/omp-image.png"];
+		const imagePath = path.resolve("/tmp/omp-image.png");
+		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
+		editor.imageLinks = [imagePath];
 		editor.setText("please inspect [Image #1]");
 		const raw = editor.render(80).join("\n");
 		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
 		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain("file:///tmp/omp-image.png");
+		expect(raw).toContain(imageUri);
 	});
 
 	it("rebuilds user messages with image hyperlinks when image links are not precomputed", () => {
+		const displayPath = path.resolve("/tmp/abc123.png");
+		const displayUri = url.pathToFileURL(path.resolve(displayPath)).href;
 		const chatContainer = new Container();
+		const sessionManagerMock = {
+			putBlobSync: () => ({
+				hash: "abc123",
+				path: path.resolve("/tmp/abc123"),
+				displayPath,
+				get ref() {
+					return "blob:sha256:abc123";
+				},
+			}),
+		};
 		const helpers = new UiHelpers({
 			chatContainer,
 			getUserMessageText: () => "please inspect [Image #1]",
-			sessionManager: {
-				putBlobSync: () => ({
-					hash: "abc123",
-					path: "/tmp/abc123",
-					displayPath: "/tmp/abc123.png",
-					get ref() {
-						return "blob:sha256:abc123";
-					},
-				}),
-			},
+			sessionManager: sessionManagerMock,
+			viewSession: { sessionManager: sessionManagerMock },
 		} as unknown as InteractiveModeContext);
 		const message: AgentMessage = {
 			role: "user",
@@ -105,7 +120,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		const raw = component.render(80).join("\n");
 		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
 		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain("file:///tmp/abc123.png");
+		expect(raw).toContain(displayUri);
 	});
 
 	it("highlights paste markers in the draft editor without a hyperlink", () => {
@@ -121,11 +136,13 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 
 	it("hyperlinks the metadata-bearing image marker format", () => {
 		const editor = new CustomEditor(getEditorTheme());
-		editor.imageLinks = ["/tmp/omp-image.png"];
+		const imagePath = path.resolve("/tmp/omp-image.png");
+		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
+		editor.imageLinks = [imagePath];
 		editor.setText("see [Image #1, 800x600] now");
 		const raw = editor.render(80).join("\n");
 		expect(Bun.stripANSI(raw)).toContain("[Image #1, 800x600]");
 		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain("file:///tmp/omp-image.png");
+		expect(raw).toContain(imageUri);
 	});
 });

@@ -1,15 +1,17 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 import chalk from "chalk";
-import * as z from "zod/v4";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import type { SessionEntry } from "../session/session-manager";
+import type { SessionEntry } from "../session/session-entries";
 import { framedBlock, renderStatusLine, renderTreeList } from "../tui";
+import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
 import { formatErrorDetail, PREVIEW_LIMITS } from "./render-utils";
 
 // =============================================================================
@@ -17,17 +19,12 @@ import { formatErrorDetail, PREVIEW_LIMITS } from "./render-utils";
 // =============================================================================
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
+/** Operation names accepted by the todo tool and echoed in successful result details. */
+export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "append" | "view";
 
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
-	/**
-	 * Append-only list of freeform notes attached by `op: "note"`.
-	 * Each element is one note and may itself be multi-line.
-	 * Rendered as text only when the task is in_progress; otherwise shown as a
-	 * dim marker indicating the task has notes.
-	 */
-	notes?: string[];
 }
 
 export interface TodoPhase {
@@ -41,6 +38,8 @@ export interface TodoCompletionTransition {
 }
 
 export interface TodoToolDetails {
+	/** Operation that produced this snapshot; absent on legacy transcript entries. */
+	op?: TodoOperation;
 	phases: TodoPhase[];
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
@@ -50,32 +49,28 @@ export interface TodoToolDetails {
 // Schema
 // =============================================================================
 
-const TodoOp = z
-	.enum(["init", "start", "done", "rm", "drop", "append", "note"] as const)
-	.describe("operation to apply");
+const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "append" | "view"').describe("operation to apply");
 
-const InitListEntry = z.object({
-	phase: z.string().describe("phase name"),
-	items: z.array(z.string().describe("task content")).min(1).describe("tasks for this phase"),
+const InitListEntry = type({
+	phase: type("string").describe("phase name"),
+	items: type("string").describe("task content").array().atLeastLength(1).describe("tasks for this phase"),
 });
 
-const TodoOpEntry = z.object({
+const todoSchema = type({
 	op: TodoOp,
-	list: z.array(InitListEntry).optional().describe("phased task list (init)"),
-	task: z.string().optional().describe("task content"),
-	phase: z.string().optional().describe("phase name"),
-	items: z.array(z.string().describe("task content")).min(1).optional().describe("tasks to append"),
-	text: z.string().optional().describe("note text"),
-});
+	"list?": InitListEntry.array().describe("phased task list (init)"),
+	"task?": type("string").describe("task content"),
+	"phase?": type("string").describe("phase name"),
+	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
+	// and both enforce non-empty with op-specific errors. A stray `items: []` on
+	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
+	"items?": type("string").describe("task content").array().describe("tasks to append"),
+}).describe("apply a single todo operation");
 
-const todoSchema = z
-	.object({
-		ops: z.array(TodoOpEntry).min(1).describe("ordered todo operations"),
-	})
-	.describe("apply ordered todo operations");
-
-type TodoParams = z.infer<typeof todoSchema>;
-type TodoOpEntryValue = TodoParams["ops"][number];
+type TodoParams = TodoSchema;
+type TodoSchema = typeof todoSchema.infer;
+/** A single todo op entry (the params object itself). */
+type TodoOpEntryValue = TodoParams;
 
 // =============================================================================
 // State helpers
@@ -94,9 +89,7 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	const out: TodoItem = { content: task.content, status: task.status };
-	if (task.notes && task.notes.length > 0) out.notes = [...task.notes];
-	return out;
+	return { content: task.content, status: task.status };
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -145,6 +138,18 @@ function normalizeInProgressTask(phases: TodoPhase[]): void {
 	if (firstPendingTask) firstPendingTask.status = "in_progress";
 }
 
+/** Return the active todo task, preferring an in-progress item over the first pending item. */
+export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | undefined {
+	let firstPending: TodoItem | undefined;
+	for (const phase of phases) {
+		for (const task of phase.tasks) {
+			if (task.status === "in_progress") return task;
+			if (!firstPending && task.status === "pending") firstPending = task;
+		}
+	}
+	return firstPending;
+}
+
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
@@ -168,31 +173,6 @@ export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPha
 	}
 
 	return [];
-}
-
-/**
- * Pick the actionable window of tasks to display in the sticky todo panel.
- *
- * Returns up to `maxVisible` open (pending / in_progress) tasks in their
- * original phase order, plus the count of remaining open tasks not shown so
- * the caller can render a `+N more` hint. When every task in `tasks` is
- * closed (completed or abandoned), returns the trailing `maxVisible` tasks
- * with `hiddenOpenCount = 0`, so the panel keeps useful context until the
- * active-phase pointer advances on the next `todo`.
- *
- * Task identity and order are preserved — this is a slice, never a sort.
- */
-export function selectStickyTodoWindow(
-	tasks: TodoItem[],
-	maxVisible = 5,
-): { visible: TodoItem[]; hiddenOpenCount: number } {
-	const openTasks = tasks.filter(t => t.status === "pending" || t.status === "in_progress");
-	if (openTasks.length > 0) {
-		const visible = openTasks.slice(0, maxVisible);
-		return { visible, hiddenOpenCount: openTasks.length - visible.length };
-	}
-	const start = Math.max(0, tasks.length - maxVisible);
-	return { visible: tasks.slice(start), hiddenOpenCount: 0 };
 }
 
 /** Minimum overlap (after normalization) required for a substring match.
@@ -280,12 +260,40 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 	return phases.flatMap(phase => phase.tasks);
 }
 
+/** Phase name for `init` given a flat `items` list with no explicit `phase`. */
+const DEFAULT_INIT_PHASE = "Tasks";
+
 function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
-	if (!entry.list) {
+	// Models routinely flatten the single-phase init into `{op:"init", items:[...]}`
+	// (optionally with a bare `phase`) instead of the canonical
+	// `list: [{phase, items}]`. Accept that shape by synthesizing a one-phase list
+	// so a common, recoverable mistake isn't a hard error.
+	const list =
+		entry.list ??
+		(entry.items && entry.items.length > 0
+			? [{ phase: entry.phase ?? DEFAULT_INIT_PHASE, items: entry.items }]
+			: undefined);
+	if (!list) {
 		errors.push("Missing list for init operation");
 		return [];
 	}
-	return entry.list.map(listEntry => ({
+	// Duplicate phase names / task contents would be permanently unaddressable
+	// (every targeting op resolves the first match), so reject them up front.
+	const seenPhases = new Set<string>();
+	const seenTasks = new Set<string>();
+	for (const listEntry of list) {
+		if (seenPhases.has(listEntry.phase)) {
+			errors.push(`Duplicate phase "${listEntry.phase}" in init list`);
+		}
+		seenPhases.add(listEntry.phase);
+		for (const content of listEntry.items) {
+			if (seenTasks.has(content)) {
+				errors.push(`Duplicate task "${content}" in init list`);
+			}
+			seenTasks.add(content);
+		}
+	}
+	return list.map(listEntry => ({
 		name: listEntry.phase,
 		tasks: listEntry.items.map<TodoItem>(content => ({ content, status: "pending" })),
 	}));
@@ -301,6 +309,19 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		return phases;
 	}
 
+	// Validate the whole batch before mutating so a failing op reports every
+	// duplicate and leaves nothing half-applied.
+	const seen = new Set<string>();
+	let hasDuplicate = false;
+	for (const content of entry.items) {
+		if (seen.has(content) || findTaskByContent(phases, content)) {
+			errors.push(`Task "${content}" already exists`);
+			hasDuplicate = true;
+		}
+		seen.add(content);
+	}
+	if (hasDuplicate) return phases;
+
 	let phase = findPhaseByName(phases, entry.phase);
 	if (!phase) {
 		phase = { name: entry.phase, tasks: [] };
@@ -308,10 +329,6 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	}
 
 	for (const content of entry.items) {
-		if (findTaskByContent(phases, content)) {
-			errors.push(`Task "${content}" already exists`);
-			return phases;
-		}
 		phase.tasks.push({ content, status: "pending" });
 	}
 	return phases;
@@ -367,28 +384,16 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 		}
 		case "rm":
 			return removeTasks(phases, entry, errors);
-		case "note": {
-			const hit = resolveTaskOrError(phases, entry.task, errors);
-			if (!hit) return phases;
-			const text = (entry.text ?? "").replace(/\s+$/u, "");
-			if (!text) {
-				errors.push("Missing text for note operation");
-				return phases;
-			}
-			hit.task.notes = hit.task.notes ? [...hit.task.notes, text] : [text];
-			return phases;
-		}
 		case "append":
 			return appendItems(phases, entry, errors);
+		case "view":
+			return phases;
 	}
 }
 
 function applyParams(phases: TodoPhase[], params: TodoParams): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
-	let next = phases;
-	for (const entry of params.ops) {
-		next = applyEntry(next, entry, errors);
-	}
+	const next = applyEntry(phases, params, errors);
 	normalizeInProgressTask(next);
 	return { phases: next, errors };
 }
@@ -396,9 +401,15 @@ function applyParams(phases: TodoPhase[], params: TodoParams): { phases: TodoPha
 /** Apply an array of `todo`-style ops to existing phases. Used by /todo slash command. */
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
-	ops: TodoParams["ops"],
+	ops: TodoParams[],
 ): { phases: TodoPhase[]; errors: string[] } {
-	return applyParams(clonePhases(currentPhases), { ops });
+	const errors: string[] = [];
+	let next = clonePhases(currentPhases);
+	for (const op of ops) {
+		next = applyEntry(next, op, errors);
+	}
+	normalizeInProgressTask(next);
+	return { phases: next, errors };
 }
 
 // =============================================================================
@@ -412,6 +423,11 @@ const STATUS_TO_MARKER: Record<TodoStatus, string> = {
 	abandoned: "-",
 };
 
+export function resolveTodoMarkdownPath(input: string, cwd: string): string {
+	const raw = normalizePathLikeInput(input) || "TODO.md";
+	return resolveToCwd(raw, cwd);
+}
+
 /** Render todo phases as a Markdown checklist suitable for editing/copying. */
 export function phasesToMarkdown(phases: TodoPhase[]): string {
 	if (phases.length === 0) return "# Todos\n";
@@ -421,14 +437,6 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
 			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}`);
-			if (task.notes && task.notes.length > 0) {
-				for (let j = 0; j < task.notes.length; j++) {
-					if (j > 0) out.push("  >");
-					for (const noteLine of task.notes[j].split("\n")) {
-						out.push(noteLine === "" ? "  >" : `  > ${noteLine}`);
-					}
-				}
-			}
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -450,45 +458,16 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 	const errors: string[] = [];
 	const phases: TodoPhase[] = [];
 	let currentPhase: TodoPhase | undefined;
-	let currentTask: TodoItem | undefined;
-	let noteBuf: string[] = [];
-
-	const flushNote = () => {
-		if (!currentTask || noteBuf.length === 0) {
-			noteBuf = [];
-			return;
-		}
-		while (noteBuf.length > 0 && noteBuf[noteBuf.length - 1] === "") noteBuf.pop();
-		if (noteBuf.length === 0) return;
-		const joined = noteBuf.join("\n");
-		currentTask.notes = currentTask.notes ? [...currentTask.notes, joined] : [joined];
-		noteBuf = [];
-	};
 
 	const lines = md.split(/\r?\n/);
 	for (let lineNum = 0; lineNum < lines.length; lineNum++) {
 		const raw = lines[lineNum];
-
-		// Blockquote line attached to the current task: `  > text` or `  >`
-		const noteMatch = /^\s*>\s?(.*)$/.exec(raw);
-		if (noteMatch && currentTask) {
-			const noteLine = noteMatch[1];
-			if (noteLine === "") {
-				// Blank `>` separates two distinct notes
-				flushNote();
-			} else {
-				noteBuf.push(noteLine);
-			}
-			continue;
-		}
 
 		const trimmed = raw.trim();
 		if (!trimmed) continue;
 
 		const headingMatch = /^#{1,6}\s+(.+?)\s*$/.exec(trimmed);
 		if (headingMatch) {
-			flushNote();
-			currentTask = undefined;
 			currentPhase = { name: headingMatch[1].trim(), tasks: [] };
 			phases.push(currentPhase);
 			continue;
@@ -496,7 +475,6 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 
 		const taskMatch = /^[-*+]\s*\[(.?)\]\s+(.+?)\s*$/.exec(trimmed);
 		if (taskMatch) {
-			flushNote();
 			if (!currentPhase) {
 				currentPhase = { name: "Todos", tasks: [] };
 				phases.push(currentPhase);
@@ -505,27 +483,25 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 			const status = MARKER_TO_STATUS[marker];
 			if (!status) {
 				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
-				currentTask = undefined;
 				continue;
 			}
-			currentTask = { content: taskMatch[2].trim(), status };
-			currentPhase.tasks.push(currentTask);
+			currentPhase.tasks.push({ content: taskMatch[2].trim(), status });
 			continue;
 		}
 
-		flushNote();
-		currentTask = undefined;
 		errors.push(`Line ${lineNum + 1}: unrecognized syntax "${trimmed}"`);
 	}
-	flushNote();
 
 	normalizeInProgressTask(phases);
 	return { phases, errors };
 }
 
-function formatSummary(phases: TodoPhase[], errors: string[]): string {
+function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {
 	const tasks = phases.flatMap(phase => phase.tasks);
-	if (tasks.length === 0) return errors.length > 0 ? `Errors: ${errors.join("; ")}` : "Todo list cleared.";
+	if (tasks.length === 0) {
+		if (errors.length > 0) return `Errors: ${errors.join("; ")}`;
+		return readOnly ? "Todo list is empty." : "Todo list cleared.";
+	}
 
 	const remainingByPhase = phases
 		.map(phase => ({
@@ -552,31 +528,31 @@ function formatSummary(phases: TodoPhase[], errors: string[]): string {
 			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
 		}
 	}
+	// Closed = completed + abandoned, mirroring the per-phase `done` count.
+	const closedAll = tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+	// The active phase is the EARLIEST one still holding open work, so the
+	// in-progress pointer can sit in a phase whose successors already have
+	// completed tasks. Detect that "worked ahead" case to explain the
+	// otherwise-surprising backward pointer instead of letting it read as a
+	// completed task reverting to pending.
+	const workedAhead = phases.some(
+		(phase, idx) =>
+			idx > currentIdx && phase.tasks.some(task => task.status === "completed" || task.status === "abandoned"),
+	);
+	lines.push(`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open.`);
 	lines.push(
-		`Phase ${currentIdx + 1}/${phases.length} "${current.name}" — ${done}/${current.tasks.length} tasks complete`,
+		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${
+			workedAhead
+				? " — earliest phase with open tasks; the in-progress pointer auto-advances to the earliest open task on each completion, so it can sit behind out-of-order work (nothing was un-completed)."
+				: "."
+		}`,
 	);
 	for (const phase of phases) {
 		lines.push(`  ${phase.name}:`);
 		for (const task of phase.tasks) {
-			const sym =
-				task.status === "completed"
-					? "✓"
-					: task.status === "in_progress"
-						? "→"
-						: task.status === "abandoned"
-							? "✗"
-							: "○";
-			const noteCount = task.notes?.length ?? 0;
-			const noteMarker = noteCount > 0 ? ` (+${noteCount} note${noteCount === 1 ? "" : "s"})` : "";
-			lines.push(`    ${sym} ${task.content}${noteMarker}`);
-			if (task.status === "in_progress" && task.notes && task.notes.length > 0) {
-				for (let j = 0; j < task.notes.length; j++) {
-					if (j > 0) lines.push("        ---");
-					for (const noteLine of task.notes[j].split("\n")) {
-						lines.push(`        ${noteLine}`);
-					}
-				}
-			}
+			const checkbox = task.status === "completed" ? "[X]" : "[ ]";
+			const tag = task.status === "in_progress" ? " (in progress)" : task.status === "abandoned" ? " (dropped)" : "";
+			lines.push(`    - ${checkbox} ${task.content}${tag}`);
 		}
 	}
 	return lines.join("\n");
@@ -595,6 +571,51 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	readonly parameters = todoSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<typeof todoSchema.infer>[] = [
+		{
+			caption: "Initial setup (multi-phase)",
+			call: {
+				op: "init",
+				list: [
+					{ phase: "Foundation", items: ["Scaffold crate", "Wire workspace"] },
+					{ phase: "Auth", items: ["Port credential store", "Wire OAuth providers"] },
+					{ phase: "Verification", items: ["Run cargo test"] },
+				],
+			},
+		},
+		{
+			caption: "View current state (read-only)",
+			call: { op: "view" },
+		},
+		{
+			caption: "Initial setup (single phase)",
+			call: {
+				op: "init",
+				list: [{ phase: "Implementation", items: ["Apply fix", "Run tests"] }],
+			},
+		},
+		{
+			caption: "Complete one task",
+			call: { op: "done", task: "Wire workspace" },
+		},
+		{
+			caption: "Complete a whole phase",
+			call: { op: "done", phase: "Auth" },
+		},
+		{
+			caption: "Remove all tasks",
+			call: { op: "rm" },
+		},
+		{
+			caption: "Drop one task",
+			call: { op: "drop", task: "Run cargo test" },
+		},
+		{
+			caption: "Append tasks to a phase",
+			call: { op: "append", phase: "Auth", items: ["Handle retries", "Run tests"] },
+		},
+	];
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(todoDescription);
@@ -608,15 +629,24 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
-		const { phases: updated, errors } = applyParams(clonePhases(previousPhases), params);
-		const completedTasks = getCompletionTransitions(previousPhases, updated);
-		this.session.setTodoPhases?.(updated);
+		// Pure-view calls are reads: no normalization, no state write.
+		const readOnly = params.op === "view";
+		const { phases: updated, errors } = readOnly
+			? { phases: previousPhases, errors: [] as string[] }
+			: applyParams(clonePhases(previousPhases), params);
+		// A batch with any error is discarded wholesale: persisting a
+		// half-applied batch makes the natural retry hit "already exists" for
+		// the ops that did land. State and rendered summary stay at previous.
+		const failed = errors.length > 0;
+		const effective = failed ? previousPhases : updated;
+		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
+		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
-		const details: TodoToolDetails = { phases: updated, storage };
+		const details: TodoToolDetails = { op: params.op, phases: effective, storage };
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {
-			content: [{ type: "text", text: formatSummary(updated, errors) }],
+			content: [{ type: "text", text: formatSummary(effective, errors, readOnly) }],
 			details,
 			isError: errors.length > 0 ? true : undefined,
 		};
@@ -627,34 +657,30 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 // TUI Renderer
 // =============================================================================
 
-type TodoRenderArgs = {
-	ops?: Array<{
-		op?: string;
-		task?: string;
-		phase?: string;
-		items?: string[];
-	}>;
+type TodoRenderOp = {
+	op?: string;
+	task?: string;
+	phase?: string;
+	items?: string[];
 };
 
-const SUP_DIGITS: Record<string, string> = {
-	"0": "\u2070",
-	"1": "\u00b9",
-	"2": "\u00b2",
-	"3": "\u00b3",
-	"4": "\u2074",
-	"5": "\u2075",
-	"6": "\u2076",
-	"7": "\u2077",
-	"8": "\u2078",
-	"9": "\u2079",
+/** New single-op shape `{op,...}`; legacy `{ops:[...]}` still seen in old transcripts. */
+type TodoRenderArgs = TodoRenderOp & {
+	ops?: TodoRenderOp[];
 };
 
-function toSuperscript(n: number): string {
-	return n
-		.toString()
-		.split("")
-		.map(d => SUP_DIGITS[d] ?? d)
-		.join("");
+/**
+ * Normalize streaming/legacy render args to a flat op list. Accepts the new
+ * top-level `{op,...}` shape (returned as a one-element list), the legacy
+ * `{ops:[...]}` batch from old transcripts/collab-web, and partially-parsed
+ * streaming deltas (non-array `ops`, non-object entries) without crashing.
+ */
+function normalizeTodoArg(args: TodoRenderArgs | undefined): TodoRenderOp[] {
+	if (!args || typeof args !== "object") return [];
+	if (Array.isArray(args.ops)) {
+		return args.ops.filter((entry): entry is TodoRenderOp => !!entry && typeof entry === "object");
+	}
+	return typeof args.op === "string" ? [args] : [];
 }
 
 // =============================================================================
@@ -696,11 +722,6 @@ export function formatPhaseDisplayName(name: string, oneBasedIndex: number): str
 	return `${phaseRomanNumeral(oneBasedIndex)}. ${name}`;
 }
 
-function noteMarker(count: number, uiTheme: Theme): string {
-	if (count <= 0) return "";
-	return uiTheme.fg("dim", chalk.italic(` \u207a${toSuperscript(count)}`));
-}
-
 export const TODO_STRIKE_HOLD_FRAMES = 2;
 export const TODO_STRIKE_REVEAL_FRAMES = 12;
 export const TODO_STRIKE_TOTAL_FRAMES = TODO_STRIKE_HOLD_FRAMES + TODO_STRIKE_REVEAL_FRAMES;
@@ -736,7 +757,6 @@ function formatTodoLine(
 	frame: number | undefined,
 ): string {
 	const checkbox = uiTheme.checkbox;
-	const marker = noteMarker(item.notes?.length ?? 0, uiTheme);
 	switch (item.status) {
 		case "completed": {
 			const revealCount = completionKeys.has(item.content) ? strikeRevealCount(item.content, frame) : undefined;
@@ -744,33 +764,15 @@ function formatTodoLine(
 				revealCount === undefined
 					? strikethroughText(item.content)
 					: partialStrikethrough(item.content, revealCount);
-			return uiTheme.fg("success", `${prefix}${checkbox.checked} ${content}`) + marker;
+			return uiTheme.fg("success", `${prefix}${checkbox.checked} ${content}`);
 		}
 		case "in_progress":
-			return uiTheme.fg("accent", `${prefix}${checkbox.unchecked} ${item.content}`) + marker;
+			return uiTheme.fg("accent", `${prefix}${checkbox.unchecked} ${item.content}`);
 		case "abandoned":
-			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${strikethroughText(item.content)}`) + marker;
+			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${strikethroughText(item.content)}`);
 		default:
-			return uiTheme.fg("dim", `${prefix}${checkbox.unchecked} ${item.content}`) + marker;
+			return uiTheme.fg("dim", `${prefix}${checkbox.unchecked} ${item.content}`);
 	}
-}
-
-function renderNoteAttachments(phases: TodoPhase[], uiTheme: Theme, indent: string): string[] {
-	const lines: string[] = [];
-	for (const phase of phases) {
-		for (const task of phase.tasks) {
-			if (task.status !== "in_progress" || !task.notes || task.notes.length === 0) continue;
-			lines.push("");
-			lines.push(`${indent}${uiTheme.fg("dim", chalk.italic(`§ notes — ${task.content}`))}`);
-			for (let j = 0; j < task.notes.length; j++) {
-				if (j > 0) lines.push("");
-				for (const noteLine of task.notes[j].split("\n")) {
-					lines.push(`${indent}  ${uiTheme.fg("dim", noteLine)}`);
-				}
-			}
-		}
-	}
-	return lines;
 }
 
 /**
@@ -793,7 +795,7 @@ function computeTouchedPhases(
 	for (const transition of completedTasks) touched.add(transition.phase);
 	// Phases explicitly named by the ops that ran. `init` replaces the whole
 	// list, so the entire plan is fresh and every phase counts as touched.
-	const ops = Array.isArray(args?.ops) ? args.ops : [];
+	const ops = normalizeTodoArg(args);
 	for (const op of ops) {
 		if (!op || typeof op !== "object") continue;
 		if (op.op === "init") {
@@ -822,18 +824,17 @@ function formatPhaseSummary(phase: TodoPhase, oneBasedIndex: number, uiTheme: Th
 
 export const todoToolRenderer = {
 	renderCall(args: TodoRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
-		// `args` here is the raw partially-parsed JSON from the streaming
-		// tool-call delta and may not satisfy `TodoRenderArgs` at runtime:
-		// `parseStreamingJson` can hand back `{ ops: "[" }` mid-delta, or
-		// entries that are `null` / strings before fields stream. Guard
-		// against non-array `ops` and non-object entries so a malformed
-		// delta never breaks the TUI render loop (#2005).
-		const opsList = Array.isArray(args?.ops) ? args.ops : [];
+		// `args` is the raw partially-parsed JSON from the streaming tool-call
+		// delta and may not satisfy `TodoRenderArgs` at runtime:
+		// `parseStreamingJson` can hand back `{ op: 1 }` mid-delta, or a legacy
+		// `{ ops: "[" }` shape before fields stream. `normalizeTodoArg` guards
+		// both the new single-op and legacy batch shapes so a malformed delta
+		// never breaks the TUI render loop (#2005).
+		const opsList = normalizeTodoArg(args);
 		const ops =
 			opsList.length === 0
 				? ["update"]
-				: opsList.map(entry => {
-						const e = entry && typeof entry === "object" ? entry : ({} as NonNullable<typeof entry>);
+				: opsList.map(e => {
 						const parts = [e.op ?? "update"];
 						if (e.task) parts.push(e.task);
 						if (e.phase) parts.push(e.phase);
@@ -919,6 +920,7 @@ export const todoToolRenderer = {
 						expanded,
 						maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 						itemType: "todo",
+						truncateFrom: "start",
 						renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
 					},
 					uiTheme,
@@ -927,7 +929,6 @@ export const todoToolRenderer = {
 					bodyLines.push(`${indent}${line}`);
 				}
 			}
-			bodyLines.push(...renderNoteAttachments(phases, uiTheme, indent));
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
 				header,

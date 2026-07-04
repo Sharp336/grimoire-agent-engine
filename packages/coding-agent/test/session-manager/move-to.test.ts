@@ -3,11 +3,9 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	loadEntriesFromFile,
-	type SessionHeader,
-	SessionManager,
-} from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { stripOuterDoubleQuotes } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -109,6 +107,23 @@ describe("SessionManager.moveTo", () => {
 		const header = getHeader(entries);
 		expect(header?.cwd).toBe(path.resolve(cwdB));
 		expect(hasAssistantEntry(entries)).toBe(true);
+	});
+
+	it("makes the moved session visible to resume from the target cwd", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const oldFile = session.getSessionFile()!;
+
+		await session.moveTo(cwdB);
+
+		const movedFile = session.getSessionFile()!;
+		const sourceSessions = await SessionManager.list(cwdA);
+		const targetSessions = await SessionManager.list(cwdB);
+
+		expect(sourceSessions.some(item => item.path === oldFile)).toBe(false);
+		expect(targetSessions.some(item => item.path === movedFile)).toBe(true);
 	});
 
 	it("succeeds on fresh session without ENOENT, then deferred persistence works", async () => {

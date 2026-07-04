@@ -21,6 +21,7 @@ import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/m
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { InstalledPlugin } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const FAKE_INSTALLED: InstalledPlugin = {
 	name: "kimi-datasource",
@@ -30,6 +31,20 @@ const FAKE_INSTALLED: InstalledPlugin = {
 	enabledFeatures: null,
 	enabled: true,
 };
+
+async function createLocalPlugin(root: string): Promise<string> {
+	const localPlugin = path.join(root, "kimi-datasource");
+	await fs.mkdir(localPlugin, { recursive: true });
+	await Bun.write(
+		path.join(localPlugin, "package.json"),
+		JSON.stringify({
+			name: "kimi-datasource",
+			version: "1.0.0",
+			omp: { extensions: ["./src/extension.ts"] },
+		}),
+	);
+	return localPlugin;
+}
 
 describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 	let tmpRoot: string;
@@ -60,7 +75,7 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		// stubs leak into sibling test files (e.g. marketplace/manager.test.ts
 		// breaks because listMarketplaces() still returns []).
 		mock.restore();
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
 	});
 
 	for (const spec of [".", "./pkg", "../pkg", "/abs/pkg", "~/pkg"]) {
@@ -113,16 +128,7 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		// (no spies on PluginManager.link), and verify the resulting symlink
 		// + lockfile entry. Pins the contract that local-path installs
 		// symlink rather than copy-install, matching `omp plugin link`.
-		const localPlugin = path.join(tmpRoot, "kimi-datasource");
-		await fs.mkdir(localPlugin, { recursive: true });
-		await Bun.write(
-			path.join(localPlugin, "package.json"),
-			JSON.stringify({
-				name: "kimi-datasource",
-				version: "1.0.0",
-				omp: { extensions: ["./src/extension.ts"] },
-			}),
-		);
+		const localPlugin = await createLocalPlugin(tmpRoot);
 
 		await runPluginCommand({ action: "install", args: [localPlugin], flags: { json: true } });
 
@@ -137,5 +143,41 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 			enabledFeatures: null,
 			enabled: true,
 		});
+	});
+	test("list --json includes linked local plugin without package dependencies", async () => {
+		const localPlugin = await createLocalPlugin(tmpRoot);
+		const output: string[] = [];
+		spyOn(console, "log").mockImplementation(message => {
+			output.push(String(message));
+		});
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+
+		await runPluginCommand({ action: "link", args: [localPlugin], flags: { json: true } });
+		output.length = 0;
+		await runPluginCommand({ action: "list", args: [], flags: { json: true } });
+
+		const listed = JSON.parse(output.join("\n")) as { npm: InstalledPlugin[] };
+		expect(listed.npm.map(plugin => plugin.name)).toContain("kimi-datasource");
+	});
+
+	test("doctor --fix preserves linked local plugin state without package dependencies", async () => {
+		await Bun.write(
+			path.join(tmpRoot, "plugins", "package.json"),
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }),
+		);
+		const localPlugin = await createLocalPlugin(tmpRoot);
+		const manager = new PluginManager(tmpRoot);
+
+		await manager.link(localPlugin);
+		const checks = await manager.doctor({ fix: true });
+
+		expect(checks.find(check => check.name === "orphan:kimi-datasource")).toBeUndefined();
+		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
+		expect(lock.plugins["kimi-datasource"]).toEqual({
+			version: "1.0.0",
+			enabledFeatures: null,
+			enabled: true,
+		});
+		expect((await manager.list()).map(plugin => plugin.name)).toContain("kimi-datasource");
 	});
 });

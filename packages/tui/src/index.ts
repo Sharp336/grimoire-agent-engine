@@ -19,6 +19,8 @@ export * from "./components/text";
 export * from "./components/truncated-text";
 // DECCARA rectangular-SGR background-fill optimizer
 export * from "./deccara";
+// Desktop notifications via D-Bus (Linux freedesktop notifications)
+export * from "./desktop-notify";
 // Editor component interface (for custom editors)
 export type * from "./editor-component";
 // Fuzzy matching
@@ -29,6 +31,11 @@ export * from "./keybindings";
 export * from "./keys";
 // Kitty graphics: Unicode placeholders
 export * from "./kitty-graphics";
+// LaTeX → Unicode/ANSI math rendering
+export * from "./latex-block";
+export * from "./latex-to-unicode";
+// SGR mouse report parsing
+export * from "./mouse";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";

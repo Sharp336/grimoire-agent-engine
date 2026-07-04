@@ -15,13 +15,24 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { commands, isSubcommand, resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
 import { looksLikeLocalPath } from "@oh-my-pi/pi-coding-agent/commands/install";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("install command is registered as a top-level subcommand", () => {
-	test("CLI runner sees `install` as a known command", async () => {
-		const cli = await import("@oh-my-pi/pi-coding-agent/cli-commands");
-		expect(cli.commands.some(c => c.name === "install")).toBe(true);
-		expect(cli.isSubcommand("install")).toBe(true);
+	test("CLI runner sees `install` as a known command", () => {
+		expect(commands.some(c => c.name === "install")).toBe(true);
+		expect(isSubcommand("install")).toBe(true);
+	});
+
+	test("CLI runner rejects only bare reserved management words", () => {
+		expect(resolveCliArgv(["extensions"])).toEqual({
+			error: '`omp extensions` is not a management command. Use `omp plugin list` / `omp plugin install`, or run `omp launch extensions` if you meant to send "extensions" as a prompt.',
+		});
+		expect(resolveCliArgv(["extensions", "are", "not", "loading"])).toEqual({
+			argv: ["launch", "extensions", "are", "not", "loading"],
+		});
+		expect(resolveCliArgv(["launch", "extensions"])).toEqual({ argv: ["launch", "extensions"] });
 	});
 });
 
@@ -51,15 +62,12 @@ describe("looksLikeLocalPath", () => {
 
 	test("bare names that exist as a local directory are treated as local", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-install-test-"));
-		const cwd = process.cwd();
 		try {
-			process.chdir(tempDir);
 			fs.mkdirSync(path.join(tempDir, "vendored-ext"));
-			expect(looksLikeLocalPath("vendored-ext")).toBe(true);
-			expect(looksLikeLocalPath("missing-pkg")).toBe(false);
+			expect(looksLikeLocalPath("vendored-ext", tempDir)).toBe(true);
+			expect(looksLikeLocalPath("missing-pkg", tempDir)).toBe(false);
 		} finally {
-			process.chdir(cwd);
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 });

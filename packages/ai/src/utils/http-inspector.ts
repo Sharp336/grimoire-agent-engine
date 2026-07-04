@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { extractHttpStatusFromError, getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error/flags";
 import { isCopilotTransientModelError } from "./retry.js";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -20,10 +21,6 @@ export type CapturedHttpErrorResponse = {
 	bodyJson?: unknown;
 };
 
-type ErrorWithStatus = {
-	status?: unknown;
-};
-
 const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
 
 export async function appendRawHttpRequestDumpFor400(
@@ -32,8 +29,7 @@ export async function appendRawHttpRequestDumpFor400(
 	dump: RawHttpRequestDump | undefined,
 ): Promise<string> {
 	// Never persist dumps under the test runner: providers exercise the 400 path
-	// with mocked fetch responses, which would otherwise litter the real ~/.omp logs.
-	if (!dump || isBunTestRuntime() || extractHttpStatusFromError(error) !== 400) {
+	if (!dump || isBunTestRuntime() || AIError.status(error) !== 400) {
 		return message;
 	}
 
@@ -67,12 +63,6 @@ export async function finalizeErrorMessage(
 	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
 }
 
-export function withHttpStatus(error: unknown, status: number): Error {
-	const wrapped = error instanceof Error ? error : new Error(String(error));
-	(wrapped as ErrorWithStatus).status = status;
-	return wrapped;
-}
-
 /**
  * Rewrite error message for GitHub Copilot request failures.
  * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
@@ -87,7 +77,7 @@ export function withHttpStatus(error: unknown, status: number): Error {
  */
 export function rewriteCopilotError(errorMessage: string, error: unknown, provider: string): string {
 	if (provider !== "github-copilot") return errorMessage;
-	const status = extractHttpStatusFromError(error);
+	const status = AIError.status(error);
 	if (status === 401) {
 		return `GitHub Copilot authentication failed (HTTP 401). Your token may have been revoked. Please re-login with /login github-copilot`;
 	}

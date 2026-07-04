@@ -51,6 +51,7 @@ tui.removeChild(component);
 tui.start();
 tui.stop();
 tui.requestRender(); // Request a re-render
+tui.requestComponentRender(component); // Re-render only the root subtree containing `component` when safe (falls back to a full render on resize, overlays, images, or concurrent full requests)
 
 // Global debug key handler (Shift+Ctrl+D)
 tui.onDebug = () => console.log("Debug triggered");
@@ -62,7 +63,7 @@ All components implement:
 
 ```typescript
 interface Component {
-	render(width: number): string[];
+	render(width: number): readonly string[];
 	handleInput?(data: string): void;
 	invalidate?(): void;
 }
@@ -70,7 +71,7 @@ interface Component {
 
 | Method               | Description                                                                                                                                                        |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `render(width)`      | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. |
+| `render(width)`      | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
 | `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
 | `invalidate?()`      | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
 
@@ -411,7 +412,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
 
 ```typescript
 interface ImageTheme {
@@ -590,7 +591,7 @@ class MyInteractiveComponent implements Component {
 		}
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		return this.items.map((item, i) => {
 			const prefix = i === this.selectedIndex ? "> " : "  ";
 			return truncateToWidth(prefix + item, width);
@@ -614,7 +615,7 @@ class MyComponent implements Component {
 		this.text = text;
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		// Option 1: Truncate long lines
 		return [truncateToWidth(this.text, width)];
 
@@ -656,7 +657,7 @@ class CachedComponent implements Component {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
 			return this.cachedLines;
 		}

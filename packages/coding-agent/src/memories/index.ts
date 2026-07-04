@@ -3,13 +3,16 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, clampThinkingLevelForModel, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
-import { getAgentDbPath, getMemoriesDir, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
+import { type ApiKey, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
+import consolidationSystemTemplate from "../prompts/memories/consolidation_system.md" with { type: "text" };
 import readPathTemplate from "../prompts/memories/read-path.md" with { type: "text" };
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
@@ -144,33 +147,147 @@ export function startMemoryStartupTask(options: {
 	});
 }
 
+interface MemoryInstructionSession {
+	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
+}
+
+interface MemoryToolDeveloperInstructionsSnapshot {
+	summary: string;
+	learned: string;
+}
+
+interface CachedMemoryToolDeveloperInstructions {
+	sessionFile: string | undefined;
+	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
+	value: string | undefined;
+}
+
+const memoryToolDeveloperInstructionsBySession = new WeakMap<
+	MemoryInstructionSession,
+	CachedMemoryToolDeveloperInstructions
+>();
+const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
+
+function getMemoryInstructionRoot(agentDir: string, settings: Settings): string {
+	return getMemoryRoot(agentDir, settings.getCwd());
+}
+
+function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
+	return session.sessionManager.getSessionFile() ?? undefined;
+}
+
+async function readMemoryToolDeveloperInstructionsSnapshot(
+	agentDir: string,
+	settings: Settings,
+): Promise<MemoryToolDeveloperInstructionsSnapshot | undefined> {
+	const cfg = loadMemoryConfig(settings);
+	if (!cfg.enabled) return undefined;
+	const memoryRoot = getMemoryInstructionRoot(agentDir, settings);
+
+	let summary = "";
+	try {
+		summary = (await Bun.file(path.join(memoryRoot, "memory_summary.md")).text()).trim();
+	} catch {
+		// Missing or unreadable summary — injection is best-effort; fall through
+		// so any captured lessons still surface on their own.
+	}
+	const learned = await readLearnedLessons(memoryRoot);
+	return { summary, learned };
+}
+
+function renderMemoryToolDeveloperInstructionsSnapshot(
+	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+	settings: Settings,
+): string | undefined {
+	if (!snapshot) return undefined;
+	const cfg = loadMemoryConfig(settings);
+	if (!cfg.enabled) return undefined;
+	if (!snapshot.summary && !snapshot.learned) return undefined;
+
+	const summaryOut = snapshot.summary
+		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
+		: "";
+	// Lessons share ONE injection budget with the summary so the combined block
+	// stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
+	// truncateByApproxTokens). With no summary, lessons get the whole budget.
+	// Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
+	// can exceed `limit * 4` chars and drive the remainder negative — when the
+	// summary already fills the budget, lessons are simply dropped.
+	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
+	const learnedOut =
+		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
+	if (!summaryOut && !learnedOut) return undefined;
+
+	return prompt.render(readPathTemplate, {
+		memory_summary: summaryOut,
+		learned: learnedOut,
+	});
+}
+
+function cacheMemoryToolDeveloperInstructions(
+	session: MemoryInstructionSession,
+	sessionFile: string | undefined,
+	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+	settings: Settings,
+): string | undefined {
+	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
+	memoryToolDeveloperInstructionsBySession.set(session, { sessionFile, snapshot, value });
+	return value;
+}
+
+/**
+ * Drop the per-session memory instruction snapshot after explicit memory state
+ * changes that must affect the active conversation immediately, such as
+ * `/memory clear`.
+ */
+export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstructionSession | undefined): void {
+	if (session) memoryToolDeveloperInstructionsBySession.delete(session);
+}
+
+/**
+ * Refresh the active session's consolidated-memory snapshot after startup maintenance.
+ *
+ * Startup may finish after the first prompt build and write `memory_summary.md`;
+ * the active session should see that summary. It must not reread `learned.md`,
+ * because a `learn` call racing with startup belongs to the next session's
+ * memory prompt, not the active prompt-cache prefix.
+ */
+export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+	session: MemoryInstructionSession,
+	agentDir: string,
+	settings: Settings,
+): Promise<void> {
+	const sessionFile = getMemoryInstructionSessionFile(session);
+	const cached = memoryToolDeveloperInstructionsBySession.get(session);
+	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const root = getMemoryInstructionRoot(agentDir, settings);
+	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
+	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
+	const learned = cachedLearned ?? baseline?.learned ?? "";
+	const snapshot = current ? { summary: current.summary, learned } : undefined;
+	cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+}
+
 /**
  * Build memory usage instructions for prompt injection.
  */
 export async function buildMemoryToolDeveloperInstructions(
 	agentDir: string,
 	settings: Settings,
+	session?: MemoryInstructionSession,
 ): Promise<string | undefined> {
-	const cfg = loadMemoryConfig(settings);
-	if (!cfg.enabled) return undefined;
-	const memoryRoot = getMemoryRoot(agentDir, settings.getCwd());
-	const summaryPath = path.join(memoryRoot, "memory_summary.md");
-
-	let text: string;
-	try {
-		text = await Bun.file(summaryPath).text();
-	} catch {
-		return undefined;
+	if (!session) {
+		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+		memoryToolDeveloperInstructionsByRoot.set(getMemoryInstructionRoot(agentDir, settings), snapshot);
+		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
-	const summary = text.trim();
-	if (!summary) return undefined;
-	const truncated = truncateByApproxTokens(summary, cfg.summaryInjectionTokenLimit);
-	if (!truncated.trim()) return undefined;
+	const sessionFile = getMemoryInstructionSessionFile(session);
+	const cached = memoryToolDeveloperInstructionsBySession.get(session);
+	if (cached && cached.sessionFile === sessionFile) return cached.value;
 
-	return prompt.render(readPathTemplate, {
-		memory_summary: truncated,
-	});
+	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
 /**
@@ -207,6 +324,7 @@ async function runMemoryStartup(options: {
 }): Promise<void> {
 	await runPhase1(options);
 	await runPhase2(options);
+	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
 	await options.session.refreshBaseSystemPrompt?.();
 }
 
@@ -272,10 +390,7 @@ async function runPhase1(options: {
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
-				apiKey: modelRegistry.resolver(phase1Model.provider, {
-					sessionId: session.sessionId,
-					baseUrl: phase1Model.baseUrl,
-				}),
+				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
@@ -432,10 +547,7 @@ async function runPhase2(options: {
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
-				apiKey: modelRegistry.resolver(phase2Model.provider, {
-					sessionId: session.sessionId,
-					baseUrl: phase2Model.baseUrl,
-				}),
+				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
 			await applyConsolidation(memoryRoot, consolidated);
@@ -523,12 +635,21 @@ async function collectThreads(session: AgentSession, currentThreadId?: string): 
 		let id = name.slice(0, -6);
 		try {
 			const fileText = await Bun.file(fullPath).text();
-			const firstLine = fileText.split("\n", 1)[0] ?? "";
-			const parsed = parseJsonlLenient(firstLine);
-			const header = Array.isArray(parsed) && parsed.length > 0 ? (parsed[0] as Record<string, unknown>) : undefined;
-			if (header && header.type === "session") {
-				if (typeof header.cwd === "string") cwd = header.cwd;
-				if (typeof header.id === "string") id = header.id;
+			let sawTitleSlot = false;
+			for (const rawLine of fileText.split(/\r?\n/)) {
+				const line = rawLine.trim();
+				if (!line) continue;
+				const parsed = parseJsonlLenient<Record<string, unknown>>(line);
+				const header = Array.isArray(parsed) && parsed.length > 0 ? parsed[0] : undefined;
+				if (!sawTitleSlot && header?.type === "title") {
+					sawTitleSlot = true;
+					continue;
+				}
+				if (header?.type === "session") {
+					if (typeof header.cwd === "string") cwd = header.cwd;
+					if (typeof header.id === "string") id = header.id;
+				}
+				break;
 			}
 		} catch {
 			// ignore malformed session files
@@ -553,7 +674,7 @@ function shouldPersistResponseItemForMemories(message: AgentMessage): boolean {
 	}
 	if (role !== "toolResult") return false;
 	const toolName = (message as { toolName?: string }).toolName;
-	if (toolName === "bash" || toolName === "eval" || toolName === "read" || toolName === "search") {
+	if (toolName === "bash" || toolName === "eval" || toolName === "read" || toolName === "grep") {
 		const text = extractMessageText(message);
 		return text.length > 0 && text.length <= 32_000;
 	}
@@ -749,6 +870,7 @@ async function runConsolidationModel(options: {
 	const response = await completeSimple(
 		model,
 		{
+			systemPrompt: [consolidationSystemTemplate],
 			messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
 		},
 		{
@@ -985,6 +1107,12 @@ function redactSecrets(input: string): string {
 		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
 		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
 		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
+		// Common provider token prefixes (GitHub, npm, Slack, Google).
+		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+		/github_pat_[A-Za-z0-9_]{20,}/g,
+		/npm_[A-Za-z0-9]{30,}/g,
+		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
+		/AIza[A-Za-z0-9_-]{30,}/g,
 	];
 	for (const pattern of patterns) {
 		out = out.replace(pattern, "[REDACTED]");
@@ -1074,7 +1202,9 @@ function truncateByApproxTokens(text: string, tokenLimit: number): string {
 
 function computeModelTokenBudget(model: Model, config: MemoryRuntimeConfig): number {
 	const maxTokens =
-		Number.isFinite(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : config.fallbackTokenLimit;
+		model.contextWindow !== null && Number.isFinite(model.contextWindow) && model.contextWindow > 0
+			? model.contextWindow
+			: config.fallbackTokenLimit;
 	return Math.max(2048, Math.floor(maxTokens));
 }
 
@@ -1089,7 +1219,6 @@ async function resolveMemoryModel(options: {
 		const resolved = resolveModelRoleValue(requestedModel, modelRegistry.getAll(), {
 			settings: session.settings,
 			matchPreferences: getModelMatchPreferences(session.settings),
-			modelRegistry,
 		});
 		if (resolved.model) return resolved.model;
 	}
@@ -1120,6 +1249,125 @@ function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 
 export function getMemoryRoot(agentDir: string, cwd: string): string {
 	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
+}
+
+/**
+ * Filename of the captured-lessons file under a project's memory root.
+ *
+ * Written by the `learn` tool via {@link saveLearnedLesson} and read back by
+ * {@link buildMemoryToolDeveloperInstructions}. Deliberately distinct from the
+ * consolidation artifacts (`MEMORY.md`, `memory_summary.md`, `skills/`) so a
+ * consolidation pass never clobbers manually captured lessons.
+ */
+const LEARNED_LESSONS_FILE = "learned.md";
+/** Newest-first cap on retained lessons, bounding file growth by entry count. */
+const MAX_LEARNED_LESSONS = 100;
+/** Per-field char caps so a single huge capture can't bloat learned.md. */
+const MAX_LEARNED_CONTENT_CHARS = 2000;
+const MAX_LEARNED_CONTEXT_CHARS = 400;
+
+/**
+ * Strip prompt-injection vectors from a single line of lesson text: control/
+ * format chars, angle brackets (`</skills>`), backticks, and `~~~` fences, then
+ * collapse whitespace. Applied on BOTH write and read (the block renders
+ * unescaped into the system prompt), mirroring managed-skill descriptions.
+ */
+function neutralizeInjection(text: string): string {
+	return text
+		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
+		.replace(/[<>`]/g, "")
+		.replace(/~{2,}/g, "~")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** Slice to `maxChars`, dropping a trailing unpaired high surrogate. */
+function boundChars(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const sliced = text.slice(0, maxChars);
+	return /[\uD800-\uDBFF]$/.test(sliced) ? sliced.slice(0, -1) : sliced;
+}
+
+/**
+ * Normalize one lesson field for storage: neutralize injection delimiters
+ * FIRST, then redact secrets (so delimiter stripping can't reassemble a token
+ * the redactor would have caught), then bound the length.
+ */
+function normalizeLearnedText(text: string, maxChars: number): string {
+	return boundChars(redactSecrets(neutralizeInjection(text)).trim(), maxChars);
+}
+
+/** Per-path write chains serializing `learned.md` read-modify-write. */
+const learnedWriteChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Append one lesson to the project's `learned.md` (newest-first, deduped,
+ * capped, secret-redacted, injection-neutralized). The file backs the `learn`
+ * tool when `memory.backend` is `local`.
+ */
+export async function saveLearnedLesson(
+	agentDir: string,
+	cwd: string,
+	input: MemoryBackendSaveInput,
+): Promise<MemoryBackendSaveResult> {
+	const content = normalizeLearnedText(input.content, MAX_LEARNED_CONTENT_CHARS);
+	if (!content) {
+		return { backend: "local", stored: 0, message: "Empty lesson; nothing stored." };
+	}
+	const context = input.context ? normalizeLearnedText(input.context, MAX_LEARNED_CONTEXT_CHARS) : "";
+	const line = context ? `- ${content} _(context: ${context})_` : `- ${content}`;
+	const filePath = path.join(getMemoryRoot(agentDir, cwd), LEARNED_LESSONS_FILE);
+
+	// Serialize the read-modify-write per file: parallel `learn` calls (sibling
+	// subagents, or two shared tool calls in one turn) share the project memory
+	// root, so an unguarded RMW would let the last writer drop the other's lesson.
+	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() => appendLearnedLine(filePath, line));
+	const guarded = run.catch(() => {});
+	learnedWriteChains.set(filePath, guarded);
+	try {
+		await run;
+	} finally {
+		// Drop the entry once this write is the chain tail, so the map does not
+		// retain one promise per distinct memory root for the process lifetime.
+		if (learnedWriteChains.get(filePath) === guarded) learnedWriteChains.delete(filePath);
+	}
+	return { backend: "local", stored: 1, message: `Lesson saved to ${LEARNED_LESSONS_FILE}.` };
+}
+
+async function appendLearnedLine(filePath: string, line: string): Promise<void> {
+	let existing = "";
+	try {
+		existing = await Bun.file(filePath).text();
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
+	const prior = existing
+		.split("\n")
+		.map(l => l.trim())
+		.filter(l => l.startsWith("- ") && l !== line);
+	const lessons = [line, ...prior].slice(0, MAX_LEARNED_LESSONS);
+	await Bun.write(filePath, `${lessons.join("\n")}\n`);
+}
+
+/**
+ * Read `learned.md`, neutralizing each line on read too — a hand-edited or
+ * pre-existing file bypasses write-time normalization and the block renders
+ * unescaped into the system prompt. Returns "" when absent/unreadable.
+ */
+async function readLearnedLessons(memoryRoot: string): Promise<string> {
+	let raw = "";
+	try {
+		raw = (await Bun.file(path.join(memoryRoot, LEARNED_LESSONS_FILE)).text()).trim();
+	} catch {
+		return "";
+	}
+	if (!raw) return "";
+	// Neutralize delimiters THEN redact per line — mirrors the write path so a
+	// hand-edited line cannot reassemble a token after delimiter stripping.
+	return raw
+		.split("\n")
+		.map(line => redactSecrets(neutralizeInjection(line)))
+		.join("\n");
 }
 
 function encodeProjectPath(cwd: string): string {

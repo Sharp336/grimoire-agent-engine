@@ -10,7 +10,7 @@ import {
 	KeybindingsManager as TuiKeybindingsManager,
 } from "@oh-my-pi/pi-tui";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
+import { JSONC, YAML } from "bun";
 
 /**
  * Application-level keybindings (coding agent specific).
@@ -31,11 +31,13 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
+	"app.retry": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -63,7 +65,9 @@ declare module "@oh-my-pi/pi-tui" {
  * Resolve default image-paste shortcuts for the current terminal platform.
  */
 export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
-	return platform === "win32" ? ["ctrl+v", "alt+v"] : ["ctrl+v"];
+	if (platform === "win32") return ["ctrl+v", "alt+v"];
+	if (platform === "darwin") return ["ctrl+v", "super+v"];
+	return ["ctrl+v"];
 }
 
 /**
@@ -130,13 +134,17 @@ export const KEYBINDINGS = {
 		defaultKeys: ["ctrl+q", "ctrl+enter"],
 		description: "Send follow-up message",
 	},
+	"app.retry": {
+		defaultKeys: "alt+r",
+		description: "Retry last failed assistant turn",
+	},
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",
 		description: "Dequeue message",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),
-		description: "Paste image from clipboard",
+		description: "Paste image or text from clipboard",
 	},
 	"app.clipboard.pasteTextRaw": {
 		defaultKeys: ["ctrl+shift+v", "alt+shift+v"],
@@ -166,9 +174,13 @@ export const KEYBINDINGS = {
 		defaultKeys: [],
 		description: "Resume session",
 	},
+	"app.agents.hub": {
+		defaultKeys: "alt+a",
+		description: "Open the agent hub",
+	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
-		description: "Observe subagent sessions",
+		description: "Open the agent hub",
 	},
 	"app.session.togglePath": {
 		defaultKeys: "ctrl+p",
@@ -207,8 +219,8 @@ export const KEYBINDINGS = {
 		description: "Search history",
 	},
 	"app.stt.toggle": {
-		defaultKeys: "alt+h",
-		description: "Toggle speech-to-text",
+		defaultKeys: [],
+		description: "Toggle speech-to-text (default gesture: hold Space)",
 	},
 } as const satisfies KeybindingDefinitions;
 
@@ -233,6 +245,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	toggleThinking: "app.thinking.toggle",
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
+	retry: "app.retry",
 	dequeue: "app.message.dequeue",
 	pasteImage: "app.clipboard.pasteImage",
 	pasteTextRaw: "app.clipboard.pasteTextRaw",
@@ -370,7 +383,7 @@ function loadRawConfig(filePath: string): unknown {
 	try {
 		const content = fs.readFileSync(filePath, "utf-8");
 		if (filePath.endsWith(".json")) {
-			return JSON.parse(content);
+			return JSONC.parse(content);
 		}
 		if (filePath.endsWith(".yml") || filePath.endsWith(".yaml")) {
 			return YAML.parse(content);

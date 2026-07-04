@@ -1,6 +1,6 @@
-import { ollamaModelManagerOptions } from "../provider-models/openai-compat";
+import * as AIError from "../error";
 import type { OAuthController } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 const OLLAMA_DOCS_URL = "https://github.com/ollama/ollama/blob/main/docs/api.md";
 
@@ -11,7 +11,7 @@ const OLLAMA_DOCS_URL = "https://github.com/ollama/ollama/blob/main/docs/api.md"
  */
 export async function loginOllama(options: OAuthController): Promise<string> {
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 	if (!options.onPrompt) {
 		return "";
@@ -30,7 +30,7 @@ export async function loginOllama(options: OAuthController): Promise<string> {
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	return apiKey.trim();
@@ -39,9 +39,5 @@ export async function loginOllama(options: OAuthController): Promise<string> {
 export const ollamaProvider = {
 	id: "ollama",
 	name: "Ollama (Local OpenAI-compatible)",
-	defaultModel: "gpt-oss:20b",
-	createModelManagerOptions: (config: ModelManagerConfig) => ollamaModelManagerOptions(config),
-	allowUnauthenticated: true,
 	login: loginOllama,
-	envKeys: "OLLAMA_API_KEY",
 } as const satisfies ProviderDefinition;

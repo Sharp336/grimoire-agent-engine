@@ -2,25 +2,39 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AssistantMessageEventStream, clearCustomApis, Effort, getCustomApi } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessageEventStream,
+	clearCustomApis,
+	Effort,
+	type FetchImpl,
+	getCustomApi,
+} from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
 	let authStorage: AuthStorage;
+	let registry: ModelRegistry;
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+
+	// Stub transport: reject every request so refresh("online") drives the full
+	// online discovery path with deterministic, instant failures instead of real
+	// network. Provider fetches (dynamic + models.dev) are caught and swallowed,
+	// leaving the registry with its bundled catalog plus runtime overlays.
+	const offlineFetch: FetchImpl = () => Promise.reject(new Error("network disabled in model-registry runtime test"));
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-runtime-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
 		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
 	});
 
 	afterEach(() => {
@@ -30,7 +44,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -96,7 +110,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	}
 
 	test("validates provider config before mutating custom API state", () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const beforeAnthropicCount = registry.getAll().filter(model => model.provider === "anthropic").length;
 
 		const invalidConfig: ProviderConfigInput = {
@@ -117,7 +130,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("registerProvider applies headers-only overrides to existing provider models across refresh", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const providerName = "anthropic";
 		const runtimeHeader = "X-Runtime-Provider-Header";
 
@@ -129,8 +141,37 @@ describe("ModelRegistry runtime provider registration", () => {
 		expectProviderHeader(registry, providerName, runtimeHeader, undefined);
 	});
 
+	test("registerProvider keeps runtime header objects live for request-time reads", () => {
+		const providerHeaders: Record<string, string> = { "X-Request-ID": "request-1" };
+		const modelHeaders: Record<string, string> = { "X-Message-ID": "message-1" };
+
+		registry.registerProvider(
+			"runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				headers: providerHeaders,
+				models: [{ ...baseModel, headers: modelHeaders }],
+			},
+			"ext://runtime",
+		);
+
+		providerHeaders["X-Request-ID"] = "request-2";
+		providerHeaders["X-Turn-ID"] = "turn-2";
+		modelHeaders["X-Message-ID"] = "message-2";
+		modelHeaders["X-Model-Turn-ID"] = "model-turn-2";
+
+		const model = registry.find("runtime-provider", "runtime-model");
+		expect({ ...(model?.headers ?? {}) }).toEqual({
+			"X-Request-ID": "request-2",
+			"X-Turn-ID": "turn-2",
+			"X-Message-ID": "message-2",
+			"X-Model-Turn-ID": "model-turn-2",
+		});
+	});
+
 	test("registerProvider applies authHeader overrides to existing provider models across refresh", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const providerName = "anthropic";
 
 		expect(getProviderModels(registry, providerName).length).toBeGreaterThan(1);
@@ -141,8 +182,77 @@ describe("ModelRegistry runtime provider registration", () => {
 		expectProviderHeader(registry, providerName, "Authorization", undefined);
 	});
 
-	test("registerProvider preserves explicit thinking on runtime models", () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+	test("registerProvider applies remoteCompaction-only overrides to existing provider models across refresh", async () => {
+		const providerName = "anthropic";
+		const overrideEndpoint = "https://runtime.example.com/v1/compact";
+
+		expect(getProviderModels(registry, providerName).length).toBeGreaterThan(1);
+		registry.registerProvider(
+			providerName,
+			{ remoteCompaction: { enabled: false, endpoint: overrideEndpoint } },
+			"ext://runtime",
+		);
+
+		const expectCompaction = () => {
+			for (const model of getProviderModels(registry, providerName)) {
+				expect(model.remoteCompaction?.enabled).toBe(false);
+				expect(model.remoteCompaction?.endpoint).toBe(overrideEndpoint);
+			}
+		};
+		expectCompaction();
+		await registry.refresh("offline");
+		expectCompaction();
+		await registry.refreshProvider(providerName, "offline");
+		expectCompaction();
+
+		registry.clearSourceRegistrations("ext://runtime");
+		for (const model of getProviderModels(registry, providerName)) {
+			expect(model.remoteCompaction?.endpoint).not.toBe(overrideEndpoint);
+		}
+	});
+
+	test("refreshRuntimeProviders preserves model-level remoteCompaction over provider defaults", async () => {
+		const providerName = "dynamic-compact-provider";
+		const providerEndpoint = "https://runtime.example.com/v1/responses/provider-compact";
+		const modelEndpoint = "https://runtime.example.com/v1/responses/model-compact";
+
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				remoteCompaction: {
+					enabled: true,
+					api: "openai-responses",
+					endpoint: providerEndpoint,
+					model: "provider-compact",
+				},
+				fetchDynamicModels: async () => [
+					{
+						...baseModel,
+						id: "dynamic-compact-model",
+						remoteCompaction: {
+							endpoint: modelEndpoint,
+							model: "model-compact",
+						},
+					},
+				],
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+		const model = registry.find(providerName, "dynamic-compact-model");
+		expect(model?.remoteCompaction).toEqual({
+			enabled: true,
+			api: "openai-responses",
+			endpoint: modelEndpoint,
+			model: "model-compact",
+		});
+	});
+
+	test("registerProvider preserves explicit thinking and backfills wire facts", () => {
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
 			apiKey: "RUNTIME_KEY",
@@ -154,8 +264,7 @@ describe("ModelRegistry runtime provider registration", () => {
 					reasoning: true,
 					thinking: {
 						mode: "anthropic-adaptive",
-						minLevel: Effort.Minimal,
-						maxLevel: Effort.High,
+						efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 					},
 				},
 			],
@@ -166,13 +275,15 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(model?.thinking).toEqual({
 			mode: "anthropic-adaptive",
-			minLevel: Effort.Minimal,
-			maxLevel: Effort.High,
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			// Wire facts are backfilled from identity; non-claude ids get the
+			// 4-tier adaptive map, filtered to the declared efforts (no xhigh).
+			effortMap: { minimal: "low" },
+			requiresEffort: true,
 		});
 	});
 
 	test("extension-registered models survive refresh('offline') cycle", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
 			apiKey: "RUNTIME_KEY",
@@ -192,10 +303,10 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("extension-registered models survive refresh('online') cycle", async () => {
-		// ModelRegistry has no fetch injection seam; refresh("online") may hit real
-		// network. The contract under test is overlay survival, not discovery success —
-		// the online path is exercised but provider failures are intentionally swallowed.
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		// The shared registry uses a stub fetch that rejects every request, so
+		// refresh("online") exercises the full online discovery path without real
+		// network: each provider's fetch fails fast and is swallowed. The contract
+		// under test is overlay survival across the online cycle, not discovery.
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
 			apiKey: "RUNTIME_KEY",
@@ -214,7 +325,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("headers-only runtime override preserves existing baseUrl across refresh", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const modelId = "runtime-headers-only-baseurl-survivor";
 		const overrideBaseUrl = "https://runtime-baseurl.example.com/v1";
 		const runtimeHeader = "X-Runtime-Headers-Only";
@@ -249,8 +359,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("runtime headers override modelOverrides headers across refresh cycles", async () => {
-		const initialRegistry = new ModelRegistry(authStorage, modelsJsonPath);
-		const targetModel = initialRegistry.getAll().find(model => model.provider === "anthropic");
+		const targetModel = registry.getAll().find(model => model.provider === "anthropic");
 		if (!targetModel) throw new Error("Expected bundled anthropic model");
 
 		const modelId = targetModel.id;
@@ -267,19 +376,21 @@ describe("ModelRegistry runtime provider registration", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
-		expect(registry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+		const configuredRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
 
-		registry.registerProvider("anthropic", { headers: { [sharedHeader]: runtimeHeaderValue } }, "ext://runtime");
-		await expectProviderHeaderAcrossRefresh(registry, "anthropic", sharedHeader, runtimeHeaderValue);
+		configuredRegistry.registerProvider(
+			"anthropic",
+			{ headers: { [sharedHeader]: runtimeHeaderValue } },
+			"ext://runtime",
+		);
+		await expectProviderHeaderAcrossRefresh(configuredRegistry, "anthropic", sharedHeader, runtimeHeaderValue);
 
-		registry.clearSourceRegistrations("ext://runtime");
-		expect(registry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+		configuredRegistry.clearSourceRegistrations("ext://runtime");
+		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
 	});
 
 	test("extension-registered API keys survive refresh cycle for auth resolution", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
-
 		// Set up the env var that the apiKey config references
 		process.env.TEST_RUNTIME_KEY = "test-value";
 
@@ -302,7 +413,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("extension-registered custom API handler survives model refresh", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
 			apiKey: "RUNTIME_KEY",
@@ -323,7 +433,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("re-registering a provider replaces overlays and keeps transport overrides stable", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const runtimeHeader = "X-ReRegister-Provider-Header";
 		const overrideBaseUrl = "https://runtime-override.example.com/v1";
 		const config1: ProviderConfigInput = {
@@ -359,7 +468,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("provider source handoff does not retain previous source transport overrides", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const providerName = "shared-runtime-provider";
 		const leakedHeader = "X-Old-Source-Header";
 		const sourceBBaseUrl = "https://source-b.example.com/v1";
@@ -402,7 +510,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("transport-only source handoff clears previous source headers immediately", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const providerName = "anthropic";
 		const sourceAHeader = "X-Source-A-Header";
 		const sourceBHeader = "X-Source-B-Header";
@@ -416,8 +523,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("multiple extension providers survive refresh independently", async () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
-
 		registry.registerProvider(
 			"provider-a",
 			{
@@ -449,7 +554,6 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("clearSourceRegistrations and syncExtensionSources remove source-scoped API and OAuth providers", () => {
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		const oauthCredentials: OAuthCredentials = {
 			access: "access-token",
 			refresh: "refresh-token",

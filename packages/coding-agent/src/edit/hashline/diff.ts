@@ -9,6 +9,7 @@
  * match is accepted even when the tag was minted by a source that did not keep
  * history, and stale tags recover through the session snapshot store when possible.
  */
+import * as path from "node:path";
 import {
 	type ApplyResult,
 	applyEdits,
@@ -30,6 +31,7 @@ import {
 } from "@oh-my-pi/hashline";
 import { resolveToCwd } from "../../tools/path-utils";
 import { generateDiffString } from "../diff";
+import { canonicalSnapshotKey } from "../file-snapshot-store";
 import { readEditFileText } from "../read-file";
 import { nativeBlockResolver } from "./block-resolver";
 
@@ -55,6 +57,87 @@ async function readSectionText(absolutePath: string, sectionPath: string): Promi
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(message || `Unable to read ${sectionPath}`);
 	}
+}
+
+/**
+ * Streaming previews recompute on every streamed chunk; re-reading the target
+ * file from disk each tick dominates the cost on large files. Cache the raw
+ * section text keyed by mtime+size so any on-disk change invalidates
+ * naturally. Used by the streaming path only — the args-complete pass always
+ * reads fresh.
+ */
+const streamingTextCache = new Map<string, { mtimeMs: number; size: number; rawContent: string }>();
+const STREAMING_TEXT_CACHE_MAX = 8;
+
+async function readSectionTextCached(absolutePath: string, sectionPath: string): Promise<string> {
+	let stamp: { mtimeMs: number; size: number } | undefined;
+	try {
+		const stat = await Bun.file(absolutePath).stat();
+		stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
+	} catch {
+		stamp = undefined;
+	}
+	if (stamp) {
+		const cached = streamingTextCache.get(absolutePath);
+		if (cached && cached.mtimeMs === stamp.mtimeMs && cached.size === stamp.size) return cached.rawContent;
+	}
+	const rawContent = await readSectionText(absolutePath, sectionPath);
+	if (stamp) {
+		if (streamingTextCache.size >= STREAMING_TEXT_CACHE_MAX && !streamingTextCache.has(absolutePath)) {
+			const oldest = streamingTextCache.keys().next().value;
+			if (oldest !== undefined) streamingTextCache.delete(oldest);
+		}
+		streamingTextCache.set(absolutePath, { mtimeMs: stamp.mtimeMs, size: stamp.size, rawContent });
+	}
+	return rawContent;
+}
+
+/**
+ * Resolve a missing authored path to a file read this session by matching its
+ * basename and snapshot tag, mirroring {@link Patcher}'s apply-time recovery so
+ * a bare/wrong-directory `[basename#tag]` header previews against the same file
+ * the edit will land on. Returns `undefined` when no unique basename+tag match
+ * exists, leaving the caller to surface the original read error.
+ */
+function recoverSectionPathFromTag(
+	section: PatchSection,
+	authoredAbsolutePath: string,
+	snapshots: SnapshotStore,
+): string | undefined {
+	if (section.fileHash === undefined) return undefined;
+	const authoredName = path.basename(section.path);
+	const authoredKey = canonicalSnapshotKey(authoredAbsolutePath);
+	const candidates = [
+		...new Set(
+			snapshots
+				.findByHash(section.fileHash)
+				.filter(snapshot => path.basename(snapshot.path) === authoredName)
+				.map(snapshot => snapshot.path),
+		),
+	].filter(candidate => candidate !== authoredKey);
+	return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/**
+ * Read the section's target file for a preview, recovering a bare/mis-typed
+ * `[basename#tag]` path onto the file its tag uniquely names. Recovery fires
+ * only when the authored path is absent — matching {@link Patcher}'s apply-time
+ * order — so a permission/parse error on an existing file surfaces against the
+ * authored path instead of silently previewing a different tagged file. Returns
+ * the path actually read so callers key snapshot lookups off the same file.
+ */
+async function readSectionForPreview(
+	section: PatchSection,
+	authoredAbsolutePath: string,
+	snapshots: SnapshotStore,
+	streaming: boolean | undefined,
+): Promise<{ absolutePath: string; rawContent: string }> {
+	const read = streaming ? readSectionTextCached : readSectionText;
+	const recovered = (await Bun.file(authoredAbsolutePath).exists())
+		? undefined
+		: recoverSectionPathFromTag(section, authoredAbsolutePath, snapshots);
+	const target = recovered ?? authoredAbsolutePath;
+	return { absolutePath: target, rawContent: await read(target, section.path) };
 }
 
 function hasAnchorScopedEdit(edits: readonly Edit[]): boolean {
@@ -116,6 +199,8 @@ function applyPreviewEdits(args: {
 	if (!options.skipHashValidation && expected === undefined) {
 		throw new Error(missingSnapshotTagMessage(section.path));
 	}
+	// The 4-hex tag is content-derived: when the live text hashes to it, trust
+	// the match and preview directly (mirrors Patcher's apply-time behavior).
 	const liveMatches = expected !== undefined && computeFileHash(normalized) === expected;
 	const edits = parsePreviewEdits(section, options.streaming);
 	const resolved = resolvePreviewEdits({ section, absolutePath, normalized, snapshots, expected, liveMatches, edits });
@@ -166,9 +251,15 @@ function buildStreamingSectionDiff(
 	section: PatchSection,
 	normalized: string,
 ): { diff: string; firstChangedLine: number | undefined } | { error: string } {
-	const { edits } = parsePatchStreaming(section.diff);
+	const { edits, fileOp } = parsePatchStreaming(section.diff);
 	const resolved = resolveBlockEdits(edits, normalized, section.path, nativeBlockResolver, { onUnresolved: "drop" });
-	if (resolved.length === 0) return { error: `No changes would be made to ${section.path}.` };
+	if (resolved.length === 0) {
+		// A whole-file op (REM / MV) carries no line edits: the change is the
+		// delete/move itself, conveyed by the result header, so emit an empty
+		// diff rather than a misleading "No changes" error.
+		if (fileOp) return { diff: "", firstChangedLine: undefined };
+		return { error: `No changes would be made to ${section.path}.` };
+	}
 
 	const fileLines = normalized.split("\n");
 	const rows: string[] = [];
@@ -219,8 +310,13 @@ export async function computeHashlineSectionDiff(
 	options: HashlineDiffOptions = {},
 ): Promise<{ diff: string; firstChangedLine: number | undefined } | { error: string }> {
 	try {
-		const absolutePath = resolveToCwd(section.path, cwd);
-		const rawContent = await readSectionText(absolutePath, section.path);
+		const authoredPath = resolveToCwd(section.path, cwd);
+		const { absolutePath, rawContent } = await readSectionForPreview(
+			section,
+			authoredPath,
+			snapshots,
+			options.streaming,
+		);
 		const { text: content } = stripBom(rawContent);
 		const normalized = normalizeToLF(content);
 		// Streaming favors a stable, monotonic preview over an exact unified
@@ -229,7 +325,12 @@ export async function computeHashlineSectionDiff(
 		// (`streaming` unset) falls through to the real Myers diff below.
 		if (options.streaming) return buildStreamingSectionDiff(section, normalized);
 		const result = applyPreviewEdits({ section, absolutePath, normalized, snapshots, options });
-		if (normalized === result.text) return { error: `No changes would be made to ${section.path}.` };
+		if (normalized === result.text) {
+			// REM/MV-only sections change no text; the header conveys the
+			// delete/move, so don't surface a "No changes" error.
+			if (section.fileOp) return { diff: "", firstChangedLine: undefined };
+			return { error: `No changes would be made to ${section.path}.` };
+		}
 		return generateDiffString(normalized, result.text, undefined, { path: section.path });
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };

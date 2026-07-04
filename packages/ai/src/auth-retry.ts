@@ -1,5 +1,6 @@
-import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { isUsageLimitError } from "./rate-limit-utils";
+import type { OAuthAccess } from "./auth-storage";
+import * as AIError from "./error";
+import { isAuthRetryableError } from "./error/auth-classify";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -51,17 +52,26 @@ export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortS
 }
 
 /**
- * Classifies whether an error should trigger a credential refresh/rotation
- * retry: a hard `401`, or a rotatable usage-limit ("usage_limit_reached",
- * Codex's "you have hit your ChatGPT usage limit", etc.).
+ * Wraps a resolver with a bearer that was already selected for this request.
+ *
+ * Callers that preflight credentials can pass the returned resolver to the
+ * auth-retry driver without making the driver know about that preflight: the
+ * first initial resolution reuses `seed`, and all later resolutions delegate to
+ * `resolver`.
  */
-export function isAuthRetryableError(error: unknown): boolean {
-	if (extractHttpStatusFromError(error) === 401) return true;
-	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-	if (!message) return false;
-	if (extractHttpStatusFromError({ message }) === 401) return true;
-	return isUsageLimitError(message);
+export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
+	let seedPending = seed !== undefined;
+	return ctx => {
+		if (seedPending && ctx.error === undefined) {
+			seedPending = false;
+			return seed;
+		}
+		return resolver(ctx);
+	};
 }
+
+// Re-exported from the error module (its new home); see error/auth-classify.ts.
+export { isAuthRetryableError };
 
 /**
  * The ordered `lastChance` values for the retry steps after the initial
@@ -105,7 +115,7 @@ export async function withAuth<T>(
 	opts?: { isAuthError?: (error: unknown) => boolean; signal?: AbortSignal; missingKeyMessage?: string },
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
-	const missingKey = (): Error => new Error(opts?.missingKeyMessage ?? "No API key available");
+	const missingKey = (): Error => new AIError.MissingApiKeyError(undefined, opts?.missingKeyMessage);
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
@@ -131,6 +141,105 @@ export async function withAuth<T>(
 		lastKey = nextKey;
 		try {
 			return await attempt(nextKey);
+		} catch (error) {
+			if (!isAuthError(error)) throw error;
+			lastError = error;
+		}
+	}
+
+	throw lastError;
+}
+
+/**
+ * Minimal structural slice of `AuthStorage` consumed by {@link withOAuthAccess}.
+ * Typed structurally (and importing only the `OAuthAccess` type) so this module
+ * never takes a runtime dependency on `./auth-storage`.
+ */
+export interface OAuthAccessSource {
+	getOAuthAccess(
+		provider: string,
+		sessionId?: string,
+		options?: { forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<OAuthAccess | undefined>;
+	rotateSessionCredential(
+		provider: string,
+		sessionId: string | undefined,
+		options?: { error?: unknown; signal?: AbortSignal },
+	): Promise<boolean>;
+}
+
+export interface WithOAuthAccessOptions {
+	/** Session id for credential stickiness, threaded into every resolve. */
+	sessionId?: string;
+	signal?: AbortSignal;
+	/** Override the retryable-error classifier (default {@link isAuthRetryableError}). */
+	isAuthError?: (error: unknown) => boolean;
+	/**
+	 * Pre-resolved access used for the initial attempt. Callers that already
+	 * resolved access for an availability gate pass it here so the helper
+	 * doesn't double-resolve (mirrors the gateway resolver's `initialKey`).
+	 */
+	seed?: OAuthAccess;
+	missingAccessMessage?: string;
+}
+
+/**
+ * {@link withAuth} for OAuth-access consumers: runs an auth-protected
+ * operation through the central a/b/c retry policy, handing the attempt the
+ * full {@link OAuthAccess} (bearer + identity metadata: `accountId`,
+ * `projectId`, `enterpriseUrl`) instead of bare API-key bytes.
+ *
+ * - initial → `getOAuthAccess` (or `opts.seed`).
+ * - step (b) → `getOAuthAccess` with `forceRefresh: true` (re-mint the SAME
+ *   account; picks up peer/broker rotations).
+ * - step (c) → `rotateSessionCredential` then re-resolve (switch to a sibling).
+ *
+ * A step is skipped when it yields no access or the same `accessToken` that
+ * just failed; non-auth errors propagate immediately. Use this instead of
+ * hand-rolled `getOAuthAccess` + fetch flows so 401s and usage-limits rotate
+ * credentials instead of failing the call.
+ */
+export async function withOAuthAccess<T>(
+	storage: OAuthAccessSource,
+	provider: string,
+	attempt: (access: OAuthAccess) => Promise<T>,
+	opts?: WithOAuthAccessOptions,
+): Promise<T> {
+	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
+	const { sessionId, signal } = opts ?? {};
+
+	let lastAccess = opts?.seed ?? (await storage.getOAuthAccess(provider, sessionId, { signal }));
+	if (!lastAccess) {
+		throw new AIError.MissingApiKeyError(
+			provider,
+			opts?.missingAccessMessage ?? `No OAuth credential available for provider: ${provider}`,
+		);
+	}
+
+	const resolveStep = async (lastChance: boolean, error: unknown): Promise<OAuthAccess | undefined> => {
+		try {
+			if (!lastChance) return await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+			await storage.rotateSessionCredential(provider, sessionId, { error, signal });
+			return await storage.getOAuthAccess(provider, sessionId, { signal });
+		} catch {
+			return undefined;
+		}
+	};
+
+	let lastError: unknown;
+	try {
+		return await attempt(lastAccess);
+	} catch (error) {
+		if (!isAuthError(error)) throw error;
+		lastError = error;
+	}
+
+	for (const lastChance of AUTH_RETRY_STEPS) {
+		const next = await resolveStep(lastChance, lastError);
+		if (!next || next.accessToken === lastAccess.accessToken) continue;
+		lastAccess = next;
+		try {
+			return await attempt(next);
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;

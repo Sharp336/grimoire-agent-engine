@@ -22,6 +22,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
+	ModelSpec,
 	ProviderResponseMetadata,
 	SimpleStreamOptions,
 	Static,
@@ -29,31 +30,35 @@ import type {
 	TSchema,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import type * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import type { AutocompleteItem, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type * as Zod from "zod/v4";
+import type { Type as arktype } from "arktype";
+import type * as zod from "zod/v4";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+import type * as PiCodingAgent from "../../index";
+import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
+import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type {
 	BashToolDetails,
 	BashToolInput,
-	FindToolDetails,
-	FindToolInput,
+	GlobToolDetails,
+	GlobToolInput,
+	GrepToolDetails,
+	GrepToolInput,
 	ReadToolDetails,
 	ReadToolInput,
-	SearchToolDetails,
-	SearchToolInput,
 	WriteToolInput,
 } from "../../tools";
+import type { ApprovalMode } from "../../tools/approval";
 import type { EventBus } from "../../utils/event-bus";
 import type {
 	AgentEndEvent,
@@ -79,6 +84,8 @@ import type {
 	SessionEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
+	SessionStopEvent,
+	SessionStopEventResult,
 	SessionSwitchEvent,
 	SessionTreeEvent,
 	TodoReminderEvent,
@@ -271,16 +278,22 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
-	tokens: number | null;
+	/** Estimated context tokens. */
+	tokens: number;
 	contextWindow: number;
-	/** Context usage as percentage of context window, or null if tokens is unknown. */
-	percent: number | null;
+	/** Context usage as percentage of context window. */
+	percent: number;
 }
 
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
+	/**
+	 * Force a one-off compaction mode for this invocation, overriding the
+	 * configured `compaction.strategy` / `remoteEnabled` (the `/compact`
+	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.
+	 */
+	mode?: CompactMode;
 }
 
 /**
@@ -291,6 +304,32 @@ export interface CompactOptions {
 // surface (model registry, system prompt, shutdown, full session manager
 // access). Field overlap is incidental; merging into a base would require
 // hooks to widen their public contract.
+/**
+ * Read-only model query facade exposed at `ctx.models`. Lets an extension select a
+ * model the same way core does — list authenticated models, read the session model,
+ * resolve a model string or role alias, and compare model families — without reaching
+ * into the mutable registry or re-implementing matching/family heuristics.
+ */
+export interface ExtensionModelQuery {
+	/** Authenticated models available this session (the same set `--model` selection sees). */
+	list(): Model[];
+	/** The current session model, if one is set. */
+	current(): Model | undefined;
+	/**
+	 * Resolve a model string (`provider/id`, bare id) or role alias (`pi/slow`, a
+	 * configured role) to a Model, using the same settings-backed aliases and match
+	 * preferences as core selection. Thinking/routing suffixes are accepted and resolved
+	 * to the base model (pass effort separately). Returns undefined when nothing matches.
+	 */
+	resolve(spec: string): Model | undefined;
+	/**
+	 * Opaque lineage token for "are these the same family?" comparisons — every Claude
+	 * point release shares a token, Claude and GPT differ. Backed by catalog canonical
+	 * identity. Compare it; do not persist it (the vocabulary tracks new releases).
+	 */
+	family(model: Model): string;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -308,6 +347,8 @@ export interface ExtensionContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
 	model: Model | undefined;
+	/** Read-only model query facade: list / current / resolve / family. */
+	models: ExtensionModelQuery;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
@@ -318,6 +359,8 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
+	/** Structured memory runtime for status/search/save across the configured backend. */
+	memory?: MemoryRuntimeContext;
 }
 
 /**
@@ -492,7 +535,14 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string[];
 }
 
-export type { AgentEndEvent, AgentStartEvent, TurnEndEvent, TurnStartEvent } from "../shared-events";
+export type {
+	AgentEndEvent,
+	AgentStartEvent,
+	SessionStopEvent,
+	SessionStopEventResult,
+	TurnEndEvent,
+	TurnStartEvent,
+} from "../shared-events";
 
 /** Fired when a message starts (user, assistant, or toolResult) */
 export interface MessageStartEvent {
@@ -604,6 +654,24 @@ export interface InputEvent {
 // Tool Events
 // ============================================================================
 
+export interface ToolApprovalRequestedEvent {
+	type: "tool_approval_requested";
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	reason?: string;
+	approvalMode: ApprovalMode;
+}
+
+export interface ToolApprovalResolvedEvent {
+	type: "tool_approval_resolved";
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	approved: boolean;
+	reason?: string;
+}
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -629,14 +697,14 @@ export interface WriteToolCallEvent extends ToolCallEventBase {
 	input: WriteToolInput;
 }
 
-export interface SearchToolCallEvent extends ToolCallEventBase {
-	toolName: "search";
-	input: SearchToolInput;
+export interface GrepToolCallEvent extends ToolCallEventBase {
+	toolName: "grep";
+	input: GrepToolInput;
 }
 
-export interface FindToolCallEvent extends ToolCallEventBase {
-	toolName: "find";
-	input: FindToolInput;
+export interface GlobToolCallEvent extends ToolCallEventBase {
+	toolName: "glob";
+	input: GlobToolInput;
 }
 
 export interface CustomToolCallEvent extends ToolCallEventBase {
@@ -650,8 +718,8 @@ export type ToolCallEvent =
 	| ReadToolCallEvent
 	| EditToolCallEvent
 	| WriteToolCallEvent
-	| SearchToolCallEvent
-	| FindToolCallEvent
+	| GrepToolCallEvent
+	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
@@ -682,14 +750,14 @@ export interface WriteToolResultEvent extends ToolResultEventBase {
 	details: undefined;
 }
 
-export interface SearchToolResultEvent extends ToolResultEventBase {
-	toolName: "search";
-	details: SearchToolDetails | undefined;
+export interface GrepToolResultEvent extends ToolResultEventBase {
+	toolName: "grep";
+	details: GrepToolDetails | undefined;
 }
 
-export interface FindToolResultEvent extends ToolResultEventBase {
-	toolName: "find";
-	details: FindToolDetails | undefined;
+export interface GlobToolResultEvent extends ToolResultEventBase {
+	toolName: "glob";
+	details: GlobToolDetails | undefined;
 }
 
 export interface CustomToolResultEvent extends ToolResultEventBase {
@@ -703,8 +771,8 @@ export type ToolResultEvent =
 	| ReadToolResultEvent
 	| EditToolResultEvent
 	| WriteToolResultEvent
-	| SearchToolResultEvent
-	| FindToolResultEvent
+	| GrepToolResultEvent
+	| GlobToolResultEvent
 	| CustomToolResultEvent;
 
 /**
@@ -731,8 +799,8 @@ export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): eve
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
 export function isToolCallEventType(toolName: "write", event: ToolCallEvent): event is WriteToolCallEvent;
-export function isToolCallEventType(toolName: "search", event: ToolCallEvent): event is SearchToolCallEvent;
-export function isToolCallEventType(toolName: "find", event: ToolCallEvent): event is FindToolCallEvent;
+export function isToolCallEventType(toolName: "grep", event: ToolCallEvent): event is GrepToolCallEvent;
+export function isToolCallEventType(toolName: "glob", event: ToolCallEvent): event is GlobToolCallEvent;
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
 	toolName: TName,
 	event: ToolCallEvent,
@@ -751,6 +819,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| SessionStopEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -771,7 +840,9 @@ export type ExtensionEvent =
 	| UserPythonEvent
 	| InputEvent
 	| ToolCallEvent
-	| ToolResultEvent;
+	| ToolResultEvent
+	| ToolApprovalRequestedEvent
+	| ToolApprovalResolvedEvent;
 
 // ============================================================================
 // Event Results
@@ -885,11 +956,13 @@ export interface ExtensionAPI {
 	/** Injected zod-backed typebox shim for legacy `Type.Object(...)` parameter authoring. */
 	typebox: typeof TypeBox;
 
-	/** Injected zod module for Zod-authored extension tools (canonical going forward). */
-	zod: typeof Zod;
+	/** Injected arktype module for arktype-authored extension tools (canonical going forward). */
+	arktype: typeof arktype;
+	/** Injected zod/v4 module for canonical extension tool parameter schemas. */
+	zod: typeof zod;
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
-	pi: typeof piCodingAgent;
+	pi: typeof PiCodingAgent;
 
 	// =========================================================================
 	// Event Subscription
@@ -925,6 +998,7 @@ export interface ExtensionAPI {
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -942,6 +1016,8 @@ export interface ExtensionAPI {
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
+	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -1081,7 +1157,7 @@ export interface ExtensionAPI {
 	 *       id: "claude-sonnet-4@20250514",
 	 *       name: "Claude Sonnet 4 (Vertex)",
 	 *       reasoning: true,
-	 *       thinking: { mode: "anthropic-adaptive", minLevel: "minimal", maxLevel: "high" },
+	 *       thinking: { mode: "anthropic-adaptive", efforts: ["minimal", "low", "medium", "high"] },
 	 *       input: ["text", "image"],
 	 *       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 	 *       contextWindow: 200000,
@@ -1168,7 +1244,7 @@ export interface ProviderModelConfig {
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
-	compat?: Model<Api>["compat"];
+	compat?: ModelSpec<Api>["compat"];
 }
 
 /** Extension factory function type. Supports both sync and async initialization. */

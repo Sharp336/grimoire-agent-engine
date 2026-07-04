@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolError } from "./tool-errors";
 
@@ -25,7 +26,11 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 );
 // Schemes whose host grammar is identifier-shaped, so any trailing
 // `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
-// excluded because mcp resource URIs may legitimately contain colons.
+// excluded because mcp resource URIs may legitimately contain colons. `ssh://`
+// is included despite an optional `:port`; `splitInternalUrlSel` skips the peel
+// for an `ssh://host:port` that has no `/path`, so the port colon is never
+// mistaken for a selector (a real ssh selector trails the `/path`, e.g.
+// `ssh://h/f:1-5`).
 const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	agent: true,
 	artifact: true,
@@ -36,6 +41,7 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	pr: true,
 	rule: true,
 	skill: true,
+	ssh: true,
 	vault: true,
 };
 // Schemes whose resource URIs are server-defined and may legitimately end
@@ -54,6 +60,7 @@ const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
 	"rule://",
 	"local://",
 	"mcp://",
+	"ssh://",
 	"vault://",
 ] as const;
 
@@ -140,9 +147,42 @@ export function expandTilde(filePath: string, home?: string): string {
 }
 
 export function expandPath(filePath: string): string {
-	const normalized = stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(filePath)));
+	const normalized = stripWindowsExtendedLengthPathPrefix(
+		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(filePath))),
+	);
 	return expandTilde(normalized);
 }
+
+function isAsciiDriveLetter(value: string): boolean {
+	if (value.length !== 1) return false;
+	const code = value.charCodeAt(0);
+	return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function windowsDriveAliasPath(filePath: string): string | undefined {
+	if (!filePath.startsWith("/")) return undefined;
+	const parts = filePath.split("/");
+	if (parts[0] !== "") return undefined;
+
+	let drive: string | undefined;
+	let tailStart = 2;
+	if (parts.length >= 2 && isAsciiDriveLetter(parts[1] ?? "")) {
+		drive = parts[1]!.toUpperCase();
+	} else if (parts.length >= 3 && (parts[1] ?? "").toLowerCase() === "mnt" && isAsciiDriveLetter(parts[2] ?? "")) {
+		drive = parts[2]!.toUpperCase();
+		tailStart = 3;
+	}
+	if (!drive) return undefined;
+
+	const tail = parts.slice(tailStart).filter(Boolean).join("\\");
+	return tail ? `${drive}:\\${tail}` : `${drive}:\\`;
+}
+
+export function normalizeWindowsDriveAliasPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32") return filePath;
+	return windowsDriveAliasPath(filePath) ?? filePath;
+}
+
 /**
  * Inclusive line range describing one selector segment (e.g. `50-100`,
  * `301-`, or `50+10`). `endLine` is `undefined` for open-ended ranges.
@@ -305,6 +345,13 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
 
 	const schemeEnd = schemeMatch[0].length;
+	// ssh:// authority carries an optional `:port`; with no `/path` after the
+	// authority, a trailing `:NNNN` is the port, not a read selector
+	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
+	// (artifact://5:1-50) still peel, so this guard is ssh-specific.
+	if (scheme === "ssh" && rawPath.indexOf("/", schemeEnd) === -1) {
+		return { path: rawPath };
+	}
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
@@ -318,6 +365,27 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };
+}
+
+/**
+ * Peel a read-tool selector off an internal-URL write target so `write` resolves
+ * the same file `read` does (e.g. `ssh://h/f:raw` -> `ssh://h/f`). Only the
+ * whole-file display modes `raw`/`conflicts` are accepted (they do not change
+ * which bytes are written); any other selector-shaped tail `splitInternalUrlSel`
+ * peels — a line range, a compound like `raw:1-20`, or a malformed `:-N` — throws,
+ * because `write` addresses a whole file, not a partial range, and silently
+ * stripping it would write to a path the caller never named. Non-URL paths and
+ * URLs without a selector pass through unchanged.
+ */
+export function peelWriteUrlSelector(rawPath: string): string {
+	const { path, sel } = splitInternalUrlSel(rawPath);
+	if (sel === undefined) return rawPath;
+	// Case-insensitive to match read's selector grammar (parseSel + the /i regexes above).
+	if (/^(?:raw|conflicts)$/i.test(sel)) return path;
+	throw new ToolError(
+		`write does not accept the trailing selector ":${sel}" — it writes a whole file. ` +
+			`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
+	);
 }
 
 function assertNotInternalUrl(expanded: string, original: string): void {
@@ -344,6 +412,40 @@ export function isInternalUrlPath(filePath: string): boolean {
 }
 
 /**
+ * True when a tool path argument references the `ssh://` scheme anywhere.
+ *
+ * Substring (not anchored) on purpose: it feeds the read/search/write approval
+ * tier, which runs synchronously on the raw args. `search` only flattens a
+ * delimited `paths: "a,ssh://h/x"` into separate entries *after* approval, so an
+ * anchored check would let an embedded `ssh://` slip through at the read tier.
+ * Matching the literal `ssh://` substring also tracks exactly what routes to the
+ * SSH handler; over-matching only over-prompts (fail-closed).
+ */
+export function pathTargetsSsh(path: string): boolean {
+	return /ssh:\/\//i.test(path);
+}
+
+/**
+ * True when a path is specifically an `ssh://` URL (anchored scheme match).
+ * Unlike {@link pathTargetsSsh} (substring, for the pre-expansion approval
+ * scan), this is the exact per-entry check used to reject `ssh://` *before* a
+ * side-effecting `InternalUrlRouter.resolve` in tools that need a local file.
+ */
+export function isSshUrl(path: string): boolean {
+	return /^ssh:\/\//i.test(path.trim());
+}
+
+/**
+ * True when the read tool's URL parser (`parseReadUrlTarget` in fetch.ts) would
+ * recognize this path as a readable external URL: a strict `http(s)://`, a
+ * collapsed `http(s):/host` (Node path normalization folds `//` → `/`), or a
+ * scheme-less `www.` spelling. Keep in sync with `parseReadUrlTarget`.
+ */
+export function isReadableUrlPath(value: string): boolean {
+	return /^https?:\/\/?/i.test(value) || /^www\./i.test(value);
+}
+
+/**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths.
  *
@@ -353,7 +455,7 @@ export function isInternalUrlPath(filePath: string): boolean {
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
 	const normalized = normalizeLocalScheme(filePath);
-	const expanded = expandPath(normalized);
+	const expanded = normalizeWindowsDriveAliasPath(expandPath(normalized));
 	const expandedAndNormalized = normalizeLocalScheme(expanded);
 
 	assertNotInternalUrl(expandedAndNormalized, normalized);
@@ -398,9 +500,47 @@ export function formatPathRelativeToCwd(
 export function stripOuterDoubleQuotes(input: string): string {
 	return input.startsWith('"') && input.endsWith('"') && input.length > 1 ? input.slice(1, -1) : input;
 }
+function normalizePathSeparators(input: string): string {
+	if (isInternalUrlPath(input)) return input;
+	if (!input.includes("\\")) return input;
+	return input.replace(/\\/g, "/");
+}
 
 export function normalizePathLikeInput(input: string): string {
 	return stripOuterDoubleQuotes(input.trim());
+}
+
+/**
+ * Parse a JSON-encoded array of path strings (e.g. `'["a.ts","b.ts"]'`).
+ * Returns `null` when the input is not a bracketed JSON string array, so the
+ * caller can fall back to treating the input as a single literal path.
+ */
+function parseStringEncodedPathArray(input: string): string[] | null {
+	const trimmed = input.trim();
+	if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+
+	if (!Array.isArray(parsed) || parsed.some(entry => typeof entry !== "string")) {
+		return null;
+	}
+	return parsed;
+}
+
+/**
+ * Normalize a path argument that may arrive as a single string, a JSON-encoded
+ * string array (`'["a.ts"]'`), or an actual array into a flat `string[]`.
+ * Delimited single strings (`"a.ts b.ts"`) are left for
+ * {@link expandDelimitedPathEntries} to split.
+ */
+export function toPathList(input: string | string[] | undefined): string[] {
+	if (typeof input === "string") return parseStringEncodedPathArray(input) ?? [input];
+	return input ?? [];
 }
 
 const GLOB_PATH_CHARS = ["*", "?", "[", "{"] as const;
@@ -485,12 +625,21 @@ async function delimitedPathPartResolves(entry: string, cwd: string, splitter: P
 	}
 }
 
+/**
+ * How many split parts must resolve to an existing path for the split to win.
+ * Semicolon is the documented list delimiter, so it splits unconditionally
+ * (`"none"`) — an all-missing list must still fan out so multi-path missing
+ * semantics can name every entry. Comma is legacy recovery (`"some"`), and
+ * whitespace/mixed are aggressive heuristics gated on every part existing.
+ */
+type DelimitedResolveRequirement = "all" | "some" | "none";
+
 async function tryDelimitedPathSplit(
 	entry: string,
 	cwd: string,
 	splitter: PathEntrySplitter,
 	mode: DelimitedPathSplitMode,
-	requireAllParts: boolean,
+	requirement: DelimitedResolveRequirement,
 ): Promise<string[] | null> {
 	const rawParts = splitTopLevelDelimitedPath(entry, mode);
 	if (rawParts.length < 2) return null;
@@ -499,9 +648,12 @@ async function tryDelimitedPathSplit(
 	if (parts.length === 0) return null;
 	if (parts.length < 2 && rawParts.length === parts.length) return null;
 
-	const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter)));
-	const valid = requireAllParts ? resolved.every(Boolean) : resolved.some(Boolean);
-	return valid ? parts : null;
+	if (requirement !== "none") {
+		const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter)));
+		const valid = requirement === "all" ? resolved.every(Boolean) : resolved.some(Boolean);
+		if (!valid) return null;
+	}
+	return parts;
 }
 
 /**
@@ -525,10 +677,10 @@ export async function splitDelimitedPathEntry(
 	}
 
 	return (
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", false)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", false)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", true)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", true))
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", "some")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", "all")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", "all"))
 	);
 }
 
@@ -582,19 +734,20 @@ export interface ResolvedMultiFindPattern {
 	targets: ResolvedFindTarget[];
 	scopePath: string;
 }
-
-/**
- * Split a user path into a base path + glob pattern for tools that delegate to
- * APIs accepting separate `path` and `glob` arguments.
- */
 export function parseSearchPath(filePath: string): ParsedSearchPath {
-	const normalizedPath = filePath.replace(/\\/g, "/");
-	if (!hasGlobPathChars(normalizedPath)) {
-		return { basePath: filePath };
+	const normalizedPath = normalizePathSeparators(filePath);
+	const segments = normalizedPath.split("/");
+	let firstGlobIndex = -1;
+	for (let i = 0; i < segments.length; i++) {
+		if (hasGlobPathChars(segments[i])) {
+			firstGlobIndex = i;
+			break;
+		}
 	}
 
-	const segments = normalizedPath.split("/");
-	const firstGlobIndex = segments.findIndex(segment => hasGlobPathChars(segment));
+	if (firstGlobIndex === -1) {
+		return { basePath: normalizedPath };
+	}
 
 	if (firstGlobIndex <= 0) {
 		return { basePath: ".", glob: normalizedPath };
@@ -617,7 +770,7 @@ export async function parseSearchPathPreferringLiteral(filePath: string, cwd: st
 	if (!hasGlobPathChars(filePath) || isInternalUrlPath(filePath)) return parseSearchPath(filePath);
 	try {
 		await fs.promises.stat(resolveToCwd(filePath, cwd));
-		return { basePath: filePath };
+		return { basePath: normalizePathSeparators(filePath) };
 	} catch {
 		return parseSearchPath(filePath);
 	}
@@ -632,7 +785,8 @@ export async function parseSearchPathPreferringLiteral(filePath: string, cwd: st
 //   /abs/path/**/\*.ts -> { basePath: "/abs/path", globPattern: "**/*.ts", hasGlob: true }
 //   src/app -> { basePath: "src/app", globPattern: "**/*", hasGlob: false }
 export function parseFindPattern(pattern: string): ParsedFindPattern {
-	const segments = pattern.split("/");
+	const normalizedPattern = normalizePathSeparators(pattern);
+	const segments = normalizedPattern.split("/");
 	let firstGlobIndex = -1;
 	for (let i = 0; i < segments.length; i++) {
 		if (hasGlobPathChars(segments[i])) {
@@ -642,14 +796,14 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 	}
 
 	if (firstGlobIndex === -1) {
-		return { basePath: pattern, globPattern: "**/*", hasGlob: false };
+		return { basePath: normalizedPattern, globPattern: "**/*", hasGlob: false };
 	}
 
 	if (firstGlobIndex === 0) {
-		const needsRecursive = !pattern.startsWith("**/");
+		const needsRecursive = !normalizedPattern.startsWith("**/");
 		return {
 			basePath: ".",
-			globPattern: needsRecursive ? `**/${pattern}` : pattern,
+			globPattern: needsRecursive ? `**/${normalizedPattern}` : normalizedPattern,
 			hasGlob: true,
 		};
 	}
@@ -722,6 +876,7 @@ async function resolveSearchPathItems(
 	pathItems: string[],
 	cwd: string,
 	suffixGlob?: string,
+	fanOutFileItems = false,
 ): Promise<ResolvedMultiSearchPath | undefined> {
 	if (pathItems.length < 1) {
 		return undefined;
@@ -753,14 +908,27 @@ async function resolveSearchPathItems(
 		}
 		return relativeBasePath === "." ? path.basename(item.absoluteBasePath) : relativeBasePath;
 	});
-	const rootPath = path.parse(commonBasePath).root;
-	const isDegenerateRoot = commonBasePath === rootPath && parsedItems.length > 1;
-	const targets = isDegenerateRoot
-		? parsedItems.map(item => ({
-				basePath: item.absoluteBasePath,
-				glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
-			}))
-		: undefined;
+	// A single walk rooted at the common ancestor is only safe when that
+	// ancestor is itself one of the requested scopes (e.g. `.` + `src/foo.ts`):
+	// the walk then covers exactly what the caller asked for. When the common
+	// ancestor is an unrequested parent (`.` + `~/.gitconfig` → `$HOME`, or
+	// disjoint trees → `/`), a collapsed walk traverses every unrelated sibling
+	// under it — fan out into per-item targets so each scan stays bounded to a
+	// requested path.
+	const commonIsRequestedScope = parsedItems.some(item => item.absoluteBasePath === commonBasePath);
+	// Walkers prune `.git` unconditionally and honor gitignore, so a plain-file
+	// item folded into a directory walk's glob union (`.` + `.git/config`) can
+	// silently never match. Callers that dedupe overlapping results opt in via
+	// `fanOutFileItems` to get explicit file targets, which bypass the walker.
+	const demotesFileItem =
+		fanOutFileItems && !allExactFiles && parsedItems.some(item => !item.parsedPath.glob && item.stat.isFile());
+	const targets =
+		parsedItems.length > 1 && (!commonIsRequestedScope || demotesFileItem)
+			? parsedItems.map(item => ({
+					basePath: item.absoluteBasePath,
+					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
+				}))
+			: undefined;
 
 	return {
 		basePath: commonBasePath,
@@ -775,8 +943,9 @@ export async function resolveExplicitSearchPaths(
 	pathItems: string[],
 	cwd: string,
 	suffixGlob?: string,
+	fanOutFileItems = false,
 ): Promise<ResolvedMultiSearchPath | undefined> {
-	return resolveSearchPathItems([...new Set(pathItems)], cwd, suffixGlob);
+	return resolveSearchPathItems([...new Set(pathItems)], cwd, suffixGlob, fanOutFileItems);
 }
 
 async function resolveFindPatternItems(
@@ -912,6 +1081,14 @@ export function resolveReadPath(filePath: string, cwd: string): string {
 // Tool-scope resolution (search/ast tools)
 // =============================================================================
 
+/** Local file materialized from a readable external URL for shared tool-scope resolution. */
+export interface ResolvedExternalSearchUrl {
+	/** Absolute or cwd-relative file path to search. */
+	sourcePath: string;
+	/** True when the materialized file must not mint editable anchors. */
+	immutable?: boolean;
+}
+
 export interface ToolScopeOptions {
 	rawPaths: string[];
 	cwd: string;
@@ -921,6 +1098,10 @@ export interface ToolScopeOptions {
 	trackImmutableSources?: boolean;
 	/** Honor `exactFilePaths` from {@link resolveExplicitSearchPaths} (search-only). */
 	surfaceExactFilePaths?: boolean;
+	/** Fan plain-file entries out into per-target scans instead of folding them
+	 * into a directory walk's glob union (search-only: the caller must dedupe
+	 * matches from overlapping targets). */
+	fanOutFileTargets?: boolean;
 	/** Extra hint appended to "Path not found" when stat fails and the user supplied multiple paths. */
 	multipathStatHint?: string;
 	/** Calling session's settings — forwarded to the internal-URL router so caller-aware handlers (issue://, pr://) honor it. */
@@ -929,6 +1110,10 @@ export interface ToolScopeOptions {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — pins resolutions to the calling session. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
+	skills?: readonly Skill[];
+	/** Materialize readable external URLs to local text files before scope derivation. */
+	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
 
 export interface ToolScopeResolution {
@@ -954,28 +1139,58 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	const { rawPaths: inputs, cwd, internalUrlAction } = opts;
 	const normalizedRawPaths = inputs.map(normalizePathLikeInput);
 	if (normalizedRawPaths.some(rawPath => rawPath.length === 0)) {
-		throw new ToolError("`paths` must contain non-empty paths or globs");
+		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
 	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd);
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
-		throw new ToolError("`paths` must contain non-empty paths or globs");
+		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
-	// External (http/https/ftp/file) URLs are not searchable; route the caller
-	// to `read` instead of letting the path-resolver surface a confusing
-	// "Path not found" for a slash-stripped URL.
-	const externalUrl = rawPaths.find(rawPath => /^(?:https?|ftp|file|ws|wss):\/\//i.test(rawPath));
-	if (externalUrl) {
-		throw new ToolError(
-			`Cannot ${internalUrlAction} external URL: ${externalUrl}. Use \`read\` to fetch web content, then search the returned text.`,
-		);
-	}
+	// Strict external-URL schemes. `file://` is intentionally absent: it has
+	// local-path semantics (expandPath strips it downstream), so it flows through
+	// the ordinary filesystem pipeline instead of the external-URL resolver.
+	const strictExternalUrlRe = /^(?:https?|ftp|ws|wss):\/\//i;
 	const internalRouter = InternalUrlRouter.instance();
 	const resolvedPathInputs: string[] = [];
 	const immutableSourcePaths = new Set<string>();
 	for (const rawPath of rawPaths) {
+		let externalUrl = strictExternalUrlRe.test(rawPath);
+		if (!externalUrl && isReadableUrlPath(rawPath) && !hasGlobPathChars(rawPath)) {
+			// Fuzzy spelling the read parser accepts (`www.host/…`, collapsed
+			// `https:/host/…`). An existing local path wins over URL
+			// interpretation so a directory literally named `www.foo` stays
+			// searchable; only a definitive ENOENT/ENOTDIR flips to URL handling
+			// (any other stat error means the path exists — let the local
+			// pipeline surface it).
+			try {
+				await fs.promises.stat(resolveToCwd(rawPath, cwd));
+			} catch (err) {
+				externalUrl = isEnoent(err) || isEnotdir(err);
+			}
+		}
+		if (externalUrl) {
+			const resolved = opts.resolveExternalUrl ? await opts.resolveExternalUrl(rawPath) : undefined;
+			if (resolved) {
+				resolvedPathInputs.push(resolved.sourcePath);
+				if (opts.trackImmutableSources && resolved.immutable) {
+					immutableSourcePaths.add(path.resolve(resolved.sourcePath));
+				}
+				continue;
+			}
+			// Resolver missing or declined (e.g. ftp/ws/wss): fail explicitly
+			// instead of letting the local-path fallthrough surface a confusing
+			// "Path not found" for a URL-shaped input.
+			throw new ToolError(
+				`Cannot ${internalUrlAction} external URL: ${rawPath}. Use \`read\` to fetch web content, then search the returned text.`,
+			);
+		}
 		if (!internalRouter.canHandle(rawPath)) {
 			resolvedPathInputs.push(rawPath);
 			continue;
+		}
+		if (isSshUrl(rawPath)) {
+			throw new ToolError(
+				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or the \`search\` tool to grep remote files.`,
+			);
 		}
 		if (hasGlobPathChars(rawPath)) {
 			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
@@ -985,6 +1200,11 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			settings: opts.settings,
 			signal: opts.signal,
 			localProtocolOptions: opts.localProtocolOptions,
+			skills: opts.skills,
+			// Tool-scope resolution only needs `sourcePath`; skip content
+			// materialization so large artifacts (or any handler that separates
+			// path from content) stay searchable without OOM risk.
+			pathOnly: true,
 		});
 		if (!resource.sourcePath) {
 			throw new ToolError(`Cannot ${internalUrlAction} internal URL without a backing file: ${rawPath}`);
@@ -1017,7 +1237,12 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		globFilter = parsedPath.glob;
 		scopePath = formatPathRelativeToCwd(searchPath, cwd);
 	} else {
-		const multiSearchPath = await resolveExplicitSearchPaths(effectivePaths, cwd);
+		const multiSearchPath = await resolveExplicitSearchPaths(
+			effectivePaths,
+			cwd,
+			undefined,
+			opts.fanOutFileTargets === true,
+		);
 		if (!multiSearchPath) {
 			throw new ToolError("`paths` must contain at least one path or glob");
 		}

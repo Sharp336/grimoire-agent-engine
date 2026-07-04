@@ -1,11 +1,10 @@
+import * as AIError from "../error";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 export const googleGeminiCliProvider = {
 	id: "google-gemini-cli",
 	name: "Google Cloud Code Assist (Gemini CLI)",
-	defaultModel: "gemini-2.5-pro",
-	specialModelManager: true,
 	login: async (cb: OAuthLoginCallbacks) => {
 		// Lazy import: keep heavy OAuth flow modules out of the eager registry graph.
 		const { loginGeminiCli } = await import("./oauth/google-gemini-cli");
@@ -13,7 +12,7 @@ export const googleGeminiCliProvider = {
 	},
 	refreshToken: async (credentials: OAuthCredentials) => {
 		if (!credentials.projectId) {
-			throw new Error("Google Cloud credentials missing projectId");
+			throw new AIError.ConfigurationError("Google Cloud credentials missing projectId");
 		}
 		const { refreshGoogleCloudToken } = await import("./oauth/google-gemini-cli");
 		return refreshGoogleCloudToken(credentials.refresh, credentials.projectId);

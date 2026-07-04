@@ -14,21 +14,24 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
 	getAgentDbPath,
 	getAgentDir,
+	getLastChangelogVersionPath,
 	getProjectDir,
 	isEnoent,
 	logger,
 	procmgr,
-	setDefaultTabWidth,
+	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
+import { JSONC, YAML } from "bun";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
-import type { ModelRole } from "../config/model-registry";
+import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
+import { normalizeToolName } from "../tools/builtin-names";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
 import {
@@ -61,8 +64,12 @@ export interface SettingsOptions {
 	agentDir?: string;
 	/** Don't persist to disk (for tests) */
 	inMemory?: boolean;
+	/** Read config sources without opening storage or writing migrations */
+	readOnly?: boolean;
 	/** Initial overrides */
 	overrides?: Partial<Record<SettingPath, unknown>>;
+	/** Extra config.yml-style overlays loaded after global/project settings */
+	configFiles?: string[];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -103,6 +110,33 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 	current[segments[segments.length - 1]] = value;
 }
 
+export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const normalized: Record<string, number> = {};
+	for (const [provider, rawLimit] of Object.entries(value)) {
+		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) continue;
+		normalized[provider] = Math.max(1, Math.floor(rawLimit));
+	}
+	return normalized;
+}
+
+export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const invalidProviders: string[] = [];
+	const normalized: Record<string, number> = {};
+	for (const [provider, rawLimit] of Object.entries(value)) {
+		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) {
+			invalidProviders.push(provider);
+			continue;
+		}
+		normalized[provider] = Math.max(1, Math.floor(rawLimit));
+	}
+	if (invalidProviders.length > 0) {
+		throw new Error(`Provider request limits must be positive numbers: ${invalidProviders.join(", ")}`);
+	}
+	return normalized;
+}
+
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
@@ -115,10 +149,12 @@ type PathScopedStringArrayEntry = {
 	providers?: unknown;
 };
 
+function expandTilde(p: string): string {
+	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
 function normalizePathPrefix(prefix: string): string {
-	const expanded =
-		prefix === "~" ? os.homedir() : prefix.startsWith("~/") ? path.join(os.homedir(), prefix.slice(2)) : prefix;
-	return path.resolve(expanded);
+	return path.resolve(expandTilde(prefix));
 }
 
 function pathMatchesPrefix(cwd: string, prefix: string): boolean {
@@ -132,17 +168,14 @@ function stringArrayFromUnknown(value: unknown): string[] {
 	return [];
 }
 
-function shallowStringRecord(value: unknown): Record<string, string> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-
-	const result: Record<string, string> = {};
-	for (const [key, item] of Object.entries(value)) {
-		if (typeof item === "string") {
-			result[key] = item;
-		}
-	}
-	return result;
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
 }
+
+type EditVariantEntry = {
+	patternLower: string;
+	mode: EditMode;
+};
 
 function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, cwd: string): string[] | undefined {
 	if (!PATH_SCOPED_ARRAY_SETTINGS.has(settingPath) || !Array.isArray(value)) return undefined;
@@ -192,19 +225,26 @@ export class Settings {
 	#agentDir: string;
 	#storage: AgentStorage | null = null;
 
+	#configFiles: string[] = [];
 	/** Global settings from config.yml */
 	#global: RawSettings = {};
 	/** Project settings from .claude/settings.yml etc */
 	#project: RawSettings = {};
+	/** Extra config.yml-style overlays passed by CLI */
+	#configOverlay: RawSettings = {};
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
+
+	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
+	#legacyLastChangelogVersion?: string;
 
 	/** Pending save (debounced) */
 	#saveTimer?: NodeJS.Timeout;
@@ -217,7 +257,8 @@ export class Settings {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, "config.yml");
-		this.#persist = !options.inMemory;
+		this.#configFiles = options.configFiles?.map(file => path.resolve(this.#cwd, expandTilde(file))) ?? [];
+		this.#persist = !options.inMemory && options.readOnly !== true;
 
 		if (options.overrides) {
 			for (const [key, value] of Object.entries(options.overrides)) {
@@ -252,10 +293,28 @@ export class Settings {
 			},
 			error => {
 				globalInstance = null;
+				globalInstancePromise = null;
 				clearBoundSettingsMethods();
 				throw error;
 			},
 		);
+	}
+
+	/**
+	 * Load effective settings from config.yml and project providers without
+	 * opening agent.db, migrating legacy settings, or writing marker files.
+	 */
+	static loadReadOnly(options: SettingsOptions = {}): Promise<Settings> {
+		const instance = new Settings({ ...options, readOnly: true });
+		return instance.#loadReadOnly();
+	}
+
+	/**
+	 * Load a persisted settings instance without touching the global singleton.
+	 */
+	static loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
+		const instance = new Settings(options);
+		return instance.#load();
 	}
 
 	/**
@@ -300,6 +359,14 @@ export class Settings {
 	}
 
 	/**
+	 * Whether `path` has an explicitly configured value (global config, project
+	 * config, or runtime override) rather than falling back to the schema default.
+	 */
+	isConfigured(path: SettingPath): boolean {
+		return getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]) !== undefined;
+	}
+
+	/**
 	 * Set a setting value (sync).
 	 * Updates global settings and queues a background save.
 	 * Triggers hooks for settings that have side effects.
@@ -316,7 +383,7 @@ export class Settings {
 		// Trigger hook if exists
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
-			hook(value, prev);
+			hook(next, prev);
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
@@ -382,6 +449,8 @@ export class Settings {
 		cloned.#storage = this.#storage;
 		cloned.#global = structuredClone(this.#global);
 		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+		cloned.#configFiles = [...this.#configFiles];
+		cloned.#configOverlay = structuredClone(this.#configOverlay);
 		cloned.#overrides = structuredClone(this.#overrides);
 		cloned.#rebuildMerged();
 		cloned.#fireAllHooks();
@@ -459,17 +528,42 @@ export class Settings {
 	 */
 	getEditVariantForModel(model: string | undefined): EditMode | null {
 		if (!model) return null;
-		const variants = (this.#merged.edit as { modelVariants?: Record<string, string> })?.modelVariants;
-		if (!variants) return null;
-		for (const pattern in variants) {
-			if (model.includes(pattern)) {
-				const value = normalizeEditMode(variants[pattern]);
-				if (value) {
-					return value;
-				}
+		const variants = this.#getEditVariantEntries();
+		if (variants.length === 0) return null;
+
+		const modelLower = model.toLowerCase();
+
+		for (let i = 0; i < variants.length; i++) {
+			const variant = variants[i];
+			if (modelLower.includes(variant.patternLower)) {
+				return variant.mode;
 			}
 		}
 		return null;
+	}
+
+	#getEditVariantEntries(): readonly EditVariantEntry[] {
+		if (this.#editVariantCache !== undefined) return this.#editVariantCache;
+
+		const value = getByPath(this.#merged, ["edit", "modelVariants"]);
+		if (!isRecord(value)) {
+			this.#editVariantCache = [];
+			return this.#editVariantCache;
+		}
+
+		const variants: EditVariantEntry[] = [];
+		for (const pattern in value) {
+			if (!Object.hasOwn(value, pattern)) continue;
+			const rawMode = value[pattern];
+			if (typeof rawMode !== "string") continue;
+			const mode = normalizeEditMode(rawMode);
+			if (mode) {
+				variants.push({ patternLower: pattern.toLowerCase(), mode });
+			}
+		}
+
+		this.#editVariantCache = variants;
+		return variants;
 	}
 
 	/**
@@ -479,11 +573,26 @@ export class Settings {
 		return this.get("bashInterceptor.patterns");
 	}
 
+	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
+		const value = getByPath(layer, ["modelRoles"]);
+		if (!isRecord(value)) return {};
+
+		const roles: Record<string, string> = {};
+		for (const role in value) {
+			if (!Object.hasOwn(value, role)) continue;
+			const modelId = value[role];
+			if (typeof modelId === "string") {
+				roles[role] = modelId;
+			}
+		}
+		return roles;
+	}
+
 	/**
 	 * Set a model role (helper for modelRoles record).
 	 */
 	setModelRole(role: ModelRole | string, modelId: string): void {
-		const current = shallowStringRecord(getByPath(this.#global, ["modelRoles"]));
+		const current = this.#modelRolesFromLayer(this.#global);
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		const updateRuntimeOverride =
 			!!runtimeOverrides &&
@@ -491,10 +600,13 @@ export class Settings {
 			!Array.isArray(runtimeOverrides) &&
 			Object.hasOwn(runtimeOverrides, role);
 
-		this.set("modelRoles", { ...current, [role]: modelId });
+		current[role] = modelId;
+		this.set("modelRoles", current);
 
 		if (updateRuntimeOverride) {
-			this.override("modelRoles", { ...shallowStringRecord(runtimeOverrides), [role]: modelId });
+			const nextRuntimeOverride = this.#modelRolesFromLayer(this.#overrides);
+			nextRuntimeOverride[role] = modelId;
+			this.override("modelRoles", nextRuntimeOverride);
 		}
 	}
 
@@ -517,7 +629,7 @@ export class Settings {
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
-		const next = shallowStringRecord(getByPath(this.#overrides, ["modelRoles"]));
+		const next = this.#modelRolesFromLayer(this.#overrides);
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
 				next[role] = modelId;
@@ -549,13 +661,28 @@ export class Settings {
 			this.#storage = await AgentStorage.open(getAgentDbPath(this.#agentDir));
 			await this.#migrateFromLegacy();
 			this.#global = await this.#loadYaml(this.#configPath!);
+			await this.#seedLastChangelogVersionMarker();
 		}
 
 		this.#project = await projectPromise;
+		this.#configOverlay = await this.#loadConfigOverlays();
 
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
 		this.#fireAllHooks();
+		return this;
+	}
+
+	async #loadReadOnly(): Promise<Settings> {
+		const projectPromise = this.#loadProjectSettings();
+
+		if (this.#configPath) {
+			this.#global = await this.#loadYaml(this.#configPath);
+		}
+
+		this.#project = await projectPromise;
+		this.#configOverlay = await this.#loadConfigOverlays();
+		this.#rebuildMerged();
 		return this;
 	}
 
@@ -589,6 +716,43 @@ export class Settings {
 		}
 	}
 
+	async #loadConfigOverlays(): Promise<RawSettings> {
+		let merged: RawSettings = {};
+		for (const filePath of this.#configFiles) {
+			merged = this.#deepMerge(merged, await this.#loadOverlayYaml(filePath));
+		}
+		return merged;
+	}
+
+	/**
+	 * Strict loader for explicit `--config` overlays: unlike `#loadYaml`,
+	 * missing or malformed files are hard errors so a typo'd path cannot
+	 * silently fall back to the persistent settings.
+	 */
+	async #loadOverlayYaml(filePath: string): Promise<RawSettings> {
+		let content: string;
+		try {
+			content = await Bun.file(filePath).text();
+		} catch (error) {
+			throw new Error(
+				isEnoent(error)
+					? `Config overlay not found: ${filePath}`
+					: `Failed to read config overlay ${filePath}: ${String(error)}`,
+			);
+		}
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(content);
+		} catch (error) {
+			throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
+		}
+		if (parsed === null || parsed === undefined) return {};
+		if (typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
+		}
+		return this.#migrateRawSettings(parsed as RawSettings);
+	}
+
 	async #migrateFromLegacy(): Promise<void> {
 		if (!this.#configPath) return;
 
@@ -606,9 +770,9 @@ export class Settings {
 		// 1. Migrate from settings.json
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
 		try {
-			const parsed = JSON.parse(await Bun.file(settingsJsonPath).text());
+			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed));
+				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
 				migrated = true;
 				try {
 					fs.renameSync(settingsJsonPath, `${settingsJsonPath}.bak`);
@@ -642,6 +806,16 @@ export class Settings {
 			delete raw.queueMode;
 		}
 
+		// lastChangelogVersion moved out of config.yml into the
+		// <agentDir>/last-changelog-version marker file so version bumps no
+		// longer dirty user-tracked configs. Capture for marker seeding (see
+		// #seedLastChangelogVersionMarker), then strip the key — the next
+		// config save drops it from disk.
+		if (typeof raw.lastChangelogVersion === "string") {
+			this.#legacyLastChangelogVersion ??= raw.lastChangelogVersion;
+		}
+		delete raw.lastChangelogVersion;
+
 		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
 		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
 			const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
@@ -671,6 +845,23 @@ export class Settings {
 				isolationObj.mode = isolationObj.enabled ? "auto" : "none";
 			}
 			delete isolationObj.enabled;
+		}
+
+		// task.simple: removed — the task tool no longer accepts a per-call
+		// schema (workflows drive structured output via eval agent()) and the
+		// batch/context shape is gated by task.batch instead.
+		if (taskObj && "simple" in taskObj) {
+			delete taskObj.simple;
+		}
+
+		// task.eager / todo.eager: boolean -> enum (default | preferred | always).
+		// `true` reproduced the previous "on" behavior, which is now `always`.
+		if (taskObj && typeof taskObj.eager === "boolean") {
+			taskObj.eager = taskObj.eager ? "always" : "default";
+		}
+		const todoObj = raw.todo as Record<string, unknown> | undefined;
+		if (todoObj && typeof todoObj.eager === "boolean") {
+			todoObj.eager = todoObj.eager ? "always" : "default";
 		}
 
 		// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
@@ -719,6 +910,23 @@ export class Settings {
 			raw["compaction.strategy"] = "shake";
 		}
 
+		// snapcompact.systemPrompt: boolean -> scoped enum.
+		const snapcompactObj = raw.snapcompact as Record<string, unknown> | undefined;
+		if (snapcompactObj && typeof snapcompactObj.systemPrompt === "boolean") {
+			snapcompactObj.systemPrompt = snapcompactObj.systemPrompt ? "all" : "none";
+		}
+		if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
+			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
+		}
+
+		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
+		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
+		// the user's explicit choice; new installs get the `auto` default that
+		// turns it on only for Gemini models.
+		if (typeof raw.inlineToolDescriptors === "boolean") {
+			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
+		}
+
 		// statusLine: rename "plan_mode" segment to "mode"
 		const statusLineObj = raw.statusLine as Record<string, unknown> | undefined;
 		if (statusLineObj) {
@@ -745,6 +953,18 @@ export class Settings {
 			delete providersObj.parallelFetch;
 		}
 		delete raw["providers.parallelFetch"];
+
+		// codexResets.autoRedeem: boolean -> tri-state enum.
+		// Existing explicit false keeps the old "do not run" behavior; missing
+		// config now falls through to the new "unset" default, which asks before
+		// the first eligible spend.
+		const codexResetsObj = raw.codexResets as Record<string, unknown> | undefined;
+		if (codexResetsObj && typeof codexResetsObj.autoRedeem === "boolean") {
+			codexResetsObj.autoRedeem = codexResetsObj.autoRedeem ? "yes" : "no";
+		}
+		if (typeof raw["codexResets.autoRedeem"] === "boolean") {
+			raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
+		}
 
 		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
 		// enum if the latter hasn't been set yet. Idempotent: subsequent
@@ -800,7 +1020,238 @@ export class Settings {
 			}
 		}
 
+		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
+		// / power.preventDisplaySleep (four booleans) → power.sleepPrevention enum.
+		// The enum is cumulative: each level adds the flags of all lower levels.
+		// Migration picks the highest level whose condition is met, scanning from
+		// most to least aggressive so a single enum value captures the old state.
+		if (
+			!("sleepPrevention" in ((raw.power as Record<string, unknown>) ?? {})) &&
+			raw["power.sleepPrevention"] === undefined
+		) {
+			const powerObj = raw.power as Record<string, unknown> | undefined;
+			const getFlag = (key: string): boolean | undefined => {
+				const nested = powerObj?.[key];
+				const flat = raw[`power.${key}`];
+				const value = nested ?? flat;
+				return typeof value === "boolean" ? value : undefined;
+			};
+			const idle = getFlag("preventIdleSleep");
+			const system = getFlag("preventSystemSleep");
+			const user = getFlag("declareUserActive");
+			const display = getFlag("preventDisplaySleep");
+			const anySet = idle !== undefined || system !== undefined || user !== undefined || display !== undefined;
+			if (anySet) {
+				const mode = system || user ? "system" : display ? "display" : idle !== false ? "idle" : "off";
+				const powerRoot = (powerObj ?? {}) as Record<string, unknown>;
+				powerRoot.sleepPrevention = mode;
+				raw.power = powerRoot;
+			}
+			// Clean up old keys (nested + flat)
+			if (powerObj) {
+				delete powerObj.preventIdleSleep;
+				delete powerObj.preventSystemSleep;
+				delete powerObj.declareUserActive;
+				delete powerObj.preventDisplaySleep;
+			}
+			delete raw["power.preventIdleSleep"];
+			delete raw["power.preventSystemSleep"];
+			delete raw["power.declareUserActive"];
+			delete raw["power.preventDisplaySleep"];
+		}
+
+		// Migration for renamed settings grep.* and glob.* from search.* and find.*:
+		// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
+		const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
+			const current = raw[key];
+			if (isRecord(current)) {
+				return current;
+			}
+			const created: Record<string, unknown> = {};
+			raw[key] = created;
+			return created;
+		};
+
+		if ("find" in raw) {
+			const findObj = raw.find;
+			if (isRecord(findObj)) {
+				const globObj = ensureRawObject("glob");
+				const findKeys: Array<"enabled"> = ["enabled"];
+				for (const key of findKeys) {
+					if (key in findObj && !(key in globObj)) {
+						globObj[key] = findObj[key];
+					}
+				}
+			}
+			delete raw.find;
+		}
+
+		if ("search" in raw) {
+			const searchObj = raw.search;
+			if (isRecord(searchObj)) {
+				const grepObj = ensureRawObject("grep");
+				const searchKeys: Array<"enabled" | "contextBefore" | "contextAfter"> = [
+					"enabled",
+					"contextBefore",
+					"contextAfter",
+				];
+				for (const key of searchKeys) {
+					if (key in searchObj && !(key in grepObj)) {
+						grepObj[key] = searchObj[key];
+					}
+				}
+			}
+			delete raw.search;
+		}
+
+		// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
+		if ("find.enabled" in raw) {
+			const globObj = ensureRawObject("glob");
+			if (!("enabled" in globObj)) {
+				globObj.enabled = raw["find.enabled"];
+			}
+			delete raw["find.enabled"];
+		}
+		if ("search.enabled" in raw) {
+			const grepObj = ensureRawObject("grep");
+			if (!("enabled" in grepObj)) {
+				grepObj.enabled = raw["search.enabled"];
+			}
+			delete raw["search.enabled"];
+		}
+		if ("search.contextBefore" in raw) {
+			const grepObj = ensureRawObject("grep");
+			if (!("contextBefore" in grepObj)) {
+				grepObj.contextBefore = raw["search.contextBefore"];
+			}
+			delete raw["search.contextBefore"];
+		}
+		if ("search.contextAfter" in raw) {
+			const grepObj = ensureRawObject("grep");
+			if (!("contextAfter" in grepObj)) {
+				grepObj.contextAfter = raw["search.contextAfter"];
+			}
+			delete raw["search.contextAfter"];
+		}
+
+		// 3. Tool-name arrays use wire IDs too. Preserve user overrides across
+		// the rename without duplicating entries if they already added grep/glob.
+		const migrateToolNameList = (names: unknown): unknown => {
+			if (!Array.isArray(names)) return names;
+			const out: unknown[] = [];
+			const seen = new Set<string>();
+			for (const name of names) {
+				const migrated = typeof name === "string" ? normalizeToolName(name) : name;
+				if (typeof migrated === "string") {
+					if (seen.has(migrated)) continue;
+					seen.add(migrated);
+				}
+				out.push(migrated);
+			}
+			return out;
+		};
+		const ensureToolsObject = (): Record<string, unknown> => {
+			const current = raw.tools;
+			if (current && typeof current === "object" && !Array.isArray(current)) {
+				return current as Record<string, unknown>;
+			}
+			const created: Record<string, unknown> = {};
+			raw.tools = created;
+			return created;
+		};
+		const toolsObj = raw.tools as Record<string, unknown> | undefined;
+		if (toolsObj && "essentialOverride" in toolsObj) {
+			toolsObj.essentialOverride = migrateToolNameList(toolsObj.essentialOverride);
+		}
+		if ("tools.essentialOverride" in raw) {
+			const nestedToolsObj = ensureToolsObject();
+			if (!("essentialOverride" in nestedToolsObj)) {
+				nestedToolsObj.essentialOverride = migrateToolNameList(raw["tools.essentialOverride"]);
+			}
+			delete raw["tools.essentialOverride"];
+		}
+
+		// Also clean up any empty nested objects we might have created or left behind
+		if (raw.glob && typeof raw.glob === "object" && Object.keys(raw.glob).length === 0) {
+			delete raw.glob;
+		}
+		if (raw.grep && typeof raw.grep === "object" && Object.keys(raw.grep).length === 0) {
+			delete raw.grep;
+		}
+		// readHashLines: removed. Hashline anchors are now driven solely by
+		// edit.mode === "hashline"; the separate read toggle only ever produced
+		// the incoherent "hashline edits without addressable anchors" state.
+		delete raw.readHashLines;
+
+		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
+		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
+		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
+		// dropped — per-family scoping is now expressed by the three tier settings.
+		const tierObj = isRecord(raw.tier) ? raw.tier : {};
+		let tierTouched = false;
+		const setTier = (family: string, value: unknown): void => {
+			if (value !== undefined && !(family in tierObj)) {
+				tierObj[family] = value;
+				tierTouched = true;
+			}
+		};
+		if (typeof raw.serviceTier === "string") {
+			switch (raw.serviceTier) {
+				case "priority":
+					setTier("openai", "priority");
+					setTier("anthropic", "priority");
+					setTier("google", "priority");
+					break;
+				case "openai-only":
+					setTier("openai", "priority");
+					break;
+				case "claude-only":
+					setTier("anthropic", "priority");
+					break;
+				case "auto":
+				case "default":
+				case "flex":
+				case "scale":
+					setTier("openai", raw.serviceTier);
+					break;
+			}
+			delete raw.serviceTier;
+		}
+		const mapInheritTier = (value: unknown): unknown =>
+			value === "openai-only" || value === "claude-only" ? "priority" : value;
+		if ("serviceTierSubagent" in raw) {
+			setTier("subagent", mapInheritTier(raw.serviceTierSubagent));
+			delete raw.serviceTierSubagent;
+		}
+		if ("serviceTierAdvisor" in raw) {
+			setTier("advisor", mapInheritTier(raw.serviceTierAdvisor));
+			delete raw.serviceTierAdvisor;
+		}
+		if (tierTouched) raw.tier = tierObj;
+		delete raw.fastModeScope;
+
 		return raw;
+	}
+
+	/**
+	 * One-time migration: seed the last-changelog-version marker file from the
+	 * legacy config.yml key. An existing marker always wins — it is the newer
+	 * source of truth.
+	 */
+	async #seedLastChangelogVersionMarker(): Promise<void> {
+		const legacy = this.#legacyLastChangelogVersion;
+		if (!legacy) return;
+		const markerPath = getLastChangelogVersionPath(this.#agentDir);
+		try {
+			if ((await Bun.file(markerPath).text()).trim()) return;
+		} catch (error) {
+			if (!isEnoent(error)) return;
+		}
+		try {
+			await Bun.write(markerPath, legacy);
+		} catch (error) {
+			logger.warn("Settings: failed to seed last-changelog-version marker", { error: String(error) });
+		}
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -862,8 +1313,10 @@ export class Settings {
 
 	#rebuildMerged(): void {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#project);
+		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
+		this.#editVariantCache = undefined;
 	}
 
 	#fireAllHooks(): void {
@@ -971,19 +1424,28 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			});
 		}
 	},
-	"display.tabWidth": value => {
-		if (typeof value === "number") {
-			setDefaultTabWidth(value);
-		}
-	},
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);
 		}
 	},
+	"providers.maxInFlightRequests": value => {
+		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
+	"worktree.base": value => {
+		const dir = typeof value === "string" && value.trim() ? value : undefined;
+		// Always call so an unset/empty value clears a previously-applied override.
+		// setWorktreesDir expands `~`, rejects relative paths, and returns the
+		// applied absolute path (or undefined when cleared/rejected).
+		if (dir && !setWorktreesDir(dir)) {
+			logger.warn("Settings: worktree.base must be an absolute or ~-relative path; ignoring", { value: dir });
+		} else if (!dir) {
+			setWorktreesDir(undefined);
+		}
+	},
 };
 /** Fires when `provider.appendOnlyContext` changes at runtime. */
 const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.appendOnlyContext");
@@ -1045,6 +1507,7 @@ export function resetSettingsForTest(): void {
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
+	configureProviderMaxInFlightRequests(undefined);
 }
 
 /**

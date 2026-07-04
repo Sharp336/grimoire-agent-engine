@@ -23,7 +23,8 @@ export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 
 // functions
-export const __piNativesV15_10_8 = nativeBindings.__piNativesV15_10_8;
+export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
+export const __piNativesV16_3_6 = nativeBindings.__piNativesV16_3_6;
 export const applyBashFixups = nativeBindings.applyBashFixups;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
@@ -59,8 +60,11 @@ export const matchesLegacySequence = nativeBindings.matchesLegacySequence;
 export const parseKey = nativeBindings.parseKey;
 export const parseKittySequence = nativeBindings.parseKittySequence;
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard;
+export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng;
 export const search = nativeBindings.search;
+export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride;
 export const sliceWithWidth = nativeBindings.sliceWithWidth;
+export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
 export const truncateToWidth = nativeBindings.truncateToWidth;

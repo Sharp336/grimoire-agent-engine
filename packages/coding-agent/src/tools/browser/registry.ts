@@ -4,25 +4,41 @@ import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, killExistingByPath, waitForCdp } from "./attach";
+import type { CmuxKind } from "./cmux/rpc";
+import { CmuxSocketClient } from "./cmux/socket-client";
 import { BROWSER_PROTOCOL_TIMEOUT_MS, launchHeadlessBrowser, loadPuppeteer, type UserAgentOverride } from "./launch";
 
-export type BrowserKind =
+export type PuppeteerBrowserKind =
 	| { kind: "headless"; headless: boolean }
 	| { kind: "spawned"; path: string }
 	| { kind: "connected"; cdpUrl: string };
 
+export type BrowserKind = PuppeteerBrowserKind | CmuxKind;
+
 export type BrowserKindTag = BrowserKind["kind"];
 
-export interface BrowserHandle {
+interface BrowserHandleCommon {
 	key: string;
 	kind: BrowserKind;
+	refCount: number;
+}
+
+export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
+	kind: PuppeteerBrowserKind;
 	browser: Browser;
 	cdpUrl?: string;
 	pid?: number;
 	subprocess?: Subprocess;
-	refCount: number;
 	stealth: { browserSession: CDPSession | null; override: UserAgentOverride | null };
 }
+
+export interface CmuxBrowserHandle extends BrowserHandleCommon {
+	kind: CmuxKind;
+	client: CmuxSocketClient;
+	surface?: string;
+}
+
+export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle;
 
 const browsers = new Map<string, BrowserHandle>();
 
@@ -34,6 +50,8 @@ function browserKey(kind: BrowserKind): string {
 			return `spawned:${kind.path}`;
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
+		case "cmux":
+			return `cmux:${kind.socketPath}`;
 	}
 }
 
@@ -48,17 +66,59 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 	const key = browserKey(kind);
 	const existing = browsers.get(key);
 	if (existing) {
+		if ("client" in existing) return existing;
 		if (existing.browser.connected) return existing;
 		browsers.delete(key);
 		await disposeBrowserHandle(existing, { kill: false });
 	}
+	// Short-circuit before launching: the tool wrapper's `untilAborted` only
+	// rejects its outer promise on abort; without this check `openBrowserHandle`
+	// would still fire and its result would land in `browsers` below.
+	if (opts.signal?.aborted) throw new ToolAbortError("Browser open aborted");
 
 	const handle = await openBrowserHandle(kind, opts);
+	// The launch may resolve AFTER the caller has already aborted (the outer
+	// `untilAborted` rejects immediately on abort but does not cancel the
+	// inner promise, and `launchHeadlessBrowser` does not accept a signal).
+	// Without this branch the completed handle sits in `browsers` at
+	// refCount:0 forever — no tab ever takes a hold, `releaseBrowser` never
+	// fires, and `releaseAllTabs` walks `tabs`, not `browsers`, so the
+	// orphaned Chromium/app process / puppeteer handle survives to process
+	// exit. (Issue #3963.)
+	if (opts.signal?.aborted) {
+		await disposeBrowserHandle(handle, { kill: kind.kind === "spawned" }).catch(err => {
+			logger.debug("Failed to dispose orphan browser after abort", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		});
+		throw new ToolAbortError("Browser open aborted");
+	}
 	browsers.set(key, handle);
 	return handle;
 }
 
+export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
+	const cdpUrl = rawCdpUrl.replace(/\/+$/, "");
+	if (/^wss?:\/\//i.test(cdpUrl)) {
+		throw new ToolError(
+			"browser app.cdp_url must be the HTTP CDP discovery endpoint (for example http://127.0.0.1:9222), not a ws:// browser websocket URL.",
+		);
+	}
+	return cdpUrl;
+}
+
 async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
+	if (kind.kind === "cmux") {
+		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
+		await client.connect();
+		return {
+			key: browserKey(kind),
+			kind,
+			client,
+			surface: kind.surface,
+			refCount: 0,
+		};
+	}
 	if (kind.kind === "headless") {
 		const browser = await launchHeadlessBrowser({ headless: kind.headless, viewport: opts.viewport });
 		return {
@@ -70,7 +130,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		};
 	}
 	if (kind.kind === "connected") {
-		const cdpUrl = kind.cdpUrl.replace(/\/+$/, "");
+		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
 		const browser = await puppeteer.connect({
@@ -157,12 +217,19 @@ export function holdBrowser(handle: BrowserHandle): void {
 export async function releaseBrowser(handle: BrowserHandle, opts: { kill: boolean }): Promise<void> {
 	handle.refCount = Math.max(0, handle.refCount - 1);
 	if (handle.refCount === 0) {
-		browsers.delete(handle.key);
+		// Only evict if the registry still points at THIS handle. After a disconnect,
+		// `acquireBrowser` may have already replaced the entry with a fresh live handle
+		// under the same key; deleting blindly would orphan that new browser.
+		if (browsers.get(handle.key) === handle) browsers.delete(handle.key);
 		await disposeBrowserHandle(handle, opts);
 	}
 }
 
 async function disposeBrowserHandle(handle: BrowserHandle, opts: { kill: boolean }): Promise<void> {
+	if ("client" in handle) {
+		handle.client.close();
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.browser.connected) {
 			try {
@@ -191,4 +258,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: { kill: boolean
 		}
 	}
 	if (opts.kill && handle.pid !== undefined) await gracefulKillTreeOnce(handle.pid);
+}
+
+/** Test-only accessor for the module-global browsers map. */
+export function getBrowsersMapForTest(): ReadonlyMap<string, BrowserHandle> {
+	return browsers;
 }

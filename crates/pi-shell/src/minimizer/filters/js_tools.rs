@@ -8,10 +8,12 @@ use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 const SUPPORTED_TOOLS: &[&str] = &["next", "prettier", "prisma"];
 const NPX_ROUTABLE_TOOLS: &[&str] = &["tsc", "eslint", "prisma", "prettier", "next"];
 
+#[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	effective_tool(program, subcommand).is_some()
 }
 
+#[must_use]
 pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerOutput {
 	let cleaned = primitives::strip_ansi(input);
 	let tool = effective_tool(ctx.program, ctx.subcommand)
@@ -31,6 +33,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	}
 }
 
+#[must_use]
 pub fn effective_tool<'a>(program: &'a str, subcommand: Option<&'a str>) -> Option<&'a str> {
 	if SUPPORTED_TOOLS.contains(&program) {
 		return Some(program);
@@ -40,7 +43,7 @@ pub fn effective_tool<'a>(program: &'a str, subcommand: Option<&'a str>) -> Opti
 	{
 		return Some(tool);
 	}
-	if is_npx_like(program) {
+	if is_npx_like(program, subcommand) {
 		let tool = subcommand?;
 		if NPX_ROUTABLE_TOOLS.contains(&tool) {
 			return Some(tool);
@@ -62,8 +65,8 @@ fn effective_tool_from_command<'a>(
 		.find(|token| SUPPORTED_TOOLS.contains(token))
 }
 
-fn is_npx_like(program: &str) -> bool {
-	matches!(program, "npx" | "bunx" | "pnpm dlx")
+fn is_npx_like(program: &str, subcommand: Option<&str>) -> bool {
+	matches!(program, "npx" | "bunx") || matches!((program, subcommand), ("pnpm", Some("dlx")))
 }
 
 fn filter_next(input: &str, exit_code: i32) -> String {
@@ -216,9 +219,9 @@ fn filter_prettier(input: &str, exit_code: i32) -> String {
 			push_line(&mut out, error);
 		}
 		if errors.len() > 20 {
-			out.push_str("... +");
+			out.push_str("[…");
 			out.push_str(&(errors.len() - 20).to_string());
-			out.push_str(" more errors\n");
+			out.push_str(" errors elided…]\n");
 		}
 		return out;
 	}
@@ -388,9 +391,9 @@ fn push_file_list(out: &mut String, files: &[String], limit: usize) {
 		push_line(out, file);
 	}
 	if files.len() > limit {
-		out.push_str("... +");
+		out.push_str("[…");
 		out.push_str(&(files.len() - limit).to_string());
-		out.push_str(" more files\n");
+		out.push_str(" files elided…]\n");
 	}
 }
 
@@ -401,6 +404,8 @@ fn push_line(out: &mut String, line: &str) {
 
 #[cfg(test)]
 mod tests {
+	use std::fmt::Write as _;
+
 	use super::*;
 	use crate::minimizer::MinimizerConfig;
 
@@ -528,5 +533,30 @@ mod tests {
 		assert!(out.contains("202604240501_add_accounts"));
 		assert!(out.contains("P3009"));
 		assert!(!out.contains("Datasource"));
+	}
+
+	#[test]
+	fn prettier_errors_truncation_is_canonical() {
+		let mut input = String::new();
+		for i in 1..=25 {
+			let _ = writeln!(input, "error in file{i}.js: line {i}");
+		}
+		let out = filter_prettier(&input, 1);
+		assert!(out.contains("[…5 errors elided…]\n"));
+		assert!(!out.contains("more errors"));
+		assert!(!out.contains("... +"));
+	}
+
+	#[test]
+	fn file_list_truncation_is_canonical() {
+		let mut files = Vec::new();
+		for i in 1..=35 {
+			files.push(format!("src/file{i}.tsx"));
+		}
+		let mut out = String::new();
+		push_file_list(&mut out, &files, 30);
+		assert!(out.contains("[…5 files elided…]\n"));
+		assert!(!out.contains("more files"));
+		assert!(!out.contains("... +"));
 	}
 }

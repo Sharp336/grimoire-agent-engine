@@ -10,7 +10,7 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@oh-my-
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
-import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 
 function ruleProvider() {
 	const cap = getCapability(ruleCapability.id);
@@ -94,6 +94,133 @@ describe("builtin-defaults rule provider", () => {
 				toolName: "write",
 				filePaths: ["packages/x/src/foo.ts"],
 			}),
+		).toEqual([]);
+	});
+
+	it("fires ts-no-inline-cast-access on inline cast-and-access but not named-type casts", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "ts-no-inline-cast-access");
+		if (!rule) throw new Error("ts-no-inline-cast-access rule missing");
+
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+
+		// AST conditions only run on edit/write streams, with the language inferred from the path.
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+
+		// Inline object-type assertion immediately read — every access form is flagged.
+		const violations = [
+			"const a = (value as { content: unknown }).content;",
+			"const b = (value as { content: unknown })?.content;",
+			'const c = (opts as { enabled: boolean })["enabled"];',
+			"const d = (value as unknown as { content: unknown }).content;",
+		];
+		for (const snippet of violations) {
+			manager.resetBuffer();
+			const matches = await manager.checkAstSnapshot(snippet, ctx);
+			expect(
+				matches.map(r => r.name),
+				snippet,
+			).toEqual(["ts-no-inline-cast-access"]);
+		}
+
+		// A cast to a named type, plain member access, and a bare cast (no read) are all left alone.
+		const allowed = [
+			"const e = (value as Foo).bar;",
+			"const f = obj.content;",
+			"const g = value as { content: unknown };",
+		];
+		for (const snippet of allowed) {
+			manager.resetBuffer();
+			const matches = await manager.checkAstSnapshot(snippet, ctx);
+			expect(matches, snippet).toEqual([]);
+		}
+
+		// Out of scope: the same violation in a non-TS file never reaches the matcher.
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot("const h = (value as { content: unknown }).content;", {
+				source: "tool",
+				toolName: "edit",
+				filePaths: ["src/foo.js"],
+			}),
+		).toEqual([]);
+	});
+	it("go-new-expr matches value→pointer helpers (named + generic) but not real functions, only on *.go", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-new-expr");
+		if (!rule) throw new Error("go-new-expr rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] };
+
+		const hits = [
+			"package p\nfunc boolPtr(v bool) *bool { return &v }",
+			"package p\nfunc Ptr[T any](v T) *T { return &v }",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				(await manager.checkAstSnapshot(snippet, ctx)).map(m => m.name),
+				snippet,
+			).toEqual(["go-new-expr"]);
+		}
+
+		const misses = [
+			"package p\nfunc add(a int, b int) *int { return &a }",
+			"package p\nfunc (s *S) Get() *int { return &s.x }",
+		];
+		for (const snippet of misses) {
+			manager.resetBuffer();
+			expect(await manager.checkAstSnapshot(snippet, ctx), snippet).toEqual([]);
+		}
+
+		// AST conditions never reach a non-go path.
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot(hits[0], { source: "tool", toolName: "edit", filePaths: ["pkg/foo.ts"] }),
+		).toEqual([]);
+	});
+
+	it("go-bench-loop fires on a *testing.B b.N loop but not an ordinary .N counter", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-bench-loop");
+		if (!rule) throw new Error("go-bench-loop rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["pkg/foo_test.go"] };
+
+		const bench =
+			"package p\nfunc BenchmarkX(b *testing.B) {\n\tsetup()\n\tfor i := 0; i < b.N; i++ {\n\t\twork()\n\t}\n}";
+		manager.resetBuffer();
+		expect((await manager.checkAstSnapshot(bench, ctx)).map(m => m.name)).toEqual(["go-bench-loop"]);
+
+		// A `.N` selector on something that is not the benchmark receiver must not fire.
+		const helper =
+			"package p\nfunc TestThing(t *testing.T) {\n\treq := build()\n\tfor i := 0; i < req.N; i++ {\n\t\twork()\n\t}\n}";
+		manager.resetBuffer();
+		expect(await manager.checkAstSnapshot(helper, ctx)).toEqual([]);
+	});
+
+	it("go-range-int fires only on *.go, never on a same-named non-go path", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-range-int");
+		if (!rule) throw new Error("go-range-int rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+
+		const loop = "package p\nfunc f(n int) {\n\tfor i := 0; i < n; i++ {\n\t\tuse(i)\n\t}\n}";
+		manager.resetBuffer();
+		expect(
+			(await manager.checkAstSnapshot(loop, { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] })).map(
+				m => m.name,
+			),
+		).toEqual(["go-range-int"]);
+		// A step-2 loop is not equivalent to range-over-int and must not fire.
+		const step2 = "package p\nfunc f(n int) {\n\tfor i := 0; i < n; i += 2 {\n\t\tuse(i)\n\t}\n}";
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot(step2, { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] }),
 		).toEqual([]);
 	});
 

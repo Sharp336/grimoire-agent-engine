@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { calculateRateLimitBackoffMs, isUsageLimitError, parseRateLimitReason } from "@oh-my-pi/pi-ai/rate-limit-utils";
+import { isUsageLimit } from "@oh-my-pi/pi-ai/error/flags";
+import {
+	calculateRateLimitBackoffMs,
+	isUsageLimitOutcome,
+	isUsageLimitStatus,
+	parseRateLimitReason,
+} from "@oh-my-pi/pi-ai/error/rate-limit";
 
 describe("parseRateLimitReason", () => {
 	it("classifies Google Quota exceeded as QUOTA_EXHAUSTED", () => {
@@ -53,15 +59,125 @@ describe("parseRateLimitReason", () => {
 			),
 		).toBe("QUOTA_EXHAUSTED");
 	});
+
+	it("classifies OpenCode Go insufficient balance as QUOTA_EXHAUSTED", () => {
+		expect(
+			parseRateLimitReason("401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/demo"),
+		).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("classifies Antigravity capacity-exhausted as QUOTA_EXHAUSTED, not transient MODEL_CAPACITY", () => {
+		// Antigravity returns "You have exhausted your capacity on this model. Your
+		// quota will reset after 3h6m38s." The literal "capacity" used to win the
+		// classifier race and land in MODEL_CAPACITY_EXHAUSTED (45-75s backoff),
+		// blocking the agent from rotating to another OAuth account even though the
+		// "quota will reset" suffix is the long-wait, switch-account signal.
+		expect(
+			parseRateLimitReason(
+				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
+			),
+		).toBe("QUOTA_EXHAUSTED");
+	});
 });
 
-describe("isUsageLimitError", () => {
+describe("isUsageLimit", () => {
 	it("detects account rate limits as credential-rotatable usage limits", () => {
 		expect(
-			isUsageLimitError(
+			isUsageLimit(
 				'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
 			),
 		).toBe(true);
+	});
+
+	it("detects OpenCode Go insufficient balance as a credential-rotatable usage limit", () => {
+		expect(
+			isUsageLimit("401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/demo"),
+		).toBe(true);
+	});
+
+	it("detects Antigravity capacity-exhausted message as a usage-limit error", () => {
+		// Without this branch `markUsageLimitReached` is never invoked, so the
+		// session sticks to the exhausted OAuth account instead of rotating —
+		// see `agent-session.ts` line 8314 and `auth-storage.ts` line 3457.
+		expect(
+			isUsageLimit(
+				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
+			),
+		).toBe(true);
+	});
+
+	// Antigravity / Cloud Code Assist returns this phrasing for an exhausted
+	// project quota; `parseRateLimitReason` already maps it to QUOTA_EXHAUSTED
+	// via the generic `quota` substring, but `isUsageLimitError` decides
+	// whether the auth layer rotates to a sibling OAuth credential, so it
+	// must match too — otherwise the session stays pinned to the exhausted
+	// account (see issue #2198).
+	it("detects Antigravity 'Individual quota reached' as a credential-rotatable usage limit", () => {
+		expect(
+			isUsageLimit(
+				"Cloud Code Assist API error (429): Individual quota reached. Contact your administrator to enable overages.",
+			),
+		).toBe(true);
+	});
+
+	it("detects bare 'quota reached' phrasing", () => {
+		expect(isUsageLimit("quota reached")).toBe(true);
+		expect(isUsageLimit("quota_reached")).toBe(true);
+	});
+
+	it("detects OpenAI quota payload codes as credential-rotatable usage limits", () => {
+		for (const message of ["insufficient_quota", "usage_limit_exceeded", "usage_limit_reached"]) {
+			expect(isUsageLimit(message)).toBe(true);
+		}
+		expect(isUsageLimitStatus(429)).toBe(true);
+		expect(isUsageLimitStatus(400)).toBe(false);
+	});
+});
+
+describe("isUsageLimitOutcome", () => {
+	it("rotates on bare/opaque 429 bodies (status-only fallback)", () => {
+		expect(isUsageLimitOutcome(429, undefined)).toBe(true);
+		expect(isUsageLimitOutcome(429, "")).toBe(true);
+		expect(isUsageLimitOutcome(429, "429")).toBe(true);
+		expect(isUsageLimitOutcome(429, "HTTP 429")).toBe(true);
+		expect(isUsageLimitOutcome(429, "Error 429")).toBe(true);
+		expect(isUsageLimitOutcome(429, "{}")).toBe(true);
+	});
+
+	it("rotates on 429 carrying quota payload codes", () => {
+		for (const message of ["insufficient_quota", "usage_limit_exceeded", "usage_limit_reached"]) {
+			expect(isUsageLimitOutcome(429, message)).toBe(true);
+		}
+	});
+
+	it("keeps informative transient 429s in the upstream-backoff lane", () => {
+		// RATE_LIMIT_EXCEEDED — generic throttling.
+		expect(isUsageLimitOutcome(429, "Cloud Code Assist API error (429): Too many requests")).toBe(false);
+		expect(isUsageLimitOutcome(429, "Requests per minute limit reached")).toBe(false);
+		// MODEL_CAPACITY_EXHAUSTED — provider overload, not account quota.
+		expect(isUsageLimitOutcome(429, "Service overloaded 529")).toBe(false);
+		// UNKNOWN but carries a transient retry hint — body is informative,
+		// so we defer to parseRateLimitReason and stay out of the quota lane.
+		expect(isUsageLimitOutcome(429, "Please retry in 5s")).toBe(false);
+	});
+
+	it("still rotates on 429 with explicit account rate-limit framing", () => {
+		expect(
+			isUsageLimitOutcome(
+				429,
+				'{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+			),
+		).toBe(true);
+	});
+
+	it("rotates on usage-limit message regardless of status", () => {
+		expect(isUsageLimitOutcome(undefined, "usage_limit_reached")).toBe(true);
+		expect(isUsageLimitOutcome(500, "insufficient_quota")).toBe(true);
+	});
+
+	it("does not rotate on auth/invalid-request statuses with unrelated bodies", () => {
+		expect(isUsageLimitOutcome(401, "Invalid API key")).toBe(false);
+		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
 	});
 });
 

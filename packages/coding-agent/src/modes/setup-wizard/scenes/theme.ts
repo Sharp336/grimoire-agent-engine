@@ -1,4 +1,12 @@
-import { padding, type SelectItem, SelectList, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	padding,
+	routeSelectListMouse,
+	type SelectItem,
+	SelectList,
+	type SgrMouseEvent,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import {
 	enableAutoTheme,
 	getAvailableThemes,
@@ -89,6 +97,8 @@ class ThemeSceneController implements SetupSceneController {
 	#message: string | undefined;
 	#previewRequest = 0;
 	#disposed = false;
+	/** Render line where the select list began, or -1 while it is not shown. */
+	#listRowStart = -1;
 	readonly #originalTheme = getCurrentThemeName();
 	readonly #originalSymbolPreset: SymbolPreset;
 	readonly #originalColorBlindMode: boolean;
@@ -117,7 +127,16 @@ class ThemeSceneController implements SetupSceneController {
 		this.#selectList.handleInput(data);
 	}
 
-	render(width: number): string[] {
+	/** Wheel moves the highlight (live preview); hover lights the row under the pointer; click confirms it. */
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		// Mirror the pre-helper flow: wheel/motion are always processed, but a
+		// hidden list (#listRowStart < 0, e.g. while loading all themes) must
+		// never hit-test a row — route through a line that resolves to undefined.
+		const listLine = this.#listRowStart >= 0 ? line - this.#listRowStart : Number.NEGATIVE_INFINITY;
+		routeSelectListMouse(this.#selectList, event, listLine);
+	}
+
+	render(width: number): readonly string[] {
 		const lines = [
 			theme.fg("muted", "Theme changes preview live. Nothing is saved until you press Enter."),
 			this.#mode === "all"
@@ -128,8 +147,10 @@ class ThemeSceneController implements SetupSceneController {
 			"",
 		];
 		if (this.#loadingAllThemes) {
+			this.#listRowStart = -1;
 			lines.push(theme.fg("dim", "Loading themes…"));
 		} else {
+			this.#listRowStart = lines.length;
 			lines.push(...this.#selectList.render(width));
 		}
 		if (this.#message) {
@@ -235,7 +256,7 @@ class ThemeSceneController implements SetupSceneController {
 		} else {
 			this.host.ctx.settings.set("theme.dark", themeName);
 		}
-		await previewTheme(themeName);
+		await previewTheme(themeName, { ephemeral: false });
 	}
 
 	async #preview(value: string): Promise<void> {
@@ -249,7 +270,7 @@ class ThemeSceneController implements SetupSceneController {
 		let result: { success: boolean; error?: string } = { success: true };
 		if (value === "auto") {
 			await this.#applyPreviewPresentation(this.#originalSymbolPreset, this.#originalColorBlindMode);
-			enableAutoTheme();
+			enableAutoTheme({ ephemeral: true });
 		} else if (value === "colorblind") {
 			await this.#applyPreviewPresentation(this.#originalSymbolPreset, true);
 		} else if (value === "ansi") {

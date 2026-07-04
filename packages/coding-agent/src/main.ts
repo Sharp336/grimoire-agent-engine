@@ -11,6 +11,8 @@ import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	directoryExists,
+	getLogPath,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
@@ -20,15 +22,14 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
-import type { Args } from "./cli/args";
+import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
-import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
+import { ModelRegistry } from "./config/model-registry";
 import {
 	getModelMatchPreferences,
 	resolveCliModel,
@@ -36,6 +37,7 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
+import { ModelsConfigFile } from "./config/models-config";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -54,6 +56,7 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -63,27 +66,46 @@ import {
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
-import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
-import { resolvePromptInput } from "./system-prompt";
+import { describePendingToolCalls } from "./session/exit-diagnostics";
+import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
+import { SessionManager } from "./session/session-manager";
+import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
+import { shouldShowStartupSplash } from "./startup-splash";
+import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { AUTO_THINKING } from "./thinking";
+import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
-import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
+import {
+	getChangelogPath,
+	getNewEntries,
+	parseChangelog,
+	readLastChangelogVersion,
+	writeLastChangelogVersion,
+} from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
+import { withTimeoutSignal } from "./utils/fetch-timeout";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
+	eventBus?: EventBus,
 ) => Promise<never>;
+
+export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
+	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
 	}
 	try {
-		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest");
+		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest", {
+			signal: withTimeoutSignal(5_000),
+		});
 		if (!response.ok) return undefined;
 
 		const data = (await response.json()) as { version?: string };
@@ -99,16 +121,14 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 	}
 }
 
+// Todo settings are caller-controlled in protocol modes. Do not host-default them:
+// embedders need project-level opt-outs for reminder/prelude prompt injection.
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
-	"todo.enabled",
-	"todo.reminders",
-	"todo.reminders.max",
-	"todo.eager",
 	"task.isolation.mode",
 	"task.isolation.merge",
 	"task.isolation.commits",
 	"task.eager",
-	"task.simple",
+	"task.batch",
 	"task.maxConcurrency",
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
@@ -117,6 +137,14 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
 	"memories.enabled",
+	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
+	// instead of inheriting a user's globally-enabled local preference, and when
+	// they do opt in they get the default tuning rather than the user's local tuning.
+	"advisor.enabled",
+	"advisor.subagents",
+	"advisor.syncBacklog",
+	"advisor.immuneTurns",
+	"tier.advisor",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
@@ -126,8 +154,16 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"bash.autoBackground.thresholdMs",
 ];
 
+// Protocol-mode hosts opt into a small set of paths whose host-default we
+// re-apply at startup so embedders inherit OMP's neutral defaults instead of
+// the local user's globally-persisted preferences for interactive use. The
+// guard preserves any explicit configuration — caller `Settings.isolated`
+// overrides, project `.claude/settings.yml`, `--config` overlays, or global
+// `config.yml` — so the host default only kicks in when nothing is set. Without
+// it the override clobbers every caller/host choice (#2598, #3207).
 function applyDefaultSettingOverrides(settingPaths: SettingPath[], targetSettings: Settings): void {
 	for (const settingPath of settingPaths) {
+		if (targetSettings.isConfigured(settingPath)) continue;
 		targetSettings.override(settingPath, getDefault(settingPath));
 	}
 }
@@ -143,13 +179,77 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 
 async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY !== false) return undefined;
+	// stdin is a pipe: a producer that never writes nor closes would block
+	// startup forever with zero output. Say what we're blocked on after 1s.
+	const notice = setTimeout(() => {
+		process.stderr.write(`${chalk.dim("Reading prompt from piped stdin (waiting for EOF; ctrl+c to abort)…")}\n`);
+	}, 1000);
+	notice.unref?.();
 	try {
 		const text = await Bun.stdin.text();
 		if (text.trim().length === 0) return undefined;
 		return text;
 	} catch {
 		return undefined;
+	} finally {
+		clearTimeout(notice);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Startup watchdog
+// ---------------------------------------------------------------------------
+// Speculative-hang reporter: until startup hands off to a mode runner, print a
+// stderr line every 10s naming the deepest in-flight startup phase. Turns
+// zero-output indefinite hangs (stuck discovery read, network wait, stdin
+// pipe) into self-diagnosing reports instead of "it just hangs" (see the
+// PI_DEBUG_STARTUP markers for the synchronous-hang counterpart).
+
+const STARTUP_WATCHDOG_INTERVAL_MS = 10_000;
+let startupWatchdogTimer: NodeJS.Timeout | undefined;
+let startupWatchdogActive = false;
+let startupWatchdogStartedAt = 0;
+
+function armStartupWatchdog(): void {
+	if (startupWatchdogTimer) return;
+	startupWatchdogTimer = setInterval(() => {
+		const elapsed = Math.round((Date.now() - startupWatchdogStartedAt) / 1000);
+		const phase = logger.openSpanPath().join(" > ") || "module load / pre-phase work";
+		process.stderr.write(
+			`${chalk.yellow(`Still starting after ${elapsed}s`)}${chalk.dim(` — phase: ${phase}`)}\n` +
+				`${chalk.dim(`  logs: ${getLogPath()} · re-run with PI_DEBUG_STARTUP=1 for streaming phase markers`)}\n`,
+		);
+	}, STARTUP_WATCHDOG_INTERVAL_MS);
+	startupWatchdogTimer.unref?.();
+}
+
+function disarmStartupWatchdog(): void {
+	if (!startupWatchdogTimer) return;
+	clearInterval(startupWatchdogTimer);
+	startupWatchdogTimer = undefined;
+}
+
+/** Begin watching startup (idempotent). */
+function startStartupWatchdog(): void {
+	startupWatchdogActive = true;
+	startupWatchdogStartedAt = Date.now();
+	armStartupWatchdog();
+}
+
+/** Permanently stop watching: a mode runner now owns the terminal. */
+function stopStartupWatchdog(): void {
+	startupWatchdogActive = false;
+	disarmStartupWatchdog();
+}
+
+/** Pause while an interactive prompt legitimately waits on the user. */
+function pauseStartupWatchdog(): void {
+	disarmStartupWatchdog();
+}
+
+/** Resume after an interactive prompt, if startup is still being watched. */
+function resumeStartupWatchdog(): void {
+	if (startupWatchdogActive) armStartupWatchdog();
 }
 
 export interface InteractiveModeNotify {
@@ -157,12 +257,28 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+export function buildModelScopeNotification(
+	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
+	startupQuiet: boolean,
+): InteractiveModeNotify | null {
+	if (startupQuiet || scopedModelsForDisplay.length === 0) {
+		return null;
+	}
+	const modelList = scopedModelsForDisplay
+		.map(scopedModel => {
+			const thinkingStr =
+				scopedModel.explicitThinkingLevel && scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
+			return `${scopedModel.model.id}${thinkingStr}`;
+		})
+		.join(", ");
+	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
+}
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
 		"markPendingSubmissionStarted" | "finishPendingSubmission" | "showError" | "checkShutdownRequested"
 	>,
-	session: Pick<AgentSession, "prompt" | "promptCustomMessage">,
+	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
 	input: SubmittedUserInput,
 ): Promise<void> {
 	if (input.cancelled) {
@@ -171,22 +287,46 @@ export async function submitInteractiveInput(
 
 	try {
 		using _keepalive = new EventLoopKeepalive();
+		// Honor the submission's queue intent, defaulting to followUp. Reading
+		// `session.isStreaming` to decide queue-vs-fresh is NOT atomic with the
+		// eventual `agent.prompt()` call inside `session.prompt()`: a background turn
+		// (queued-message drain, idle compaction, goal/loop continuation timer) can
+		// flip the agent busy in the gap, and a bare prompt() would then throw
+		// AgentBusyError straight to an error toast even though the UI shows no
+		// "Working…". Passing a behavior unconditionally is a no-op when the session
+		// is genuinely idle (a fresh turn runs and the option is ignored) and queues
+		// the message instead of erroring when a turn is already underway. Normal
+		// user Enter carries "steer" (interrupt, matching the streaming-branch Enter);
+		// background/continuation submits omit it and fall back to "followUp". The
+		// synthetic branch below opts out by design.
+		const streamingBehavior = input.streamingBehavior ?? ("followUp" as const);
 		// Continue shortcuts submit an already-started synthetic developer prompt with
 		// no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
 		if (input.customType) {
-			await session.promptCustomMessage({
+			const message = {
 				customType: input.customType,
 				content: input.text,
 				display: input.display ?? false,
-				attribution: "agent",
-			});
+				attribution: "agent" as const,
+			};
+			await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.synthetic) {
-			await session.prompt(input.text, { synthetic: true, expandPromptTemplates: false });
+			// Synthetic continue shortcuts are hidden developer prompts. The streaming
+			// queue (#queueUserMessage) only carries user-attributed messages, so we do
+			// NOT pass streamingBehavior here: queueing would silently demote the
+			// developer directive to a visible user message. A synthetic submit while
+			// streaming keeps its prior behavior (rejected as busy) rather than changing
+			// its role.
+			await session.prompt(input.text, {
+				synthetic: true,
+				expandPromptTemplates: false,
+				userInitiated: input.userInitiated,
+			});
 		} else {
-			await session.prompt(input.text, { images: input.images });
+			await session.prompt(input.text, { images: input.images, streamingBehavior });
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -225,6 +365,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
+		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
+		// host can open `session/new` for any client-supplied workspace, so
+		// re-discover `TITLE_SYSTEM.md` against THIS session's `cwd` to keep the
+		// replan-driven title refresh consistent with the target project's
+		// policy (PR #3736 follow-up).
+		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
+		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const { session: nextSession } = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -235,6 +382,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			agentId,
 			hasUI: false,
 			enableMCP: false,
+			titleSystemPrompt,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
@@ -256,9 +404,11 @@ async function runInteractiveMode(
 	mcpManager: MCPManager | undefined,
 	resuming: boolean,
 	forceSetupWizard: boolean,
+	showStartupSplash: boolean,
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
+	joinLink?: string,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -273,10 +423,13 @@ async function runInteractiveMode(
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
 	// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
 	// to know whether the stored setup version is current. Lazy-load the wizard
-	// barrel only when setup is stale or forced; otherwise skip it entirely.
+	// barrel only when setup is stale, forced, or the explicit startup splash
+	// setting needs the shared setup splash renderer.
 	const storedSetupVersion = settings.get("setupVersion");
 	const setupWizard =
-		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION ? await import("./modes/setup-wizard") : undefined;
+		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+			? await import("./modes/setup-wizard")
+			: undefined;
 	const setupScenes = setupWizard
 		? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
 				resuming,
@@ -285,11 +438,16 @@ async function runInteractiveMode(
 				force: forceSetupWizard,
 			})
 		: [];
+	const playStartupSplash = showStartupSplash && setupScenes.length === 0;
 
 	await mode.init({
-		suppressWelcomeIntro: resuming || setupScenes.length > 0,
+		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 		clearInitialTerminalHistory: true,
 	});
+
+	if (setupWizard && playStartupSplash) {
+		await setupWizard.runStartupSplash(mode);
+	}
 
 	if (setupWizard && setupScenes.length > 0) {
 		await setupWizard.runSetupWizard(mode, setupScenes);
@@ -311,7 +469,7 @@ async function runInteractiveMode(
 	// Every in-process session load also uses `clearTerminalHistory`; cold launch
 	// follows the same clean-cutover path instead of preserving a previous run's
 	// transcript above the fresh one.
-	mode.renderInitialMessages(undefined, { preserveExistingChat: true, clearTerminalHistory: true });
+	mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true });
 
 	for (const notify of notifs) {
 		if (!notify) {
@@ -324,6 +482,12 @@ async function runInteractiveMode(
 		} else if (notify.kind === "info") {
 			mode.showStatus(notify.message);
 		}
+	}
+
+	// `omp join <link>`: dispatch through the same builtin path as a typed
+	// `/join` so collab guards and error rendering stay in one place.
+	if (joinLink !== undefined) {
+		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
 	if (initialMessage !== undefined) {
@@ -361,12 +525,14 @@ async function promptForkSession(session: SessionInfo): Promise<SessionPromptRes
 		return "unavailable";
 	}
 	const message = `Session found in different project: ${session.cwd}. Fork into current directory? [y/N] `;
+	pauseStartupWatchdog();
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
 		const answer = (await rl.question(message)).trim().toLowerCase();
 		return answer === "y" || answer === "yes" ? "accepted" : "declined";
 	} finally {
 		rl.close();
+		resumeStartupWatchdog();
 	}
 }
 
@@ -375,12 +541,14 @@ async function promptMoveSession(session: SessionInfo): Promise<SessionPromptRes
 		return "unavailable";
 	}
 	const message = `Session's directory no longer exists (${session.cwd}). Move (re-root) it into the current directory? [Y/n] `;
+	pauseStartupWatchdog();
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
 		const answer = (await rl.question(message)).trim().toLowerCase();
 		return answer === "" || answer === "y" || answer === "yes" ? "accepted" : "declined";
 	} finally {
 		rl.close();
+		resumeStartupWatchdog();
 	}
 }
 
@@ -427,7 +595,11 @@ async function moveMissingCwdSessionIfNeeded(
 		return { status: "declined" };
 	}
 
-	const manager = await SessionManager.open(session.path, sessionDir);
+	// Open anchored at the (now-missing) recorded cwd: `open` otherwise falls back
+	// to the launch cwd, which would make the `moveTo` below a no-op whenever the
+	// move target equals the current project dir. moveTo never chdirs, so the
+	// stale cwd is only a relocation source, not a directory we enter.
+	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
 	await manager.moveTo(cwd, sessionDir);
 	return { status: "moved", manager };
 }
@@ -437,7 +609,7 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 		return undefined;
 	}
 
-	const lastVersion = settings.get("lastChangelogVersion");
+	const lastVersion = await readLastChangelogVersion();
 	if (lastVersion === VERSION) {
 		// Steady state: user already saw the current version's changelog. Skip the file read + parse.
 		return undefined;
@@ -448,28 +620,18 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 
 	if (!lastVersion) {
 		if (entries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
+			await writeLastChangelogVersion(VERSION);
 			return entries.map(e => e.content).join("\n\n");
 		}
 	} else {
 		const newEntries = getNewEntries(entries, lastVersion);
 		if (newEntries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
+			await writeLastChangelogVersion(VERSION);
 			return newEntries.map(e => e.content).join("\n\n");
 		}
 	}
 
 	return undefined;
-}
-
-async function flushChangelogVersion(): Promise<void> {
-	try {
-		await settings.flush();
-	} catch (error: unknown) {
-		logger.warn("Failed to persist lastChangelogVersion", { error });
-	}
 }
 
 /** Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager. */
@@ -613,23 +775,42 @@ function discoverAppendSystemPromptFile(): string | undefined {
 	return undefined;
 }
 
+/** Apply resolved CLI/discovered prompt files without bypassing system prompt templates. */
+export function applyResolvedSystemPromptInputs(
+	options: CreateAgentSessionOptions,
+	resolvedSystemPrompt: string | undefined,
+	resolvedAppendPrompt: string | undefined,
+): void {
+	if (resolvedSystemPrompt) {
+		options.customSystemPrompt = resolvedSystemPrompt;
+	}
+	if (resolvedAppendPrompt) {
+		options.appendSystemPrompt = resolvedAppendPrompt;
+	}
+}
+
 async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
-): Promise<{ options: CreateAgentSessionOptions }> {
+): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
+	if (parsed.maxTime !== undefined) {
+		options.deadline = Date.now() + parsed.maxTime * 1000;
+	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
 	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
 	const resolvedSystemPrompt = await resolvePromptInput(systemPromptSource, "system prompt");
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
 	const resolvedAppendPrompt = await resolvePromptInput(appendPromptSource, "append system prompt");
+	const titleSystemPromptSource = discoverTitleSystemPromptFile();
+	const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -679,7 +860,6 @@ async function buildSessionOptions(
 				{
 					settings: activeSettings,
 					matchPreferences: modelMatchPreferences,
-					modelRegistry,
 				},
 			);
 			const rememberedResolvedModel = rememberedSpec.model;
@@ -717,9 +897,9 @@ async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		// `auto` is a session-level concept only; per-scoped-model (Ctrl+P) thinking
 		// overrides stay concrete, so coerce the auto default to "unset" here.
-		const defaultThinkingLevelSetting = activeSettings.get("defaultThinkingLevel");
-		const defaultThinkingLevel =
-			defaultThinkingLevelSetting === AUTO_THINKING ? undefined : defaultThinkingLevelSetting;
+		const defaultThinkingLevel = concreteThinkingLevel(
+			parseConfiguredThinkingLevel(activeSettings.get("defaultThinkingLevel")),
+		);
 		options.scopedModels = scopedModels.map(scopedModel => ({
 			model: scopedModel.model,
 			thinkingLevel: scopedModel.explicitThinkingLevel
@@ -732,12 +912,13 @@ async function buildSessionOptions(
 	// (handled by caller before createAgentSession)
 
 	// System prompt
-	if (resolvedSystemPrompt && resolvedAppendPrompt) {
-		options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, resolvedAppendPrompt, ...defaultPrompt.slice(1)];
-	} else if (resolvedSystemPrompt) {
-		options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, ...defaultPrompt.slice(1)];
-	} else if (resolvedAppendPrompt) {
-		options.systemPrompt = defaultPrompt => [...defaultPrompt, resolvedAppendPrompt];
+	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
+	// Replan-driven title refresh resolves the override from this same field on
+	// `AgentSession`, so threading it through `CreateAgentSessionOptions` keeps
+	// both first-input titling (`input-controller.ts`) and replan refresh
+	// (`AgentSession.#refreshTitleAfterReplan`) on one source of truth.
+	if (titleSystemPrompt) {
+		options.titleSystemPrompt = titleSystemPrompt;
 	}
 
 	// Tools
@@ -775,12 +956,13 @@ async function buildSessionOptions(
 		options.additionalExtensionPaths = [];
 	}
 
-	return { options };
+	return options;
 }
 
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
+	selectSession?: typeof selectSession;
 	runAcpMode?: RunAcpMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -792,6 +974,7 @@ export async function runRootCommand(
 	deps: RunRootCommandDependencies = {},
 ): Promise<void> {
 	logger.startTiming();
+	startStartupWatchdog();
 
 	// Initialize theme early with defaults (CLI commands need symbols)
 	// Will be re-initialized with user preferences later
@@ -803,34 +986,11 @@ export async function runRootCommand(
 	const notifs: (InteractiveModeNotify | null)[] = [];
 
 	// Create AuthStorage and ModelRegistry upfront
-	const authStorage = await logger.time("discoverModels", deps.discoverAuthStorage ?? discoverAuthStorage);
-	const modelRegistry = new ModelRegistry(authStorage);
+	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	if (parsedArgs.version) {
-		process.stdout.write(`${VERSION}\n`);
-		process.exit(0);
-	}
-
-	if (parsedArgs.listModels !== undefined) {
-		const settingsInstance = await logger.time("settings:init:list-models", Settings.init, {
-			cwd: getProjectDir(),
-		});
-		await modelRegistry.refresh("online");
-		const cliExtensionPaths = parsedArgs.noExtensions
-			? []
-			: [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
-		const settingsExtensions = settingsInstance.get("extensions") ?? [];
-		const disabledExtensionIds = settingsInstance.get("disabledExtensions") ?? [];
-		const searchPattern = typeof parsedArgs.listModels === "string" ? parsedArgs.listModels : undefined;
-		await runListModelsCommand({
-			modelRegistry,
-			cwd: getProjectDir(),
-			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions,
-			disabledExtensionIds,
-			disableExtensionDiscovery: Boolean(parsedArgs.noExtensions),
-			searchPattern,
-		});
+		writeStartupNotice(parsedArgs, `${VERSION}\n`);
 		process.exit(0);
 	}
 
@@ -845,7 +1005,7 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 			process.exit(1);
 		}
-		process.stdout.write(`Exported to: ${result}\n`);
+		writeStartupNotice(parsedArgs, `Exported to: ${result}\n`);
 		process.exit(0);
 	}
 
@@ -877,11 +1037,16 @@ export async function runRootCommand(
 	}
 
 	let cwd = getProjectDir();
-	const settingsInstance = deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd }));
+	const settingsInstance =
+		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 		// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
 		settingsInstance.override("tools.approvalMode", parsedArgs.approvalMode);
+	} else if (parsedArgs.autoApprove) {
+		// --auto-approve / --yolo without an explicit --approval-mode: reflect in settings so
+		// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
+		settingsInstance.override("tools.approvalMode", "yolo");
 	}
 	if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 		applyRpcDefaultSettingOverrides(settingsInstance);
@@ -916,9 +1081,20 @@ export async function runRootCommand(
 		});
 	}
 
+	// --print-thoughts (single-shot print mode) must surface reasoning, so un-hide
+	// thinking before the session is built — otherwise a passive omitThinking
+	// setting makes the provider omit summaries and the flag prints nothing. An
+	// explicit --hide-thinking block display option still wins for output display.
+	if (parsedArgs.printThoughts && !isProtocolMode && !isInteractive) {
+		settingsInstance.override("omitThinking", false);
+	}
 	// Apply --hide-thinking CLI flag (ephemeral, not persisted)
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
+	}
+	// Apply --advisor CLI flag (ephemeral, not persisted)
+	if (parsedArgs.advisor) {
+		settingsInstance.override("advisor.enabled", true);
 	}
 
 	await logger.time(
@@ -972,37 +1148,56 @@ export async function runRootCommand(
 	// message rather than letting the decline bubble up as an uncaught exception
 	// (see issue #1668).
 	if (typeof parsedArgs.resume === "string" && !sessionManager) {
-		process.stdout.write(`${chalk.dim("Resume cancelled: session is in another project.")}\n`);
-		return;
+		writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: session is in another project.")}\n`);
+		stopStartupWatchdog();
+		process.exit(0);
 	}
 
 	// Handle --resume (no value): show session picker
 	if (parsedArgs.resume === true && !parsedArgs.fork) {
 		const folderSessions = await logger.time("SessionManager.list", SessionManager.list, cwd, parsedArgs.sessionDir);
 		let preloadedAllSessions: SessionInfo[] | undefined;
-		let startInAllScope = false;
 		if (folderSessions.length === 0) {
-			// Nothing in the current folder — fall back to a global scan so the
-			// picker can still open in all-projects scope instead of dead-ending.
+			// Probe globally so we can exit fast when the user has no sessions at
+			// all, but never auto-switch the picker into all-projects scope — that
+			// silently surfaced other projects' history when the cwd was empty
+			// (issue #3099). The preloaded list also makes the user's Tab switch
+			// instant on the way in.
 			preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
 			if (preloadedAllSessions.length === 0) {
-				process.stdout.write(`${chalk.dim("No sessions found")}\n`);
-				return;
+				writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
+				stopStartupWatchdog();
+				process.exit(0);
 			}
-			startInAllScope = true;
 		}
-		const selected = await logger.time("selectSession", selectSession, folderSessions, {
+		pauseStartupWatchdog();
+		const selected = await logger.time("selectSession", deps.selectSession ?? selectSession, folderSessions, {
 			allSessions: preloadedAllSessions,
-			startInAllScope,
 		});
+		resumeStartupWatchdog();
 		if (!selected) {
-			process.stdout.write(`${chalk.dim("No session selected")}\n`);
-			return;
+			writeStartupNotice(parsedArgs, `${chalk.dim("No session selected")}\n`);
+			// Quit instead of returning: startup already armed long-lived handles
+			// (theme watcher + SIGWINCH/macOS appearance listeners via initTheme,
+			// settings save timer, model registry) that keep the event loop alive,
+			// so a bare return hangs the process after the picker leaves the alt
+			// screen. No session was built here, so there is nothing to flush. The
+			// in-session `/resume` picker (selector-controller.ts) takes a different
+			// onCancel that just closes the overlay — only this startup path exits.
+			stopStartupWatchdog();
+			process.exit(0);
 		}
 		// Resuming a session from another project: switch the process into that
 		// project's directory and refresh cwd-derived caches before the session is
 		// built, so settings discovery, plugins, and capabilities all scope to it.
-		if (selected.cwd && normalizePathForComparison(selected.cwd) !== normalizePathForComparison(getProjectDir())) {
+		// Skip the chdir when the recorded project directory is gone: `setProjectDir`
+		// would throw on the missing path. `SessionManager.open` then falls back to
+		// the launch cwd, so the resumed session simply stays where the user is.
+		if (
+			selected.cwd &&
+			normalizePathForComparison(selected.cwd) !== normalizePathForComparison(getProjectDir()) &&
+			(await directoryExists(selected.cwd))
+		) {
 			// Let the original (launch-cwd) plugin-root preload settle first so its
 			// late resolution can't clobber the re-warm we trigger below.
 			await pluginPreloadPromise.catch(() => {});
@@ -1017,6 +1212,21 @@ export async function runRootCommand(
 		sessionManager = await SessionManager.open(selected.path);
 	}
 
+	if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork)) {
+		const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
+		if (pendingToolWarning) {
+			logger.warn("Resumed session has pending tool calls", {
+				sessionId: sessionManager.getSessionId(),
+				sessionFile: sessionManager.getSessionFile(),
+			});
+			if (isInteractive) {
+				notifs.push({ kind: "warn", message: pendingToolWarning });
+			} else {
+				process.stderr.write(`${chalk.yellow(`${pendingToolWarning}\n`)}`);
+			}
+		}
+	}
+
 	await pluginPreloadPromise;
 
 	scheduleMarketplaceAutoUpdate({
@@ -1025,7 +1235,7 @@ export async function runRootCommand(
 		clearPluginRootsCache: clearPluginRootsAndCaches,
 	});
 
-	const { options: sessionOptions } = await logger.time(
+	const sessionOptions = await logger.time(
 		"buildSessionOptions",
 		buildSessionOptions,
 		parsedArgs,
@@ -1045,7 +1255,7 @@ export async function runRootCommand(
 	// Both are no-ops when OTEL_EXPORTER_OTLP_ENDPOINT is unset. An empty config
 	// is enough to enable telemetry — content capture is governed by the
 	// standard OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var.
-	await initTelemetryExport();
+	await logger.time("initTelemetryExport", initTelemetryExport);
 	if (isTelemetryExportEnabled()) {
 		sessionOptions.telemetry = {};
 	}
@@ -1086,6 +1296,7 @@ export async function runRootCommand(
 		});
 		// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 		const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
+		stopStartupWatchdog();
 		await runAcpMode(createAcpSession);
 	} else {
 		// Resolve extension-registered CLI flags before creating the session so a
@@ -1104,6 +1315,15 @@ export async function runRootCommand(
 			},
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+		// Fail fast on stale/typo flags (e.g. `omp --list-models`) now that we
+		// know the real extension flag set. Without this check the unrecognized
+		// token gets silently consumed and any following positional leaks as the
+		// initial prompt — kicking off a real LLM session, MCP connection, and
+		// tool calls (issue #2459). Exit code 2 matches the conventional
+		// "command line usage error" convention.
+		if (reportUnrecognizedFlags(initialArgs)) {
+			process.exit(2);
+		}
 		const processedFiles =
 			initialArgs.fileArgs.length > 0
 				? await logger.time("processFileArguments", () =>
@@ -1119,11 +1339,39 @@ export async function runRootCommand(
 			stdinContent: pipedInput,
 		});
 
+		const showStartupSplash = shouldShowStartupSplash({
+			configured: settingsInstance.get("startup.showSplash"),
+			isInteractive,
+			resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
+			quiet: settingsInstance.get("startup.quiet"),
+			timing: Boolean($env.PI_TIMING),
+			stdinIsTTY: process.stdin.isTTY,
+			stdoutIsTTY: process.stdout.isTTY,
+		});
+
 		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
 			...sessionOptions,
 			eventBus,
 			preloadedExtensions: extensionsResult,
 		});
+
+		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
+		// scan, collab mirror, resumed process) has a sessionFile but no in-memory
+		// reviver, so `ensureLive` (IRC sends, hub focus) would refuse it. Install a
+		// factory — bound to THIS top-level session — that rebuilds the subagent from
+		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
+		// bootstrap: ACP keeps several concurrent top-level sessions and a single
+		// process-global factory must not be clobbered by the most recent one.
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+			createPersistedSubagentReviverFactory({
+				session,
+				authStorage,
+				modelRegistry,
+				settings: settingsInstance,
+				enableLsp: sessionOptions.enableLsp ?? true,
+			}),
+			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+		);
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
@@ -1138,6 +1386,9 @@ export async function runRootCommand(
 		}
 
 		if (!isInteractive && !session.model) {
+			if (modelRegistryError) {
+				process.stderr.write(`${chalk.red(modelRegistryError.message)}\n\n`);
+			}
 			if (modelFallbackMessage) {
 				process.stderr.write(`${chalk.red(modelFallbackMessage)}\n`);
 			} else {
@@ -1152,20 +1403,21 @@ export async function runRootCommand(
 		if (mode === "rpc" || mode === "rpc-ui") {
 			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
-			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined);
+			stopStartupWatchdog();
+			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);
 
-			const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
-			if (scopedModelsForDisplay.length > 0) {
-				const modelList = scopedModelsForDisplay
-					.map(scopedModel => {
-						const thinkingStr = !scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
-						return `${scopedModel.model.id}${thinkingStr}`;
-					})
-					.join(", ");
-				process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`)}\n`);
+			const modelScopeNotification = buildModelScopeNotification(
+				scopedModels,
+				settingsInstance.get("startup.quiet"),
+			);
+			if (modelScopeNotification) {
+				// Routed through the TUI (not stdout): the startup capture owns the
+				// terminal in raw mode here, and the TUI's first clearScrollback paint
+				// would wipe a pre-TUI line anyway.
+				notifs.push(modelScopeNotification);
 			}
 
 			if ($env.PI_TIMING) {
@@ -1175,6 +1427,7 @@ export async function runRootCommand(
 				}
 			}
 
+			stopStartupWatchdog();
 			logger.endTiming();
 			await runInteractiveMode(
 				session,
@@ -1188,18 +1441,22 @@ export async function runRootCommand(
 				mcpManager,
 				Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
 				deps.forceSetupWizard === true,
+				showStartupSplash,
 				eventBus,
 				initialMessage,
 				initialImages,
+				parsedArgs.join,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
+			stopStartupWatchdog();
 			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,
 				messages: initialArgs.messages,
 				initialMessage,
 				initialImages,
+				printThoughts: initialArgs.printThoughts,
 			});
 			if ($env.PI_TIMING) {
 				logger.printTimings();

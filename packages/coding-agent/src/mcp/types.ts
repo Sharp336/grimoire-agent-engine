@@ -55,6 +55,8 @@ export interface MCPAuthConfig {
 	clientId?: string;
 	/** Client secret — persisted for token refresh */
 	clientSecret?: string;
+	/** MCP resource URI — persisted for OAuth resource indicators during refresh */
+	resource?: string;
 }
 
 /** Base server config with shared options */
@@ -72,6 +74,8 @@ interface MCPServerConfigBase {
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;
+		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
+		prompt?: string;
 	};
 }
 
@@ -107,7 +111,10 @@ export const MCP_CONFIG_SCHEMA_URL =
 export interface MCPConfigFile {
 	$schema?: string;
 	mcpServers?: Record<string, MCPServerConfig>;
+	/** Names to hide regardless of any source `enabled` flag. Highest precedence. */
 	disabledServers?: string[];
+	/** Names to force-enable when a non-writable source reports `enabled: false`. */
+	enabledServers?: string[];
 }
 
 // =============================================================================

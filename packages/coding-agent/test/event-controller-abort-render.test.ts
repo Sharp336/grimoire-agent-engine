@@ -16,8 +16,10 @@
  *       → `updateContent` receives a message with `stopReason: "stop"`;
  *         `errorMessage` is NOT set (TTSR existing behavior unchanged).
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -50,25 +52,31 @@ function createFixture(opts: {
 	retryAttempt?: number;
 }) {
 	const updateContent = vi.fn();
-	const setUsageInfo = vi.fn();
 	const setComplete = vi.fn();
 	const markTranscriptBlockFinalized = vi.fn();
-	const streamingComponent = { updateContent, setUsageInfo, setComplete, markTranscriptBlockFinalized };
+	const streamingComponent = { updateContent, setComplete, markTranscriptBlockFinalized };
 	const requestRender = vi.fn();
 
-	const ctx = {
+	const ctxBase = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
-		ui: { requestRender, setEagerNativeScrollbackRebuild: vi.fn() },
+		ui: { requestRender },
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
 		streamingComponent,
 		streamingMessage: opts.streamingMessage,
 		pendingTools: new Map(),
-		session: {
-			isTtsrAbortPending: opts.isTtsrAbortPending ?? false,
-			retryAttempt: opts.retryAttempt ?? 0,
-		},
+		noteDisplayableThinkingContent: vi.fn(() => false),
+	};
+	const sessionMock = {
+		isTtsrAbortPending: opts.isTtsrAbortPending ?? false,
+		retryAttempt: opts.retryAttempt ?? 0,
+	};
+	const ctx = {
+		...ctxBase,
+		session: sessionMock,
+		viewSession: sessionMock,
+		clearTransientSessionUi: () => {},
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
@@ -76,6 +84,13 @@ function createFixture(opts: {
 }
 
 describe("EventController #handleMessageEnd abort labeling", () => {
+	beforeEach(async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+	});
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
 	it("C1: SILENT_ABORT_MARKER + aborted -> updateContent stopReason='stop', errorMessage NOT overwritten", async () => {
 		const message = makeAssistantMessage({
 			stopReason: "aborted",
@@ -103,6 +118,23 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 		// And the streamingMessage on ctx was cleared after the handler ran (lifecycle
 		// guard — kept for completeness).
 		expect(ctx.streamingMessage).toBeUndefined();
+	});
+
+	it("C1b: silent-abort errorId without marker suppresses the abort line", async () => {
+		const message = makeAssistantMessage({
+			stopReason: "aborted",
+			errorMessage: undefined,
+			errorId: AIError.create(AIError.Flag.SilentAbort),
+		});
+		const { controller, streamingComponent } = createFixture({ streamingMessage: message });
+
+		await controller.handleEvent({ type: "message_end", message });
+
+		expect(message.errorMessage).toBeUndefined();
+		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
+		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		expect(arg.stopReason).toBe("stop");
+		expect(arg.errorMessage).toBeUndefined();
 	});
 
 	it("C2: errorMessage undefined (no threaded reason) + aborted + no TTSR -> errorMessage='Operation aborted', updateContent receives original ref", async () => {

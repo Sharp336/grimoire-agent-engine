@@ -1,7 +1,19 @@
-import * as path from "node:path";
-import { $env, isCompiledBinary, logger } from "@oh-my-pi/pi-utils";
-import type { Subprocess } from "bun";
+import { $env, logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
+import {
+	createUnavailableWorker,
+	createWorkerHandle,
+	createWorkerSubprocess,
+	logWorkerMessage,
+	type RefCountedWorkerHandle,
+	resolveWorkerSpawnCmd,
+	SMOKE_TEST_TIMEOUT_MS,
+	type SpawnedSubprocess,
+	smokeTestWorker,
+	spawnWorkerOrUnavailable,
+	workerEnvFromParent,
+} from "../subprocess/worker-client";
+import { safeSend } from "../utils/ipc";
 import { tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
 import {
@@ -14,43 +26,45 @@ import {
 } from "./models";
 import type { TinyTitleProgressEvent, TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "./title-protocol";
 
-/**
- * Abstraction over the tiny-model subprocess. Modelled as a worker interface
- * so existing callers (titles, memory completions, downloads) compose the
- * same way; the runtime implementation is a Bun child process so
- * `onnxruntime-node`'s NAPI finalizer never runs inside the main agent
- * address space — that destructor segfaults Bun on Windows during shutdown
- * (issue #1606).
- */
-interface WorkerHandle {
-	send(message: TinyTitleWorkerInbound): void;
-	onMessage(handler: (message: TinyTitleWorkerOutbound) => void): () => void;
-	onError(handler: (error: Error) => void): () => void;
-	terminate(): Promise<void>;
-}
-
 type PendingRequest =
 	| { kind: "generate"; modelKey: TinyTitleLocalModelKey; resolve: (title: string | null) => void }
 	| { kind: "complete"; modelKey: TinyMemoryLocalModelKey; resolve: (text: string | null) => void }
-	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (ok: boolean) => void };
+	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
+
+export interface TinyTitleDownloadResult {
+	ok: boolean;
+	error?: string;
+}
 
 export interface TinyTitleDownloadOptions {
 	signal?: AbortSignal;
 	onProgress?: (event: TinyTitleProgressEvent) => void;
 }
 
-// Cold-starting the worker subprocess from a compiled binary (decompress + module
-// graph load) is slow on contended CI runners — the macos-15-intel release smoke
-// blew past 5s while arm64/linux/win passed. The probe only needs to prove the
-// worker spawns and ponges at all (a dead worker never ponges regardless), so a
-// generous bound removes the flake without weakening the check.
-const SMOKE_TEST_TIMEOUT_MS = 30_000;
+/**
+ * Per-request controls for {@link TinyTitleClient.generate}.
+ *
+ * Carries the optional abort signal and title-system-prompt override used by
+ * callers that customize automatic session-title generation.
+ */
+export interface TinyTitleGenerateOptions {
+	signal?: AbortSignal;
+	systemPrompt?: string;
+}
+
+function normalizeTinyTitleGenerateOptions(
+	options: AbortSignal | TinyTitleGenerateOptions | undefined,
+): TinyTitleGenerateOptions {
+	if (!options) return {};
+	if ("aborted" in options && "addEventListener" in options) return { signal: options };
+	return options;
+}
 
 /**
  * Hidden subcommand on the main CLI that boots the tiny-model worker in the
  * spawned subprocess. Kept in sync with the dispatch in `cli.ts`.
  */
-export const TINY_WORKER_ARG = "--tiny-worker";
+export const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 
 function readTinyModelSetting(path: "providers.tinyModelDevice" | "providers.tinyModelDtype"): string | undefined {
 	try {
@@ -87,125 +101,54 @@ export function tinyWorkerEnvOverlay(
 }
 
 /**
- * Env handed to the tiny-model subprocess. The `PI_TINY_DEVICE` / `PI_TINY_DTYPE`
- * env vars win; otherwise the persisted `providers.tinyModelDevice` /
- * `providers.tinyModelDtype` settings are mapped onto those vars so the
- * subprocess's env-based resolution picks them up. Resolved once at spawn
- * (pipelines are cached for the lifetime of the subprocess).
+ * Env handed to the tiny-model subprocess — and reused verbatim by the STT and
+ * TTS workers, which share the same device/dtype resolution. The
+ * `PI_TINY_DEVICE` / `PI_TINY_DTYPE` env vars win; otherwise the persisted
+ * `providers.tinyModelDevice` / `providers.tinyModelDtype` settings are mapped
+ * onto those vars so the subprocess's env-based resolution picks them up.
+ * Resolved once at spawn (pipelines are cached for the lifetime of the
+ * subprocess).
  */
-function tinyWorkerEnv(): Record<string, string> {
-	const overlay = tinyWorkerEnvOverlay(
-		$env,
-		readTinyModelSetting("providers.tinyModelDevice"),
-		readTinyModelSetting("providers.tinyModelDtype"),
+export function tinyWorkerEnv(): Record<string, string> {
+	return workerEnvFromParent(
+		tinyWorkerEnvOverlay(
+			$env,
+			readTinyModelSetting("providers.tinyModelDevice"),
+			readTinyModelSetting("providers.tinyModelDtype"),
+		),
 	);
-	const base = $env as Record<string, string | undefined>;
-	const merged: Record<string, string> = {};
-	for (const key in base) {
-		const value = base[key];
-		if (typeof value === "string") merged[key] = value;
-	}
-	for (const key in overlay) merged[key] = overlay[key];
-	return merged;
-}
-
-/**
- * Resolve the argv used to relaunch the agent CLI into tiny-worker mode. In a
- * compiled binary the entry point is the binary itself; in dev/source the
- * spawned `bun` needs the absolute path to `cli.ts` so it can resolve module
- * imports against the on-disk source tree.
- */
-function tinyWorkerSpawnCmd(): string[] {
-	if (isCompiledBinary()) return [process.execPath, TINY_WORKER_ARG];
-	const cliPath = path.resolve(import.meta.dir, "..", "cli.ts");
-	return [process.execPath, cliPath, TINY_WORKER_ARG];
-}
-
-interface SpawnedSubprocess {
-	proc: Subprocess<"ignore", "inherit", "inherit">;
-	inbound: Set<(message: TinyTitleWorkerOutbound) => void>;
-	errors: Set<(error: Error) => void>;
-	/**
-	 * Flipped to `true` by {@link wrapSubprocess}'s `terminate()` right
-	 * before it SIGKILLs the child so `onExit` can distinguish the
-	 * expected hard-kill from a crash/OOM/external signal. Only the
-	 * latter is surfaced as a worker error.
-	 */
-	intentionalExit: { value: boolean };
 }
 
 /**
  * Spawn the tiny-model worker as a subprocess. Exported for tests and the
- * smoke probe; production callers go through {@link spawnTinyTitleWorker}
- * which wraps the result in a {@link WorkerHandle}.
+ * smoke probe; production callers go through {@link spawnTinyTitleWorker}.
  */
-export function createTinyTitleSubprocess(): SpawnedSubprocess {
-	const inbound = new Set<(message: TinyTitleWorkerOutbound) => void>();
-	const errors = new Set<(error: Error) => void>();
-	const intentionalExit = { value: false };
-	const proc = Bun.spawn({
-		cmd: tinyWorkerSpawnCmd(),
+export function createTinyTitleSubprocess(): SpawnedSubprocess<TinyTitleWorkerOutbound> {
+	return createWorkerSubprocess<TinyTitleWorkerOutbound>({
+		spawnCommand: resolveWorkerSpawnCmd(TINY_WORKER_ARG),
 		env: tinyWorkerEnv(),
-		stdin: "ignore",
-		stdout: "inherit",
-		stderr: "inherit",
-		serialization: "advanced",
-		windowsHide: true,
-		ipc(message) {
-			for (const handler of inbound) handler(message as TinyTitleWorkerOutbound);
-		},
-		onExit(_proc, exitCode, signalCode) {
-			// Clean exit. The child only exits via SIGKILL in practice, but
-			// treat code 0 as a no-op for symmetry.
-			if (exitCode === 0) return;
-			// `exitCode === null` + non-null `signalCode` covers both the
-			// expected SIGKILL from `terminate()` AND external kills
-			// (SIGSEGV from a native crash, SIGKILL from the OOM killer, an
-			// operator `kill -9`, etc.). Swallow only the expected one;
-			// every other signal exit is a real worker death that must
-			// fault every in-flight request so callers don't await forever.
-			if (exitCode === null && intentionalExit.value) return;
-			const reason = exitCode !== null ? `code ${exitCode}` : `signal ${signalCode ?? "unknown"}`;
-			const err = new Error(`tiny model subprocess exited with ${reason}`);
-			for (const handler of errors) handler(err);
-		},
+		exitLabel: "tiny model subprocess",
 	});
-	// Don't keep the parent event loop alive on account of an idle worker; the
-	// agent dispose path calls `terminate()` explicitly when shutting down.
-	proc.unref();
-	return { proc, inbound, errors, intentionalExit };
 }
 
-function wrapSubprocess({ proc, inbound, errors, intentionalExit }: SpawnedSubprocess): WorkerHandle {
+function wrapSubprocess(
+	spawned: SpawnedSubprocess<TinyTitleWorkerOutbound>,
+): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+	const { proc } = spawned;
 	return {
-		send(message) {
+		...createWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(spawned, message =>
+			safeSend(proc, message, "tiny-title"),
+		),
+		ref() {
 			try {
-				proc.send(message);
-			} catch (error) {
-				logger.debug("tiny-title: send to subprocess failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+				proc.ref();
+			} catch {
+				// Already gone.
 			}
 		},
-		onMessage(handler) {
-			inbound.add(handler);
-			return () => inbound.delete(handler);
-		},
-		onError(handler) {
-			errors.add(handler);
-			return () => errors.delete(handler);
-		},
-		async terminate() {
-			// SIGKILL: the whole point of the subprocess isolation is that the
-			// parent never runs `onnxruntime-node`'s NAPI finalizer. A polite
-			// SIGTERM lets the subprocess try to clean up, which is exactly the
-			// codepath that crashes Bun on Windows. Hard-kill instead — the
-			// model lives in process memory and the OS reclaims everything.
-			// Flip the intentional-exit flag *before* killing so `onExit` can
-			// tell this apart from a crash or external SIGKILL.
-			intentionalExit.value = true;
+		unref() {
 			try {
-				proc.kill("SIGKILL");
+				proc.unref();
 			} catch {
 				// Already gone.
 			}
@@ -213,62 +156,38 @@ function wrapSubprocess({ proc, inbound, errors, intentionalExit }: SpawnedSubpr
 	};
 }
 
-function spawnInlineUnavailableWorker(error: unknown): WorkerHandle {
-	const listeners = new Set<(message: TinyTitleWorkerOutbound) => void>();
-	const errorMessage = error instanceof Error ? error.message : String(error);
-	const emit = (message: TinyTitleWorkerOutbound): void => {
-		for (const listener of listeners) listener(message);
-	};
+function spawnInlineUnavailableWorker(
+	error: unknown,
+): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 	return {
-		send(message) {
-			queueMicrotask(() => {
-				if (message.type === "ping") {
-					emit({ type: "pong", id: message.id });
-					return;
-				}
-				emit({ type: "error", id: message.id, error: errorMessage });
-			});
-		},
-		onMessage(handler) {
-			listeners.add(handler);
-			return () => listeners.delete(handler);
-		},
-		onError() {
-			return () => {};
-		},
-		async terminate() {
-			listeners.clear();
-		},
+		...createUnavailableWorker<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(error),
+		ref() {},
+		unref() {},
 	};
 }
 
-function spawnTinyTitleWorker(): WorkerHandle {
-	try {
-		return wrapSubprocess(createTinyTitleSubprocess());
-	} catch (error) {
-		logger.warn("Tiny title worker spawn failed; local titles disabled", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		return spawnInlineUnavailableWorker(error);
-	}
-}
-
-function logWorkerMessage(message: Extract<TinyTitleWorkerOutbound, { type: "log" }>): void {
-	if (message.level === "debug") logger.debug(message.msg, message.meta);
-	else if (message.level === "warn") logger.warn(message.msg, message.meta);
-	else logger.error(message.msg, message.meta);
+function spawnTinyTitleWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+	return spawnWorkerOrUnavailable(
+		() => wrapSubprocess(createTinyTitleSubprocess()),
+		spawnInlineUnavailableWorker,
+		"Tiny title worker spawn failed; local titles disabled",
+	);
 }
 
 export class TinyTitleClient {
-	#worker: WorkerHandle | null = null;
+	#worker: RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> | null = null;
 	#unsubscribeMessage: (() => void) | null = null;
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
+	#failedModels = new Set<TinyLocalModelKey>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
 	#nextRequestId = 0;
-	#spawnWorker: () => WorkerHandle;
+	#refed = false;
+	#spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
 
-	constructor(spawnWorker: () => WorkerHandle = spawnTinyTitleWorker) {
+	constructor(
+		spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = spawnTinyTitleWorker,
+	) {
 		this.#spawnWorker = spawnWorker;
 	}
 
@@ -277,28 +196,38 @@ export class TinyTitleClient {
 		return () => this.#progressListeners.delete(listener);
 	}
 
-	async generate(modelKey: string, message: string, signal?: AbortSignal): Promise<string | null> {
+	async generate(modelKey: string, message: string, signal?: AbortSignal): Promise<string | null>;
+	async generate(modelKey: string, message: string, options?: TinyTitleGenerateOptions): Promise<string | null>;
+	async generate(
+		modelKey: string,
+		message: string,
+		optionsOrSignal?: AbortSignal | TinyTitleGenerateOptions,
+	): Promise<string | null> {
+		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
 		if (!isTinyTitleLocalModelKey(modelKey)) return null;
-		if (signal?.aborted) return null;
+		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
 
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#pending.set(id, { kind: "generate", modelKey, resolve });
+			this.#addPending(id, { kind: "generate", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "generate") return;
-				this.#pending.delete(id);
+				this.#deletePending(id);
 				pending.resolve(null);
 			};
-			signal?.addEventListener("abort", abort, { once: true });
+			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
-				worker.send({ type: "generate", id, modelKey, message });
+				const request: TinyTitleWorkerInbound = options.systemPrompt
+					? { type: "generate", id, modelKey, message, systemPrompt: options.systemPrompt }
+					: { type: "generate", id, modelKey, message };
+				worker.send(request);
 				return await promise;
 			} finally {
-				signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				options.signal?.removeEventListener("abort", abort);
+				this.#deletePending(id);
 			}
 		} catch (error) {
 			logger.debug("tiny-title: local generation failed", {
@@ -315,17 +244,17 @@ export class TinyTitleClient {
 		options: { maxTokens?: number; signal?: AbortSignal } = {},
 	): Promise<string | null> {
 		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted) return null;
+		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
 
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#pending.set(id, { kind: "complete", modelKey, resolve });
+			this.#addPending(id, { kind: "complete", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "complete") return;
-				this.#pending.delete(id);
+				this.#deletePending(id);
 				pending.resolve(null);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -334,7 +263,7 @@ export class TinyTitleClient {
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
 			logger.debug("tiny-model: local completion failed", {
@@ -345,21 +274,21 @@ export class TinyTitleClient {
 		}
 	}
 
-	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<boolean> {
-		if (!isTinyLocalModelKey(modelKey)) return false;
-		if (options.signal?.aborted) return false;
+	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<TinyTitleDownloadResult> {
+		if (!isTinyLocalModelKey(modelKey)) return { ok: false };
+		if (options.signal?.aborted) return { ok: false };
 
 		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<boolean>();
-			this.#pending.set(id, { kind: "download", modelKey, resolve });
+			const { promise, resolve } = Promise.withResolvers<TinyTitleDownloadResult>();
+			this.#addPending(id, { kind: "download", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "download") return;
-				this.#pending.delete(id);
-				pending.resolve(false);
+				this.#deletePending(id);
+				pending.resolve({ ok: false });
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
@@ -367,14 +296,15 @@ export class TinyTitleClient {
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
 			logger.debug("tiny-title: local model download failed", {
 				modelKey,
-				error: error instanceof Error ? error.message : String(error),
+				error: message,
 			});
-			return false;
+			return { ok: false, error: message };
 		} finally {
 			unsubscribe?.();
 		}
@@ -390,9 +320,10 @@ export class TinyTitleClient {
 		for (const pending of this.#pending.values()) {
 			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
 			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve(false);
+			else pending.resolve({ ok: false });
 		}
 		this.#pending.clear();
+		this.#refed = false;
 		try {
 			await worker?.terminate();
 		} catch {
@@ -400,13 +331,39 @@ export class TinyTitleClient {
 		}
 	}
 
-	#ensureWorker(): WorkerHandle {
+	#ensureWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 		if (this.#worker) return this.#worker;
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		return worker;
+	}
+
+	/** Register a pending request and keep the worker referenced while work is in flight. */
+	#addPending(id: string, request: PendingRequest): void {
+		this.#pending.set(id, request);
+		this.#syncWorkerRef();
+	}
+
+	/** Drop a pending request and unref the worker once nothing is in flight. */
+	#deletePending(id: string): void {
+		if (this.#pending.delete(id)) this.#syncWorkerRef();
+	}
+
+	/**
+	 * Tiny-model workers are spawned `unref`'d so idle TUI sessions can exit.
+	 * Short-lived CLI downloads need the opposite while awaiting worker IPC, or
+	 * Bun can drain the event loop before the subprocess answers.
+	 */
+	#syncWorkerRef(): void {
+		const worker = this.#worker;
+		if (!worker) return;
+		const shouldRef = this.#pending.size > 0;
+		if (shouldRef === this.#refed) return;
+		this.#refed = shouldRef;
+		if (shouldRef) worker.ref();
+		else worker.unref();
 	}
 
 	#handleMessage(message: TinyTitleWorkerOutbound): void {
@@ -422,13 +379,13 @@ export class TinyTitleClient {
 
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
-		this.#pending.delete(message.id);
+		this.#deletePending(message.id);
 		if (message.type === "title") {
 			if (pending.kind === "generate") pending.resolve(message.title);
 			return;
 		}
 		if (message.type === "downloaded") {
-			if (pending.kind === "download") pending.resolve(true);
+			if (pending.kind === "download") pending.resolve({ ok: true });
 			return;
 		}
 		if (message.type === "completion") {
@@ -436,10 +393,15 @@ export class TinyTitleClient {
 			return;
 		}
 		logger.debug("tiny-title: worker returned error", { error: message.error });
+		this.#markFailedModel(pending);
 		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-		if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-		else pending.resolve(false);
+		if (pending.kind === "download") pending.resolve({ ok: false, error: message.error });
+		else pending.resolve(null);
 		void this.terminate();
+	}
+
+	#markFailedModel(pending: PendingRequest): void {
+		if (pending.kind === "generate" || pending.kind === "complete") this.#failedModels.add(pending.modelKey);
 	}
 
 	#emitProgress(event: TinyTitleProgressEvent): void {
@@ -451,7 +413,7 @@ export class TinyTitleClient {
 		for (const pending of this.#pending.values()) {
 			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
 			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve(false);
+			else pending.resolve({ ok: false, error: error.message });
 		}
 		this.#pending.clear();
 		void this.terminate();
@@ -472,25 +434,5 @@ export async function smokeTestTinyTitleWorker({
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	const handle = wrapSubprocess(createTinyTitleSubprocess());
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const timer = setTimeout(() => reject(new Error(`tiny title worker did not pong within ${timeoutMs}ms`)), timeoutMs);
-	const unsubscribeMessage = handle.onMessage(message => {
-		if (message.type === "pong") {
-			resolve();
-			return;
-		}
-		if (message.type === "log") return;
-		reject(new Error(`tiny title worker: expected pong, got ${JSON.stringify(message)}`));
-	});
-	const unsubscribeError = handle.onError(reject);
-	try {
-		handle.send({ type: "ping", id: "smoke" } satisfies TinyTitleWorkerInbound);
-		await promise;
-	} finally {
-		clearTimeout(timer);
-		unsubscribeMessage();
-		unsubscribeError();
-		await handle.terminate();
-	}
+	await smokeTestWorker(wrapSubprocess(createTinyTitleSubprocess()), "tiny title worker", timeoutMs);
 }

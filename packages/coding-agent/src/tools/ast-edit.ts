@@ -1,12 +1,13 @@
 import * as path from "node:path";
 import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
-import { getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { type } from "arktype";
+import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
@@ -15,6 +16,7 @@ import { Ellipsis, fileHyperlink, framedBlock, renderStatusLine, truncateToWidth
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
+import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
@@ -34,16 +36,17 @@ import { queueResolveHandler } from "./resolve";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-const astEditOpSchema = z.object({
-	pat: z.string().describe("ast pattern"),
-	out: z.string().describe("replacement template"),
+const astEditOpSchema = type({
+	pat: type("string").describe("ast pattern"),
+	out: type("string").describe("replacement template"),
 });
 
-const astEditSchema = z.object({
-	ops: z.array(astEditOpSchema).min(1).describe("rewrite ops"),
-	paths: z
-		.array(z.string().describe("file, directory, glob, or internal URL to rewrite"))
-		.min(1)
+const astEditSchema = type({
+	ops: astEditOpSchema.array().atLeastLength(1).describe("rewrite ops"),
+	paths: type("string")
+		.describe("file, directory, glob, or internal URL to rewrite")
+		.array()
+		.atLeastLength(1)
 		.describe("files, directories, globs, or internal URLs to rewrite"),
 });
 
@@ -164,16 +167,18 @@ export interface AstEditToolDetails {
 	cwd?: string;
 }
 
+type AstEditSchemaInfer = typeof astEditSchema.infer;
+
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
 	readonly approval = (args: unknown) => {
-		const paths = Array.isArray((args as Partial<z.infer<typeof astEditSchema>>).paths)
-			? ((args as Partial<z.infer<typeof astEditSchema>>).paths as string[])
+		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
+			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
 			: [];
 		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const params = args as Partial<z.infer<typeof astEditSchema>>;
+		const params = args as Partial<AstEditSchemaInfer>;
 		const lines: string[] = [];
 		const ops = Array.isArray(params.ops) ? params.ops : [];
 		const firstOp = ops[0];
@@ -194,6 +199,51 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly description: string;
 	readonly parameters = astEditSchema;
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<AstEditSchemaInfer>[] = [
+		{
+			caption: "Rename a call site across TypeScript files",
+			call: {
+				ops: [{ pat: "oldApi($$$ARGS)", out: "newApi($$$ARGS)" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Delete matching calls",
+			call: {
+				ops: [{ pat: "console.log($$$ARGS)", out: "" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Rewrite import source path",
+			call: {
+				ops: [{ pat: 'import { $$$IMPORTS } from "old-package"', out: 'import { $$$IMPORTS } from "new-package"' }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Modernize to optional chaining (same metavariable enforces identity)",
+			call: {
+				ops: [{ pat: "$A && $A()", out: "$A?.()" }],
+				paths: ["src/**/*.ts"],
+			},
+		},
+		{
+			caption: "Swap two arguments using captures",
+			call: {
+				ops: [{ pat: "assertEqual($A, $B)", out: "assertEqual($B, $A)" }],
+				paths: ["tests/**/*.ts"],
+			},
+		},
+		{
+			caption: "Python — convert print calls to logging",
+			call: {
+				ops: [{ pat: "print($$$ARGS)", out: "logger.info($$$ARGS)" }],
+				paths: ["src/**/*.py"],
+			},
+		},
+	];
 	readonly deferrable = true;
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
@@ -202,7 +252,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 
 	async execute(
 		_toolCallId: string,
-		params: z.infer<typeof astEditSchema>,
+		params: AstEditSchemaInfer,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AstEditToolDetails>,
 		_context?: AgentToolContext,
@@ -234,6 +284,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				settings: this.session.settings,
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
+				skills: this.session.skills,
+				resolveExternalUrl: async rawPath => {
+					if (!parseReadUrlTarget(rawPath)) return undefined;
+					throw new ToolError(
+						`Cannot rewrite external URL: ${rawPath}. Use \`read\` or \`search\` to inspect fetched web content; ast_edit only applies to local files.`,
+					);
+				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
@@ -295,7 +352,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					const absolutePath = path.resolve(this.session.cwd, relativePath);
 					try {
 						const fullText = normalizeToLF(await Bun.file(absolutePath).text());
-						const tag = snapshotStore.record(absolutePath, fullText);
+						const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
 						// Best-effort: if a file disappears between ast-edit and rendering, emit plain line output.
@@ -402,6 +459,23 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						for (const change of applyResult.changes) {
 							recordAppliedFile(formatPath(change.path));
 						}
+						// The preview minted tags from pre-apply content; the rewrite just
+						// invalidated them. Re-record post-apply snapshots (canonical keys)
+						// so the model's next hashline edit anchors against fresh tags.
+						const freshTagLines: string[] = [];
+						if (useHashLines) {
+							const snapshotStore = getFileSnapshotStore(this.session);
+							for (const relativePath of appliedFileList) {
+								const appliedAbsolutePath = path.resolve(this.session.cwd, relativePath);
+								try {
+									const fullText = normalizeToLF(await Bun.file(appliedAbsolutePath).text());
+									const freshTag = snapshotStore.record(canonicalSnapshotKey(appliedAbsolutePath), fullText);
+									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
+								} catch {
+									// File disappeared between apply and re-read; skip its tag.
+								}
+							}
+						}
 						const appliedFileReplacements = appliedFileList.map(filePath => ({
 							path: filePath,
 							count: appliedFileReplacementCounts.get(filePath) ?? 0,
@@ -429,17 +503,20 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								filePath => fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
 							);
 						if (stalePreview) {
-							const text =
+							const staleText =
 								applyResult.totalReplacements === 0
 									? `Preview is stale / no longer matches; no replacements were applied. Preview expected ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}.`
 									: applyResult.totalReplacements < result.totalReplacements
 										? `Preview is stale / no longer matches; only ${applyResult.totalReplacements} of ${result.totalReplacements} replacements were applied in ${applyResult.filesTouched} of ${result.filesTouched} files.`
 										: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
-							return { ...toolResult(appliedDetails).text(text).done(), isError: true };
+							const staleWithTags =
+								freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
+							return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
 						}
 						const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
 						const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
-						const text = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+						const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+						const text = freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
 						return toolResult(appliedDetails).text(text).done();
 					},
 				});
@@ -492,6 +569,14 @@ function buildChangeBody(groups: string[][], expanded: boolean, budget: number, 
 	return lines;
 }
 
+/** One-line header preview of an AST pattern. `renderStatusLine` only flattens
+ * CR/LF, so a multi-line tab-indented pattern would otherwise punch raw tabs
+ * into the status line; collapse all whitespace runs to single spaces. */
+function patternPreview(pat: string | undefined): string | undefined {
+	const collapsed = pat?.replace(/\s+/g, " ").trim();
+	return collapsed || undefined;
+}
+
 export const astEditToolRenderer = {
 	inline: true,
 	renderCall(args: AstEditRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
@@ -500,7 +585,8 @@ export const astEditToolRenderer = {
 		const rewriteCount = args.ops?.length ?? 0;
 		if (rewriteCount > 1) meta.push(`${rewriteCount} rewrites`);
 
-		const description = rewriteCount === 1 ? args.ops?.[0]?.pat : rewriteCount ? `${rewriteCount} rewrites` : "?";
+		const description =
+			rewriteCount === 1 ? patternPreview(args.ops?.[0]?.pat) : rewriteCount ? `${rewriteCount} rewrites` : "?";
 		const header = renderStatusLine({ icon: "pending", title: "AST Edit", description, meta }, uiTheme);
 		// Pending call has no body yet — a lone status line is sleeker than an empty frame.
 		return new Text(header, 0, 0);
@@ -533,7 +619,7 @@ export const astEditToolRenderer = {
 
 		if (totalReplacements === 0) {
 			const rewriteCount = args?.ops?.length ?? 0;
-			const description = rewriteCount === 1 ? args?.ops?.[0]?.pat : undefined;
+			const description = rewriteCount === 1 ? patternPreview(args?.ops?.[0]?.pat) : undefined;
 			const meta = ["0 replacements"];
 			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
@@ -558,7 +644,7 @@ export const astEditToolRenderer = {
 		meta.push(`searched ${filesSearched}`);
 		if (limitReached) meta.push(uiTheme.fg("warning", "limit reached"));
 		const rewriteCount = args?.ops?.length ?? 0;
-		const description = rewriteCount === 1 ? args?.ops?.[0]?.pat : undefined;
+		const description = rewriteCount === 1 ? patternPreview(args?.ops?.[0]?.pat) : undefined;
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
 		const allLines = textContent.split("\n");

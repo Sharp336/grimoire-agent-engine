@@ -53,6 +53,15 @@ async function settle(term: VirtualTerminal): Promise<void> {
 	await term.flush();
 }
 
+// A non-multiplexer resize paints the viewport immediately (plain rows) and
+// defers the authoritative full paint — which is where DECCARA rectangle fills
+// are planned — until the drag has been quiet for the resize settle window
+// (120 ms). Integration test against the real scheduler, so wait it out.
+async function settleResize(term: VirtualTerminal): Promise<void> {
+	await Bun.sleep(160);
+	await settle(term);
+}
+
 function captureWrites(term: VirtualTerminal): string[] {
 	const writes: string[] = [];
 	const realWrite = term.write.bind(term);
@@ -129,10 +138,11 @@ describe("detectRectangularSgrSupport", () => {
 		expect(detectRectangularSgrSupport("kitty", { PI_NO_DECCARA: "false" })).toBe(true);
 	});
 
-	it("disables under tmux/screen/zellij multiplexers", () => {
+	it("disables under tmux/screen/zellij/cmux multiplexers", () => {
 		expect(detectRectangularSgrSupport("kitty", { TMUX: "/tmp/tmux-1000/default,123,0" })).toBe(false);
 		expect(detectRectangularSgrSupport("kitty", { STY: "1234.pts-0" })).toBe(false);
 		expect(detectRectangularSgrSupport("kitty", { ZELLIJ: "0" })).toBe(false);
+		expect(detectRectangularSgrSupport("kitty", { CMUX_SURFACE_ID: "surface" })).toBe(false);
 		expect(detectRectangularSgrSupport("kitty", { TERM: "tmux-256color" })).toBe(false);
 		expect(detectRectangularSgrSupport("kitty", { TERM: "screen.xterm" })).toBe(false);
 	});
@@ -499,8 +509,8 @@ describe("TUI DECCARA integration", () => {
 			await settle(term);
 
 			const writes = captureWrites(term);
-			term.resize(40, 10); // height change, content unchanged -> viewportRepaint
-			await settle(term);
+			term.resize(40, 10); // height change, content unchanged
+			await settleResize(term); // DECCARA fills land on the deferred full paint
 			const out = writes.join("");
 
 			expect(out).toContain(DECSACE_RECT);

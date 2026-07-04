@@ -1,8 +1,8 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
-import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
+import { type BaseType, type } from "arktype";
+import type { AgentSessionEvent } from "../session/agent-session";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
@@ -41,9 +41,18 @@ export interface SubagentProgressPayload {
 	agent: string;
 	agentSource: AgentSource;
 	task: string;
+	parentToolCallId?: string;
 	assignment?: string;
 	progress: AgentProgress;
 	sessionFile?: string;
+	/** See {@link SubagentLifecyclePayload.detached}. */
+	detached?: boolean;
+}
+
+/** Payload emitted on TASK_SUBAGENT_EVENT_CHANNEL */
+export interface SubagentEventPayload {
+	id: string;
+	event: AgentSessionEvent;
 }
 
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
@@ -54,88 +63,227 @@ export interface SubagentLifecyclePayload {
 	description?: string;
 	status: "started" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
+	parentToolCallId?: string;
 	index: number;
+	/**
+	 * Spawn runs as a detached background job: the parent turn keeps working
+	 * while this agent runs. Sync task spawns (parent blocked on the call) and
+	 * eval `agent()` bridge spawns (rendered inside their eval cell) leave this
+	 * unset — surfaces like the subagent HUD only list detached spawns.
+	 */
+	detached?: boolean;
 }
 
-const assignmentDescription = "per-task instructions; self-contained";
+/** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
+export const ROLE_LABEL_MAX = 80;
+/** Schema bound on the raw `role` input, before it is label-normalized at every use site. */
+export const ROLE_INPUT_MAX = 256;
+const ROLE_INPUT_SCHEMA = `string <= ${ROLE_INPUT_MAX}` as const;
 
-const createTaskItemSchema = (_contextEnabled: boolean) =>
-	z.object({
-		id: z.string().max(48).describe("camelcase identifier"),
-		description: z.string().describe("ui label, not seen by subagent"),
-		assignment: z.string().describe(assignmentDescription),
-	});
+export const taskItemSchema = type({
+	"id?": "string",
+	"description?": "string",
+	"role?": ROLE_INPUT_SCHEMA,
+	assignment: "string",
+	"+": "delete",
+});
+const taskItemSchemaIsolated = type({
+	"id?": "string",
+	"description?": "string",
+	"role?": ROLE_INPUT_SCHEMA,
+	assignment: "string",
+	"isolated?": "boolean",
+	"+": "delete",
+});
 
-/** Single task item for parallel execution (default shape with context enabled). */
-export const taskItemSchema = createTaskItemSchema(true);
-export type TaskItem = z.infer<typeof taskItemSchema>;
+/** Single task item. Fields are optional defensively: args stream in token by token. */
+export interface TaskItem {
+	/** Stable agent id; default = generated AdjectiveNoun. */
+	id?: string;
+	/** UI label, not seen by the subagent. */
+	description?: string;
+	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
+	role?: string;
+	/** The work; required by the schema. */
+	assignment?: string;
+	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
+	isolated?: boolean;
+}
 
-const createTaskSchema = (options: { isolationEnabled: boolean; simpleMode: TaskSimpleMode }) => {
-	const { contextEnabled, customSchemaEnabled } = getTaskSimpleModeCapabilities(options.simpleMode);
-	const itemSchema = createTaskItemSchema(contextEnabled);
-
-	let schema = z.object({
-		agent: z.string().describe("agent type"),
-		tasks: z.array(itemSchema).describe("tasks to execute in parallel"),
-	});
-	if (contextEnabled) {
-		schema = schema.extend({
-			context: z.string().optional().describe("shared background prepended to each assignment"),
-		});
-	}
-
-	if (customSchemaEnabled) {
-		schema = schema.extend({
-			schema: z.string().optional().describe("jtd schema for expected response shape"),
-		});
-	}
-
-	if (options.isolationEnabled) {
-		schema = schema.extend({
-			isolated: z.boolean().optional().describe("run in isolated env; returns patches"),
-		});
-	}
-
-	return schema;
-};
-
-export const taskSchema = createTaskSchema({ isolationEnabled: true, simpleMode: "default" });
-export const taskSchemaNoIsolation = createTaskSchema({ isolationEnabled: false, simpleMode: "default" });
-const taskSchemaSchemaFree = createTaskSchema({ isolationEnabled: true, simpleMode: "schema-free" });
-const taskSchemaSchemaFreeNoIsolation = createTaskSchema({ isolationEnabled: false, simpleMode: "schema-free" });
-const taskSchemaIndependent = createTaskSchema({ isolationEnabled: true, simpleMode: "independent" });
-const taskSchemaIndependentNoIsolation = createTaskSchema({ isolationEnabled: false, simpleMode: "independent" });
-const ALL_TASK_SCHEMAS = [
-	taskSchema,
-	taskSchemaNoIsolation,
-	taskSchemaSchemaFree,
-	taskSchemaSchemaFreeNoIsolation,
-	taskSchemaIndependent,
-	taskSchemaIndependentNoIsolation,
-] as const;
+export const taskSchema = type({
+	agent: "string = 'task'",
+	"id?": "string",
+	"description?": "string",
+	"role?": ROLE_INPUT_SCHEMA,
+	assignment: "string",
+	"isolated?": "boolean",
+	"+": "delete",
+});
+const taskSchemaNoIsolation = type({
+	agent: "string = 'task'",
+	"id?": "string",
+	"description?": "string",
+	"role?": ROLE_INPUT_SCHEMA,
+	assignment: "string",
+	"+": "delete",
+});
+const taskSchemaBatch = type({
+	agent: "string = 'task'",
+	context: "string",
+	tasks: taskItemSchemaIsolated.array(),
+	"+": "delete",
+});
+const taskSchemaBatchNoIsolation = type({
+	agent: "string = 'task'",
+	context: "string",
+	tasks: taskItemSchema.array(),
+	"+": "delete",
+});
+const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
-/** Active task tool parameter schema for the current simple-mode / isolation flags */
-export type TaskToolSchemaInstance = DynamicTaskSchema;
+/** Active task tool parameter schema for the current isolation / batch flags */
+export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
 
-export function getTaskSchema(options: { isolationEnabled: boolean; simpleMode: TaskSimpleMode }): DynamicTaskSchema {
-	switch (options.simpleMode) {
-		case "schema-free":
-			return options.isolationEnabled ? taskSchemaSchemaFree : taskSchemaSchemaFreeNoIsolation;
-		case "independent":
-			return options.isolationEnabled ? taskSchemaIndependent : taskSchemaIndependentNoIsolation;
-		default:
-			return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+const taskSchemaCache = new Map<string, BaseType>();
+
+function taskAgentSchemaRule(defaultAgent: string): string {
+	const trimmed = defaultAgent.trim();
+	if (TASK_AGENT_NAME_PATTERN.test(trimmed)) {
+		return `string = '${trimmed}'`;
 	}
+	return "string";
 }
 
+function createTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	defaultAgent: string;
+}): BaseType {
+	const agent = taskAgentSchemaRule(options.defaultAgent);
+	if (options.batchEnabled) {
+		if (options.isolationEnabled) {
+			return type.raw({
+				agent,
+				context: "string",
+				tasks: taskItemSchemaIsolated.array(),
+				"+": "delete",
+			});
+		}
+		return type.raw({
+			agent,
+			context: "string",
+			tasks: taskItemSchema.array(),
+			"+": "delete",
+		});
+	}
+	if (options.isolationEnabled) {
+		return type.raw({
+			agent,
+			"id?": "string",
+			"description?": "string",
+			"role?": ROLE_INPUT_SCHEMA,
+			assignment: "string",
+			"isolated?": "boolean",
+			"+": "delete",
+		});
+	}
+	return type.raw({
+		agent,
+		"id?": "string",
+		"description?": "string",
+		"role?": ROLE_INPUT_SCHEMA,
+		assignment: "string",
+		"+": "delete",
+	});
+}
+
+export function getTaskSchema(options: { isolationEnabled: boolean; batchEnabled: boolean }): DynamicTaskSchema;
+export function getTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	defaultAgent: string;
+}): TaskToolSchemaInstance;
+export function getTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	defaultAgent?: string;
+}): TaskToolSchemaInstance {
+	const defaultAgent = options.defaultAgent ?? "task";
+	if (defaultAgent === "task") {
+		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
+		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+	}
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${defaultAgent}`;
+	const cached = taskSchemaCache.get(key);
+	if (cached) return cached;
+	const schema = createTaskSchema({ ...options, defaultAgent });
+	taskSchemaCache.set(key, schema);
+	return schema;
+}
+
+/**
+ * Runtime params union over both wire shapes. The model sees exactly one shape
+ * (`{ agent, context, tasks[] }` when `task.batch` is on, `{ agent, ...item }`
+ * otherwise); runtime stays permissive so internal callers and stale
+ * transcripts using the flat form keep working under either setting.
+ */
 export interface TaskParams {
-	agent: string;
+	/** Agent type to spawn; omitted values resolve from the session spawn policy. */
+	agent?: string;
+	/** Stable agent id (flat form); default = generated AdjectiveNoun. */
+	id?: string;
+	/** UI label (flat form), not seen by the subagent. */
+	description?: string;
+	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
+	role?: string;
+	/** The work (flat form). */
+	assignment?: string;
+	/** Batch form (`task.batch`): one subagent per item. */
+	tasks?: TaskItem[];
+	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
 	context?: string;
-	schema?: string;
-	tasks: TaskItem[];
+	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+}
+
+/**
+ * One-line, length-capped label safe for a single roster line, a registry
+ * `displayName`, or a system-prompt field. Collapses every run of whitespace
+ * AND control/format characters — including U+0085 NEL, ESC/ANSI, and the
+ * zero-width separators that `\s` misses — to a single space, then caps length.
+ * So untrusted text (a spawn `role`, a peer activity gist) can neither break the
+ * line, inject prompt structure, nor smuggle terminal escapes. Caps at `max`
+ * characters (clamped to >= 1; default `ROLE_LABEL_MAX`), appending an ellipsis when truncated.
+ */
+export function oneLineLabel(text: string, max = ROLE_LABEL_MAX): string {
+	const oneLine = text.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
+	const cap = Math.max(1, max);
+	// Count/cut by code point, not UTF-16 code unit, so truncation can never
+	// split an astral character into a lone surrogate.
+	const chars = [...oneLine];
+	return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : oneLine;
+}
+
+/**
+ * Display name for a spawned subagent: its tailored `role` (label-normalized)
+ * when one is given, else the agent type's name. Empty/whitespace roles fall
+ * back to the agent name.
+ */
+export function resolveSubagentDisplayName(role: string | undefined, agentName: string): string {
+	const trimmed = role?.trim();
+	return trimmed ? oneLineLabel(trimmed) : agentName;
+}
+
+/**
+ * Whether an agent at `taskDepth` may still spawn children — i.e. it currently
+ * holds the `task` tool. Mirrors the task-tool availability gate;
+ * `maxRecursionDepth < 0` disables the cap entirely.
+ */
+export function canSpawnAtDepth(maxRecursionDepth: number, taskDepth: number): boolean {
+	return maxRecursionDepth < 0 || taskDepth < maxRecursionDepth;
 }
 
 /** A code review finding reported by the reviewer agent */
@@ -180,6 +328,23 @@ export interface AgentDefinition {
 	filePath?: string;
 }
 
+/** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
+export interface YieldItem {
+	data?: unknown;
+	status?: "success" | "aborted";
+	error?: string;
+	/** A string label is terminal; a non-empty array of labels is incremental. */
+	type?: string | string[];
+	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
+	useLastTurn?: boolean;
+	/**
+	 * Set by the in-tool yield validator when it exhausted its retry budget and
+	 * accepted schema-invalid data anyway. The executor preserves that override
+	 * during post-mortem validation.
+	 */
+	schemaOverridden?: boolean;
+}
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -197,6 +362,8 @@ export interface AgentProgress {
 	recentTools: Array<{ tool: string; args: string; endMs: number }>;
 	recentOutput: string[];
 	toolCount: number;
+	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */
+	requests: number;
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
 	/**
@@ -267,6 +434,8 @@ export interface SingleResult {
 	durationMs: number;
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
+	/** Count of assistant requests (assistant message_end events) across the run. */
+	requests: number;
 	/** Latest per-turn context size at task completion. See `AgentProgress.contextTokens`. */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. */
@@ -285,6 +454,12 @@ export interface SingleResult {
 	patchPath?: string;
 	/** Branch name for isolated branch-mode output */
 	branchName?: string;
+	/**
+	 * Baseline commit SHA the task branch was created from. Passed to
+	 * `mergeTaskBranches` so cherry-pick uses the inclusive range
+	 * `branchBaseSha..branchName` and preserves every agent commit's message.
+	 */
+	branchBaseSha?: string;
 	/** Nested repo patches to apply after parent merge */
 	nestedPatches?: NestedRepoPatch[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */

@@ -6,7 +6,6 @@ use napi::{
 	Env, Result,
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
-	tokio::sync::mpsc,
 };
 use napi_derive::napi;
 use pi_shell::{
@@ -25,33 +24,43 @@ use crate::task;
 #[derive(Debug, Clone, Default)]
 pub struct MinimizerOptions {
 	/// Master switch. Absent / false = disabled.
-	pub enabled:           Option<bool>,
+	pub enabled:              Option<bool>,
 	/// Optional path to a TOML settings file whose values override
 	/// field-level defaults. `~` is expanded.
-	pub settings_path:     Option<String>,
+	pub settings_path:        Option<String>,
 	/// Optional xxHash64 digest (hex) of the settings file contents. When
 	/// supplied, the engine refuses to honor a settings file whose hash does
 	/// not match — a lightweight trust gate for agent-controllable paths.
-	pub settings_hash:     Option<String>,
+	pub settings_hash:        Option<String>,
 	/// Opt-in allowlist of program names (e.g. `"git"`). When empty or
 	/// absent, all built-in filters are active.
-	pub only:              Option<Vec<String>>,
+	pub only:                 Option<Vec<String>>,
 	/// Program names explicitly excluded from minimization.
-	pub except:            Option<Vec<String>>,
+	pub except:               Option<Vec<String>>,
 	/// Maximum captured bytes per command before the engine falls back to
 	/// the raw, un-minimized output. Default 4 MiB.
-	pub max_capture_bytes: Option<u32>,
+	pub max_capture_bytes:    Option<u32>,
+	/// Source-outline level for `cat <source-file>` minimization. Accepts
+	/// `"default"` (current behavior) or `"aggressive"` (strip function bodies).
+	pub source_outline_level: Option<String>,
+	/// Kill-switch to fall back to the pre-PR (legacy) filter behavior for
+	/// grep / find / pytest. When `Some(true)`, filters that opted into the
+	/// always-shrink Tier 1 / Tier 2 behavior skip the new code path. When
+	/// `None`, defers to the `OMP_MINIMIZER_LEGACY_FILTERS` env var.
+	pub legacy_filters:       Option<bool>,
 }
 
 impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 	fn from(value: MinimizerOptions) -> Self {
 		Self {
-			enabled:           value.enabled,
-			settings_path:     value.settings_path,
-			settings_hash:     value.settings_hash,
-			only:              value.only,
-			except:            value.except,
-			max_capture_bytes: value.max_capture_bytes,
+			enabled:              value.enabled,
+			settings_path:        value.settings_path,
+			settings_hash:        value.settings_hash,
+			only:                 value.only,
+			except:               value.except,
+			max_capture_bytes:    value.max_capture_bytes,
+			source_outline_level: value.source_outline_level,
+			legacy_filters:       value.legacy_filters,
 		}
 	}
 }
@@ -158,20 +167,24 @@ pub struct ShellRunResult {
 	pub cancelled: bool,
 	/// Whether the command timed out before completion.
 	pub timed_out: bool,
+
 	/// When the minimizer rewrote the captured output, this carries the
 	/// original buffer + telemetry so the session layer can persist it as
 	/// an artifact and splice an `artifact://<id>` reference into the
 	/// minimized text shown to the agent. `None` when nothing was rewritten.
-	pub minimized: Option<MinimizerResult>,
+	pub minimized:   Option<MinimizerResult>,
+	/// Shell working directory after command completion.
+	pub working_dir: Option<String>,
 }
 
 impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
-			exit_code: value.exit_code,
-			cancelled: value.cancelled,
-			timed_out: value.timed_out,
-			minimized: value.minimized.map(Into::into),
+			exit_code:   value.exit_code,
+			cancelled:   value.cancelled,
+			timed_out:   value.timed_out,
+			minimized:   value.minimized.map(Into::into),
+			working_dir: value.working_dir,
 		}
 	}
 }
@@ -235,6 +248,15 @@ impl Shell {
 		self.inner.abort().await;
 		Ok(())
 	}
+
+	/// Count live background jobs (`&`/`nohup` children still running) on this
+	/// session. Completed jobs are reaped first. The host uses this to retain a
+	/// per-call shell whose background processes are still running instead of
+	/// dropping it (which would SIGKILL them via kill-on-drop).
+	#[napi]
+	pub async fn live_background_job_count(&self) -> u32 {
+		self.inner.live_background_job_count().await
+	}
 }
 
 /// Execute a brush shell command.
@@ -274,11 +296,11 @@ pub fn execute_shell<'env>(
 
 fn bridge_chunks(
 	on_chunk: Option<ThreadsafeFunction<String>>,
-) -> (Option<mpsc::UnboundedSender<String>>, Option<napi::tokio::task::JoinHandle<()>>) {
+) -> (Option<flume::Sender<String>>, Option<napi::tokio::task::JoinHandle<()>>) {
 	let Some(on_chunk) = on_chunk else {
 		return (None, None);
 	};
-	let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+	let (tx, rx) = flume::unbounded::<String>();
 	let handle = napi::tokio::spawn(async move {
 		// Hard cap on one coalesced batch so the JS main thread never sees a
 		// multi-MB napi callback (a giant single string would stall sanitize +
@@ -288,7 +310,7 @@ fn bridge_chunks(
 		// each batch because `String` ownership is moved into the napi call.
 		const INITIAL_BATCH_CAP: usize = 8 * 1024;
 		let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-		while let Some(first) = rx.recv().await {
+		while let Ok(first) = rx.recv_async().await {
 			batch.push_str(&first);
 			// Greedily drain everything already queued. Child processes that
 			// write byte-at-a-time (printf-style progress, llama-cli token
@@ -338,11 +360,13 @@ pub fn apply_bash_fixups(command: String) -> BashFixupResult {
 mod tests {
 	use std::time::Duration;
 
+	#[cfg(unix)]
+	use flume;
 	use pi_shell::{
 		ShellRunOptions as CoreShellRunOptions,
 		cancel::{AbortReason, CancelToken},
 	};
-	use tokio::{sync::mpsc, time};
+	use tokio::time;
 
 	use super::CoreShell;
 
@@ -391,7 +415,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn embedded_external_command_runs_in_its_own_session() {
 		let shell = CoreShell::new(None);
-		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let (tx, rx) = flume::unbounded::<String>();
 		let handle = tokio::spawn(async move {
 			shell
 				.run(
@@ -406,7 +430,7 @@ mod tests {
 				)
 				.await
 		});
-		let child_pid = time::timeout(Duration::from_secs(5), rx.recv())
+		let child_pid = time::timeout(Duration::from_secs(5), rx.recv_async())
 			.await
 			.expect("timed out waiting for child pid")
 			.expect("missing child pid chunk")
@@ -414,9 +438,13 @@ mod tests {
 			.parse::<i32>()
 			.expect("child pid parses");
 		// SAFETY: `getsid(0)` only queries the current process session; the
-		// return value is checked below.
+		// return value is checked below. Inside a PID namespace (e.g. the
+		// containerized CI runner) the host's session leader can live outside
+		// the namespace, so `getsid(0)` legitimately reports 0 — only -1 is a
+		// real failure. The meaningful invariant is that the child detached
+		// into its own session (`child_sid == child_pid`, distinct from host).
 		let host_sid = unsafe { libc::getsid(0) };
-		assert!(host_sid > 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
+		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 		// SAFETY: `child_pid` is a live positive PID reported by the child; the
 		// return value is checked below.
 		let child_sid = unsafe { libc::getsid(child_pid) };

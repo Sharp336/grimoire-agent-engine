@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
+	iterateWithTerminalGrace,
 } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 
 /**
@@ -41,6 +42,7 @@ afterEach(() => {
 			Bun.env[key] = prior;
 		}
 	}
+	vi.useRealTimers();
 });
 
 describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
@@ -143,6 +145,14 @@ async function expectRejectsWithMessage(run: () => Promise<void>, message: strin
 	expect((caught as Error).message).toBe(message);
 }
 
+async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: string): Promise<void> {
+	for (let i = 0; i < 1000; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(errorMessage);
+}
+
 describe("iterateWithIdleTimeout", () => {
 	it("does not reset the first-progress deadline for no-progress items", async () => {
 		const abortController = new AbortController();
@@ -176,29 +186,39 @@ describe("iterateWithIdleTimeout", () => {
 		}
 	});
 
-	it("cleans first-item timers when the source throws before progress", async () => {
-		let firstItemTimedOut = false;
+	it("clears the first-item watchdog timer when the source rejects before progress", async () => {
+		vi.useFakeTimers();
+		const baselineTimers = vi.getTimerCount();
 
-		// biome-ignore lint/correctness/useYield: intentionally yields nothing — the test exercises the path where the source generator throws before its first yield.
-		async function* failingStream(): AsyncGenerator<string> {
-			throw new Error("stream failed");
-		}
+		// The first pull stays pending until we reject it, so the watchdog can be
+		// observed armed before the source errors. Rejecting a deferred promise is a
+		// microtask resolution, so the source error wins the watchdog race
+		// deterministically — with fake timers the watchdog never fires unless time is
+		// advanced, which this test never does.
+		const firstPull = Promise.withResolvers<IteratorResult<string>>();
+		const failingStream: AsyncIterable<string> = {
+			[Symbol.asyncIterator]: () => ({ next: () => firstPull.promise }),
+		};
 
-		await expectRejectsWithMessage(async () => {
-			for await (const _item of iterateWithIdleTimeout(failingStream(), {
+		const settled = expectRejectsWithMessage(async () => {
+			for await (const _item of iterateWithIdleTimeout(failingStream, {
 				firstItemTimeoutMs: 10,
 				errorMessage: "idle timeout",
 				firstItemErrorMessage: "first progress timeout",
-				onFirstItemTimeout: () => {
-					firstItemTimedOut = true;
-				},
 			})) {
 				// Unreachable.
 			}
 		}, "stream failed");
 
-		await Bun.sleep(20);
-		expect(firstItemTimedOut).toBe(false);
+		// The wrapper arms a first-item watchdog timer while it waits for the first pull.
+		await drainMicrotasksUntil(() => vi.getTimerCount() > baselineTimers, "first-item watchdog timer was not armed");
+
+		firstPull.reject(new Error("stream failed"));
+		await settled;
+
+		// Surfacing the source error must clear the watchdog timer rather than leave it
+		// pending to fire after the stream has already failed.
+		expect(vi.getTimerCount()).toBe(baselineTimers);
 	});
 
 	it("cleans first-item timers when the consumer returns before progress", async () => {
@@ -255,5 +275,77 @@ describe("iterateWithIdleTimeout", () => {
 		// instead of being left suspended.
 		await Bun.sleep(5);
 		expect(upstreamClosed).toBe(true);
+	});
+});
+
+describe("iterateWithTerminalGrace", () => {
+	it("passes items through untouched while the stream is not finished", async () => {
+		async function* source(): AsyncGenerator<string> {
+			yield "a";
+			yield "b";
+		}
+
+		const seen: string[] = [];
+		for await (const item of iterateWithTerminalGrace(source(), {
+			finishedAtMs: () => undefined,
+			graceMs: 50,
+		})) {
+			seen.push(item);
+		}
+		expect(seen).toEqual(["a", "b"]);
+	});
+
+	it("yields trailing items that arrive within the grace window", async () => {
+		let finishedAt: number | undefined;
+		async function* source(): AsyncGenerator<string> {
+			yield "finish";
+			await Bun.sleep(5);
+			yield "usage";
+			await new Promise<never>(() => {}); // server holds the connection open
+		}
+
+		const seen: string[] = [];
+		for await (const item of iterateWithTerminalGrace(source(), {
+			finishedAtMs: () => finishedAt,
+			graceMs: 100,
+		})) {
+			seen.push(item);
+			if (item === "finish") finishedAt = Date.now();
+			if (item === "usage") break;
+		}
+		expect(seen).toEqual(["finish", "usage"]);
+	});
+
+	it("ends cleanly and fires onGraceEnd when the source stays silent past the grace window", async () => {
+		let finishedAt: number | undefined;
+		let graceEnded = false;
+		let upstreamClosed = false;
+		async function* source(): AsyncGenerator<string> {
+			try {
+				yield "finish";
+				await new Promise<never>(() => {}); // never sends [DONE], never closes
+			} finally {
+				upstreamClosed = true;
+			}
+		}
+
+		const seen: string[] = [];
+		for await (const item of iterateWithTerminalGrace(source(), {
+			finishedAtMs: () => finishedAt,
+			graceMs: 20,
+			onGraceEnd: () => {
+				graceEnded = true;
+			},
+		})) {
+			seen.push(item);
+			finishedAt = Date.now();
+		}
+
+		// Clean end of iteration — no throw — with the grace hook invoked so the
+		// caller can abort the transport and release the parked source read.
+		expect(seen).toEqual(["finish"]);
+		expect(graceEnded).toBe(true);
+		await Bun.sleep(5);
+		expect(upstreamClosed).toBe(false); // parked mid-await; only the abort can release it
 	});
 });

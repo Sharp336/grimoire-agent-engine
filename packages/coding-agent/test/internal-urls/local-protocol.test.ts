@@ -8,13 +8,14 @@ import {
 	resolveLocalRoot,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "local-protocol-"));
 	try {
 		return await fn(dir);
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 
@@ -88,6 +89,29 @@ describe("LocalProtocolHandler", () => {
 		expect(resolveLocalUrlToPath("local://memo.txt", { getSessionId: () => "session-fallback" })).toBe(
 			path.join(root, "memo.txt"),
 		);
+	});
+
+	it("uses a stable short temp root for long Windows artifact paths", async () => {
+		const longArtifactsDir = path.join(os.tmpdir(), "a".repeat(220), "artifacts");
+		const expectedRoot = path.join(os.tmpdir(), "omp-local", "session_long");
+		const options = {
+			getArtifactsDir: () => longArtifactsDir,
+			getSessionId: () => "session:long",
+		};
+		const root = resolveLocalRoot(options, "win32");
+		const resolved = resolveLocalUrlToPath("local://memo.txt", options, "win32");
+
+		expect(root).toBe(expectedRoot);
+		expect(resolved).toBe(path.join(expectedRoot, "memo.txt"));
+
+		// The short root must survive moves of the artifact directory so
+		// `local://PLAN.md` and handoff files written pre-move stay reachable
+		// after `SessionManager.moveTo()` updates `getArtifactsDir()`.
+		const movedOptions = {
+			getArtifactsDir: () => path.join(os.tmpdir(), "b".repeat(220), "artifacts"),
+			getSessionId: () => "session:long",
+		};
+		expect(resolveLocalRoot(movedOptions, "win32")).toBe(expectedRoot);
 	});
 
 	it("blocks symlink escapes outside local root", async () => {

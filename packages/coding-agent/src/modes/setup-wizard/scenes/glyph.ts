@@ -1,4 +1,4 @@
-import { type SelectItem, SelectList } from "@oh-my-pi/pi-tui";
+import { routeSelectListMouse, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
@@ -29,6 +29,8 @@ class GlyphSceneController implements SetupSceneController {
 	#selectList: SelectList;
 	#previewRequest = 0;
 	#committing = false;
+	/** Render line where the select list begins. */
+	#listRowStart = 0;
 
 	constructor(private readonly host: SetupSceneHost) {
 		this.#selectList = new SelectList(GLYPH_ITEMS, GLYPH_ITEMS.length, getSelectListTheme());
@@ -60,12 +62,17 @@ class GlyphSceneController implements SetupSceneController {
 		this.#selectList.handleInput(data);
 	}
 
-	render(width: number): string[] {
-		return [
-			theme.fg("muted", "If a row shows boxes, tofu, or misaligned icons, pick another."),
-			"",
-			...this.#selectList.render(width),
-		];
+	/** Wheel moves the highlight (live preview); hover lights the row under the pointer; click confirms it. */
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		if (this.#committing) return;
+		routeSelectListMouse(this.#selectList, event, line - this.#listRowStart);
+	}
+
+	render(width: number): readonly string[] {
+		const lines = [theme.fg("muted", "If a row shows boxes, tofu, or misaligned icons, pick another."), ""];
+		this.#listRowStart = lines.length;
+		lines.push(...this.#selectList.render(width));
+		return lines;
 	}
 
 	async #commit(preset: SymbolPreset): Promise<void> {

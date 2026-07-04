@@ -16,13 +16,25 @@
  */
 
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type Component, Markdown, type MarkdownTheme, renderInlineMarkdown, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
+import {
+	type Component,
+	Ellipsis,
+	Markdown,
+	type MarkdownTheme,
+	renderInlineMarkdown,
+	TERMINAL,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type as arkType } from "arktype";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+import { vocalizer } from "../tts/vocalizer";
 import { framedBlock, renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
@@ -32,24 +44,24 @@ import { ToolAbortError } from "./tool-errors";
 // Types
 // =============================================================================
 
-const OptionItem = z.object({
-	label: z.string().describe("display label"),
-	description: z.string().describe("optional explanatory text displayed below the label").optional(),
+const OptionItem = arkType({
+	label: arkType("string").describe("display label"),
+	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
 });
 
-const QuestionItem = z.object({
-	id: z.string().describe("question id"),
-	question: z.string().describe("question text"),
-	options: z.array(OptionItem).describe("available options"),
-	multi: z.boolean().describe("allow multiple selections").optional(),
-	recommended: z.number().describe("recommended option index").optional(),
+const QuestionItem = arkType({
+	id: arkType("string").describe("question id"),
+	question: arkType("string").describe("question text"),
+	options: OptionItem.array().describe("available options"),
+	"multi?": arkType("boolean").describe("allow multiple selections"),
+	"recommended?": arkType("number").describe("recommended option index"),
 });
 
-const askSchema = z.object({
-	questions: z.array(QuestionItem).min(1).describe("questions to ask"),
+const askSchema = arkType({
+	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
 });
 
-export type AskToolInput = z.infer<typeof askSchema>;
+export type AskToolInput = typeof askSchema.infer;
 
 /** Result for a single question */
 export interface QuestionResult {
@@ -59,6 +71,8 @@ export interface QuestionResult {
 	multi: boolean;
 	selectedOptions: string[];
 	customInput?: string;
+	/** True when the answer was auto-selected because the dialog timed out. */
+	timedOut?: boolean;
 }
 
 export interface AskToolDetails {
@@ -67,6 +81,8 @@ export interface AskToolDetails {
 	multi?: boolean;
 	selectedOptions?: string[];
 	customInput?: string;
+	/** True when the answer was auto-selected because the dialog timed out. */
+	timedOut?: boolean;
 	/** Multi-part question mode */
 	results?: QuestionResult[];
 }
@@ -94,9 +110,13 @@ function toSelectOption(option: AskOption, label = option.label): ExtensionUISel
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_SUFFIX = " (Recommended)";
+// Window after the timeout deadline within which an `undefined` selection is
+// attributed to a UI-enforced timeout (for surfaces that close the dialog at
+// the deadline but never invoke `onTimeout`). Cancels beyond it are user Esc.
+const TIMEOUT_DETECTION_TOLERANCE_MS = 1_000;
 
 function getDoneOptionLabel(): string {
-	return `${theme.symbol("tool.ask")} Done selecting`;
+	return `${theme.status.success} Done selecting`;
 }
 
 /** Add "(Recommended)" suffix to the option at the given index if not already present */
@@ -124,6 +144,214 @@ function getAutoSelectionOnTimeout(options: AskOption[], recommended?: number): 
 /** Strip "(Recommended)" suffix from a label */
 function stripRecommendedSuffix(label: string): string {
 	return label.endsWith(RECOMMENDED_SUFFIX) ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label;
+}
+
+interface CustomInputContext {
+	selectionMarker: "radio" | "checkbox";
+	checkedIndices?: readonly number[];
+	markableCount: number;
+}
+
+/** Hard caps for the editor title rendered while the user types an `Other`
+ *  custom answer. {@link HookEditorComponent} renders the title via a single
+ *  `Text` child stacked above the prompt editor with no `maxVisible` windowing,
+ *  so the title MUST fit a normal terminal:
+ *  - {@link MAX_CUSTOM_INPUT_OPTION_ROWS}: at most this many option-row entries
+ *    survive {@link pickCustomInputOptionWindow}, regardless of total options.
+ *  - {@link MAX_CUSTOM_INPUT_TITLE_ROWS}: hard cap on rendered title rows after
+ *    every line is pre-truncated to one row at the live terminal width. Sized
+ *    so a 24-row terminal still has space for the input row, hint, and chrome.
+ */
+const MAX_CUSTOM_INPUT_OPTION_ROWS = 8;
+const MAX_CUSTOM_INPUT_TITLE_ROWS = 16;
+const MIN_CUSTOM_INPUT_CONTENT_WIDTH = 20;
+/** Subtracted from the terminal width to leave room for the surrounding
+ *  `Text(... padX=1)` padding + DynamicBorder vertical chrome. */
+const CUSTOM_INPUT_CHROME_COLUMNS = 4;
+const CUSTOM_INPUT_DESCRIPTION_INDENT = "    ";
+
+function customInputContentWidth(): number {
+	const cols = process.stdout.columns ?? 80;
+	return Math.max(MIN_CUSTOM_INPUT_CONTENT_WIDTH, cols - CUSTOM_INPUT_CHROME_COLUMNS);
+}
+
+function clampLineToWidth(line: string, width: number): string {
+	if (visibleWidth(line) <= width) return line;
+	return truncateToWidth(line, width, Ellipsis.Unicode);
+}
+
+function flattenDescription(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function getSelectOptionDescription(option: ExtensionUISelectItem): string | undefined {
+	return typeof option === "string" ? undefined : option.description;
+}
+
+interface CustomInputOptionGap {
+	total: number;
+	checked: number;
+}
+
+interface CustomInputOptionWindow {
+	indices: number[];
+	gapBefore: Map<number, CustomInputOptionGap>;
+}
+
+/** Window the option list so the title stays bounded. Required rows are the
+ *  selected `Other` row and the first option as an anchor; checked rows fill
+ *  the remaining budget before unselected leading rows. Hidden checked options
+ *  are summarized in gap markers so the rendered option-row count still never
+ *  exceeds {@link MAX_CUSTOM_INPUT_OPTION_ROWS}. */
+function pickCustomInputOptionWindow(
+	total: number,
+	selectedIndex: number,
+	checked: ReadonlySet<number>,
+): CustomInputOptionWindow {
+	if (total === 0) return { indices: [], gapBefore: new Map() };
+	if (total <= MAX_CUSTOM_INPUT_OPTION_ROWS) {
+		return {
+			indices: Array.from({ length: total }, (_, i) => i),
+			gapBefore: new Map(),
+		};
+	}
+	const keep = new Set<number>();
+	const addIfRoom = (index: number) => {
+		if (index >= 0 && index < total && keep.size < MAX_CUSTOM_INPUT_OPTION_ROWS) {
+			keep.add(index);
+		}
+	};
+	addIfRoom(selectedIndex);
+	addIfRoom(0);
+	for (const i of [...checked].sort((a, b) => a - b)) {
+		addIfRoom(i);
+	}
+	for (let i = 0; i < total && keep.size < MAX_CUSTOM_INPUT_OPTION_ROWS; i++) {
+		addIfRoom(i);
+	}
+	const indices = [...keep].sort((a, b) => a - b);
+	const gapBefore = new Map<number, CustomInputOptionGap>();
+	const countCheckedBetween = (startInclusive: number, endExclusive: number): number => {
+		let count = 0;
+		for (const i of checked) {
+			if (i >= startInclusive && i < endExclusive) count++;
+		}
+		return count;
+	};
+	let prev = -1;
+	for (const idx of indices) {
+		if (idx > prev + 1) {
+			gapBefore.set(idx, {
+				total: idx - prev - 1,
+				checked: countCheckedBetween(prev + 1, idx),
+			});
+		}
+		prev = idx;
+	}
+	if (prev < total - 1) {
+		gapBefore.set(total, {
+			total: total - 1 - prev,
+			checked: countCheckedBetween(prev + 1, total),
+		});
+	}
+	return { indices, gapBefore };
+}
+
+interface CustomInputRow {
+	text: string;
+	/** Lower priority drops first when over budget; negative values are pinned.
+	 *  Gap markers are budgeted rows too so sparse checked selections cannot
+	 *  push the editor input off-screen. */
+	priority: number;
+}
+
+function buildCustomInputRows(
+	question: string,
+	options: ExtensionUISelectItem[],
+	context: CustomInputContext,
+	contentWidth: number,
+): CustomInputRow[] {
+	const selectedIndex = options.findIndex(option => getSelectOptionLabel(option) === OTHER_OPTION);
+	const checked = new Set(context.checkedIndices ?? []);
+	const window = pickCustomInputOptionWindow(options.length, selectedIndex, checked);
+	const rows: CustomInputRow[] = [];
+	rows.push({ text: clampLineToWidth(question, contentWidth), priority: -1 });
+	rows.push({ text: "", priority: -1 });
+
+	const emitGap = (gap: CustomInputOptionGap) => {
+		const checkedSuffix = gap.checked > 0 ? `, ${gap.checked} checked` : "";
+		rows.push({
+			text: clampLineToWidth(
+				`    … ${gap.total} more option${gap.total === 1 ? "" : "s"}${checkedSuffix} …`,
+				contentWidth,
+			),
+			priority: 2,
+		});
+	};
+
+	for (const index of window.indices) {
+		const gap = window.gapBefore.get(index);
+		if (gap !== undefined) emitGap(gap);
+		const option = options[index]!;
+		const label = getSelectOptionLabel(option);
+		const isSelected = index === selectedIndex;
+		const isMarkable = index < context.markableCount;
+		const prefix =
+			context.selectionMarker === "radio" && (isMarkable || isSelected)
+				? `${isSelected ? theme.radio.selected : theme.radio.unselected} `
+				: context.selectionMarker === "checkbox" && isMarkable
+					? `${checked.has(index) ? theme.checkbox.checked : theme.checkbox.unchecked} `
+					: isSelected
+						? `${theme.nav.cursor} `
+						: "  ";
+		rows.push({ text: clampLineToWidth(prefix + label, contentWidth), priority: -1 });
+		const description = getSelectOptionDescription(option);
+		if (description) {
+			const flat = flattenDescription(description);
+			if (flat) {
+				rows.push({
+					text: clampLineToWidth(`${CUSTOM_INPUT_DESCRIPTION_INDENT}${flat}`, contentWidth),
+					// Selected (Other) carries no description; favor checked rows
+					// when budget pressure forces description rows to be dropped.
+					priority: isSelected ? 2 : checked.has(index) ? 1 : 0,
+				});
+			}
+		}
+	}
+
+	const trailingGap = window.gapBefore.get(options.length);
+	if (trailingGap !== undefined) emitGap(trailingGap);
+	rows.push({ text: "", priority: -1 });
+	rows.push({ text: "Enter your response:", priority: -1 });
+	return rows;
+}
+
+function applyCustomInputRowBudget(rows: CustomInputRow[], budget: number): CustomInputRow[] {
+	if (rows.length <= budget) return rows;
+	// Drop droppable rows lowest priority first; on ties, drop later rows first
+	// so the user still sees the earliest options' descriptions.
+	const droppable = rows
+		.map((row, index) => ({ row, index }))
+		.filter(entry => entry.row.priority >= 0)
+		.sort((a, b) => a.row.priority - b.row.priority || b.index - a.index);
+	const removed = new Set<number>();
+	for (const { index } of droppable) {
+		if (rows.length - removed.size <= budget) break;
+		removed.add(index);
+	}
+	return rows.filter((_, i) => !removed.has(i));
+}
+
+function formatCustomInputTitle(
+	question: string,
+	options: ExtensionUISelectItem[],
+	context: CustomInputContext,
+): string {
+	const contentWidth = customInputContentWidth();
+	const rows = buildCustomInputRows(question, options, context, contentWidth);
+	return applyCustomInputRowBudget(rows, MAX_CUSTOM_INPUT_TITLE_ROWS)
+		.map(row => row.text)
+		.join("\n");
 }
 
 // =============================================================================
@@ -230,14 +458,24 @@ async function askSingleQuestion(
 			? await untilAborted(signal, () => ui.select(prompt, optionsToShow, dialogOptions))
 			: await ui.select(prompt, optionsToShow, dialogOptions);
 		if (!timeoutTriggered && choice === undefined && typeof timeout === "number") {
-			timeoutTriggered = Date.now() - startMs >= timeout;
+			// Fallback for UI surfaces that enforce `timeout` without invoking
+			// `onTimeout`: their auto-cancel resolves right at the deadline. A
+			// cancel arriving well past the deadline is a deliberate user Esc on
+			// a surface that kept the dialog open — keep treating it as a cancel.
+			const elapsed = Date.now() - startMs;
+			timeoutTriggered = elapsed >= timeout && elapsed <= timeout + TIMEOUT_DETECTION_TOLERANCE_MS;
 		}
 		return { choice, timedOut: timeoutTriggered, navigation: navigationAction };
 	};
 
-	const promptForCustomInput = async (): Promise<{ input: string | undefined }> => {
+	const promptForCustomInput = async (
+		title: string,
+		optionsToShow: ExtensionUISelectItem[],
+		context: CustomInputContext,
+	): Promise<{ input: string | undefined }> => {
 		const dialogOptions = signal ? { signal } : undefined;
-		const showCustomInput = () => ui.editor("Enter your response:", undefined, dialogOptions, { promptStyle: true });
+		const editorTitle = formatCustomInputTitle(title, optionsToShow, context);
+		const showCustomInput = () => ui.editor(editorTitle, undefined, dialogOptions, { promptStyle: true });
 		const input = signal ? await untilAborted(signal, showCustomInput) : await showCustomInput();
 		return { input };
 	};
@@ -291,9 +529,13 @@ async function askSingleQuestion(
 					timedOut = true;
 					break;
 				}
-				const customResult = await promptForCustomInput();
+				const customResult = await promptForCustomInput(`${prefix}${promptWithProgress}`, opts, {
+					selectionMarker: "checkbox",
+					checkedIndices,
+					markableCount: questionOptions.length,
+				});
 				if (customResult.input === undefined) {
-					break;
+					continue;
 				}
 				customInput = customResult.input;
 				break;
@@ -317,51 +559,60 @@ async function askSingleQuestion(
 		}
 		selectedOptions = Array.from(selected);
 	} else {
-		const displayOptions = addRecommendedSuffix(questionOptions, recommended);
-		const optionsWithNavigation: ExtensionUISelectItem[] = [...displayOptions, OTHER_OPTION];
+		while (true) {
+			const displayOptions = addRecommendedSuffix(questionOptions, recommended);
+			const optionsWithNavigation: ExtensionUISelectItem[] = [...displayOptions, OTHER_OPTION];
 
-		let initialIndex = recommended;
-		const previouslySelected = selectedOptions[0];
-		if (previouslySelected) {
-			const selectedIndex = questionOptions.findIndex(option => option.label === previouslySelected);
-			if (selectedIndex >= 0) initialIndex = selectedIndex;
-		} else if (customInput !== undefined) {
-			initialIndex = displayOptions.length;
-		}
-		if (initialIndex !== undefined) {
-			const maxIndex = Math.max(optionsWithNavigation.length - 1, 0);
-			initialIndex = Math.max(0, Math.min(initialIndex, maxIndex));
-		}
-
-		const {
-			choice,
-			timedOut: selectTimedOut,
-			navigation: arrowNavigation,
-		} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
-			selectionMarker: "radio",
-			markableCount: displayOptions.length,
-		});
-		timedOut = selectTimedOut;
-
-		if (arrowNavigation) {
-			return { selectedOptions, customInput, timedOut, navigation: arrowNavigation };
-		}
-		if (choice === undefined) {
-			if (!timedOut) {
-				return { selectedOptions, customInput, timedOut, cancelled: true };
+			let initialIndex = recommended;
+			const previouslySelected = selectedOptions[0];
+			if (previouslySelected) {
+				const selectedIndex = questionOptions.findIndex(option => option.label === previouslySelected);
+				if (selectedIndex >= 0) initialIndex = selectedIndex;
+			} else if (customInput !== undefined) {
+				initialIndex = displayOptions.length;
 			}
-		} else if (choice === OTHER_OPTION) {
-			if (!selectTimedOut) {
-				const customResult = await promptForCustomInput();
-				if (customResult.input !== undefined) {
-					customInput = customResult.input;
-					selectedOptions = [];
+			if (initialIndex !== undefined) {
+				const maxIndex = Math.max(optionsWithNavigation.length - 1, 0);
+				initialIndex = Math.max(0, Math.min(initialIndex, maxIndex));
+			}
+
+			const {
+				choice,
+				timedOut: selectTimedOut,
+				navigation: arrowNavigation,
+			} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
+				selectionMarker: "radio",
+				markableCount: displayOptions.length,
+			});
+			timedOut = selectTimedOut;
+
+			if (arrowNavigation) {
+				return { selectedOptions, customInput, timedOut, navigation: arrowNavigation };
+			}
+			if (choice === undefined) {
+				if (!timedOut) {
+					return { selectedOptions, customInput, timedOut, cancelled: true };
 				}
-				// If editor was dismissed (undefined), keep prior selectedOptions/customInput intact
+				break;
 			}
-		} else {
+			if (choice === OTHER_OPTION) {
+				if (selectTimedOut) {
+					break;
+				}
+				const customResult = await promptForCustomInput(promptWithProgress, optionsWithNavigation, {
+					selectionMarker: "radio",
+					markableCount: displayOptions.length,
+				});
+				if (customResult.input === undefined) {
+					continue;
+				}
+				customInput = customResult.input;
+				selectedOptions = [];
+				break;
+			}
 			selectedOptions = [stripRecommendedSuffix(choice)];
 			customInput = undefined;
+			break;
 		}
 		if (navigation?.allowForward) {
 			return { selectedOptions, customInput, timedOut, navigation: "forward" };
@@ -380,9 +631,10 @@ function formatQuestionResult(result: QuestionResult): string {
 		return `${result.id}: "${result.customInput}"`;
 	}
 	if (result.selectedOptions.length > 0) {
+		const suffix = result.timedOut ? " (auto-selected after timeout)" : "";
 		return result.multi
-			? `${result.id}: [${result.selectedOptions.join(", ")}]`
-			: `${result.id}: ${result.selectedOptions[0]}`;
+			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
+			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
 	}
 	return `${result.id}: (cancelled)`;
 }
@@ -407,6 +659,46 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly description: string;
 	readonly parameters = askSchema;
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
+		{
+			caption: "Single question",
+			call: {
+				questions: [
+					{
+						id: "auth_method",
+						question: "Which authentication method should this API use?",
+						options: [
+							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
+							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
+							{
+								label: "Session cookies",
+								description: "Browser-first authentication backed by server-side sessions.",
+							},
+						],
+						recommended: 0,
+					},
+				],
+			},
+		},
+		{
+			caption: "Multiple questions",
+			call: {
+				questions: [
+					{
+						id: "storage_type",
+						question: "Which storage backend?",
+						options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+					},
+					{
+						id: "auth_method",
+						question: "Which auth method?",
+						options: [{ label: "JWT" }, { label: "Session cookies" }],
+					},
+				],
+			},
+		},
+	];
 	// Run alone in its tool batch. The interactive selector/editor is a single
 	// shared UI surface (`ExtensionUiController.showHookSelector` has no queue and
 	// overwrites `ctx.hookSelector` on each call), so two concurrent `ask` calls
@@ -473,6 +765,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			};
 		}
 
+		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
+		// mode — it's the assistant addressing the user — gated only by speech.enabled
+		// (the vocalizer re-checks the setting and no-ops when disabled).
+		if (this.session.settings.get("speech.enabled")) {
+			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
+		}
+
 		const askQuestion = async (
 			q: AskParams["questions"][number],
 			options?: { previous?: QuestionResult; navigation?: NavigationControls },
@@ -519,13 +818,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				multi: q.multi ?? false,
 				selectedOptions,
 				customInput,
+				timedOut: timedOut || undefined,
 			};
 
 			const responseParts: string[] = [];
 			if (selectedOptions.length > 0) {
-				responseParts.push(
-					q.multi ? `User selected: ${selectedOptions.join(", ")}` : `User selected: ${selectedOptions[0]}`,
-				);
+				const selectedText = q.multi
+					? `User selected: ${selectedOptions.join(", ")}`
+					: `User selected: ${selectedOptions[0]}`;
+				responseParts.push(timedOut ? `${selectedText} (auto-selected after timeout)` : selectedText);
 			}
 			if (customInput !== undefined) {
 				responseParts.push(
@@ -573,6 +874,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				multi: q.multi ?? false,
 				selectedOptions,
 				customInput,
+				timedOut: timedOut || undefined,
 			};
 
 			if (navAction === "back") {
@@ -624,10 +926,62 @@ interface AskRenderArgs {
 	}>;
 }
 
+/**
+ * Coerce an untrusted option list (streamed or model-mangled call args) into
+ * well-formed render options. Bare strings become labels; entries without a
+ * string label are dropped.
+ */
+function normalizeRenderOptions(raw: unknown): AskRenderOption[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: AskRenderOption[] = [];
+	for (const entry of raw) {
+		if (typeof entry === "string") {
+			out.push({ label: entry });
+			continue;
+		}
+		if (!entry || typeof entry !== "object") continue;
+		const { label, description } = entry as Partial<AskRenderOption>;
+		if (typeof label !== "string") continue;
+		out.push(typeof description === "string" ? { label, description } : { label });
+	}
+	return out;
+}
+
+/**
+ * Coerce untrusted `questions` call args into a renderable array. Models
+ * occasionally double-encode the array as a JSON string — a bare string passes
+ * a truthy `.length` check but has no `.map`, which used to crash the TUI
+ * render loop. Partially streamed args can also be missing fields.
+ */
+function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["questions"]> | undefined {
+	if (typeof raw === "string") {
+		try {
+			raw = JSON.parse(raw);
+		} catch {
+			return undefined;
+		}
+	}
+	if (!Array.isArray(raw)) return undefined;
+	const out: NonNullable<AskRenderArgs["questions"]> = [];
+	for (const entry of raw) {
+		if (!entry || typeof entry !== "object") continue;
+		const q = entry as Partial<NonNullable<AskRenderArgs["questions"]>[number]>;
+		out.push({
+			id: typeof q.id === "string" ? q.id : "?",
+			question: typeof q.question === "string" ? q.question : "",
+			options: normalizeRenderOptions(q.options) ?? [],
+			multi: q.multi === true,
+		});
+	}
+	return out;
+}
+
 /** Render a custom free-text answer as a status line plus indented continuation rows. */
 function renderCustomInputLines(uiTheme: Theme, customInput: string): string[] {
 	const lines = customInput.split("\n");
-	const out: string[] = [` ${uiTheme.styledSymbol("tool.ask", "accent")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`];
+	const out: string[] = [
+		` ${uiTheme.styledSymbol("status.success", "success")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`,
+	];
 	for (let i = 1; i < lines.length; i++) out.push(`   ${uiTheme.fg("toolOutput", lines[i])}`);
 	return out;
 }
@@ -707,8 +1061,10 @@ export const askToolRenderer = {
 			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, width - 3 + 1));
 
 		// Multi-part questions: one divider-labelled section per question.
-		if (args.questions && args.questions.length > 0) {
-			const questions = args.questions;
+		// Call args are untrusted (partially streamed or model-mangled) and a
+		// throw here takes down the whole TUI render loop — normalize first.
+		const questions = normalizeRenderQuestions(args.questions);
+		if (questions && questions.length > 0) {
 			const header = `${label} ${uiTheme.fg("muted", `${questions.length} questions`)}`;
 			return framedBlock(uiTheme, width => {
 				const sections = questions.map(q => {
@@ -716,8 +1072,11 @@ export const askToolRenderer = {
 					if (q.multi) meta.push("multi");
 					if (q.options?.length) meta.push(`options:${q.options.length}`);
 					const metaStr = meta.length > 0 ? uiTheme.fg("dim", ` · ${meta.join(" · ")}`) : "";
-					const lines = md(q.question, width);
-					if (q.options?.length) lines.push(...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi));
+					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+					const mdLines = md(q.question, width);
+					const lines = q.options?.length
+						? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi)]
+						: mdLines;
 					return { label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, lines };
 				});
 				return { header, sections, state: "pending", borderColor: "borderMuted", width };
@@ -725,7 +1084,7 @@ export const askToolRenderer = {
 		}
 
 		// Single question
-		if (!args.question) {
+		if (typeof args.question !== "string" || !args.question) {
 			const errorLine = formatErrorMessage("No question provided", uiTheme);
 			return framedBlock(uiTheme, width => ({
 				header: errorLine,
@@ -739,14 +1098,16 @@ export const askToolRenderer = {
 		const question = args.question;
 		const meta: string[] = [];
 		if (args.multi) meta.push("multi");
-		if (args.options?.length) meta.push(`options:${args.options.length}`);
+		const questionOptions = normalizeRenderOptions(args.options);
+		if (questionOptions?.length) meta.push(`options:${questionOptions.length}`);
 		const header = `${label}${formatMeta(meta, uiTheme)}`;
-		const questionOptions = args.options;
 		const multi = args.multi;
 		return framedBlock(uiTheme, width => {
-			const bodyLines = md(question, width);
-			if (questionOptions?.length)
-				bodyLines.push(...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi));
+			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+			const mdLines = md(question, width);
+			const bodyLines = questionOptions?.length
+				? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi)]
+				: mdLines;
 			return {
 				header,
 				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
@@ -792,10 +1153,11 @@ export const askToolRenderer = {
 			);
 			return framedBlock(uiTheme, width => {
 				const sections = results.map(r => {
-					const lines = md(r.question, width);
-					lines.push(
+					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+					const lines = [
+						...md(r.question, width),
 						...renderAnswerOptionLines(uiTheme, mdTheme, r.options, r.selectedOptions, r.multi, r.customInput),
-					);
+					];
 					return { label: uiTheme.fg("dim", `[${r.id}]`), lines };
 				});
 				return {
@@ -828,9 +1190,17 @@ export const askToolRenderer = {
 		const dSelected = details.selectedOptions;
 		const dMulti = details.multi;
 		const dCustom = details.customInput;
+		const dTimedOut = details.timedOut;
 		return framedBlock(uiTheme, width => {
-			const bodyLines = md(question, width);
-			bodyLines.push(...renderAnswerOptionLines(uiTheme, mdTheme, dOptions, dSelected, dMulti, dCustom));
+			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
+			const bodyLines = [
+				...md(question, width),
+				...renderAnswerOptionLines(uiTheme, mdTheme, dOptions, dSelected, dMulti, dCustom),
+			];
+			if (dTimedOut) {
+				// Distinguish auto-selection from a real user choice in the transcript.
+				bodyLines.push(uiTheme.fg("dim", "auto-selected after timeout — not a user choice"));
+			}
 			return {
 				header,
 				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],

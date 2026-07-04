@@ -13,23 +13,20 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
-		const tempDir = path.join(os.tmpdir(), `pi-acp-mcp-isolation-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
+		let authStorage: AuthStorage | undefined;
 		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 			const modelRegistry = new ModelRegistry(authStorage);
 			const settings = Settings.isolated({});
 			const fakeSession = {} as AgentSession;
@@ -56,7 +53,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			const factory = createAcpSessionFactory({
 				baseOptions: { enableMCP: true } as CreateAgentSessionOptions,
 				settings,
-				sessionDir: path.join(tempDir, "sessions"),
+				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
 				parsedArgs: {},
@@ -64,13 +61,79 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				createSession,
 			});
 
-			const result = await factory(tempDir);
+			const result = await factory(tempDir.path());
 			expect(result).toBe(fakeSession);
 			expect(captured).toHaveLength(1);
 			expect(captured[0].enableMCP).toBe(false);
 		} finally {
-			authStorage.close();
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			try {
+				authStorage?.close();
+			} finally {
+				await Bun.sleep(0);
+				await tempDir.remove();
+			}
+		}
+	});
+});
+
+describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)", () => {
+	it("re-resolves the title prompt for the per-session cwd instead of inheriting the launch cwd's override", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-title-prompt-");
+		let authStorage: AuthStorage | undefined;
+		try {
+			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			const settings = Settings.isolated({});
+
+			const projectDir = tempDir.join("project");
+			await Bun.write(`${projectDir}/.omp/TITLE_SYSTEM.md`, "Project-specific title policy.");
+
+			const fakeSession = {} as AgentSession;
+			const captured: CreateAgentSessionOptions[] = [];
+			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+				captured.push(options);
+				return {
+					session: fakeSession,
+					extensionsResult: {
+						extensions: [],
+						errors: [],
+						runner: undefined,
+					} as unknown as CreateAgentSessionResult["extensionsResult"],
+					setToolUIContext: () => {},
+					eventBus: {
+						emit: () => {},
+						on: () => () => {},
+						off: () => {},
+					} as unknown as CreateAgentSessionResult["eventBus"],
+				};
+			};
+
+			// baseOptions carries the LAUNCH cwd's prompt; the factory must
+			// override it with the per-session cwd's `TITLE_SYSTEM.md`.
+			const factory = createAcpSessionFactory({
+				baseOptions: {
+					titleSystemPrompt: "Launch-cwd policy that must not leak.",
+				} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: {},
+				rawArgs: [],
+				createSession,
+			});
+
+			await factory(projectDir);
+
+			expect(captured).toHaveLength(1);
+			expect(captured[0].titleSystemPrompt).toBe("Project-specific title policy.");
+		} finally {
+			try {
+				authStorage?.close();
+			} finally {
+				await Bun.sleep(0);
+				await tempDir.remove();
+			}
 		}
 	});
 });

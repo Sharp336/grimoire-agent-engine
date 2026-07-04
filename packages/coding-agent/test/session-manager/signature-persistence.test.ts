@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { SessionManager, type SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBlobsDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function isAssistantSessionEntry(entry: unknown): entry is SessionMessageEntry & { message: AssistantMessage } {
@@ -26,42 +27,6 @@ function getAssistantMessage(session: SessionManager): AssistantMessage {
 }
 
 describe("SessionManager signature persistence", () => {
-	it("clears oversized signatures instead of truncating them", async () => {
-		using tempDir = TempDir.createSync("@pi-session-signature-persistence-");
-		const session = SessionManager.create(tempDir.path(), tempDir.path());
-
-		session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
-		session.appendMessage({
-			role: "assistant",
-			content: [
-				{ type: "thinking", thinking: "reasoning", thinkingSignature: "s".repeat(600_000) },
-				{ type: "text", text: "done", textSignature: "m".repeat(600_000) },
-				{ type: "toolCall", id: "tool_1", name: "read", arguments: {}, thoughtSignature: "t".repeat(600_000) },
-			],
-			api: "openai-responses",
-			provider: "openai",
-			model: "gpt-5-mini",
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: 2,
-		} satisfies AssistantMessage);
-		await session.flush();
-
-		const reloaded = await SessionManager.open(session.getSessionFile()!);
-		const assistant = getAssistantMessage(reloaded);
-
-		expect(assistant.content[0]).toMatchObject({ type: "thinking", thinking: "reasoning", thinkingSignature: "" });
-		expect(assistant.content[1]).toMatchObject({ type: "text", text: "done", textSignature: "" });
-		expect(assistant.content[2]).toMatchObject({ type: "toolCall", id: "tool_1", thoughtSignature: "" });
-	});
-
 	it("externalizes provider image data URLs and restores preserved history payloads across reload", async () => {
 		using tempDir = TempDir.createSync("@pi-session-provider-image-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
@@ -133,6 +98,71 @@ describe("SessionManager signature persistence", () => {
 		});
 	});
 
+	it("externalizes and restores tool result image blocks across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-tool-image-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const contentImage: ImageContent = {
+			type: "image",
+			data: Buffer.from("read-image-payload".repeat(100)).toString("base64"),
+			mimeType: "image/png",
+		};
+		const detailImage: ImageContent = {
+			type: "image",
+			data: Buffer.from("eval-detail-image-payload".repeat(100)).toString("base64"),
+			mimeType: "image/png",
+		};
+
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tool_image", name: "eval", arguments: {} }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		} satisfies AssistantMessage);
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "tool_image",
+			toolName: "eval",
+			content: [{ type: "text", text: "displayed image" }, contentImage],
+			details: { images: [detailImage] },
+			isError: false,
+			timestamp: 2,
+		});
+		await session.flush();
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const rawSession = await fs.readFile(sessionFile, "utf8");
+		expect(rawSession).not.toContain(contentImage.data);
+		expect(rawSession).not.toContain(detailImage.data);
+
+		const contentHash = new Bun.SHA256().update(Buffer.from(contentImage.data, "base64")).digest("hex");
+		const detailHash = new Bun.SHA256().update(Buffer.from(detailImage.data, "base64")).digest("hex");
+		await expect(fs.readFile(path.join(getBlobsDir(), contentHash))).resolves.toBeDefined();
+		await expect(fs.readFile(path.join(getBlobsDir(), detailHash))).resolves.toBeDefined();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		const reloadedToolEntry = reloaded
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "toolResult");
+		if (reloadedToolEntry?.type !== "message" || reloadedToolEntry.message.role !== "toolResult") {
+			throw new Error("Expected tool result message");
+		}
+
+		expect(reloadedToolEntry.message.content).toEqual([{ type: "text", text: "displayed image" }, contentImage]);
+		expect((reloadedToolEntry.message.details as { images?: ImageContent[] }).images).toEqual([detailImage]);
+	});
+
 	it("rehydrates assistant replay metadata in memory without rewriting the session file", async () => {
 		using tempDir = TempDir.createSync("@pi-session-rehydrate-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
@@ -159,7 +189,7 @@ describe("SessionManager signature persistence", () => {
 				{ type: "text", text: "done" },
 			],
 			api: "openai-responses",
-			provider: "openai",
+			provider: "github-copilot",
 			model: "gpt-5-mini",
 			usage: {
 				input: 1,
@@ -184,16 +214,67 @@ describe("SessionManager signature persistence", () => {
 		const reloaded = await SessionManager.open(sessionFile);
 		const assistant = getAssistantMessage(reloaded);
 
-		// After rehydration, assistant providerPayload must be stripped to prevent
-		// stale native history replay on warmed sessions.
+		// GitHub Copilot rejects replayed assistant-side native history on a warmed
+		// session, so its replay metadata is stripped in memory after rehydration.
 		expect(assistant.providerPayload).toBeUndefined();
-		expect(assistant.content[0]).toMatchObject({
-			type: "thinking",
-			thinking: "reasoning",
-			thinkingSignature: undefined,
-		});
+		const thinking = assistant.content[0];
+		expect(thinking).toMatchObject({ type: "thinking", thinking: "reasoning" });
+		if (thinking?.type !== "thinking") throw new Error("Expected thinking block");
+		expect(thinking.thinkingSignature).toBeUndefined();
 		expect(await fs.readFile(sessionFile, "utf8")).toBe(persistedBefore);
 		expect((await fs.stat(sessionFile)).mtimeMs).toBe(initialMtimeMs);
 		await reloaded.close();
-	});
+	}, 15_000);
+
+	it("drops a reasoning signature duplicated by the provider payload and keeps the payload on reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-reasoning-dedup-e2e-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: regresses persistence truncating providerPayload reasoning items.
+		const encrypted = `ENCRYPTED_REASONING_BLOB_UNIQUE_TOKEN_${"E".repeat(600_000)}`;
+		const reasoning = { type: "reasoning", id: "rs_1", encrypted_content: encrypted };
+
+		session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "reasoning", thinkingSignature: JSON.stringify(reasoning) },
+				{ type: "text", text: "done" },
+			],
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-5.2-codex",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [reasoning] },
+			timestamp: 2,
+		} satisfies AssistantMessage);
+		await session.flush();
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		// The encrypted blob was stored twice (thinkingSignature + providerPayload);
+		// persistence drops the signature copy, so the session file carries it once.
+		const onDisk = await fs.readFile(sessionFile, "utf8");
+		expect(onDisk.split(encrypted).length - 1).toBe(1);
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		const assistant = getAssistantMessage(reloaded);
+		const thinking = assistant.content.find(block => block.type === "thinking");
+		if (thinking?.type !== "thinking") throw new Error("Expected thinking block");
+		expect(thinking.thinkingSignature).toBeUndefined();
+		// openai-codex (non-Copilot) keeps the replay payload, so the encrypted reasoning
+		// stays recoverable for native-history replay / remote compaction.
+		expect(assistant.providerPayload?.type).toBe("openaiResponsesHistory");
+		const items = assistant.providerPayload?.type === "openaiResponsesHistory" ? assistant.providerPayload.items : [];
+		expect(items[0]?.encrypted_content).toBe(encrypted);
+		await reloaded.close();
+	}, 15_000);
 });

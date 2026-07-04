@@ -1,120 +1,103 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
-import { resolveSSEConnectTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
-import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import type { Server } from "bun";
+import { afterEach, describe, expect, it } from "bun:test";
+import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 
-let activeServer: Server<undefined> | undefined;
+const encoder = new TextEncoder();
+const REQUEST_TIMEOUT_MS = 50;
+const GUARD_TIMEOUT_MS = 500;
+
+let server: Bun.Server<undefined> | null = null;
+
+type ToolList = {
+	tools: { name: string; inputSchema: { type: string } }[];
+};
 
 afterEach(() => {
-	activeServer?.stop(true);
-	activeServer = undefined;
+	server?.stop(true);
+	server = null;
 });
 
-describe("HTTP MCP transport", () => {
-	it("continues initialization when the optional GET SSE listener does not respond", async () => {
-		let getRequests = 0;
-		let initializedNotifications = 0;
-		let connection: MCPServerConnection | undefined;
+async function connectedTransport(): Promise<HttpTransport> {
+	if (!server) throw new Error("Test server was not started");
+	const transport = new HttpTransport({
+		type: "http",
+		url: `http://127.0.0.1:${server.port}/mcp`,
+		timeout: REQUEST_TIMEOUT_MS,
+	});
+	await transport.connect();
+	return transport;
+}
 
-		activeServer = Bun.serve({
+function stalledBodyResponse(bodyPrefix: string, init?: ResponseInit): Response {
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(bodyPrefix));
+			},
+		}),
+		init,
+	);
+}
+
+// Real time is intentional: this exercises Bun fetch aborting a live HTTP body stream,
+// which fake timers do not drive through the socket/readable-stream stack.
+async function withPendingGuard<T>(promise: Promise<T>, label: string): Promise<T> {
+	return await Promise.race([
+		promise,
+		Bun.sleep(GUARD_TIMEOUT_MS).then(() => {
+			throw new Error(`${label} stayed pending past ${GUARD_TIMEOUT_MS}ms`);
+		}),
+	]);
+}
+
+describe("MCP Streamable HTTP transport timeouts", () => {
+	it("keeps the request timeout active until a JSON response body is fully read", async () => {
+		server = Bun.serve({
 			port: 0,
-			async fetch(request) {
-				if (request.method === "GET") {
-					getRequests++;
-					return new Promise<Response>(() => {});
-				}
-
-				if (request.method === "DELETE") {
-					return new Response(null, { status: 204 });
-				}
-				const body = (await request.json()) as { id?: string | number; method?: string };
-				if (body.method === "initialize") {
-					return Response.json(
-						{
-							jsonrpc: "2.0",
-							id: body.id,
-							result: {
-								protocolVersion: "2025-03-26",
-								capabilities: { tools: {} },
-								serverInfo: { name: "storybook-repro", version: "0.0.0" },
-							},
-						},
-						{ headers: { "Mcp-Session-Id": "session-1" } },
-					);
-				}
-
-				if (body.method === "notifications/initialized") {
-					initializedNotifications++;
-					return new Response(null, { status: 202 });
-				}
-
-				return Response.json({ jsonrpc: "2.0", id: body.id, result: {} });
+			fetch() {
+				return stalledBodyResponse('{"jsonrpc":"2.0","id":"', {
+					headers: { "Content-Type": "application/json" },
+				});
 			},
 		});
+		const transport = await connectedTransport();
 
-		try {
-			connection = await connectToServer("storybook", {
-				type: "http",
-				url: String(activeServer.url),
-				timeout: 1_000,
-			});
-
-			expect(connection.serverInfo.name).toBe("storybook-repro");
-			expect(getRequests).toBe(1);
-			expect(initializedNotifications).toBe(1);
-		} finally {
-			await connection?.transport.close();
-		}
+		await expect(withPendingGuard(transport.request("tools/list"), "request")).rejects.toThrow(
+			`Request timeout after ${REQUEST_TIMEOUT_MS}ms`,
+		);
 	});
 
-	it("reports required initialize request failures", async () => {
-		activeServer = Bun.serve({
+	it("keeps the notify timeout active while reading HTTP error bodies", async () => {
+		server = Bun.serve({
 			port: 0,
-			async fetch(request) {
-				if (request.method === "DELETE") {
-					return new Response(null, { status: 204 });
-				}
-				return new Response("initialize exploded", { status: 500 });
+			fetch() {
+				return stalledBodyResponse("partial failure body", {
+					status: 500,
+					headers: { "Content-Type": "text/plain" },
+				});
 			},
 		});
+		const transport = await connectedTransport();
 
-		await expect(
-			connectToServer("broken", {
-				type: "http",
-				url: String(activeServer.url),
-				timeout: 1_000,
-			}),
-		).rejects.toThrow("HTTP 500: initialize exploded");
+		await expect(withPendingGuard(transport.notify("notifications/initialized"), "notify")).rejects.toThrow(
+			`Notify timeout after ${REQUEST_TIMEOUT_MS}ms`,
+		);
 	});
 
-	describe("resolveSSEConnectTimeoutMs", () => {
-		const originalEnv = process.env.OMP_MCP_TIMEOUT_MS;
-
-		beforeEach(() => {
-			delete process.env.OMP_MCP_TIMEOUT_MS;
+	it("still resolves normal JSON response bodies", async () => {
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: 1,
+					result: { tools: [{ name: "fast", inputSchema: { type: "object" } }] },
+				});
+			},
 		});
+		const transport = await connectedTransport();
 
-		afterEach(() => {
-			if (originalEnv === undefined) delete process.env.OMP_MCP_TIMEOUT_MS;
-			else process.env.OMP_MCP_TIMEOUT_MS = originalEnv;
-		});
-
-		it("returns 0 when the server config disables the MCP timeout", () => {
-			expect(resolveSSEConnectTimeoutMs(0)).toBe(0);
-		});
-
-		it("returns 0 when OMP_MCP_TIMEOUT_MS disables the MCP timeout", () => {
-			process.env.OMP_MCP_TIMEOUT_MS = "0";
-			expect(resolveSSEConnectTimeoutMs(undefined)).toBe(0);
-		});
-
-		it("caps the startup deadline at one second for the default request budget", () => {
-			expect(resolveSSEConnectTimeoutMs(30_000)).toBe(1_000);
-		});
-
-		it("scales below short request budgets so connect-time never exceeds them", () => {
-			expect(resolveSSEConnectTimeoutMs(200)).toBe(50);
+		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
+			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
 	});
 });

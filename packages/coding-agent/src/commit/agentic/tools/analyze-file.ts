@@ -1,5 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
 import analyzeFilePrompt from "../../../commit/agentic/prompts/analyze-file.md" with { type: "text" };
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import type { NumstatEntry } from "../../../commit/types";
@@ -12,9 +12,9 @@ import type { TaskParams } from "../../../task/types";
 import type { ToolSession } from "../../../tools";
 import { getFilePriority } from "./git-file-diff";
 
-const analyzeFileSchema = z.object({
-	files: z.array(z.string().describe("file path")).min(1),
-	goal: z.string().describe("analysis focus").optional(),
+const analyzeFileSchema = type({
+	files: type("string").describe("file path").array().atLeastLength(1),
+	"goal?": type("string").describe("analysis focus"),
 });
 
 const analyzeFileOutputSchema = {
@@ -38,11 +38,17 @@ function buildToolSession(
 	return {
 		cwd: options.cwd,
 		hasUI: false,
+		// Programmatic fan-out: results feed the commit agent's evidence, not a
+		// model choosing further spawns, so the specialization nudge is noise here.
+		suppressSpawnAdvisory: true,
 		getSessionFile: () => ctx.sessionManager.getSessionFile() ?? null,
 		getSessionSpawns: () => options.spawns,
 		settings: options.settings,
 		authStorage: options.authStorage,
 		modelRegistry: options.modelRegistry,
+		// The task tool no longer takes a per-call schema; the inherited session
+		// schema drives structured output for every spawn from this session.
+		outputSchema: analyzeFileOutputSchema,
 	};
 }
 
@@ -57,31 +63,47 @@ export function createAnalyzeFileTool(options: {
 	return {
 		name: "analyze_files",
 		label: "Analyze Files",
-		description: "Spawn quick_task agents to analyze files.",
+		description: "Spawn sonic agents to analyze files.",
 		parameters: analyzeFileSchema,
-		async execute(toolCallId, params, onUpdate, ctx, signal) {
+		async execute(toolCallId, params, _onUpdate, ctx, signal) {
 			const toolSession = buildToolSession(ctx, options);
+			// The hand-built ToolSession carries no asyncJobManager, so every
+			// execute() below takes the task tool's sync fallback and resolves
+			// with the subagent's result inline — exactly what this flow needs.
+			// The tool's session semaphore bounds the parallel fan-out.
 			const taskTool = await TaskTool.create(toolSession);
 			const numstat = options.state.overview?.numstat ?? [];
-			const tasks = params.files.map((file, index) => {
-				const relatedFiles = formatRelatedFiles(params.files, file, numstat);
-				const assignment = prompt.render(analyzeFilePrompt, {
-					file,
-					goal: params.goal,
-					related_files: relatedFiles,
-				});
-				return {
-					id: `AnalyzeFile${index + 1}`,
-					description: `Analyze ${file}`,
-					assignment,
-				};
-			});
-			const taskParams: TaskParams = {
-				agent: "quick_task",
-				schema: JSON.stringify(analyzeFileOutputSchema),
-				tasks,
+
+			const analyses = await Promise.all(
+				params.files.map((file, index) => {
+					const relatedFiles = formatRelatedFiles(params.files, file, numstat);
+					const assignment = prompt.render(analyzeFilePrompt, {
+						file,
+						goal: params.goal,
+						related_files: relatedFiles,
+					});
+					const taskParams: TaskParams = {
+						agent: "sonic",
+						id: `AnalyzeFile${index + 1}`,
+						description: `Analyze ${file}`,
+						assignment,
+					};
+					return taskTool.execute(`${toolCallId}-${index + 1}`, taskParams, signal);
+				}),
+			);
+			const results = analyses.flatMap(analysis => analysis.details?.results ?? []);
+			const text = analyses
+				.map(analysis => analysis.content.find(part => part.type === "text")?.text ?? "")
+				.filter(Boolean)
+				.join("\n\n");
+			return {
+				content: [{ type: "text", text: text || "(no output)" }],
+				details: {
+					projectAgentsDir: null,
+					results,
+					totalDurationMs: analyses.reduce((sum, analysis) => sum + (analysis.details?.totalDurationMs ?? 0), 0),
+				},
 			};
-			return taskTool.execute(toolCallId, taskParams, signal, onUpdate);
 		},
 	};
 }

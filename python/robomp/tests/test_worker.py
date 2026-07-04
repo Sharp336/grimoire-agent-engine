@@ -70,6 +70,7 @@ class _FakeRpcClient:
             messages: list = []
             events: list = []
             assistant_text: str = "ok"
+            assistant_message: dict | None = None
 
         return _Turn()
 
@@ -189,6 +190,32 @@ async def test_run_task_sets_impl_authorized_from_directive(
 
     assert result == "ok"
     assert captured == {"impl_authorized": True}
+
+
+@pytest.mark.asyncio
+async def test_run_task_preserves_impl_authorized_when_resuming(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, _bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
+    captured: dict[str, bool] = {}
+
+    monkeypatch.setattr(worker, "_build_prompt", lambda *args, **kwargs: "prompt")
+
+    def capture_build(bindings: worker.ToolBindings) -> tuple:
+        captured["impl_authorized"] = bindings.impl_authorized
+        return ()
+
+    monkeypatch.setattr(worker.host_tools, "build", capture_build)
+
+    result = await worker.run_task(
+        task_kind="handle_comment",
+        inputs=inputs,
+        directive=worker.DirectiveInfo(body="go ahead", author="can1357", authorizes_impl=True),
+    )
+
+    assert result == "ok"
+    assert captured == {"impl_authorized": True}
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
 
 
 @pytest.mark.asyncio

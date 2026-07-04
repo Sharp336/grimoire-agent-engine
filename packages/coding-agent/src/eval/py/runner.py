@@ -26,14 +26,16 @@ when installed.
 
 from __future__ import annotations
 
-import asyncio
 import ast
-import contextvars
+import asyncio
 import base64
 import builtins
+import codecs
+import contextvars
 import inspect
 import io
 import json
+import locale
 import os
 import re
 import runpy
@@ -45,14 +47,29 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Frame writer
 # ---------------------------------------------------------------------------
 
-_RAW_STDOUT = sys.__stdout__
+# Frames travel on a private dup of the original stdout. fd 1 itself is then
+# repointed at a capture pipe: child processes spawned by user code without
+# stdout=PIPE inherit fd 1, and their output is forwarded to the host as
+# regular stdout frames by a drain thread instead of being written raw into
+# the NDJSON channel (where it would be dropped as invalid JSON — or worse,
+# spoof a frame). The wire protocol is unchanged: the host still reads NDJSON
+# frames from the subprocess stdout.
 _RAW_STDERR = sys.__stderr__
+try:
+    _FRAME_FD = os.dup(sys.__stdout__.fileno())
+    _RAW_STDOUT = os.fdopen(_FRAME_FD, "w", encoding="utf-8", errors="backslashreplace")
+    _CAPTURE_READ_FD, _capture_write_fd = os.pipe()
+    os.dup2(_capture_write_fd, sys.__stdout__.fileno())
+    os.close(_capture_write_fd)
+except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+    _RAW_STDOUT = sys.__stdout__
+    _CAPTURE_READ_FD = None
 _OUT_LOCK = threading.Lock()
 
 
@@ -78,11 +95,22 @@ def _emit(frame: dict) -> None:
 
 
 class _StreamProxy(io.TextIOBase):
-    """Emit each ``write()`` as a typed frame tied to the current request."""
+    """Emit ``write()`` data as typed frames tied to the current request.
+
+    Writes are coalesced per request: a frame is emitted once the buffer holds
+    a complete line (everything up to the last newline goes out together) or
+    grows past ``_MAX_BUFFER`` bytes, so the common ``print()`` pair of
+    ``write(text)`` + ``write("\\n")`` costs one frame instead of two. Partial
+    lines are bounded by ``flush()`` and the end-of-request flush.
+    """
+
+    _MAX_BUFFER = 8192
 
     def __init__(self, kind: str) -> None:
         super().__init__()
         self._kind = kind
+        self._lock = threading.Lock()
+        self._buffers: dict[str, str] = {}
 
     def writable(self) -> bool:  # noqa: D401 - protocol method
         return True
@@ -100,11 +128,43 @@ class _StreamProxy(io.TextIOBase):
             _RAW_STDERR.write(data)
             _RAW_STDERR.flush()
             return len(data)
-        _emit({"type": self._kind, "id": rid, "data": data})
+        emit_text = None
+        with self._lock:
+            buf = self._buffers.pop(rid, "") + data
+            if len(buf) >= self._MAX_BUFFER:
+                emit_text = buf
+            else:
+                nl = buf.rfind("\n")
+                if nl >= 0:
+                    emit_text = buf[: nl + 1]
+                    rest = buf[nl + 1 :]
+                    if rest:
+                        self._buffers[rid] = rest
+                else:
+                    self._buffers[rid] = buf
+        if emit_text:
+            _emit({"type": self._kind, "id": rid, "data": emit_text})
         return len(data)
 
     def flush(self) -> None:  # noqa: D401 - protocol method
+        rid = _CURRENT_RID.get()
+        if rid is not None:
+            self.flush_rid(rid)
         return None
+
+    def flush_rid(self, rid: str) -> None:
+        """Flush any buffered partial line for ``rid`` as its own frame."""
+        with self._lock:
+            buf = self._buffers.pop(rid, None)
+        if buf:
+            _emit({"type": self._kind, "id": rid, "data": buf})
+
+
+def _flush_stream_proxies(rid: str) -> None:
+    """Drain buffered proxy output for ``rid`` (called before its done frame)."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, _StreamProxy):
+            stream.flush_rid(rid)
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +185,56 @@ class _RunnerState:
         self.last_install_marker: int = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.active_executions: int = 0
+        # Best-effort attribution target for captured fd-1 bytes (child
+        # processes inheriting stdout). With overlapping requests the most
+        # recently started one wins — strictly better than dropping the bytes.
+        self.capture_rid: str | None = None
 
 
 _CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar("omp_current_rid", default=None)
+_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS: contextvars.ContextVar[set[int] | None] = contextvars.ContextVar(
+    "omp_displayed_matplotlib_figure_ids",
+    default=None,
+)
+
 
 _STATE = _RunnerState()
+
+
+def _drain_captured_stdout() -> None:
+    """Forward bytes written to the captured fd 1 as stdout frames.
+
+    Runs on a daemon thread for the life of the process. Child processes that
+    inherit fd 1 (any ``subprocess`` call without ``stdout=PIPE``) land here.
+    """
+    if _CAPTURE_READ_FD is None:
+        return
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        try:
+            chunk = os.read(_CAPTURE_READ_FD, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        text = decoder.decode(chunk)
+        if not text:
+            continue
+        rid = _STATE.capture_rid
+        if rid is None:
+            _RAW_STDERR.write(text)
+            _RAW_STDERR.flush()
+        else:
+            _emit({"type": "stdout", "id": rid, "data": text})
+
+
+def _start_capture_drain() -> None:
+    if _CAPTURE_READ_FD is None:
+        return
+    thread = threading.Thread(target=_drain_captured_stdout, name="omp-fd1-capture", daemon=True)
+    thread.start()
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +398,158 @@ def _emit_status(op: str, **data: Any) -> None:
         return
     _emit({"type": "display", "id": rid, "bundle": bundle})
 
+_SHELL_READ_CHUNK_BYTES = 8192
+_SHELL_OUTPUT_MAX_BYTES = 1024 * 1024
+_SHELL_OUTPUT_MAX_LINES = 3000
+_SHELL_RESULT_CAPTURE_BYTES = _SHELL_OUTPUT_MAX_BYTES
+_PIP_LINE_SCAN_CHARS = 64 * 1024
+_SHELL_TRUNCATION_NOTICE = (
+    f"[output truncated: shell helper exceeded {_SHELL_OUTPUT_MAX_BYTES} bytes "
+    f"or {_SHELL_OUTPUT_MAX_LINES} lines; remaining output discarded]\n"
+)
+
+
+def _process_output_encoding() -> str:
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
+def _process_output_decoder(encoding: str) -> codecs.IncrementalDecoder:
+    return codecs.getincrementaldecoder(encoding)(errors="strict")
+
+
+def _take_prefix_by_lines(text: str, max_lines: int) -> str:
+    if max_lines <= 0:
+        return ""
+    cursor = 0
+    for _ in range(max_lines):
+        newline = text.find("\n", cursor)
+        if newline < 0:
+            return text
+        cursor = newline + 1
+    return text[:cursor]
+
+
+def _take_prefix_by_encoded_bytes(text: str, max_bytes: int, encoding: str) -> str:
+    if max_bytes <= 0:
+        return ""
+    if len(text.encode(encoding, errors="strict")) <= max_bytes:
+        return text
+    lo = 0
+    hi = len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(text[:mid].encode(encoding, errors="strict")) <= max_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
+
+
+class _ShellOutputLimiter:
+    def __init__(self, *, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._truncated = False
+        self._at_line_start = True
+
+    def write(self, text: str) -> None:
+        if not text or self._truncated:
+            return
+        limited = _take_prefix_by_lines(text, self._remaining_lines)
+        truncated = limited != text
+        byte_limited = _take_prefix_by_encoded_bytes(limited, self._remaining_bytes, self._encoding)
+        truncated = truncated or byte_limited != limited
+        if byte_limited:
+            sys.stdout.write(byte_limited)
+            sys.stdout.flush()
+            self._remaining_bytes -= len(byte_limited.encode(self._encoding, errors="strict"))
+            self._remaining_lines -= byte_limited.count("\n")
+            self._at_line_start = byte_limited.endswith("\n")
+        if truncated:
+            self._emit_truncation_notice()
+
+    def _emit_truncation_notice(self) -> None:
+        if self._truncated:
+            return
+        prefix = "" if self._at_line_start else "\n"
+        sys.stdout.write(prefix + _SHELL_TRUNCATION_NOTICE)
+        sys.stdout.flush()
+        self._truncated = True
+
+
+def _stream_process_output(proc: subprocess.Popen, on_text: Callable[[str], None] | None = None) -> None:
+    assert proc.stdout is not None
+    encoding = _process_output_encoding()
+    decoder = _process_output_decoder(encoding)
+    limiter = _ShellOutputLimiter(
+        max_bytes=_SHELL_OUTPUT_MAX_BYTES,
+        max_lines=_SHELL_OUTPUT_MAX_LINES,
+        encoding=encoding,
+    )
+    while True:
+        chunk = os.read(proc.stdout.fileno(), _SHELL_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        text = decoder.decode(chunk)
+        if text:
+            limiter.write(text)
+            if on_text is not None:
+                on_text(text)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        limiter.write(tail)
+        if on_text is not None:
+            on_text(tail)
+
+
+class _BoundedTextCapture:
+    def __init__(self, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._parts: list[str] = []
+
+    def add(self, text: str) -> None:
+        if self._remaining_bytes <= 0 or self._remaining_lines <= 0:
+            return
+        line_limited = _take_prefix_by_lines(text, self._remaining_lines)
+        part = _take_prefix_by_encoded_bytes(line_limited, self._remaining_bytes, self._encoding)
+        if not part:
+            return
+        self._parts.append(part)
+        self._remaining_bytes -= len(part.encode(self._encoding, errors="strict"))
+        self._remaining_lines -= part.count("\n")
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+class _BoundedLineScanner:
+    def __init__(self, max_chars: int, on_line: Callable[[str], None]) -> None:
+        self._max_chars = max_chars
+        self._on_line = on_line
+        self._partial = ""
+
+    def add(self, text: str) -> None:
+        data = self._partial + text
+        lines = data.splitlines(keepends=True)
+        if not lines:
+            return
+        if lines[-1].endswith(("\n", "\r")):
+            self._partial = ""
+        else:
+            self._partial = lines.pop()
+        for line in lines:
+            self._on_line(line)
+        if len(self._partial) > self._max_chars:
+            self._partial = self._partial[-self._max_chars :]
+
+    def finish(self) -> None:
+        if self._partial:
+            self._on_line(self._partial)
+            self._partial = ""
+
 
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
@@ -302,19 +559,20 @@ def _magic_pip(args: str) -> None:
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
     installed_packages: list[str] = []
-    assert proc.stdout is not None
-    for raw_line in proc.stdout:
-        sys.stdout.write(raw_line)
+
+    def scan_pip_line(raw_line: str) -> None:
         m = re.search(r"Successfully installed\s+(.+)$", raw_line)
         if m:
             for token in m.group(1).split():
                 # Token is name-version; drop the version suffix.
                 pkg = token.rsplit("-", 1)[0]
                 installed_packages.append(pkg.replace("_", "-"))
+
+    scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
+    _stream_process_output(proc, scanner.add)
+    scanner.finish()
     proc.wait()
     if installed_packages:
         import importlib
@@ -454,12 +712,6 @@ def _magic_run(args: str) -> None:
 def _magic_cell_bash(args: str, body: str) -> int:
     return _run_shell_body(body, shell_arg="/bin/bash")
 
-
-@cell_magic("sh")
-def _magic_cell_sh(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg="/bin/sh")
-
-
 @cell_magic("capture")
 def _magic_cell_capture(args: str, body: str) -> str:
     """Capture stdout/stderr of body; bind to ``args`` (a name) if provided."""
@@ -502,12 +754,8 @@ def _run_shell_body(body: str, *, shell_arg: str) -> int:
         [shell_arg, "-c", body],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
-    assert proc.stdout is not None
-    for raw_line in proc.stdout:
-        sys.stdout.write(raw_line)
+    _stream_process_output(proc)
     proc.wait()
     return proc.returncode
 
@@ -543,16 +791,16 @@ class _ShellResult(list):
 
 
 def __omp_shell(cmd: str) -> _ShellResult:
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
     )
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    lines = [line for line in (proc.stdout or "").splitlines()]
+    capture = _BoundedTextCapture(_SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES, _process_output_encoding())
+    _stream_process_output(proc, capture.add)
+    proc.wait()
+    lines = [line for line in capture.text().splitlines()]
     return _ShellResult(lines, proc.returncode)
 
 
@@ -572,6 +820,36 @@ _REPR_MIMES = [
 ]
 
 
+def _is_matplotlib_figure(value: Any) -> bool:
+    figure_module = sys.modules.get("matplotlib.figure")
+    figure_cls = getattr(figure_module, "Figure", None)
+    if isinstance(figure_cls, type) and isinstance(value, figure_cls):
+        return True
+
+    value_type = type(value)
+    return value_type.__module__ == "matplotlib.figure" and value_type.__name__ == "Figure"
+
+
+def _matplotlib_figure_png(value: Any) -> str | None:
+    if not _is_matplotlib_figure(value):
+        return None
+
+    savefig = getattr(value, "savefig", None)
+    if not callable(savefig):
+        return None
+
+    try:
+        buf = io.BytesIO()
+        savefig(buf, format="png", bbox_inches="tight")
+    except Exception:
+        return None
+
+    displayed_ids = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get()
+    if displayed_ids is not None:
+        displayed_ids.add(id(value))
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def _coerce_image_bytes(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return base64.b64encode(bytes(value)).decode("ascii")
@@ -587,6 +865,10 @@ def _mime_bundle(value: Any) -> dict:
     accessors, and always provides ``text/plain``.
     """
     bundle: dict[str, Any] = {}
+    matplotlib_png = _matplotlib_figure_png(value)
+    if matplotlib_png is not None:
+        bundle["image/png"] = matplotlib_png
+
 
     mimebundle = getattr(value, "_repr_mimebundle_", None)
     if callable(mimebundle):
@@ -660,6 +942,9 @@ def _flush_matplotlib_figures() -> None:
     for num in fignums:
         try:
             fig = plt.figure(num)
+            if id(fig) in (_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get() or set()):
+                plt.close(fig)
+                continue
             buf = io.BytesIO()
             fig.savefig(buf, format="png", bbox_inches="tight")
             data = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -880,6 +1165,8 @@ def _start_parent_watchdog() -> None:
 async def _handle_request_async(req: dict) -> None:
     rid = str(req.get("id"))
     token = _CURRENT_RID.set(rid)
+    displayed_matplotlib_token = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.set(set())
+    _STATE.capture_rid = rid
     _STATE.user_ns["__omp_run_id__"] = rid
     _STATE.cancel_requested = False
     _STATE.execution_count += 1
@@ -934,6 +1221,7 @@ async def _handle_request_async(req: dict) -> None:
             except Exception:
                 pass
 
+        _flush_stream_proxies(rid)
         _emit({
             "type": "done",
             "id": rid,
@@ -942,7 +1230,11 @@ async def _handle_request_async(req: dict) -> None:
             "cancelled": cancelled,
         })
     finally:
+        if _STATE.capture_rid == rid:
+            _STATE.capture_rid = None
+        _flush_stream_proxies(rid)
         _CURRENT_RID.reset(token)
+        _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.reset(displayed_matplotlib_token)
 
 
 def _emit_error(rid: str, exc: BaseException) -> None:
@@ -986,6 +1278,7 @@ async def _main_async() -> None:
     sys.stderr = _StreamProxy("stderr")
     _install_idle_sigint()
     _start_parent_watchdog()
+    _start_capture_drain()
 
     stdin = sys.__stdin__
     if stdin is None:

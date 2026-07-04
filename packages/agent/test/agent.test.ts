@@ -80,6 +80,65 @@ describe("Agent", () => {
 		expect(mock.calls.length).toBe(2);
 	});
 
+	it("delivers a steer that lands at the yield boundary instead of stranding it", async () => {
+		// Regression: a steering message queued after the stop-boundary dequeue
+		// (e.g. while onBeforeYield runs) was silently stranded in the queue until
+		// the next manual prompt. The outer yield drain must re-poll steering.
+		const mock = createMockModel({ responses: [{ content: ["First answer"] }, { content: ["Steer answer"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+		let injected = false;
+		agent.setOnBeforeYield(() => {
+			if (injected) return;
+			injected = true;
+			agent.steer({
+				role: "user",
+				content: [{ type: "text", text: "Late steer" }],
+				steering: true,
+				timestamp: Date.now(),
+			});
+		});
+
+		await agent.prompt("Initial");
+
+		expect(mock.calls.length).toBe(2);
+		expect(agent.hasQueuedMessages()).toBe(false);
+		const steerDelivered = agent.state.messages.some(
+			message =>
+				message.role === "user" &&
+				Array.isArray(message.content) &&
+				message.content.some(part => part.type === "text" && part.text === "Late steer"),
+		);
+		expect(steerDelivered).toBe(true);
+		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
+	});
+
+	it("keeps Anthropic refusal errors out of the next provider context", async () => {
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ["I can't assist with that request."],
+					stopReason: "error",
+					stopDetails: { type: "refusal", category: "bio", explanation: "policy refusal" },
+					errorMessage: "Refusal (bio): policy refusal",
+				},
+				{ content: ["recovered"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+
+		await agent.prompt("trigger refusal");
+		await agent.prompt("next request");
+
+		expect(mock.calls).toHaveLength(2);
+		const replayedMessages = mock.calls[1].context.messages;
+		expect(replayedMessages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(JSON.stringify(replayedMessages)).not.toContain("Refusal (bio)");
+		expect(JSON.stringify(replayedMessages)).not.toContain("I can't assist");
+	});
+
 	it("prompt() emits assistant error lifecycle for Anthropic output-blocked stream errors before assistant start", async () => {
 		const mock = createMockModel({ responses: [] });
 		const errorText = "Output blocked by content filtering policy";
@@ -309,6 +368,38 @@ describe("Agent", () => {
 		]);
 	});
 
+	it("drops queued forced toolChoice when the queued tool is not active", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		type Details = { value: string };
+
+		const betaTool: AgentTool<typeof toolSchema, Details> = {
+			name: "beta",
+			label: "Beta",
+			description: "Beta tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `beta:${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				tools: [betaTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+			getToolChoice: () => ({ type: "function", name: "alpha" }),
+		});
+
+		await agent.prompt("refresh tools");
+
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0]?.context.tools?.map(tool => tool.name)).toEqual(["beta"]);
+		expect(mock.calls[0]?.options?.toolChoice).toBeUndefined();
+	});
+
 	it("re-reads thinking level for each model call within a run", async () => {
 		const toolSchema = z.object({ value: z.string() });
 		type Details = { value: string };
@@ -354,6 +445,69 @@ describe("Agent", () => {
 		expect(reasoningPerCall).toEqual([ThinkingLevel.Low, ThinkingLevel.High]);
 	});
 
+	it("forwards explicit reasoning disablement to the stream", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				messages: [],
+				disableReasoning: true,
+			},
+			streamFn: mock.stream,
+		});
+
+		await agent.prompt("run");
+
+		expect(mock.calls[0]?.options?.disableReasoning).toBe(true);
+	});
+
+	it("re-reads disableReasoning for each model call within a run", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		type Details = { value: string };
+		const alphaTool: AgentTool<typeof toolSchema, Details> = {
+			name: "alpha",
+			label: "Alpha",
+			description: "Alpha tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `alpha:${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "alpha", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				thinkingLevel: ThinkingLevel.High,
+				disableReasoning: false,
+				tools: [alphaTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		// Flip thinking off mid-run after the first assistant turn produces the
+		// tool call but before the continuation request is sent.
+		const unsubscribe = agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				agent.setThinkingLevel(undefined);
+				agent.setDisableReasoning(true);
+			}
+		});
+
+		await agent.prompt("run");
+		unsubscribe();
+
+		const disablePerCall = mock.calls.map(call => call.options?.disableReasoning);
+		expect(disablePerCall).toEqual([false, true]);
+	});
+
 	it("forwards distinct provider session id and prompt cache key to the stream", async () => {
 		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
 		const agent = new Agent({
@@ -367,6 +521,78 @@ describe("Agent", () => {
 
 		expect(mock.calls[0]?.options?.sessionId).toBe("provider-lineage");
 		expect(mock.calls[0]?.options?.promptCacheKey).toBe("parent-cache");
+	});
+
+	it("forwards the live cwd from cwdResolver to the stream, overriding the static cwd", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			cwd: "/static/repo-a",
+			cwdResolver: () => "/live/repo-b",
+		});
+
+		await agent.prompt("run");
+
+		// The resolver wins over the constructor-time `cwd`: provider workspace
+		// discovery (e.g. GitLab Duo namespace/project) must key off the live dir.
+		expect(mock.calls[0]?.options?.cwd).toBe("/live/repo-b");
+	});
+
+	it("falls back to the static cwd when cwdResolver returns undefined", async () => {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, messages: [] },
+			streamFn: mock.stream,
+			cwd: "/static/repo-a",
+			cwdResolver: () => undefined,
+		});
+
+		await agent.prompt("run");
+
+		expect(mock.calls[0]?.options?.cwd).toBe("/static/repo-a");
+	});
+
+	it("re-reads cwd from cwdResolver for each model call within a run (a /move mid-run is seen)", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		type Details = { value: string };
+		const alphaTool: AgentTool<typeof toolSchema, Details> = {
+			name: "alpha",
+			label: "Alpha",
+			description: "Alpha tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `alpha:${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "alpha", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+
+		// The host owns the live cwd; `cwdResolver` reads it on every config build.
+		let liveCwd = "/live/repo-a";
+		const agent = new Agent({
+			initialState: { model: mock.model, tools: [alphaTool], messages: [] },
+			streamFn: mock.stream,
+			cwdResolver: () => liveCwd,
+		});
+
+		// Simulate `/move` between the tool-call turn and the continuation request.
+		const unsubscribe = agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				liveCwd = "/live/repo-b";
+			}
+		});
+
+		await agent.prompt("run");
+		unsubscribe();
+
+		const cwdPerCall = mock.calls.map(call => call.options?.cwd);
+		expect(cwdPerCall).toEqual(["/live/repo-a", "/live/repo-b"]);
 	});
 
 	it("returns static metadata via the plain setter", () => {

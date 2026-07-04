@@ -1,7 +1,17 @@
+import type { CollabSessionState } from "../../../collab/protocol";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
+import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 
 export type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+
+/** Collab session indicator + (guest-only) host-state override for segments. */
+export interface CollabStatus {
+	role: "host" | "guest";
+	participantCount: number;
+	/** Guest only: host footer snapshot that overrides locally computed values. */
+	stateOverride?: CollabSessionState | null;
+}
 
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
@@ -18,6 +28,12 @@ export interface StatusLineSettings {
 	segmentOptions?: StatusLineSegmentOptions;
 	showHookStatus?: boolean;
 	sessionAccent?: boolean;
+	/** Drop the theme's `statusLineBg` fill and powerline caps so the bar
+	 *  inherits the terminal's default background. */
+	transparent?: boolean;
+	/** Replace the model-segment icon with the thinking-level glyph and drop the
+	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
+	compactThinkingLevel?: boolean;
 }
 
 export type EffectiveStatusLineSettings = Required<
@@ -33,8 +49,13 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: AgentSession;
+	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
+	focusedAgentId?: string | undefined;
+	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;
+	/** Render the model segment's thinking level as a compact leading glyph. */
+	compactThinkingLevel: boolean;
 	planMode: {
 		enabled: boolean;
 		paused: boolean;
@@ -46,6 +67,7 @@ export interface SegmentContext {
 		enabled: boolean;
 		paused: boolean;
 	} | null;
+	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {
 		input: number;
@@ -56,17 +78,34 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
-	contextPercent: number;
+	/** Context usage percent, or null when unknown (e.g. right after compaction). */
+	contextPercent: number | null;
+	contextTokens: number;
 	contextWindow: number;
 	autoCompactEnabled: boolean;
 	subagentCount: number;
-	sessionStartTime: number;
+	/**
+	 * Active processing time accumulated this session, in ms — the union of
+	 * every `agent_start`→`agent_end` window plus the currently-streaming
+	 * window if the agent is running. Idle wall-clock never contributes, so
+	 * this is what {@link StatusLineSegmentId.time_spent} renders instead of
+	 * `Date.now() - sessionStart`.
+	 */
+	activeMs: number;
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;
 		pr: { number: number; url: string } | null;
 	};
+	/**
+	 * Set when the path cwd is a *linked* git worktree, naming the shared
+	 * primary checkout (the project). Lets the path segment collapse the
+	 * base-prefixed `<base>/<project>/<worktree>` path to the project name —
+	 * the worktree/branch is already shown by the git segment.
+	 */
+	worktree: { projectName: string; worktreeName: string } | null;
 	usage: {
+		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null;

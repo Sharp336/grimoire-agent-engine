@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,12 +16,15 @@ import type { AgentDefinition, TaskParams } from "@oh-my-pi/pi-coding-agent/task
 import type { IsolationHandle, WorktreeBaseline } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 const TEST_TASK: TaskParams = {
 	agent: "task",
-	tasks: [{ id: "CheckLsp", description: "Check LSP availability", assignment: "Inspect LSP tools." }],
+	id: "CheckLsp",
+	description: "Check LSP availability",
+	assignment: "Inspect LSP tools.",
 };
 
 function createAssistantStopMessage(text: string): AssistantMessage {
@@ -91,6 +97,7 @@ function createSession(
 		isolationMode?: "none" | "auto";
 		parentEnableLsp?: boolean;
 		planMode?: PlanModeState;
+		sessionFile?: string | null;
 		taskEnableLsp?: boolean;
 	} = {},
 ): ToolSession {
@@ -110,7 +117,7 @@ function createSession(
 			"task.isolation.mode": options.isolationMode ?? "none",
 			...(options.taskEnableLsp !== undefined ? { "task.enableLsp": options.taskEnableLsp } : {}),
 		}),
-		getSessionFile: () => null,
+		getSessionFile: () => options.sessionFile ?? null,
 		getSessionSpawns: () => "*",
 		modelRegistry,
 		getPlanModeState: () => options.planMode,
@@ -236,6 +243,30 @@ describe("subagent LSP availability", () => {
 		expect(getOptions()?.enableLsp).toBe(false);
 	});
 
+	it("opens isolated persisted subagent sessions with the worktree cwd", async () => {
+		mockAgents({
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Use normal tools.",
+			source: "bundled",
+			tools: ["write"],
+		});
+		mockIsolation();
+		const { getOptions } = mockCreateAgentSession();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-session-cwd-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const tool = await TaskTool.create(createSession({ isolationMode: "auto", sessionFile: parentSessionFile }));
+			await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
+
+			const sessionManager = getOptions()?.sessionManager as { getCwd?: () => string } | undefined;
+			expect(getOptions()?.cwd).toBe("/tmp/isolated-subagent");
+			expect(sessionManager?.getCwd?.()).toBe("/tmp/isolated-subagent");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("applies plan-mode subagent tools, preserves read-only agent tools, and honors task.enableLsp", async () => {
 		mockAgents({
 			name: "task",
@@ -252,7 +283,7 @@ describe("subagent LSP availability", () => {
 
 		const toolNames = getOptions()?.toolNames;
 		expect(getOptions()?.enableLsp).toBe(true);
-		expect(toolNames).toEqual(["read", "search", "find", "lsp", "web_search", "ast_grep", "report_finding", "irc"]);
+		expect(toolNames).toEqual(["read", "grep", "glob", "lsp", "web_search", "ast_grep", "report_finding", "irc"]);
 		expect(toolNames).not.toContain("bash");
 		expect(toolNames).not.toContain("memory_edit");
 		expect(toolNames).not.toContain("retain");

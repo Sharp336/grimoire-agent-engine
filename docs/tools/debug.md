@@ -19,6 +19,8 @@
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
+  - `packages/coding-agent/src/debug/terminal-info.ts` — terminal state collection/formatting
+  - `packages/coding-agent/src/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
 
 ## Inputs
 
@@ -78,7 +80,7 @@
 - `custom_request`: `command`
 
 ### Interactive selector values
-`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `raw-sse`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
+`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `terminal`, `protocols`, `raw-sse`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
 
 ## Outputs
 The agent tool returns a standard `toolResult()` payload from `packages/coding-agent/src/tools/debug.ts`:
@@ -141,6 +143,8 @@ Side-channel artifacts outside the model tool result:
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
    - `system`: call `collectSystemInfo()` and render `formatSystemInfo()` into the chat pane
+   - `terminal`: `collectTerminalState()` + `formatTerminalState()` rendered into the chat pane
+   - `protocols`: fires a test desktop notification (unless suppressed), then mounts `ProtocolProbeComponent` with a sample image
    - `open-artifacts`: open the current session artifact directory if it exists
    - `transcript`: delegates to `ctx.handleDebugTranscriptCommand()`
    - `clear-cache`: show confirmation, then remove artifact directories older than 30 days with `clearArtifactCache()`
@@ -151,6 +155,44 @@ Side-channel artifacts outside the model tool result:
 - **Adapter selection**
   - `launch`: explicit `adapter` wins; otherwise `selectLaunchAdapter()` ranks available adapters by extension match, root-marker match, then native-debugger preference (`gdb`, `lldb-dap`) for extensionless binaries.
   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
+- **Custom adapter config**
+  - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
+  - Search order mirrors LSP config: project root, project config dirs (`.omp/`, `.pi/`, `.claude/`), user config dirs, plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
+  - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
+  - Adapter fields:
+    - `command`: executable name or path. Required.
+    - `args`: adapter argv.
+    - `languages`: display/filter metadata.
+    - `fileTypes`: file extensions or filenames used for launch auto-selection.
+    - `rootMarkers`: files/directories used to rank adapters for a project.
+    - `launchDefaults`: default DAP launch arguments merged before the selected program/cwd/args.
+    - `attachDefaults`: default DAP attach arguments merged before pid/port/host/cwd.
+    - `connectMode`: `"stdio"` (default) or `"socket"`.
+    - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
+
+Example `.omp/dap.json`:
+
+```json
+{
+  "adapters": {
+    "custom-jvm": {
+      "command": "kotlin-debug-adapter",
+      "args": ["--stdio"],
+      "languages": ["java", "kotlin"],
+      "fileTypes": [".java", ".kt", ".kts"],
+      "rootMarkers": ["pom.xml", "build.gradle", "build.gradle.kts"],
+      "launchDefaults": {
+        "request": "launch",
+        "projectRoot": "."
+      },
+      "attachDefaults": {
+        "request": "attach",
+        "host": "127.0.0.1"
+      }
+    }
+  }
+}
+```
 - **Transport**
   - stdio adapters: direct `stdin`/`stdout` framing.
   - socket adapters: Unix domain socket on Linux; TCP callback on macOS/other.
@@ -186,6 +228,8 @@ Side-channel artifacts outside the model tool result:
   - `dump` — report bundle without profiler artifacts.
   - `work` — standalone work-profile flamegraph export/open.
   - `system` — formatted OS/arch/CPU/memory/version/cwd/shell/terminal dump.
+  - `terminal` — formatted terminal subprotocol/geometry/scrollback state dump.
+  - `protocols` — terminal protocol test: desktop-notification side effect plus a probe panel sampling special protocols.
   - `open-artifacts` / `transcript` / `clear-cache` — artifact directory open, transcript export, artifact-cache pruning.
 
 ## Side Effects
@@ -195,7 +239,7 @@ Side-channel artifacts outside the model tool result:
   - Work-profile export writes `/tmp/work-profile-<timestamp>.svg`.
   - Log source reads daily log files from the logs dir.
   - Artifact-cache cleanup removes session artifact directories older than the cutoff.
-  - `resolveRawSseDebugBuffer()` may attach a non-enumerable `rawSseDebugBuffer` property to the owner object.
+  - `resolveRawSseDebugBuffer()` reuses an explicit `rawSseDebugBuffer` property on the owner when present, otherwise caches a buffer under a private `Symbol("debug.rawSseBuffer")` key (silently skipped when the owner is non-extensible).
 - Network
   - Socket-mode adapters bind/connect local sockets.
   - Remote attach may connect through the adapter to a remote debug port.
@@ -203,7 +247,7 @@ Side-channel artifacts outside the model tool result:
   - Spawns debugger adapters (`gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv`, and others from `defaults.json`) detached.
   - Reverse DAP `runInTerminal` requests spawn the debuggee detached via `ptree.spawn()`.
   - `getWorkProfile(30)` comes from `@oh-my-pi/pi-natives`.
-  - CPU profiling uses `node:inspector/promises`; heap snapshots use `Bun.generateHeapSnapshot("v8")`; raw/log viewers sanitize text via `@oh-my-pi/pi-natives`.
+  - CPU profiling uses `node:inspector/promises`; heap snapshots use `Bun.generateHeapSnapshot("v8")`; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
   - `openPath()` launches the OS default file/browser handler for artifact dirs and SVGs.
   - Log/raw-SSE viewers can call `copyToClipboard()`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
@@ -226,7 +270,7 @@ Side-channel artifacts outside the model tool result:
 - Single active session: enforced by `#ensureLaunchSlot()` in `packages/coding-agent/src/dap/session.ts`.
 - Idle session cleanup: `IDLE_TIMEOUT_MS = 10 * 60 * 1000`, checked every `CLEANUP_INTERVAL_MS = 30 * 1000`.
 - Adapter liveness heartbeat: `HEARTBEAT_INTERVAL_MS = 5 * 1000`.
-- Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; older text is trimmed in ~1 KiB slices and `outputTruncated` is recorded.
+- Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; whole chunks are dropped from the front (then the front chunk is byte-sliced so exactly the cap remains) and `outputTruncated` is recorded.
 - Initial stop capture timeout after launch/attach: `STOP_CAPTURE_TIMEOUT_MS = 5_000`.
 - Socket-mode adapter readiness timeout: `10_000` ms in `waitForCondition()` and TCP connect timeout logic in `packages/coding-agent/src/dap/client.ts`.
 - Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
@@ -257,7 +301,7 @@ Side-channel artifacts outside the model tool result:
   - `data is required for write_memory`
   - `command is required for custom_request`
 - Adapter selection failure throws `No debugger adapter available. Installed adapters: ...`.
-- Capability-gated actions throw from `requireCapability(...)`, e.g. `Active adapter does not support memory reads.`
+- Capability-gated actions throw from `requireCapability(...)`, e.g. `Current adapter does not support memory reads`.
 - No-session and state errors come from `DapSessionManager`, e.g. `No active debug session. Launch or attach first.`, `No active stack frame. Run stack_trace first or supply frame_id.`, `Debugger reported no threads.`
 - Launching a second live session throws `Debug session <id> is still active. Terminate it before launching another.`
 - DAP transport/request failures surface as thrown errors from `DapClient`:

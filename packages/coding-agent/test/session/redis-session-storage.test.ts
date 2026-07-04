@@ -6,7 +6,7 @@
  * a general-purpose mock. Each test exercises one contract:
  *
  * - the metadata index keeps `existsSync`/`statSync`/`listFilesSync`
- *   coherent with `writeText`/`writer.writeLineSync`;
+ *   coherent with `writeText`/`writer.append`;
  * - `drain()` waits for fire-and-forget background writes;
  * - `deleteSessionWithArtifacts` removes both the JSONL key and any sidecar
  *   keys under the artifacts prefix;
@@ -19,6 +19,7 @@ import {
 	RedisSessionStorage,
 	type RedisSessionStorageClient,
 } from "@oh-my-pi/pi-coding-agent/session/redis-session-storage";
+import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 interface FakeRedisCall {
 	method: string;
@@ -194,6 +195,45 @@ describe("RedisSessionStorage", () => {
 		expect(redis.calls.some(call => call.method === "strlen")).toBe(true);
 	});
 
+	it("persists title updates as indexed fields across storage reloads", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const sessionPath = "/sessions/p/titled.jsonl";
+		const header = `${JSON.stringify({ type: "session", id: "s", timestamp: "t1", cwd: "/repo" })}\n`;
+		await storage.writeText(
+			sessionPath,
+			`${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t1" })}${header}`,
+		);
+
+		await storage.updateSessionTitle(sessionPath, { title: "New", source: "user", updatedAt: "t2" });
+
+		expect(JSON.parse((await storage.readText(sessionPath)).split("\n")[0])).toMatchObject({
+			type: "title",
+			title: "New",
+			source: "user",
+			updatedAt: "t2",
+		});
+		expect(JSON.parse((await storage.readTextSlices(sessionPath, 256, 0))[0].split("\n")[0])).toMatchObject({
+			type: "title",
+			title: "New",
+			source: "user",
+			updatedAt: "t2",
+		});
+
+		const reloaded = await RedisSessionStorage.create({ client: redis });
+		expect(JSON.parse((await reloaded.readText(sessionPath)).split("\n")[0])).toMatchObject({
+			type: "title",
+			title: "New",
+			source: "user",
+			updatedAt: "t2",
+		});
+		expect(JSON.parse((await reloaded.readTextSlices(sessionPath, 256, 0))[0].split("\n")[0])).toMatchObject({
+			type: "title",
+			title: "New",
+			source: "user",
+			updatedAt: "t2",
+		});
+	});
+
 	it("listFilesSync returns only direct children matching the glob", async () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		await storage.writeText("/dir/a.jsonl", "x");
@@ -221,11 +261,11 @@ describe("RedisSessionStorage", () => {
 		expect(c).toBeGreaterThan(b);
 	});
 
-	it("writer.writeLineSync appends to Redis after drain", async () => {
+	it("writer.append appends to Redis after drain", async () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const writer = storage.openWriter("/sessions/p/session.jsonl");
-		writer.writeLineSync('{"type":"session"}\n');
-		writer.writeLineSync('{"type":"message"}\n');
+		await writer.append('{"type":"session"}\n');
+		await writer.append('{"type":"message"}\n');
 
 		// Reads await queued appends and fetch content from Redis.
 		expect(await storage.readText("/sessions/p/session.jsonl")).toBe('{"type":"session"}\n{"type":"message"}\n');
@@ -244,7 +284,7 @@ describe("RedisSessionStorage", () => {
 		await storage.writeText("/sessions/p/keep.jsonl", "old content\n");
 
 		const writer = storage.openWriter("/sessions/p/keep.jsonl", { flags: "w" });
-		writer.writeLineSync("fresh\n");
+		await writer.append("fresh\n");
 		await writer.close();
 
 		expect(await storage.readText("/sessions/p/keep.jsonl")).toBe("fresh\n");
@@ -255,7 +295,7 @@ describe("RedisSessionStorage", () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const writer = storage.openWriter("/sessions/p/fail.jsonl");
 		redis.failNext("append", new Error("redis exploded"));
-		writer.writeLineSync("doomed\n");
+		void writer.append("doomed\n").catch(() => {});
 
 		await expect(storage.drain()).rejects.toThrow("redis exploded");
 		expect(writer.getError()?.message).toBe("redis exploded");

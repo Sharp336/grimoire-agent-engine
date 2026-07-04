@@ -116,7 +116,41 @@ export declare class Shell {
    * Returns `Ok(())` even when no commands are running.
    */
   abort(): Promise<void>
+  /**
+   * Count live background jobs (`&`/`nohup` children still running) on this
+   * session. Completed jobs are reaped first. The host uses this to retain a
+   * per-call shell whose background processes are still running instead of
+   * dropping it (which would SIGKILL them via kill-on-drop).
+   */
+  liveBackgroundJobCount(): Promise<number>
 }
+
+/**
+ * Install the bounded Tokio runtime napi-rs adopts for async exports and the
+ * bounded Rayon global pool used by native parallel iterators.
+ *
+ * The JS loader calls this exactly once, synchronously, right *after* `dlopen`
+ * returns and *before* any async native or parallel iterator runs — never from
+ * `#[module_init]`. Building a multi-thread runtime eagerly spawns worker
+ * threads, and doing that during module init (while the dynamic-loader lock is
+ * held) deadlocks on some hosts: a fresh worker blocks acquiring the loader
+ * lock that the init thread still owns. napi-rs only materializes its runtime
+ * on the first async call (`RT` is a `LazyLock`) and
+ * `create_custom_tokio_runtime` merely records the runtime in a `OnceLock`, so
+ * installing it post-load is still honored.
+ *
+ * Without the Tokio override napi builds its own default (one worker per CPU,
+ * spawned eagerly), which aborts the process (`os error 1455`) on a
+ * memory-constrained Windows host before any JS error can surface;
+ * [`create_windows_napi_tokio_runtime`] pre-flights the spawn instead. Rayon
+ * has the same one-thread-per-core lazy default, so [`configure_rayon_pool`]
+ * installs a probed global pool before `count_tokens` or vendored `sort` can
+ * trigger it across a N-API nounwind boundary. If no worker thread is
+ * spawnable, patched Rayon callsites stay sequential rather than registering a
+ * current-thread-only global pool that cannot steal work from later native
+ * calls. Idempotent.
+ */
+export declare function __ompInstallTokioRuntime(): void
 
 /**
  * Version sentinel — exists solely so the JS loader can prove at load time
@@ -136,7 +170,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV15_10_8(): void
+export declare function __piNativesV16_3_6(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -452,9 +486,9 @@ export declare function copyToClipboard(text: string): void
  * Count tokens in `input`.
  *
  * `input` may be a single string or an array of strings; an array returns
- * the sum across all elements (encoded in parallel via rayon). Always
- * returns a single token total — use this for any aggregate budget question
- * without paying a per-element napi crossing.
+ * the sum across all elements (encoded in parallel via rayon when the global
+ * pool is available). Always returns a single token total — use this for any
+ * aggregate budget question without paying a per-element napi crossing.
  *
  * Uses ordinary encoding (no special-token handling), which is the right
  * choice for measuring user/model content rather than wire-protocol tokens.
@@ -584,7 +618,7 @@ export interface FuzzyFindOptions {
   hidden?: boolean
   /** Respect .gitignore (default: true). */
   gitignore?: boolean
-  /** Enable shared filesystem scan cache (default: false). */
+  /** Enable walker scan caching (default: false). */
   cache?: boolean
   /** Maximum number of matches to return (default: 100). */
   maxResults?: number
@@ -619,9 +653,9 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
  * Resolves the search root, scans entries, applies glob and optional file-type
  * filters, and optionally streams each accepted match through `on_match`.
  *
- * If `sortByMtime` is enabled with a finite `maxResults`, uncached scans keep
- * only the current top results while traversing instead of collecting the full
- * tree.
+ * When `sortByMtime` is enabled, the walker ranks matches by mtime before the
+ * native layer applies final symlink-aware file-type filtering and callback
+ * emission.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -636,10 +670,7 @@ export interface GlobMatch {
   path: string
   /** Resolved filesystem type for the match. */
   fileType: FileType
-  /**
-   * Modification time in milliseconds since Unix epoch (from
-   * `symlink_metadata`).
-   */
+  /** Modification time in milliseconds since Unix epoch. */
   mtime?: number
   /** File size in bytes for regular files. */
   size?: number
@@ -664,7 +695,7 @@ export interface GlobOptions {
   maxResults?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable shared filesystem scan cache (default: false). */
+  /** Enable walker scan caching (default: false). */
   cache?: boolean
   /** Sort results by mtime (most recent first) before applying limit. */
   sortByMtime?: boolean
@@ -735,8 +766,6 @@ export interface GrepOptions {
   hidden?: boolean
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable shared filesystem scan cache (default: false). */
-  cache?: boolean
   /** Maximum number of matches to return. */
   maxCount?: number
   /** Skip first N matches. */
@@ -751,6 +780,12 @@ export interface GrepOptions {
   maxColumns?: number
   /** Output mode (content, filesWithMatches, or count). */
   mode?: GrepOutputMode
+  /**
+   * Maximum matches collected per file (content mode). Keeps one hot file
+   * from exhausting the global `max_count` budget before other files are
+   * reached.
+   */
+  maxCountPerFile?: number
   /** Abort signal for cancelling the operation. */
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
@@ -782,6 +817,8 @@ export interface GrepResult {
   filesSearched: number
   /** Whether the limit/offset stopped the search early. */
   limitReached?: boolean
+  /** Number of files skipped because they exceed the size limit. */
+  skippedOversized?: number
 }
 
 /**
@@ -858,13 +895,13 @@ export interface HtmlToMarkdownOptions {
 }
 
 /**
- * Invalidate the filesystem scan cache.
+ * Invalidate the walker scan cache.
  *
  * When called with a path, removes entries for roots containing that path.
  * When called without a path, clears the entire cache.
  *
- * Intended to be called after agent file mutations (write, edit, rename,
- * delete).
+ * Intended to be called after agent file mutations: write, edit, rename, or
+ * delete.
  */
 export declare function invalidateFsScanCache(path?: string | undefined | null): void
 
@@ -1131,6 +1168,18 @@ export interface MinimizerOptions {
    * the raw, un-minimized output. Default 4 MiB.
    */
   maxCaptureBytes?: number
+  /**
+   * Source-outline level for `cat <source-file>` minimization. Accepts
+   * `"default"` (current behavior) or `"aggressive"` (strip function bodies).
+   */
+  sourceOutlineLevel?: string
+  /**
+   * Kill-switch to fall back to the pre-PR (legacy) filter behavior for
+   * grep / find / pytest. When `Some(true)`, filters that opted into the
+   * always-shrink Tier 1 / Tier 2 behavior skip the new code path. When
+   * `None`, defers to the `OMP_MINIMIZER_LEGACY_FILTERS` env var.
+   */
+  legacyFilters?: boolean
 }
 
 /**
@@ -1265,6 +1314,28 @@ export interface PtyStartOptions {
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
 /**
+ * Render one snapcompact frame on a libuv worker: print pre-normalized text
+ * onto a `size`-wide bitmap and encode it as PNG.
+ *
+ * The bitmap height hugs the rows the text actually occupies
+ * (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
+ * pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
+ * floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+ * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
+ * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
+ * directly from grayscale coverage.
+ * `stretch: false` pins bitmap fonts to the indexed path, printing
+ * natural-size glyphs on the requested cell box; `columns: 2` flows
+ * pre-wrapped newline-separated lines down two newspaper columns.
+ * `U+000E`/`U+000F` in `text` toggle dim-gray ink spans without occupying a
+ * cell.
+ * Returns a promise for the PNG encoded as base64, created as a one-byte
+ * (Latin-1) JS string straight from native code — no `Uint8Array` hop or
+ * JS-side re-encode.
+ */
+export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/**
  * Search content for a pattern (one-shot, compiles pattern each time).
  * For repeated searches with the same pattern, use [`grep`] with file filters.
  *
@@ -1312,6 +1383,8 @@ export interface SearchResult {
   /** Error message, if any. */
   error?: string
 }
+
+export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /** Options for executing a shell command via brush-core. */
 export interface ShellExecuteOptions {
@@ -1372,6 +1445,8 @@ export interface ShellRunResult {
    * minimized text shown to the agent. `None` when nothing was rewritten.
    */
   minimized?: MinimizerResult
+  /** Shell working directory after command completion. */
+  workingDir?: string
 }
 
 /**
@@ -1392,6 +1467,60 @@ export interface SliceResult {
  * width.
  */
 export declare function sliceWithWidth(line: string, startCol: number, length: number, strict: boolean | undefined | null, tabWidth: number): SliceResult
+
+/** Shape options for one snapcompact frame. */
+export interface SnapcompactRenderOptions {
+  /**
+   * Frame width in pixels; also bounds the grid rows
+   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
+   * text actually uses instead of padding to a square.
+   */
+  size: number
+  /**
+   * Bundled font: `"5x8"`, `"6x12"`, `"8x13"` (X.org BDF), `"8x8"`
+   * (unscii-8), or `"silver"` (embedded TrueType). Default `"5x8"`.
+   */
+  font?: string
+  /**
+   * Target cell advance in pixels. Differing from the font's natural cell
+   * triggers the Lanczos stretch path. Default: font natural width.
+   */
+  cellWidth?: number
+  /** Target cell pitch in pixels. Default: font natural height. */
+  cellHeight?: number
+  /**
+   * Ink variant: `"sent"` (six-hue sentence cycling) or `"bw"` (black).
+   * Default `"sent"`.
+   */
+  variant?: string
+  /**
+   * Print each text line this many times; copies after the first sit on a
+   * pale highlight band. Default 1.
+   */
+  lineRepeat?: number
+  /**
+   * Stretch behavior. Unset: auto — Lanczos-stretch whenever the target
+   * cell differs from the font's natural cell. `false`: never stretch —
+   * render indexed with glyphs at natural size on the requested cell box
+   * (e.g. 8x13 glyphs on an 8x16 pitch, the "8on16" shapes). `true`: force
+   * the stretch path (identical to auto; natural cells render indexed).
+   */
+  stretch?: boolean
+  /**
+   * Layout columns: `1` (default) row-major grid; `2` two newspaper "doc"
+   * columns of pre-wrapped newline-separated lines.
+   */
+  columns?: number
+}
+
+/**
+ * Return the subset of `chars` that the named snapcompact font can render.
+ *
+ * The TypeScript normalizer uses this to keep Unicode text intact only when
+ * the selected native font has a glyph for it; renderer control codes are
+ * considered renderable because they are interpreted outside font lookup.
+ */
+export declare function snapcompactSupportedChars(font: string, chars: string): string
 
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
 

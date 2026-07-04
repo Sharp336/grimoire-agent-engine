@@ -22,7 +22,16 @@
     },
     "disabledServers": {
       "type": "array",
-      "description": "User-level denylist for disabling discovered servers by name.",
+      "description": "User-level denylist for disabling discovered servers by name. Highest precedence: a server here is hidden regardless of any other source.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "enabledServers": {
+      "type": "array",
+      "description": "User-level allowlist that overrides a discovered server's `enabled: false` flag (e.g. when the source config is owned by another tool such as opencode.json). The denylist still wins.",
       "items": {
         "type": "string",
         "minLength": 1
@@ -62,6 +71,10 @@
         "clientSecret": {
           "type": "string",
           "description": "OAuth client secret persisted for refresh."
+        },
+        "resource": {
+          "type": "string",
+          "description": "MCP resource URI persisted for OAuth resource indicators."
         }
       }
     },
@@ -85,6 +98,10 @@
         },
         "callbackPath": {
           "type": "string"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "OAuth `prompt` parameter sent during authorization (default: omit unless the requested scope contains `offline_access`, which sends \"consent\"; set to \"\" to always omit)."
         }
       },
       "description": "Explicit OAuth client settings for servers that need them during /mcp reauth or initial connect."

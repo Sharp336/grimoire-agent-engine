@@ -1,15 +1,21 @@
+import type { KnownProvider } from "@oh-my-pi/pi-catalog";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
+import { azureProvider } from "./azure";
+import { basetenProvider } from "./baseten";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
+import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
+import { devinProvider } from "./devin";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
 import { gitlabDuoProvider } from "./gitlab-duo";
+import { gitLabDuoWorkflowProvider } from "./gitlab-duo-workflow";
 import { googleProvider } from "./google";
 import { googleAntigravityProvider } from "./google-antigravity";
 import { googleGeminiCliProvider } from "./google-gemini-cli";
@@ -20,6 +26,7 @@ import { kagiProvider } from "./kagi";
 import { kiloProvider } from "./kilo";
 import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
+import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
@@ -40,14 +47,15 @@ import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
 import { qwenPortalProvider } from "./qwen-portal";
+import { sakanaProvider } from "./sakana";
 import { syntheticProvider } from "./synthetic";
 import { tavilyProvider } from "./tavily";
 import { togetherProvider } from "./together";
 import type { ProviderDefinition } from "./types";
+import { umansProvider } from "./umans";
 import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
-import { waferPassProvider } from "./wafer-pass";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
 import { xaiOauthProvider } from "./xai-oauth";
@@ -67,6 +75,7 @@ import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
  * list for the loginable providers; non-login model providers are appended.
  */
 const ALL = [
+	azureProvider,
 	openaiCodexProvider,
 	anthropicProvider,
 	zaiProvider,
@@ -74,15 +83,19 @@ const ALL = [
 	openrouterProvider,
 	githubCopilotProvider,
 	cursorProvider,
+	devinProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,
 	xaiOauthProvider,
 	gitlabDuoProvider,
+	gitLabDuoWorkflowProvider,
 	alibabaCodingPlanProvider,
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
+	umansProvider,
 	qwenPortalProvider,
+	sakanaProvider,
 	minimaxCodeProvider,
 	minimaxCodeCnProvider,
 	xiaomiProvider,
@@ -90,10 +103,10 @@ const ALL = [
 	xiaomiTokenPlanAmsProvider,
 	xiaomiTokenPlanCnProvider,
 	firepassProvider,
-	waferPassProvider,
 	deepseekProvider,
 	moonshotProvider,
 	cerebrasProvider,
+	basetenProvider,
 	fireworksProvider,
 	togetherProvider,
 	nvidiaProvider,
@@ -104,6 +117,7 @@ const ALL = [
 	syntheticProvider,
 	nanogptProvider,
 	waferServerlessProvider,
+	coreWeaveProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
 	litellmProvider,
@@ -117,6 +131,7 @@ const ALL = [
 	ollamaProvider,
 	ollamaCloudProvider,
 	lmStudioProvider,
+	llamaCppProvider,
 	vllmProvider,
 	openaiProvider,
 	googleProvider,
@@ -137,7 +152,12 @@ export function getProviderDefinition(id: string): ProviderDefinition | undefine
 	return BY_ID.get(id);
 }
 
-/** Chat-model providers (those carrying a `defaultModel`). */
-export type KnownProviderId = Extract<RegistryDef, { defaultModel: string }>["id"];
+/** Compile-time completeness: every catalog chat-model provider must have a registry definition. */
+type _MissingCatalogProviders = Exclude<KnownProvider, RegistryDef["id"]>;
+type _CheckRegistryComplete = _MissingCatalogProviders extends never
+	? true
+	: ["registry is missing catalog providers", _MissingCatalogProviders];
+true satisfies _CheckRegistryComplete;
+
 /** Loginable providers (those carrying a `login` flow). */
 export type OAuthProviderUnion = Extract<RegistryDef, { login: object }>["id"];

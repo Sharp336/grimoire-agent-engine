@@ -1,4 +1,4 @@
-import { getGitHubCopilotBaseUrl, parseGitHubCopilotApiKey } from "../registry/oauth/github-copilot";
+import { getGitHubCopilotBaseUrl, parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { Message } from "../types";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
@@ -16,7 +16,8 @@ export function resolveGitHubCopilotBaseUrl(
 	apiKey: string | undefined,
 ): string | undefined {
 	if (!apiKey) return baseUrl;
-	const { enterpriseUrl } = parseGitHubCopilotApiKey(apiKey);
+	const { enterpriseUrl, apiEndpoint } = parseGitHubCopilotApiKey(apiKey);
+	if (apiEndpoint && (!baseUrl || baseUrl.includes("githubcopilot.com"))) return apiEndpoint;
 	if (!enterpriseUrl) return baseUrl;
 	if (baseUrl && !baseUrl.includes("githubcopilot.com")) return baseUrl;
 	return getGitHubCopilotBaseUrl(enterpriseUrl);

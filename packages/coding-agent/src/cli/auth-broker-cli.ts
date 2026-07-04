@@ -19,21 +19,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import {
-	AuthBrokerClient,
 	type AuthCredential,
 	AuthStorage,
 	type CredentialDisabledEvent,
-	DEFAULT_AUTH_BROKER_BIND,
 	getEnvApiKey,
 	getOAuthProviders,
 	listProvidersWithEnvKey,
 	type OAuthCredential,
 	type OAuthProvider,
 	type OAuthProviderInfo,
+	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
-	startAuthBroker,
 } from "@oh-my-pi/pi-ai";
+import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
@@ -213,9 +212,29 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	const storage = new AuthStorage(store);
 	await storage.reload();
 	try {
+		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
+		// Agent's vscode:// URI) get the manual paste fallback. An explicit
+		// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
+		// so for loopback providers we must not pass it: it would make
+		// `OAuthCallbackFlow` race a readline prompt against the HTTP callback and, if
+		// the callback wins, leave that prompt outstanding (dirty/blocked terminal).
+		// `AuthStorage.login` independently refuses to synthesize the default prompt
+		// for non-paste-code providers, so this is defense-in-depth on the same gate.
+		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
 		await storage.login(provider, {
-			onAuth({ url, instructions }) {
-				process.stdout.write(`\nOpen this URL in your browser:\n${url}\n`);
+			onAuth({ url, launchUrl, instructions }) {
+				process.stdout.write("\nOpen this URL in your browser:\n");
+				// Full URL first so the CLI works from any machine, including SSH
+				// sessions where a `launchUrl` (loopback `/launch` on the OMP
+				// host) would resolve against the caller's browser and fail.
+				// Headless capture is unaffected: it reads the first URL line.
+				process.stdout.write(`${url}\n`);
+				if (launchUrl && launchUrl !== url) {
+					// Local shortcut for the machine running OMP. Terminals or
+					// screen-scrapers narrower than the full URL still get an
+					// unbroken copy target here.
+					process.stdout.write(`Local shortcut (this machine only): ${launchUrl}\n`);
+				}
 				if (instructions) process.stdout.write(`${instructions}\n`);
 				process.stdout.write("\n");
 			},
@@ -225,6 +244,13 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 			onPrompt(p) {
 				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
 			},
+			...(usesManualInput
+				? {
+						onManualCodeInput() {
+							return ask("Paste the authorization code (or full redirect URL):");
+						},
+					}
+				: undefined),
 		});
 		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
 	} finally {

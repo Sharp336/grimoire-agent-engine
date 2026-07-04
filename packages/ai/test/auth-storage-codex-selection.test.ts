@@ -6,6 +6,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -168,7 +169,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -265,6 +266,59 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.getApiKey("openai-codex", "session-exhausted");
 		expect(apiKey).toBe("api-acct-healthy");
+	});
+
+	test("temporarily blocks only the exhausted Codex OAuth credential after a quota 429", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-A", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-B", "b@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-A",
+			createCodexUsageReport({
+				accountId: "acct-A",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-B",
+			createCodexUsageReport({
+				accountId: "acct-B",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const sessionId = "session-codex-quota-429";
+		const firstKey = await authStorage.getApiKey("openai-codex", sessionId);
+		if (!firstKey) throw new Error("expected initial Codex credential");
+		const exhaustedAccount = firstKey.replace(/^api-/, "");
+		const healthyAccount = exhaustedAccount === "acct-A" ? "acct-B" : "acct-A";
+		usageByAccount.set(
+			exhaustedAccount,
+			createCodexUsageReport({
+				accountId: exhaustedAccount,
+				primary: { usedFraction: 1, resetInMs: 5 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 5 * 60 * 1000 },
+			}),
+		);
+
+		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+		const switched = await authStorage.rotateSessionCredential("openai-codex", sessionId, {
+			error: Object.assign(new Error("insufficient_quota"), { status: 429 }),
+		});
+
+		expect(switched).toBe(true);
+		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe(`api-${healthyAccount}`);
+		const activeAccounts = (await authStorage.checkCredentials())
+			.map(result => result.accountId)
+			.filter((accountId): accountId is string => accountId !== undefined)
+			.sort();
+		expect(activeAccounts).toEqual(["acct-A", "acct-B"]);
 	});
 
 	test("falls back to earliest-unblocking account when all exhausted", async () => {
@@ -552,17 +606,18 @@ function createClaudeLimit(args: {
 	durationMs: number;
 	usedFraction: number;
 	resetInMs: number;
+	tier?: "fable";
 }): UsageLimit {
 	const clamped = Math.min(Math.max(args.usedFraction, 0), 1);
 	const used = clamped * 100;
-	const label = args.key === "5h" ? "Claude 5 Hour" : "Claude 7 Day";
+	const label = args.key === "5h" ? "Claude 5 Hour" : args.tier === "fable" ? "Claude 7 Day (Fable)" : "Claude 7 Day";
 	return {
-		id: `anthropic:${args.key}`,
+		id: args.tier ? `anthropic:${args.key}:${args.tier}` : `anthropic:${args.key}`,
 		label,
 		scope: {
 			provider: "anthropic",
 			windowId: args.key,
-			shared: true,
+			...(args.tier ? { tier: args.tier } : { shared: true }),
 		},
 		window: {
 			id: args.key,
@@ -586,24 +641,37 @@ function createClaudeUsageReport(args: {
 	accountId: string;
 	primary: { usedFraction: number; resetInMs: number };
 	secondary: { usedFraction: number; resetInMs: number };
+	fableSecondary?: { usedFraction: number; resetInMs: number };
 }): UsageReport {
-	return {
-		provider: "anthropic",
-		fetchedAt: Date.now(),
-		limits: [
-			createClaudeLimit({
-				key: "5h",
-				durationMs: FIVE_HOUR_MS,
-				usedFraction: args.primary.usedFraction,
-				resetInMs: args.primary.resetInMs,
-			}),
+	const limits = [
+		createClaudeLimit({
+			key: "5h",
+			durationMs: FIVE_HOUR_MS,
+			usedFraction: args.primary.usedFraction,
+			resetInMs: args.primary.resetInMs,
+		}),
+		createClaudeLimit({
+			key: "7d",
+			durationMs: WEEK_MS,
+			usedFraction: args.secondary.usedFraction,
+			resetInMs: args.secondary.resetInMs,
+		}),
+	];
+	if (args.fableSecondary) {
+		limits.push(
 			createClaudeLimit({
 				key: "7d",
 				durationMs: WEEK_MS,
-				usedFraction: args.secondary.usedFraction,
-				resetInMs: args.secondary.resetInMs,
+				usedFraction: args.fableSecondary.usedFraction,
+				resetInMs: args.fableSecondary.resetInMs,
+				tier: "fable",
 			}),
-		],
+		);
+	}
+	return {
+		provider: "anthropic",
+		fetchedAt: Date.now(),
+		limits,
 		metadata: { accountId: args.accountId },
 	};
 }
@@ -646,7 +714,7 @@ describe("AuthStorage claude oauth ranking", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -834,6 +902,37 @@ describe("AuthStorage claude oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "anthropic", "weighted-claude-three");
 		expect(countFor(counts, "api-acct-slow")).toBeGreaterThan(countFor(counts, "api-acct-medium"));
 		expect(countFor(counts, "api-acct-slow")).toBeGreaterThan(countFor(counts, "api-acct-fast"));
+	});
+
+	test("selects the account with lower Fable weekly usage for Claude Fable requests", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-a",
+			createClaudeUsageReport({
+				accountId: "acct-a",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 6 * 24 * HOUR_MS },
+				fableSecondary: { usedFraction: 0.85, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-b",
+			createClaudeUsageReport({
+				accountId: "acct-b",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.7, resetInMs: 6 * 24 * HOUR_MS },
+				fableSecondary: { usedFraction: 0.2, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("anthropic", undefined, { modelId: "claude-fable-5" });
+		expect(apiKey).toBe("api-acct-b");
 	});
 
 	test("single credential works without ranking", async () => {

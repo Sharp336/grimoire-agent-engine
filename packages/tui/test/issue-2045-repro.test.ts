@@ -24,6 +24,18 @@ class CaptureTerminal implements Terminal {
 		return false;
 	}
 
+	get kittyEnableSequence(): string | null {
+		return null;
+	}
+
+	get keyboardEnhancementEnterSequence(): string | null {
+		return null;
+	}
+
+	get keyboardEnhancementExitSequence(): string | null {
+		return null;
+	}
+
 	get appearance(): TerminalAppearance | undefined {
 		return undefined;
 	}

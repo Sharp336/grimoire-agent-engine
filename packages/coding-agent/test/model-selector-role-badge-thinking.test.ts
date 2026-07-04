@@ -1,10 +1,13 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { getBundledModel, type Model } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-selector";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function normalizeRenderedText(text: string): string {
@@ -15,8 +18,6 @@ function createSelector(model: Model, settings: Settings): ModelSelectorComponen
 	const modelRegistry = {
 		getAll: () => [model],
 		getDiscoverableProviders: () => [],
-		getCanonicalModels: () => [],
-		resolveCanonicalModel: () => undefined,
 	} as unknown as ModelRegistry;
 	const ui = {
 		requestRender: vi.fn(),
@@ -34,7 +35,7 @@ function createSelector(model: Model, settings: Settings): ModelSelectorComponen
 }
 
 function createOllamaCloudModel(id: string): Model {
-	return {
+	return buildModel({
 		id,
 		name: "DeepSeek V4 Pro",
 		api: "ollama-chat",
@@ -45,10 +46,10 @@ function createOllamaCloudModel(id: string): Model {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 8192,
-	};
+	});
 }
 function createContextTestModel(id: string, contextWindow: number): Model {
-	return {
+	return buildModel({
 		id,
 		name: id,
 		api: "ollama-chat",
@@ -59,20 +60,18 @@ function createContextTestModel(id: string, contextWindow: number): Model {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens: 1024,
-	};
+	});
 }
 
 function createScopedSelector(
 	models: Model[],
 	settings: Settings,
-	onSelect: (model: Model) => void,
+	onSelect: (model: Model, role: string | null, thinkingLevel?: ConfiguredThinkingLevel, selector?: string) => void,
 	options?: { temporaryOnly?: boolean; currentContextTokens?: number },
 ): ModelSelectorComponent {
 	const modelRegistry = {
 		getAll: () => models,
 		getDiscoverableProviders: () => [],
-		getCanonicalModels: () => [],
-		resolveCanonicalModel: () => undefined,
 	} as unknown as ModelRegistry;
 	const ui = {
 		requestRender: vi.fn(),
@@ -83,7 +82,7 @@ function createScopedSelector(
 		settings,
 		modelRegistry,
 		models.map(model => ({ model })),
-		model => onSelect(model),
+		(model, role, thinkingLevel, selector) => onSelect(model, role, thinkingLevel, selector),
 		() => {},
 		options,
 	);
@@ -137,6 +136,85 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(menuRendered).toContain("Set as SMOL (Quick)");
 	});
 
+	test("renders xhigh effort for OpenAI GPT-5.5 thinking options", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+
+		const selector = createSelector(model, Settings.isolated({}));
+		await Bun.sleep(0);
+		installTestTheme();
+
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Thinking for: Default (gpt-5.5)");
+		expect(rendered).toContain("low medium high xhigh");
+		expect(rendered).not.toContain("low medium high max");
+	});
+
+	test("reloads DEFAULT(auto) from defaultThinkingLevel", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+
+		const settings = Settings.isolated({
+			defaultThinkingLevel: AUTO_THINKING,
+			modelRoles: {
+				default: `${model.provider}/${model.id}`,
+			},
+		});
+
+		const selector = createSelector(model, settings);
+		await Bun.sleep(0);
+		installTestTheme();
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("DEFAULT (auto)");
+	});
+
+	test("renders DEFAULT (auto) when modelRoles.default carries an explicit :auto suffix", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: `${model.provider}/${model.id}:auto`,
+			},
+		});
+
+		const selector = createSelector(model, settings);
+		await Bun.sleep(0);
+		installTestTheme();
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("DEFAULT (auto)");
+		expect(rendered).not.toContain("DEFAULT (inherit)");
+	});
+
+	test("renders SMOL (auto) when modelRoles.smol carries an explicit :auto suffix", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: `${model.provider}/${model.id}`,
+				smol: `${model.provider}/${model.id}:auto`,
+			},
+		});
+
+		const selector = createSelector(model, settings);
+		await Bun.sleep(0);
+		installTestTheme();
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("SMOL (auto)");
+		expect(rendered).not.toContain("SMOL (inherit)");
+	});
+
 	test("shows compact auto badges for unconfigured role defaults", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
@@ -154,7 +232,7 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(rendered).toContain("[SLOW auto]");
 	});
 
-	test("dims and disables models below the current context size", async () => {
+	test("dims and disables models below the current context size in temporary mode", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
 		const small = createContextTestModel("a-small", 4096);
@@ -175,7 +253,21 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(selected).toEqual(["b-large"]);
 	});
 
-	test("does not open the model menu when every candidate is disabled", async () => {
+	test("labels temporary picker as session-only and points to role assignment", async () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const model = createContextTestModel("session-model", 128_000);
+		const selector = createScopedSelector([model], settings, () => {}, { temporaryOnly: true });
+		await Bun.sleep(0);
+		installTestTheme();
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Temporary model selection is session-only");
+		expect(rendered).toContain("Alt+M or /model");
+		expect(rendered).toContain("default/smol/plan/task/slow/custom roles");
+	});
+
+	test("opens over-context default role actions for global configuration", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
 		const small = createContextTestModel("only-small", 4096);
@@ -188,12 +280,101 @@ describe("ModelSelector role badge thinking display", () => {
 
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(rendered).toContain("only-small");
-		expect(rendered).toContain("current context 6k > 4.1k limit");
+		expect(rendered).not.toContain("current context 6k > 4.1k limit");
 
 		selector.handleInput("\n");
-		const afterEnter = normalizeRenderedText(selector.render(220).join("\n"));
-		expect(afterEnter).not.toContain("Action for");
+		const afterOpen = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(afterOpen).toContain("Action for: only-small");
+		expect(afterOpen).toContain("Set as DEFAULT (Default)");
+		expect(afterOpen).not.toContain("context>4.1k");
+
+		selector.handleInput("\n");
+		const afterRoleEnter = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(afterRoleEnter).toContain("Thinking for: Default (only-small)");
 		expect(onSelect).not.toHaveBeenCalled();
+
+		selector.handleInput("\n");
+		expect(onSelect.mock.calls[0]?.[0]).toBe(small);
+		expect(onSelect.mock.calls[0]?.[1]).toBe("default");
+		expect(onSelect.mock.calls[0]?.[3]).toBe("test/only-small");
+	});
+
+	test("uses cached models for Enter while offline refresh is still pending", () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const cachedModel = createContextTestModel("cached-fast", 128_000);
+		const refreshGate = Promise.withResolvers<void>();
+		const onSelect = vi.fn();
+		const modelRegistry = {
+			getAll: () => [cachedModel],
+			refresh: vi.fn(() => refreshGate.promise),
+			refreshProvider: vi.fn(async () => {}),
+			getError: () => undefined,
+			getAvailable: () => [cachedModel],
+			getDiscoverableProviders: () => [],
+		} as unknown as ModelRegistry;
+		const ui = {
+			requestRender: vi.fn(),
+		} as unknown as TUI;
+
+		const selector = new ModelSelectorComponent(
+			ui,
+			undefined,
+			settings,
+			modelRegistry,
+			[],
+			model => onSelect(model.id),
+			() => {},
+			{ temporaryOnly: true },
+		);
+
+		selector.handleInput("\n");
+		expect(onSelect).toHaveBeenCalledWith("cached-fast");
+		expect(modelRegistry.refresh).toHaveBeenCalledTimes(1);
+		refreshGate.resolve();
+	});
+
+	test("keeps the highlighted model when a background refresh reorders the list", async () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const modelBb = createContextTestModel("bb-model", 128_000);
+		const modelCc = createContextTestModel("cc-model", 128_000);
+		const modelAa = createContextTestModel("aa-model", 128_000);
+		let availableModels: Model[] = [modelBb, modelCc];
+		const refreshGate = Promise.withResolvers<void>();
+		const onSelect = vi.fn();
+		const modelRegistry = {
+			getAll: () => availableModels,
+			refresh: vi.fn(() => refreshGate.promise),
+			refreshProvider: vi.fn(async () => {}),
+			getError: () => undefined,
+			getAvailable: () => availableModels,
+			getDiscoverableProviders: () => [],
+		} as unknown as ModelRegistry;
+		const ui = {
+			requestRender: vi.fn(),
+		} as unknown as TUI;
+
+		const selector = new ModelSelectorComponent(
+			ui,
+			undefined,
+			settings,
+			modelRegistry,
+			[],
+			model => onSelect(model.id),
+			() => {},
+			{ temporaryOnly: true },
+		);
+
+		// Highlight the second entry, then let the pending refresh land a model
+		// that sorts ahead of it and shifts every index.
+		selector.handleInput("\x1b[B");
+		availableModels = [modelAa, modelBb, modelCc];
+		refreshGate.resolve();
+		await Bun.sleep(0);
+
+		selector.handleInput("\n");
+		expect(onSelect).toHaveBeenCalledWith("cc-model");
 	});
 
 	test("refreshes Ollama Cloud using provider id instead of tab label", async () => {
@@ -213,8 +394,6 @@ describe("ModelSelector role badge thinking display", () => {
 			getError: () => undefined,
 			getAvailable: () => availableModels,
 			getDiscoverableProviders: () => ["ollama-cloud"],
-			getCanonicalModels: () => [],
-			resolveCanonicalModel: () => undefined,
 			getProviderDiscoveryState: () => ({
 				provider: "ollama-cloud",
 				status: "idle",
@@ -242,7 +421,6 @@ describe("ModelSelector role badge thinking display", () => {
 		const initialRendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(initialRendered).toContain("OLLAMA CLOUD");
 
-		selector.handleInput("\t");
 		selector.handleInput("\t");
 		await Bun.sleep(125);
 		installTestTheme();
@@ -276,8 +454,6 @@ describe("ModelSelector role badge thinking display", () => {
 			getError: () => undefined,
 			getAvailable: () => availableModels,
 			getDiscoverableProviders: () => ["ollama-cloud"],
-			getCanonicalModels: () => [],
-			resolveCanonicalModel: () => undefined,
 			getProviderDiscoveryState: () => ({
 				provider: "ollama-cloud",
 				status: "idle",
@@ -302,7 +478,6 @@ describe("ModelSelector role badge thinking display", () => {
 		await Bun.sleep(0);
 		installTestTheme();
 
-		selector.handleInput("\t");
 		selector.handleInput("\t");
 
 		// Core regression: tab switch must not synchronously enter provider refresh.

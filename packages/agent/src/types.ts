@@ -1,12 +1,14 @@
 import type {
-	ApiKeyResolveContext,
+	ApiKey,
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	Context,
 	Effort,
 	ImageContent,
 	Message,
 	Model,
+	ServiceTier,
 	SimpleStreamOptions,
 	Static,
 	streamSimple,
@@ -16,8 +18,9 @@ import type {
 	ToolResultMessage,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
+import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
-import type { HarmonyAuditEvent } from "./harmony-leak";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
 
@@ -33,6 +36,52 @@ export type StreamFn = (
  * (e.g. dropping late diagnostics a newer edit superseded).
  */
 export type AsideMessage = AgentMessage | (() => AgentMessage | null);
+
+export interface AgentTurnEndContext {
+	/** Assistant/user message that just completed this turn boundary. */
+	message: AgentMessage;
+	/** Tool results produced by this turn, already paired with `message` in the live context. */
+	toolResults: ToolResultMessage[];
+	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
+	willContinue: boolean;
+}
+
+/**
+ * A soft tool requirement: the host wants `toolName` called before the loop
+ * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
+ * up front (changing `tool_choice` invalidates the provider message cache).
+ * Returned from {@link AgentLoopConfig.getToolChoice} in place of a hard
+ * {@link ToolChoice}: the loop injects `reminder` once when a new `id` becomes
+ * active, runs with `toolChoice` unchanged, and escalates to a one-turn forced
+ * choice only if the model fails to call `toolName`. Auto-clears when the host
+ * stops returning it or `toolName` is no longer an active tool.
+ */
+export interface SoftToolRequirement {
+	/** Discriminates a soft requirement from a hard {@link ToolChoice}. */
+	soft: true;
+	/**
+	 * Stable id of the *current* requirement. The loop injects `reminder` when
+	 * this id first becomes active and again whenever it changes (e.g. one
+	 * stacked preview resolves and the next becomes the head), but never
+	 * re-injects for an unchanged id across turns.
+	 */
+	id: string;
+	/** Tool that must be called before the loop runs other tools or yields. */
+	toolName: string;
+	/** Host-owned reminder messages, injected once per `id` activation. */
+	reminder: AgentMessage[];
+}
+
+/**
+ * A per-turn tool-choice directive: either a hard provider {@link ToolChoice}
+ * (applied verbatim) or a {@link SoftToolRequirement} (remind-then-escalate).
+ */
+export type ToolChoiceDirective = ToolChoice | SoftToolRequirement;
+
+/** True when a {@link ToolChoiceDirective} is a soft requirement, not a hard choice. */
+export function isSoftToolRequirement(directive: ToolChoiceDirective | undefined): directive is SoftToolRequirement {
+	return typeof directive === "object" && directive !== null && (directive as SoftToolRequirement).soft === true;
+}
 
 /**
  * Configuration for the agent loop.
@@ -52,6 +101,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Used by providers that support session-based caching (e.g., OpenAI Codex).
 	 */
 	sessionId?: string;
+
+	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
+	deadline?: number;
 
 	/**
 	 * Optional resolver called per LLM request to produce request metadata.
@@ -108,21 +160,53 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
-	 * Resolves an API key dynamically for each LLM call.
-	 *
-	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire
-	 * during long-running tool execution phases.
+	 * Optional transform applied to the final provider context after conversion,
+	 * normalization, and append-only context handling, but before telemetry capture
+	 * and provider send.
 	 */
-	getApiKey?: (provider: string, ctx?: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+
+	/**
+	 * Resolves the API key or resolver for the current model before each LLM call.
+	 *
+	 * Returning an ApiKeyResolver lets the stream retry policy refresh or rotate
+	 * the model-scoped credential after auth/usage-limit errors.
+	 */
+	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Called after each tool execution to check for user interruptions unless interruptMode is "wait".
-	 * If messages are returned, remaining tool calls are skipped and
-	 * these messages are added to the context before the next LLM call.
+	 * Called at injection boundaries only (loop start and after a tool batch
+	 * fully settles), so dequeued messages are immediately injected. The
+	 * mid-batch interrupt poll uses {@link hasSteeringMessages} instead and
+	 * never consumes the queue.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
+
+	/**
+	 * Peeks whether steering messages are queued, without consuming them.
+	 *
+	 * Called after each tool execution (unless interruptMode is "wait") to decide
+	 * whether to skip the remaining tool calls in the batch. The queue keeps
+	 * owning its messages until the loop reaches the next injection boundary and
+	 * dequeues via {@link getSteeringMessages} — so callers can still cancel or
+	 * restore queued messages while in-flight tools settle, and an external
+	 * abort in that window leaves the queue intact for a post-abort continue.
+	 *
+	 * When omitted, steering never interrupts a running tool batch; queued
+	 * messages are still delivered at the next injection boundary.
+	 */
+	hasSteeringMessages?: () => boolean | Promise<boolean>;
+
+	/**
+	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
+	 *
+	 * Uses the same delivery rules as steering: the poll is non-consuming, only
+	 * runs for interruptible tools, and is ignored when interruptMode is "wait".
+	 * The host owns message injection at the next boundary.
+	 */
+	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -176,12 +260,39 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	intentTracing?: boolean;
 	/**
+	 * Strip tool descriptions (top-level + nested schema annotations) from the
+	 * provider-bound tool specs. Use when the full catalog is rendered into the
+	 * system prompt instead, so descriptions are not duplicated on the wire.
+	 */
+	pruneToolDescriptions?: boolean;
+	/**
+	 * Owned tool calling dialect.
+	 *
+	 * Undefined keeps provider-native tool calling. A dialect value sends no
+	 * native `tools`, forces `toolChoice` off, appends that dialect's tool catalog
+	 * instructions, re-encodes prior tool calls/results as text, and parses the
+	 * model's text output back into canonical `toolCall` blocks.
+	 */
+	dialect?: Dialect;
+	/**
+	 * When owned (in-band) tool calling is active and the model starts
+	 * fabricating a tool result inside its own turn, control how the loop reacts:
+	 * - `true` (default): abort the provider request immediately so it stops
+	 *   generating the hallucinated continuation (cheaper, lower latency).
+	 * - `false`: let the request finish and silently discard everything past the
+	 *   fabrication boundary (keeps the connection alive but pays for the tokens
+	 *   the model spends on the discarded tail).
+	 * Only meaningful when {@link dialect} (or `PI_DIALECT`) selects an
+	 * owned dialect; native tool calling never fabricates results in text.
+	 */
+	abortOnFabricatedToolResult?: boolean;
+	/**
 	 * Append-only context mode — stabilizes system prompt + tool spec bytes
 	 * across turns so provider prefix caches hit at maximum rate.
 	 *
 	 * When set, the loop reads messages from the append-only log (stable
 	 * byte prefix) and caches system prompt + tools. Tools exclude per-turn
-	 * `_i` intent fields.
+	 * `i` intent fields.
 	 */
 	appendOnlyContext?: AppendOnlyContextManager;
 
@@ -197,10 +308,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 
 	/**
-	 * Dynamic tool choice override, resolved per LLM call.
-	 * When set and returns a value, overrides the static `toolChoice`.
+	 * Dynamic tool-choice directive, resolved once per turn. Returns a hard
+	 * {@link ToolChoice} (applied verbatim, overriding the static `toolChoice`),
+	 * a {@link SoftToolRequirement} (the loop reminds-then-escalates instead of
+	 * forcing `tool_choice` immediately, so a model that complies with the
+	 * reminder pays no message-cache invalidation), or `undefined` to fall back
+	 * to the static `toolChoice`.
 	 */
-	getToolChoice?: () => ToolChoice | undefined;
+	getToolChoice?: () => ToolChoiceDirective | undefined;
 
 	/**
 	 * Dynamic reasoning effort override, resolved per LLM call.
@@ -209,6 +324,45 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the next model call instead of waiting for the next prompt.
 	 */
 	getReasoning?: () => Effort | undefined;
+	/**
+	 * Dynamic model override, resolved once per LLM call. When set, each
+	 * provider call re-reads the model (like {@link getReasoning}) so mid-run
+	 * model switches — context promotion, retry fallback — apply on the next
+	 * call instead of the run finishing on the stale model captured at
+	 * run-loop start. Falls back to the static {@link model} when unset.
+	 */
+	getModel?: () => Model;
+
+	/**
+	 * Dynamic reasoning-disable override, resolved per LLM call. When set,
+	 * its return value overrides the static `disableReasoning` from
+	 * `SimpleStreamOptions` for that request. Pair with `getReasoning` so
+	 * mid-run transitions into and out of the explicit `off` state propagate
+	 * to the next provider call.
+	 */
+	getDisableReasoning?: () => boolean | undefined;
+
+	/**
+	 * Per-call effective service-tier resolver. Unlike {@link getReasoning},
+	 * this is *authoritative*: when set, its return value (including
+	 * `undefined`) fully replaces the static `serviceTier` for the request and
+	 * its telemetry. The resolver receives the model being requested so the
+	 * caller can scope the tier per provider/model without mutating the shared
+	 * session `serviceTier` (e.g. opting a Fireworks model into the Priority
+	 * serving path while leaving the OpenAI/Anthropic tier untouched).
+	 */
+	getServiceTier?: (model: Model) => ServiceTier | undefined;
+
+	/**
+	 * Per-call working-directory resolver, read once per LLM call. When set, its
+	 * return value overrides the static {@link SimpleStreamOptions.cwd} for the
+	 * request (falling back to that static `cwd` when it returns `undefined`).
+	 * Lets the host reflect a session move (`/move`, which updates the working
+	 * directory without reconstructing the loop config) into provider options —
+	 * e.g. GitLab Duo Agent namespace/project discovery keys off this cwd's git
+	 * remote, so a stale value would strand discovery on the original repo.
+	 */
+	getCwd?: () => string | undefined;
 
 	/**
 	 * Called after a tool call has been validated and is about to execute.
@@ -227,6 +381,27 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
+	/**
+	 * Called after a turn ends and before the loop polls steering/asides for the
+	 * next iteration. `context` carries the just-finished turn; `context.willContinue`
+	 * is true when the current tool-loop batch is continuing without yielding to
+	 * post-turn steering.
+	 */
+	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+
+	/**
+	 * Called once an assistant message is finalized from the model stream, before
+	 * it is appended to the context, emitted as `message_end`, or its tool calls
+	 * are validated and dispatched. The hook may mutate the message in place —
+	 * both its text content and its tool-call arguments — and those edits are seen
+	 * by the transcript, the UI, and tool execution alike (single source of truth).
+	 *
+	 * Used for inline macro expansion: rewriting `@[[runtime.name(args)]]` tokens
+	 * to host-computed values before anything downstream consumes the message.
+	 * Runs at most once per assistant message; must not throw (a throw would abort
+	 * the turn).
+	 */
+	transformAssistantMessage?: (message: AssistantMessage, signal?: AbortSignal) => Promise<void> | void;
 
 	/**
 	 * Called after a tool finishes executing, before `tool_execution_end` and the
@@ -293,6 +468,8 @@ export interface AfterToolCallResult {
 	details?: unknown;
 	/** If provided, replaces the error flag carried with the tool result. */
 	isError?: boolean;
+	/** If provided, replaces the contextually-useless flag carried with the tool result. */
+	useless?: boolean;
 }
 
 /** Context passed to `beforeToolCall`. */
@@ -358,6 +535,7 @@ export interface AgentState {
 	systemPrompt: string[];
 	model: Model;
 	thinkingLevel?: Effort;
+	disableReasoning?: boolean;
 	tools: AgentTool<any>[];
 	messages: AgentMessage[]; // Can include attachments + custom message types
 	isStreaming: boolean;
@@ -374,6 +552,8 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).
 	// agent-loop honors this and surfaces it as a tool error on the wire.
 	isError?: boolean;
+	/** Marks the result as contextually useless: safe for compaction to elide once consumed (e.g. zero matches, wait timeout). Ignored when isError is set. */
+	useless?: boolean;
 }
 
 // Callback for streaming tool execution updates
@@ -438,16 +618,26 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Concurrency mode for tool scheduling when multiple calls are in one turn.
 	 * - "shared": can run alongside other shared tools (default)
 	 * - "exclusive": runs alone; other tools wait until it finishes
+	 * - function: resolved per call from the (raw, pre-validation) arguments
 	 */
-	concurrency?: "shared" | "exclusive";
+	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
 	/**
-	 * Controls how the INTENT_FIELD (`_i`) is handled for this tool.
-	 * - `"require"` (default): `_i` is injected and required in the parameter schema.
-	 * - `"optional"`: `_i` is injected as an optional/nullable field.
-	 * - `"omit"`: `_i` is NOT injected. Use for tools where intent is obvious (yield, resolve, todo, …).
-	 * - function: `_i` is NOT injected; intent is derived dynamically from (potentially partial / streaming) args.
+	 * If true, the agent loop may abort this tool mid-execution to deliver a
+	 * queued steering message (instead of waiting for the tool to finish on its
+	 * own). Set only on tools that purely *wait* and observe their abort signal
+	 * cleanly (e.g. the `job` poll), so the abort surfaces the tool's current
+	 * snapshot rather than corrupting a side effect. Honored only when
+	 * `interruptMode` is "immediate".
+	 */
+	interruptible?: boolean;
+	/**
+	 * Controls how the INTENT_FIELD (`i`) is handled for this tool.
+	 * - `"require"` (default): `i` is injected and required in the parameter schema.
+	 * - `"optional"`: `i` is injected as an optional/nullable field.
+	 * - `"omit"`: `i` is NOT injected. Use for tools where intent is obvious (yield, resolve, todo, …).
+	 * - function: `i` is NOT injected; intent is derived dynamically from (potentially partial / streaming) args.
 	 */
 	intent?: "omit" | "optional" | "require" | ((args: Partial<Static<TParameters>>) => string | undefined);
 
@@ -459,6 +649,27 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * matching.
 	 */
 	matcherDigest?: (args: unknown) => string | undefined;
+
+	/**
+	 * Surface the target file paths a (potentially partial) streamed call would
+	 * touch, so path-scoped stream matchers (e.g. TTSR `tool:edit(*.ts)` globs)
+	 * can match without a top-level `path`/`paths` argument. Used for tools whose
+	 * wire grammar embeds paths inside the streamed payload (hashline section
+	 * headers, apply_patch envelope markers). Return `undefined` (or an empty
+	 * array) to fall back to the caller's top-level argument scan.
+	 */
+	matcherPaths?: (args: unknown) => readonly string[] | undefined;
+
+	/**
+	 * Per-file projection of a (potentially partial) streamed call, pairing each
+	 * touched file path with the digest of only the lines added to that file.
+	 * Path-scoped stream matchers (TTSR) evaluate each entry in isolation, so a
+	 * scoped rule like `tool:edit(*.ts)` never fires on text that actually
+	 * belongs to a sibling Markdown hunk in a multi-file payload. Takes
+	 * precedence over {@link matcherDigest} + {@link matcherPaths} when present;
+	 * returns `undefined` (or empty) to fall back to the combined hooks.
+	 */
+	matcherEntries?: (args: unknown) => readonly { path: string; digest: string }[] | undefined;
 
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;

@@ -10,6 +10,10 @@ export interface TinyTitleLocalModelSpec {
 	label: string;
 	description: string;
 	contextNote: string;
+	/** Model family emits hidden reasoning unless the chat template disables it. */
+	reasoning?: boolean;
+	/** Reason this model is blocked before loading the ONNX runtime. */
+	unsupportedReason?: string;
 }
 
 export const TINY_TITLE_LOCAL_MODELS = [
@@ -28,6 +32,7 @@ export const TINY_TITLE_LOCAL_MODELS = [
 		label: "Qwen3 0.6B",
 		description: "Most robust local option; slower first load, about 500 MB cached.",
 		contextNote: "Use when title quality matters more than local startup cost.",
+		reasoning: true,
 	},
 	{
 		key: "gemma-270m",
@@ -82,8 +87,9 @@ void TINY_TITLE_MODEL_VALUES_MATCH_REGISTRY;
 export const TINY_TITLE_MODEL_OPTIONS = [
 	{
 		value: ONLINE_TINY_TITLE_MODEL_KEY,
-		label: "Online (pi/smol)",
-		description: "Current online title generation path; no local model download or on-device inference.",
+		label: "Online (TINY role, else pi/smol)",
+		description:
+			"Online title generation: the TINY model role (set one in /models) when assigned, otherwise the online fallback (commit role, then pi/smol). No local download or on-device inference.",
 	},
 	...TINY_TITLE_LOCAL_MODELS.map(model => ({
 		value: model.key,
@@ -105,7 +111,7 @@ export function getTinyTitleModelSpec(key: TinyTitleLocalModelKey): (typeof TINY
 /** Default memory model: the online path (the configured smol / remote LLM; no local download). */
 export const ONLINE_MEMORY_MODEL_KEY = "online";
 /** Recommended local model for memory tasks when none is named. */
-export const DEFAULT_MEMORY_LOCAL_MODEL_KEY = "qwen3-1.7b";
+export const DEFAULT_MEMORY_LOCAL_MODEL_KEY = "lfm2-1.2b";
 
 /**
  * Local models for Mnemopi memory tasks (fact extraction + consolidation).
@@ -120,8 +126,20 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		dtype: "q4",
 		label: "Qwen3 1.7B",
 		description:
-			"Recommended; most disciplined extraction (ignores chit-chat), good consolidation, about 1.1 GB cached.",
-		contextNote: "Best single-model pick for memory from the local experiment.",
+			"Disabled for local inference: onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
+		contextNote: "Blocked before load to avoid the unsupported RotaryEmbedding runtime path.",
+		reasoning: true,
+		unsupportedReason:
+			"onnxruntime-node does not support Qwen3 RotaryEmbedding cache updates in onnx-community/Qwen3-1.7B-ONNX",
+	},
+	{
+		key: "llama3.2:3b",
+		repo: "onnx-community/Llama-3.2-3B-Instruct-ONNX",
+		dtype: "q4",
+		label: "Llama 3.2 3B",
+		description:
+			"Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
+		contextNote: "Use when larger model capacity is preferred over faster load times.",
 	},
 	{
 		key: "gemma-3-1b",
@@ -152,6 +170,7 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 export const TINY_MEMORY_MODEL_VALUES = [
 	ONLINE_MEMORY_MODEL_KEY,
 	"qwen3-1.7b",
+	"llama3.2:3b",
 	"gemma-3-1b",
 	"qwen2.5-1.5b",
 	"lfm2-1.2b",
@@ -175,9 +194,9 @@ void TINY_MEMORY_MODEL_VALUES_MATCH_REGISTRY;
 export const TINY_MEMORY_MODEL_OPTIONS = [
 	{
 		value: ONLINE_MEMORY_MODEL_KEY,
-		label: "Online (smol/remote)",
+		label: "Online (TINY role, else smol)",
 		description:
-			"Use the configured Mnemopi LLM mode (smol or remote); no local model download or on-device inference.",
+			"Use the online model: the TINY role from /models when set, otherwise pi/smol. No local model download or on-device inference.",
 	},
 	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
 		value: model.key,
@@ -194,6 +213,12 @@ export function getTinyMemoryModelSpec(key: TinyMemoryLocalModelKey): (typeof TI
 	const spec = TINY_MEMORY_LOCAL_MODELS.find(model => model.key === key);
 	if (!spec) throw new Error(`Unknown tiny memory model: ${key}`);
 	return spec;
+}
+
+/** Return whether a memory local model may emit reasoning tokens before answers. */
+export function isTinyMemoryReasoningModelKey(key: TinyMemoryLocalModelKey): boolean {
+	const spec = getTinyMemoryModelSpec(key);
+	return "reasoning" in spec && spec.reasoning === true;
 }
 
 /** Any local model key (title or memory), used by the shared inference worker. */
@@ -231,8 +256,9 @@ export type AutoThinkingModelKey = TinyMemoryModelKey;
 export const AUTO_THINKING_MODEL_OPTIONS = [
 	{
 		value: ONLINE_AUTO_THINKING_MODEL_KEY,
-		label: "Online (smol)",
-		description: "Classify prompt difficulty with the online smol model; no local download or on-device inference.",
+		label: "Online (TINY role, else smol)",
+		description:
+			"Classify prompt difficulty online with the TINY role model (set one in /models) or pi/smol; no local download or on-device inference.",
 	},
 	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
 		value: model.key,

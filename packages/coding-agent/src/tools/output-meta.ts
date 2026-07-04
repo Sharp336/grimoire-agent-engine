@@ -12,6 +12,7 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
@@ -384,6 +385,56 @@ export function formatFullOutputReference(artifactId: string): string {
 	return `Read artifact://${artifactId} for full output`;
 }
 
+const RAW_OUTPUT_ARTIFACT_PREFIX = "[raw output: artifact://";
+const RAW_OUTPUT_ARTIFACT_SUFFIX = "]";
+
+/** Remove the trailing bash raw-output artifact footer while preserving its artifact id. */
+export function stripRawOutputArtifactNotice(text: string): { text: string; artifactId?: string } {
+	const trimmed = text.trimEnd();
+	const lineStart = trimmed.lastIndexOf("\n");
+	const candidateStart = lineStart === -1 ? 0 : lineStart + 1;
+	if (
+		!trimmed.startsWith(RAW_OUTPUT_ARTIFACT_PREFIX, candidateStart) ||
+		!trimmed.endsWith(RAW_OUTPUT_ARTIFACT_SUFFIX)
+	) {
+		return { text };
+	}
+
+	const idStart = candidateStart + RAW_OUTPUT_ARTIFACT_PREFIX.length;
+	const idEnd = trimmed.length - RAW_OUTPUT_ARTIFACT_SUFFIX.length;
+	if (idStart === idEnd) return { text };
+	for (let i = idStart; i < idEnd; i++) {
+		const code = trimmed.charCodeAt(i);
+		if (code < 48 || code > 57) return { text };
+	}
+
+	const artifactId = trimmed.slice(idStart, idEnd);
+	return {
+		text: trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd(),
+		artifactId,
+	};
+}
+
+function isGeneratedOutputNoticeLine(line: string): boolean {
+	if (!line.startsWith("[") || !line.endsWith("]")) return false;
+	const body = line.slice(1, -1);
+	return (
+		body.startsWith("Showing ") ||
+		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
+		/^\d+ results limit reached\. Use limit=\d+ for more/u.test(body) ||
+		body.startsWith("Some lines truncated to ")
+	);
+}
+
+/** Remove a trailing generated output notice when metadata is unavailable. */
+export function stripGeneratedOutputNotice(text: string): string {
+	const trimmed = text.trimEnd();
+	const lineStart = trimmed.lastIndexOf("\n");
+	const candidateStart = lineStart === -1 ? 0 : lineStart + 1;
+	if (!isGeneratedOutputNoticeLine(trimmed.slice(candidateStart))) return text;
+	return trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd();
+}
+
 export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 	let notice: string;
 
@@ -616,9 +667,22 @@ async function spillLargeResultToArtifact(
 	const totalBytes = Buffer.byteLength(fullText, "utf-8");
 	if (totalBytes <= threshold) return result;
 
-	// Save full output as artifact
-	const artifactId = await sessionManager.saveArtifact(fullText, toolName);
-	if (!artifactId) return result;
+	// Save the full output as an artifact so the elided bytes stay recoverable.
+	// In a persistent session this hits `Bun.write`, which can throw (disk full,
+	// permissions). The spill wraps arbitrary tools (built-in, MCP, extension,
+	// RPC-host); a save failure must never convert a successful call into an
+	// error, nor re-expose the full (possibly context-blowing) output. Mirror
+	// `enforceInlineByteCap`: always truncate past the threshold, and only
+	// attach the `artifact://` recovery link when the save actually succeeded.
+	let artifactId: string | undefined;
+	try {
+		artifactId = await sessionManager.saveArtifact(fullText, toolName);
+	} catch (error) {
+		logger.warn("Failed to spill large tool result to artifact", {
+			tool: toolName,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 
 	// Truncate: middle elision when a head budget is configured, otherwise tail-only.
 	const useMiddle = headBytes > 0;

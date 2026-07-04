@@ -1,6 +1,6 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { type } from "arktype";
 import checkpointDescription from "../prompts/tools/checkpoint.md" with { type: "text" };
 import rewindDescription from "../prompts/tools/rewind.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -17,17 +17,26 @@ export interface CheckpointState {
 	startedAt: string;
 }
 
-const checkpointSchema = z.object({
-	goal: z.string().describe("investigation goal"),
+export interface CompletedRewindState {
+	/** Report retained after a successful rewind. */
+	report: string;
+	/** Timestamp for the checkpoint that was rewound. */
+	startedAt: string;
+	/** Timestamp when the rewind completed. */
+	rewoundAt: string;
+}
+
+const checkpointSchema = type({
+	goal: type("string").describe("investigation goal"),
 });
 
-type CheckpointParams = z.infer<typeof checkpointSchema>;
+type CheckpointParams = typeof checkpointSchema.infer;
 
-const rewindSchema = z.object({
-	report: z.string().describe("investigation findings"),
+const rewindSchema = type({
+	report: type("string").describe("investigation findings"),
 });
 
-type RewindParams = z.infer<typeof rewindSchema>;
+type RewindParams = typeof rewindSchema.infer;
 
 export interface CheckpointToolDetails {
 	goal: string;
@@ -123,7 +132,12 @@ export class RewindTool implements AgentTool<typeof rewindSchema, RewindToolDeta
 			throw new ToolError("Checkpoint not available in subagents.");
 		}
 		if (!this.session.getCheckpointState?.()) {
-			throw new ToolError("No active checkpoint.");
+			if (this.session.getLastCompletedRewind?.()) {
+				throw new ToolError(
+					"Checkpoint already completed; continue from the retained rewind report instead of calling rewind again.",
+				);
+			}
+			throw new ToolError("No active checkpoint. Create a checkpoint before calling rewind.");
 		}
 		const report = params.report.trim();
 		if (report.length === 0) {

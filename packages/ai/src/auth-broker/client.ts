@@ -6,9 +6,12 @@
  * `/v1/healthz` require a bearer token.
  */
 import { readSseEvents } from "@oh-my-pi/pi-utils";
-import type { ZodType, infer as zInfer } from "zod/v4";
+import { type } from "arktype";
 import type { AuthCredential } from "../auth-storage";
 import type {
+	CredentialBlockRequest,
+	CredentialBlockResponse,
+	CredentialBlocksDeleteResponse,
 	CredentialDisableRequest,
 	CredentialDisableResponse,
 	CredentialRefreshResponse,
@@ -20,6 +23,8 @@ import type {
 	UsageResponse,
 } from "./types";
 import {
+	credentialBlockResponseSchema,
+	credentialBlocksDeleteResponseSchema,
 	credentialDisableResponseSchema,
 	credentialRefreshResponseSchema,
 	credentialUploadResponseSchema,
@@ -106,7 +111,11 @@ export class AuthBrokerClient {
 	}
 
 	healthz(signal?: AbortSignal): Promise<HealthzResponse> {
-		return this.#request("GET", "/v1/healthz", { schema: healthzResponseSchema, auth: false, signal });
+		return this.#request<HealthzResponse>("GET", "/v1/healthz", {
+			schema: healthzResponseSchema,
+			auth: false,
+			signal,
+		});
 	}
 
 	async fetchSnapshot(opts: FetchSnapshotOptions = {}): Promise<FetchSnapshotResult> {
@@ -132,14 +141,14 @@ export class AuthBrokerClient {
 		}
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = snapshotResponseSchema.safeParse(raw);
-		if (!validated.success) {
+		const validated = snapshotResponseSchema(raw);
+		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
-				body: validated.error.message,
+				body: validated.summary,
 			});
 		}
-		const snapshot = validated.data as SnapshotResponse;
+		const snapshot = validated as SnapshotResponse;
 		return { status: 200, snapshot, generation: etagGeneration ?? snapshot.generation };
 	}
 
@@ -200,13 +209,13 @@ export class AuthBrokerClient {
 					cause: err,
 				});
 			}
-			const validated = snapshotStreamEventSchema.safeParse(parsed);
-			if (!validated.success) {
+			const validated = snapshotStreamEventSchema(parsed);
+			if (validated instanceof type.errors) {
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
-					body: validated.error.message,
+					body: validated.summary,
 				});
 			}
-			const event = validated.data;
+			const event = validated as SnapshotStreamEvent;
 			if (!sawFirstEvent) {
 				sawFirstEvent = true;
 				if (event.kind !== "snapshot") {
@@ -230,19 +239,19 @@ export class AuthBrokerClient {
 		// `metadata`) but leaves provider-specific extension fields permissive so
 		// the broker can ship new shapes ahead of the client. `raw` is accepted
 		// but normally stripped by the broker before send.
-		return this.#request("GET", "/v1/usage", { schema: usageResponseSchema, signal }) as Promise<UsageResponse>;
+		return this.#request<UsageResponse>("GET", "/v1/usage", { schema: usageResponseSchema, signal });
 	}
 
 	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
-		return this.#request("POST", `/v1/credential/${id}/refresh`, {
+		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh`, {
 			schema: credentialRefreshResponseSchema,
 			signal,
-		}) as Promise<CredentialRefreshResponse>;
+		});
 	}
 
 	async disableCredential(id: number, cause: string, signal?: AbortSignal): Promise<CredentialDisableResponse> {
 		const body: CredentialDisableRequest = { cause };
-		return this.#request("POST", `/v1/credential/${id}/disable`, {
+		return this.#request<CredentialDisableResponse>("POST", `/v1/credential/${id}/disable`, {
 			body,
 			schema: credentialDisableResponseSchema,
 			signal,
@@ -255,29 +264,49 @@ export class AuthBrokerClient {
 		signal?: AbortSignal,
 	): Promise<CredentialUploadResponse> {
 		const body: CredentialUploadRequest = { provider, credential };
-		return this.#request("POST", "/v1/credential", {
+		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
 			body,
 			schema: credentialUploadResponseSchema,
 			signal,
-		}) as Promise<CredentialUploadResponse>;
+		});
 	}
 
-	async #request<TSchema extends ZodType>(
-		method: "GET" | "POST",
+	async upsertCredentialBlock(
+		id: number,
+		block: CredentialBlockRequest,
+		signal?: AbortSignal,
+	): Promise<CredentialBlockResponse> {
+		const body: CredentialBlockRequest = block;
+		return this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
+			body,
+			schema: credentialBlockResponseSchema,
+			signal,
+		});
+	}
+
+	async deleteCredentialBlocks(id: number, signal?: AbortSignal): Promise<CredentialBlocksDeleteResponse> {
+		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/blocks`, {
+			schema: credentialBlocksDeleteResponseSchema,
+			signal,
+		});
+	}
+
+	async #request<t>(
+		method: "GET" | "POST" | "DELETE",
 		path: string,
-		opts: { schema: TSchema; auth?: boolean; body?: unknown; signal?: AbortSignal },
-	): Promise<zInfer<TSchema>> {
+		opts: { schema: (input: unknown) => unknown; auth?: boolean; body?: unknown; signal?: AbortSignal },
+	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = opts.schema.safeParse(raw);
-		if (!validated.success) {
+		const validated = opts.schema(raw);
+		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
-				body: validated.error.message,
+				body: validated.summary,
 			});
 		}
-		return validated.data;
+		return validated as t;
 	}
 
 	#parseJson(text: string, status: number): unknown {
@@ -293,7 +322,7 @@ export class AuthBrokerClient {
 	}
 
 	async #fetchRaw(
-		method: "GET" | "POST",
+		method: "GET" | "POST" | "DELETE",
 		path: string,
 		opts: {
 			auth?: boolean;

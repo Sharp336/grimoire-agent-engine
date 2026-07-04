@@ -9,9 +9,12 @@ import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
+import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
-import type { SessionStats } from "../../session/agent-session";
+import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type {
+	RpcAvailableCommandsUpdateFrame,
+	RpcAvailableSlashCommand,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcHandoffResult,
@@ -22,6 +25,12 @@ import type {
 	RpcHostToolUpdate,
 	RpcResponse,
 	RpcSessionState,
+	RpcSubagentEventFrame,
+	RpcSubagentLifecycleFrame,
+	RpcSubagentMessagesResult,
+	RpcSubagentProgressFrame,
+	RpcSubagentSnapshot,
+	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -52,6 +61,11 @@ export interface RpcClientOptions {
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
 export type RpcEventListener = (event: AgentEvent) => void;
+export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
+export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
+export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
+export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
+export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -92,6 +106,23 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"tool_execution_end",
 ]);
 
+const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
+	...agentEventTypes,
+	"auto_compaction_start",
+	"auto_compaction_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"retry_fallback_applied",
+	"retry_fallback_succeeded",
+	"ttsr_triggered",
+	"todo_reminder",
+	"todo_auto_clear",
+	"irc_message",
+	"notice",
+	"thinking_level_changed",
+	"goal_updated",
+]);
+
 function isRpcResponse(value: unknown): value is RpcResponse {
 	if (!isRecord(value)) return false;
 	if (value.type !== "response") return false;
@@ -109,6 +140,33 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 	const type = value.type;
 	if (typeof type !== "string") return false;
 	return agentEventTypes.has(type as AgentEvent["type"]);
+}
+
+function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
+	if (!isRecord(value)) return false;
+	const type = value.type;
+	if (typeof type !== "string") return false;
+	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
+}
+
+function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "subagent_lifecycle" && isRecord(value.payload);
+}
+
+function isRpcSubagentProgressFrame(value: unknown): value is RpcSubagentProgressFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "subagent_progress" && isRecord(value.payload);
+}
+
+function isRpcSubagentEventFrame(value: unknown): value is RpcSubagentEventFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "subagent_event" && isRecord(value.payload);
+}
+
+function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
@@ -148,6 +206,11 @@ function normalizeToolResult<TDetails>(result: RpcClientToolResult<TDetails>): A
 export class RpcClient {
 	#process: ptree.ChildProcess | null = null;
 	#eventListeners: RpcEventListener[] = [];
+	#sessionEventListeners: RpcSessionEventListener[] = [];
+	#subagentLifecycleListeners = new Set<RpcSubagentLifecycleListener>();
+	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
+	#subagentEventListeners = new Set<RpcSubagentEventListener>();
+	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -162,11 +225,20 @@ export class RpcClient {
 
 	/**
 	 * Start the RPC agent process.
+	 *
+	 * Safe to call again after {@link stop} on the same instance: a fresh
+	 * {@link AbortController} is minted for each start, and any failure after
+	 * the child spawn kills the child and clears internal state so callers may
+	 * retry without leaking processes.
 	 */
 	async start(): Promise<void> {
 		if (this.#process) {
 			throw new Error("Client already started");
 		}
+
+		// Mint a fresh controller so a previous stop()'s abort does not
+		// short-circuit the new stdout reader (issue #4079).
+		this.#abortController = new AbortController();
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -184,18 +256,19 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.#process = ptree.spawn(["bun", cliPath, ...args], {
+		const child = ptree.spawn(["bun", cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...Bun.env, ...this.options.env },
 			stdin: "pipe",
 		});
+		this.#process = child;
 
 		// Wait for the "ready" signal or process exit
 		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
 		let readySettled = false;
 
 		// Process lines in background, intercepting the ready signal
-		const lines = readJsonl(this.#process.stdout, this.#abortController.signal);
+		const lines = readJsonl(child.stdout, this.#abortController.signal);
 		void (async () => {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
@@ -205,10 +278,16 @@ export class RpcClient {
 				}
 				this.#handleLine(line);
 			}
-			// Stream ended without ready signal — process exited
+			// Stream ended without the ready signal — the child exited or is
+			// exiting. Defer to the exit handler below: ptree resolves
+			// `exited` only after stderr is fully drained (nonzero exits), so
+			// rejecting here would snapshot a partial stderr tail and lose
+			// the actual startup error.
+			if (readySettled) return;
+			await child.exited.catch(() => {});
 			if (!readySettled) {
 				readySettled = true;
-				readyReject(new Error(`Agent process exited before ready. Stderr: ${this.#process?.peekStderr() ?? ""}`));
+				readyReject(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`));
 			}
 		})().catch((err: Error) => {
 			if (!readySettled) {
@@ -218,22 +297,26 @@ export class RpcClient {
 		});
 
 		// Also race against process exit (in case stdout closes before we read it)
-		void this.#process.exited.then((exitCode: number) => {
-			if (!readySettled) {
+		void child.exited.then(
+			(exitCode: number) => {
+				if (readySettled) return;
 				readySettled = true;
-				readyReject(
-					new Error(`Agent process exited with code ${exitCode}. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-				);
-			}
-		});
+				readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`));
+			},
+			(err: Error) => {
+				// Killed or reaped without an exit code (e.g. stop() during
+				// startup); surface it instead of leaking an unhandled rejection.
+				if (readySettled) return;
+				readySettled = true;
+				readyReject(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause: err }));
+			},
+		);
 
 		// Timeout to prevent hanging forever
 		const readyTimeout = this.#startTimeout(30000, () => {
 			if (readySettled) return;
 			readySettled = true;
-			readyReject(
-				new Error(`Timeout waiting for agent to become ready. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-			);
+			readyReject(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
 		});
 
 		try {
@@ -241,6 +324,20 @@ export class RpcClient {
 			if (this.#customTools.length > 0) {
 				await this.setCustomTools(this.#customTools);
 			}
+		} catch (err) {
+			// Startup failed after we spawned the child. Kill it and clear
+			// state so the caller (or a retry via start() again) does not
+			// leak the abandoned process (issue #4079).
+			try {
+				child.kill();
+			} catch {
+				// best-effort cleanup
+			}
+			this.#abortController.abort();
+			if (this.#process === child) {
+				this.#process = null;
+			}
+			throw err;
 		} finally {
 			clearTimeout(readyTimeout);
 		}
@@ -284,6 +381,51 @@ export class RpcClient {
 				this.#eventListeners.splice(index, 1);
 			}
 		};
+	}
+
+	/**
+	 * Subscribe to all top-level session events, including non-core session state events.
+	 */
+	onSessionEvent(listener: RpcSessionEventListener): () => void {
+		this.#sessionEventListeners.push(listener);
+		return () => {
+			const index = this.#sessionEventListeners.indexOf(listener);
+			if (index !== -1) {
+				this.#sessionEventListeners.splice(index, 1);
+			}
+		};
+	}
+
+	/**
+	 * Subscribe to subagent lifecycle frames after setSubagentSubscription("progress" | "events").
+	 */
+	onSubagentLifecycle(listener: RpcSubagentLifecycleListener): () => void {
+		this.#subagentLifecycleListeners.add(listener);
+		return () => this.#subagentLifecycleListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to aggregated subagent progress frames after setSubagentSubscription("progress" | "events").
+	 */
+	onSubagentProgress(listener: RpcSubagentProgressListener): () => void {
+		this.#subagentProgressListeners.add(listener);
+		return () => this.#subagentProgressListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to raw subagent session events. Call setSubagentSubscription(\"events\") to enable them server-side.
+	 */
+	onSubagentEvent(listener: RpcSubagentEventListener): () => void {
+		this.#subagentEventListeners.add(listener);
+		return () => this.#subagentEventListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to slash-command availability updates emitted by the RPC server.
+	 */
+	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
+		this.#availableCommandsUpdateListeners.add(listener);
+		return () => this.#availableCommandsUpdateListeners.delete(listener);
 	}
 
 	/**
@@ -359,6 +501,40 @@ export class RpcClient {
 	}
 
 	/**
+	 * Configure subagent frames emitted by the RPC server. Servers default to "off".
+	 * "progress" emits lifecycle/progress frames; "events" additionally emits raw subagent session events.
+	 */
+	async setSubagentSubscription(level: RpcSubagentSubscriptionLevel): Promise<RpcSubagentSubscriptionLevel> {
+		const response = await this.#send({ type: "set_subagent_subscription", level });
+		return this.#getData<{ level: RpcSubagentSubscriptionLevel }>(response).level;
+	}
+
+	/**
+	 * Return the RPC server's current subagent snapshot.
+	 */
+	async getSubagents(): Promise<RpcSubagentSnapshot[]> {
+		const response = await this.#send({ type: "get_subagents" });
+		return this.#getData<{ subagents: RpcSubagentSnapshot[] }>(response).subagents;
+	}
+
+	/**
+	 * Read persisted transcript entries for a tracked subagent session.
+	 */
+	async getSubagentMessages(selector: {
+		subagentId?: string;
+		sessionFile?: string;
+		fromByte?: number;
+	}): Promise<RpcSubagentMessagesResult> {
+		const response = await this.#send({
+			type: "get_subagent_messages",
+			subagentId: selector.subagentId,
+			sessionFile: selector.sessionFile,
+			fromByte: selector.fromByte,
+		});
+		return this.#getData<RpcSubagentMessagesResult>(response);
+	}
+
+	/**
 	 * Set model by provider and ID.
 	 */
 	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
@@ -384,6 +560,14 @@ export class RpcClient {
 	async getAvailableModels(): Promise<ModelInfo[]> {
 		const response = await this.#send({ type: "get_available_models" });
 		return this.#getData<{ models: ModelInfo[] }>(response).models;
+	}
+
+	/**
+	 * Get list of available slash commands.
+	 */
+	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
+		const response = await this.#send({ type: "get_available_commands" });
+		return this.#getData<{ commands: RpcAvailableSlashCommand[] }>(response).commands;
 	}
 
 	/**
@@ -540,17 +724,21 @@ export class RpcClient {
 	 * The server will emit an `open_url` extension_ui_request for the auth URL.
 	 * Resolves when login completes or rejects on failure.
 	 *
-	 * @param onOpenUrl Called when the server emits the auth URL. The host must open
-	 *   it in a browser for the callback-server OAuth flow to complete.
+	 * @param onOpenUrl Called when the server emits the auth URL. The host must
+	 *   open `url` in a browser for the callback-server OAuth flow to complete.
+	 *   When the flow's callback server hosts a `/launch` redirect, `launchUrl`
+	 *   is a short loopback URL that 302s to `url` — hosts SHOULD surface it as
+	 *   the truncation-safe copy target so terminal viewport clipping cannot
+	 *   corrupt trailing OAuth query parameters (e.g. `code_challenge_method=S256`).
 	 */
 	async login(
 		providerId: string,
-		options?: { onOpenUrl?: (url: string, instructions?: string) => void },
+		options?: { onOpenUrl?: (url: string, instructions?: string, launchUrl?: string) => void },
 	): Promise<{ providerId: string }> {
 		const { onOpenUrl } = options ?? {};
 		const listener = onOpenUrl
 			? (req: RpcExtensionUIRequest) => {
-					if (req.method === "open_url") onOpenUrl(req.url, req.instructions);
+					if (req.method === "open_url") onOpenUrl(req.url, req.instructions, req.launchUrl);
 				}
 			: undefined;
 		if (listener) this.#extensionUiListeners.add(listener);
@@ -679,9 +867,42 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcSubagentLifecycleFrame(data)) {
+			for (const listener of this.#subagentLifecycleListeners) {
+				listener(data.payload);
+			}
+			return;
+		}
+
+		if (isRpcSubagentProgressFrame(data)) {
+			for (const listener of this.#subagentProgressListeners) {
+				listener(data.payload);
+			}
+			return;
+		}
+
+		if (isRpcSubagentEventFrame(data)) {
+			for (const listener of this.#subagentEventListeners) {
+				listener(data.payload);
+			}
+			return;
+		}
+
+		if (isRpcAvailableCommandsUpdateFrame(data)) {
+			for (const listener of this.#availableCommandsUpdateListeners) {
+				listener(data.commands);
+			}
+			return;
+		}
+
+		if (!isAgentSessionEvent(data)) return;
+
+		for (const listener of this.#sessionEventListeners) {
+			listener(data);
+		}
+
 		if (!isAgentEvent(data)) return;
 
-		// Otherwise it's an event
 		for (const listener of this.#eventListeners) {
 			listener(data);
 		}
@@ -789,7 +1010,7 @@ export class RpcClient {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}
-		const stdin = this.#process.stdin as import("bun").FileSink;
+		const stdin = this.#process.stdin as FileSink;
 		stdin.write(`${JSON.stringify(frame)}\n`);
 		const flushResult = stdin.flush();
 		if (isPromise(flushResult)) {

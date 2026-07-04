@@ -1,6 +1,6 @@
-import { cloudflareAiGatewayModelManagerOptions } from "../provider-models/openai-compat";
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
-import type { ModelManagerConfig, ProviderDefinition } from "./types";
+import type { ProviderDefinition } from "./types";
 
 const AUTH_URL = "https://developers.cloudflare.com/ai-gateway/configuration/authentication/";
 
@@ -12,7 +12,7 @@ const AUTH_URL = "https://developers.cloudflare.com/ai-gateway/configuration/aut
  */
 export async function loginCloudflareAiGateway(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error("Cloudflare AI Gateway login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Cloudflare AI Gateway");
 	}
 
 	options.onAuth?.({
@@ -27,12 +27,12 @@ export async function loginCloudflareAiGateway(options: OAuthController): Promis
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	return trimmed;
@@ -41,9 +41,5 @@ export async function loginCloudflareAiGateway(options: OAuthController): Promis
 export const cloudflareAiGatewayProvider = {
 	id: "cloudflare-ai-gateway",
 	name: "Cloudflare AI Gateway",
-	defaultModel: "claude-sonnet-4-5",
-	createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
-	catalogDiscovery: { label: "Cloudflare AI Gateway", envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"] },
-	envKeys: "CLOUDFLARE_AI_GATEWAY_API_KEY",
 	login: (cb: OAuthLoginCallbacks) => loginCloudflareAiGateway(cb),
 } as const satisfies ProviderDefinition;

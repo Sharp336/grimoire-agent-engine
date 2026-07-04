@@ -15,8 +15,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import type { CanonicalModelVariant } from "../config/model-equivalence";
-import { type CanonicalModelQueryOptions, ModelRegistry } from "../config/model-registry";
+import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -26,7 +25,7 @@ import {
 } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import dryBalanceBenchPrompt from "../prompts/dry-balance-bench.md" with { type: "text" };
-import { discoverAuthStorage } from "../sdk";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 
 const DEFAULT_SAMPLE_COUNT = 100;
 const DEFAULT_CONCURRENCY = 32;
@@ -74,9 +73,6 @@ export interface DryBalanceModelRegistry {
 	getAll(): Model<Api>[];
 	getAvailable(): Model<Api>[];
 	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
-	getCanonicalVariants(canonicalId: string, options?: CanonicalModelQueryOptions): CanonicalModelVariant[];
-	resolveCanonicalModel?(canonicalId: string, options?: CanonicalModelQueryOptions): Model<Api> | undefined;
-	getCanonicalId?(model: Model<Api>): string | undefined;
 }
 
 export interface DryBalanceRuntime {
@@ -279,7 +275,7 @@ function isBenchFirstTokenEvent(event: AssistantMessageEvent): boolean {
 }
 
 function resolveBenchMaxTokens(model: Model<Api>): number {
-	return Number.isFinite(model.maxTokens) && model.maxTokens > 0
+	return model.maxTokens !== null && Number.isFinite(model.maxTokens) && model.maxTokens > 0
 		? Math.min(BENCH_MAX_TOKENS, model.maxTokens)
 		: BENCH_MAX_TOKENS;
 }
@@ -523,8 +519,10 @@ async function runBenchTargets(
 async function createDefaultRuntime(): Promise<DryBalanceRuntime> {
 	const authStorage = await discoverAuthStorage();
 	try {
-		const settings = await Settings.init({ cwd: getProjectDir() });
+		const cwd = getProjectDir();
+		const settings = await Settings.init({ cwd });
 		const modelRegistry = new ModelRegistry(authStorage);
+		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
 			modelRegistry,
 			settings,
@@ -564,7 +562,6 @@ async function resolveDryBalanceModel(
 	const defaultRoleSpec = resolveModelRoleValue(settings?.getModelRole("default"), allowedModels, {
 		settings,
 		matchPreferences: preferences,
-		modelRegistry,
 	});
 	if (defaultRoleSpec.model) {
 		return { model: defaultRoleSpec.model, warning: defaultRoleSpec.warning };
