@@ -380,6 +380,15 @@ async function runInTabWithSnapshot(
 	if (tab.pending.size > 0) throw new ToolError(`Tab ${JSON.stringify(name)} is busy`);
 	const id = Snowflake.next();
 	const { promise, resolve, reject } = Promise.withResolvers<RunResultOk>();
+	// The cmux backend below never awaits `promise` — it races `runCmuxCode`
+	// directly and only stores {resolve, reject} here so `releaseTab` can
+	// reject in-flight runs when a tab dies out from under them (e.g. a
+	// sibling `browser close --all` while this run is in flight). With zero
+	// consumers, that reject() call previously produced an unhandled
+	// rejection that crashed the whole process (issue: "Tab ... was closed").
+	// Attaching a no-op catch here doesn't affect the worker backend below,
+	// which still awaits `promise` itself via `raceWithTimeout`.
+	promise.catch(() => {});
 	const pending: PendingRun = {
 		resolve,
 		reject,
