@@ -3260,6 +3260,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.rs": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust Eval Backend",
+			description: "Allow the eval tool to dispatch Rust cells to the persistent evcxr REPL kernel",
+		},
+	},
+
+	"eval.rs.cacheMiB": {
+		type: "number",
+		default: 512,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust Eval Compile Cache (MiB)",
+			description:
+				"Size of evcxr's on-disk crate compilation cache (~/.cache/evcxr) shared across sessions. 0 disables. Speeds up repeat :dep across fresh kernels.",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "128", label: "128 MiB" },
+				{ value: "256", label: "256 MiB" },
+				{ value: "512", label: "512 MiB" },
+				{ value: "1024", label: "1024 MiB" },
+				{ value: "2048", label: "2048 MiB" },
+			],
+		},
+	},
+
 	// Runtime knobs (consumed by eval backends and the /python slash command)
 	"python.kernelMode": {
 		type: "enum",
@@ -3303,6 +3334,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Julia Interpreter",
 			description:
 				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
+		},
+	},
+	"rust.interpreter": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Rust REPL Interpreter",
+			description: "Optional path to an exact evcxr executable. When set, automatic Rust REPL discovery is skipped.",
 		},
 	},
 

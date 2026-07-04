@@ -3,11 +3,11 @@ Run one step of code in a persistent kernel.
 <instruction>
 **One eval call = one cell = one logical step.** State persists per language across separate eval calls, tool calls, and `task` subagents — define helpers/datasets/clients in one call, then later calls reuse them directly.
 
-Work incrementally: imports in one call, define in the next, test, then use — each its own eval call. Re-run setup ONLY after `reset`, a kernel crash, or a `NameError`/`ReferenceError` proving the state is gone. Parallelize work *within* a cell with the `parallel(thunks)` helper, not by batching steps.
+Work incrementally: imports in one call, define in the next, test, then use — each its own eval call. Re-run setup ONLY after `reset`, a kernel crash, or a `NameError`/`ReferenceError` proving the state is gone.{{#ifAny py js rb jl}} Parallelize work *within* a cell with the `parallel(thunks)` helper, not by batching steps.{{/ifAny}}
 
 Fields:
 
-- `language` — {{#if py}}`"py"` IPython kernel{{/if}}{{#ifAll py js}}, {{/ifAll}}{{#if js}}`"js"` persistent JavaScript VM{{/if}}{{#if rb}}{{#ifAny py js}}, {{/ifAny}}`"rb"` persistent Ruby kernel{{/if}}{{#if jl}}{{#ifAny py js rb}}, {{/ifAny}}`"jl"` persistent Julia kernel{{/if}}.
+- `language` — {{#if py}}`"py"` IPython kernel{{/if}}{{#ifAll py js}}, {{/ifAll}}{{#if js}}`"js"` persistent JavaScript VM{{/if}}{{#if rb}}{{#ifAny py js}}, {{/ifAny}}`"rb"` persistent Ruby kernel{{/if}}{{#if jl}}{{#ifAny py js rb}}, {{/ifAny}}`"jl"` persistent Julia kernel{{/if}}{{#if rs}}{{#ifAny py js rb jl}}, {{/ifAny}}`"rs"` persistent Rust REPL kernel{{/if}}.
 - `code` — cell body, verbatim. Newlines/quotes JSON-encoded; no fences, no headers.
 - `title` (optional) — short transcript label (e.g. `"imports"`).
 - `timeout` (optional) — seconds. Raise only for heavy compute or long non-agent tool calls.
@@ -17,9 +17,11 @@ Fields:
 {{#if js}}JS runs under **Bun**: Bun globals/APIs are available (`Bun.file`, `Bun.write`, `Bun.$`, `fetch`, `Buffer`); top-level `await`/`return` work directly.{{/if}}
 {{#if rb}}Ruby: synchronous; helper options are keyword args (e.g. `output("id", limit: 2)`); the last expression auto-displays unless it is `nil`, an assignment, or a definition (like IRB).{{/if}}
 {{#if jl}}Julia: synchronous; helper options are standard keyword args (e.g. `output("id", limit=2)`); the last expression auto-displays unless it is an assignment or a definition (like the Julia REPL).{{/if}}
+{{#if rs}}Rust runs through a persistent evcxr REPL; use standard Rust syntax plus evcxr commands such as `:dep` for crates. Evcxr auto-displays final expressions and supports top-level `.await` by starting Tokio as documented upstream. Rust cells currently expose the Evcxr REPL and standard library; host workflow helpers are not available in Rust cells.{{/if}}
 On error, fix and re-run only the failing step — prior calls' state survives.
 </instruction>
 
+{{#ifAny py js rb jl}}
 <prelude>
 {{#ifAll py js}}Same helpers + arg order, both runtimes. Python: sync, options = trailing kwargs. JS: async/`await`able, options = ONE trailing object literal, never positional (extras throw).{{else}}{{#if py}}Sync; options = trailing kwargs.{{/if}}{{#if js}}Async/`await`able; options = ONE trailing object literal, never positional (extras throw).{{/if}}{{/ifAll}}{{#if rb}} Ruby: sync, options = trailing keyword args.{{/if}}{{#if jl}} Julia: sync, options = trailing keyword args.{{/if}}
 ```
@@ -59,13 +61,14 @@ budget → per-turn token budget
 {{#if spawns}}
 <dag>
 Pipe handles through stage helpers to build a dependency graph — acyclic waves:
-- **Name nodes.** Capture each `agent(…, {{#if py}}handle=True{{/if}}{{#if js}}{ handle: true }{{/if}}{{#if jl}}handle=true{{/if}})` result; carries `handle` (`agent://<id>`) + `output`.
+- **Name nodes.** Capture each `agent(...)` call's handle: {{#if py}}`handle=True` (py){{/if}}{{#if js}}{{#if py}}; {{/if}}`{ handle: true }` (js){{/if}}{{#if rb}}{{#ifAny py js}}; {{/ifAny}}`handle: true` (rb){{/if}}{{#if jl}}{{#ifAny py js rb}}; {{/ifAny}}`handle=true` (jl){{/if}}. The result carries `handle` (`agent://<id>`) + `output`.
 - **Wire edges by reference.** Put an upstream node's `handle`/`output` in the dependent stage's prompt — large transcript never re-inlined. Bulk: `write("local://<name>.md", …)`, pass the URI.
 - **`pipeline(items, *stages)` = staged waves**, barrier between stages (every item clears stage N before any enters N+1). **`parallel(thunks)` = one wave** of independent nodes.
 - **Isolate failure.** A raising node re-raises the lowest-index error, aborts its wave; wrap risky nodes in try/except so a failure degrades only its dependent subtree, independent branches finish.
 - **Acyclic only.** A node never waits on its own descendant.
 </dag>
 {{/if}}
+{{/ifAny}}
 
 <critical>
 Prior top-level names (`data`, `sessions`, helpers, imports) survive into the next eval call — reuse them; NEVER re-import, re-require, or re-declare a helper. Re-read a file only if it may have changed since the last read. Re-run setup only after `reset`, a crash, or a `NameError`/`ReferenceError`.

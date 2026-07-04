@@ -1,7 +1,12 @@
 import * as path from "node:path";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
-import { attachSessionOwner, createCancelledKernelResult, executeWithKernelBase } from "../executor-base";
+import {
+	createCancelledKernelResult,
+	executeWithKernelBase,
+	KernelSessionRegistry,
+	type RegistrySession,
+} from "../executor-base";
 import { ensurePyToolBridge, type PyToolBridgeInfo } from "../py/tool-bridge";
 import type { EvalDisplayOutput, EvalStatusEvent } from "../types";
 import {
@@ -53,32 +58,12 @@ export interface JuliaResult {
 	stdinRequested: boolean;
 }
 
-interface JuliaSessionOwners {
-	ownerIds: Set<string>;
-	hasFallbackOwner: boolean;
-}
-
-interface JuliaSession extends JuliaSessionOwners {
-	sessionKey: string;
-	sessionId: string;
-	cwd: string;
-	kernel: JuliaKernel;
-}
-
-interface StartingJuliaSession extends JuliaSessionOwners {
-	promise: Promise<JuliaSession>;
-}
-
 class JuliaExecutionCancelledError extends Error {
 	constructor(readonly timedOut: boolean) {
 		super(timedOut ? "Julia execution timed out" : "Julia execution cancelled");
 		this.name = "JuliaExecutionCancelledError";
 	}
 }
-
-const sessions = new Map<string, JuliaSession>();
-const startingSessions = new Map<string, StartingJuliaSession>();
-const resettingSessions = new Map<string, Promise<void>>();
 
 function normalizeSessionCwd(cwd: string): string {
 	return path.resolve(cwd);
@@ -251,161 +236,67 @@ async function startKernel(cwd: string, options: JuliaExecutorOptions): Promise<
 	});
 }
 
-async function acquireSession(
-	sessionKey: string,
-	sessionId: string,
-	cwd: string,
-	options: JuliaExecutorOptions,
-): Promise<JuliaSession> {
-	const existing = sessions.get(sessionKey);
-	if (existing) {
-		attachSessionOwner(existing, sessionId, options.kernelOwnerId);
-		return existing;
+class JuliaRegistry extends KernelSessionRegistry<JuliaKernel, JuliaExecutorOptions, JuliaResult> {
+	readonly languageLabel = "Julia";
+	readonly cancelledErrorClass = JuliaExecutionCancelledError;
+
+	buildSessionKey(sessionId: string, cwd: string, options: JuliaExecutorOptions): string {
+		return buildSessionKey(sessionId, cwd, options.interpreter);
 	}
 
-	const inFlight = startingSessions.get(sessionKey);
-	if (inFlight) {
-		attachSessionOwner(inFlight, sessionId, options.kernelOwnerId);
-		return await waitForPromiseWithCancellation(inFlight.promise, options);
+	resetShutdownTimeoutMs(): number {
+		return SHUTDOWN_GRACE_MS;
 	}
 
-	let startingSession!: StartingJuliaSession;
-	const startPromise = (async () => {
-		const kernel = await startKernel(cwd, options);
-		const session: JuliaSession = {
-			sessionKey,
-			sessionId,
-			cwd,
-			kernel,
-			ownerIds: new Set(startingSession.ownerIds),
-			hasFallbackOwner: startingSession.hasFallbackOwner,
-		};
-		if (startingSessions.get(sessionKey) === startingSession) {
-			sessions.set(sessionKey, session);
+	beforeKernelReplacement(session: RegistrySession<JuliaKernel>): void {
+		logger.warn("Julia subprocess died or is unresponsive; spawning fresh process", {
+			sessionKey: session.sessionKey,
+		});
+	}
+
+	async beforeExecution(sessionId: string, options: JuliaExecutorOptions): Promise<void> {
+		await ensureToolBridge(options);
+		if (options.bridge && !options.bridgeSessionId) {
+			options.bridgeSessionId = sessionId;
 		}
-		return session;
-	})();
+	}
 
-	startingSession = {
-		ownerIds: new Set(),
-		hasFallbackOwner: false,
-		promise: startPromise,
-	};
-	attachSessionOwner(startingSession, sessionId, options.kernelOwnerId);
-	startingSessions.set(sessionKey, startingSession);
-	try {
-		return await waitForPromiseWithCancellation(startPromise, options);
-	} finally {
-		if (startingSessions.get(sessionKey) === startingSession) startingSessions.delete(sessionKey);
+	clearResettingOnDisposeAll(): boolean {
+		return true;
+	}
+
+	isSessionCancellationError(error: unknown): boolean {
+		return isCancellationError(error);
+	}
+
+	isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
+		return isTimedOutCancellation(error, signal);
+	}
+
+	async waitForStartingSession(
+		promise: Promise<RegistrySession<JuliaKernel>>,
+		options: JuliaExecutorOptions,
+	): Promise<RegistrySession<JuliaKernel>> {
+		return await waitForPromiseWithCancellation(promise, options);
+	}
+
+	async startKernel(cwd: string, options: JuliaExecutorOptions): Promise<JuliaKernel> {
+		return await startKernel(cwd, options);
+	}
+
+	async runOnKernel(kernel: JuliaKernel, code: string, options: JuliaExecutorOptions): Promise<JuliaResult> {
+		return await executeJuliaWithKernel(kernel, code, options);
 	}
 }
 
-async function replaceSessionKernel(session: JuliaSession, cwd: string, options: JuliaExecutorOptions): Promise<void> {
-	logger.warn("Julia subprocess died or is unresponsive; spawning fresh process", {
-		sessionKey: session.sessionKey,
-	});
-	const oldKernel = session.kernel;
-	const remaining = getRemainingTimeoutMs(options.deadlineMs);
-	await oldKernel
-		.shutdown(remaining !== undefined ? { timeoutMs: Math.max(0, remaining) } : undefined)
-		.catch(() => undefined);
-	if (sessions.get(session.sessionKey) !== session) {
-		throw new JuliaExecutionCancelledError(false);
-	}
-	requireRemainingTimeoutMs(options.deadlineMs);
-	const nextKernel = await startKernel(cwd, options);
-	if (sessions.get(session.sessionKey) !== session) {
-		await nextKernel.shutdown().catch(() => undefined);
-		throw new JuliaExecutionCancelledError(false);
-	}
-	session.kernel = nextKernel;
-}
-
-async function resetSession(sessionKey: string): Promise<void> {
-	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
-	if (!session) return;
-	sessions.delete(sessionKey);
-	await session.kernel.shutdown({ timeoutMs: SHUTDOWN_GRACE_MS }).catch(() => undefined);
-}
+const registry = new JuliaRegistry();
 
 export async function disposeAllJuliaKernelSessions(): Promise<void> {
-	const pending = [...startingSessions.values()].map(starting => starting.promise);
-	startingSessions.clear();
-	resettingSessions.clear();
-	const started = await Promise.allSettled(pending);
-	const all = [...sessions.entries()];
-	for (const result of started) {
-		if (result.status !== "fulfilled") continue;
-		if (!all.some(([, session]) => session === result.value)) {
-			all.push([result.value.sessionKey, result.value]);
-		}
-	}
-	for (const [id, session] of all) {
-		if (sessions.get(id) === session) sessions.delete(id);
-	}
-	const results = await Promise.allSettled(all.map(([, session]) => session.kernel.shutdown()));
-	for (let i = 0; i < all.length; i += 1) {
-		const [id, session] = all[i];
-		const result = results[i];
-		if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
-		const reason = result.status === "rejected" ? result.reason : "not confirmed";
-		logger.warn("Julia kernel shutdown not confirmed", {
-			sessionId: session.sessionId,
-			sessionKey: id,
-			cwd: session.cwd,
-			reason,
-		});
-		if (!sessions.has(id)) sessions.set(id, session);
-	}
+	await registry.disposeAll();
 }
 
 export async function disposeJuliaKernelSessionsByOwner(ownerId: string): Promise<void> {
-	const toShutdown: JuliaSession[] = [];
-	const startingToShutdown: StartingJuliaSession[] = [];
-	for (const session of [...sessions.values()]) {
-		if (!session.ownerIds.has(ownerId)) continue;
-		if (session.ownerIds.size === 1) {
-			toShutdown.push(session);
-			continue;
-		}
-		session.ownerIds.delete(ownerId);
-	}
-	for (const [sessionKey, starting] of [...startingSessions.entries()]) {
-		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
-		if (starting.ownerIds.size === 1) {
-			startingSessions.delete(sessionKey);
-			startingToShutdown.push(starting);
-			continue;
-		}
-		starting.ownerIds.delete(ownerId);
-	}
-	for (const session of toShutdown) {
-		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
-	}
-	const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
-	for (const result of started) {
-		if (result.status !== "fulfilled") continue;
-		const session = result.value;
-		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
-		toShutdown.push(session);
-	}
-	const results = await Promise.allSettled(toShutdown.map(session => session.kernel.shutdown()));
-	for (let i = 0; i < toShutdown.length; i += 1) {
-		const session = toShutdown[i];
-		const result = results[i];
-		if (result.status === "fulfilled" && result.value?.confirmed !== false) {
-			session.ownerIds.delete(ownerId);
-			continue;
-		}
-		const reason = result.status === "rejected" ? result.reason : "not confirmed";
-		logger.warn("Julia kernel shutdown not confirmed", {
-			sessionId: session.sessionId,
-			sessionKey: session.sessionKey,
-			cwd: session.cwd,
-			reason,
-		});
-		if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
-	}
+	await registry.disposeByOwner(ownerId);
 }
 
 async function executeWithKernel(
@@ -449,61 +340,6 @@ async function ensureToolBridge(options: JuliaExecutorOptions): Promise<void> {
 	}
 }
 
-async function executeOnSession(code: string, cwd: string, options: JuliaExecutorOptions): Promise<JuliaResult> {
-	const sessionId = options.sessionId ?? `session:${cwd}`;
-	const sessionKey = buildSessionKey(sessionId, cwd, options.interpreter);
-	if (options.bridge && !options.bridgeSessionId) {
-		options.bridgeSessionId = sessionId;
-	}
-	if (options.reset) {
-		const inFlight = resettingSessions.get(sessionKey);
-		if (inFlight) await inFlight.catch(() => undefined);
-		else {
-			const resetPromise = resetSession(sessionKey);
-			resettingSessions.set(
-				sessionKey,
-				resetPromise.then(() => undefined),
-			);
-			try {
-				await resetPromise;
-			} finally {
-				resettingSessions.delete(sessionKey);
-			}
-		}
-	} else {
-		const inFlight = resettingSessions.get(sessionKey);
-		if (inFlight) await inFlight.catch(() => undefined);
-	}
-	const session = await acquireSession(sessionKey, sessionId, cwd, options);
-	if (options.signal?.aborted) {
-		throw new JuliaExecutionCancelledError(isTimedOutCancellation(options.signal.reason, options.signal));
-	}
-	if (sessions.get(session.sessionKey) !== session) {
-		throw new JuliaExecutionCancelledError(false);
-	}
-	if (!session.kernel.isAlive()) {
-		await replaceSessionKernel(session, cwd, options);
-		if (sessions.get(session.sessionKey) !== session) {
-			throw new JuliaExecutionCancelledError(false);
-		}
-	}
-	const runOptions = { ...options, cwd };
-	try {
-		return await executeWithKernel(session.kernel, code, runOptions);
-	} catch (err) {
-		if (isCancellationError(err) || options.signal?.aborted) throw err;
-		if (session.kernel.isAlive()) throw err;
-		if (sessions.get(session.sessionKey) !== session) {
-			throw new JuliaExecutionCancelledError(false);
-		}
-		await replaceSessionKernel(session, cwd, options);
-		if (sessions.get(session.sessionKey) !== session) {
-			throw new JuliaExecutionCancelledError(false);
-		}
-		return await executeWithKernel(session.kernel, code, runOptions);
-	}
-}
-
 export async function executeJuliaWithKernel(
 	kernel: JuliaKernel,
 	code: string,
@@ -529,8 +365,7 @@ export async function executeJulia(code: string, options?: JuliaExecutorOptions)
 			);
 		}
 		await ensureKernelAvailable(cwd, executionOptions);
-		await ensureToolBridge(executionOptions);
-		return await executeOnSession(code, cwd, executionOptions);
+		return await registry.executeOnSession(code, executionOptions);
 	} catch (err) {
 		if (isCancellationError(err) || executionOptions.signal?.aborted) {
 			return createCancelledJuliaResult(isTimedOutCancellation(err, executionOptions.signal));

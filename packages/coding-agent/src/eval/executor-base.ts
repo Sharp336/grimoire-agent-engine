@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
@@ -6,7 +8,8 @@ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/ou
 import { isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
-import { registerPyToolBridge } from "./py/tool-bridge";
+import { registerPyToolBridge } from "./py/tool-bridge-registry";
+import { resolveExplicitPath } from "./runtime-env";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -239,6 +242,319 @@ export function attachSessionOwner(
 	if (session.hasFallbackOwner || session.ownerIds.size === 0) {
 		session.ownerIds.add(sessionId);
 		session.hasFallbackOwner = true;
+	}
+}
+
+/** Minimal lifecycle surface driven by {@link KernelSessionRegistry}. */
+export interface RegistryKernel {
+	isAlive(): boolean;
+	shutdown(options?: { timeoutMs?: number }): Promise<{ confirmed?: boolean }>;
+}
+
+/** Fields every retained-kernel executor option set structurally provides. */
+export interface RegistryExecutorOptions {
+	cwd?: string;
+	sessionId?: string;
+	signal?: AbortSignal;
+	deadlineMs?: number;
+	kernelOwnerId?: string;
+	reset?: boolean;
+	interpreter?: string;
+}
+
+export interface RegistrySession<TKernel> {
+	sessionKey: string;
+	sessionId: string;
+	cwd: string;
+	kernel: TKernel;
+	ownerIds: Set<string>;
+	hasFallbackOwner: boolean;
+}
+
+interface StartingRegistrySession<TKernel> {
+	ownerIds: Set<string>;
+	hasFallbackOwner: boolean;
+	promise: Promise<RegistrySession<TKernel>>;
+}
+
+export abstract class KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends RegistryExecutorOptions,
+	TResult,
+> {
+	#sessions = new Map<string, RegistrySession<TKernel>>();
+	#startingSessions = new Map<string, StartingRegistrySession<TKernel>>();
+	#resettingSessions = new Map<string, Promise<void>>();
+
+	abstract readonly languageLabel: string;
+	abstract readonly cancelledErrorClass: CancelledErrorClass;
+	abstract startKernel(cwd: string, options: TOptions): Promise<TKernel>;
+	abstract runOnKernel(kernel: TKernel, code: string, options: TOptions): Promise<TResult>;
+
+	buildSessionKey(sessionId: string, cwd: string, options: TOptions): string {
+		const normalizedCwd = path.resolve(cwd);
+		return `${sessionId}\0${normalizedCwd}\0${this.normalizeInterpreter(normalizedCwd, options.interpreter)}`;
+	}
+
+	normalizeInterpreter(cwd: string, interpreter: string | undefined): string {
+		if (interpreter === undefined) return "";
+		const resolved = resolveExplicitPath(interpreter, cwd);
+		try {
+			return fs.realpathSync.native(resolved);
+		} catch {
+			return resolved;
+		}
+	}
+
+	resetShutdownTimeoutMs(): number | undefined {
+		return undefined;
+	}
+
+	beforeKernelReplacement(_session: RegistrySession<TKernel>): void {}
+
+	async beforeExecution(_sessionId: string, _options: TOptions): Promise<void> {}
+
+	clearResettingOnDisposeAll(): boolean {
+		return false;
+	}
+
+	isSessionCancellationError(error: unknown): boolean {
+		return isCancellationError(error, this.cancelledErrorClass);
+	}
+
+	isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
+		return isTimedOutCancellation(error, this.cancelledErrorClass, signal);
+	}
+
+	async waitForStartingSession(
+		promise: Promise<RegistrySession<TKernel>>,
+		options: TOptions,
+	): Promise<RegistrySession<TKernel>> {
+		return await waitForPromiseWithCancellation(promise, options, this.cancelledErrorClass);
+	}
+
+	async executeOnSession(code: string, options: TOptions): Promise<TResult> {
+		const cwd = options.cwd;
+		if (cwd === undefined) throw new Error(`${this.languageLabel} kernel session cwd is required`);
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		await this.beforeExecution(sessionId, options);
+		const sessionKey = this.buildSessionKey(sessionId, cwd, options);
+		if (options.reset) {
+			const inFlight = this.#resettingSessions.get(sessionKey);
+			if (inFlight) await inFlight.catch(() => undefined);
+			else {
+				const resetPromise = this.#resetSession(sessionKey);
+				this.#resettingSessions.set(
+					sessionKey,
+					resetPromise.then(() => undefined),
+				);
+				try {
+					await resetPromise;
+				} finally {
+					this.#resettingSessions.delete(sessionKey);
+				}
+			}
+		} else {
+			const inFlight = this.#resettingSessions.get(sessionKey);
+			if (inFlight) await inFlight.catch(() => undefined);
+		}
+		const session = await this.#acquireSession(sessionKey, sessionId, cwd, options);
+		if (options.signal?.aborted) {
+			throw new this.cancelledErrorClass(this.isSessionTimedOutCancellation(options.signal.reason, options.signal));
+		}
+		if (this.#sessions.get(session.sessionKey) !== session) {
+			throw new this.cancelledErrorClass(false);
+		}
+		if (!session.kernel.isAlive()) {
+			await this.#replaceSessionKernel(session, cwd, options);
+			if (this.#sessions.get(session.sessionKey) !== session) {
+				throw new this.cancelledErrorClass(false);
+			}
+		}
+		const runOptions = { ...options, cwd };
+		try {
+			return await this.runOnKernel(session.kernel, code, runOptions);
+		} catch (err) {
+			if (this.isSessionCancellationError(err) || options.signal?.aborted) throw err;
+			if (session.kernel.isAlive()) throw err;
+			if (this.#sessions.get(session.sessionKey) !== session) {
+				throw new this.cancelledErrorClass(false);
+			}
+			await this.#replaceSessionKernel(session, cwd, options);
+			if (this.#sessions.get(session.sessionKey) !== session) {
+				throw new this.cancelledErrorClass(false);
+			}
+			return await this.runOnKernel(session.kernel, code, runOptions);
+		}
+	}
+
+	async disposeAll(): Promise<void> {
+		if (this.clearResettingOnDisposeAll()) this.#resettingSessions.clear();
+		const pending = [...this.#startingSessions.values()].map(starting => starting.promise);
+		this.#startingSessions.clear();
+		const started = await Promise.allSettled(pending);
+		const all = [...this.#sessions.entries()];
+		for (const result of started) {
+			if (result.status !== "fulfilled") continue;
+			if (!all.some(([, session]) => session === result.value)) {
+				all.push([result.value.sessionKey, result.value]);
+			}
+		}
+		for (const [id, session] of all) {
+			if (this.#sessions.get(id) === session) this.#sessions.delete(id);
+		}
+		const results = await Promise.allSettled(all.map(([, session]) => session.kernel.shutdown()));
+		for (let i = 0; i < all.length; i += 1) {
+			const [id, session] = all[i];
+			const result = results[i];
+			if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
+			const reason = result.status === "rejected" ? result.reason : "not confirmed";
+			logger.warn(`${this.languageLabel} kernel shutdown not confirmed`, {
+				sessionId: session.sessionId,
+				sessionKey: id,
+				cwd: session.cwd,
+				reason,
+			});
+			if (!this.#sessions.has(id)) this.#sessions.set(id, session);
+		}
+	}
+
+	async disposeByOwner(ownerId: string): Promise<void> {
+		const toShutdown: RegistrySession<TKernel>[] = [];
+		const startingToShutdown: StartingRegistrySession<TKernel>[] = [];
+		for (const session of [...this.#sessions.values()]) {
+			if (!session.ownerIds.has(ownerId)) continue;
+			if (session.ownerIds.size === 1) {
+				toShutdown.push(session);
+				continue;
+			}
+			session.ownerIds.delete(ownerId);
+		}
+		for (const [sessionKey, starting] of [...this.#startingSessions.entries()]) {
+			if (this.#sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+			if (starting.ownerIds.size === 1) {
+				this.#startingSessions.delete(sessionKey);
+				startingToShutdown.push(starting);
+				continue;
+			}
+			starting.ownerIds.delete(ownerId);
+		}
+		for (const session of toShutdown) {
+			if (this.#sessions.get(session.sessionKey) === session) this.#sessions.delete(session.sessionKey);
+		}
+		const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
+		for (const result of started) {
+			if (result.status !== "fulfilled") continue;
+			const session = result.value;
+			if (this.#sessions.get(session.sessionKey) === session) this.#sessions.delete(session.sessionKey);
+			toShutdown.push(session);
+		}
+		const results = await Promise.allSettled(toShutdown.map(session => session.kernel.shutdown()));
+		for (let i = 0; i < toShutdown.length; i += 1) {
+			const session = toShutdown[i];
+			const result = results[i];
+			if (result.status === "fulfilled" && result.value?.confirmed !== false) {
+				session.ownerIds.delete(ownerId);
+				continue;
+			}
+			const reason = result.status === "rejected" ? result.reason : "not confirmed";
+			logger.warn(`${this.languageLabel} kernel shutdown not confirmed`, {
+				sessionId: session.sessionId,
+				sessionKey: session.sessionKey,
+				cwd: session.cwd,
+				reason,
+			});
+			if (!this.#sessions.has(session.sessionKey)) this.#sessions.set(session.sessionKey, session);
+		}
+	}
+
+	async #acquireSession(
+		sessionKey: string,
+		sessionId: string,
+		cwd: string,
+		options: TOptions,
+	): Promise<RegistrySession<TKernel>> {
+		const existing = this.#sessions.get(sessionKey);
+		if (existing) {
+			attachSessionOwner(existing, sessionId, options.kernelOwnerId);
+			return existing;
+		}
+		const starting = this.#startingSessions.get(sessionKey);
+		if (starting) {
+			attachSessionOwner(starting, sessionId, options.kernelOwnerId);
+			return await this.waitForStartingSession(starting.promise, options);
+		}
+		let startingSession: StartingRegistrySession<TKernel> | undefined;
+		const startup = (async () => {
+			const kernel = await this.startKernel(cwd, options);
+			const current = startingSession;
+			if (!current) throw new this.cancelledErrorClass(false);
+			const session: RegistrySession<TKernel> = {
+				sessionKey,
+				sessionId,
+				cwd,
+				kernel,
+				ownerIds: new Set(current.ownerIds),
+				hasFallbackOwner: current.hasFallbackOwner,
+			};
+			if (this.#startingSessions.get(sessionKey) === current) {
+				this.#sessions.set(sessionKey, session);
+			} else {
+				await session.kernel.shutdown().catch(() => undefined);
+				throw new this.cancelledErrorClass(false);
+			}
+			return session;
+		})();
+		startingSession = {
+			ownerIds: new Set(),
+			hasFallbackOwner: false,
+			promise: startup,
+		};
+		attachSessionOwner(startingSession, sessionId, options.kernelOwnerId);
+		this.#startingSessions.set(sessionKey, startingSession);
+		try {
+			return await this.waitForStartingSession(startup, options);
+		} finally {
+			if (this.#startingSessions.get(sessionKey) === startingSession) this.#startingSessions.delete(sessionKey);
+		}
+	}
+
+	async #replaceSessionKernel(session: RegistrySession<TKernel>, cwd: string, options: TOptions): Promise<void> {
+		this.beforeKernelReplacement(session);
+		const old = session.kernel;
+		const remaining = getRemainingTimeoutMs(options.deadlineMs);
+		await old
+			.shutdown(remaining !== undefined ? { timeoutMs: Math.max(0, remaining) } : undefined)
+			.catch(() => undefined);
+		if (this.#sessions.get(session.sessionKey) !== session) {
+			throw new this.cancelledErrorClass(false);
+		}
+		this.#requireRemainingTimeoutMs(options.deadlineMs);
+		const next = await this.startKernel(cwd, options);
+		if (this.#sessions.get(session.sessionKey) !== session) {
+			await next.shutdown().catch(() => undefined);
+			throw new this.cancelledErrorClass(false);
+		}
+		session.kernel = next;
+	}
+
+	async #resetSession(sessionKey: string): Promise<void> {
+		const existing =
+			this.#sessions.get(sessionKey) ??
+			(await this.#startingSessions.get(sessionKey)?.promise.catch(() => undefined));
+		if (!existing) return;
+		this.#sessions.delete(sessionKey);
+		const timeoutMs = this.resetShutdownTimeoutMs();
+		await existing.kernel.shutdown(timeoutMs !== undefined ? { timeoutMs } : undefined).catch(() => undefined);
+	}
+
+	#requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
+		const remainingMs = getRemainingTimeoutMs(deadlineMs);
+		if (remainingMs === undefined) return undefined;
+		if (remainingMs <= 0) {
+			throw new this.cancelledErrorClass(true);
+		}
+		return remainingMs;
 	}
 }
 

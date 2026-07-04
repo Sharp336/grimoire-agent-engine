@@ -1,7 +1,6 @@
 import * as path from "node:path";
 
-import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
-import type { ToolSession } from "../../tools";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
@@ -14,17 +13,10 @@ import {
 	KernelSessionRegistry,
 	waitForPromiseWithCancellation,
 } from "../executor-base";
-import type { JsStatusEvent } from "../js/shared/types";
-import { ensurePyToolBridge } from "../py/tool-bridge";
-import {
-	checkRubyKernelAvailability,
-	type KernelDisplayOutput,
-	type KernelExecuteOptions,
-	type KernelExecuteResult,
-	RubyKernel,
-} from "./kernel";
+import type { KernelDisplayOutput } from "../py/display";
+import { checkRustKernelAvailability, RustKernel, type RustKernelAvailability } from "./kernel";
 
-export interface RubyExecutorOptions {
+export interface RustExecutorOptions {
 	/** Working directory for command execution */
 	cwd?: string;
 	/** Timeout in milliseconds */
@@ -44,7 +36,7 @@ export interface RubyExecutorOptions {
 	sessionId?: string;
 	/** Logical owner identifier for retained kernel cleanup */
 	kernelOwnerId?: string;
-	/** Explicit interpreter path (`ruby.interpreter`). Skips discovery when set. */
+	/** Explicit interpreter path (`rust.interpreter`). Skips discovery when set. */
 	interpreter?: string;
 	/** Restart the kernel before executing */
 	reset?: boolean;
@@ -61,26 +53,11 @@ export interface RubyExecutorOptions {
 	 * `PI_EVAL_LOCAL_ROOTS` (JSON).
 	 */
 	localRoots?: Record<string, string>;
-	/**
-	 * ToolSession used to resolve host-side `tool.<name>(args)` calls. When
-	 * omitted, the bridge env vars are not injected and `tool.foo(...)` raises.
-	 */
-	toolSession?: ToolSession;
-	/** Callback for status events emitted by tool bridge invocations. */
-	emitStatus?: (event: JsStatusEvent) => void;
-	/** Live status events streamed as they are emitted. */
-	onStatus?: (event: JsStatusEvent) => void;
-	/** @internal Bridge session id, set by `executeRuby` before delegating. */
-	bridgeSessionId?: string;
-	/** @internal Bridge endpoint info, set by `executeRuby` before delegating. */
-	bridge?: { url: string; token: string };
+	/** evcxr compile-cache size in MiB; 0 disables. Primed via `:cache` at kernel start. */
+	cacheMiB?: number;
 }
 
-export interface RubyKernelExecutor {
-	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
-}
-
-export interface RubyResult {
+export interface RustResult {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -102,7 +79,7 @@ function normalizeSessionCwd(cwd: string): string {
 // Cancellation plumbing
 // ---------------------------------------------------------------------------
 
-class RubyExecutionCancelledError extends Error {
+class RustExecutionCancelledError extends Error {
 	readonly timedOut: boolean;
 
 	constructor(timedOut: boolean) {
@@ -116,7 +93,7 @@ function requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 	const remainingMs = getRemainingTimeoutMs(deadlineMs);
 	if (remainingMs === undefined) return undefined;
 	if (remainingMs <= 0) {
-		throw new RubyExecutionCancelledError(true);
+		throw new RustExecutionCancelledError(true);
 	}
 	return remainingMs;
 }
@@ -140,7 +117,7 @@ function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKill
 	return `eval cell timed out after ${duration}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
 }
 
-function createCancelledRubyResult(timedOut: boolean, timeoutMs?: number): RubyResult {
+function createCancelledRustResult(timedOut: boolean, timeoutMs?: number): RustResult {
 	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
 	return createCancelledKernelResult(output);
 }
@@ -149,44 +126,59 @@ function createCancelledRubyResult(timedOut: boolean, timeoutMs?: number): RubyR
 // Kernel start helpers
 // ---------------------------------------------------------------------------
 
-async function startKernel(cwd: string, options: RubyExecutorOptions): Promise<RubyKernel> {
+async function startKernel(cwd: string, options: RustExecutorOptions): Promise<RustKernel> {
 	requireRemainingTimeoutMs(options.deadlineMs);
-	return await RubyKernel.start({
-		cwd,
-		env: buildManagedKernelEnv(options),
-		signal: options.signal,
-		deadlineMs: options.deadlineMs,
-		interpreter: options.interpreter,
-	});
+	try {
+		return await RustKernel.start({
+			cwd,
+			env: buildManagedKernelEnv(options),
+			signal: options.signal,
+			cacheMiB: options.cacheMiB,
+			deadlineMs: options.deadlineMs,
+			interpreter: options.interpreter,
+		});
+	} catch (err) {
+		// A caller deadline that expires DURING startup surfaces as a plain
+		// startup Error; convert it to a timed-out cancellation so executeRust's
+		// catch returns a cancelled result instead of throwing. The built-in
+		// STARTUP_TIMEOUT_MS failure (no caller deadline) stays a real error.
+		if (!isCancellationError(err, RustExecutionCancelledError)) {
+			const remaining = getRemainingTimeoutMs(options.deadlineMs);
+			if (remaining !== undefined && remaining <= 0) {
+				throw new RustExecutionCancelledError(true);
+			}
+		}
+		throw err;
+	}
 }
 
-class RubyRegistry extends KernelSessionRegistry<RubyKernel, RubyExecutorOptions, RubyResult> {
-	readonly languageLabel = "Ruby";
-	readonly cancelledErrorClass = RubyExecutionCancelledError;
+export class RustRegistry extends KernelSessionRegistry<RustKernel, RustExecutorOptions, RustResult> {
+	readonly languageLabel = "Rust";
+	readonly cancelledErrorClass = RustExecutionCancelledError;
 
-	async startKernel(cwd: string, options: RubyExecutorOptions): Promise<RubyKernel> {
+	buildSessionKey(sessionId: string, cwd: string, options: RustExecutorOptions): string {
+		// evcxr's process env is fixed at spawn with no per-cell reapplication channel,
+		// so managed env is part of kernel identity — a caller with a different session
+		// file/artifacts dir gets its own kernel instead of reusing one primed with stale PI_* values.
+		return `${super.buildSessionKey(sessionId, cwd, options)}\0${Bun.hash(JSON.stringify(buildManagedKernelEnvPatch(options))).toString(36)}`;
+	}
+
+	async startKernel(cwd: string, options: RustExecutorOptions): Promise<RustKernel> {
 		return await startKernel(cwd, options);
 	}
 
-	async runOnKernel(kernel: RubyKernel, code: string, options: RubyExecutorOptions): Promise<RubyResult> {
-		return await executeRubyWithKernel(kernel, code, options);
-	}
-
-	async beforeExecution(sessionId: string, options: RubyExecutorOptions): Promise<void> {
-		await ensureToolBridge(options);
-		if (options.bridge && !options.bridgeSessionId) {
-			options.bridgeSessionId = sessionId;
-		}
+	async runOnKernel(kernel: RustKernel, code: string, options: RustExecutorOptions): Promise<RustResult> {
+		return await executeRustWithKernel(kernel, code, options);
 	}
 }
 
-const registry = new RubyRegistry();
+const registry = new RustRegistry();
 
-export async function disposeAllRubyKernelSessions(): Promise<void> {
+export async function disposeAllRustKernelSessions(): Promise<void> {
 	await registry.disposeAll();
 }
 
-export async function disposeRubyKernelSessionsByOwner(ownerId: string): Promise<void> {
+export async function disposeRustKernelSessionsByOwner(ownerId: string): Promise<void> {
 	await registry.disposeByOwner(ownerId);
 }
 
@@ -194,58 +186,61 @@ export async function disposeRubyKernelSessionsByOwner(ownerId: string): Promise
 // Execution
 // ---------------------------------------------------------------------------
 
-async function executeWithKernel(
-	kernel: RubyKernelExecutor,
-	code: string,
-	options: RubyExecutorOptions | undefined,
-): Promise<RubyResult> {
-	return executeWithKernelBase<RubyExecutorOptions>({
-		kernel,
-		code,
-		options,
-		runIdPrefix: "rb",
-		errorLogLabel: "Ruby",
-		cancelledErrorClass: RubyExecutionCancelledError,
-		buildKernelEnvPatch: buildManagedKernelEnvPatch,
-		formatKernelTimeoutAnnotation,
-		formatTimeoutAnnotation,
-	});
+import type { RustKernelExecuteOptions, RustKernelExecuteResult } from "./kernel";
+
+export interface RustKernelExecutor {
+	execute(code: string, options: RustKernelExecuteOptions): Promise<RustKernelExecuteResult>;
+	readonly id: string;
 }
 
-async function ensureKernelAvailable(cwd: string, options: RubyExecutorOptions): Promise<void> {
-	const availability = await waitForPromiseWithCancellation(
-		checkRubyKernelAvailability(cwd, options.interpreter),
+const kernelLocks = new WeakSet<RustKernelExecutor>();
+
+export async function executeRustWithKernel(
+	kernel: RustKernelExecutor,
+	code: string,
+	options: RustExecutorOptions | undefined,
+): Promise<RustResult> {
+	if (options?.signal?.aborted) {
+		return createCancelledRustResult(
+			isTimedOutCancellation(options.signal.reason, RustExecutionCancelledError, options.signal),
+		);
+	}
+	if (kernelLocks.has(kernel)) {
+		throw new Error("concurrent execution on the same Rust kernel is not allowed");
+	}
+	kernelLocks.add(kernel);
+	try {
+		return await executeWithKernelBase<RustExecutorOptions>({
+			kernel,
+			code,
+			options,
+			runIdPrefix: "rs",
+			errorLogLabel: "Rust",
+			cancelledErrorClass: RustExecutionCancelledError,
+			buildKernelEnvPatch: buildManagedKernelEnvPatch,
+			formatKernelTimeoutAnnotation,
+			formatTimeoutAnnotation,
+		});
+	} finally {
+		kernelLocks.delete(kernel);
+	}
+}
+
+async function ensureKernelAvailable(cwd: string, options: RustExecutorOptions): Promise<void> {
+	const availability: RustKernelAvailability = await waitForPromiseWithCancellation(
+		checkRustKernelAvailability(cwd, options.interpreter),
 		options,
-		RubyExecutionCancelledError,
+		RustExecutionCancelledError,
 	);
 	if (!availability.ok) {
-		throw new Error(availability.reason ?? "Ruby kernel unavailable");
+		throw new Error(availability.reason ?? "Rust kernel unavailable");
 	}
 }
 
-async function ensureToolBridge(options: RubyExecutorOptions): Promise<void> {
-	if (!options.toolSession || options.bridge) return;
-	try {
-		options.bridge = await ensurePyToolBridge();
-	} catch (err) {
-		logger.warn("Failed to start Ruby tool bridge", {
-			error: err instanceof Error ? err.message : String(err),
-		});
-	}
-}
-
-export async function executeRubyWithKernel(
-	kernel: RubyKernelExecutor,
-	code: string,
-	options?: RubyExecutorOptions,
-): Promise<RubyResult> {
-	return await executeWithKernel(kernel, code, options);
-}
-
-export async function executeRuby(code: string, options?: RubyExecutorOptions): Promise<RubyResult> {
+export async function executeRust(code: string, options?: RustExecutorOptions): Promise<RustResult> {
 	const cwd = normalizeSessionCwd(options?.cwd ?? getProjectDir());
 	const deadlineMs = getExecutionDeadlineMs(options);
-	const executionOptions: RubyExecutorOptions = {
+	const executionOptions: RustExecutorOptions = {
 		...(options ?? {}),
 		cwd,
 		deadlineMs,
@@ -254,10 +249,10 @@ export async function executeRuby(code: string, options?: RubyExecutorOptions): 
 	try {
 		requireRemainingTimeoutMs(deadlineMs);
 		if (executionOptions.signal?.aborted) {
-			throw new RubyExecutionCancelledError(
+			throw new RustExecutionCancelledError(
 				isTimedOutCancellation(
 					executionOptions.signal.reason,
-					RubyExecutionCancelledError,
+					RustExecutionCancelledError,
 					executionOptions.signal,
 				),
 			);
@@ -265,9 +260,9 @@ export async function executeRuby(code: string, options?: RubyExecutorOptions): 
 		await ensureKernelAvailable(cwd, executionOptions);
 		return await registry.executeOnSession(code, executionOptions);
 	} catch (err) {
-		if (isCancellationError(err, RubyExecutionCancelledError) || executionOptions.signal?.aborted) {
-			return createCancelledRubyResult(
-				isTimedOutCancellation(err, RubyExecutionCancelledError, executionOptions.signal),
+		if (isCancellationError(err, RustExecutionCancelledError) || executionOptions.signal?.aborted) {
+			return createCancelledRustResult(
+				isTimedOutCancellation(err, RustExecutionCancelledError, executionOptions.signal),
 			);
 		}
 		throw err;

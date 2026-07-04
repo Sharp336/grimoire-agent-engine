@@ -190,6 +190,7 @@ import {
 	type PythonResult,
 } from "../eval/py/executor";
 import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
+import { disposeRustKernelSessionsByOwner } from "../eval/rs/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
@@ -5579,6 +5580,7 @@ export class AgentSession {
 		}
 		await disposeKernelSessionsByOwner(this.#evalKernelOwnerId);
 		await disposeRubyKernelSessionsByOwner(this.#evalKernelOwnerId);
+		await disposeRustKernelSessionsByOwner(this.#evalKernelOwnerId);
 		await disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId);
 		// Release headless / spawned Chromium and worker tabs this session
 		// opened via the browser tool. The tool's `tabs`/`browsers` maps are

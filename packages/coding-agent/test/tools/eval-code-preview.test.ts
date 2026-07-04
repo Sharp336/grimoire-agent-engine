@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
-import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	theme as currentTheme,
+	getThemeByName,
+	setThemeInstance,
+	type Theme,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
@@ -14,6 +19,7 @@ import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils"
  */
 describe("eval renderer: viewport tail window for cell code", () => {
 	let theme: Theme;
+	let priorTheme: Theme;
 	const total = previewWindowRows() + 5;
 	const code = Array.from({ length: total }, (_, i) => `value_${i} = ${i}`).join("\n");
 	const firstLine = "value_0 = 0";
@@ -22,12 +28,14 @@ describe("eval renderer: viewport tail window for cell code", () => {
 	beforeAll(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		priorTheme = currentTheme;
 		theme = (await getThemeByName("dark"))!;
 		expect(theme).toBeDefined();
 		setThemeInstance(theme);
 	});
 
 	afterAll(() => {
+		setThemeInstance(priorTheme);
 		resetSettingsForTest();
 	});
 
@@ -70,5 +78,16 @@ describe("eval renderer: viewport tail window for cell code", () => {
 		expect(rendered).toContain(lastLine);
 		expect(rendered).toContain("earlier line");
 		expect(rendered).not.toContain(firstLine);
+	});
+
+	it("renders rs code correctly in the pending preview", () => {
+		const component = evalToolRenderer.renderCall(
+			{ language: "rs", code: "let answer: i32 = 42;" },
+			{ expanded: false, isPartial: true },
+			theme,
+		);
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendered).toContain("let answer: i32 = 42;");
+		expect(rendered).toContain("🦀");
 	});
 });

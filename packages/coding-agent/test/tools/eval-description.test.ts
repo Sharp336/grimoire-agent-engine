@@ -63,7 +63,7 @@ describe("eval tool description", () => {
 describe("eval tool dynamic schema", () => {
 	// resolveEvalBackends lets PI_* env flags override settings; neutralize them per-test
 	// so the schema is driven purely by the isolated settings (and restore to avoid leaks).
-	const EVAL_ENV_FLAGS = ["PI_PY", "PI_JS", "PI_RB", "PI_JL"] as const;
+	const EVAL_ENV_FLAGS = ["PI_PY", "PI_JS", "PI_RB", "PI_JL", "PI_RS"] as const;
 	let savedEnv: Record<string, string | undefined>;
 	beforeEach(() => {
 		savedEnv = {};
@@ -80,37 +80,41 @@ describe("eval tool dynamic schema", () => {
 		}
 	});
 
-	it("hides rb/jl from the wire schema, summary, description, and examples by default", () => {
+	it("hides rb/jl/rs from the wire schema, summary, description, and examples by default", () => {
 		const tool = new EvalTool(makeSession({}));
 		const fields = wireCellFields(tool);
-		// Default config: rb/jl off → the wire schema is byte-identical to the pre-feature py/js one.
+		// Default config: rb/jl/rs off → the wire schema is byte-identical to the pre-feature py/js one.
 		expect(fields.languages).toEqual(["js", "py"]);
 		expect(fields.languageDescription).toBe('runtime: "py" for the IPython kernel, "js" for the persistent JS VM');
 		expect(fields.codeDescription).toBe("code to run in this eval call, verbatim. Use top-level await freely.");
 		expect(tool.summary).toBe("Execute Python or JavaScript code in an in-process eval backend");
-		expect(tool.description).not.toMatch(/ruby|julia/i);
+		expect(tool.description).not.toMatch(/ruby|julia|rust/i);
 		// Examples must not advertise a disabled backend.
 		const exampleLangs = tool.examples.map(ex => ("call" in ex ? ex.call.language : null));
 		expect(exampleLangs).toEqual(["py", "py", "py"]);
 		expect(tool.examples.some(ex => "call" in ex && ex.call.language === "rb")).toBe(false);
+		expect(tool.examples.some(ex => "call" in ex && ex.call.language === "rs")).toBe(false);
 	});
 
-	it("advertises rb/jl across enum, descriptions, summary, and prelude once enabled", () => {
-		const tool = new EvalTool(makeSession({ backends: { "eval.rb": true, "eval.jl": true } }));
+	it("advertises rb/jl/rs across enum, descriptions, summary, and prelude once enabled", () => {
+		const tool = new EvalTool(makeSession({ backends: { "eval.rb": true, "eval.jl": true, "eval.rs": true } }));
 		const fields = wireCellFields(tool);
-		expect(fields.languages).toEqual(["jl", "js", "py", "rb"]);
+		expect(fields.languages).toEqual(["jl", "js", "py", "rb", "rs"]);
 		expect(fields.languageDescription).toBe(
-			'runtime: "py" for the IPython kernel, "js" for the persistent JS VM, "rb" for the persistent Ruby kernel, "jl" for the persistent Julia kernel',
+			'runtime: "py" for the IPython kernel, "js" for the persistent JS VM, "rb" for the persistent Ruby kernel, "jl" for the persistent Julia kernel, "rs" for the persistent Rust REPL kernel',
 		);
 		expect(fields.codeDescription).toContain(
-			"code to run in this eval call, verbatim. Top-level `await` is available in py/js; rb/jl auto-display the last expression like a REPL.",
+			"code to run in this eval call, verbatim. Top-level `await` is available in py/js; rb/jl/rs auto-display the last expression like a REPL.",
 		);
-		expect(tool.summary).toBe("Execute Python, JavaScript, Ruby, or Julia code in a persistent eval backend");
+		expect(tool.summary).toBe("Execute Python, JavaScript, Ruby, Julia, or Rust code in a persistent eval backend");
 		expect(tool.description).toMatch(/ruby/i);
 		expect(tool.description).toMatch(/julia/i);
-		// Ruby examples appear once rb is enabled.
+		expect(tool.description).toMatch(/rust/i);
+		// Ruby and Rust examples appear once enabled.
 		const rbExampleLangs = tool.examples.filter(ex => "call" in ex && ex.call.language === "rb");
 		expect(rbExampleLangs.length).toBe(2);
+		const rsExampleLangs = tool.examples.filter(ex => "call" in ex && ex.call.language === "rs");
+		expect(rsExampleLangs.length).toBe(2);
 	});
 
 	it("advertises only the enabled subset of optional backends", () => {
@@ -120,5 +124,21 @@ describe("eval tool dynamic schema", () => {
 		expect(tool.summary).toBe("Execute Python, JavaScript, or Ruby code in a persistent eval backend");
 		expect(tool.description).toMatch(/ruby/i);
 		expect(tool.description).not.toMatch(/julia/i);
+	});
+
+	it("advertises only the Rust subset of optional backends", () => {
+		const tool = new EvalTool(makeSession({ backends: { "eval.rs": true } }));
+		const fields = wireCellFields(tool);
+		expect(fields.languages).toEqual(["js", "py", "rs"]);
+		expect(tool.summary).toBe("Execute Python, JavaScript, or Rust code in a persistent eval backend");
+		expect(tool.description).toMatch(/rust/i);
+		expect(tool.description).not.toMatch(/ruby|julia/i);
+	});
+
+	it("omits host workflow helpers from the description when Rust is the only backend", () => {
+		const desc = getEvalToolDescription({ py: false, js: false, rb: false, jl: false, rs: true, spawns: true });
+		expect(desc).not.toContain("<prelude>");
+		expect(desc).not.toContain("<dag>");
+		expect(desc).not.toContain("parallel(thunks)");
 	});
 });
