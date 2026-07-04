@@ -882,7 +882,7 @@ fn search_dir<W: Write>(
 		Ok(walk) => walk,
 		Err(err) => {
 			if !opts.no_messages {
-				let _ = writeln!(pi_uutils_ctx::stderr(), "{err}");
+				let _ = writeln!(pi_uutils_ctx::stderr(), "rg: {err}");
 			}
 			return SearchOutcome { any_match: false, had_error: true };
 		},
