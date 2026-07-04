@@ -58,14 +58,12 @@ export interface JuliaResult {
 	stdinRequested: boolean;
 }
 
-
 class JuliaExecutionCancelledError extends Error {
 	constructor(readonly timedOut: boolean) {
 		super(timedOut ? "Julia execution timed out" : "Julia execution cancelled");
 		this.name = "JuliaExecutionCancelledError";
 	}
 }
-
 
 function normalizeSessionCwd(cwd: string): string {
 	return path.resolve(cwd);
@@ -239,54 +237,54 @@ async function startKernel(cwd: string, options: JuliaExecutorOptions): Promise<
 }
 
 class JuliaRegistry extends KernelSessionRegistry<JuliaKernel, JuliaExecutorOptions, JuliaResult> {
-	protected readonly languageLabel = "Julia";
-	protected readonly cancelledErrorClass = JuliaExecutionCancelledError;
+	readonly languageLabel = "Julia";
+	readonly cancelledErrorClass = JuliaExecutionCancelledError;
 
-	protected buildSessionKey(sessionId: string, cwd: string, options: JuliaExecutorOptions): string {
+	buildSessionKey(sessionId: string, cwd: string, options: JuliaExecutorOptions): string {
 		return buildSessionKey(sessionId, cwd, options.interpreter);
 	}
 
-	protected resetShutdownTimeoutMs(): number {
+	resetShutdownTimeoutMs(): number {
 		return SHUTDOWN_GRACE_MS;
 	}
 
-	protected beforeKernelReplacement(session: RegistrySession<JuliaKernel>): void {
+	beforeKernelReplacement(session: RegistrySession<JuliaKernel>): void {
 		logger.warn("Julia subprocess died or is unresponsive; spawning fresh process", {
 			sessionKey: session.sessionKey,
 		});
 	}
 
-	protected async beforeExecution(sessionId: string, options: JuliaExecutorOptions): Promise<void> {
+	async beforeExecution(sessionId: string, options: JuliaExecutorOptions): Promise<void> {
 		await ensureToolBridge(options);
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
 	}
 
-	protected clearResettingOnDisposeAll(): boolean {
+	clearResettingOnDisposeAll(): boolean {
 		return true;
 	}
 
-	protected isSessionCancellationError(error: unknown): boolean {
+	isSessionCancellationError(error: unknown): boolean {
 		return isCancellationError(error);
 	}
 
-	protected isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
+	isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
 		return isTimedOutCancellation(error, signal);
 	}
 
-	protected async waitForStartingSession(
+	async waitForStartingSession(
 		promise: Promise<RegistrySession<JuliaKernel>>,
 		options: JuliaExecutorOptions,
 	): Promise<RegistrySession<JuliaKernel>> {
 		return await waitForPromiseWithCancellation(promise, options);
 	}
 
-	protected async startKernel(cwd: string, options: JuliaExecutorOptions): Promise<JuliaKernel> {
+	async startKernel(cwd: string, options: JuliaExecutorOptions): Promise<JuliaKernel> {
 		return await startKernel(cwd, options);
 	}
 
-	protected async runOnKernel(kernel: JuliaKernel, code: string, options: JuliaExecutorOptions): Promise<JuliaResult> {
+	async runOnKernel(kernel: JuliaKernel, code: string, options: JuliaExecutorOptions): Promise<JuliaResult> {
 		return await executeJuliaWithKernel(kernel, code, options);
 	}
 }
@@ -341,7 +339,6 @@ async function ensureToolBridge(options: JuliaExecutorOptions): Promise<void> {
 		});
 	}
 }
-
 
 export async function executeJuliaWithKernel(
 	kernel: JuliaKernel,

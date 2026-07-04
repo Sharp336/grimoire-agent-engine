@@ -161,18 +161,18 @@ async function startKernel(cwd: string, options: RubyExecutorOptions): Promise<R
 }
 
 class RubyRegistry extends KernelSessionRegistry<RubyKernel, RubyExecutorOptions, RubyResult> {
-	protected readonly languageLabel = "Ruby";
-	protected readonly cancelledErrorClass = RubyExecutionCancelledError;
+	readonly languageLabel = "Ruby";
+	readonly cancelledErrorClass = RubyExecutionCancelledError;
 
-	protected async startKernel(cwd: string, options: RubyExecutorOptions): Promise<RubyKernel> {
+	async startKernel(cwd: string, options: RubyExecutorOptions): Promise<RubyKernel> {
 		return await startKernel(cwd, options);
 	}
 
-	protected async runOnKernel(kernel: RubyKernel, code: string, options: RubyExecutorOptions): Promise<RubyResult> {
+	async runOnKernel(kernel: RubyKernel, code: string, options: RubyExecutorOptions): Promise<RubyResult> {
 		return await executeRubyWithKernel(kernel, code, options);
 	}
 
-	protected async beforeExecution(sessionId: string, options: RubyExecutorOptions): Promise<void> {
+	async beforeExecution(sessionId: string, options: RubyExecutorOptions): Promise<void> {
 		await ensureToolBridge(options);
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
@@ -233,7 +233,6 @@ async function ensureToolBridge(options: RubyExecutorOptions): Promise<void> {
 		});
 	}
 }
-
 
 export async function executeRubyWithKernel(
 	kernel: RubyKernelExecutor,
