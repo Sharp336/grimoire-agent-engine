@@ -62,6 +62,8 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Security"] }
 winreg.workspace = true
+[dev-dependencies]
+pi-grep-testkit = { path = "../pi-grep-testkit" }
 
 [build-dependencies]
 napi-build.workspace = true
