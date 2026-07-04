@@ -64,7 +64,9 @@ export interface EphemeralPsHostLease {
 	dispose(): Promise<void>;
 }
 
-async function spawnHost(options: SpawnPsHostOptions): Promise<PsHost> {
+type PsHostSpawner = (options: SpawnPsHostOptions) => Promise<PsHost>;
+
+const spawnRealHost: PsHostSpawner = async options => {
 	const host = new PsHost({
 		parentPid: process.pid,
 		shellPath: options.shellPath,
@@ -78,6 +80,17 @@ async function spawnHost(options: SpawnPsHostOptions): Promise<PsHost> {
 		throw err;
 	}
 	return host;
+};
+
+let spawnHost: PsHostSpawner = spawnRealHost;
+
+/**
+ * Test seam: replace the spawner so pool bookkeeping (single-flight, idle
+ * eviction, dispose-all) can be exercised with fake hosts and no real pwsh
+ * processes. Pass `null` to restore the real spawner.
+ */
+export function setPsHostSpawnerForTests(spawner: PsHostSpawner | null): void {
+	spawnHost = spawner ?? spawnRealHost;
 }
 
 /** Get the session's warm host, spawning and starting one on first use. */

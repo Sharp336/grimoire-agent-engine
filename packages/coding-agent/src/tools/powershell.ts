@@ -4,7 +4,7 @@ import type { PsHost } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $which, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import type { Theme } from "../modes/theme/theme";
+import { highlightCode, type Theme } from "../modes/theme/theme";
 import powershellDescription from "../prompts/tools/powershell.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
@@ -243,10 +243,11 @@ interface PowerShellRenderContext {
 }
 
 function formatPowerShellCommandLines(command: string, uiTheme: Theme): string[] {
-	const sanitized = replaceTabs(command);
-	const rawLines = sanitized.length > 0 ? sanitized.split("\n") : ["…"];
+	const sanitized = replaceTabs(command || "…");
 	const prefix = uiTheme.fg("dim", "PS> ");
-	return rawLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
+	const highlightedLines = highlightCode(sanitized, "powershell");
+	if (highlightedLines.length === 0) return [prefix.trimEnd()];
+	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
 
 export const powershellToolRenderer = {
@@ -292,10 +293,38 @@ export const powershellToolRenderer = {
 		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
 		const outputBlock = new CachedOutputBlock();
 
+		const output = stripOutputNotice(textContent, details?.meta).trimEnd();
+
+		// Per-instance cache for the inner-lines computation, mirroring bash.ts
+		// (issue #2081): without it every TUI repaint re-runs split/replaceTabs/
+		// styling over the full stored output for every row in scrollback. Keyed
+		// by the inputs that change the produced lines; width is not one of them
+		// (wrapping happens inside the output block, which caches per width).
+		let cachedExpanded: boolean | undefined;
+		let cachedVisual: readonly string[] | undefined;
+		let cachedLines: string[] | undefined;
+
+		const renderFrame = (width: number, expanded: boolean | undefined, outputLines: string[]): readonly string[] =>
+			outputBlock.render(
+				{
+					header,
+					state,
+					sections: [
+						{ lines: capPreviewLines(cmdLines, uiTheme, { expanded }) },
+						{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },
+					],
+					width,
+				},
+				uiTheme,
+			);
+
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
 				const { expanded, renderContext } = options;
-				const output = stripOutputNotice(textContent, details?.meta).trimEnd();
+				const visual = renderContext?.visualLines;
+				if (cachedLines && cachedExpanded === expanded && cachedVisual === visual) {
+					return renderFrame(width, expanded, cachedLines);
+				}
 				const outputLines: string[] = [];
 
 				if (output) {
@@ -335,18 +364,10 @@ export const powershellToolRenderer = {
 					if (warning) outputLines.push(warning);
 				}
 
-				return outputBlock.render(
-					{
-						header,
-						state,
-						sections: [
-							{ lines: capPreviewLines(cmdLines, uiTheme, { expanded }) },
-							{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },
-						],
-						width,
-					},
-					uiTheme,
-				);
+				cachedExpanded = expanded;
+				cachedVisual = visual;
+				cachedLines = outputLines;
+				return renderFrame(width, expanded, outputLines);
 			},
 			invalidate: () => {
 				outputBlock.invalidate();

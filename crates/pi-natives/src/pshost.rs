@@ -875,6 +875,68 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	async fn maps_signal_abort_distinct_from_timeout() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// External abort (AbortReason::Signal) with no timeout configured: the
+		// result must attribute the stop to cancellation, not the timeout arm.
+		// (emplace_abort_token: a default token has no abort flag to hook.)
+		let mut cancel = task::CancelToken::default();
+		let aborter = cancel.emplace_abort_token();
+		let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel::<String>();
+		let exec_fut = host
+			.core
+			.exec("Start-Sleep -Seconds 30".to_string(), None, None, 200, cancel, chunk_tx);
+		let abort_fut = async {
+			tokio::time::sleep(Duration::from_millis(400)).await;
+			aborter.abort(task::AbortReason::Signal);
+		};
+		let (res, ()) = tokio::join!(exec_fut, abort_fut);
+		let res = res.expect("aborted exec still resolves");
+		assert!(res.cancelled, "signal abort maps to cancelled");
+		assert!(!res.timed_out, "signal abort is not attributed to timeout");
+
+		// Only the pipeline was stopped; the runspace survives.
+		let (out, _) = run_cmd(&host, "'alive'", task::CancelToken::default()).await;
+		assert_eq!(out, "alive", "runspace survives a signal abort");
+
+		host.dispose().await.expect("host disposes");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn surfaces_host_death_mid_exec_as_error() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Kill the sidecar from inside the exec: the awaiting run must reject
+		// promptly instead of hanging until an outer timeout.
+		let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel::<String>();
+		let res = host
+			.core
+			.exec(
+				"[Environment]::Exit(3)".to_string(),
+				None,
+				None,
+				200,
+				task::CancelToken::default(),
+				chunk_tx,
+			)
+			.await;
+		assert!(res.is_err(), "host death mid-exec surfaces as an error");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
 	async fn surfaces_warning_host_and_verbose_streams() {
 		if !pwsh_available() {
 			eprintln!("skipping pshost test: pwsh not found on PATH");

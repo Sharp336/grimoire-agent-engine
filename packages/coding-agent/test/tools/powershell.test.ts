@@ -2,8 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { $which } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
+import { getThemeByName } from "../../src/modes/theme/theme";
 import type { ToolSession } from "../../src/tools";
-import { loadPowerShellTool, type PowerShellToolDetails } from "../../src/tools/powershell";
+import { loadPowerShellTool, type PowerShellToolDetails, powershellToolRenderer } from "../../src/tools/powershell";
 import { acquirePsHost, disposeAllPsHosts } from "../../src/tools/pshost-manager";
 
 const hasPwsh = Boolean(await $which("pwsh"));
@@ -133,4 +134,46 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(warn)).toContain("WARNING: heads-up");
 		expect(warn.isError ?? false).toBe(false);
 	});
+});
+
+// Ungated: these need neither pwsh nor a live host.
+
+test("loadPowerShellTool returns null when no shell resolves", async () => {
+	// The stub returns a bogus shellPath for every settings key the loader
+	// reads, so $which cannot resolve it and the tool must stay unregistered.
+	const stubSettings = { get: () => "omp-no-such-shell-zzz-12345" };
+	const session = { cwd: process.cwd(), settings: stubSettings } as unknown as ToolSession;
+	expect(await loadPowerShellTool(session)).toBeNull();
+});
+
+test("renderer tags non-default host modes and renders the output", async () => {
+	const theme = await getThemeByName("dark");
+	expect(theme).toBeDefined();
+	if (!theme) return;
+
+	const component = powershellToolRenderer.renderResult(
+		{
+			content: [{ type: "text", text: "boom" }],
+			isError: true,
+			details: { host: "ephemeral" } as PowerShellToolDetails,
+		},
+		{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
+		theme,
+		{ command: "cmd /c exit 5", host: "ephemeral" },
+	);
+	const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+	const plain = stripAnsi(component.render(80).join("\n"));
+	expect(plain).toContain("PowerShell · ephemeral");
+	expect(plain).toContain("boom");
+
+	// Default session mode carries no tag.
+	const sessionComponent = powershellToolRenderer.renderResult(
+		{ content: [{ type: "text", text: "ok" }], details: { host: "session" } as PowerShellToolDetails },
+		{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
+		theme,
+		{ command: "'ok'" },
+	);
+	const sessionPlain = stripAnsi(sessionComponent.render(80).join("\n"));
+	expect(sessionPlain).toContain("PowerShell");
+	expect(sessionPlain).not.toContain("PowerShell ·");
 });
