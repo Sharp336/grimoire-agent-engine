@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { PsHost } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $which, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -18,7 +19,7 @@ import {
 	stripOutputNotice,
 } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { acquirePsHost } from "./pshost-manager";
+import { acquirePsHost, disposePsHostSession, spawnEphemeralPsHost } from "./pshost-manager";
 import { capPreviewLines, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -28,18 +29,49 @@ const powershellSchema = type({
 	command: type("string").describe("PowerShell command to run in the persistent session"),
 	"cwd?": type("string").describe("working directory for this command"),
 	"timeout?": type("number").describe("timeout in seconds"),
+	"host?": type('"session" | "ephemeral" | "new-session"').describe(
+		'which host runs the command: "session" (default) the persistent session host; "ephemeral" a throwaway host fully terminated before the result returns; "new-session" discard the session host and run in a fresh replacement',
+	),
 });
 
 type PowerShellToolParams = typeof powershellSchema.infer;
 
+export type PowerShellHostMode = "session" | "ephemeral" | "new-session";
+
 export interface PowerShellToolDetails {
 	meta?: OutputMeta;
-	/** PID of the backing pwsh host (attach with `Enter-PSHostProcess -Id`). */
+	/** Which host ran the command. */
+	host?: PowerShellHostMode;
+	/**
+	 * PID of the backing pwsh host (attach with `Enter-PSHostProcess -Id`).
+	 * For ephemeral runs the process has already exited; the PID is only a
+	 * historical record for log correlation.
+	 */
 	pid?: number;
 	/** Monotonic execution id within the host. */
 	execId?: number;
 	exitCode?: number;
 	hadErrors?: boolean;
+}
+
+/**
+ * Pool key for the session host. Sessions without an explicit id must not
+ * collapse onto one shared key: "new-session" would otherwise replace another
+ * session's host, and runspace state would leak across sessions.
+ */
+const FALLBACK_POOL_KEYS = new WeakMap<ToolSession, string>();
+let fallbackPoolKeySeq = 0;
+
+function psHostPoolKey(session: ToolSession): string {
+	const explicit = session.getSessionId?.();
+	if (explicit) return explicit;
+	let key = FALLBACK_POOL_KEYS.get(session);
+	if (!key) {
+		fallbackPoolKeySeq += 1;
+		key = `anon:${fallbackPoolKeySeq}`;
+		FALLBACK_POOL_KEYS.set(session, key);
+	}
+	return key;
 }
 
 export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerShellToolDetails> {
@@ -48,14 +80,19 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<PowerShellToolParams>;
 		const command = typeof params.command === "string" ? params.command : "(missing)";
-		return [`Command: ${truncateForPrompt(command)}`];
+		const lines = [`Command: ${truncateForPrompt(command)}`];
+		if (params.host && params.host !== "session") lines.push(`Host: ${params.host}`);
+		return lines;
 	};
 	readonly summary =
 		"Execute PowerShell in a persistent host whose session state (variables, modules, last result objects) is retained across calls";
 	readonly loadMode = "discoverable";
 	readonly label = "PowerShell";
 	readonly parameters = powershellSchema;
-	readonly concurrency = "exclusive";
+	/** Ephemeral runs share nothing (own process, own runspace, never pooled),
+	 * so they may run alongside other tools; session-host runs stay exclusive. */
+	readonly concurrency = (args: Partial<PowerShellToolParams>): "shared" | "exclusive" =>
+		args.host === "ephemeral" ? "shared" : "exclusive";
 	readonly strict = true;
 	readonly description: string;
 
@@ -65,7 +102,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 
 	async execute(
 		_toolCallId: string,
-		{ command, cwd, timeout: rawTimeout }: PowerShellToolParams,
+		{ command, cwd, timeout: rawTimeout, host: hostMode = "session" }: PowerShellToolParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<PowerShellToolDetails>,
 		_ctx?: AgentToolContext,
@@ -73,13 +110,36 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		const settings = this.session.settings;
 		const timeoutSec = clampTimeout("powershell", rawTimeout);
 
-		const host = await acquirePsHost({
-			sessionId: this.session.getSessionId?.() ?? "default",
+		const spawnOptions = {
 			cwd: this.session.cwd,
 			shellPath: settings.get("powershell.shellPath")?.trim() || undefined,
 			historyDepth: settings.get("powershell.historyDepth"),
-			idleTtlMs: settings.get("powershell.idleTtlMs"),
-		});
+		};
+
+		// Teardown is awaited before the result is built: for an ephemeral host,
+		// "the call returned" must mean "the process is gone" — loaded assemblies
+		// and file locks are state, and releasing them is the point of the mode.
+		let host: PsHost;
+		let teardown: () => void | Promise<void>;
+		if (hostMode === "ephemeral") {
+			const lease = await spawnEphemeralPsHost(spawnOptions);
+			host = lease.host;
+			teardown = lease.dispose;
+		} else {
+			const sessionKey = psHostPoolKey(this.session);
+			// new-session: fully kill the old host before spawning the replacement,
+			// so the poisoned runspace's locks are provably gone when the command
+			// runs. Spawn failure leaves the session hostless; the next call
+			// re-spawns lazily, exactly like a first call.
+			if (hostMode === "new-session") await disposePsHostSession(sessionKey);
+			const lease = await acquirePsHost({
+				...spawnOptions,
+				sessionId: sessionKey,
+				idleTtlMs: settings.get("powershell.idleTtlMs"),
+			});
+			host = lease.host;
+			teardown = lease.release;
+		}
 
 		const resolvedCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : undefined;
 		const width = settings.get("powershell.outputWidth");
@@ -94,10 +154,16 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			maxColumns: resolveOutputMaxColumns(settings),
 		});
 
-		const result = await host.run(
-			{ command, cwd: resolvedCwd, width, timeoutMs: timeoutSec * 1000, signal },
-			(_err, chunk) => sink.push(chunk),
-		);
+		const pid = host.pid;
+		let result: Awaited<ReturnType<PsHost["run"]>>;
+		try {
+			result = await host.run(
+				{ command, cwd: resolvedCwd, width, timeoutMs: timeoutSec * 1000, signal },
+				(_err, chunk) => sink.push(chunk),
+			);
+		} finally {
+			await teardown();
+		}
 		const summary = await sink.dump();
 		const outputText = summary.output || "(no output)";
 
@@ -113,7 +179,8 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		const failed = result.hadErrors || nonZeroExit;
 
 		const details: PowerShellToolDetails = {
-			pid: host.pid,
+			host: hostMode,
+			pid,
 			execId: result.execId,
 			exitCode,
 			hadErrors: result.hadErrors,
@@ -148,6 +215,13 @@ export async function loadPowerShellTool(session: ToolSession): Promise<PowerShe
 
 interface PowerShellRenderArgs {
 	command?: string;
+	host?: string;
+}
+
+/** Non-default host modes are tagged in the frame title so a reader can see
+ * why runspace state did (or did not) carry over. */
+function powershellTitle(args?: PowerShellRenderArgs): string {
+	return args?.host && args.host !== "session" ? `PowerShell · ${args.host}` : "PowerShell";
 }
 
 interface PowerShellRenderContext {
@@ -169,7 +243,7 @@ function formatPowerShellCommandLines(command: string, uiTheme: Theme): string[]
 export const powershellToolRenderer = {
 	renderCall(args: PowerShellRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const command = args.command ?? "";
-		const header = renderStatusLine({ icon: "pending", title: "PowerShell", description: "" }, uiTheme);
+		const header = renderStatusLine({ icon: "pending", title: powershellTitle(args), description: "" }, uiTheme);
 		const cmdLines = formatPowerShellCommandLines(command, uiTheme);
 		const outputBlock = new CachedOutputBlock();
 		return markFramedBlockComponent({
@@ -193,6 +267,7 @@ export const powershellToolRenderer = {
 		result: {
 			content: Array<{ type: string; text?: string }>;
 			details?: PowerShellToolDetails;
+			isError?: boolean;
 		},
 		options: RenderResultOptions & { renderContext?: PowerShellRenderContext },
 		uiTheme: Theme,
@@ -200,7 +275,10 @@ export const powershellToolRenderer = {
 	): Component {
 		const details = result.details;
 		const command = args?.command ?? "";
-		const header = renderStatusLine({ icon: "success", title: "PowerShell", description: "" }, uiTheme);
+		const isError = result.isError === true;
+		const isPartial = options.isPartial === true;
+		const state = isPartial ? ("pending" as const) : isError ? ("error" as const) : ("success" as const);
+		const header = renderStatusLine({ icon: state, title: powershellTitle(args), description: "" }, uiTheme);
 		const cmdLines = formatPowerShellCommandLines(command, uiTheme);
 		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
 		const outputBlock = new CachedOutputBlock();
@@ -248,7 +326,7 @@ export const powershellToolRenderer = {
 				return outputBlock.render(
 					{
 						header,
-						state: "success",
+						state,
 						sections: [
 							{ lines: capPreviewLines(cmdLines, uiTheme, { expanded }) },
 							{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },

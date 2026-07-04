@@ -121,6 +121,7 @@ function Start-Exec($req) {
     # pipeline's output (captured in $out). Exit code is read afterwards via the
     # session-state proxy — a direct API call, not another pipeline.
     $wrapped = @"
+`$global:__ompExit = `$null
 if (`$__ompCwd) {
     try { Set-Location -LiteralPath `$__ompCwd -ErrorAction Stop }
     catch { Write-Error "Set-Location failed: `$(`$_.Exception.Message)"; return }

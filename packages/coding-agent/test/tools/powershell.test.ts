@@ -43,7 +43,8 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(third).trim()).toBe("22");
 
 		// Non-zero native exit -> isError result (not thrown), output preserved.
-		const failed = await tool.execute("c4", { command: "cmd /c exit 5" });
+		const nativeFail = process.platform === "win32" ? "cmd /c exit 5" : "/bin/sh -c 'exit 5'";
+		const failed = await tool.execute("c4", { command: nativeFail });
 		expect(failed.isError).toBe(true);
 		expect(textOf(failed)).toContain("code 5");
 
@@ -58,6 +59,49 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(badCwd.isError).toBe(true);
 		expect(textOf(badCwd)).toContain("Set-Location failed");
 		expect(textOf(badCwd)).not.toContain("should not run");
+	});
+
+	test("host modes: ephemeral is isolated and disposed; new-session replaces the runspace", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-host-modes"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Ephemeral calls are independent processes -> shared concurrency; the
+		// session host stays exclusive.
+		expect(tool.concurrency({ host: "ephemeral" })).toBe("shared");
+		expect(tool.concurrency({})).toBe("exclusive");
+		expect(tool.concurrency({ host: "new-session" })).toBe("exclusive");
+
+		const seed = await tool.execute("m1", { command: "$y = 7; $y" });
+		expect(textOf(seed).trim()).toBe("7");
+		expect(seed.details?.host).toBe("session");
+		const sessionPid = seed.details?.pid;
+
+		// Ephemeral: fresh runspace, session state invisible, own process.
+		const eph = await tool.execute("m2", { command: "Test-Path variable:y", host: "ephemeral" });
+		expect(textOf(eph).trim()).toBe("False");
+		expect(eph.details?.host).toBe("ephemeral");
+		expect(eph.details?.pid).not.toBe(sessionPid);
+
+		// Awaited teardown: the ephemeral process is dead before the result returns.
+		expect(() => process.kill(eph.details?.pid as number, 0)).toThrow();
+
+		// The session host is untouched by the ephemeral call.
+		const still = await tool.execute("m3", { command: "$y" });
+		expect(textOf(still).trim()).toBe("7");
+		expect(still.details?.pid).toBe(sessionPid);
+
+		// new-session: old runspace state is gone and a new host takes over.
+		const fresh = await tool.execute("m4", { command: "Test-Path variable:y", host: "new-session" });
+		expect(textOf(fresh).trim()).toBe("False");
+		expect(fresh.details?.host).toBe("new-session");
+		const freshPid = fresh.details?.pid;
+		expect(freshPid).not.toBe(sessionPid);
+
+		// The replacement is the warm session host now: it persists.
+		const persisted = await tool.execute("m5", { command: "$z = 1; $z" });
+		expect(textOf(persisted).trim()).toBe("1");
+		expect(persisted.details?.pid).toBe(freshPid);
 	});
 
 	test("captures non-success streams (Write-Host, Write-Warning)", async () => {
