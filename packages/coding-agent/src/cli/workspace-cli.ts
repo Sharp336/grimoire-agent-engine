@@ -1,3 +1,9 @@
+import {
+	WorkspaceBindingRegistry,
+	type WorkspaceBinding,
+	type WorkspaceBindingPublication,
+} from "../session/workspace-binding";
+
 /**
  * Workspace CLI service.
  *
@@ -301,6 +307,121 @@ export function createWorkspaceCliService(options: CreateWorkspaceCliServiceOpti
 			};
 		},
 	};
+}
+
+export interface CreateDefaultWorkspaceCliServiceOptions {
+	registry?: WorkspaceBindingRegistry;
+	now?: () => string;
+}
+
+export function createDefaultWorkspaceCliService(
+	options: CreateDefaultWorkspaceCliServiceOptions = {},
+): WorkspaceCliService {
+	const registry = options.registry ?? new WorkspaceBindingRegistry();
+	return createWorkspaceCliService({
+		registry: new WorkspaceBindingRegistryStoreAdapter(registry),
+		publisher: new GitWorkspacePublisher(options.now),
+		now: options.now,
+	});
+}
+
+class WorkspaceBindingRegistryStoreAdapter implements WorkspaceRegistryStore {
+	constructor(private readonly registry: WorkspaceBindingRegistry) {}
+
+	async listWorkspaces(): Promise<WorkspaceRegistryRecord[]> {
+		const bindings = await this.registry.listBindings();
+		return Promise.all(bindings.map(binding => bindingToWorkspaceRecord(binding)));
+	}
+
+	async getWorkspace(id: string): Promise<WorkspaceRegistryRecord | undefined> {
+		const binding = await this.registry.lookupBySessionId(id);
+		return binding ? bindingToWorkspaceRecord(binding) : undefined;
+	}
+
+	async discardWorkspace(id: string): Promise<WorkspaceRegistryRecord | undefined> {
+		const binding = await this.registry.remove(id);
+		return binding ? bindingToWorkspaceRecord(binding) : undefined;
+	}
+
+	async markPublished(
+		id: string,
+		publication: WorkspaceBranchPublication,
+	): Promise<WorkspaceRegistryRecord | undefined> {
+		const binding = await this.registry.markPublished(id, publication);
+		return binding ? bindingToWorkspaceRecord(binding) : undefined;
+	}
+}
+
+class GitWorkspacePublisher implements WorkspacePublisher {
+	constructor(private readonly now: (() => string) | undefined) {}
+
+	async publishBranch(
+		workspaceRecord: WorkspaceRegistryRecord,
+		contract: WorkspacePublishContract,
+	): Promise<WorkspaceBranchPublication> {
+		if (contract.kind !== "branch") {
+			throw new Error(`unsupported publish contract kind: ${contract.kind}`);
+		}
+
+		await runGit(workspaceRecord.rootPath, ["branch", "--", contract.branchName, "HEAD"]);
+		const commitSha = await runGit(workspaceRecord.rootPath, ["rev-parse", "HEAD"]);
+		return {
+			kind: "branch",
+			branchName: contract.branchName,
+			commitSha,
+			publishedAt: this.now?.() ?? new Date().toISOString(),
+		};
+	}
+}
+
+async function bindingToWorkspaceRecord(binding: WorkspaceBinding): Promise<WorkspaceRegistryRecord> {
+	return {
+		id: binding.sessionId,
+		rootPath: binding.workspaceRoot,
+		ownerAgentId: binding.agentId ?? "Main",
+		ownerDisplayName: binding.agentId ?? "Main",
+		status: binding.status,
+		branchName: await currentBranchName(binding.workspaceRoot),
+		createdAt: binding.createdAt,
+		updatedAt: binding.lastSeenAt,
+		publication: binding.publication ? toWorkspacePublication(binding.publication) : undefined,
+	};
+}
+
+function toWorkspacePublication(publication: WorkspaceBindingPublication): WorkspaceBranchPublication {
+	return {
+		kind: "branch",
+		branchName: publication.branchName,
+		commitSha: publication.commitSha,
+		publishedAt: publication.publishedAt,
+	};
+}
+
+async function currentBranchName(workspaceRoot: string): Promise<string> {
+	try {
+		const branchName = await runGit(workspaceRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+		return branchName.length > 0 ? branchName : "(unknown)";
+	} catch {
+		return "(unknown)";
+	}
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		const detail = stderr.trim() || stdout.trim() || `git ${args.join(" ")} exited ${exitCode}`;
+		throw new Error(detail);
+	}
+	return stdout.trim();
 }
 
 export async function runWorkspaceCommand(

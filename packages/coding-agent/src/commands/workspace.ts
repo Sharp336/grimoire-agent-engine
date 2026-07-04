@@ -1,5 +1,7 @@
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import { runWorkspaceCommand } from "../cli/workspace-cli";
+import { createDefaultWorkspaceCliService, runWorkspaceCommand } from "../cli/workspace-cli";
+import { Settings } from "../config/settings";
 import type { WorkspaceAction, WorkspaceCommandArgs, WorkspaceStatus } from "../cli/workspace-cli";
 
 const ACTIONS: WorkspaceAction[] = ["list", "status", "discard", "cleanup", "publish"];
@@ -52,7 +54,8 @@ export default class Workspace extends Command {
 			contract: flags.branch ? { kind: "branch", branchName: flags.branch } : undefined,
 		};
 
-		await runWorkspaceCommand(cmd);
+		await Settings.init({ cwd: getProjectDir() });
+		await runWorkspaceCommand(cmd, { service: createDefaultWorkspaceCliService() });
 	}
 }
 

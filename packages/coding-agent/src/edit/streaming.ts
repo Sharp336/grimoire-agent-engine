@@ -248,10 +248,10 @@ function stripApplyPatchPathNoise(value: string): string {
 		.replace(/^\s*\*{3}\s*Move\s+to\s*:\s*/i, "");
 }
 
-/** Extract `*** Add/Update/Delete File:` paths from a (possibly partial) apply_patch envelope. */
+/** Extract touched paths from a (possibly partial) apply_patch envelope, including rename destinations. */
 function extractApplyPatchEnvelopePaths(input: string): string[] {
 	const paths: string[] = [];
-	const re = /^\s*\*{3}\s+(?:Add|Update|Delete)\s+File\s*:\s*(\S.*?)\s*$/gm;
+	const re = /^\s*\*{3}\s+(?:(?:Add|Update|Delete)\s+File|Move\s+to)\s*:\s*(\S.*?)\s*$/gim;
 	for (const match of input.matchAll(re)) {
 		const candidate = match[1].trim();
 		if (candidate.length > 0) paths.push(candidate);
@@ -417,7 +417,14 @@ const patchStrategy: EditStreamingStrategy<PatchArgs> = {
 		return digest;
 	},
 	matcherPaths(args) {
-		return typeof args?.path === "string" && args.path.length > 0 ? [args.path] : undefined;
+		const paths = typeof args?.path === "string" && args.path.length > 0 ? [args.path] : [];
+		const edits = args?.edits;
+		if (Array.isArray(edits)) {
+			for (const edit of edits) {
+				if (typeof edit?.rename === "string" && edit.rename.length > 0) paths.push(edit.rename);
+			}
+		}
+		return paths.length > 0 ? paths : undefined;
 	},
 	matcherEntries(args) {
 		const path = args?.path;

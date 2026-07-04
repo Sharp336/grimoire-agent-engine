@@ -12,6 +12,13 @@ const REGISTRY_FILE_PROPERTY = "__workspaceBindingRegistryFile";
 
 export type WorkspaceBindingKind = "main" | "sub" | string;
 export type WorkspaceBindingStatus = "running" | "parked" | "stopped" | "completed" | "failed" | string;
+export interface WorkspaceBindingPublication {
+	kind: "branch" | (string & {});
+	branchName: string;
+	commitSha: string;
+	publishedAt: string;
+}
+
 
 export interface WorkspaceBinding {
 	sessionId: string;
@@ -22,6 +29,7 @@ export interface WorkspaceBinding {
 	status: WorkspaceBindingStatus;
 	createdAt: string;
 	lastSeenAt: string;
+	publication?: WorkspaceBindingPublication;
 }
 
 export interface RegisterWorkspaceBindingInput {
@@ -87,6 +95,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+function readPublication(value: unknown): WorkspaceBindingPublication | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = readString(value, "kind");
+	const branchName = readString(value, "branchName");
+	const commitSha = readString(value, "commitSha");
+	const publishedAt = readString(value, "publishedAt");
+	if (!kind || !branchName || !commitSha || !publishedAt) return undefined;
+	return { kind, branchName, commitSha, publishedAt };
+}
+
+
 function readString(record: Record<string, unknown>, key: string): string | undefined {
 	const value = record[key];
 	return typeof value === "string" ? value : undefined;
@@ -114,6 +133,8 @@ function normalizeBinding(value: unknown): WorkspaceBinding | null {
 	const kind = readString(value, "kind");
 	if (agentId !== undefined) binding.agentId = agentId;
 	if (kind !== undefined) binding.kind = kind;
+	const publication = readPublication(value.publication);
+	if (publication !== undefined) binding.publication = publication;
 	return binding;
 }
 
@@ -178,6 +199,11 @@ export class WorkspaceBindingRegistry {
 		return attachRegistryFile({ ...binding }, this.registryFile);
 	}
 
+	async listBindings(): Promise<WorkspaceBinding[]> {
+		const registry = await this.#read();
+		return registry.bindings.map(binding => attachRegistryFile({ ...binding }, this.registryFile));
+	}
+
 	async lookupBySessionId(sessionId: string): Promise<WorkspaceBinding | null> {
 		const registry = await this.#read();
 		const binding = registry.bindings.find(entry => entry.sessionId === sessionId);
@@ -194,6 +220,33 @@ export class WorkspaceBindingRegistry {
 			lastSeenAt: update.lastSeenAt ?? new Date().toISOString(),
 		};
 		registry.bindings = registry.bindings.map(entry => (entry.sessionId === sessionId ? updated : entry));
+		await writeRegistryFileAtomic(this.registryFile, registry);
+		return attachRegistryFile({ ...updated }, this.registryFile);
+	}
+
+	async remove(sessionId: string): Promise<WorkspaceBinding | null> {
+		const registry = await this.#read();
+		const index = registry.bindings.findIndex(entry => entry.sessionId === sessionId);
+		if (index === -1) return null;
+		const [removed] = registry.bindings.splice(index, 1);
+		if (!removed) return null;
+		await writeRegistryFileAtomic(this.registryFile, registry);
+		return attachRegistryFile({ ...removed }, this.registryFile);
+	}
+
+	async markPublished(sessionId: string, publication: WorkspaceBindingPublication): Promise<WorkspaceBinding | null> {
+		const registry = await this.#read();
+		const index = registry.bindings.findIndex(entry => entry.sessionId === sessionId);
+		if (index === -1) return null;
+		const existing = registry.bindings[index];
+		if (!existing) return null;
+		const updated: WorkspaceBinding = {
+			...existing,
+			status: "published",
+			lastSeenAt: publication.publishedAt,
+			publication,
+		};
+		registry.bindings[index] = updated;
 		await writeRegistryFileAtomic(this.registryFile, registry);
 		return attachRegistryFile({ ...updated }, this.registryFile);
 	}

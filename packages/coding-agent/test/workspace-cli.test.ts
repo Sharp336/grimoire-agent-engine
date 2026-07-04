@@ -1,5 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
+	createDefaultWorkspaceCliService,
 	createWorkspaceCliService,
 	type WorkspaceBranchPublication,
 	type WorkspaceCliService,
@@ -8,8 +12,45 @@ import {
 	type WorkspaceRegistryRecord,
 	type WorkspaceRegistryStore,
 } from "@oh-my-pi/pi-coding-agent/cli/workspace-cli";
+import { WorkspaceBindingRegistry } from "@oh-my-pi/pi-coding-agent/session/workspace-binding";
 
 const NOW = "2026-07-04T12:00:00.000Z";
+const createdRoots: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(createdRoots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
+});
+
+async function makeTempRoot(prefix: string): Promise<string> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	createdRoots.push(root);
+	return root;
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(stderr.trim() || stdout.trim() || `git ${args.join(" ")} exited ${exitCode}`);
+	}
+	return stdout.trim();
+}
+
+async function makeGitWorkspace(): Promise<string> {
+	const root = await makeTempRoot("omp-workspace-cli-");
+	const workspaceRoot = path.join(root, "workspace");
+	await fs.mkdir(workspaceRoot, { recursive: true });
+	await runGit(workspaceRoot, ["init", "-b", "main"]);
+	await fs.writeFile(path.join(workspaceRoot, "README.md"), "# workspace\n");
+	await runGit(workspaceRoot, ["add", "README.md"]);
+	await runGit(workspaceRoot, ["-c", "user.name=OMP Test", "-c", "user.email=omp@example.invalid", "commit", "-m", "init"]);
+	return workspaceRoot;
+}
+
 
 function workspace(overrides: Partial<WorkspaceRegistryRecord> & Pick<WorkspaceRegistryRecord, "id">): WorkspaceRegistryRecord {
 	return {
@@ -290,6 +331,62 @@ describe("workspace CLI service publish contract", () => {
 			kind: "branch",
 			branchName: "workspace/ws-ready-review",
 			commitSha: "commit-ws-ready",
+			publishedAt: NOW,
+		});
+	});
+});
+
+describe("default workspace CLI service", () => {
+	it("uses the persisted binding registry and publishes a Git branch", async () => {
+		const workspaceRoot = await makeGitWorkspace();
+		const agentDir = await makeTempRoot("omp-workspace-registry-");
+		const registry = new WorkspaceBindingRegistry({ agentDir });
+		await registry.register({
+			sessionId: "ws-real",
+			sessionFile: path.join(agentDir, "sessions", "ws-real.jsonl"),
+			workspaceRoot,
+			agentId: "Main",
+			status: "idle",
+			createdAt: "2026-07-04T10:00:00.000Z",
+			lastSeenAt: "2026-07-04T10:05:00.000Z",
+		});
+
+		const service = createDefaultWorkspaceCliService({ registry, now: () => NOW });
+		const headSha = await runGit(workspaceRoot, ["rev-parse", "HEAD"]);
+
+		await expect(service.list({ json: true })).resolves.toEqual({
+			workspaces: [
+				{
+					id: "ws-real",
+					rootPath: workspaceRoot,
+					owner: { id: "Main", displayName: "Main" },
+					status: "idle",
+					branchName: "main",
+					publication: null,
+					createdAt: "2026-07-04T10:00:00.000Z",
+					updatedAt: "2026-07-04T10:05:00.000Z",
+				},
+			],
+		});
+
+		await expect(
+			service.publish({
+				id: "ws-real",
+				requesterAgentId: "Main",
+				contract: { kind: "branch", branchName: "workspace/ws-real-review" },
+			}),
+		).resolves.toEqual({
+			ok: true,
+			workspaceId: "ws-real",
+			branchName: "workspace/ws-real-review",
+			commitSha: headSha,
+			publishedAt: NOW,
+		});
+		expect(await runGit(workspaceRoot, ["rev-parse", "workspace/ws-real-review"])).toBe(headSha);
+		expect((await registry.lookupBySessionId("ws-real"))?.publication).toEqual({
+			kind: "branch",
+			branchName: "workspace/ws-real-review",
+			commitSha: headSha,
 			publishedAt: NOW,
 		});
 	});

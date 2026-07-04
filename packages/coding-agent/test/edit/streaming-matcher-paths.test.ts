@@ -23,6 +23,15 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 			expect(EDIT_MODE_STRATEGIES.patch.matcherPaths({ path: "src/bar.ts" })).toEqual(["src/bar.ts"]);
 		});
 
+		it("includes patch rename destinations", () => {
+			expect(
+				EDIT_MODE_STRATEGIES.patch.matcherPaths({
+					path: "src/old.ts",
+					edits: [{ op: "update", rename: "../outside/new.ts", diff: "@@\n-old\n+new" }],
+				}),
+			).toEqual(["src/old.ts", "../outside/new.ts"]);
+		});
+
 		it("returns undefined when no path is present", () => {
 			expect(EDIT_MODE_STRATEGIES.replace.matcherPaths({})).toBeUndefined();
 			expect(EDIT_MODE_STRATEGIES.patch.matcherPaths({})).toBeUndefined();
@@ -95,6 +104,23 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 				"",
 			].join("\n");
 			expect(EDIT_MODE_STRATEGIES.apply_patch.matcherPaths({ input })).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+		});
+
+		it("includes apply_patch Move to destinations", () => {
+			const input = [
+				"*** Begin Patch",
+				"*** Update File: src/old.ts",
+				"*** Move to: ../outside/new.ts",
+				"@@",
+				"-old",
+				"+new",
+				"*** End Patch",
+				"",
+			].join("\n");
+			expect(EDIT_MODE_STRATEGIES.apply_patch.matcherPaths({ input })).toEqual([
+				"src/old.ts",
+				"../outside/new.ts",
+			]);
 		});
 
 		it("recovers paths from a streaming partial envelope (no End Patch yet)", () => {
