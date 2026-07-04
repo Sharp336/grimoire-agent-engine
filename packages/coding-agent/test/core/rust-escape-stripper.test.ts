@@ -59,6 +59,45 @@ describe("TerminalEscapeStripper", () => {
 	});
 
 	// ---------------------------------------------------------------------------
+	// 8-bit C1 sequence handling: introducers are stripped like their ESC-pair
+	// equivalents, and the C1 ST terminator closes a sequence without leaking.
+	// ---------------------------------------------------------------------------
+
+	it("strips a complete C1 CSI color sequence", () => {
+		const stripper = new TerminalEscapeStripper();
+		expect(stripper.write("\u009b31mred\u009b0m")).toBe("red");
+	});
+
+	it("strips a complete C1 OSC terminated by BEL", () => {
+		const stripper = new TerminalEscapeStripper();
+		expect(stripper.write("\u009d0;title\u0007after")).toBe("after");
+	});
+
+	it("strips a complete C1 DCS string terminated by C1 ST without leaking ST", () => {
+		const stripper = new TerminalEscapeStripper();
+		expect(stripper.write("\u0090content\u009c")).toBe("");
+	});
+
+	it("strips a complete C1 APC string terminated by C1 ST without leaking ST", () => {
+		const stripper = new TerminalEscapeStripper();
+		expect(stripper.write("\u009fcontent\u009c")).toBe("");
+	});
+
+	it("preserves C1 success marker and prompt after an unterminated C1-introduced sequence", () => {
+		const stripper = new TerminalEscapeStripper();
+		expect(stripper.write("\u009d0;unterminated")).toBe("");
+		const out = stripper.write("\u0091>> ");
+		expect(out).toContain("\u0091");
+		expect(out).toContain(">> ");
+	});
+
+	it("preserves C1 markers and prompt in normal flow", () => {
+		const stripper = new TerminalEscapeStripper();
+		const out = stripper.write("\u0091\u0092>> ");
+		expect(out).toBe("\u0091\u0092>> ");
+	});
+
+	// ---------------------------------------------------------------------------
 	// Plain passthrough — no escape sequences at all.
 	// ---------------------------------------------------------------------------
 

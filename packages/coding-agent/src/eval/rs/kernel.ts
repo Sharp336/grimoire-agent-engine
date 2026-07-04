@@ -56,6 +56,11 @@ export interface RustKernelAvailability {
 }
 
 export interface RustKernelExecuteOptions {
+	/**
+	 * Process cwd is fixed at Evcxr spawn and is part of the registry session key.
+	 * A cell that mutates the process cwd (e.g. std::env::set_current_dir) persists
+	 * until kernel reset because Evcxr has no per-cell reapplication channel.
+	 */
 	cwd?: string;
 	/** Per-cell env patches are accepted for GenericKernel compatibility; Evcxr's process env is fixed at start. */
 	env?: Record<string, string | null | undefined>;
@@ -116,8 +121,21 @@ export class TerminalEscapeStripper {
 			}
 			switch (this.#state) {
 				case "normal": {
+					// 8-bit C1 introducers (U+009B CSI, U+009D OSC, U+0090/U+0098/U+009E/
+					// U+009F DCS/SOS/PM/APC) must be stripped like their ESC-pair equivalents
+					// so ANSI/C1 control output from user code does not flow into the eval
+					// transcript/TUI. Evcxr's completion markers U+0091/U+0092 and any other
+					// non-introducer C1 bytes are deliberately left as printable output.
 					if (char === "\u001b") {
 						this.#state = "escape";
+					} else if (char === "\u009b") {
+						this.#state = "csi";
+					} else if (char === "\u009d") {
+						this.#state = "osc";
+					} else if (char === "\u0090" || char === "\u0098" || char === "\u009e" || char === "\u009f") {
+						this.#state = "string";
+					} else if (char === "\u009c") {
+						// C1 ST with no open sequence: drop it.
 					} else {
 						output += char;
 					}
