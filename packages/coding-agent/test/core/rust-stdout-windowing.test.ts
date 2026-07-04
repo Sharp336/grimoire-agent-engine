@@ -1,13 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	disposeAllRustKernelSessions,
-	executeRust,
-} from "@oh-my-pi/pi-coding-agent/eval/rs/executor";
-import { TempDir } from "@oh-my-pi/pi-utils";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeAllRustKernelSessions, executeRust } from "@oh-my-pi/pi-coding-agent/eval/rs/executor";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const PAYLOAD_LINES = 200;
 const PAYLOAD_X_PER_LINE = 1000;

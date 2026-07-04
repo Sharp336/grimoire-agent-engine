@@ -3,10 +3,9 @@ import {
 	disposeAllJuliaKernelSessions,
 	disposeJuliaKernelSessionsByOwner,
 	executeJulia,
-	executeJuliaWithKernel,
 } from "@oh-my-pi/pi-coding-agent/eval/jl/executor";
-import type { KernelExecuteResult, KernelShutdownResult } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { JuliaKernel } from "@oh-my-pi/pi-coding-agent/eval/jl/kernel";
+import type { KernelExecuteResult, KernelShutdownResult } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 
 const OK_RESULT: KernelExecuteResult = {
 	status: "ok",
@@ -131,10 +130,10 @@ describe("Julia executor lifecycle", () => {
 		expect(startCalls).toBe(2);
 		const replacementKernel = kernels[1];
 		expect(replacementKernel).not.toBe(firstKernel);
-		
+
 		finishShutdown();
 		await disposePromise;
-		
+
 		await secondExecutePromise;
 		await disposeJuliaKernelSessionsByOwner("owner-b");
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
@@ -172,7 +171,7 @@ describe("Julia executor lifecycle", () => {
 
 	it("coalesces concurrent reset requests into a single replacement", async () => {
 		await executeJulia("println(1)", { sessionId: "s1", cwd: "/tmp/a" });
-		
+
 		const firstKernel = kernels[0];
 
 		const ex1 = executeJulia("println(2)", { sessionId: "s1", cwd: "/tmp/a", reset: true });

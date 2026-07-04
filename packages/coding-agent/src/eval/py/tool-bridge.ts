@@ -9,13 +9,9 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../js/tool-bridge";
-import {
-	clearPyToolBridgeRegistrations,
-	getPyToolBridgeEntry,
-	type PyToolBridgeEntry,
-} from "./tool-bridge-registry";
-export { registerPyToolBridge, type PyToolBridgeEntry } from "./tool-bridge-registry";
+import { clearPyToolBridgeRegistrations, getPyToolBridgeEntry, type PyToolBridgeEntry } from "./tool-bridge-registry";
 
+export { type PyToolBridgeEntry, registerPyToolBridge } from "./tool-bridge-registry";
 
 export interface PyToolBridgeInfo {
 	url: string;
@@ -145,7 +141,6 @@ export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
 		throw err;
 	}
 }
-
 
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {

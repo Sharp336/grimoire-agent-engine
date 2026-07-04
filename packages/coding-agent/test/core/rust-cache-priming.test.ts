@@ -1,11 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-	disposeAllRustKernelSessions,
-	executeRust,
-} from "@oh-my-pi/pi-coding-agent/eval/rs/executor";
-import { TempDir } from "@oh-my-pi/pi-utils";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { disposeAllRustKernelSessions, executeRust } from "@oh-my-pi/pi-coding-agent/eval/rs/executor";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function shellSingleQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;

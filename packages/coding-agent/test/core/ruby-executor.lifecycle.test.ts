@@ -154,12 +154,12 @@ describe("ruby executor owner cleanup", () => {
 
 		const disposingKernel = kernels[0];
 		if (!disposingKernel) throw new Error("Missing kernel");
-		
+
 		const shutdownDeferred = Promise.withResolvers<KernelShutdownResult>();
 		disposingKernel.shutdown.mockImplementation(() => shutdownDeferred.promise);
 
 		const disposal = disposeRubyKernelSessionsByOwner("owner-a");
-		
+
 		await executeRuby("2 + 2", {
 			cwd: "/tmp/disposal-race-kernel",
 			sessionId: "race-session",
@@ -246,32 +246,32 @@ describe("ruby executor owner cleanup", () => {
 
 		expect(kernel1.shutdown).toHaveBeenCalledTimes(1);
 		shutdownDeferred.resolve({ confirmed: true });
-		
+
 		await Promise.all([p1, p2]);
 
 		expect(startCalls).toBe(2);
 		const kernel2 = kernels[1];
 		if (!kernel2) throw new Error("Missing kernel");
-		
+
 		expect(kernel2.execute).toHaveBeenCalledTimes(2);
 	});
 
 	it("replaces a dead kernel before execution and retries once", async () => {
 		await executeRuby("1", { cwd: "/tmp/dead-kernel", sessionId: "dead-kernel-session" });
 		expect(startCalls).toBe(1);
-		
+
 		const deadKernel = kernels[0];
 		if (!deadKernel) throw new Error("Missing kernel");
-		
+
 		// Mark it dead so the next execute replaces it
 		deadKernel.alive = false;
 
 		await executeRuby("2", { cwd: "/tmp/dead-kernel", sessionId: "dead-kernel-session" });
-		
+
 		expect(startCalls).toBe(2);
 		const replacementKernel = kernels[1];
 		if (!replacementKernel) throw new Error("Missing replacement kernel");
-		
+
 		expect(deadKernel.execute).toHaveBeenCalledTimes(1);
 		expect(deadKernel.shutdown).toHaveBeenCalledTimes(1);
 		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
