@@ -39,6 +39,14 @@ $ErrorActionPreference = 'Stop'
 $stdin  = [Console]::OpenStandardInput()
 $stdout = [Console]::OpenStandardOutput()
 
+# The framed protocol owns the raw stdout stream captured above. User commands
+# (or .NET libraries they load) can still write directly to [Console]::Out —
+# e.g. [Console]::WriteLine(...) — and raw bytes on the protocol channel would
+# desync the frame reader and kill the host. Point Console.Out at a buffer
+# instead; Complete-Exec drains it as ordinary output after each command.
+$script:consoleOut = New-Object System.IO.StringWriter
+[Console]::SetOut($script:consoleOut)
+
 function Write-Frame([hashtable] $obj) {
     $json  = $obj | ConvertTo-Json -Depth 8 -Compress
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
@@ -80,7 +88,10 @@ function Invoke-OnRunspace([string] $script, [object[]] $arguments) {
     try { return $ps.Invoke() } finally { $ps.Dispose() }
 }
 
-# Initialize the object-retention store inside the shared runspace.
+# Initialize the object-retention store inside the shared runspace. The
+# PostCommandLookupAction flags any Application (native executable) lookup so
+# per-invocation exit codes can be attributed without ever resetting
+# $LASTEXITCODE — user commands read the true persisted value at all times.
 [void](Invoke-OnRunspace @'
 $global:__omp = [ordered]@{}
 $global:__omp.Last    = $null
@@ -88,6 +99,13 @@ $global:__omp.Counter = 0
 $global:__omp.History = [ordered]@{}
 $ProgressPreference   = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
+$ExecutionContext.InvokeCommand.PostCommandLookupAction = {
+    param($CommandName, $CommandLookupEventArgs)
+    if ($CommandLookupEventArgs.Command -and
+        $CommandLookupEventArgs.Command.CommandType -eq [System.Management.Automation.CommandTypes]::Application) {
+        $global:__ompNativeRan = $true
+    }
+}
 '@)
 
 # ── Exec lifecycle ───────────────────────────────────────────────────────────
@@ -113,9 +131,15 @@ function Start-Exec($req) {
     }
 
     # Retain result objects AND keep user variables at top scope: @() is an
-    # array-subexpression, which (unlike & {}) does NOT open a child scope, so
-    # `$x = 1` in the user command persists into the next call. Newlines guard
-    # against a trailing line-comment swallowing the closing paren.
+    # array-subexpression and try/finally is a plain block — neither (unlike
+    # & {}) opens a child scope, so `$x = 1` in the user command persists into
+    # the next call. $LASTEXITCODE is never written by the wrapper, so user
+    # commands always read the true persisted value; this invocation's native
+    # exit is attributed via the PostCommandLookupAction flag (or an observed
+    # value change, covering path-invoked executables that skip name lookup)
+    # inside a finally, so it is recorded even when the command throws, calls
+    # exit, or the pipeline is stopped. Newlines guard against a trailing
+    # line-comment swallowing the closing paren.
     # ONE pipeline per call carries everything: run the user command at top
     # scope, retain its live objects in $global:__omp, then render them as the
     # pipeline's output (captured in $out). Exit code is read afterwards via the
@@ -127,15 +151,15 @@ if (`$__ompCwd) {
     catch { Write-Error "Set-Location failed: `$(`$_.Exception.Message)"; return }
 }
 `$global:__ompPrevExit = `$global:LASTEXITCODE
-`$global:LASTEXITCODE = `$null
+`$global:__ompNativeRan = `$false
+try {
 `$global:__omp.Last = @(
 $command
 )
-if (`$null -eq `$global:LASTEXITCODE) {
-    `$global:__ompExit = `$null
-    `$global:LASTEXITCODE = `$global:__ompPrevExit
-} else {
+} finally {
+if ((`$global:__ompNativeRan -or `$global:LASTEXITCODE -ne `$global:__ompPrevExit) -and `$null -ne `$global:LASTEXITCODE) {
     `$global:__ompExit = [int]`$global:LASTEXITCODE
+}
 }
 `$global:__omp.Counter++
 `$global:__omp.History[[string]`$global:__omp.Counter] = `$global:__omp.Last
@@ -168,6 +192,11 @@ function Complete-Exec {
     # plain; Warning/Verbose/Debug render yellow and Error red — matching the
     # PowerShell console — with their conventional labels retained.
     Write-Chunk $cur.Id 'output' ($cur.Out -join '')
+    # Drain direct [Console]::Out writes (redirected at startup) as output.
+    if ($script:consoleOut.GetStringBuilder().Length -gt 0) {
+        Write-Chunk $cur.Id 'output' $script:consoleOut.ToString()
+        [void]$script:consoleOut.GetStringBuilder().Clear()
+    }
     if ($cur.PS.Streams.Information.Count -gt 0) {
         Write-Chunk $cur.Id 'information' (($cur.PS.Streams.Information | ForEach-Object { [string]$_.MessageData }) -join $NL)
     }
@@ -184,10 +213,10 @@ function Complete-Exec {
         Write-Chunk $cur.Id 'error' (Colorize ($cur.PS.Streams.Error | Out-String -Width $cur.Width) '31;1')
     }
 
-    # Per-invocation exit code: the wrapped script resets $LASTEXITCODE before the
-    # command and records __ompExit only when this pipeline ran a native command,
-    # so a stale code from an earlier call never marks a later PS-only command as
-    # failed (the real $LASTEXITCODE is restored for cross-call persistence).
+    # Per-invocation exit code: the wrapped script records __ompExit only when
+    # this pipeline ran a native command (lookup flag or exit-code change), so a
+    # stale code from an earlier call never marks a later PS-only command as
+    # failed, while $LASTEXITCODE itself stays untouched and readable.
     $ec = $null
     try { $ec = $rs.SessionStateProxy.GetVariable('__ompExit') } catch { }
     $exitCode = if ($null -ne $ec) { [int]$ec } else { $null }

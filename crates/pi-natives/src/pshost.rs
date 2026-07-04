@@ -323,11 +323,18 @@ fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
 /// script — even when several processes first-write the same new hash at once
 /// (e.g. `test:ts` and `test:rs` running in parallel after a bootstrap change).
 fn ensure_bootstrap() -> Result<PathBuf> {
+	static TMP_NONCE: AtomicU32 = AtomicU32::new(0);
 	let dir = std::env::temp_dir();
 	let hash = xxhash_rust::xxh64::xxh64(BOOTSTRAP.as_bytes(), 0);
 	let path = dir.join(format!("omp-pshost-{hash:016x}.ps1"));
 	if !path.exists() {
-		let tmp = dir.join(format!("omp-pshost-{hash:016x}.{}.tmp", std::process::id()));
+		// pid + nonce: two hosts first-created concurrently in one process must
+		// not write/truncate the same temp file before the rename publishes it.
+		let tmp = dir.join(format!(
+			"omp-pshost-{hash:016x}.{}.{}.tmp",
+			std::process::id(),
+			TMP_NONCE.fetch_add(1, Ordering::Relaxed)
+		));
 		std::fs::write(&tmp, BOOTSTRAP).map_err(|err| {
 			Error::from_reason(format!("Failed to write PowerShell host script: {err}"))
 		})?;
@@ -773,10 +780,22 @@ mod tests {
 		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, Some(7), "native exit code propagates");
 
+		// Repeating the identical native exit must still be attributed to this
+		// invocation (command-lookup flag; a value change alone can't see it).
+		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
+		assert_eq!(res.exit_code, Some(7), "repeated identical native exit is reported");
+
 		// A PS-only command after a native exit must not inherit the stale code.
 		let (_, res) = run_cmd(&host, "'ok'", task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, None, "no stale exit code after a native exit");
 		assert!(!res.had_errors, "PS-only command is not an error");
+
+		// A terminating error must not corrupt the persisted $LASTEXITCODE: the
+		// wrapped script's finally restores it (still 7 from the native exit).
+		let (_, res) = run_cmd(&host, "throw 'boom'", task::CancelToken::default()).await;
+		assert!(res.had_errors, "throw surfaces as had_errors");
+		let (out, _) = run_cmd(&host, "$LASTEXITCODE", task::CancelToken::default()).await;
+		assert_eq!(out, "7", "LASTEXITCODE survives a terminating error");
 
 		// Invalid cwd fails fast without running the command.
 		let (bad_out, bad_res) = {
@@ -838,6 +857,19 @@ mod tests {
 			run_cmd(&host, "Write-Warning 'be-careful'", task::CancelToken::default()).await;
 		assert!(out.contains("WARNING: be-careful"), "warning labeled: {out:?}");
 		assert!(!res.had_errors, "warning does not set had_errors");
+
+		// Direct Console.Out writes are buffered at startup redirection, never
+		// spliced into the framed protocol stream: the host survives and the
+		// text surfaces as ordinary output.
+		let (out, res) = run_cmd(
+			&host,
+			"[Console]::WriteLine('console-direct'); 'pipeline-ok'",
+			task::CancelToken::default(),
+		)
+		.await;
+		assert!(out.contains("console-direct"), "Console.Out captured: {out:?}");
+		assert!(out.contains("pipeline-ok"), "pipeline output intact: {out:?}");
+		assert!(!res.had_errors, "Console.Out write is not an error");
 
 		// Verbose is captured only when the command opts in via -Verbose.
 		let (quiet, _) = run_cmd(&host, "Write-Verbose 'hidden'", task::CancelToken::default()).await;
