@@ -193,7 +193,7 @@ import {
 } from "../eval/py/executor";
 import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
-import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import type { BashResult } from "../exec/bash-executor";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
@@ -307,7 +307,6 @@ import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { buildResolveReminderMessage } from "../tools/resolve";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -317,6 +316,7 @@ import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallba
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
+import { BashRuntime } from "./bash-runtime";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
 	type CodexAutoRedeemRedeemDecision,
@@ -335,7 +335,6 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import {
-	type BashExecutionMessage,
 	type CustomMessage,
 	convertToLlm,
 	demoteInterruptedThinking,
@@ -1631,8 +1630,7 @@ export class AgentSession {
 	#toolChoiceQueue = new ToolChoiceQueue();
 
 	// Bash execution state
-	#bashAbortControllers = new Set<AbortController>();
-	#pendingBashMessages: BashExecutionMessage[] = [];
+	#bashRuntime: BashRuntime;
 
 	// Python execution state
 	#evalAbortControllers = new Set<AbortController>();
@@ -2219,6 +2217,30 @@ export class AgentSession {
 					},
 					{ deliverAs: message.deliverAs },
 				);
+			},
+		});
+		this.#bashRuntime = new BashRuntime({
+			isStreaming: () => this.isStreaming,
+			getCwd: () => this.sessionManager.getCwd(),
+			getSessionKey: () => this.sessionId,
+			appendToAgent: message => this.agent.appendMessage(message),
+			appendToSession: message => this.sessionManager.appendMessage(message),
+			saveOriginalArtifact: async text => {
+				try {
+					return await this.sessionManager.saveArtifact(text, "bash-original");
+				} catch {
+					return undefined;
+				}
+			},
+			runUserBashHook: async input => {
+				if (!this.#extensionRunner?.hasHandlers("user_bash")) return undefined;
+				const hookResult = await this.#extensionRunner.emitUserBash({
+					type: "user_bash",
+					command: input.command,
+					excludeFromContext: input.excludeFromContext,
+					cwd: input.cwd,
+				});
+				return hookResult?.result;
 			},
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
@@ -7487,7 +7509,7 @@ export class AgentSession {
 		const generation = this.#promptGeneration;
 		try {
 			// Flush any pending bash messages before the new prompt
-			this.#flushPendingBashMessages();
+			this.#bashRuntime.flushPendingMessages();
 			this.#flushPendingPythonMessages();
 			this.#flushPendingIrcAsides();
 
@@ -13688,14 +13710,6 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
-	async #saveBashOriginalArtifact(originalText: string): Promise<string | undefined> {
-		try {
-			return await this.sessionManager.saveArtifact(originalText, "bash-original");
-		} catch {
-			return undefined;
-		}
-	}
-
 	/**
 	 * Execute a bash command.
 	 * Adds result to agent context and session.
@@ -13709,41 +13723,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; useUserShell?: boolean },
 	): Promise<BashResult> {
-		const excludeFromContext = options?.excludeFromContext === true;
-		const cwd = this.sessionManager.getCwd();
-
-		if (this.#extensionRunner?.hasHandlers("user_bash")) {
-			const hookResult = await this.#extensionRunner.emitUserBash({
-				type: "user_bash",
-				command,
-				excludeFromContext,
-				cwd,
-			});
-			if (hookResult?.result) {
-				this.recordBashResult(command, hookResult.result, options);
-				return hookResult.result;
-			}
-		}
-
-		const abortController = new AbortController();
-		this.#bashAbortControllers.add(abortController);
-
-		try {
-			const result = await executeBashCommand(command, {
-				onChunk,
-				signal: abortController.signal,
-				sessionKey: this.sessionId,
-				cwd,
-				timeout: clampTimeout("bash") * 1000,
-				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
-				useUserShell: options?.useUserShell,
-			});
-
-			this.recordBashResult(command, result, options);
-			return result;
-		} finally {
-			this.#bashAbortControllers.delete(abortController);
-		}
+		return this.#bashRuntime.execute(command, onChunk, options);
 	}
 
 	/**
@@ -13751,67 +13731,24 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
-		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
-		const bashMessage: BashExecutionMessage = {
-			role: "bashExecution",
-			command,
-			output: result.output,
-			exitCode: result.exitCode,
-			cancelled: result.cancelled,
-			truncated: result.truncated,
-			meta,
-			timestamp: Date.now(),
-			excludeFromContext: options?.excludeFromContext,
-		};
-
-		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
-		if (this.isStreaming) {
-			// Queue for later - will be flushed on agent_end
-			this.#pendingBashMessages.push(bashMessage);
-		} else {
-			// Add to agent state immediately
-			this.agent.appendMessage(bashMessage);
-
-			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
-		}
+		return this.#bashRuntime.record(command, result, options);
 	}
 
 	/**
 	 * Cancel running bash command.
 	 */
 	abortBash(): void {
-		for (const abortController of this.#bashAbortControllers) {
-			abortController.abort();
-		}
+		return this.#bashRuntime.abort();
 	}
 
 	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
-		return this.#bashAbortControllers.size > 0;
+		return this.#bashRuntime.isRunning;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
 	get hasPendingBashMessages(): boolean {
-		return this.#pendingBashMessages.length > 0;
-	}
-
-	/**
-	 * Flush pending bash messages to agent state and session.
-	 * Called after agent turn completes to maintain proper message ordering.
-	 */
-	#flushPendingBashMessages(): void {
-		if (this.#pendingBashMessages.length === 0) return;
-
-		for (const bashMessage of this.#pendingBashMessages) {
-			// Add to agent state
-			this.agent.appendMessage(bashMessage);
-
-			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
-		}
-
-		this.#pendingBashMessages = [];
+		return this.#bashRuntime.hasPendingMessages;
 	}
 
 	// =========================================================================
