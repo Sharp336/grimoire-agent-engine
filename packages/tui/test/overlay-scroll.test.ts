@@ -363,6 +363,75 @@ describe("TUI overlays", () => {
 		}
 	});
 
+	it("preserves WezTerm scrollback when clearScrollback is requested", async () => {
+		await withEnv("WEZTERM_PANE", "123", async () => {
+			const term = new VirtualTerminal(40, 4);
+			term.write("shell-0\r\nshell-1\r\nshell-2\r\nshell-3\r\nshell-4\r\n");
+			await flushRender(term);
+			const writes: string[] = [];
+			const realWrite = term.write.bind(term);
+			(term as unknown as { write: (s: string) => void }).write = (data: string) => {
+				writes.push(data);
+				realWrite(data);
+			};
+
+			const tui = new TUI(term);
+			const component = new MutableContentComponent(buildRows(8));
+			tui.addChild(component);
+			try {
+				tui.start({ clearScrollback: true });
+				await flushRender(term);
+
+				expect(writes.join("")).not.toContain("\x1b[3J");
+				expect(term.getScrollBuffer().join("\n").includes("shell-")).toBeTruthy();
+				expect(term.getViewport().join("\n").includes("row-7")).toBeTruthy();
+
+				writes.length = 0;
+				component.setLines(["new-session-0", "new-session-1", "new-session-2", "new-session-3"]);
+				tui.requestRender(true, { clearScrollback: true });
+				await flushRender(term);
+
+				expect(writes.join("")).not.toContain("\x1b[3J");
+				expect(term.getScrollBuffer().join("\n").includes("shell-")).toBeTruthy();
+				expect(term.getViewport().join("\n").includes("new-session-3")).toBeTruthy();
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("preserves WezTerm scrollback on resize", async () => {
+		await withEnv("WEZTERM_PANE", "123", async () => {
+			const term = new VirtualTerminal(40, 4);
+			term.write("shell-0\r\nshell-1\r\nshell-2\r\nshell-3\r\nshell-4\r\n");
+			await flushRender(term);
+
+			const tui = new TUI(term);
+			tui.addChild(new MutableContentComponent(buildRows(20)));
+			const writes: string[] = [];
+			const realWrite = term.write.bind(term);
+			(term as unknown as { write: (s: string) => void }).write = (data: string) => {
+				writes.push(data);
+				realWrite(data);
+			};
+
+			try {
+				tui.start();
+				await flushRender(term);
+				writes.length = 0;
+
+				term.resize(80, 4);
+				await settleResize(term);
+
+				expect(writes.join("")).not.toContain("\x1b[3J");
+				expect(term.getScrollBuffer().join("\n").includes("shell-")).toBeTruthy();
+				expect(term.getViewport().join("\n").includes("row-19")).toBeTruthy();
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
 	it("preserves rendered scrollback on forced redraw after startup", async () => {
 		const term = new VirtualTerminal(40, 4);
 		const tui = new TUI(term);

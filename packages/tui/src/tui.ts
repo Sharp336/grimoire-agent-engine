@@ -6,9 +6,10 @@
  * history exactly once, in order, when the component-reported commit boundary
  * (`NativeScrollbackLiveRegion`) says they are final. ED3 (`CSI 3 J`) is
  * emitted only for gesture-driven replays (session replace, resize,
- * resetDisplay) where snapping the viewport is acceptable. The engine never
- * probes or guesses the terminal's scroll position, and the hot path clamps
- * over-wide lines instead of throwing. See `docs/tui-core-renderer.md`.
+ * resetDisplay) on terminals where native scrollback is safe to erase. The
+ * engine never probes or guesses the terminal's scroll position, and the hot
+ * path clamps over-wide lines instead of throwing. See
+ * `docs/tui-core-renderer.md`.
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
@@ -391,6 +392,15 @@ function isMultiplexerSession(): boolean {
 	return isInsideTerminalMultiplexer();
 }
 
+/** Detect direct terminals whose normal-buffer scrollback belongs to the user. */
+function preservesUserScrollbackSession(): boolean {
+	return Bun.env.WEZTERM_PANE !== undefined;
+}
+
+function canEraseNativeScrollback(): boolean {
+	return !isMultiplexerSession() && !preservesUserScrollbackSession();
+}
+
 /**
  * Terminals that re-report their size whenever the alternate screen buffer is
  * toggled. The non-multiplexer resize fast path ({@link TUI.#beginResizeViewport})
@@ -412,12 +422,13 @@ function reportsSizeOnAltScreenToggle(): boolean {
 
 /**
  * Resize should repaint the visible window in place — no alternate-screen
- * borrow, no ED3 scrollback rewrap — for multiplexer panes and for terminals
- * that loop on alt-screen toggles. The tradeoff is identical to a multiplexer:
- * scrollback above the window keeps its old wrap instead of being re-flowed.
+ * borrow, no ED3 scrollback rewrap — for multiplexer panes, terminals with
+ * user-owned scrollback, and terminals that loop on alt-screen toggles. The
+ * tradeoff is identical to a multiplexer: scrollback above the window keeps
+ * its old wrap instead of being re-flowed.
  */
 function resizeRepaintsInPlace(): boolean {
-	return isMultiplexerSession() || reportsSizeOnAltScreenToggle();
+	return isMultiplexerSession() || preservesUserScrollbackSession() || reportsSizeOnAltScreenToggle();
 }
 
 /**
@@ -584,10 +595,9 @@ export class Container implements Component {
  * method owns the bytes written and the state update.
  *
  * - `fullPaint`: gesture-driven replay — initial paint, session replacement,
- *   resize, resetDisplay. Clears the viewport and (for destructive replaces,
- *   outside multiplexers) native scrollback via ED3, then writes the
- *   committed prefix and the visible window. The only ED3 callsite in the
- *   engine.
+ *   resize, resetDisplay. Clears the viewport and, where native scrollback is
+ *   safe to erase, sends ED3 before writing the committed prefix and visible
+ *   window. The only ED3 callsite in the engine.
  * - `update`: ordinary frame. Commits the newly settled chunk at the
  *   scrollback seam (if any) and repaints the window with relative moves.
  */
@@ -1827,16 +1837,16 @@ export class TUI extends Container {
 	resetDisplay(): void {
 		if (this.#stopped) return;
 		this.invalidate();
-		// A reset that lands inside a tmux/screen/zellij resize burst would
-		// paint mid-reflow and re-introduce the flash race (issue #2088).
-		// Fold it into the in-flight debounce instead; the settled paint runs
-		// the same `#prepareForcedRender(!isMultiplexerSession())` path via
-		// `requestRender(true)`, so the clear-scrollback intent is preserved.
+		// A reset that lands inside an in-place resize burst would paint
+		// mid-reflow and re-introduce the flash race (issue #2088). Fold it
+		// into the in-flight debounce instead; the settled paint runs the same
+		// `requestRender(true)` path while preserving whether this terminal may
+		// erase native scrollback.
 		if (this.#multiplexerResizeTimer) {
-			this.#armMultiplexerResizeTimer(!isMultiplexerSession());
+			this.#armMultiplexerResizeTimer(canEraseNativeScrollback());
 			return;
 		}
-		this.#prepareForcedRender(!isMultiplexerSession());
+		this.#prepareForcedRender(canEraseNativeScrollback());
 		this.#resizeEventPending = true;
 		this.#renderRequested = false;
 		this.#executeRender();
@@ -2839,7 +2849,10 @@ export class TUI extends Container {
 		const cursorTrackingLineCount = hasVisibleOverlay ? Math.max(frame.length, windowTop + height) : frame.length;
 
 		const intent: RenderIntent = fullPaint
-			? { kind: "fullPaint", clearScrollback: replaceRequested || geometryRebuild ? !isMultiplexerSession() : false }
+			? {
+					kind: "fullPaint",
+					clearScrollback: replaceRequested || geometryRebuild ? canEraseNativeScrollback() : false,
+				}
 			: { kind: "update", chunkTo, windowTop };
 		this.#logRedraw(intent, frameLength, height);
 
@@ -3421,10 +3434,9 @@ export class TUI extends Container {
 			// The drag is quiet: replay the rewrapped transcript authoritatively.
 			// #resizeEventPending was preserved across every viewport-only frame
 			// (the fast path never consumes it), so this classifies as a geometry
-			// rebuild — ED3 + full history — and the clearScrollback intent below
-			// matches the gesture-driven reset path.
+			// rebuild. Only terminals that may erase native scrollback receive ED3.
 			this.#resizeEventPending = true;
-			this.requestRender(true, { clearScrollback: !isMultiplexerSession() });
+			this.requestRender(true, { clearScrollback: canEraseNativeScrollback() });
 		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
 	}
 

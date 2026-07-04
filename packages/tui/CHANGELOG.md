@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved WezTerm's pre-existing terminal scrollback by suppressing ED3 clears during startup, resize, and session replacement ([#4485](https://github.com/can1357/oh-my-pi/issues/4485)).
+
 ## [16.3.5] - 2026-07-04
 
 ### Fixed
