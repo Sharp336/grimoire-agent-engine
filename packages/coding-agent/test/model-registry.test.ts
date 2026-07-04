@@ -359,6 +359,60 @@ describe("ModelRegistry", () => {
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 			}
 		});
+		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("zhipu-coding-plan", "glm-5.2");
+			if (!model) throw new Error("expected bundled zhipu-coding-plan/glm-5.2 model");
+			await authStorage.set("zhipu-coding-plan", { type: "api_key", key: "zhipu-domestic-key" });
+			await authStorage.set("zai", { type: "api_key", key: "zai-international-key" });
+
+			const calls: Array<{
+				provider: string;
+				sessionId: string | undefined;
+				options: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal } | undefined;
+			}> = [];
+			const originalGetApiKey = authStorage.getApiKey.bind(authStorage);
+			authStorage.getApiKey = async (
+				provider: string,
+				sessionId?: string,
+				options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+			): Promise<string | undefined> => {
+				calls.push({ provider, sessionId, options });
+				return originalGetApiKey(provider, sessionId, options);
+			};
+
+			const sessionId = "session-zhipu-auth-path";
+			await expect(registry.getApiKey(model, sessionId)).resolves.toBe("zhipu-domestic-key");
+			expect(calls.at(-1)).toEqual({
+				provider: "zhipu-coding-plan",
+				sessionId,
+				options: {
+					baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+					modelId: "glm-5.2",
+				},
+			});
+
+			const resolved = await registry.resolver(
+				model,
+				sessionId,
+			)({
+				lastChance: false,
+				error: undefined,
+				signal: undefined,
+			});
+			expect(resolved).toBe("zhipu-domestic-key");
+			expect(calls.at(-1)).toEqual({
+				provider: "zhipu-coding-plan",
+				sessionId,
+				options: {
+					baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+					modelId: "glm-5.2",
+					forceRefresh: undefined,
+					signal: undefined,
+				},
+			});
+		});
+
 		test("baseUrl-only override does not affect other providers", () => {
 			const googleModels = getModelsForProvider(anthropicProxy, "google");
 			// Google models should still have their original baseUrl
@@ -1230,6 +1284,36 @@ describe("ModelRegistry", () => {
 			expect(nonexistent.getError()).toBeUndefined();
 		});
 
+		test("invalid models config exposes schema errors instead of silently dropping providers", () => {
+			writeRawModelsJson({
+				myprovider: {
+					baseUrl: "http://localhost:8000/v1",
+					api: "openai-completions",
+					auth: "none",
+					compat: { thinkingFormat: "deepseek" },
+					models: [
+						{
+							id: "my-model",
+							name: "My Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 8192,
+							maxTokens: 4096,
+						},
+					],
+				},
+			});
+
+			const invalid = new ModelRegistry(authStorage, modelsJsonPath);
+			const error = invalid.getError();
+
+			expect(error?.message).toContain("Failed to load config file models, Schema error");
+			expect(error?.message).toContain("providers.myprovider.compat.thinkingFormat");
+			expect(error?.message).toContain("deepseek");
+			expect(invalid.find("myprovider", "my-model")).toBeUndefined();
+		});
+
 		test("model override can change cost fields partially", () => {
 			const sonnet = getModelsForProvider(costPartial, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
 			// Input cost should be overridden
@@ -1666,6 +1750,8 @@ describe("ModelRegistry", () => {
 		let cachedDiscoverableRemoteCompaction: ModelRegistry;
 		let vertexNonAuthoritative: ModelRegistry;
 		let vertexStale: ModelRegistry;
+		let litellmStaleNamespaceCache: ModelRegistry;
+		let litellmCurrentNamespaceCache: ModelRegistry;
 		const vertexProjectModel = () =>
 			buildModel({
 				id: "zai-org/glm-4.7-maas",
@@ -1913,6 +1999,54 @@ describe("ModelRegistry", () => {
 						),
 				},
 			);
+			const litellmProxyConfig = () => ({
+				providers: {
+					"litellm-proxy": {
+						baseUrl: "http://litellm-proxy.example:4000/v1",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						discovery: { type: "litellm" },
+						models: [],
+					},
+				},
+			});
+			const litellmCachedModel = (name: string) =>
+				buildModel({
+					id: "minimax/minimax-m3",
+					name,
+					api: "openai-completions",
+					provider: "litellm-proxy",
+					baseUrl: "http://litellm-proxy.example:4000/v1",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
+				// Row under the retired pre-reseller-suffix-stripping namespace; the
+				// rich-v2 bump must orphan it instead of serving the stale name.
+				seedCache: dbPath =>
+					writeModelCache(
+						"litellm-proxy:litellm-rich-v1",
+						Date.now(),
+						[litellmCachedModel("MiniMax-M3 (3x usage)")],
+						true,
+						"",
+						dbPath,
+					),
+			});
+			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
+				seedCache: dbPath =>
+					writeModelCache(
+						"litellm-proxy:litellm-rich-v2",
+						Date.now(),
+						[litellmCachedModel("MiniMax-M3")],
+						true,
+						"",
+						dbPath,
+					),
+			});
 		});
 
 		test("legacy cached discovery sentinels are ignored after nullable limit cutover", () => {
@@ -1952,6 +2086,19 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("ignores litellm discovery rows cached under the retired rich-v1 namespace", () => {
+			// PR #3717 changed the LiteLLM mappers (reseller usage-suffix stripping);
+			// warm rich-v1 rows carry pre-change display names and must not load.
+			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
+			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
+		});
+
+		test("loads litellm discovery rows cached under the rich-v2 namespace", () => {
+			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
+			expect(model?.name).toBe("MiniMax-M3");
+			expect(model?.provider).toBe("litellm-proxy");
+		});
+
 		test("replaces bundled google-vertex models with authoritative Vertex project discovery", () => {
 			const vertexModels = getModelsForProvider(vertexAuthoritative, "google-vertex");
 			expect(vertexModels.map(model => model.id)).toEqual(["zai-org/glm-4.7-maas"]);
@@ -1976,6 +2123,20 @@ describe("ModelRegistry", () => {
 
 			expect(syntheticModels.map(model => model.id)).toEqual(["hf:zai-org/GLM-5.1"]);
 			expect(registry.find("synthetic", "hf:moonshotai/Kimi-K2.5")).toBeUndefined();
+		});
+
+		test("does not re-add bundled Zhipu Coding Plan models after account discovery", async () => {
+			authStorage.setRuntimeApiKey("zhipu-coding-plan", "zhipu-test-key");
+			const fetchMock = mockOpenAiCompatibleModels("https://open.bigmodel.cn/api/coding/paas/v4/models", [
+				"glm-5.1",
+			]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("zhipu-coding-plan", "online");
+			const zhipuModels = getModelsForProvider(registry, "zhipu-coding-plan");
+
+			expect(zhipuModels.map(model => model.id)).toEqual(["glm-5.1"]);
+			expect(registry.find("zhipu-coding-plan", "glm-5.2")).toBeUndefined();
 		});
 
 		test("keeps bundled google-vertex fallback when cached project catalog is non-authoritative", () => {

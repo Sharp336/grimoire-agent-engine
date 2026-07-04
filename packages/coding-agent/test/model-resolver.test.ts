@@ -142,6 +142,21 @@ const mockMaxSuffixModels: Model<Api>[] = [
 	}),
 ];
 
+const mockAutoSuffixModels: Model<Api>[] = [
+	buildModel({
+		id: "runtime:auto",
+		name: "Runtime Auto",
+		api: "openai-completions",
+		provider: "example",
+		baseUrl: "https://example.com/api",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	}),
+];
+
 const mockProviderOverlapModels: Model<"anthropic-messages">[] = [
 	buildModel({
 		id: "kimi-k2.5",
@@ -306,6 +321,50 @@ describe("pickDefaultAvailableModel", () => {
 		expect(result?.provider).toBe("anthropic");
 		expect(result?.id).toBe(DEFAULT_MODEL_PER_PROVIDER.anthropic);
 	});
+
+	test("uses the Zhipu Coding Plan login-validated model before newer z.ai defaults", () => {
+		const zhipuGlm51 = buildModel({
+			id: "glm-5.1",
+			name: "GLM-5.1",
+			api: "openai-completions",
+			provider: "zhipu-coding-plan",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 131072,
+		});
+		const zhipuGlm52 = buildModel({
+			id: "glm-5.2",
+			name: "GLM-5.2",
+			api: "openai-completions",
+			provider: "zhipu-coding-plan",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 131072,
+		});
+		const zaiGlm52 = buildModel({
+			id: "glm-5.2",
+			name: "GLM-5.2",
+			api: "anthropic-messages",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/anthropic",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 131072,
+		});
+
+		const result = pickDefaultAvailableModel([zhipuGlm51, zhipuGlm52, zaiGlm52]);
+
+		expect(result?.provider).toBe("zhipu-coding-plan");
+		expect(result?.id).toBe("glm-5.1");
+	});
 });
 
 describe("parseModelPattern", () => {
@@ -370,6 +429,14 @@ describe("parseModelPattern", () => {
 		test("literal model ids ending in max win over the thinking alias", () => {
 			const result = parseModelPattern("nanogpt/coding-router:max", mockMaxSuffixModels);
 			expect(result.model?.id).toBe("coding-router:max");
+			expect(result.thinkingLevel).toBeUndefined();
+			expect(result.explicitThinkingLevel).toBe(false);
+			expect(result.warning).toBeUndefined();
+		});
+
+		test("literal model ids ending in auto win over the auto sentinel alias", () => {
+			const result = parseModelPattern("example/runtime:auto", mockAutoSuffixModels);
+			expect(result.model?.id).toBe("runtime:auto");
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toBeUndefined();
@@ -609,6 +676,25 @@ describe("resolveModelRoleValue", () => {
 		expect(result.model?.provider).toBe("anthropic");
 		expect(result.model?.id).toBe("claude-sonnet-4-5");
 		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("preserves an explicit :auto suffix as an explicit thinking selector", () => {
+		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto", allModels);
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.thinkingLevel).toBe("auto");
+		expect(result.explicitThinkingLevel).toBe(true);
+		expect(result.warning).toBeUndefined();
+	});
+
+	test("does not clamp :auto against the model's supported efforts", () => {
+		// claude-sonnet-4-5 caps at "high"; ensure auto isn't collapsed onto it
+		// by resolveThinkingLevelForModel.
+		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto", allModels);
+
+		expect(result.thinkingLevel).toBe("auto");
 		expect(result.explicitThinkingLevel).toBe(true);
 	});
 });
@@ -1055,6 +1141,26 @@ describe("parseModelString", () => {
 			expect(result).toEqual({ provider: "nanogpt", id: "coding-router:max" });
 		});
 
+		test("leaves :auto attached to the model id unless the caller opts in via allowAutoAlias", () => {
+			// Without allowAutoAlias, the strict suffix parser must not silently
+			// reinterpret a literal `:auto` id as an auto-thinking selector.
+			const result = parseModelString("example/runtime:auto");
+			expect(result).toEqual({ provider: "example", id: "runtime:auto" });
+		});
+
+		test("extracts auto sentinel when explicitly enabled for provider id selectors", () => {
+			const result = parseModelString("openai/gpt-5:auto", { allowAutoAlias: true });
+			expect(result).toEqual({ provider: "openai", id: "gpt-5", thinkingLevel: "auto" });
+		});
+
+		test("preserves literal :auto model ids when the caller can prove they exist", () => {
+			const result = parseModelString("example/runtime:auto", {
+				allowAutoAlias: true,
+				isLiteralModelId: (provider, id) => provider === "example" && id === "runtime:auto",
+			});
+			expect(result).toEqual({ provider: "example", id: "runtime:auto" });
+		});
+
 		test("does not strip inherited object keys as thinking suffixes", () => {
 			const result = parseModelString("anthropic/claude-sonnet-4-5:constructor");
 			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:constructor" });
@@ -1084,6 +1190,12 @@ describe("resolveModelFromString", () => {
 		const result = resolveModelFromString("nanogpt/coding-router:max", mockMaxSuffixModels);
 		expect(result?.provider).toBe("nanogpt");
 		expect(result?.id).toBe("coding-router:max");
+	});
+
+	test("preserves literal :auto provider model ids before alias parsing", () => {
+		const result = resolveModelFromString("example/runtime:auto", mockAutoSuffixModels);
+		expect(result?.provider).toBe("example");
+		expect(result?.id).toBe("runtime:auto");
 	});
 });
 
@@ -1125,6 +1237,20 @@ describe("extractExplicitThinkingSelector", () => {
 			isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:max",
 		});
 		expect(result).toBe(Effort.XHigh);
+	});
+
+	test("does not carry auto from literal role model ids", () => {
+		const result = extractExplicitThinkingSelector("nanogpt/coding-router:auto", undefined, {
+			isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:auto",
+		});
+		expect(result).toBeUndefined();
+	});
+
+	test("treats auto as an explicit selector when the model id is not literal", () => {
+		const result = extractExplicitThinkingSelector("openai/gpt-5:auto", undefined, {
+			isLiteralModelId: () => false,
+		});
+		expect(result).toBe("auto");
 	});
 });
 

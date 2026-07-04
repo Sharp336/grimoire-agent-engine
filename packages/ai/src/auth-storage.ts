@@ -16,7 +16,13 @@ import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
-import type { OAuthController, OAuthCredentials, OAuthProvider, OAuthProviderId } from "./registry/oauth/types";
+import type {
+	OAuthAuthInfo,
+	OAuthController,
+	OAuthCredentials,
+	OAuthProvider,
+	OAuthProviderId,
+} from "./registry/oauth/types";
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -362,6 +368,13 @@ export interface AuthCredentialStore {
 	 * `signal` propagates the agent's cancel down to the broker fetch.
 	 */
 	getUsageReport?(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
+	/**
+	 * Optional store hook to ingest a parsed provider usage report for one OAuth
+	 * credential. Remote broker stores use this to overlay header-derived limits
+	 * onto their cached aggregate `/v1/usage` response without mutating broker
+	 * state.
+	 */
+	ingestUsageReport?(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean;
 	/**
 	 * Optional store hook to invalidate a specific credential after the upstream
 	 * provider returned 401 on a supposedly-fresh key. Remote stores force the
@@ -1856,7 +1869,7 @@ export class AuthStorage {
 		provider: OAuthProviderId,
 		ctrl: OAuthController & {
 			/** onAuth is required by auth-storage but optional in OAuthController */
-			onAuth: (info: { url: string; instructions?: string }) => void;
+			onAuth: (info: OAuthAuthInfo) => void;
 			/** onPrompt is required for some providers (github-copilot, openai-codex) */
 			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
 		},
@@ -2234,16 +2247,15 @@ export class AuthStorage {
 				this.#recordUsageHistory(request, report);
 				return report;
 			}
-			// Failure: cache the LAST GOOD value (if any) with a short jittered TTL
-			// so the credential cools down briefly without dropping out of the
-			// report. If we never had a good value, return null this cycle and
-			// don't write — let the next poll retry.
+			// Failure: apply a short jittered cool-down so the credential doesn't
+			// re-hit the endpoint on every poll. Serve the last good value when we
+			// have one (keeps the credential in the report); otherwise cache null
+			// so a cold or throttled credential stops re-bursting until the window
+			// expires and the next poll retries.
 			const lastGood = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
-			if (lastGood !== null) {
-				const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
-				const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
-				this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
-			}
+			const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
+			const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
+			this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
 			this.#usageRequestInFlight.delete(cacheKey);
@@ -2360,7 +2372,7 @@ export class AuthStorage {
 		headers: Record<string, string>,
 		options?: { sessionId?: string; baseUrl?: string },
 	): boolean {
-		if (this.#fetchUsageReportsOverride || this.#store.fetchUsageReports) return false;
+		if (this.#fetchUsageReportsOverride) return false;
 
 		const credential = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
 		if (!credential) return false;
@@ -2380,6 +2392,14 @@ export class AuthStorage {
 		if (credential.projectId && metadata.projectId === undefined) metadata.projectId = credential.projectId;
 		const report: UsageReport = { ...parsedReport, metadata };
 
+		const storeIngest = this.#store.ingestUsageReport?.bind(this.#store);
+		if (storeIngest) {
+			const ingested = storeIngest(provider, credential, report);
+			if (ingested) this.#usageHeaderIngestAt.set(cacheKey, now);
+			return ingested;
+		}
+
+		if (this.#fetchUsageReportsOverride || this.#store.fetchUsageReports) return false;
 		const prior = this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value;
 		let merged = report;
 		if (prior && Array.isArray(prior.limits)) {

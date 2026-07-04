@@ -157,7 +157,6 @@ export class SelectorController {
 						const result = await previewTheme(themeName);
 						if (result.success) {
 							this.ctx.statusLine.invalidate();
-							this.ctx.updateEditorTopBorder();
 							this.ctx.ui.invalidate();
 							this.ctx.ui.requestRender();
 						}
@@ -175,7 +174,6 @@ export class SelectorController {
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 							...previewSettings,
 						});
-						this.ctx.updateEditorTopBorder();
 						this.ctx.ui.requestRender();
 					},
 					getStatusLinePreview: () => {
@@ -203,7 +201,6 @@ export class SelectorController {
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 						});
-						this.ctx.updateEditorTopBorder();
 						this.ctx.ui.requestRender();
 					},
 				},
@@ -456,7 +453,6 @@ export class SelectorController {
 			case "tui.tight":
 				setTuiTight(value as boolean);
 				this.ctx.ui.invalidate();
-				this.ctx.updateEditorTopBorder();
 				this.ctx.ui.requestRender();
 				break;
 
@@ -472,7 +468,7 @@ export class SelectorController {
 			case "theme": {
 				setTheme(value as string, true).then(result => {
 					this.ctx.statusLine.invalidate();
-					this.ctx.updateEditorTopBorder();
+					this.ctx.ui.requestRender();
 					this.ctx.ui.invalidate();
 					if (!result.success) {
 						this.ctx.showError(`Failed to load theme "${value}": ${result.error}\nFell back to dark theme.`);
@@ -483,7 +479,7 @@ export class SelectorController {
 			case "symbolPreset": {
 				setSymbolPreset(value as "unicode" | "nerd" | "ascii").then(() => {
 					this.ctx.statusLine.invalidate();
-					this.ctx.updateEditorTopBorder();
+					this.ctx.ui.requestRender();
 					this.ctx.ui.invalidate();
 				});
 				break;
@@ -557,7 +553,6 @@ export class SelectorController {
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);
-				this.ctx.updateEditorTopBorder();
 				this.ctx.ui.requestRender();
 				break;
 			}
@@ -1046,7 +1041,7 @@ export class SelectorController {
 		this.ctx.clearTransientSessionUi();
 		this.ctx.statusLine.invalidate();
 		this.ctx.statusLine.resetActiveTime();
-		this.ctx.updateEditorTopBorder();
+		this.ctx.ui.requestRender();
 		this.ctx.updateEditorBorderColor();
 		this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
@@ -1122,11 +1117,19 @@ export class SelectorController {
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		try {
 			await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
-				onAuth: (info: { url: string; instructions?: string }) => {
+				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
 					const block = new TranscriptBlock();
+					// Full URL first: works from any machine, including SSH boxes
+					// where the OMP-hosted `launchUrl` would resolve against the
+					// user's local browser and fail.
 					block.addChild(new Text(theme.fg("dim", info.url), 1, 0));
 					const hyperlink = `\x1b]8;;${info.url}\x07Click here to login\x1b]8;;\x07`;
 					block.addChild(new Text(theme.fg("accent", hyperlink), 1, 0));
+					if (info.launchUrl && info.launchUrl !== info.url) {
+						block.addChild(
+							new Text(theme.fg("dim", `Local shortcut (this machine only): ${info.launchUrl}`), 1, 0),
+						);
+					}
 					if (info.instructions) {
 						block.addChild(new Spacer(1));
 						block.addChild(new Text(theme.fg("warning", info.instructions), 1, 0));
