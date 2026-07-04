@@ -13,6 +13,7 @@ import type {
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { mapCursorGrepExecArgs } from "@oh-my-pi/pi-ai/providers/cursor-grep-bridge";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveToCwd } from "./tools/path-utils";
 
@@ -177,13 +178,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
-			pattern: args.pattern,
-			path: searchPath,
-			case: args.caseInsensitive === true ? false : undefined,
-		});
-		return toolResultMessage;
+		const mapped = mapCursorGrepExecArgs(args);
+		if (mapped.error) {
+			return createToolResultMessage(toolCallId, "grep", buildToolErrorResult(mapped.error), true);
+		}
+		return executeTool(this.options, "grep", toolCallId, mapped.ompArgs);
 	}
 
 	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {

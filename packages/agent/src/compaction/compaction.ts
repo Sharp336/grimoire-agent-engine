@@ -304,6 +304,22 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
+
+/**
+ * Snapcompact archives history as images; text-only models cannot consume those
+ * frames. Downgrade to context-full so maintenance still runs without repeated
+ * per-cycle downgrade warnings.
+ */
+export function resolveCompactionStrategyForModel(
+	strategy: CompactionSettings["strategy"] | undefined,
+	model: Pick<Model, "input"> | undefined,
+): CompactionSettings["strategy"] {
+	if (strategy === "snapcompact" && model && !model.input.includes("image")) {
+		return "context-full";
+	}
+	return strategy ?? "context-full";
+}
+
 export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
 	// Fixed token limit takes priority over percentage
 	const thresholdTokens = settings.thresholdTokens;

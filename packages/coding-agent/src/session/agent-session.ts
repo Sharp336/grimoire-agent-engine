@@ -63,6 +63,7 @@ import {
 	prepareCompaction,
 	renderHandoffPrompt,
 	resolveBudgetReserveTokens,
+	resolveCompactionStrategyForModel,
 	resolveThresholdTokens,
 	type SessionMessageEntry,
 	type ShakeConfig,
@@ -9456,9 +9457,16 @@ export class AgentSession {
 			// strategy/remote flags for this one invocation. Merged before
 			// prepareCompaction so the remote gating (preparation.settings.
 			// remoteEnabled/endpoint) and the snapcompact decision below both see it.
-			const effectiveSettings = compactMode
+			let effectiveSettings = compactMode
 				? { ...compactionSettings, ...compactMode.overrides }
 				: compactionSettings;
+			const resolvedCompactionStrategy = resolveCompactionStrategyForModel(
+				effectiveSettings.strategy,
+				this.model,
+			);
+			if (resolvedCompactionStrategy !== effectiveSettings.strategy) {
+				effectiveSettings = { ...effectiveSettings, strategy: resolvedCompactionStrategy };
+			}
 			// /compact remote demands provider-native compaction. When no remote
 			// endpoint is configured (one would override per-model gating in
 			// compact()), drop fallback candidates that aren't remote-capable so the
@@ -9528,14 +9536,7 @@ export class AgentSession {
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
-			if (wantsSnapcompact && !this.model.input.includes("image")) {
-				this.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.model.id} is text-only)`,
-					"compaction",
-				);
-				throw new Error(`snapcompact cannot run locally: ${this.model.id} is text-only.`);
-			} else if (snapcompactReady) {
+			if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
 				);
@@ -12109,7 +12110,11 @@ export class AgentSession {
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const effectiveCompactionStrategy = resolveCompactionStrategyForModel(
+			compactionSettings.strategy,
+			this.model,
+		);
+		if (effectiveCompactionStrategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#promptGeneration;
 		const suppressContinuation = options.suppressContinuation === true;
@@ -12120,7 +12125,7 @@ export class AgentSession {
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
-		if (compactionSettings.strategy === "shake") {
+		if (effectiveCompactionStrategy === "shake") {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -12142,7 +12147,7 @@ export class AgentSession {
 			reason !== "overflow" &&
 			reason !== "incomplete" &&
 			reason !== "idle" &&
-			compactionSettings.strategy === "handoff"
+			effectiveCompactionStrategy === "handoff"
 		) {
 			this.#schedulePostPromptTask(
 				async signal => {
@@ -12159,19 +12164,11 @@ export class AgentSession {
 		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
 		// so a handoff request on the existing context is still viable.
 		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
+			effectiveCompactionStrategy === "snapcompact"
 				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
+				: effectiveCompactionStrategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
-		if (action === "snapcompact" && this.model && !this.model.input.includes("image")) {
-			this.emitNotice(
-				"warning",
-				`snapcompact needs a vision-capable active model (${this.model.id} is text-only); using context-full auto-compaction instead.`,
-				"compaction",
-			);
-			action = "context-full";
-		}
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();

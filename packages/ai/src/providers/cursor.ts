@@ -144,6 +144,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import { mapCursorGrepExecArgs } from "./cursor-grep-bridge";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
@@ -1114,12 +1115,12 @@ async function handleExecServerMessage(
 			// Mirror the coding-agent bridge's arg mapping so live UI (from
 			// `tool_execution_start`) and rebuilt transcript (from this block)
 			// display identical args.
-			const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "grep", {
-				pattern: args.pattern,
-				path: searchPath,
-				case: args.caseInsensitive === true ? false : undefined,
-			});
+			const mapped = mapCursorGrepExecArgs(args);
+			if (mapped.error) {
+				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(mapped.error));
+				return;
+			}
+			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "grep", mapped.ompArgs);
 			const { execResult } = await resolveExecHandler(
 				args,
 				execHandlers?.grep?.bind(execHandlers),

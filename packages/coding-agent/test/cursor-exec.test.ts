@@ -64,4 +64,17 @@ describe("CursorExecHandlers.grep bridge", () => {
 		} as any);
 		expect((sensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
+	it("returns a clear error when Cursor sends an empty grep pattern", async () => {
+		const result = await handlers.grep({
+			toolCallId: "call-empty",
+			path: cwd,
+			pattern: "   ",
+		} as any);
+		expect(result.isError).toBe(true);
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("non-empty pattern"),
+		});
+	});
+
 });

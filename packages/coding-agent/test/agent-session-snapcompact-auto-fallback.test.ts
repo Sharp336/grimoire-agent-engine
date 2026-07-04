@@ -138,9 +138,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const result = await harness.awaitCompactionEnd();
 		expect(result).toEqual({ action: "context-full", errorMessage: undefined });
 		expect(compactionModule.compact).toHaveBeenCalled();
-		expect(harness.notices).toContain(
-			"snapcompact needs a vision-capable active model (alibaba/qwen3-coder-480b-a35b-instruct is text-only); using context-full auto-compaction instead.",
-		);
+		expect(
+			harness.notices.some(message =>
+				message.includes("snapcompact needs a vision-capable active model"),
+			),
+		).toBe(false);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({
 			type: "compaction",
 			summary: "compacted",
