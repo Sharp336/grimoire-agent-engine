@@ -17,10 +17,7 @@ use std::{
 };
 
 use grep_matcher::Matcher;
-use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{
-	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
-};
+use grep_searcher::{Searcher, Sink, SinkContext, SinkContextKind, SinkMatch};
 use napi::{
 	JsString,
 	bindgen_prelude::*,
@@ -566,21 +563,29 @@ fn run_search_slice(
 
 fn build_searcher_for_params(params: SearchParams) -> Searcher {
 	let collect_content = params.mode == OutputMode::Content;
-	build_searcher(
-		if collect_content {
-			params.context_before
+	// Delegates searcher construction to pi-grep-core. `BinaryMode::Automatic`
+	// resolves to `BinaryDetection::quit(b'\0')` (text/null_data/force all off),
+	// preserving pi-natives' historical quit-on-NUL policy; the spec's other
+	// knobs default off, so `.passthru`/`.invert_match`/`.max_matches(None)` are
+	// no-ops that leave the built searcher byte-identical to the prior builder.
+	let spec = pi_grep_core::SearcherSpec {
+		line_number: collect_content,
+		before_context: if collect_content {
+			params.context_before as usize
 		} else {
 			0
 		},
-		if collect_content {
-			params.context_after
+		after_context: if collect_content {
+			params.context_after as usize
 		} else {
 			0
 		},
-		params.multiline,
-		collect_content,
-	)
+		multi_line: params.multiline,
+		..pi_grep_core::SearcherSpec::default()
+	};
+	pi_grep_core::build_searcher(&spec, pi_grep_core::BinaryMode::Automatic)
 }
+
 std::thread_local! {
 	static PARALLEL_GREP_SEARCHER: RefCell<Option<(SearchParams, Searcher)>> =
 		const { RefCell::new(None) };
@@ -606,13 +611,14 @@ fn build_searcher(
 	multiline: bool,
 	line_number: bool,
 ) -> Searcher {
-	SearcherBuilder::new()
-		.binary_detection(BinaryDetection::quit(b'\x00'))
-		.line_number(line_number)
-		.multi_line(multiline)
-		.before_context(context_before as usize)
-		.after_context(context_after as usize)
-		.build()
+	let spec = pi_grep_core::SearcherSpec {
+		before_context: context_before as usize,
+		after_context: context_after as usize,
+		multi_line: multiline,
+		line_number,
+		..pi_grep_core::SearcherSpec::default()
+	};
+	pi_grep_core::build_searcher(&spec, pi_grep_core::BinaryMode::Automatic)
 }
 
 fn file_len_exceeds_limit(len: usize) -> bool {
@@ -958,19 +964,30 @@ fn build_regex_matcher(
 	ignore_case: bool,
 	multiline: bool,
 ) -> std::result::Result<grep_regex::RegexMatcher, grep_regex::Error> {
-	let build = |line_terminated| {
-		let mut builder = RegexMatcherBuilder::new();
-		builder.case_insensitive(ignore_case).multi_line(multiline);
-		if line_terminated {
-			builder.line_terminator(Some(b'\n'));
-		}
-		builder.build(pattern)
+	// Delegates the leaf matcher build to pi-grep-core; the fallback ladder
+	// (brace sanitization, paren-escape retry, literal fallback) stays here in
+	// `build_matcher`. The core applies its extra `MatcherSpec` knobs at their
+	// defaults, and `build_matcher` == `build_many(&[pattern])`, so this is
+	// byte-identical (matches and error strings) to the prior single-pattern
+	// `RegexMatcherBuilder::build`.
+	//
+	// Fast path (preserved from upstream): when not multiline, first try a
+	// matcher whose line terminator is `\n` (faster anchor matching); fall
+	// back to the default (no terminator) if that build fails.
+	let owned = pattern.to_owned();
+	let patterns = std::slice::from_ref(&owned);
+	let spec = |line_terminated: bool| pi_grep_core::MatcherSpec {
+		case_insensitive: ignore_case,
+		multi_line: multiline,
+		line_terminator: line_terminated.then_some(b'\n'),
+		..pi_grep_core::MatcherSpec::default()
 	};
-
-	if !multiline && let Ok(matcher) = build(true) {
+	if !multiline
+		&& let Ok(matcher) = pi_grep_core::build_matcher(patterns, &spec(true))
+	{
 		return Ok(matcher);
 	}
-	build(false)
+	pi_grep_core::build_matcher(patterns, &spec(false))
 }
 
 fn build_matcher(
