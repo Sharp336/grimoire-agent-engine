@@ -65,7 +65,7 @@ pub struct WalkSpec {
 }
 
 /// Post-traversal path filters applied to each candidate entry.
-pub struct PathFilters {
+struct PathFilters {
 	overrides:    Option<Override>,
 	types:        Option<Types>,
 	max_filesize: Option<u64>,
@@ -74,7 +74,7 @@ pub struct PathFilters {
 impl PathFilters {
 	/// Whether `path` (of kind `file_type`, with optional known `size`) survives
 	/// the override/type/size filters. Directories are gated by overrides only.
-	pub fn includes(&self, path: &Path, file_type: FileType, size: Option<f64>) -> bool {
+	fn includes(&self, path: &Path, file_type: FileType, size: Option<f64>) -> bool {
 		let is_dir = file_type == FileType::Dir;
 		if self
 			.overrides
