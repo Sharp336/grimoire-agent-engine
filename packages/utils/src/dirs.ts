@@ -737,6 +737,11 @@ export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
 }
 
+/** Get the workspace binding registry path (~/.omp/agent/workspace-registry.json). */
+export function getWorkspaceRegistryPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "workspace-registry.json", "data");
+}
+
 /** Get the path to models.db (model cache database). */
 export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");

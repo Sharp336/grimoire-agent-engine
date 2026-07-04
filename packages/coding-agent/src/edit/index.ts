@@ -18,6 +18,7 @@ import patchDescription from "../prompts/tools/patch.md" with { type: "text" };
 import replaceDescription from "../prompts/tools/replace.md" with { type: "text" };
 import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
+import type { WorkspaceGuardToolMetadata } from "../tools/workspace-guard";
 import { isInternalUrlPath } from "../tools/path-utils";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
@@ -374,6 +375,16 @@ export class EditTool implements AgentTool<TInput> {
 	readonly formatApprovalDetails = (args: unknown): string[] => [
 		`File: ${truncateForPrompt(extractApprovalPath(args))}`,
 	];
+	readonly workspaceGuard: WorkspaceGuardToolMetadata<EditParams> = {
+		access: "mutate",
+		targetPath: params => {
+			const paths = this.matcherPaths(params);
+			if (paths && paths.length > 0) return paths;
+
+			const targetPath = extractApprovalPath(params);
+			return targetPath !== "(unknown)" ? targetPath : undefined;
+		},
+	};
 	readonly name = "edit";
 	readonly label = "Edit";
 	readonly loadMode = "essential";

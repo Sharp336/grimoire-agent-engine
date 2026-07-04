@@ -47,6 +47,7 @@ import {
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
+import type { WorkspaceGuardToolMetadata } from "./workspace-guard";
 import { formatPathRelativeToCwd, isInternalUrlPath, pathTargetsSsh, peelWriteUrlSelector } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
 import {
@@ -223,6 +224,19 @@ interface ResolvedSqliteWritePath {
 	exists: boolean;
 }
 
+function resolveWriteWorkspaceGuardPath(params: WriteParams): string | undefined {
+	const writePath = peelWriteUrlSelector(unwrapHashlineHeaderPath(params.path));
+	if (pathTargetsSsh(writePath) || isInternalUrlPath(writePath)) return undefined;
+
+	const archiveCandidate = parseArchivePathCandidates(writePath)[0];
+	if (archiveCandidate) return archiveCandidate.archivePath;
+
+	const sqliteCandidate = parseSqlitePathCandidates(writePath)[0];
+	if (sqliteCandidate) return sqliteCandidate.sqlitePath;
+
+	return writePath;
+}
+
 function isArchivePathNotFound(error: unknown): boolean {
 	if (isEnoent(error)) return true;
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
@@ -283,6 +297,10 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  * Creates or overwrites files with optional LSP formatting and diagnostics.
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
+	readonly workspaceGuard: WorkspaceGuardToolMetadata<WriteParams> = {
+		access: "mutate",
+		targetPath: resolveWriteWorkspaceGuardPath,
+	};
 	readonly name = "write";
 	readonly approval = (args: unknown): ToolTier => {
 		const rawPath = (args as Partial<WriteParams>).path;

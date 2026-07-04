@@ -38,6 +38,7 @@ import {
 import { resolveToCwd } from "./path-utils";
 import { capPreviewLines, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
+import type { WorkspaceGuardToolMetadata } from "./workspace-guard";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
@@ -352,12 +353,28 @@ function stripExitCodeNotice(text: string, exitCode: number | undefined): string
 	return stripTrailingNotice(text, formatExitCodeNotice(exitCode));
 }
 
+function resolveBashWorkspaceGuardCwd(params: BashToolInput): string | undefined {
+	if (params.cwd && params.cwd.length > 0) return params.cwd;
+
+	const cdMatch = params.command.match(/^cd[ \t]+((?:[^&\\\n\r]|\\.)+?)[ \t]*&&[ \t]*/);
+	const rawCwd = cdMatch?.[1];
+	if (!rawCwd || /[$`(]/.test(rawCwd)) return undefined;
+
+	const cwd = rawCwd.trim().replace(/^["']|["']$/g, "");
+	if (cwd.includes("://") || cwd.includes("local:/")) return undefined;
+	return cwd.length > 0 ? cwd : undefined;
+}
+
 /**
  * Bash tool implementation.
  *
  * Executes bash commands with optional timeout and working directory.
  */
 export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSchemaWithAsync, BashToolDetails> {
+	readonly workspaceGuard: WorkspaceGuardToolMetadata<BashToolInput> = {
+		access: "mutate",
+		requestedCwd: resolveBashWorkspaceGuardCwd,
+	};
 	readonly name = "bash";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;

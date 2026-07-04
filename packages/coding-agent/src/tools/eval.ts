@@ -20,6 +20,7 @@ import { upsertStatusEvent } from "./eval-render";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import type { WorkspaceGuardToolMetadata } from "./workspace-guard";
 import { clampTimeout } from "./tool-timeouts";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
@@ -282,6 +283,9 @@ function formatEvalInputLanguage(value: string): string {
 }
 
 export class EvalTool implements AgentTool<typeof evalSchema> {
+	readonly workspaceGuard: WorkspaceGuardToolMetadata<EvalToolParams> = {
+		access: "mutate",
+	};
 	readonly name = "eval";
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {

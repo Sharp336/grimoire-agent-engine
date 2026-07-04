@@ -53,6 +53,7 @@ import {
 	type TitleChangeEntry,
 	type TtsrInjectionEntry,
 	type UsageStatistics,
+	type WorkspaceBindingMetadata,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
@@ -1154,6 +1155,10 @@ export class SessionManager {
 		return this.#cwd;
 	}
 
+	getWorkspaceRoot(): string {
+		return this.#header.workspaceBinding?.workspaceRoot ?? this.#cwd;
+	}
+
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
 	}
@@ -1392,7 +1397,9 @@ export class SessionManager {
 		outputSchema?: unknown;
 		spawns?: string;
 		readSummarize?: boolean;
+		workspaceBinding?: WorkspaceBindingMetadata;
 	}): string {
+		this.#forceFileCreation = true;
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1579,6 +1586,12 @@ export class SessionManager {
 		}
 
 		return changed;
+	}
+
+	setWorkspaceBinding(metadata: WorkspaceBindingMetadata): void {
+		this.#header.workspaceBinding = { ...metadata };
+		this.#forceFileCreation = true;
+		this.#rewriteRequired = true;
 	}
 
 	getHeader(): SessionHeader | null {
@@ -1836,6 +1849,7 @@ export class SessionManager {
 			outputSchema?: unknown;
 			spawns?: string;
 			readSummarize?: boolean;
+			workspaceBinding?: WorkspaceBindingMetadata;
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -1854,6 +1868,7 @@ export class SessionManager {
 			outputSchema?: unknown;
 			spawns?: string;
 			readSummarize?: boolean;
+			workspaceBinding?: WorkspaceBindingMetadata;
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
@@ -1865,6 +1880,7 @@ export class SessionManager {
 					outputSchema: entry.outputSchema,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
+					workspaceBinding: entry.workspaceBinding,
 				};
 				break;
 			}

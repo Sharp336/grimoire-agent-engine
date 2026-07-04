@@ -20,6 +20,7 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
+import type { WorkspaceGuardToolMetadata } from "./workspace-guard";
 import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
 import {
 	appendParseErrorsBulletList,
@@ -168,8 +169,16 @@ export interface AstEditToolDetails {
 }
 
 type AstEditSchemaInfer = typeof astEditSchema.infer;
+function resolveAstEditWorkspaceGuardPaths(params: AstEditSchemaInfer): readonly string[] | undefined {
+	const localPaths = params.paths.filter(candidate => !isInternalUrlPath(candidate));
+	return localPaths.length > 0 ? localPaths : undefined;
+}
 
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
+	readonly workspaceGuard: WorkspaceGuardToolMetadata<AstEditSchemaInfer> = {
+		access: "mutate",
+		targetPath: resolveAstEditWorkspaceGuardPaths,
+	};
 	readonly name = "ast_edit";
 	readonly approval = (args: unknown) => {
 		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)

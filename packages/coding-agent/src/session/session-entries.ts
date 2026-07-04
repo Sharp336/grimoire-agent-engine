@@ -23,6 +23,12 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+export interface WorkspaceBindingMetadata {
+	sessionId: string;
+	workspaceRoot: string;
+	registryFile: string;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -32,6 +38,7 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+	workspaceBinding?: WorkspaceBindingMetadata;
 }
 
 export interface NewSessionOptions {
@@ -167,6 +174,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	workspaceBinding?: WorkspaceBindingMetadata;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

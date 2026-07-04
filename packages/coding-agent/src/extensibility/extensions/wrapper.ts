@@ -6,6 +6,7 @@ import type { ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, requiresApproval } from "../../tools/approval";
+import { checkWorkspaceGuardForTool, resolveWorkspaceGuardContext } from "../../tools/workspace-guard";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -111,6 +112,19 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	) {
+		if (this.tool.workspaceGuard) {
+			const workspaceGuardContext =
+				resolveWorkspaceGuardContext(context) ?? resolveWorkspaceGuardContext(this.runner.createContext());
+			if (!workspaceGuardContext) {
+				throw new Error(`Tool "${this.tool.name}" cannot be checked against the bound workspace.`);
+			}
+
+			const workspaceGuardDecision = await checkWorkspaceGuardForTool(this.tool, params, workspaceGuardContext);
+			if (workspaceGuardDecision && !workspaceGuardDecision.allowed) {
+				throw new Error(workspaceGuardDecision.message);
+			}
+		}
+
 		// 1. Check approval policy (before extension handlers).
 		// CLI `--auto-approve` / `--yolo` sets approval mode to yolo.
 		// User `tools.approval.<tool>` policies are still applied in all modes.
