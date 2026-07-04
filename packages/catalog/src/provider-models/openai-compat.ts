@@ -2774,6 +2774,172 @@ export function moonshotModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.6 Morph
+// ---------------------------------------------------------------------------
+
+export interface MorphModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function morphModelManagerOptions(config?: MorphModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	// dynamicModelsAuthoritative: when live /v1/models succeeds, the dynamic
+	// list is the complete catalog and stale seed IDs are pruned (preventing a
+	// withdrawn model from lingering as a phantom). A failed fetch still keeps
+	// the seed so the provider stays usable offline.
+	// Reasoning wire format: Morph encodes reasoning effort as a nested
+	// `reasoning: { effort: "medium" }` field, not top-level `reasoning_effort`.
+	// The compat layer (packages/catalog/src/compat/openai.ts) maps morphllm to
+	// the "openrouter" thinkingFormat so applyChatCompletionsCompatPolicy emits
+	// the correct nested shape.
+	const base = createSimpleOpenAICompletionsOptions(
+		"morphllm" as Parameters<typeof getBundledModels>[0],
+		"https://api.morphllm.com/v1",
+		config,
+	);
+	return {
+		...base,
+		// Morph's /v1/models returns specialized endpoints alongside chat models:
+		// Fast Apply (morph-v3-*), Compact (morph-compactor), WarpGrep
+		// (morph-warp-grep-*), Computer Use (morph-computer-use-*), the auto
+		// router, and deepseek/ aliases of morph-dsv4flash. These expect
+		// dedicated payloads (XML code-edit, search queries, etc.), not
+		// conversation + tool schemas, so importing them as openai-completions
+		// chat models produces broken agent sessions after the first refresh.
+		// Filter them out, keeping only the documented open-weight chat models.
+		...(config?.apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "morphllm",
+					baseUrl: config?.baseUrl ?? "https://api.morphllm.com/v1",
+					apiKey: config.apiKey,
+					mapModel: (entry, defaults) => {
+						const references = createBundledReferenceMap<"openai-completions">("morphllm");
+						const reference = references.get(defaults.id);
+						return mapWithBundledReference(entry, defaults, reference);
+					},
+					filterModel: (_entry, mapped) => isMorphChatModel(mapped.id),
+					fetch: config?.fetch,
+				}),
+		}),
+		dynamicModelsAuthoritative: true,
+	};
+}
+
+/**
+ * Morph's /v1/models endpoint returns specialized endpoints (Fast Apply,
+ * WarpGrep, Compact, Computer Use, auto-router, deepseek/ aliases, and
+ * potentially embedding/rerank models) alongside the documented open-weight
+ * chat models. Only the chat models accept conversation history + tool schemas;
+ * the others expect dedicated payloads. Use an allowlist of the six documented
+ * chat IDs so future specialized endpoints are never imported as chat models.
+ */
+const MORPH_CHAT_MODEL_IDS: ReadonlySet<string> = new Set([
+	"morph-qwen35-397b",
+	"morph-glm52-744b",
+	"morph-minimax27-230b",
+	"morph-minimax3-428b",
+	"morph-qwen36-27b",
+	"morph-dsv4flash",
+]);
+
+function isMorphChatModel(modelId: string): boolean {
+	return MORPH_CHAT_MODEL_IDS.has(modelId);
+}
+
+/**
+ * Static seed for Morph's documented model lineup so `ModelRegistry.#loadModels()`
+ * can resolve `morphllm/<id>` synchronously at boot — before background `/v1/models`
+ * discovery completes. Without this, an env-key default-provider cold start misses
+ * the model until discovery finishes. Live discovery replaces/augments at runtime.
+ * Pushed into models.json by generate-models.ts under the same authoritative-guard
+ * pattern as SAKANA_FUGU_STATIC_MODELS.
+ *
+ * Pricing/context/modalities from https://www.morphllm.com/api/models/json (2026-07-04).
+ * The morph-v3-* apply models (Fast Apply / Large Apply) are intentionally excluded: they
+ * expect XML code-edit payloads and support neither tools nor reasoning, so they cannot run
+ * the agent loop. They remain discoverable via live /v1/models if a user explicitly wants
+ * them, but are not bundled/selectable as chat models. The six open-weight fast models here
+ * support tools, JSON mode, structured outputs, logprobs, and reasoning.
+ */
+export const MORPH_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "morph-qwen35-397b",
+		name: "Qwen 3.5 397B",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.5, output: 3.5, cacheRead: 0.3, cacheWrite: 0 },
+		contextWindow: 262144,
+		maxTokens: 131072,
+	},
+	{
+		id: "morph-minimax27-230b",
+		name: "MiniMax M2.7 230B",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.279, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 196608,
+		maxTokens: 196608,
+	},
+	{
+		id: "morph-minimax3-428b",
+		name: "MiniMax M3 428B",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.6, output: 2.4, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256000,
+		maxTokens: 256000,
+	},
+	{
+		id: "morph-glm52-744b",
+		name: "GLM-5.2 744B",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.1, output: 4.1, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 1048576,
+	},
+	{
+		id: "morph-qwen36-27b",
+		name: "Qwen 3.6 27B",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.289, output: 2.4, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131072,
+		maxTokens: 131072,
+	},
+	{
+		id: "morph-dsv4flash",
+		name: "DeepSeek V4 Flash",
+		api: "openai-completions",
+		provider: "morphllm",
+		baseUrl: "https://api.morphllm.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.139, output: 0.278, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 1048576,
+	},
+];
+
+// ---------------------------------------------------------------------------
 // 16.5 Sakana AI
 // ---------------------------------------------------------------------------
 

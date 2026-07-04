@@ -176,6 +176,11 @@ const MIMO_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]>
 	xhigh: "high",
 };
 
+const MORPH_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]> = {
+	minimal: "low",
+	xhigh: "high",
+};
+
 function mergeMimoReasoningEffortMap(compat: ResolvedOpenAISharedCompat, enabled: boolean): void {
 	if (!enabled) return;
 	compat.reasoningEffortMap = { ...MIMO_REASONING_EFFORT_MAP, ...compat.reasoningEffortMap };
@@ -403,10 +408,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				: isOpenRouter
 					? "openrouter"
 					: "raw";
+	const isMorph = provider === "morphllm";
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
 		isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
 			? "zai"
-			: isOpenRouter
+			: isOpenRouter || isMorph
 				? "openrouter"
 				: isQwen && isNvidiaNim
 					? "qwen-chat-template"
@@ -429,7 +435,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		reasoningEffortMap: isMimoReasoningEffortModel ? MIMO_REASONING_EFFORT_MAP : {},
+		reasoningEffortMap: isMimoReasoningEffortModel
+			? MIMO_REASONING_EFFORT_MAP
+			: isMorph
+				? MORPH_REASONING_EFFORT_MAP
+				: {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
 		// family classifier so OpenAI-compat proxies serving Gemini are covered.

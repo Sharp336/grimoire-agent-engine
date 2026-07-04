@@ -104,6 +104,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `nvidia` | `NVIDIA_API_KEY` |
 | `huggingface` | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN` |
 | `moonshot` | `MOONSHOT_API_KEY` |
+| `morphllm` | `MORPH_API_KEY` (also `MORPHLLM_API_KEY`) |
 | `nanogpt` | `NANO_GPT_API_KEY` |
 | `venice` | `VENICE_API_KEY` |
 | `vercel-ai-gateway` | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |

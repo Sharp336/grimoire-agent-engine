@@ -37,6 +37,7 @@ import {
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
+	MORPH_STATIC_MODELS,
 	mapModelsDevToModels,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
@@ -467,6 +468,21 @@ async function generateModels() {
 			.filter(batch => batch.descriptor.dynamicModelsAuthoritative === true && batch.models.length > 0)
 			.map(batch => batch.descriptor.providerId),
 	);
+	// Providers whose descriptor declares dynamicModelsAuthoritative but lack
+	// catalogDiscovery (e.g. morphllm) are never in catalogProviderModelBatches, so
+	// they never produce a live fetch at gen time. Mark them authoritative for the
+	// preserve-fallback pruner so stale snapshot entries are dropped, but keep them
+	// out of authoritativeCatalogProviders so the static-seed guard still pushes.
+	// Providers WITH catalogDiscovery (aimlapi, baseten, …) are excluded: when their
+	// live fetch fails (no key), their snapshot entries must survive as fallback.
+	const catalogDiscoveryProviderIds = new Set(catalogProviderDescriptors.map(d => d.providerId));
+	const descriptorAuthoritativeProviders = new Set<string>();
+	for (const descriptor of PROVIDER_DESCRIPTORS) {
+		if (descriptor.dynamicModelsAuthoritative === true && !catalogDiscoveryProviderIds.has(descriptor.providerId)) {
+			descriptorAuthoritativeProviders.add(descriptor.providerId);
+		}
+	}
+	const authoritativeForPruning = new Set([...authoritativeCatalogProviders, ...descriptorAuthoritativeProviders]);
 	const catalogProviderModels = catalogProviderModelBatches.flatMap(batch => batch.models);
 	const bundledModelsDevModels = modelsDevModels.filter(model => !authoritativeCatalogProviders.has(model.provider));
 	// getGitLabDuoModels returns built models; project back to spec stage for the bundle.
@@ -501,6 +517,12 @@ async function generateModels() {
 	// Sakana is authoritative and stale seed IDs must stay out.
 	if (!authoritativeCatalogProviders.has("sakana")) {
 		allModels.push(...SAKANA_FUGU_STATIC_MODELS);
+	}
+	// Seed Morph's default model so a fresh install (no cached Morph catalog
+	// yet) still resolves `morphllm/morph-v3-fast` synchronously at boot. If live
+	// `/v1/models` succeeds, morphllm is authoritative and the seed stays out.
+	if (!authoritativeCatalogProviders.has("morphllm")) {
+		allModels.push(...MORPH_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
@@ -561,7 +583,7 @@ async function generateModels() {
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
 				!RETIRED_PROVIDERS.has(model.provider) &&
-				!authoritativeCatalogProviders.has(model.provider) &&
+				!authoritativeForPruning.has(model.provider) &&
 				!modelsDevSnapshotExcludedProviders.has(model.provider)
 			) {
 				allModels.push(model);
