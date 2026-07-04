@@ -286,17 +286,17 @@ export abstract class KernelSessionRegistry<
 	#startingSessions = new Map<string, StartingRegistrySession<TKernel>>();
 	#resettingSessions = new Map<string, Promise<void>>();
 
-	protected abstract readonly languageLabel: string;
-	protected abstract readonly cancelledErrorClass: CancelledErrorClass;
-	protected abstract startKernel(cwd: string, options: TOptions): Promise<TKernel>;
-	protected abstract runOnKernel(kernel: TKernel, code: string, options: TOptions): Promise<TResult>;
+	abstract readonly languageLabel: string;
+	abstract readonly cancelledErrorClass: CancelledErrorClass;
+	abstract startKernel(cwd: string, options: TOptions): Promise<TKernel>;
+	abstract runOnKernel(kernel: TKernel, code: string, options: TOptions): Promise<TResult>;
 
-	protected buildSessionKey(sessionId: string, cwd: string, options: TOptions): string {
+	buildSessionKey(sessionId: string, cwd: string, options: TOptions): string {
 		const normalizedCwd = path.resolve(cwd);
 		return `${sessionId}\0${normalizedCwd}\0${this.normalizeInterpreter(normalizedCwd, options.interpreter)}`;
 	}
 
-	protected normalizeInterpreter(cwd: string, interpreter: string | undefined): string {
+	normalizeInterpreter(cwd: string, interpreter: string | undefined): string {
 		if (interpreter === undefined) return "";
 		const resolved = resolveExplicitPath(interpreter, cwd);
 		try {
@@ -306,31 +306,31 @@ export abstract class KernelSessionRegistry<
 		}
 	}
 
-	protected resetShutdownTimeoutMs(): number | undefined {
+	resetShutdownTimeoutMs(): number | undefined {
 		return undefined;
 	}
 
-	protected beforeKernelReplacement(_session: RegistrySession<TKernel>): void {}
+	beforeKernelReplacement(_session: RegistrySession<TKernel>): void {}
 
-	protected async beforeExecution(_sessionId: string, _options: TOptions): Promise<void> {}
+	async beforeExecution(_sessionId: string, _options: TOptions): Promise<void> {}
 
-	protected clearResettingOnDisposeAll(): boolean {
+	clearResettingOnDisposeAll(): boolean {
 		return false;
 	}
 
-	protected isSessionCancellationError(error: unknown): boolean {
+	isSessionCancellationError(error: unknown): boolean {
 		return isCancellationError(error, this.cancelledErrorClass);
 	}
 
-	protected isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
+	isSessionTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
 		return isTimedOutCancellation(error, this.cancelledErrorClass, signal);
 	}
 
-	protected async waitForStartingSession(
+	async waitForStartingSession(
 		promise: Promise<RegistrySession<TKernel>>,
-		_options: TOptions,
+		options: TOptions,
 	): Promise<RegistrySession<TKernel>> {
-		return await promise;
+		return await waitForPromiseWithCancellation(promise, options, this.cancelledErrorClass);
 	}
 
 	async executeOnSession(code: string, options: TOptions): Promise<TResult> {
@@ -343,7 +343,7 @@ export abstract class KernelSessionRegistry<
 			const inFlight = this.#resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 			else {
-				const resetPromise = this.resetSession(sessionKey);
+				const resetPromise = this.#resetSession(sessionKey);
 				this.#resettingSessions.set(
 					sessionKey,
 					resetPromise.then(() => undefined),
@@ -358,7 +358,7 @@ export abstract class KernelSessionRegistry<
 			const inFlight = this.#resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 		}
-		const session = await this.acquireSession(sessionKey, sessionId, cwd, options);
+		const session = await this.#acquireSession(sessionKey, sessionId, cwd, options);
 		if (options.signal?.aborted) {
 			throw new this.cancelledErrorClass(this.isSessionTimedOutCancellation(options.signal.reason, options.signal));
 		}
@@ -366,7 +366,7 @@ export abstract class KernelSessionRegistry<
 			throw new this.cancelledErrorClass(false);
 		}
 		if (!session.kernel.isAlive()) {
-			await this.replaceSessionKernel(session, cwd, options);
+			await this.#replaceSessionKernel(session, cwd, options);
 			if (this.#sessions.get(session.sessionKey) !== session) {
 				throw new this.cancelledErrorClass(false);
 			}
@@ -380,7 +380,7 @@ export abstract class KernelSessionRegistry<
 			if (this.#sessions.get(session.sessionKey) !== session) {
 				throw new this.cancelledErrorClass(false);
 			}
-			await this.replaceSessionKernel(session, cwd, options);
+			await this.#replaceSessionKernel(session, cwd, options);
 			if (this.#sessions.get(session.sessionKey) !== session) {
 				throw new this.cancelledErrorClass(false);
 			}
@@ -468,7 +468,7 @@ export abstract class KernelSessionRegistry<
 		}
 	}
 
-	private async acquireSession(
+	async #acquireSession(
 		sessionKey: string,
 		sessionId: string,
 		cwd: string,
@@ -499,6 +499,9 @@ export abstract class KernelSessionRegistry<
 			};
 			if (this.#startingSessions.get(sessionKey) === current) {
 				this.#sessions.set(sessionKey, session);
+			} else {
+				await session.kernel.shutdown().catch(() => undefined);
+				throw new this.cancelledErrorClass(false);
 			}
 			return session;
 		})();
@@ -516,11 +519,7 @@ export abstract class KernelSessionRegistry<
 		}
 	}
 
-	private async replaceSessionKernel(
-		session: RegistrySession<TKernel>,
-		cwd: string,
-		options: TOptions,
-	): Promise<void> {
+	async #replaceSessionKernel(session: RegistrySession<TKernel>, cwd: string, options: TOptions): Promise<void> {
 		this.beforeKernelReplacement(session);
 		const old = session.kernel;
 		const remaining = getRemainingTimeoutMs(options.deadlineMs);
@@ -530,7 +529,7 @@ export abstract class KernelSessionRegistry<
 		if (this.#sessions.get(session.sessionKey) !== session) {
 			throw new this.cancelledErrorClass(false);
 		}
-		this.requireRemainingTimeoutMs(options.deadlineMs);
+		this.#requireRemainingTimeoutMs(options.deadlineMs);
 		const next = await this.startKernel(cwd, options);
 		if (this.#sessions.get(session.sessionKey) !== session) {
 			await next.shutdown().catch(() => undefined);
@@ -539,16 +538,17 @@ export abstract class KernelSessionRegistry<
 		session.kernel = next;
 	}
 
-	private async resetSession(sessionKey: string): Promise<void> {
+	async #resetSession(sessionKey: string): Promise<void> {
 		const existing =
-			this.#sessions.get(sessionKey) ?? (await this.#startingSessions.get(sessionKey)?.promise.catch(() => undefined));
+			this.#sessions.get(sessionKey) ??
+			(await this.#startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 		if (!existing) return;
 		this.#sessions.delete(sessionKey);
 		const timeoutMs = this.resetShutdownTimeoutMs();
 		await existing.kernel.shutdown(timeoutMs !== undefined ? { timeoutMs } : undefined).catch(() => undefined);
 	}
 
-	private requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
+	#requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 		const remainingMs = getRemainingTimeoutMs(deadlineMs);
 		if (remainingMs === undefined) return undefined;
 		if (remainingMs <= 0) {
