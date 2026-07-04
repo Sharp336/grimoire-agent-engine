@@ -5,6 +5,7 @@ import {
 	executeRust,
 	executeRustWithKernel,
 	type RustKernelExecutor,
+	RustRegistry,
 } from "@oh-my-pi/pi-coding-agent/eval/rs/executor";
 import type { RustKernelExecuteOptions, RustKernelExecuteResult } from "@oh-my-pi/pi-coding-agent/eval/rs/kernel";
 import { RustKernel } from "@oh-my-pi/pi-coding-agent/eval/rs/kernel";
@@ -193,5 +194,28 @@ describe("Rust executor lifecycle", () => {
 			expect(result.cancelled).toBe(true);
 			expect(result.output).toContain("timed out");
 		});
+	});
+
+	it("uses a distinct session key when managed env differs only in sessionFile/artifactsDir", () => {
+		const registry = new RustRegistry();
+		const baseOptions = {
+			cwd: "/tmp/rust-a",
+			sessionFile: "/tmp/parent/session.json",
+			artifactsDir: "/tmp/parent/artifacts",
+		};
+		const differentSession = {
+			...baseOptions,
+			sessionFile: "/tmp/child/session.json",
+		};
+		const differentArtifacts = {
+			...baseOptions,
+			artifactsDir: "/tmp/child/artifacts",
+		};
+
+		const baseKey = registry.buildSessionKey("s1", baseOptions.cwd, baseOptions);
+		expect(registry.buildSessionKey("s1", baseOptions.cwd, differentSession)).not.toBe(baseKey);
+		expect(registry.buildSessionKey("s1", baseOptions.cwd, differentArtifacts)).not.toBe(baseKey);
+		// Same managed env reuses the same key.
+		expect(registry.buildSessionKey("s1", baseOptions.cwd, { ...baseOptions })).toBe(baseKey);
 	});
 });

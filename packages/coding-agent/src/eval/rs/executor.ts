@@ -152,15 +152,22 @@ async function startKernel(cwd: string, options: RustExecutorOptions): Promise<R
 	}
 }
 
-class RustRegistry extends KernelSessionRegistry<RustKernel, RustExecutorOptions, RustResult> {
-	protected readonly languageLabel = "Rust";
-	protected readonly cancelledErrorClass = RustExecutionCancelledError;
+export class RustRegistry extends KernelSessionRegistry<RustKernel, RustExecutorOptions, RustResult> {
+	readonly languageLabel = "Rust";
+	readonly cancelledErrorClass = RustExecutionCancelledError;
 
-	protected async startKernel(cwd: string, options: RustExecutorOptions): Promise<RustKernel> {
+	buildSessionKey(sessionId: string, cwd: string, options: RustExecutorOptions): string {
+		// evcxr's process env is fixed at spawn with no per-cell reapplication channel,
+		// so managed env is part of kernel identity — a caller with a different session
+		// file/artifacts dir gets its own kernel instead of reusing one primed with stale PI_* values.
+		return `${super.buildSessionKey(sessionId, cwd, options)}\0${Bun.hash(JSON.stringify(buildManagedKernelEnvPatch(options))).toString(36)}`;
+	}
+
+	async startKernel(cwd: string, options: RustExecutorOptions): Promise<RustKernel> {
 		return await startKernel(cwd, options);
 	}
 
-	protected async runOnKernel(kernel: RustKernel, code: string, options: RustExecutorOptions): Promise<RustResult> {
+	async runOnKernel(kernel: RustKernel, code: string, options: RustExecutorOptions): Promise<RustResult> {
 		return await executeRustWithKernel(kernel, code, options);
 	}
 }
@@ -229,7 +236,6 @@ async function ensureKernelAvailable(cwd: string, options: RustExecutorOptions):
 		throw new Error(availability.reason ?? "Rust kernel unavailable");
 	}
 }
-
 
 export async function executeRust(code: string, options?: RustExecutorOptions): Promise<RustResult> {
 	const cwd = normalizeSessionCwd(options?.cwd ?? getProjectDir());
