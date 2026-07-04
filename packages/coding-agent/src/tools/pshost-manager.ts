@@ -98,6 +98,13 @@ export async function acquirePsHost(options: AcquirePsHostOptions): Promise<PsHo
 	sweepIdle(options.idleTtlMs, options.sessionId);
 
 	let entry = HOSTS.get(options.sessionId);
+	if (entry && !entry.host.alive) {
+		// The sidecar died — a crash, or a wedged pipeline force-killed after
+		// an unacknowledged stop. Evict it and fall through to a fresh spawn.
+		HOSTS.delete(options.sessionId);
+		void safeDispose(entry.host);
+		entry = undefined;
+	}
 	if (!entry) {
 		// Single-flight the spawn: without this, concurrent acquires for the
 		// same session would each see an empty slot, spawn their own host, and

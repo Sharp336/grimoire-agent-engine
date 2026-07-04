@@ -198,11 +198,20 @@ export declare class PsHost {
   /** PID of the sidecar (`0` until [`PsHost::start`] completes). */
   get pid(): number
   /**
+   * Whether the sidecar process is currently running. `false` after a crash
+   * or after a wedged pipeline forced a kill on stop-ack timeout — pools use
+   * this to evict dead entries instead of handing them back out.
+   */
+  get alive(): boolean
+  /**
    * Run `command` on the shared runspace.
    *
    * `on_chunk` streams rendered output/error text. Returns exit status and
    * flags; cancellation (timeout / abort signal) is reported via `cancelled`
-   * / `timed_out` rather than rejection, and leaves the runspace intact.
+   * / `timed_out` rather than rejection, and leaves the runspace intact when
+   * the host acknowledges the stop. If it does not (pipeline wedged in an
+   * uncooperative native call), the sidecar is force-killed and [`alive`]
+   * turns false so pools evict the dead host instead of reusing it.
    */
   run(options: PsRunOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<PsRunResult>
   /**

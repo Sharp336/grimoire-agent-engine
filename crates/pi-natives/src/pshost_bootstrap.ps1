@@ -317,7 +317,12 @@ while ($alive) {
             'stop' {
                 if ($script:current -and $script:current.Id -eq [int]$req.id) {
                     $script:current.Stopped = $true
-                    try { $script:current.PS.Stop() } catch { } # best-effort
+                    # BeginStop, never Stop: a synchronous Stop() blocks this
+                    # event loop until the pipeline yields, and a pipeline stuck
+                    # in an uncooperative native/.NET call never does — the loop
+                    # must stay responsive so completion (or the Rust side's
+                    # stop-ack timeout) can proceed.
+                    try { [void]$script:current.PS.BeginStop($null, $null) } catch { } # best-effort
                 }
             }
             'exit' { $alive = $false }

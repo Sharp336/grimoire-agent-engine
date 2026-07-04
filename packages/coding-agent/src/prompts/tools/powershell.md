@@ -22,7 +22,7 @@ Variables you set persist too: `$data = Get-Process` in one call, then `$data | 
 
 - `command` (required): PowerShell to execute in the shared runspace.
 - `cwd` (optional): working directory for this command; the location persists into the runspace afterward.
-- `timeout` (optional): seconds before the in-flight pipeline is stopped. The runspace and all retained state survive a timeout — only the running pipeline is cancelled.
+- `timeout` (optional): seconds before the in-flight pipeline is stopped. The runspace and all retained state survive a timeout — only the running pipeline is cancelled. (Exception: if the pipeline cannot be stopped because it is blocked in a native call, the host is terminated and the next call starts a fresh session host.)
 - `host` (optional): which host runs the command.
   - `session` (default): the persistent session host described above.
   - `ephemeral`: a throwaway host spawned for this call only. Nothing from the session carries in, nothing carries out, and the process is fully terminated before the result returns — so any file locks or loaded assemblies are released by the time you see the output. Use it when loading assemblies or `Add-Type` classes that cannot be unloaded (e.g. importing a DLL you are about to rebuild). Costs a fresh process spawn (~1s) per call.

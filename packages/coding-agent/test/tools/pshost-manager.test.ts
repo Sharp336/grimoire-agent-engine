@@ -10,6 +10,7 @@ import {
 
 interface FakeHost {
 	pid: number;
+	alive: boolean;
 	disposed: boolean;
 	dispose(): Promise<void>;
 }
@@ -17,6 +18,7 @@ interface FakeHost {
 function makeFakeHost(pid: number, opts: { failDispose?: boolean } = {}): FakeHost {
 	const fake: FakeHost = {
 		pid,
+		alive: true,
 		disposed: false,
 		async dispose() {
 			if (opts.failDispose) throw new Error("dispose failed");
@@ -94,6 +96,25 @@ describe("pshost-manager pool (fake hosts)", () => {
 		busy.release();
 		own.release();
 		ownAgain.release();
+	});
+
+	test("a dead pooled host is evicted and replaced on acquire", async () => {
+		const hosts: FakeHost[] = [];
+		setPsHostSpawnerForTests(async () => {
+			const host = makeFakeHost(hosts.length + 1);
+			hosts.push(host);
+			return host as unknown as PsHost;
+		});
+		const opts = { ...baseOpts, sessionId: "dead", idleTtlMs: 0 };
+		const first = await acquirePsHost(opts);
+		first.release();
+
+		// Simulate a crash / stop-ack force-kill: the pooled entry goes dead.
+		if (hosts[0]) hosts[0].alive = false;
+		const second = await acquirePsHost(opts);
+		expect(second.host).not.toBe(first.host);
+		expect(hosts).toHaveLength(2);
+		second.release();
 	});
 
 	test("disposePsHostSession removes and disposes only that session's host", async () => {

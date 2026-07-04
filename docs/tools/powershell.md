@@ -38,7 +38,7 @@ Streaming behavior:
 
 Failure behavior:
 
-- Timeout → thrown `ToolError` (output preserved); the runspace and all retained state survive — only the in-flight pipeline is stopped.
+- Timeout → thrown `ToolError` (output preserved); the runspace and all retained state survive — only the in-flight pipeline is stopped. If the stop is not acknowledged within 3s (pipeline wedged in an uncooperative native/.NET call), the sidecar is force-killed; the pool detects the dead host via `PsHost.alive` and respawns lazily on the next call.
 - Abort signal → thrown `ToolAbortError`.
 - Non-zero exit code from a native command run by this call, or error-stream writes → non-thrown `isError` result with output preserved. A stale `$LASTEXITCODE` persisting from an earlier call is never attributed to the current one.
 

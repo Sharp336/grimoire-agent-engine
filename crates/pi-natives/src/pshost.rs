@@ -290,8 +290,8 @@ impl HostCore {
 				Err(_) => None,
 			},
 			reason = cancel.wait() => {
-				// Stop just this pipeline; the runspace (and all retained state)
-				// survives.
+				// Stop just this pipeline; when the host acknowledges the stop,
+				// the runspace (and all retained state) survives.
 				let _ = self.send(encode_frame(&HostRequest::Stop { id })?);
 				let timed_out = matches!(reason, task::AbortReason::Timeout);
 				match tokio::time::timeout(Duration::from_secs(3), &mut done_rx).await {
@@ -302,13 +302,27 @@ impl HostCore {
 						timed_out,
 						exec_id:    id,
 					}),
-					_ => Some(PsRunResult {
-						exit_code:  None,
-						had_errors: true,
-						cancelled:  !timed_out,
-						timed_out,
-						exec_id:    id,
-					}),
+					_ => {
+						// No stop acknowledgement: the pipeline is wedged in
+						// uncooperative native/.NET code and the runspace can no
+						// longer be trusted — handing this host back to the pool
+						// would hang or reject every later command behind the
+						// stuck pipeline. Kill the sidecar; pools detect the dead
+						// host via `alive` and respawn lazily on the next call.
+						let process = self.process.lock().clone();
+						if let Some(process) = process {
+							let _ = process
+								.terminate_tree(true, 0, 5_000, core_cancel::CancelToken::default())
+								.await;
+						}
+						Some(PsRunResult {
+							exit_code:  None,
+							had_errors: true,
+							cancelled:  !timed_out,
+							timed_out,
+							exec_id:    id,
+						})
+					},
 				}
 			},
 		};
@@ -476,11 +490,27 @@ impl PsHost {
 		self.core.pid.load(Ordering::Relaxed)
 	}
 
+	/// Whether the sidecar process is currently running. `false` after a crash
+	/// or after a wedged pipeline forced a kill on stop-ack timeout — pools use
+	/// this to evict dead entries instead of handing them back out.
+	#[napi(getter)]
+	pub fn alive(&self) -> bool {
+		self
+			.core
+			.process
+			.lock()
+			.as_ref()
+			.is_some_and(|process| matches!(process.status(), core_process::ProcessStatus::Running))
+	}
+
 	/// Run `command` on the shared runspace.
 	///
 	/// `on_chunk` streams rendered output/error text. Returns exit status and
 	/// flags; cancellation (timeout / abort signal) is reported via `cancelled`
-	/// / `timed_out` rather than rejection, and leaves the runspace intact.
+	/// / `timed_out` rather than rejection, and leaves the runspace intact when
+	/// the host acknowledges the stop. If it does not (pipeline wedged in an
+	/// uncooperative native call), the sidecar is force-killed and [`alive`]
+	/// turns false so pools evict the dead host instead of reusing it.
 	#[napi]
 	pub fn run<'env>(
 		&self,
@@ -600,6 +630,12 @@ async fn supervise(core: Arc<HostCore>, req_rx: mpsc::UnboundedReceiver<Vec<u8>>
 		.stdout(std::process::Stdio::piped())
 		.stderr(std::process::Stdio::piped())
 		.kill_on_drop(true);
+	// Own process group on Unix: teardown uses terminate_tree(group=true),
+	// which signals the target's group — that must never be the foreground
+	// group inherited from the agent, or disposing a stuck sidecar would
+	// SIGTERM omp itself and every sibling job.
+	#[cfg(unix)]
+	command.process_group(0);
 
 	let mut child = match command.spawn() {
 		Ok(child) => child,
@@ -934,6 +970,32 @@ mod tests {
 			)
 			.await;
 		assert!(res.is_err(), "host death mid-exec surfaces as an error");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kills_host_when_stop_is_not_acknowledged() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// [Thread]::Sleep blocks inside .NET, so BeginStop cannot interrupt it:
+		// no done frame arrives, and the stop-ack timeout must kill the sidecar
+		// instead of handing a wedged runspace back for reuse.
+		let started = std::time::Instant::now();
+		let (_, res) = run_cmd(
+			&host,
+			"[System.Threading.Thread]::Sleep(60000)",
+			task::CancelToken::new(Some(500), None),
+		)
+		.await;
+		assert!(res.timed_out, "wedged pipeline reports timed_out");
+		assert!(res.had_errors, "unacknowledged stop is a failed run");
+		assert!(started.elapsed() < Duration::from_secs(20), "kill path returns promptly");
+		assert!(!host.alive(), "sidecar is dead after an unacknowledged stop");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
