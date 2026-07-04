@@ -105,6 +105,26 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(persisted.details?.pid).toBe(freshPid);
 	});
 
+	test("a session host that dies mid-run is dropped and respawned", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-death-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		const before = await tool.execute("d1", { command: "$PID" });
+		const beforePid = Number(textOf(before).trim());
+		expect(beforePid).toBeGreaterThan(0);
+
+		// Kill the sidecar from inside the command: the run must reject…
+		await expect(tool.execute("d2", { command: "[Environment]::Exit(5)" })).rejects.toThrow();
+
+		// …and the next default call gets a fresh host, not the pooled corpse.
+		const after = await tool.execute("d3", { command: "$PID" });
+		expect(after.isError ?? false).toBe(false);
+		const afterPid = Number(textOf(after).trim());
+		expect(afterPid).toBeGreaterThan(0);
+		expect(afterPid).not.toBe(beforePid);
+	});
+
 	test("concurrent acquires for one session converge on a single host", async () => {
 		const opts = { sessionId: "ps-race-test", cwd: process.cwd(), historyDepth: 5, idleTtlMs: 0 };
 		// Without single-flight spawning, both acquires would see an empty pool

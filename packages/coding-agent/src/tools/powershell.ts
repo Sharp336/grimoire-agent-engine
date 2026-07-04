@@ -126,6 +126,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		// assemblies and file locks are state and releasing them is the point
 		// of the mode. For a session host it only returns the lease to the
 		// pool (refreshing the idle clock); nothing is disposed.
+		const sessionKey = psHostPoolKey(this.session);
 		let host: PsHost;
 		let teardown: () => void | Promise<void>;
 		if (hostMode === "ephemeral") {
@@ -133,7 +134,6 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			host = lease.host;
 			teardown = lease.dispose;
 		} else {
-			const sessionKey = psHostPoolKey(this.session);
 			// new-session: fully kill the old host before the acquire below, so
 			// the poisoned runspace's locks are provably gone when the command
 			// runs. The acquire then spawns the replacement — the pool entry is
@@ -170,6 +170,14 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 				{ command, cwd: resolvedCwd, width, timeoutMs: timeoutSec * 1000, signal },
 				(_err, chunk) => sink.push(chunk),
 			);
+		} catch (err) {
+			// run() rejects only when the host died mid-command (crash,
+			// [Environment]::Exit, forced kill). Drop the session pool entry
+			// now rather than releasing a corpse — otherwise the next default
+			// call has to trip over the dead host before the pool's alive
+			// check evicts it.
+			if (hostMode !== "ephemeral") await disposePsHostSession(sessionKey);
+			throw err;
 		} finally {
 			await teardown();
 		}

@@ -361,17 +361,59 @@ fn bootstrap_is_valid(path: &std::path::Path, hash: u64) -> bool {
 	xxhash_rust::xxh64::xxh64(&bytes, 0) == hash
 }
 
-/// Materialize the embedded bootstrap to a content-addressed temp file. The
-/// bytes are verified (hash + regular-file check) before the path is ever
-/// returned — existence alone is not trusted, so a file planted at the
-/// predictable name is replaced rather than executed. Publication is a unique
-/// temp file + atomic rename, so a host that reads a valid file never sees a
-/// partial write, even when several processes first-write the same new hash at
-/// once (e.g. `test:ts` and `test:rs` running in parallel after a bootstrap
-/// change). A racing writer that wins leaves identical bytes.
+/// Directory the bootstrap is materialized into. On Unix this is a private
+/// per-user subdir (mode 0700, owned by the current euid) of the temp dir:
+/// the script name is predictable, and in a shared world-writable /tmp
+/// another user could pre-create valid bytes and rewrite them between hash
+/// validation and `pwsh -File` opening the file. On Windows `%TEMP%` is
+/// already per-user.
+fn bootstrap_dir() -> Result<PathBuf> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+		let euid = unsafe { libc::geteuid() };
+		let dir = std::env::temp_dir().join(format!("omp-pshost-{euid}"));
+		let mut builder = std::fs::DirBuilder::new();
+		builder.mode(0o700);
+		match builder.create(&dir) {
+			Ok(()) => {},
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
+			Err(err) => {
+				return Err(Error::from_reason(format!(
+					"Failed to create PowerShell host script dir: {err}"
+				)));
+			},
+		}
+		// Refuse a squatted dir: it must be a real directory (not a symlink),
+		// owned by us, with no group/other access.
+		let meta = std::fs::symlink_metadata(&dir).map_err(|err| {
+			Error::from_reason(format!("Failed to stat PowerShell host script dir: {err}"))
+		})?;
+		if !meta.is_dir() || meta.uid() != euid || (meta.permissions().mode() & 0o077) != 0 {
+			return Err(Error::from_reason(
+				"PowerShell host script dir has unsafe ownership or permissions",
+			));
+		}
+		Ok(dir)
+	}
+	#[cfg(not(unix))]
+	{
+		Ok(std::env::temp_dir())
+	}
+}
+
+/// Materialize the embedded bootstrap to a content-addressed file in
+/// [`bootstrap_dir`]. The bytes are verified (hash + regular-file check)
+/// before the path is ever returned — existence alone is not trusted, so a
+/// planted or corrupted file is replaced rather than executed. Publication is
+/// a unique temp file + atomic rename, so a host that reads a valid file
+/// never sees a partial write, even when several processes first-write the
+/// same new hash at once (e.g. `test:ts` and `test:rs` running in parallel
+/// after a bootstrap change). A racing writer that wins leaves identical
+/// bytes.
 fn ensure_bootstrap() -> Result<PathBuf> {
 	static TMP_NONCE: AtomicU32 = AtomicU32::new(0);
-	let dir = std::env::temp_dir();
+	let dir = bootstrap_dir()?;
 	let hash = xxhash_rust::xxh64::xxh64(BOOTSTRAP.as_bytes(), 0);
 	let path = dir.join(format!("omp-pshost-{hash:016x}.ps1"));
 	if bootstrap_is_valid(&path, hash) {
