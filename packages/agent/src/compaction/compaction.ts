@@ -171,6 +171,7 @@ export interface CompactionSettings {
 	 */
 	reserveTokens?: number;
 	keepRecentTokens: number;
+	preferFastModel?: boolean;
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
@@ -191,6 +192,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	thresholdTokens: -1,
 	midTurnEnabled: true,
 	keepRecentTokens: 20000,
+	preferFastModel: true,
 	autoContinue: true,
 	remoteEnabled: true,
 	remoteStreamingV2Enabled: true,

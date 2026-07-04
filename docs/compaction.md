@@ -238,6 +238,17 @@ Prompt selection:
 - short UI summary: `compaction-short-summary.md`
 - handoff document: `handoff-document.md` (used by `generateHandoff(...)`, not serialized compaction)
 
+LLM summary model selection:
+
+1. `currentModel.compactionModel`, if the active model metadata defines one.
+2. `modelRoles.compaction`, if configured.
+3. A provider-local fast compaction model such as `gpt-5.3-codex-spark`, when `compaction.preferFastModel !== false` and the prepared compaction input fits the fast model's context and modalities.
+4. The active session model.
+5. Built-in fallback roles (`default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`).
+6. The remaining available model with the largest context window.
+
+Candidates without usable credentials are skipped. The inferred fast compaction candidate is skipped before any request when the prepared input is too large for its usable context window, so the chain falls through to the active model or later fallback. `/compact remote` keeps the same order but filters out provider-native non-remote-capable candidates when no `compaction.remoteEndpoint` is configured. Snapcompact does not use this chain because it archives history locally and requires the active model to support image input.
+
 Remote summarization modes:
 
 - If `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs:
@@ -411,6 +422,7 @@ From `settings-schema.ts`:
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`
+- `compaction.preferFastModel` = `true`
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`

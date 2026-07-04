@@ -119,6 +119,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { parseKnownModel } from "@oh-my-pi/pi-catalog/identity/classify";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
@@ -620,6 +621,8 @@ const RETRY_BACKOFF_JITTER_RATIO = 0.25;
  * most-recent kept turn already exceeds the threshold (the snapcompact thrash).
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
+const DEFAULT_FAST_COMPACTION_MODEL_ID = "gpt-5.3-codex-spark";
+const DEFAULT_FAST_COMPACTION_INPUT_SAFETY_TOKENS = 8_192;
 
 function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
 	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
@@ -9480,12 +9483,13 @@ export class AgentSession {
 				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(
+			const preparedCompaction = await this.#prepareCompactionWithCandidateFilter(
 				pathEntries,
 				effectiveSettings,
-				await this.#runnableCompactionCandidates(compactionCandidates, this.sessionId),
+				compactionCandidates,
+				availableModels,
 			);
-			if (!preparation) {
+			if (!preparedCompaction) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
 				if (lastEntry?.type === "compaction") {
@@ -9493,6 +9497,8 @@ export class AgentSession {
 				}
 				throw new Error("Nothing to compact (session too small)");
 			}
+			const { preparation } = preparedCompaction;
+			compactionCandidates = preparedCompaction.candidates;
 
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
@@ -11633,6 +11639,183 @@ export class AgentSession {
 		return this.#resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
 	}
 
+	#resolveCompactionRoleTarget(currentModel: Model | undefined, availableModels: Model[]): Model | undefined {
+		return this.#resolveRoleModelFull("compaction", availableModels, currentModel).model;
+	}
+
+	#resolveDefaultFastCompactionTarget(currentModel: Model | undefined, availableModels: Model[]): Model | undefined {
+		if (!currentModel || this.settings.get("compaction.preferFastModel") === false) return undefined;
+		const currentParsed = parseKnownModel(currentModel.id);
+		if (currentParsed.family !== "openai" || currentParsed.variant === "codex-spark") return undefined;
+
+		const candidates = availableModels.filter(model => {
+			if (model.provider !== currentModel.provider || model.api !== currentModel.api) return false;
+			if (this.#getModelKey(model) === this.#getModelKey(currentModel)) return false;
+			if (!model.input.includes("text")) return false;
+			const parsed = parseKnownModel(model.id);
+			return parsed.family === "openai" && parsed.variant === "codex-spark";
+		});
+		candidates.sort((a, b) => {
+			const rankDiff = this.#defaultFastCompactionRank(a) - this.#defaultFastCompactionRank(b);
+			if (rankDiff !== 0) return rankDiff;
+			const priorityDiff = (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+			if (priorityDiff !== 0) return priorityDiff;
+			const contextDiff = (b.contextWindow ?? 0) - (a.contextWindow ?? 0);
+			if (contextDiff !== 0) return contextDiff;
+			return this.#getModelKey(a).localeCompare(this.#getModelKey(b));
+		});
+		return candidates[0];
+	}
+
+	#defaultFastCompactionRank(model: Model): number {
+		if (model.id === DEFAULT_FAST_COMPACTION_MODEL_ID || model.id.endsWith(`/${DEFAULT_FAST_COMPACTION_MODEL_ID}`)) {
+			return 0;
+		}
+		return model.id.includes("preview") ? 2 : 1;
+	}
+
+	#isExplicitCompactionTarget(candidate: Model, currentModel: Model | undefined, availableModels: Model[]): boolean {
+		if (!currentModel) return false;
+		const candidateKey = this.#getModelKey(candidate);
+		const configured = this.#resolveCompactionConfiguredTarget(currentModel, availableModels);
+		if (configured && this.#getModelKey(configured) === candidateKey) return true;
+		const roleTarget = this.#resolveCompactionRoleTarget(currentModel, availableModels);
+		return !!roleTarget && this.#getModelKey(roleTarget) === candidateKey;
+	}
+
+	#isInferredDefaultFastCompactionCandidate(
+		candidate: Model,
+		currentModel: Model | undefined,
+		availableModels: Model[],
+	): boolean {
+		const inferred = this.#resolveDefaultFastCompactionTarget(currentModel, availableModels);
+		if (!inferred || this.#getModelKey(inferred) !== this.#getModelKey(candidate)) return false;
+		return !this.#isExplicitCompactionTarget(candidate, currentModel, availableModels);
+	}
+
+	#filterCompactionCandidatesForPreparation(
+		candidates: readonly Model[],
+		preparation: CompactionPreparation,
+		availableModels: Model[],
+	): Model[] {
+		return candidates.filter(candidate => {
+			if (!this.#isInferredDefaultFastCompactionCandidate(candidate, this.model, availableModels)) return true;
+			return this.#compactionPreparationFitsCandidate(preparation, candidate);
+		});
+	}
+
+	async #prepareCompactionWithCandidateFilter(
+		pathEntries: SessionEntry[],
+		settings: CompactionSettings,
+		candidates: readonly Model[],
+		availableModels: Model[],
+	): Promise<{ preparation: CompactionPreparation; candidates: Model[] } | undefined> {
+		const initialRunnableCandidates = await this.#runnableCompactionCandidates(candidates, this.sessionId);
+		const initialPreparation = prepareCompaction(pathEntries, settings, initialRunnableCandidates);
+		if (!initialPreparation) return undefined;
+
+		const filteredCandidates = this.#filterCompactionCandidatesForPreparation(
+			candidates,
+			initialPreparation,
+			availableModels,
+		);
+		const filteredRunnableCandidates = await this.#runnableCompactionCandidates(filteredCandidates, this.sessionId);
+		if (this.#sameCompactionCandidateKeys(initialRunnableCandidates, filteredRunnableCandidates)) {
+			return { preparation: initialPreparation, candidates: filteredCandidates };
+		}
+
+		const preparation = prepareCompaction(pathEntries, settings, filteredRunnableCandidates);
+		if (!preparation) return undefined;
+		return {
+			preparation,
+			candidates: this.#filterCompactionCandidatesForPreparation(filteredCandidates, preparation, availableModels),
+		};
+	}
+
+	#sameCompactionCandidateKeys(left: readonly Model[], right: readonly Model[]): boolean {
+		if (left.length !== right.length) return false;
+		for (let i = 0; i < left.length; i++) {
+			if (this.#getModelKey(left[i]) !== this.#getModelKey(right[i])) return false;
+		}
+		return true;
+	}
+
+	#compactionPreparationFitsCandidate(preparation: CompactionPreparation, candidate: Model): boolean {
+		if (this.#compactionPreparationNeedsImageInput(preparation) && !candidate.input.includes("image")) {
+			logger.debug("Skipping default fast compaction model because the prepared input contains images", {
+				model: this.#getModelKey(candidate),
+			});
+			return false;
+		}
+
+		const contextWindow = candidate.contextWindow ?? 0;
+		if (contextWindow <= 0) return true;
+		const usableInputBudget = Math.max(
+			1,
+			contextWindow - effectiveReserveTokens(contextWindow, preparation.settings),
+		);
+		const estimatedInputTokens = this.#estimateCompactionRequestTokens(preparation, candidate);
+		if (estimatedInputTokens + DEFAULT_FAST_COMPACTION_INPUT_SAFETY_TOKENS <= usableInputBudget) return true;
+
+		logger.debug("Skipping default fast compaction model because the prepared input exceeds its usable context", {
+			model: this.#getModelKey(candidate),
+			estimatedInputTokens,
+			usableInputBudget,
+			contextWindow,
+		});
+		return false;
+	}
+
+	#estimateCompactionRequestTokens(preparation: CompactionPreparation, candidate: Model): number {
+		const basePromptTokens = countTokens(this.#baseSystemPrompt);
+		if (preparation.settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(candidate)) {
+			return (
+				basePromptTokens +
+				this.#estimateMessagesTokens([
+					...preparation.messagesToSummarize,
+					...preparation.turnPrefixMessages,
+					...preparation.recentMessages,
+				])
+			);
+		}
+
+		const priorSummaryTokens = preparation.previousSummary ? countTokens(preparation.previousSummary) : 0;
+		const historySummaryTokens =
+			this.#estimateMessagesTokens(preparation.messagesToSummarize) + priorSummaryTokens + basePromptTokens;
+		const turnPrefixTokens = this.#estimateMessagesTokens(preparation.turnPrefixMessages) + basePromptTokens;
+		const shortSummaryTokens = this.#estimateMessagesTokens(preparation.recentMessages) + basePromptTokens;
+		return Math.max(historySummaryTokens, turnPrefixTokens, shortSummaryTokens);
+	}
+
+	#estimateMessagesTokens(messages: readonly AgentMessage[]): number {
+		let total = 0;
+		for (const message of messages) {
+			total += estimateTokens(message);
+		}
+		return total;
+	}
+
+	#compactionPreparationNeedsImageInput(preparation: CompactionPreparation): boolean {
+		return [
+			...preparation.messagesToSummarize,
+			...preparation.turnPrefixMessages,
+			...preparation.recentMessages,
+		].some(message => this.#messageHasImageContent(message));
+	}
+
+	#messageHasImageContent(message: AgentMessage): boolean {
+		const content = (message as { content?: unknown }).content;
+		if (Array.isArray(content) && content.some(block => this.#isImageContentBlock(block))) return true;
+		const blocks = (message as { blocks?: unknown }).blocks;
+		if (Array.isArray(blocks) && blocks.some(block => this.#isImageContentBlock(block))) return true;
+		const images = (message as { images?: unknown }).images;
+		return Array.isArray(images) && images.length > 0;
+	}
+
+	#isImageContentBlock(block: unknown): boolean {
+		return typeof block === "object" && block !== null && (block as { type?: unknown }).type === "image";
+	}
+
 	#resolveRoleModelFull(
 		role: string,
 		availableModels: Model[],
@@ -11692,8 +11875,11 @@ export class AgentSession {
 		if (preferredModel) {
 			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels));
 		}
+		addCandidate(this.#resolveCompactionRoleTarget(preferredModel ?? undefined, availableModels));
+		addCandidate(this.#resolveDefaultFastCompactionTarget(preferredModel ?? undefined, availableModels));
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
+			if (role === "compaction") continue;
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined).model);
 		}
 
@@ -11740,8 +11926,12 @@ export class AgentSession {
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
 	): Promise<CompactionResult> {
-		const candidates =
-			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
+		const availableModels = this.#modelRegistry.getAvailable();
+		const candidates = this.#filterCompactionCandidatesForPreparation(
+			precomputedCandidates ?? this.#getCompactionModelCandidates(availableModels),
+			preparation,
+			availableModels,
+		);
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
@@ -12253,12 +12443,13 @@ export class AgentSession {
 
 			const pathEntries = this.sessionManager.getBranch();
 
-			const autoCompactionCandidates = await this.#runnableCompactionCandidates(
+			const preparedCompaction = await this.#prepareCompactionWithCandidateFilter(
+				pathEntries,
+				compactionSettings,
 				this.#getCompactionModelCandidates(availableModels),
-				this.sessionId,
+				availableModels,
 			);
-			const preparation = prepareCompaction(pathEntries, compactionSettings, autoCompactionCandidates);
-			if (!preparation) {
+			if (!preparedCompaction) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -12287,6 +12478,7 @@ export class AgentSession {
 				if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
 				return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 			}
+			const { preparation } = preparedCompaction;
 
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
@@ -12424,7 +12616,7 @@ export class AgentSession {
 				details = snapcompactResult.details;
 				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
-				const candidates = this.#getCompactionModelCandidates(availableModels);
+				const candidates = preparedCompaction.candidates;
 				const retrySettings = this.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 				let compactResult: CompactionResult | undefined;

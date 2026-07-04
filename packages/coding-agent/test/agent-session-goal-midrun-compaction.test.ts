@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -63,18 +64,20 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 	async function createHarness(
 		settingsOverride: Record<string, unknown> = {},
-		options: { extensionRunner?: ExtensionRunner } = {},
+		options: { extensionRunner?: ExtensionRunner; model?: Model; authenticatedModels?: readonly Model[] } = {},
 	): Promise<{
 		session: AgentSession;
 		observedContexts: string[][];
 		sessionManager: SessionManager;
 	}> {
 		const observedContexts: string[][] = [];
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const model = options.model ?? getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		for (const authenticatedModel of options.authenticatedModels ?? [model]) {
+			authStorage.setRuntimeApiKey(authenticatedModel.provider, "test-key");
+		}
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${cleanups.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
@@ -114,9 +117,9 @@ describe("AgentSession mid-run threshold compaction", () => {
 							content: [
 								{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
 							],
-							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
 							usage: highUsage(50_000),
 							stopReason: "toolUse" as const,
 							timestamp: Date.now(),
@@ -124,9 +127,9 @@ describe("AgentSession mid-run threshold compaction", () => {
 					: {
 							role: "assistant" as const,
 							content: [{ type: "text" as const, text: "All done." }],
-							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
 							usage: highUsage(200),
 							stopReason: "stop" as const,
 							timestamp: Date.now(),
@@ -165,6 +168,10 @@ describe("AgentSession mid-run threshold compaction", () => {
 		}));
 	}
 
+	function modelKey(model: { provider: string; id: string }): string {
+		return `${model.provider}/${model.id}`;
+	}
+
 	it("compacts in place between tool-call turns outside goal mode", async () => {
 		const { session, observedContexts } = await createHarness();
 		const compactSpy = mockCompaction("MID-RUN-COMPACTED");
@@ -186,6 +193,25 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
+	});
+
+	it("uses the provider-local fast compaction model for auto mid-run compaction when it fits", async () => {
+		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const { session } = await createHarness(
+			{},
+			{ model: currentModel, authenticatedModels: [currentModel, fastModel] },
+		);
+		const compactSpy = mockCompaction("OPENAI-FAST-MID-RUN-COMPACTED");
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
 	});
 
 	it("falls back to in-place compaction for mid-run handoff strategy", async () => {

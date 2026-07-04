@@ -1894,6 +1894,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.preferFastModel": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Prefer Fast Compaction Model",
+			description:
+				"Use a provider-local fast model for LLM summary compaction when no explicit compaction model is configured; falls back when the prepared compaction input does not fit",
+		},
+	},
+
 	"compaction.strategy": {
 		type: "enum",
 		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
@@ -5056,6 +5068,7 @@ export interface CompactionSettings {
 	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;
+	preferFastModel: boolean;
 	handoffSaveToDisk: boolean;
 	autoContinue: boolean;
 	remoteEnabled: boolean;

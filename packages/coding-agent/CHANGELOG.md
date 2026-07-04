@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `modelRoles.compaction` role for routing LLM summary compaction to a dedicated model when the active model does not define `compactionModel`.
+- Added `compaction.preferFastModel` to try a provider-local fast compaction model by default and fall back when the prepared input does not fit.
+
 ## [16.3.6] - 2026-07-04
 
 ### Changed
