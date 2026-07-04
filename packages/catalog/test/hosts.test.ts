@@ -37,6 +37,15 @@ describe("modelMatchesHost", () => {
 			modelMatchesHost({ provider: "custom", baseUrl: "https://api.fireworks.ai/inference/v1" }, "fireworks"),
 		).toBe(true);
 	});
+
+	test("classifies the LongCat (Meituan) provider under the zai binary-thinking host", () => {
+		// LongCat speaks the same z.ai-style `thinking:{type}` + reasoning_content
+		// protocol, so it shares the zai host classification (and the downstream
+		// supportsReasoningEffort=false derivation). It must NOT match zhipu.
+		const longcat = { provider: "longcat", baseUrl: "https://api.longcat.chat/openai/v1" };
+		expect(modelMatchesHost(longcat, "zai")).toBe(true);
+		expect(modelMatchesHost(longcat, "zhipu")).toBe(false);
+	});
 });
 
 describe("endpoint shape predicates", () => {

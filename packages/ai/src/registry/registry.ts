@@ -28,6 +28,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
+import { longcatProvider } from "./longcat";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
@@ -105,6 +106,7 @@ const ALL = [
 	firepassProvider,
 	deepseekProvider,
 	moonshotProvider,
+	longcatProvider,
 	cerebrasProvider,
 	basetenProvider,
 	fireworksProvider,

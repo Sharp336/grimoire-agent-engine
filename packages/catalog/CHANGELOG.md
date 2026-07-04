@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- First-party LongCat (Meituan) provider (`longcat`) serving `LongCat-2.0` from the native `api.longcat.chat` OpenAI-compatible endpoint: bundled seed + `catalogDiscovery` against `/openai/v1/models`, `LONGCAT_API_KEY` env var, featured `mapModel` baking pricing (in $0.75 / out $2.95 / cached $0.015 per Mtok), 1M-token context, 128K output. LongCat's API only accepts the binary `thinking:{type:"enabled"|"disabled"}` toggle (DeepSeek-style `reasoning_content`) and 400s on `reasoning_effort:"minimal"`/`"xhigh"`, so the provider is classified as a `zai`-protocol host (`hosts.ts`) — omp derives `thinkingFormat:"zai"` + `supportsReasoningEffort:false` and never emits `reasoning_effort`. The model id is case-sensitive (`LongCat-2.0`).
 
 ## [16.3.4] - 2026-07-03
 

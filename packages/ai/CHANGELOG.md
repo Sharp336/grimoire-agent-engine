@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- `/login longcat` API-key login for the first-party LongCat (Meituan) provider, validating the key against `https://api.longcat.chat/openai/v1/models`.
 
 ## [16.3.5] - 2026-07-04
 

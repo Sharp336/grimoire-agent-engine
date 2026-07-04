@@ -2845,6 +2845,90 @@ export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): Mo
 }
 
 // ---------------------------------------------------------------------------
+// 16.6 LongCat (Meituan)
+// ---------------------------------------------------------------------------
+
+const LONGCAT_DEFAULT_BASE_URL = "https://api.longcat.chat/openai/v1";
+const LONGCAT_MODEL_ID = "LongCat-2.0";
+
+/**
+ * Shared LongCat-2.0 metadata, applied to both the static seed and discovered
+ * models so the rows can't drift. LongCat's `/v1/models` returns only
+ * `{id, object, owned_by}` (no pricing/context/capability hints), and the id
+ * is case-sensitive (`LongCat-2.0`, else HTTP 400 "Unsupported model").
+ */
+const LONGCAT_2_MODEL_META: Pick<
+	ModelSpec<"openai-completions">,
+	"name" | "reasoning" | "input" | "contextWindow" | "maxTokens" | "cost" | "compat"
+> = {
+	name: "LongCat 2.0",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 1_000_000,
+	maxTokens: 131_072,
+	cost: { input: 0.75, output: 2.95, cacheRead: 0.015, cacheWrite: 0 },
+	// Binary `thinking:{type:"enabled"|"disabled"}` only — LongCat ignores
+	// `reasoning_effort` and 400s on minimal/xhigh. The zai host
+	// classification (hosts.ts) derives supportsReasoningEffort=false so omp
+	// never emits it.
+	compat: {
+		thinkingFormat: "zai",
+		reasoningContentField: "reasoning_content",
+		supportsDeveloperRole: false,
+	},
+};
+
+export interface LongcatModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function longcatModelManagerOptions(
+	config?: LongcatModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? LONGCAT_DEFAULT_BASE_URL;
+	return {
+		providerId: "longcat",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "longcat",
+					baseUrl,
+					apiKey,
+					// Stamp the documented metadata only onto the known id — a
+					// future sibling served from the same endpoint must not
+					// silently inherit LongCat-2.0's pricing/context. Baking it
+					// here (vs. relying on a bundled reference) lets live rows
+					// self-describe for a brand-new provider where the live
+					// entry wins first-source dedup before any reference exists.
+					mapModel: (
+						_entry: OpenAICompatibleModelRecord,
+						defaults: ModelSpec<"openai-completions">,
+					): ModelSpec<"openai-completions"> =>
+						defaults.id === LONGCAT_MODEL_ID ? { ...defaults, ...LONGCAT_2_MODEL_META } : defaults,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// Seed LongCat-2.0 so the provider is usable when catalog generation has no
+// live API key. If live `/v1/models` succeeds (longcat is NOT marked
+// dynamicModelsAuthoritative), live rows are deduped ahead of this seed.
+export const LONGCAT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: LONGCAT_MODEL_ID,
+		api: "openai-completions",
+		provider: "longcat",
+		baseUrl: LONGCAT_DEFAULT_BASE_URL,
+		...LONGCAT_2_MODEL_META,
+	},
+];
+
+// ---------------------------------------------------------------------------
 // 17. Qwen Portal
 // ---------------------------------------------------------------------------
 
