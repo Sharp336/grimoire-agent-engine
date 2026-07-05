@@ -72,6 +72,87 @@ plan via the todo surface that updates as phases/tickets advance. *Blocked-by:* 
 Ticketization (010). *Self-verify:* integration asserts the todo surface reflects
 state after a phase/ticket transition.
 
+## Capability rails (v4) — the core design correction
+
+The plan built PROCEDURAL rails (can't skip a phase, can't self-approve) but NOT
+CAPABILITY rails. The target Chinese models (DeepSeek/GLM/Qwen/Kimi) are smart
+**executors** but weak **architects** — sycophantic in Grilling, unsound in ADR/
+Ticketization. A cheap primary driving Grilling→ADR→PRD→Tickets produces a garbage plan
+that the rails then faithfully execute. Procedural gates catch "did it self-approve",
+not "is the plan any good". The fix is **per-phase model binding**: a STRONG model owns
+the judgment phases, the cheap model only executes within its frame.
+
+### ADR-006 — Per-phase role binding (strong architect, cheap executor)
+- Each phase in `NikoflowState` carries a `role: ModelRole`; on a phase boundary the mode
+  swaps the primary via the **existing** plan-mode model-swap path
+  (`resolveRoleModelWithThinking`, `interactive-mode.ts:1956`) — no new mechanism.
+- **Binding:** Grilling / ADR / PRD / Ticketization → **`plan`** (strong); TDD/Execute →
+  **`default`** (cheap); Verify + reviewer sub-agent (TSK-008) → **`advisor`/`slow`**
+  (strong, NEVER `pi/task`). ADR evidence-gathering may use a cheap `task` sub-agent.
+- **Capability map** (which phase needs which):
+
+  | Phase | Cheap-CN adequate? | Role |
+  |---|---|---|
+  | Grilling | No (sycophantic; weak questions cascade) | `plan` |
+  | ADR | No (decision); yes (evidence) | `plan` (+ cheap `task` for facts) |
+  | PRD | Draft yes, coherence no | `plan`/`slow`, strong approve-rewrite |
+  | Ticketization | No (DAG soundness ≠ structural validity) | `plan`; DAG review `advisor` |
+  | TDD/Execute | **Yes** (the one phase) | `default` (cheap) |
+  | Verify | No (reviewer must not be weaker than executor) | `advisor`/`slow` |
+
+- **Enforcement, not suggestion (code fact):** an unconfigured `plan` role **silently
+  falls to the primary** (`model-resolver.ts:875-892`, `plan` has no priority chain). So
+  the cheap-preset MUST set `modelRoles.plan` explicitly, and nikoflow **fail-fast on
+  activation** if `plan` resolves to the same model as `default` ("architect phases would
+  run on the executor — configure a strong `plan` model or confirm"). Without this the
+  default install silently defeats the whole thesis.
+- **TSK-009 correction:** the preset sets **`modelRoles.default`** (the primary), NOT
+  `modelRoles.task` (`task` = sub-agents, `task/agents.ts:54`). Acceptance adds: transcript
+  proves Grilling/ADR/PRD/Tickets ran on `plan`, Execute on `default` (via TSK-011).
+- **Two presets:** `cheap-exec+strong-arch` (cheap `default` + Opus/GPT `plan`/`advisor`)
+  AND `cheap-cn-full` (reasoning-class CN as architect: GLM-5.2 / DeepSeek-v4-pro / Kimi-
+  thinking on `plan`+`advisor`, GLM-flash/qwen-coder on `default`). GLM-5.2 + MiniMax-M3
+  use `api=anthropic-messages` → honest named tool_choice (see the force caveat below).
+
+### Design-drift inside Execute (rails don't reach here)
+Gates fire at phase boundaries; inside a ticket the cheap executor still decides *how* to
+implement, *whether* a test is green-enough, *how* to read an AC. Compress that space:
+- The Ticketization gate (on `plan`) emits, per ticket, **implementation notes** (files /
+  pattern / helpers), not just AC — shrinking the executor's design latitude to near-zero.
+- The TSK-008 reviewer checks not only "AC met" but "**consistent with the ADR/PRD**"
+  (anti-drift) — add to TSK-008 acceptance. Both mechanisms already exist; cheap to add.
+
+### Cost shape (the "~1/10" claim, corrected)
+~80–90% of tokens are Execute (cheap, many); architecture phases are few but dense.
+With a **Western strong architect** (Opus/GPT), blended cost is realistically **~25–40%**
+of "SOTA-does-everything", not 1/10 — the strong architect + strong reviewer read
+expensive context. The **`cheap-cn-full`** preset (strong architect is *also* a cheap CN
+reasoning model) is what keeps blended near **~1/10–1/7**. The headline claim must be
+stated as "≈ SOTA quality at X% cost" with X **measured**, not asserted.
+
+### TSK-000 / TSK-012 — measure the right split (4 arms)
+Neither current arm isolates the strong-architect's contribution — which, per the owner's
+thesis, is where the lift comes from. Required arms:
+(a) cheap bare · (b) cheap + rails **all-cheap** (pure procedure effect) · (c) cheap
+executor + **strong `plan`/`advisor`** rails (the product) · (d) SOTA bare · opt. (e)
+strong-CN architect. Metric = quality **and blended $/solved-task** (tokens are unequally
+priced — use catalog cost fields + advisor JSONL). **Falsifiers:** if (b)≈(c) the
+"weak-architect" thesis is wrong and strong roles are unneeded (ship a config preset,
+build nothing); if (c)≫(b) procedural rails alone don't work and the capability binding is
+the product.
+
+### Forced tool_choice degrades SILENTLY on target models (fix TSK-004)
+The roadmap expected a throw; the real behavior on `openai-completions`
+(DeepSeek/Kimi/Qwen/Zhipu) is **silent degradation** (`providers/openai-completions.ts:
+1454`): forced→auto. Worse: `compat/openai.ts:269,444` — DeepSeek-reasoning
+`supportsToolChoice=false`; **Kimi forced-tool DISABLES reasoning** exactly on the
+ADR/PRD/ticket artifacts that need it. Only GLM-5.2 / MiniMax-M3 (anthropic-messages) force
+honestly. → the artifact gate must **validate post-hoc** ("was the artifact tool actually
+called + well-formed?"), never trust that the force took; "degrade to escalate" is
+insufficient because the failure is silent (nothing to detect but a missing result).
+
+---
+
 ## Use-case coverage (v3) — gaps the phase model must answer
 
 Stress-testing the design across real scenarios surfaced 7 gaps. These are DESIGN
