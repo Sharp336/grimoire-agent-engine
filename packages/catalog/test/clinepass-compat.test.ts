@@ -96,6 +96,18 @@ describe("clinepass compat resolution", () => {
 		expect(compat.thinkingFormat).toBe("openai");
 		expect(compat.reasoningEffortMap?.xhigh).toBe("xhigh");
 	});
+
+	it("keeps the MiMo effort clamp instead of the identity passthrough", () => {
+		// MiMo SKUs support only low/medium/high. The identity ClinePass map would
+		// let an API caller send an unsupported `minimal`/`xhigh` on the wire; the
+		// MiMo map must win so those clamp to low/high.
+		for (const id of ["mimo-v2.5", "mimo-v2.5-pro"]) {
+			const compat = buildOpenAICompat(
+				clinepassSpec(id, { thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] } }),
+			);
+			expect(compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
+		}
+	});
 });
 
 describe("clinepass generator seed (source of truth)", () => {

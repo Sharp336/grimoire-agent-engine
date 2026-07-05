@@ -466,11 +466,16 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		reasoningEffortMap: isClinePass
-			? CLINEPASS_REASONING_EFFORT_MAP
-			: isMimoReasoningEffortModel
-				? MIMO_REASONING_EFFORT_MAP
-				: {},
+		// ClinePass MiMo SKUs must keep the MiMo clamp (minimal->low, xhigh->high):
+		// the model only supports low/medium/high, so the identity map would let an
+		// unsupported minimal/xhigh reach the wire. Non-MiMo ClinePass models take
+		// the identity passthrough that suppresses the family xhigh->max rewrite.
+		reasoningEffortMap:
+			isClinePass && !isMimoReasoningEffortModel
+				? CLINEPASS_REASONING_EFFORT_MAP
+				: isMimoReasoningEffortModel
+					? MIMO_REASONING_EFFORT_MAP
+					: {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
 		// family classifier so OpenAI-compat proxies serving Gemini are covered.
