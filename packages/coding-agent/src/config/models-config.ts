@@ -19,6 +19,7 @@ export interface ProviderValidationModel {
 	contextWindow?: number;
 	supportsTools?: boolean;
 	maxTokens?: number;
+	preferWebsockets?: boolean;
 }
 
 export interface ProviderValidationConfig {

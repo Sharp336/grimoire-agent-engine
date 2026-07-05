@@ -80,6 +80,9 @@
 
 - Fixed Ollama/Ollama Cloud EOS-only completions to retry empty stops with a single output token before the agent loop can halt silently. ([#4659](https://github.com/can1357/oh-my-pi/issues/4659))
 - Fixed Claude Sonnet 5 failing every request on feature-gated gateways (Azure Foundry, OpenAI-compatible relays) that reject strict tools with "structured_outputs not supported" — the rejection is now classified as a strict-tool rejection, so the request retries without strict tools and the session remembers the downgrade.
+### Fixed
+
+- Fixed `openai-codex-responses` to generate Codex client metadata for OAuth, OpenAI API-key gateways, and third-party API-key proxies, while omitting workspace-specific metadata from requests.
 
 ## [16.3.7] - 2026-07-05
 

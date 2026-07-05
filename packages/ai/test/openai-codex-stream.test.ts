@@ -53,6 +53,22 @@ function createCodexTestModel(baseUrl?: string): Model<"openai-codex-responses">
 	});
 }
 
+function createCodexApiKeyGatewayModel(): Model<"openai-codex-responses"> {
+	return buildModel({
+		id: "gpt-5.5",
+		name: "GPT-5.5 via Codex Gateway",
+		api: "openai-codex-responses",
+		provider: "codex-api-key-gateway",
+		baseUrl: "https://codex-gateway.example.test",
+		reasoning: true,
+		preferWebsockets: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 270000,
+		maxTokens: 128000,
+	});
+}
+
 function createCodexTestContext(): Context {
 	return {
 		systemPrompt: ["You are a helpful assistant."],
@@ -67,6 +83,18 @@ function createCompletedCodexSse(text: string): string {
 		`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text }] } })}`,
 		`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
 	].join("\n\n")}\n\n`;
+}
+
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(`git ${args.join(" ")} failed: ${Buffer.from(result.stderr).toString("utf8")}`);
+	}
+	return Buffer.from(result.stdout).toString("utf8").trim();
 }
 
 function createStatefulCodexSse(text: string, responseId: string): string {
@@ -310,12 +338,14 @@ describe("openai-codex streaming", () => {
 			maxTokens: 128000,
 		});
 		let requestHeaders: Headers | undefined;
+		let requestBody: Record<string, unknown> | undefined;
 		let requestUrl: string | undefined;
 		let requestCount = 0;
 		const fetchMock: FetchImpl = async (input, init) => {
 			requestCount += 1;
 			requestUrl = input instanceof Request ? input.url : input.toString();
 			requestHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
 			return new Response(createCompletedCodexSse("pong"), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -332,7 +362,15 @@ describe("openai-codex streaming", () => {
 		expect(requestUrl).toBe("http://127.0.0.1:2455/backend-api/codex/responses");
 		expect(requestHeaders?.get("Authorization")).toBe("Bearer opaque-proxy-key");
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
-		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
+		expect(requestHeaders?.has("OpenAI-Beta")).toBe(false);
+		const turnMetadataHeader = requestHeaders?.get("x-codex-turn-metadata");
+		expect(turnMetadataHeader).toBeString();
+		const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+		expect(turnMetadata.workspace_kind).toBeUndefined();
+		expect(turnMetadata.workspaces).toBeUndefined();
+		expect(requestBody?.client_metadata).toMatchObject({
+			"x-codex-turn-metadata": turnMetadataHeader,
+		});
 		expect(requestHeaders?.get("originator")).toBe("pi");
 	});
 
@@ -340,6 +378,7 @@ describe("openai-codex streaming", () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		let capturedHeaders: WsHeaders | undefined;
+		const sentRequests: Array<Record<string, unknown>> = [];
 		class OpaqueKeyWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
@@ -348,7 +387,8 @@ describe("openai-codex streaming", () => {
 				this.scheduleOpen();
 			}
 
-			send(): void {
+			send(data: string): void {
+				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
 				this.emitCodexResponse({ messageId: "msg_opaque", responseId: "resp_opaque", text: "pong" });
 			}
 		}
@@ -380,7 +420,10 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(capturedHeaders?.authorization).toBe("Bearer opaque-proxy-key");
 		expect(capturedHeaders?.["chatgpt-account-id"]).toBeUndefined();
-		expect(capturedHeaders?.["openai-beta"]).toBe("responses_websockets=2026-02-06");
+		expect(capturedHeaders?.["openai-beta"]).toBeUndefined();
+		expect(sentRequests[0]?.client_metadata).toMatchObject({
+			"x-codex-turn-metadata": expect.any(String),
+		});
 		expect(capturedHeaders?.originator).toBe("pi");
 	});
 
@@ -412,6 +455,223 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(capturedBody?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "replacement" }] }]);
 		expect(capturedBody?.prompt_cache_key).toBe("replacement-cache-key");
+	});
+
+	it("uses Codex Desktop request metadata for API-key custom providers", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-");
+		setAgentDir(tempDir.path());
+		const sessionId = "019f1e0a-778b-7f72-ac5d-c947c5cbd7ec";
+		const apiKey = "gateway-test-key";
+		const model = createCodexApiKeyGatewayModel();
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Headers | undefined;
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			capturedUrl = String(input);
+			capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey,
+			sessionId,
+			fetch: fetchMock,
+			preferWebsockets: false,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedUrl).toBe("https://codex-gateway.example.test/codex/responses");
+		expect(capturedHeaders?.get("authorization")).toBe(`Bearer ${apiKey}`);
+		expect(capturedHeaders?.has("chatgpt-account-id")).toBe(false);
+		expect(capturedHeaders?.has("openai-beta")).toBe(false);
+		expect(capturedHeaders?.get("originator")).toBe("pi");
+		expect(capturedHeaders?.get("accept")).toBe("text/event-stream");
+		expect(capturedHeaders?.get("content-type")).toBe("application/json");
+		expect(capturedHeaders?.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+		expect(capturedHeaders?.get("session-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("thread-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("x-client-request-id")).toBe(sessionId);
+		expect(capturedHeaders?.get("x-codex-window-id")).toBe(`${sessionId}:0`);
+		expect(capturedHeaders?.get("user-agent")).toStartWith("pi/");
+
+		const turnMetadataHeader = capturedHeaders?.get("x-codex-turn-metadata");
+		expect(turnMetadataHeader).toBeString();
+		const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+		expect(turnMetadata).toMatchObject({
+			session_id: sessionId,
+			thread_id: sessionId,
+			window_id: `${sessionId}:0`,
+			request_kind: "turn",
+			thread_source: "user",
+			sandbox: "seatbelt",
+		});
+		expect(typeof turnMetadata.installation_id).toBe("string");
+		expect(typeof turnMetadata.turn_id).toBe("string");
+		expect(typeof turnMetadata.turn_started_at_unix_ms).toBe("number");
+		expect(turnMetadata.workspace_kind).toBeUndefined();
+		expect(turnMetadata.workspaces).toBeUndefined();
+
+		const clientMetadata = capturedBody?.client_metadata as Record<string, string> | undefined;
+		expect(clientMetadata).toMatchObject({
+			"x-codex-window-id": `${sessionId}:0`,
+			"x-codex-installation-id": turnMetadata.installation_id,
+			turn_id: turnMetadata.turn_id,
+			thread_id: sessionId,
+			session_id: sessionId,
+			"x-codex-turn-metadata": turnMetadataHeader,
+		});
+		expect(capturedBody?.store).toBe(false);
+		expect(capturedBody?.previous_response_id).toBeUndefined();
+	});
+
+	it("does not include workspace metadata for API-key project requests", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-project-");
+		setAgentDir(tempDir.path());
+		const repoDir = tempDir.path();
+		await Bun.write(`${repoDir}/file.txt`, "hello\n");
+		runGit(repoDir, ["init", "--initial-branch=main"]);
+		runGit(repoDir, ["config", "user.email", "tester@example.com"]);
+		runGit(repoDir, ["config", "user.name", "Tester"]);
+		runGit(repoDir, ["add", "file.txt"]);
+		runGit(repoDir, ["commit", "-m", "baseline"]);
+		runGit(repoDir, ["remote", "add", "origin", "https://example.test/repo.git"]);
+		const sessionId = "019f1e0a-778b-7f72-ac5d-c947c5cbd7ec";
+		const model = createCodexApiKeyGatewayModel();
+		let capturedHeaders: Headers | undefined;
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: "gateway-test-key",
+			sessionId,
+			fetch: fetchMock,
+			preferWebsockets: false,
+			cwd: repoDir,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		const turnMetadataHeader = capturedHeaders?.get("x-codex-turn-metadata");
+		expect(turnMetadataHeader).toBeString();
+		const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+		expect(turnMetadata.workspace_kind).toBeUndefined();
+		expect(turnMetadata.workspaces).toBeUndefined();
+		expect(turnMetadata.thread_id).toBe(sessionId);
+		const clientMetadata = capturedBody?.client_metadata as Record<string, string> | undefined;
+		expect(clientMetadata?.["x-codex-turn-metadata"]).toBe(turnMetadataHeader ?? undefined);
+		expect(clientMetadata?.["x-codex-window-id"]).toBe(`${sessionId}:0`);
+	});
+
+	it("replays cache headers for API-key custom providers across requests", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-cache-");
+		setAgentDir(tempDir.path());
+		const model = createCodexApiKeyGatewayModel();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const requestTurnStates: Array<string | null> = [];
+		const requestModelsEtags: Array<string | null> = [];
+		let callCount = 0;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			requestTurnStates.push(headers.get("x-codex-turn-state"));
+			requestModelsEtags.push(headers.get("x-models-etag"));
+			const index = callCount;
+			callCount += 1;
+			const responseHeaders = new Headers({ "content-type": "text/event-stream" });
+			responseHeaders.set("x-codex-turn-state", `turn-state-${callCount}`);
+			responseHeaders.set("x-models-etag", `models-etag-${callCount}`);
+			const sse =
+				index === 0
+					? `${[
+							`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_file", arguments: "" } })}`,
+							`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_file", arguments: '{"path":"README.md"}' } })}`,
+							`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+						].join("\n\n")}\n\n`
+					: createCompletedCodexSse(`Hello ${callCount}`);
+			return new Response(sse, { status: 200, headers: responseHeaders });
+		};
+		const firstUser = { role: "user" as const, content: "First", timestamp: Date.now() };
+		const first = await streamOpenAICodexResponses(
+			model,
+			{ systemPrompt: [], messages: [firstUser] },
+			{
+				apiKey: "gateway-test-key",
+				sessionId: "api-key-cache-session",
+				providerSessionState,
+				fetch: fetchMock,
+				preferWebsockets: false,
+			},
+		).result();
+		const toolCall = first.content.find(
+			(c): c is Extract<(typeof first.content)[number], { type: "toolCall" }> => c.type === "toolCall",
+		);
+		expect(toolCall).toBeDefined();
+		await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: [],
+				messages: [
+					firstUser,
+					first,
+					{
+						role: "toolResult" as const,
+						toolCallId: toolCall!.id,
+						toolName: toolCall!.name,
+						content: [{ type: "text" as const, text: "file contents" }],
+						isError: false,
+						timestamp: Date.now() + 1,
+					},
+				],
+			},
+			{
+				apiKey: "gateway-test-key",
+				sessionId: "api-key-cache-session",
+				providerSessionState,
+				fetch: fetchMock,
+				preferWebsockets: false,
+			},
+		).result();
+
+		expect(requestTurnStates).toEqual([null, "turn-state-1"]);
+		expect(requestModelsEtags).toEqual([null, "models-etag-1"]);
+	});
+
+	it("supports API-key overrides of the bundled openai-codex provider", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-api-key-override-");
+		setAgentDir(tempDir.path());
+		const model = {
+			...createCodexTestModel("https://codex-gateway.example.test"),
+			preferWebsockets: false,
+		};
+		let capturedHeaders: Headers | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: "gateway-test-key",
+			sessionId: "api-key-openai-codex-override-session",
+			fetch: fetchMock,
+			preferWebsockets: false,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedHeaders?.get("authorization")).toBe("Bearer gateway-test-key");
+		expect(capturedHeaders?.has("chatgpt-account-id")).toBe(false);
+		expect(capturedHeaders?.get("session-id")).toBe("api-key-openai-codex-override-session");
 	});
 
 	it("forwards SimpleStreamOptions textVerbosity into the Codex request body", async () => {
@@ -1287,6 +1547,7 @@ describe("openai-codex streaming", () => {
 		].join("\n\n")}\n\n`;
 
 		const encoder = new TextEncoder();
+		let capturedBody: Record<string, unknown> | undefined;
 		const stream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(encoder.encode(sse));
@@ -1304,9 +1565,18 @@ describe("openai-codex streaming", () => {
 			}
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
 				const headers = init?.headers instanceof Headers ? init.headers : undefined;
+				capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
 				expect(headers?.get("Authorization")).toBe(`Bearer ${token}`);
 				expect(headers?.get("chatgpt-account-id")).toBe("acc_test");
 				expect(headers?.get("OpenAI-Beta")).toBe("responses=experimental");
+				const turnMetadataHeader = headers?.get("x-codex-turn-metadata");
+				expect(turnMetadataHeader).toBeString();
+				const turnMetadata = JSON.parse(turnMetadataHeader ?? "{}") as Record<string, unknown>;
+				expect(turnMetadata.workspace_kind).toBeUndefined();
+				expect(turnMetadata.workspaces).toBeUndefined();
+				expect(capturedBody?.client_metadata).toMatchObject({
+					"x-codex-turn-metadata": turnMetadataHeader,
+				});
 				expect(headers?.get("originator")).toBe("pi");
 				expect(headers?.get("accept")).toBe("text/event-stream");
 				expect(headers?.has("x-api-key")).toBe(false);

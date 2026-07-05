@@ -12,6 +12,7 @@ import {
 	$flag,
 	asRecord,
 	fetchWithRetry,
+	getInstallId,
 	logger,
 	parseStreamingJson,
 	readSseJson,
@@ -184,7 +185,15 @@ const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "int
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
+const CODEX_CLIENT_BETA_FEATURES = "remote_compaction_v2";
+const CODEX_CLIENT_SESSION_ID_HEADER = "session-id";
+const CODEX_CLIENT_THREAD_ID_HEADER = "thread-id";
+const X_CLIENT_REQUEST_ID_HEADER = "x-client-request-id";
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
+const X_CODEX_WINDOW_ID_HEADER = "x-codex-window-id";
+const X_CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id";
+const X_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
+const X_CODEX_BETA_FEATURES_HEADER = "x-codex-beta-features";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 /** WebSocket frames cannot carry per-request HTTP headers; codex-rs mirrors the lite marker into `client_metadata` under this key. */
@@ -345,6 +354,25 @@ interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketPublicToPrivate: Map<string, string>;
 }
 
+interface CodexClientTurnMetadata {
+	installation_id: string;
+	session_id: string;
+	thread_id: string;
+	turn_id: string;
+	window_id: string;
+	request_kind: "turn";
+	thread_source: "user";
+	sandbox: "seatbelt";
+	turn_started_at_unix_ms: number;
+}
+
+interface CodexClientMetadata {
+	windowId: string;
+	turnMetadata: CodexClientTurnMetadata;
+	turnMetadataJson: string;
+	bodyClientMetadata: Record<string, string>;
+}
+
 interface CodexRequestContext {
 	apiKey: string;
 	accountId?: string;
@@ -352,6 +380,7 @@ interface CodexRequestContext {
 	url: string;
 	requestHeaders: Record<string, string>;
 	transportSessionId?: string;
+	clientMetadata?: CodexClientMetadata;
 	providerSessionState?: CodexProviderSessionState;
 	websocketState?: CodexWebSocketSessionState;
 	responsesLite: boolean;
@@ -620,6 +649,37 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 		},
 	};
 	return state;
+}
+
+async function createCodexClientMetadata(sessionId: string | undefined): Promise<CodexClientMetadata> {
+	const resolvedSessionId = sessionId && sessionId.length > 0 ? sessionId : Bun.randomUUIDv7();
+	const windowId = `${resolvedSessionId}:0`;
+	const turnId = Bun.randomUUIDv7();
+	const turnMetadata: CodexClientTurnMetadata = {
+		installation_id: getInstallId(),
+		session_id: resolvedSessionId,
+		thread_id: resolvedSessionId,
+		turn_id: turnId,
+		window_id: windowId,
+		request_kind: "turn",
+		thread_source: "user",
+		sandbox: "seatbelt",
+		turn_started_at_unix_ms: Date.now(),
+	};
+	const turnMetadataJson = JSON.stringify(turnMetadata);
+	return {
+		windowId,
+		turnMetadata,
+		turnMetadataJson,
+		bodyClientMetadata: {
+			[X_CODEX_WINDOW_ID_HEADER]: windowId,
+			[X_CODEX_INSTALLATION_ID_HEADER]: turnMetadata.installation_id,
+			turn_id: turnId,
+			thread_id: resolvedSessionId,
+			session_id: resolvedSessionId,
+			[X_CODEX_TURN_METADATA_HEADER]: turnMetadataJson,
+		},
+	};
 }
 
 function getCodexProviderSessionState(
@@ -900,7 +960,8 @@ async function buildCodexRequestContext(
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
-	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
+	const clientMetadata = await createCodexClientMetadata(transportSessionId ?? options?.sessionId);
+	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey, clientMetadata?.bodyClientMetadata);
 
 	const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
 	const rawRequestDump: RawHttpRequestDump = {
@@ -933,6 +994,7 @@ async function buildCodexRequestContext(
 		url,
 		requestHeaders,
 		transportSessionId,
+		clientMetadata,
 		providerSessionState,
 		websocketState,
 		responsesLite,
@@ -947,6 +1009,7 @@ export async function buildTransformedCodexRequestBody(
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
 	promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
+    baseClientMetadata?: Record<string, string>,
 ): Promise<RequestBody> {
 	const params: RequestBody = {
 		model: model.requestModelId ?? model.id,
@@ -979,8 +1042,9 @@ export async function buildTransformedCodexRequestBody(
 		params.instructions = systemPrompts[0];
 	}
 	const developerMessages = systemPrompts.slice(1);
-	if (options?.clientMetadata && Object.keys(options.clientMetadata).length > 0) {
-		params.client_metadata = { ...options.clientMetadata };
+	const clientMetadata = { ...(options?.clientMetadata ?? {}), ...(baseClientMetadata ?? {}) };
+	if (Object.keys(clientMetadata).length > 0) {
+		params.client_metadata = clientMetadata;
 	}
 	const codexOptions: CodexRequestOptions = {
 		reasoningEffort: options?.reasoning,
@@ -1090,6 +1154,7 @@ async function openCodexWebSocketTransport(
 		"websocket",
 		websocketState,
 		requestContext.responsesLite,
+		requestContext.clientMetadata,
 	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
 	requestContext.rawRequestDump.body = websocketRequest;
@@ -1167,6 +1232,7 @@ async function openCodexSseTransport(
 				wireBody,
 				state,
 				requestContext.responsesLite,
+				requestContext.clientMetadata,
 				requestSetup.requestSignal,
 				requestSetup.firstEventTimeoutMs,
 				event => options?.onSseEvent?.(event, model),
@@ -2137,6 +2203,7 @@ export async function prewarmOpenAICodexResponses(
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 	if (!apiKey) return;
 	const accountId = getCodexAccountId(apiKey);
+	if (!accountId) return;
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
@@ -3273,12 +3340,13 @@ async function openCodexSseEventStream(
 	body: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
 	responsesLite: boolean,
+	clientMetadata: CodexClientMetadata | undefined,
 	signal: AbortSignal | undefined,
 	firstEventTimeoutMs: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
-	const headers = createCodexHeaders(requestHeaders, accountId, apiKey, sessionId, "sse", state, responsesLite);
+	const headers = createCodexHeaders(requestHeaders, accountId, apiKey, sessionId, "sse", state, responsesLite, clientMetadata);
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex request", {
 			url,
@@ -3338,28 +3406,53 @@ function createCodexHeaders(
 	transport: CodexTransport = "sse",
 	state?: CodexWebSocketSessionState,
 	responsesLite = false,
+	clientMetadata?: CodexClientMetadata,
 ): Headers {
 	const headers = new Headers(initHeaders ?? {});
 	headers.delete("x-api-key");
 	headers.set("Authorization", `Bearer ${accessToken}`);
-	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
-	const betaHeader =
-		transport === "websocket"
-			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
-			: OPENAI_HEADER_VALUES.BETA_RESPONSES;
-	headers.delete(OPENAI_HEADERS.BETA);
-	headers.delete("openai-beta");
-	headers.set(OPENAI_HEADERS.BETA, betaHeader);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
-	if (sessionId) {
-		headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
-		headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
-		headers.set("x-client-request-id", sessionId);
+	headers.delete(OPENAI_HEADERS.BETA);
+	headers.delete("openai-beta");
+	if (accountId !== undefined) {
+		headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+		const betaHeader =
+			transport === "websocket"
+				? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
+				: OPENAI_HEADER_VALUES.BETA_RESPONSES;
+		headers.set(OPENAI_HEADERS.BETA, betaHeader);
+		if (sessionId) {
+			headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
+			headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
+		} else {
+			headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
+			headers.delete(OPENAI_HEADERS.SESSION_ID);
+		}
 	} else {
+		headers.delete(OPENAI_HEADERS.ACCOUNT_ID);
 		headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
 		headers.delete(OPENAI_HEADERS.SESSION_ID);
-		headers.delete("x-client-request-id");
+		headers.delete("conversation-id");
+	}
+	const codexSessionId = clientMetadata?.turnMetadata.session_id ?? sessionId;
+	if (codexSessionId) {
+		headers.set(CODEX_CLIENT_SESSION_ID_HEADER, codexSessionId);
+		headers.set(CODEX_CLIENT_THREAD_ID_HEADER, clientMetadata?.turnMetadata.thread_id ?? codexSessionId);
+		headers.set(X_CLIENT_REQUEST_ID_HEADER, codexSessionId);
+	} else {
+		headers.delete(CODEX_CLIENT_SESSION_ID_HEADER);
+		headers.delete(CODEX_CLIENT_THREAD_ID_HEADER);
+		headers.delete(X_CLIENT_REQUEST_ID_HEADER);
+	}
+	if (clientMetadata) {
+		headers.set(X_CODEX_WINDOW_ID_HEADER, clientMetadata.windowId);
+		headers.set(X_CODEX_TURN_METADATA_HEADER, clientMetadata.turnMetadataJson);
+		headers.set(X_CODEX_BETA_FEATURES_HEADER, CODEX_CLIENT_BETA_FEATURES);
+	} else {
+		headers.delete(X_CODEX_WINDOW_ID_HEADER);
+		headers.delete(X_CODEX_TURN_METADATA_HEADER);
+		headers.delete(X_CODEX_BETA_FEATURES_HEADER);
 	}
 	if (state?.turnState) {
 		headers.set(X_CODEX_TURN_STATE_HEADER, state.turnState);
@@ -3398,7 +3491,11 @@ function redactHeaders(headers: Headers): Record<string, string> {
 			lower.includes("account") ||
 			lower.includes("session") ||
 			lower.includes("conversation") ||
-			lower === "x-client-request-id" ||
+			lower === CODEX_CLIENT_THREAD_ID_HEADER ||
+			lower === X_CLIENT_REQUEST_ID_HEADER ||
+			lower === X_CODEX_WINDOW_ID_HEADER ||
+			lower === X_CODEX_INSTALLATION_ID_HEADER ||
+			lower === X_CODEX_TURN_METADATA_HEADER ||
 			lower === "cookie"
 		) {
 			redacted[key] = "[redacted]";

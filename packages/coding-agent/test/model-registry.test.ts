@@ -574,6 +574,7 @@ describe("ModelRegistry", () => {
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 								contextWindow: 200_000,
 								maxTokens: 100_000,
+								preferWebsockets: false,
 								compactionModel: "cc-switch/gpt-5.4",
 								remoteCompaction: {
 									endpoint: "http://127.0.0.1:8080/v1/responses/model-compact",
@@ -652,6 +653,11 @@ describe("ModelRegistry", () => {
 				v2Endpoint: "http://127.0.0.1:8080/v1/responses/model-stream",
 				model: "gpt-5.5-compact",
 			});
+		});
+
+		test("custom Codex Responses models preserve websocket preference", () => {
+			const model = customResponsesCompat.find("cc-switch", "gpt-5.5");
+			expect(model?.preferWebsockets).toBe(false);
 		});
 
 		test("model-level compat overrides provider-level compat for custom models", () => {
@@ -1641,6 +1647,8 @@ describe("ModelRegistry", () => {
 		let defaultOAuth: ModelRegistry;
 		let apiKeyOptOut: ModelRegistry;
 		let nonAnthropic: ModelRegistry;
+		let codexDefaultApiKey: ModelRegistry;
+		let codexExplicitOAuth: ModelRegistry;
 		const proxyAnthropicModels = [
 			{
 				id: "claude-sonnet-4-5",
@@ -1652,10 +1660,22 @@ describe("ModelRegistry", () => {
 				maxTokens: 8000,
 			},
 		];
+		const proxyCodexModels = [
+			{
+				id: "gpt-5.5",
+				name: "GPT-5.5",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200000,
+				maxTokens: 8000,
+			},
+		];
 		beforeAll(async () => {
 			oauthAuth = await AuthStorage.create(":memory:");
 			oauthAuth.setRuntimeApiKey("proxy-anthropic", "literal-key");
 			oauthAuth.setRuntimeApiKey("proxy-openai", "literal-key");
+			oauthAuth.setRuntimeApiKey("proxy-codex", "literal-key");
 			const build = async (config: Record<string, unknown>) => {
 				const registry = new ModelRegistry(oauthAuth, sharedConfigPath(config));
 				await registry.refresh("offline");
@@ -1713,6 +1733,27 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			codexDefaultApiKey = await build({
+				providers: {
+					"proxy-codex": {
+						baseUrl: "https://proxy.example.com",
+						apiKey: "literal-key",
+						api: "openai-codex-responses",
+						models: proxyCodexModels,
+					},
+				},
+			});
+			codexExplicitOAuth = await build({
+				providers: {
+					"proxy-codex": {
+						baseUrl: "https://proxy.example.com",
+						apiKey: "literal-key",
+						api: "openai-codex-responses",
+						auth: "oauth",
+						models: proxyCodexModels,
+					},
+				},
+			});
 		});
 		afterAll(() => oauthAuth.close());
 
@@ -1738,6 +1779,15 @@ describe("ModelRegistry", () => {
 			const model = nonAnthropic.find("proxy-openai", "gpt-5");
 			expect(model).toBeDefined();
 			expect(model?.isOAuth).toBeUndefined();
+		});
+
+		test("openai-codex-responses uses API-key auth unless auth: oauth is explicit", () => {
+			const apiKeyModel = codexDefaultApiKey.find("proxy-codex", "gpt-5.5");
+			const oauthModel = codexExplicitOAuth.find("proxy-codex", "gpt-5.5");
+			expect(apiKeyModel).toBeDefined();
+			expect(apiKeyModel?.isOAuth).toBeUndefined();
+			expect(oauthModel).toBeDefined();
+			expect(oauthModel?.isOAuth).toBe(true);
 		});
 	});
 
