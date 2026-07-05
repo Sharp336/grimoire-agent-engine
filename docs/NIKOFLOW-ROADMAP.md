@@ -150,6 +150,41 @@ Example (`.omp/settings.json` / nikoflow block):
 // nikoflow refuses to start if `plan` is unset or == `default`.
 ```
 
+### Handoff & durability holes (v5 — found auditing the per-phase-swap design)
+
+These attack the capability-rail directly at its seams; all verified against source:
+
+- **H1 — Every phase swap RESETS the provider session.** `setModelTemporary` →
+  `#setModelWithProviderSessionReset` (`agent-session.ts:8706,11323`) closes the provider
+  session on each architect↔executor swap. Consequence: **provider-side prompt cache is
+  dropped every phase boundary** → the cheap executor re-ingests the whole plan context
+  *uncached* (full input price), and latency spikes. This is a direct, unbudgeted hit to
+  the cost thesis (§cost) — minimize swaps (batch same-role phases), and price the
+  cache-loss in TSK-012.
+- **H2 — Retry-fallback silently replaces a pinned role model.** `retry` machinery
+  (`agent-session.ts:13160-13323`) can swap a pinned model to a fallback on error, and
+  `retry.fallbackRevertPolicy` can be `never` → **your explicitly-pinned strong `plan`
+  architect can silently become a different (possibly weak) model mid-run and stay there.**
+  The "explicit pin" guarantee (v4) is NOT durable. Fix: nikoflow sets an explicit
+  `fallbackRevertPolicy` for strong roles AND re-verifies `role→model` at the top of every
+  architect/reviewer phase, failing the gate if the strong role silently downgraded.
+- **H3 — The reviewer sees the plan as one-liners.** Non-whitelisted custom message types
+  are collapsed to a single line for the model (`PRIMARY_CONTEXT_CUSTOM_TYPES`,
+  `session-history-format.ts:230`). If nikoflow's ADR/PRD/ticket artifacts aren't
+  whitelisted, the advisor/reviewer reviews a **summary, not the real plan** → weak/blind
+  gate. Fix: register nikoflow's artifact message types in the whitelist so the reviewer
+  (and the executor) get them in full.
+- **H4 — The architectural plan is NOT protected from compaction.** Compaction protection
+  exists only for `local://PLAN.md` reads (`plan-protection.ts:25`). In a long deep run the
+  ADR/PRD/ticket decisions (made early by the strong model) can be **compacted away before
+  the cheap executor finishes**, leaving it drifting without its plan — defeating the whole
+  rail. Fix: persist nikoflow's plan artifacts as PLAN.md-style protected files and reuse
+  `plan-protection` so they survive compaction.
+
+*(Further gaps from angles grilling-without-human / cheap-model instruction budget /
+collision with OMP advisor+hooks+swarm / ticket-failure escalation are under a running
+audit and will be appended.)*
+
 ### Design-drift inside Execute (rails don't reach here)
 Gates fire at phase boundaries; inside a ticket the cheap executor still decides *how* to
 implement, *whether* a test is green-enough, *how* to read an AC. Compress that space:
