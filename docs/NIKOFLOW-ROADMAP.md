@@ -19,6 +19,38 @@ force the engineering process and (b) make an independent reviewer's blocker
 
 ---
 
+## ⚠️ READ FIRST — Reality check after 6 audit passes
+
+Six adversarial passes each found real, code-verified gaps. **That pattern is the verdict,
+not a to-do list.** The full native harness sits on undocumented, single-slot, fast-moving
+upstream internals, and its one differentiated idea — the **binding, non-self-approvable
+reviewer gate** — is surrounded by ~70% re-derivation of features OMP already ships
+(plan-mode ≈ Grilling+human-gate, advisor = reviewer, todo = live plan surface, `modelRoles`
+= role routing) plus a growing wall of fragile seams: the architect's *thinking* doesn't
+cross the model handoff (H5), the callbacks clobber the advisor (H6), the plan is compacted
+away (H4), the reviewer sees it as a one-liner (H3), retry silently demotes the architect
+(H2), forced tool-choice degrades silently on the target models. Building the 23-ticket
+native mode against a personal fork = high-risk, high-maintenance, mostly re-derivation.
+
+**Honest lean plan (this supersedes the full ticket program below as the recommended path):**
+1. **Zero-code arm (b):** `modelRoles` preset (strong `plan` + cheap `default` + strong
+   `advisor`) + a nikoflow **prompt/skill** — no harness. Captures most of the thesis TODAY
+   and is rebase-proof. This IS the spike's control arm; it may be the whole product.
+2. **Corrected TSK-000 spike** (numeric kill thresholds + the 4 arms, §"TSK-000/TSK-012")
+   → measure quality AND blended $/task, gate-tag malformation rate, self-approval events.
+3. **Only if** the residual gap is caused by self-approval that the prompt layer can't fix →
+   build the **minimal binding-gate core (~4 tickets, 1–2 weeks):** phase-state, per-phase
+   role-binding (with H2 re-assert), gate-hold-via-follow-up-queue (H6), reviewer-verdict-as-
+   tool_result (M1). Everything else — Grilling→ADR→PRD ceremony — stays a **prompt layer**
+   (portable, rebase-proof), not native code.
+4. Pitch that ~4-ticket **binding-gate primitive** upstream (a maintainer might take a small
+   generic capability; they already refused a whole methodology mode).
+
+The ticket program below (TSK-001–023, H1–H9) is the *reference design* if you ever build
+the full harness — but the numbers from step 2 decide whether any of it is worth building.
+
+---
+
 ## Fable-5 QA — verdict & mandatory revisions (v2)
 
 Adversarial review audited every Appendix-A ref against the live code. **Verdict: TAKE** —
@@ -196,9 +228,51 @@ These attack the capability-rail directly at its seams; all verified against sou
   when plan fidelity matters (a cheap model summarizing the strong architect's plan is
   self-defeating).
 
-*(Further gaps from angles grilling-without-human / cheap-model instruction budget /
-collision with OMP advisor+hooks+swarm / ticket-failure escalation are under a running
-audit and will be appended.)*
+**v6 — deeper audit (5 new, verified):**
+- **H5 — the architect's THINKING doesn't cross the provider seam.**
+  `transform-messages.ts` preserves native thinking only when target wire format == source;
+  anthropic **demotes** foreign thinking to plain text or drops it (`anthropic.ts:3461-3491`),
+  openai-completions replays reasoning only when compat flags demand (`:1799-1849`). So the
+  strong `plan` model's *hidden reasoning* behind ADR/PRD/ticket decisions **never reaches
+  the cheap executor**. **Invariant the plan must state:** every architectural decision is
+  materialized as a **visible artifact** (tool_result / disk file), never left in thinking;
+  the ADR/PRD/Ticket gates pin their *output to disk*, and thinking is non-load-bearing
+  across a phase boundary.
+- **H6 — `onBeforeYield` CANNOT block, and all four callbacks are single-slot.** It returns
+  `void` (`agent.ts:750`) → cannot hold the turn; a gate-hold must **enqueue a follow-up
+  message** (`agent-loop.ts:1120`), not "refuse to yield". And `onTurnEnd`/`beforeToolCall`/
+  `getToolChoice`/`onBeforeYield` are scalar setters — assigning any **clobbers the
+  advisor's existing `onTurnEnd`**, killing the very reviewer the gate depends on. This makes
+  TSK-005's Appendix-A mechanism **wrong as written**. Fix: WRAP/CHAIN every existing handler
+  (capture prior fn, call it, then gate logic); gate-hold via the follow-up queue.
+- **H7 — Grilling has no human to interrogate in autonomous/batch mode.** Grilling is
+  iterative human Q&A (plan-approval path); TSK-020's batch profile removes the human. The
+  economic thesis (unattended batch) **structurally conflicts with the phase that supplies
+  the quality lift** — unattended, the strong model self-answers (inventing the assumptions
+  Grilling exists to surface) or no-ops. Fix: autonomous runs replace Grilling with a
+  **spec-completeness gate** (strong model writes an assumptions/risks/unknowns doc; a
+  reviewer sub-agent scores coverage); state plainly batch gets a weaker spec than interactive.
+- **H8 — no executor-capability-failure ladder.** The only retry primitives are
+  provider-error fallback and the benchmark's `--max-attempts` — nothing for "cheap executor
+  can't get the test green N times." So a genuinely-stuck ticket loops the verify-cap and
+  **aborts the whole flow**, or the executor self-deceives green (the exact target failure).
+  Fix: per-ticket attempt counter → ladder: retry → re-run Ticketization implementation-notes
+  on `plan` → escalate the single ticket's execution to `plan`/`advisor` → human.
+- **H9 — cheap-model instruction budget.** Per-turn injections already stack (`todo-reminder`
+  + `plan-mode-context` + continuation + goal/ultrathink/workflow notices); nikoflow's phase
+  protocol + gate-tag banners add more **every turn**, and an advisor 3-fail clears
+  seen-context forcing full re-expansion (`runtime.ts:370`). On weak-instruction cheap
+  executors this crowds the ticket → **garbled gate tags → fail-closed → stuck** (UC-H1). Fix:
+  minimal per-turn injection, only in the executor's active phase; **measure gate-tag
+  malformation rate on cheap models in TSK-000 as a first-class falsifier.**
+
+**Sharpenings of H1-H4/M2:** H1 → batch same-role phases (swap primary 3×: to `plan`, to
+`default`, to `advisor` — not per-phase). H2 → re-assert phase→role after the
+`retry_fallback_applied` event (`agent-session.ts:13197`), not only at activation. H3 →
+whitelist is exactly `{plan-mode-context, plan-mode-reference}` (`session-history-format.ts:230`).
+H4 → generalize the compaction matcher to a path-set. M2 → the advisor breaker actively sets
+`success=true` after dropping backlog (`runtime.ts:355-371`), so "advisor silent" reads as
+pass — the gate must require a positive verdict `tool_result`, treat silence/drop as escalate.
 
 ### Design-drift inside Execute (rails don't reach here)
 Gates fire at phase boundaries; inside a ticket the cheap executor still decides *how* to
