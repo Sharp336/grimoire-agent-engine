@@ -12,7 +12,7 @@ const loginNeuralwatt = createApiKeyLogin({
 		kind: "chat-completions",
 		provider: "Neuralwatt",
 		baseUrl: "https://api.neuralwatt.com/v1",
-		model: "glm-5.2",
+		model: "qwen3.6-35b-fast",
 	},
 });
 
