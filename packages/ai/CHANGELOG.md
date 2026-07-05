@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ClinePass as a native `clinepass` provider with an API-key login flow (`CLINE_API_KEY`, `sk_…` keys). ClinePass is Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` that re-hosts open coding models (GLM, DeepSeek, Kimi, Qwen, MiMo, MiniMax) behind one OpenAI-compatible endpoint; its keys reject `/v1/models`, so login validation pings chat completions against the default model directly. Added a `clinepass` `wireModelIdMode` that translates the friendly bare catalog id (`glm-5.2`) to the `cline-pass/glm-5.2` wire form at request time. The compat is gated on the `clinepass` provider id (not the shared `api.cline.bot` host, which also serves generic passthrough model ids), forwards `reasoning_effort` verbatim across `minimal`..`xhigh` (the gateway 400s only on `max`), and reads streamed chain-of-thought from `delta.reasoning`.
+
 ## [16.3.6] - 2026-07-04
 
 ### Added

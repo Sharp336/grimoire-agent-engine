@@ -50,14 +50,6 @@ export const KNOWN_HOSTS = {
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
 	fireworks: { urlMarkers: ["fireworks.ai"] },
-	/**
-	 * ClinePass — Cline's subscription gateway. It re-hosts open coding models
-	 * (GLM, DeepSeek, Kimi, Qwen, MiMo, MiniMax) behind one OpenAI-compatible
-	 * endpoint, so gate ClinePass compat on this host rather than on the upstream
-	 * vendor's id family (the upstream backend varies per model: vercel,
-	 * openrouter, alibabaCloud).
-	 */
-	clinepass: { providers: ["clinepass"], urlMarkers: ["api.cline.bot"] },
 	groq: { providers: ["groq"], urlMarkers: ["api.groq.com"] },
 	minimax: {
 		providers: ["minimax", "minimax-code", "minimax-code-cn"],

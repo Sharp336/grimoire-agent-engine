@@ -3,6 +3,7 @@ import { toClinepassPublicModelId, toClinepassWireModelId } from "../src/clinepa
 import { buildOpenAICompat } from "../src/compat/openai";
 import { Effort } from "../src/effort";
 import { getBundledModels } from "../src/models";
+import { buildClinepassSeed, CLINEPASS_STATIC_MODELS } from "../src/provider-models/openai-compat";
 import type { ModelSpec } from "../src/types";
 
 const CLINEPASS_BASE_URL = "https://api.cline.bot/api/v1";
@@ -60,6 +61,17 @@ describe("clinepass compat resolution", () => {
 		expect(compat.maxTokensField).toBe("max_completion_tokens");
 	});
 
+	it("gates on the clinepass provider id, not the api.cline.bot host", () => {
+		// A custom OpenAI-compat provider pointed at the same host serves generic
+		// passthrough ids (e.g. `anthropic/claude-sonnet-4-6`). Those must NOT get
+		// the `cline-pass/` wire prefix, the `reasoning` field, or the effort
+		// passthrough — only the `clinepass` provider does.
+		const custom = clinepassSpec("anthropic/claude-sonnet-4-6", { provider: "my-openai-compat" });
+		const compat = buildOpenAICompat(custom);
+		expect(compat.wireModelIdMode).not.toBe("clinepass");
+		expect(compat.reasoningContentField).toBe("reasoning_content");
+	});
+
 	it("passes the full effort ladder through verbatim — never rewrites xhigh to max", () => {
 		// The gateway 400s on `reasoning_effort: "max"` (verified live); the id-based
 		// GLM-5.2 / DeepSeek family remaps would otherwise inject `max`.
@@ -83,6 +95,37 @@ describe("clinepass compat resolution", () => {
 		const compat = buildOpenAICompat(clinepassSpec("qwen3.7-max"));
 		expect(compat.thinkingFormat).toBe("openai");
 		expect(compat.reasoningEffortMap?.xhigh).toBe("xhigh");
+	});
+});
+
+describe("clinepass generator seed (source of truth)", () => {
+	it("seeds all ten models — ClinePass has no /v1/models, so the seed is canonical", () => {
+		const seed = buildClinepassSeed();
+		expect(seed).toHaveLength(10);
+		expect(seed.map(m => m.id).sort()).toEqual(CLINEPASS_STATIC_MODELS.map(m => m.id).sort());
+		for (const model of seed) {
+			expect(model.provider).toBe("clinepass");
+			expect(model.api).toBe("openai-completions");
+			expect(model.baseUrl).toBe("https://api.cline.bot/api/v1");
+			expect(model.reasoning).toBe(true);
+		}
+	});
+
+	it("returns fresh copies so callers cannot mutate the shared seed", () => {
+		const a = buildClinepassSeed();
+		const b = buildClinepassSeed();
+		expect(a[0]).not.toBe(b[0]);
+	});
+
+	it("keeps the bundled catalog in sync with the seed ids", () => {
+		const bundledIds = getBundledModels("clinepass")
+			.map(m => m.id)
+			.sort();
+		expect(bundledIds).toEqual(
+			buildClinepassSeed()
+				.map(m => m.id)
+				.sort(),
+		);
 	});
 });
 

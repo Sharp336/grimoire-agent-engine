@@ -1702,6 +1702,108 @@ export function clinepassModelManagerOptions(
 	};
 }
 
+const CLINEPASS_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINEPASS_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+/**
+ * Full effort ladder ClinePass accepts on the wire (`minimal`..`xhigh`; the
+ * gateway 400s only on `max`, verified live). The host-gated compat in
+ * `buildOpenAICompat` supplies the identity `reasoningEffortMap` that keeps
+ * `xhigh` from being rewritten to `max`.
+ */
+const CLINEPASS_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+/**
+ * MiMo's family classifier caps the ladder at `low`..`high` on every host
+ * (`MIMO_REASONING_EFFORT_MAP` maps `minimal`→`low`, `xhigh`→`high`); ClinePass
+ * follows that convention rather than special-casing the gateway.
+ */
+const CLINEPASS_MIMO_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
+
+function createClinepassStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-completions">["input"],
+	efforts: readonly Effort[],
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "clinepass",
+		baseUrl: CLINEPASS_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost: { ...CLINEPASS_ZERO_COST },
+		contextWindow,
+		maxTokens,
+		thinking: { mode: "effort", efforts: [...efforts] },
+	};
+}
+
+/**
+ * Curated ClinePass catalog. ClinePass has no `/v1/models` endpoint (discovery
+ * 404s), so — like Fire Pass — the bundled entries are the source of truth.
+ * `generate-models.ts` pushes this seed so a credential-free regen reproduces
+ * the ten models rather than re-ingesting an already-edited snapshot.
+ * `applyGeneratedModelPolicies` re-bakes each `thinking` block; the resolved
+ * per-model compat (wire prefix, `reasoning` field, effort passthrough) is
+ * derived from the `clinepass` host in {@link buildOpenAICompat}.
+ */
+export const CLINEPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createClinepassStaticModel("glm-5.2", "GLM 5.2 (ClinePass)", 1_000_000, 131072, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel(
+		"kimi-k2.7-code",
+		"Kimi K2.7 Code (ClinePass)",
+		262144,
+		262144,
+		["text", "image"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel("kimi-k2.6", "Kimi K2.6 (ClinePass)", 262144, 65536, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel(
+		"deepseek-v4-pro",
+		"DeepSeek V4 Pro (ClinePass)",
+		1_000_000,
+		131072,
+		["text"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel(
+		"deepseek-v4-flash",
+		"DeepSeek V4 Flash (ClinePass)",
+		1_000_000,
+		131072,
+		["text"],
+		CLINEPASS_EFFORTS,
+	),
+	createClinepassStaticModel("mimo-v2.5", "MiMo V2.5 (ClinePass)", 262144, 128000, ["text"], CLINEPASS_MIMO_EFFORTS),
+	createClinepassStaticModel(
+		"mimo-v2.5-pro",
+		"MiMo V2.5 Pro (ClinePass)",
+		1_048_576,
+		128000,
+		["text"],
+		CLINEPASS_MIMO_EFFORTS,
+	),
+	createClinepassStaticModel("minimax-m3", "MiniMax M3 (ClinePass)", 512000, 131072, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel("qwen3.7-max", "Qwen3.7 Max (ClinePass)", 1_000_000, 65536, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel(
+		"qwen3.7-plus",
+		"Qwen3.7 Plus (ClinePass)",
+		1_000_000,
+		65536,
+		["text"],
+		CLINEPASS_EFFORTS,
+	),
+];
+
+/** Render the curated ClinePass catalog as generator seed specs. */
+export function buildClinepassSeed(): ModelSpec<"openai-completions">[] {
+	return CLINEPASS_STATIC_MODELS.map(model => ({ ...model }));
+}
+
 // ---------------------------------------------------------------------------
 // 7.7 Wafer Serverless
 // ---------------------------------------------------------------------------

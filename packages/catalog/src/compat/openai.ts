@@ -280,10 +280,12 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
 	// ClinePass fronts many upstream vendors (GLM, DeepSeek, Kimi, Qwen, MiMo,
-	// MiniMax) behind one OpenAI-compatible gateway. Gate its compat on the host
-	// so the per-vendor id-family remaps (which key off the bare model id) do not
-	// mis-shape ClinePass requests.
-	const isClinePass = modelMatchesHost(hostModel, "clinepass");
+	// MiniMax) behind one OpenAI-compatible gateway. Gate its compat on the
+	// `clinepass` provider id, NOT the `api.cline.bot` host: the same host also
+	// serves generic passthrough model ids (`anthropic/claude-sonnet-4-6`, …) for
+	// users who point a custom OpenAI-compat provider at it, and those must not
+	// get the `cline-pass/` wire prefix or the ClinePass family-remap suppression.
+	const isClinePass = provider === "clinepass";
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
