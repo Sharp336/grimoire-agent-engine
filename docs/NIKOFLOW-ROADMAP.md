@@ -72,6 +72,57 @@ plan via the todo surface that updates as phases/tickets advance. *Blocked-by:* 
 Ticketization (010). *Self-verify:* integration asserts the todo surface reflects
 state after a phase/ticket transition.
 
+## Use-case coverage (v3) — gaps the phase model must answer
+
+Stress-testing the design across real scenarios surfaced 7 gaps. These are DESIGN
+questions to resolve in ADR/PRD, plus tickets:
+
+- **UC-A3 — Non-TDD task shapes (refactor / debug / research / docs).** The TDD phase's
+  "RED before GREEN" assumes *new* tests; a pure refactor, a debugging session, a research
+  task, or a docs change doesn't fit. → **TSK-019 — per-task-type phase profiles**: the
+  Grilling phase classifies task shape (feature / refactor / debug / research / docs) and
+  selects a phase profile where "Verify" means the appropriate evidence (characterization
+  tests for refactor, a reproduction+fix for debug, sources for research), not always
+  test-first. Without this the harness only fits "new feature with tests."
+- **UC-C2 — Autonomous / headless / batch (the cheap-model-at-scale value).** Human gates
+  cannot get a user turn in CI/print/RPC/batch — yet running cheap models *in batch* is the
+  whole economic thesis. → **TSK-020 — autonomous gate policy**: a launch-time
+  authorization profile where human gates are either (a) pre-authorized at invocation
+  (`--autonomous --depth deep --approve prd,tickets`) or (b) replaced by a stronger-model
+  reviewer gate; anti-self-approval still holds (a real *reviewer* tool_result, not the
+  primary's text). This makes nikoflow usable unattended, not just interactive.
+- **UC-D1 — Human override / abort.** Anti-self-approval binds the MODEL, not the human. A
+  human must be able to force-advance, skip a phase, or abort — explicitly and audited. →
+  **TSK-021 — human override**: `omp nikoflow` accepts an operator override at any gate
+  (recorded in the transcript/stats as an override, distinct from a passed gate) plus a
+  clean abort that tears down phase state.
+- **UC-G1 — Mid-flow model switch.** OMP swaps models on context growth/compaction
+  (`contextPromotionTarget`/`compactionModel`). The phase/gate/ticket state must survive the
+  swap AND the new model must be re-briefed on the current phase + open gate. →
+  **TSK-022 — model-switch survival**: phase-state persists across model switches; on switch,
+  re-inject the current phase rules + open-gate context into the new model's prompt.
+- **UC-F1 — Parallel tickets.** The OMC nikoflow isolates each ticket in its own git
+  worktree for concurrency; this roadmap is silent. Decide explicitly: **v1 = strictly
+  serial**; parallel ticket execution (via worktrees / swarm-extension) is a later ticket
+  (TSK-023), not v1. Name the cut so it's not an accidental omission.
+- **UC-E1 — Reviewer graceful degradation (not deadlock).** Fail-closed (M2) must not mean
+  "stuck forever." No reviewer available / API down → after bounded attempts, **escalate to
+  the human with the partial work and the reason**, never silent-hang and never auto-pass.
+  Fold into TSK-007/008 acceptance.
+- **UC-I1 — Composition with plan-mode / swarm.** nikoflow reuses the plan-approval
+  machinery; if the user is already in plan-mode, or nikoflow runs inside a swarm worker,
+  the two must not collide. → design note in ADR: nikoflow owns the flow; plan-mode's
+  approval overlay is *borrowed*, not stacked; swarm workers run nikoflow only if launched
+  as the flow owner. Verify no double-gate.
+
+**Also:** UC-A1 (trivial task) — Grilling may over-propose; the tactical tier already exists
+but add a "no-gate micro" escape for genuine one-liners so the harness doesn't tax a typo.
+UC-B1 (huge task) — the Ticketization gate should cap ticket count / force decomposition
+before APPROVED. UC-H1 (cheap model garbles the gate protocol) is TSK-006's bounded-
+attempts→escalate invariant (already named in M-fixes).
+
+---
+
 **Verify-before-build checks** (do in TSK-000/001, not after): (a) per-provider — does
 DeepSeek/GLM/Qwen/Kimi support hard `tool_choice` forcing? `buildNamedToolChoice` throws
 "model does not support forcing a specific tool" on some, so the Soft-ladder's top rung may
