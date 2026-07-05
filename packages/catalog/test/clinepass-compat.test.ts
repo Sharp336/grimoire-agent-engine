@@ -181,15 +181,33 @@ describe("clinepass bundled catalog", () => {
 		}
 	});
 
-	it("keeps the curated vision capability — only kimi-k2.7-code accepts images", () => {
-		// The global models.dev fallback matches bare ids against same-id models
-		// from other providers and would otherwise overwrite `input`, wrongly
-		// advertising `image` support on text-only ClinePass models. `clinepass`
-		// is excluded from that fallback, so the seed's capabilities survive.
-		expect(byId.get("kimi-k2.7-code")?.input).toEqual(["text", "image"]);
-		for (const id of ["glm-5.2", "kimi-k2.6", "deepseek-v4-pro", "mimo-v2.5", "minimax-m3", "qwen3.7-plus"]) {
+	it("carries the live-verified vision capability per model", () => {
+		// `clinepass` is excluded from the global models.dev fallback, so these
+		// curated `input` values survive verbatim. Vision support was probed live
+		// against api.cline.bot (colored-image recognition with color controls):
+		// kimi-k2.6/kimi-k2.7-code/mimo-v2.5/qwen3.7-plus genuinely read images;
+		// the rest either can't see them, 400 on image content, or (minimax-m3)
+		// accept the payload but are blind.
+		for (const id of ["kimi-k2.6", "kimi-k2.7-code", "mimo-v2.5", "qwen3.7-plus"]) {
+			expect(byId.get(id)?.input).toEqual(["text", "image"]);
+		}
+		for (const id of [
+			"glm-5.2",
+			"deepseek-v4-pro",
+			"deepseek-v4-flash",
+			"mimo-v2.5-pro",
+			"minimax-m3",
+			"qwen3.7-max",
+		]) {
 			expect(byId.get(id)?.input).toEqual(["text"]);
 		}
+	});
+
+	it("uses the full MiMo v2.5 context window (1M), not the kimi-copied 262144", () => {
+		// Live upstream error confirmed mimo-v2.5's ceiling is 1048576, matching
+		// its mimo-v2.5-pro sibling and the first-party xiaomi entry.
+		expect(byId.get("mimo-v2.5")?.contextWindow).toBe(1_048_576);
+		expect(byId.get("mimo-v2.5-pro")?.contextWindow).toBe(1_048_576);
 	});
 
 	it("keeps the curated (ClinePass) display names — fallback does not strip the suffix", () => {
