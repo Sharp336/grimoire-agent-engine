@@ -17,6 +17,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	featherlessModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -139,6 +140,13 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "kimi-k2.6-turbo",
 		envVars: ["FIREPASS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => firepassModelManagerOptions(config),
+	},
+	{
+		id: "featherless",
+		defaultModel: "zai-org/GLM-5.2",
+		envVars: ["FEATHERLESS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => featherlessModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "fireworks",

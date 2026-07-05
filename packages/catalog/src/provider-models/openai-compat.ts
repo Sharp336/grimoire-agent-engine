@@ -606,6 +606,109 @@ function createSimpleAnthropicProviderOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Featherless
+// ---------------------------------------------------------------------------
+
+const FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
+const FEATHERLESS_DEFAULT_MODEL_ID = "zai-org/GLM-5.2";
+const FEATHERLESS_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+const FEATHERLESS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: FEATHERLESS_DEFAULT_MODEL_ID,
+		name: FEATHERLESS_DEFAULT_MODEL_ID,
+		api: "openai-completions",
+		provider: "featherless",
+		baseUrl: FEATHERLESS_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		supportsTools: true,
+		cost: FEATHERLESS_ZERO_COST,
+		contextWindow: 262_144,
+		maxTokens: null,
+	},
+	{
+		id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+		name: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+		api: "openai-completions",
+		provider: "featherless",
+		baseUrl: FEATHERLESS_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		supportsTools: true,
+		cost: FEATHERLESS_ZERO_COST,
+		contextWindow: 32_768,
+		maxTokens: 32_768,
+	},
+	{
+		id: "moonshotai/Kimi-K2-Instruct-0905",
+		name: "moonshotai/Kimi-K2-Instruct-0905",
+		api: "openai-completions",
+		provider: "featherless",
+		baseUrl: FEATHERLESS_BASE_URL,
+		reasoning: false,
+		input: ["text"],
+		supportsTools: true,
+		cost: FEATHERLESS_ZERO_COST,
+		contextWindow: 32_768,
+		maxTokens: 32_768,
+	},
+];
+
+interface FeatherlessModelRecord extends OpenAICompatibleModelRecord {
+	context_length?: unknown;
+	max_completion_tokens?: unknown;
+	available_on_current_plan?: unknown;
+	features?: unknown;
+}
+
+function mapFeatherlessModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	const record = entry as FeatherlessModelRecord;
+	if (record.available_on_current_plan === false || !isRecord(record.features) || record.features.tool_use !== true) {
+		return null;
+	}
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		supportsTools: true,
+		contextWindow: toPositiveNumber(record.context_length, defaults.contextWindow),
+		maxTokens: toPositiveNumber(record.max_completion_tokens, defaults.maxTokens),
+	};
+}
+
+export interface FeatherlessModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function featherlessModelManagerOptions(
+	config?: FeatherlessModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? FEATHERLESS_BASE_URL;
+	return {
+		providerId: "featherless",
+		staticModels: FEATHERLESS_STATIC_MODELS.map(model => ({ ...model, baseUrl })),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "featherless",
+					baseUrl,
+					apiKey,
+					mapModel: mapFeatherlessModel,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Umans AI Coding Plan
 // ---------------------------------------------------------------------------
 

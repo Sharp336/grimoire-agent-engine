@@ -63,6 +63,22 @@ function createContextTestModel(id: string, contextWindow: number): Model {
 	});
 }
 
+function createProviderTestModel(provider: string, id: string): Model {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		baseUrl: "https://example.com/v1",
+		reasoning: false,
+		provider,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 4096,
+	});
+}
+
 function createScopedSelector(
 	models: Model[],
 	settings: Settings,
@@ -506,5 +522,28 @@ describe("ModelSelector role badge thinking display", () => {
 		const finalRendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(finalRendered).toContain("deepseek-v4-pro");
 		expect(finalRendered).not.toContain("Refreshing OLLAMA CLOUD in background");
+	});
+
+	test("requires search before rendering high-cardinality provider tabs and surfaces queried API-loaded models", () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const models = Array.from({ length: 501 }, (_, index) =>
+			createProviderTestModel("featherless", index === 427 ? "needle-context-tool-model" : `bulk-model-${index}`),
+		);
+		const selector = createScopedSelector(models, settings, () => {});
+
+		selector.handleInput("\t");
+		const providerTabRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(providerTabRendered).toContain(
+			"FEATHERLESS has 501 API-loaded models. Type to search by provider/model id.",
+		);
+		expect(providerTabRendered).not.toContain("bulk-model-0");
+		expect(providerTabRendered).not.toContain("needle-context-tool-model");
+
+		for (const ch of "needle") selector.handleInput(ch);
+		const searchRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(searchRendered).toContain("featherless/needle-context-tool-model");
+		expect(searchRendered).not.toContain("Type to search by provider/model id");
+		expect(searchRendered).not.toContain("bulk-model-0");
 	});
 });

@@ -112,6 +112,8 @@ const ALL_TAB = "ALL";
 const STATIC_PROVIDER_TABS: ProviderTabState[] = [{ id: ALL_TAB, label: ALL_TAB }];
 
 const MODEL_TAB_REFRESH_DEBOUNCE_MS = 120;
+const MODEL_SEARCH_REQUIRED_THRESHOLD = 500;
+const ALL_MODELS_SEARCH_REQUIRED_THRESHOLD = 5_000;
 
 function formatProviderTabLabel(providerId: string): string {
 	return providerId.replace(/[-_]+/g, " ").toUpperCase();
@@ -145,6 +147,7 @@ export class ModelSelectorComponent extends Container {
 	#onSelectCallback = (() => {}) as RoleSelectCallback;
 	#onCancelCallback = (() => {}) as CancelCallback;
 	#errorMessage?: unknown;
+	#emptyStateMessage?: string;
 	#tui: TUI;
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#temporaryOnly: boolean;
@@ -703,13 +706,27 @@ export class ModelSelectorComponent extends Container {
 
 	#filterModels(query: string): void {
 		const activeProviderId = this.#getActiveProviderId();
+		const trimmedQuery = query.trim();
+		this.#emptyStateMessage = undefined;
 
 		let baseModels = this.#allModels;
 		if (activeProviderId) {
 			baseModels = this.#allModels.filter(m => m.provider === activeProviderId);
 		}
 
-		if (query.trim()) {
+		const searchRequiredThreshold = activeProviderId
+			? MODEL_SEARCH_REQUIRED_THRESHOLD
+			: ALL_MODELS_SEARCH_REQUIRED_THRESHOLD;
+		if (!trimmedQuery && baseModels.length > searchRequiredThreshold) {
+			const label = activeProviderId ? formatProviderTabLabel(activeProviderId) : "All providers";
+			this.#filteredModels = [];
+			this.#selectedIndex = 0;
+			this.#emptyStateMessage = `  ${label} has ${formatNumber(baseModels.length).toLowerCase()} API-loaded models. Type to search by provider/model id.`;
+			this.#updateList();
+			return;
+		}
+
+		if (trimmedQuery) {
 			// If user is searching from a provider tab, auto-switch to ALL to show global provider results.
 			if (activeProviderId) {
 				this.#activeTabIndex = 0;
@@ -727,7 +744,7 @@ export class ModelSelectorComponent extends Container {
 			// through the same fuzzy matcher. The score is biased by provider-
 			// prefix length, so re-sort by MRU/version afterwards; skip role
 			// rank so a weakly matching default doesn't trump a stronger match.
-			const fuzzyMatches = fuzzyFilter(baseModels, query, ({ id, provider }) => `${provider}/${id}`);
+			const fuzzyMatches = fuzzyFilter(baseModels, trimmedQuery, ({ id, provider }) => `${provider}/${id}`);
 			this.#sortModels(fuzzyMatches, { skipRoleRank: true });
 			this.#filteredModels = fuzzyMatches;
 		} else {
@@ -891,7 +908,7 @@ export class ModelSelectorComponent extends Container {
 				this.#listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
 			}
 		} else if (visibleItems.length === 0) {
-			const statusMessage = this.#getProviderEmptyStateMessage();
+			const statusMessage = this.#emptyStateMessage ?? this.#getProviderEmptyStateMessage();
 			this.#listContainer.addChild(new Text(theme.fg("muted", statusMessage ?? "  No matching models"), 0, 0));
 		} else {
 			const selected = visibleItems[this.#selectedIndex];

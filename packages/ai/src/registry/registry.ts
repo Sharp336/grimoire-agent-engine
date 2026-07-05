@@ -11,6 +11,7 @@ import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { featherlessProvider } from "./featherless";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -103,6 +104,7 @@ const ALL = [
 	xiaomiTokenPlanAmsProvider,
 	xiaomiTokenPlanCnProvider,
 	firepassProvider,
+	featherlessProvider,
 	deepseekProvider,
 	moonshotProvider,
 	cerebrasProvider,
