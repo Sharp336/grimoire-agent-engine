@@ -1493,6 +1493,7 @@ export function zhipuCodingPlanModelManagerOptions(
 
 interface NeuralwattMetadataCapabilities {
 	reasoning?: boolean;
+	reasoning_effort?: boolean;
 	vision?: boolean;
 	developer_role?: boolean;
 }
@@ -1530,6 +1531,7 @@ function readNeuralwattMetadata(entry: OpenAICompatibleModelRecord): NeuralwattM
 	const capabilities: NeuralwattMetadataCapabilities | undefined = isRecord(capabilitiesRaw)
 		? {
 				reasoning: toBoolean(capabilitiesRaw.reasoning),
+				reasoning_effort: toBoolean(capabilitiesRaw.reasoning_effort),
 				vision: toBoolean(capabilitiesRaw.vision),
 				developer_role: toBoolean(capabilitiesRaw.developer_role),
 			}
@@ -1598,6 +1600,7 @@ export function neuralwattModelManagerOptions(
 							compat: {
 								thinkingFormat: "zai",
 								supportsDeveloperRole: capabilities?.developer_role ?? false,
+								supportsReasoningEffort: capabilities?.reasoning_effort ?? false,
 								maxTokensField: "max_tokens" as const,
 								reasoningContentField: "reasoning_content" as const,
 								requiresReasoningContentForToolCalls: isReasoning,
