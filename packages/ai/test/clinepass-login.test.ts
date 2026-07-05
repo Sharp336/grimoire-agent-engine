@@ -1,5 +1,5 @@
 /**
- * ClinePass `/login` validation.
+ * ClinePass API-key `/login` validation (the manual paste path).
  *
  * ClinePass routes runtime requests through `max_completion_tokens`, and its
  * reasoning models return a 5xx `empty response content` when a 1-token budget
@@ -7,13 +7,17 @@
  * (`max_tokens: 1`) would therefore risk rejecting a valid key on the ClinePass
  * endpoint, so ClinePass validation overrides the probe to use the runtime
  * token field with a real budget.
+ *
+ * These tests target `loginClinepassApiKey` directly (the paste flow);
+ * `loginClinepass` is the dispatcher that tries the Cline CLI WorkOS creds
+ * first — covered in clinepass-oauth.test.ts.
  */
 import { describe, expect, it } from "bun:test";
 
-import { loginClinepass } from "@oh-my-pi/pi-ai/registry/clinepass";
+import { loginClinepassApiKey } from "@oh-my-pi/pi-ai/registry/clinepass";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
-function makeController(fetchImpl: FetchImpl): Parameters<typeof loginClinepass>[0] {
+function makeController(fetchImpl: FetchImpl): Parameters<typeof loginClinepassApiKey>[0] {
 	return {
 		fetch: fetchImpl,
 		onPrompt: async () => "sk_TESTKEY",
@@ -22,7 +26,7 @@ function makeController(fetchImpl: FetchImpl): Parameters<typeof loginClinepass>
 	};
 }
 
-describe("loginClinepass", () => {
+describe("loginClinepassApiKey", () => {
 	it("probes chat completions with the runtime token field and a real budget", async () => {
 		let capturedUrl = "";
 		let capturedAuth = "";
@@ -34,7 +38,7 @@ describe("loginClinepass", () => {
 			return new Response(JSON.stringify({ success: true, data: { choices: [] } }), { status: 200 });
 		};
 
-		const key = await loginClinepass(makeController(fetchImpl));
+		const key = await loginClinepassApiKey(makeController(fetchImpl));
 
 		expect(key).toBe("sk_TESTKEY");
 		const url = new URL(capturedUrl);
@@ -53,7 +57,7 @@ describe("loginClinepass", () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response('{"error":"Invalid API key.","success":false}', { status: 401, statusText: "Unauthorized" });
 
-		await expect(loginClinepass(makeController(fetchImpl))).rejects.toThrow(
+		await expect(loginClinepassApiKey(makeController(fetchImpl))).rejects.toThrow(
 			/ClinePass API key validation failed \(401\)/,
 		);
 	});
