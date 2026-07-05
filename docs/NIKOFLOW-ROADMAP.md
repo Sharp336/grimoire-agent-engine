@@ -19,6 +19,60 @@ force the engineering process and (b) make an independent reviewer's blocker
 
 ---
 
+## Fable-5 QA — verdict & mandatory revisions (v2)
+
+Adversarial review audited every Appendix-A ref against the live code. **Verdict: TAKE** —
+the crux is buildable without forking the loop, and the refs are honest. Applied
+revisions (they change the plan, not just annotate it):
+
+**M1 — The reviewer verdict, not the advisor blocker, is the real gate.** The advisor can
+never signal "resolved," and two dedupe layers (`advise-tool.ts:169,185` + `emission-guard`
+one-note-per-cycle) physically prevent it from re-emitting an unmet blocker. So a raw
+`blocker` latch is **unsound** as a "block until cleared" gate. → **TSK-008 (independent
+reviewer whose verdict arrives as a `tool_result` with a unique gate-id) is THE execute/
+verify gate; the advisor `blocker` is only a soft steering signal. Dependency inverted:
+007 now depends on 008.**
+
+**M2 — Fail-closed, not fail-open.** `waitForCatchup(30000,…)` resolves on a timer
+regardless of backlog, and the 3-fail circuit-breaker drops backlog and counts success
+(`runtime.ts:356`). "Advisor silent" must NOT read as "approved." The gate requires an
+explicit per-turn reviewer ACK (verdict tool_result carrying the current gate-id); absence
+of a verdict = gate not passed → escalate to the user after bounded attempts. Never
+promote on a timeout.
+
+**M3 — De-risk the thesis FIRST (new TSK-000 spike, before TSK-001).** 1–2 days: existing
+advisor + `advisor.syncBacklog` + *prompt-level* (non-enforced) phase rules, cheap primary
+(DeepSeek/GLM) vs bare, on ~10 `typescript-edit-benchmark` tasks. Measure pass-rate **and
+tokens/time/gate-thrash**. If a cheap primary can't follow even soft rails → do not build
+the harness. This is the cheapest falsifier of the whole cheap→SOTA thesis.
+
+**Added/fixed tickets** (fold into Phase 4): **TSK-013** NikoflowState persistence across
+save/resume/compaction (a resume mid-Execute must not reset gates); **TSK-014** the
+*methodology-mode registry itself* — `modes/` is UI transport, no methodology-mode slot
+exists, so "register the mode" is hidden design work; **TSK-015** headless/RPC/print scope
+— human gates currently sit on interactive-mode plan-approval, so either add an RPC gate
+path or explicitly scope v1 as *interactive-only*; **TSK-016** inject phase rules into the
+primary prompt (port `prompts.ts` via `PRIMARY_CONTEXT_CUSTOM_TYPES`); **TSK-017** the
+upstream rebase procedure (`origin=can1357/oh-my-pi`, we work in a fork). **Fixes:** TSK-004
+uses the Soft-ladder (`setForcedToolChoice` *ends* the turn — wrong mechanism for "don't
+yield until artifact"); TSK-012 `blocked-by` = 000–011 (not 009); bounded-attempts→escalate
+must be a real PBT invariant (the "no-deadlock" property today covers advisor failure but
+NOT a cheap primary that never emits the exact tag).
+
+**Verify-before-build checks** (do in TSK-000/001, not after): (a) per-provider — does
+DeepSeek/GLM/Qwen/Kimi support hard `tool_choice` forcing? `buildNamedToolChoice` throws
+"model does not support forcing a specific tool" on some, so the Soft-ladder's top rung may
+be absent — the gate design must degrade to escalate, not hang. (b) Grilling "read-only" by
+tool-name does NOT stop `bash echo > file`; either ban bash-writes in Grilling or sandbox.
+(c) `onTurnEnd`/`beforeToolCall`/`onBeforeYield` are single-slot last-writer-wins fields and
+the session already owns `onTurnEnd` — chain, don't overwrite (R2 was understated).
+
+**Scope reality:** DEEP + full ticket set + PBT + benchmark ≈ **4–8 weeks**, not a "feature."
+Minimal thesis-proving core: **TSK-000 spike → 001, 002/014, 003, 005, 006, 008-as-gate**;
+PBT/011/012 are the tail.
+
+---
+
 ## 🔥 Phase 1 — Grilling (interrogate before any code)
 
 **Why this, why now.** oh-my-pi already owns its agent loop and ships a strong
