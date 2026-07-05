@@ -112,6 +112,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--model": (result, value) => {
 		result.model = value;
 	},
+	"--codex-home": (result, value) => {
+		result.codexHome = value;
+	},
+	"--codex-home-chain": (result, value) => {
+		result.codexHomeChain = value;
+	},
 	"--smol": (result, value) => {
 		result.smol = value;
 	},
@@ -129,6 +135,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			deps.logger.warn("Invalid seconds passed to --max-time", { value });
 		}
 	},
+
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
