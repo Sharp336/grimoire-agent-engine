@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Morph (`morphllm`) provider descriptor with a static seed of six chat models, allowlist-filtered dynamic discovery, `openrouter`-style nested `reasoning: { effort }` wire encoding, and `max_tokens` (not `max_completion_tokens`) for completion requests.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed
