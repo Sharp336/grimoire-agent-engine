@@ -33,6 +33,7 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	type BeforeToolCallContext,
 	type CompactionSummaryMessage,
 	countTokens,
 	resolveTelemetry,
@@ -238,6 +239,15 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import {
+	type InstalledNikoflowCallbacks,
+	installNikoflowAgentSessionMode,
+	type MinimalToolCallContext,
+	type NikoflowToolPolicy,
+	type OnTurnEnd,
+	type ToolChoiceGetter,
+} from "../nikoflow/mode";
+import type { NikoflowState } from "../nikoflow/state";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -844,6 +854,15 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
 	skipCompactionCheck?: boolean;
+}
+
+export interface AgentSessionNikoflowModeOptions {
+	getState: () => NikoflowState | null | undefined;
+	isGateSatisfied: (state: NikoflowState) => boolean;
+	enqueueFollowUp?: (message: string) => void | Promise<void>;
+	policy?: NikoflowToolPolicy;
+	afterTurnEnd?: OnTurnEnd<AgentMessage[], AgentTurnEndContext>;
+	nikoflowToolChoice?: ToolChoiceGetter<ToolChoiceDirective>;
 }
 
 /** Result from a handoff operation. */
@@ -6991,6 +7010,46 @@ export class AgentSession {
 	 */
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
 		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model);
+	}
+
+	async installNikoflowMode(
+		options: AgentSessionNikoflowModeOptions,
+	): Promise<InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective>> {
+		const session = this;
+		const previousBeforeToolCall = session.agent.beforeToolCall;
+		return installNikoflowAgentSessionMode<
+			AgentMessage[],
+			AgentTurnEndContext,
+			ToolChoiceDirective,
+			Model,
+			ConfiguredThinkingLevel
+		>(
+			{
+				get beforeToolCall() {
+					return previousBeforeToolCall
+						? (context: MinimalToolCallContext, signal?: AbortSignal) =>
+								previousBeforeToolCall(context as BeforeToolCallContext, signal)
+						: undefined;
+				},
+				set beforeToolCall(fn) {
+					session.agent.beforeToolCall = fn
+						? (context: BeforeToolCallContext, signal?: AbortSignal) => fn(context, signal)
+						: undefined;
+				},
+				getOnTurnEnd: () => session.agent.getOnTurnEnd(),
+				setOnTurnEnd: fn => session.agent.setOnTurnEnd(fn),
+				getOnBeforeYield: () => session.agent.getOnBeforeYield(),
+				setOnBeforeYield: fn => session.agent.setOnBeforeYield(fn),
+				getGetToolChoice: () => session.agent.getToolChoiceHandler(),
+				setGetToolChoice: fn => session.agent.setGetToolChoice(fn),
+				resolveRoleModelWithThinking: role => session.resolveRoleModelWithThinking(role),
+				applyRoleModel: entry => session.applyRoleModel(entry),
+			},
+			{
+				...options,
+				enqueueFollowUp: options.enqueueFollowUp ?? (message => session.followUp(message)),
+			},
+		);
 	}
 
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {

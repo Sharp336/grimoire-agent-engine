@@ -5,9 +5,11 @@ import {
 	createNikoflowGetToolChoice,
 	createNikoflowOnBeforeYield,
 	createNikoflowOnTurnEnd,
+	installNikoflowAgentSessionMode,
 	installNikoflowCallbacks,
 	isWriteTool,
 	type MinimalToolCallContext,
+	type NikoflowAgentSessionHost,
 	type NikoflowCallbackHost,
 	nikoflowToolViolation,
 } from "../mode";
@@ -66,19 +68,19 @@ describe("nikoflow mode callback helpers", () => {
 		expect(nikoflowToolViolation(executeState, tool("write"), { hasFailingTest: () => true })).toBeNull();
 	});
 
-	test("chains tool choice with nikoflow priority", () => {
+	test("chains tool choice without swallowing the previous directive", () => {
 		expect(
 			createNikoflowGetToolChoice(
 				() => "previous",
 				() => "nikoflow",
 			)(),
-		).toBe("nikoflow");
+		).toBe("previous");
 		expect(
 			createNikoflowGetToolChoice(
-				() => "previous",
 				() => undefined,
+				() => "nikoflow",
 			)(),
-		).toBe("previous");
+		).toBe("nikoflow");
 	});
 
 	test("enqueues a follow-up when a gate is unmet", async () => {
@@ -150,7 +152,7 @@ describe("nikoflow mode callback helpers", () => {
 			block: true,
 			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
 		});
-		expect(bundle.getToolChoice?.()).toBe("nikoflow-choice");
+		expect(bundle.getToolChoice?.()).toBe("previous-choice");
 		expect(calls[0]).toBe("previous-turn");
 		expect(calls[1]).toBe("nikoflow-turn");
 		expect(calls[2]).toBe("previous-yield");
@@ -209,8 +211,8 @@ describe("nikoflow mode callback helpers", () => {
 			block: true,
 			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
 		});
-		expect(installed.bundle.getToolChoice?.()).toBe("nikoflow-choice");
-		expect(installedChoice?.()).toBe("nikoflow-choice");
+		expect(installed.bundle.getToolChoice?.()).toBe("previous-choice");
+		expect(installedChoice?.()).toBe("previous-choice");
 		expect(calls).toEqual([
 			"previous-turn",
 			"nikoflow-turn",
@@ -224,5 +226,90 @@ describe("nikoflow mode callback helpers", () => {
 		expect(installedTurn).toBe(previousTurn);
 		expect(installedYield).toBe(previousYield);
 		expect(installedChoice).toBe(previousChoice);
+	});
+
+	test("attaches to an AgentSession-like host without clobbering existing handlers", async () => {
+		interface MockModel {
+			provider: string;
+			id: string;
+		}
+
+		const calls: string[] = [];
+		const followUps: string[] = [];
+		const appliedRoles: string[] = [];
+		let state = mintGateRequest(createState("standard"), "g1");
+		let gateSatisfied = false;
+		let installedTurn: ((messages: string[]) => Promise<void> | void) | undefined = () => {
+			calls.push("advisor-turn");
+		};
+		let installedYield: (() => Promise<void> | void) | undefined = () => {
+			calls.push("previous-yield");
+		};
+		let installedChoice: (() => string | undefined) | undefined = () => "previous-choice";
+
+		const roleModel = (role: string): MockModel => ({
+			provider: "mock",
+			id: role === "plan" ? "strong" : role,
+		});
+		const host: NikoflowAgentSessionHost<string[], undefined, string, MockModel> = {
+			beforeToolCall: () => {
+				calls.push("previous-before");
+				return undefined;
+			},
+			getOnTurnEnd: () => installedTurn,
+			setOnTurnEnd: fn => {
+				installedTurn = fn;
+			},
+			getOnBeforeYield: () => installedYield,
+			setOnBeforeYield: fn => {
+				installedYield = fn;
+			},
+			getGetToolChoice: () => installedChoice,
+			setGetToolChoice: fn => {
+				installedChoice = fn;
+			},
+			resolveRoleModelWithThinking: role => ({
+				model: roleModel(role),
+				explicitThinkingLevel: false,
+			}),
+			applyRoleModel: entry => {
+				appliedRoles.push(entry.role);
+			},
+		};
+
+		await installNikoflowAgentSessionMode(host, {
+			getState: () => state,
+			isGateSatisfied: () => gateSatisfied,
+			enqueueFollowUp: message => {
+				followUps.push(message);
+			},
+			afterTurnEnd: () => {
+				calls.push("nikoflow-turn");
+			},
+			nikoflowToolChoice: () => undefined,
+		});
+
+		await installedTurn?.([]);
+		expect(calls.slice(0, 2)).toEqual(["advisor-turn", "nikoflow-turn"]);
+		expect(appliedRoles).toEqual(["plan"]);
+
+		expect(await installedYield?.()).toBeUndefined();
+		expect(followUps).toHaveLength(1);
+		expect(followUps[0]).toContain('phase "grilling"');
+
+		gateSatisfied = true;
+		expect(await installedYield?.()).toBeUndefined();
+		expect(followUps).toHaveLength(1);
+
+		expect(await host.beforeToolCall?.(tool("write"))).toEqual({
+			block: true,
+			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
+		});
+		expect(calls).toContain("previous-before");
+		expect(installedChoice?.()).toBe("previous-choice");
+
+		state = advancePhase(createState("tactical"));
+		await installedTurn?.([]);
+		expect(appliedRoles).toEqual(["plan", "default"]);
 	});
 });

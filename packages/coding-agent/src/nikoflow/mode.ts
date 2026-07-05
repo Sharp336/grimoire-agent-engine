@@ -1,4 +1,5 @@
-import { currentPhase, type NikoflowState } from "./state";
+import { assertNikoflowRoleRails } from "./roles";
+import { currentPhase, currentRole, type NikoflowRole, type NikoflowState } from "./state";
 
 export interface MinimalToolCallContext {
 	toolCall: { name?: string; toolName?: string };
@@ -50,14 +51,46 @@ export interface NikoflowCallbackBundle<TMessages = unknown, TContext = unknown,
 
 export interface NikoflowCallbackHost<TMessages = unknown, TContext = unknown, TDirective = unknown> {
 	beforeToolCall?: BeforeToolCall;
+	getOnTurnEnd?: () => OnTurnEnd<TMessages, TContext> | undefined;
 	setOnTurnEnd?: (fn: OnTurnEnd<TMessages, TContext> | undefined) => void;
+	getOnBeforeYield?: () => OnBeforeYield | undefined;
 	setOnBeforeYield?: (fn: OnBeforeYield | undefined) => void;
+	getGetToolChoice?: () => ToolChoiceGetter<TDirective> | undefined;
 	setGetToolChoice?: (fn: ToolChoiceGetter<TDirective> | undefined) => void;
 }
 
 export interface InstalledNikoflowCallbacks<TMessages = unknown, TContext = unknown, TDirective = unknown> {
 	bundle: NikoflowCallbackBundle<TMessages, TContext, TDirective>;
 	uninstall: () => void;
+}
+
+export interface NikoflowSessionModel {
+	provider: string;
+	id: string;
+}
+
+export interface NikoflowSessionResolvedRole<TModel extends NikoflowSessionModel, TThinking = unknown> {
+	model?: TModel | null;
+	thinkingLevel?: TThinking;
+	explicitThinkingLevel: boolean;
+}
+
+export interface NikoflowSessionRoleEntry<TModel extends NikoflowSessionModel, TThinking = unknown> {
+	role: NikoflowRole;
+	model: TModel;
+	thinkingLevel?: TThinking;
+	explicitThinkingLevel: boolean;
+}
+
+export interface NikoflowAgentSessionHost<
+	TMessages = unknown,
+	TContext = unknown,
+	TDirective = unknown,
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+> extends NikoflowCallbackHost<TMessages, TContext, TDirective> {
+	resolveRoleModelWithThinking: (role: NikoflowRole) => NikoflowSessionResolvedRole<TModel, TThinking>;
+	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
 }
 
 const DIRECT_WRITE_TOOLS = new Set(["apply_patch", "edit", "multi_edit", "str_replace_editor", "write", "write_file"]);
@@ -132,7 +165,7 @@ export function createNikoflowGetToolChoice<TDirective>(
 	previous: ToolChoiceGetter<TDirective> | undefined,
 	nikoflowChoice: ToolChoiceGetter<TDirective>,
 ): ToolChoiceGetter<TDirective> {
-	return () => nikoflowChoice() ?? previous?.();
+	return () => previous?.() ?? nikoflowChoice();
 }
 
 export function formatGateHoldMessage(state: NikoflowState): string {
@@ -182,9 +215,15 @@ export function installNikoflowCallbacks<TMessages = unknown, TContext = unknown
 	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
 ): InstalledNikoflowCallbacks<TMessages, TContext, TDirective> {
 	const previousBeforeToolCall = host.beforeToolCall;
+	const previousOnTurnEnd = options.onTurnEnd ?? host.getOnTurnEnd?.();
+	const previousOnBeforeYield = options.onBeforeYield ?? host.getOnBeforeYield?.();
+	const previousGetToolChoice = options.getToolChoice ?? host.getGetToolChoice?.();
 	const bundle = createNikoflowCallbackBundle({
 		...options,
 		beforeToolCall: options.beforeToolCall ?? previousBeforeToolCall,
+		onTurnEnd: previousOnTurnEnd,
+		onBeforeYield: previousOnBeforeYield,
+		getToolChoice: previousGetToolChoice,
 	});
 
 	host.beforeToolCall = bundle.beforeToolCall;
@@ -196,9 +235,53 @@ export function installNikoflowCallbacks<TMessages = unknown, TContext = unknown
 		bundle,
 		uninstall: () => {
 			host.beforeToolCall = previousBeforeToolCall;
-			host.setOnTurnEnd?.(options.onTurnEnd);
-			host.setOnBeforeYield?.(options.onBeforeYield);
-			host.setGetToolChoice?.(options.getToolChoice);
+			host.setOnTurnEnd?.(previousOnTurnEnd);
+			host.setOnBeforeYield?.(previousOnBeforeYield);
+			host.setGetToolChoice?.(previousGetToolChoice);
 		},
 	};
+}
+
+export async function installNikoflowAgentSessionMode<
+	TMessages = unknown,
+	TContext = unknown,
+	TDirective = unknown,
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+>(
+	host: NikoflowAgentSessionHost<TMessages, TContext, TDirective, TModel, TThinking>,
+	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
+): Promise<InstalledNikoflowCallbacks<TMessages, TContext, TDirective>> {
+	assertNikoflowRoleRails(role => {
+		const resolved = host.resolveRoleModelWithThinking(role);
+		return resolved.model ? { provider: resolved.model.provider, model: resolved.model.id } : null;
+	});
+
+	let appliedRole: NikoflowRole | null = null;
+	const applyCurrentRole = async () => {
+		const state = options.getState();
+		const role = state ? currentRole(state) : null;
+		if (!role || role === appliedRole) return;
+
+		const resolved = host.resolveRoleModelWithThinking(role);
+		if (!resolved.model) return;
+
+		await host.applyRoleModel({
+			role,
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			explicitThinkingLevel: resolved.explicitThinkingLevel,
+		});
+		appliedRole = role;
+	};
+
+	await applyCurrentRole();
+
+	return installNikoflowCallbacks(host, {
+		...options,
+		afterTurnEnd: async (messages, signal, context) => {
+			await options.afterTurnEnd?.(messages, signal, context);
+			await applyCurrentRole();
+		},
+	});
 }

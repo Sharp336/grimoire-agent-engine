@@ -747,9 +747,28 @@ export class Agent {
 		this.#onAssistantMessageEvent = fn;
 	}
 
+	getToolChoiceHandler(): (() => ToolChoiceDirective | undefined) | undefined {
+		return this.#getToolChoice;
+	}
+
+	setGetToolChoice(fn: (() => ToolChoiceDirective | undefined) | undefined): void {
+		this.#getToolChoice = fn;
+	}
+
+	getOnBeforeYield(): (() => Promise<void> | void) | undefined {
+		return this.#onBeforeYield;
+	}
+
 	setOnBeforeYield(fn: (() => Promise<void> | void) | undefined): void {
 		this.#onBeforeYield = fn;
 	}
+
+	getOnTurnEnd():
+		| ((messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void)
+		| undefined {
+		return this.#onTurnEnd;
+	}
+
 	setOnTurnEnd(
 		fn:
 			| ((messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void)
