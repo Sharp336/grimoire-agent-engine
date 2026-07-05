@@ -1,3 +1,4 @@
+import { toClinepassWireModelId } from "@oh-my-pi/pi-catalog/clinepass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { isGlm52ReasoningEffortModelId } from "@oh-my-pi/pi-catalog/identity";
@@ -473,6 +474,8 @@ export function applyWireModelIdTransform(
 			return toFirepassWireModelId(baseId);
 		case "fireworks":
 			return toFireworksWireModelId(baseId);
+		case "clinepass":
+			return toClinepassWireModelId(baseId);
 		case "openrouter":
 			return applyOpenRouterRoutingVariant(baseId, openrouterVariant);
 		default:

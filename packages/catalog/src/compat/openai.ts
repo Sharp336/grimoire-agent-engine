@@ -176,6 +176,26 @@ const MIMO_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]>
 	xhigh: "high",
 };
 
+/**
+ * ClinePass exposes every backend through one gateway that accepts the standard
+ * OpenAI effort ladder verbatim (`minimal`..`xhigh`) and 400s only on `max`
+ * (verified live against `api.cline.bot`: `glm-5.2`, `deepseek-v4-pro`,
+ * `minimax-m3`, `qwen3.7-*` all accept `minimal`..`xhigh` and reject `max`).
+ * Identity passthrough suppresses the id-based family remaps that would
+ * otherwise apply because model families are detected from the bare id: without
+ * it `cline-pass/glm-5.2` inherits GLM-5.2's `xhigh -> "max"` overlay (an
+ * instant 500) and `cline-pass/deepseek-v4-*` collapse `minimal`..`high` to
+ * `"high"`. `compat.reasoningEffortMap` wins over `thinking.effortMap` at wire
+ * resolution, so declaring the identity map here neutralizes both.
+ */
+const CLINEPASS_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]> = {
+	minimal: "minimal",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+};
+
 function mergeMimoReasoningEffortMap(compat: ResolvedOpenAISharedCompat, enabled: boolean): void {
 	if (!enabled) return;
 	compat.reasoningEffortMap = { ...MIMO_REASONING_EFFORT_MAP, ...compat.reasoningEffortMap };
@@ -259,6 +279,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const hostModel = { provider, baseUrl };
 
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
+	// ClinePass fronts many upstream vendors (GLM, DeepSeek, Kimi, Qwen, MiMo,
+	// MiniMax) behind one OpenAI-compatible gateway. Gate its compat on the host
+	// so the per-vendor id-family remaps (which key off the bare model id) do not
+	// mis-shape ClinePass requests.
+	const isClinePass = modelMatchesHost(hostModel, "clinepass");
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
@@ -400,21 +425,31 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			? "firepass"
 			: provider === "fireworks"
 				? "fireworks"
+				: isClinePass
+					? "clinepass"
+					: isOpenRouter
+						? "openrouter"
+						: "raw";
+	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
+		// ClinePass is a uniform OpenAI-compatible gateway: it drives reasoning
+		// through plain `reasoning_effort` for every backend (including the Qwen
+		// SKUs) and merely tolerates the Qwen `enable_thinking` params without
+		// needing them (verified live). Pin `openai` so the Qwen models keep the
+		// full `xhigh` effort ladder ClinePass accepts, and no vendor-specific
+		// thinking fields are emitted.
+		isClinePass
+			? "openai"
+			: isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
+				? "zai"
 				: isOpenRouter
 					? "openrouter"
-					: "raw";
-	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
-			? "zai"
-			: isOpenRouter
-				? "openrouter"
-				: isQwen && isNvidiaNim
-					? "qwen-chat-template"
-					: isQwen && isFireworks
-						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+					: isQwen && isNvidiaNim
+						? "qwen-chat-template"
+						: isQwen && isFireworks
+							? "openai"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -429,7 +464,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		reasoningEffortMap: isMimoReasoningEffortModel ? MIMO_REASONING_EFFORT_MAP : {},
+		reasoningEffortMap: isClinePass
+			? CLINEPASS_REASONING_EFFORT_MAP
+			: isMimoReasoningEffortModel
+				? MIMO_REASONING_EFFORT_MAP
+				: {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
 		// family classifier so OpenAI-compat proxies serving Gemini are covered.
@@ -467,7 +506,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
-		reasoningContentField: "reasoning_content",
+		// ClinePass streams chain-of-thought in `delta.reasoning` (OpenRouter-style),
+		// not the OpenAI-compat default `delta.reasoning_content` (verified live).
+		reasoningContentField: isClinePass ? "reasoning" : "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API.
 		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models

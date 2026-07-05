@@ -123,6 +123,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo` | `GITLAB_TOKEN` |
 | `opencode-zen`, `opencode-go` | `OPENCODE_API_KEY` |
 | `firepass` | `FIREPASS_API_KEY` |
+| `clinepass` | `CLINE_API_KEY` |
 | `wafer-serverless` | `WAFER_SERVERLESS_API_KEY` |
 | `xiaomi` | `XIAOMI_API_KEY` |
 | `ollama-cloud` | `OLLAMA_CLOUD_API_KEY` |

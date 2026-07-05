@@ -1678,6 +1678,31 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.6b ClinePass (Cline subscription gateway)
+// ---------------------------------------------------------------------------
+
+export interface ClinepassModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * ClinePass is Cline's flat-rate subscription (https://docs.cline.bot/getting-started/clinepass)
+ * that re-hosts open coding models behind one OpenAI-compatible endpoint at
+ * `https://api.cline.bot/api/v1`. Its keys do not authorize `/v1/models`
+ * (discovery 404s), so this manager never performs dynamic discovery — the
+ * bundled `models.json` entries are canonical, like Fire Pass.
+ */
+export function clinepassModelManagerOptions(
+	_config?: ClinepassModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		providerId: "clinepass",
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.7 Wafer Serverless
 // ---------------------------------------------------------------------------
 
