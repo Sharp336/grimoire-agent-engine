@@ -59,6 +59,19 @@ yield until artifact"); TSK-012 `blocked-by` = 000–011 (not 009); bounded-atte
 must be a real PBT invariant (the "no-deadlock" property today covers advisor failure but
 NOT a cheap primary that never emits the exact tag).
 
+**TSK-018 — Live plan surface via the native `todo` tool.** oh-my-pi already ships a
+phase-grouped, harness-pinned plan surface — `tools/todo.ts` (`{phase, items[]}`, tree-
+rendered "Updated Plan") + `modes/components/todo-reminder.ts` (re-pins incomplete items
+into the transcript every turn). nikoflow's phases + tickets map onto it 1:1 (the todo
+tool is *already* phase-grouped). **Render nikoflow's phase list + the current
+`tickets.json` slice into the todo surface** so the user sees a live "Updated Plan □"
+(current phase, tickets, statuses, stop condition), kept alive by `todo-reminder`, backed
+by the stricter validated ticket-DAG underneath. This is transparency/UX for near-free and
+a gap the v1 draft missed. *Acceptance:* an active nikoflow run shows a live phase/ticket
+plan via the todo surface that updates as phases/tickets advance. *Blocked-by:* 002/014,
+Ticketization (010). *Self-verify:* integration asserts the todo surface reflects
+state after a phase/ticket transition.
+
 **Verify-before-build checks** (do in TSK-000/001, not after): (a) per-provider — does
 DeepSeek/GLM/Qwen/Kimi support hard `tool_choice` forcing? `buildNamedToolChoice` throws
 "model does not support forcing a specific tool" on some, so the Soft-ladder's top rung may
