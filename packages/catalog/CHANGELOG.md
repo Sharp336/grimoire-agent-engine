@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping; reasoning requests now use documented OpenAI-style fields (`reasoning_effort`, `reasoning_content`).
+
 ## [16.4.3] - 2026-07-11
 
 ### Fixed
@@ -126,6 +130,9 @@
 ### Fixed
 
 - Fixed compatibility with OpenCode Go DeepSeek V4 models by sending max_tokens instead of max_completion_tokens to match the provider's API requirements.
+### Added
+
+- Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping.
 
 ## [16.3.7] - 2026-07-05
 
