@@ -426,6 +426,12 @@ function isSakanaFuguReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): bo
 
 function isDeepseekReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	if (!spec.reasoning) return false;
+	// Morph hosts DeepSeek V4 Flash as `morph-dsv4flash` but Morph's fast-model
+	// docs list `low`/`medium`/`high` reasoning efforts (nested `reasoning.effort`),
+	// not DeepSeek's collapsed `high`-only ladder. Exclude morphllm so the
+	// generic DeepSeek name detector does not match "DeepSeek V4 Flash" and
+	// apply DEEPSEEK_REASONING_EFFORT_MAP (low/medium → high) to it.
+	if (spec.provider === "morphllm") return false;
 	const lowerId = spec.id.toLowerCase();
 	const lowerName = (spec.name ?? "").toLowerCase();
 	const isOpenCodeDeepseekAlias =

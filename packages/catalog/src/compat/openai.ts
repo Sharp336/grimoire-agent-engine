@@ -176,6 +176,11 @@ const MIMO_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]>
 	xhigh: "high",
 };
 
+const MORPH_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]> = {
+	minimal: "low",
+	xhigh: "high",
+};
+
 function mergeMimoReasoningEffortMap(compat: ResolvedOpenAISharedCompat, enabled: boolean): void {
 	if (!enabled) return;
 	compat.reasoningEffortMap = { ...MIMO_REASONING_EFFORT_MAP, ...compat.reasoningEffortMap };
@@ -326,7 +331,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isZhipu ||
 		hostMatchesUrl(baseUrl, "chutes") ||
 		hostMatchesUrl(baseUrl, "fireworks") ||
-		isDirectDeepseekApi;
+		isDirectDeepseekApi ||
+		// Morph's OpenAI-compat endpoint advertises `max_tokens` in its model
+		// metadata and rejects `max_completion_tokens`; `/login` validation
+		// also uses `max_tokens`, so regular agent turns must match.
+		provider === "morphllm";
 
 	// Hosts whose chat-completions endpoints are known to accept multiple
 	// leading `system`/`developer` messages (preferred for KV-cache reuse).
@@ -403,10 +412,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				: isOpenRouter
 					? "openrouter"
 					: "raw";
+	const isMorph = provider === "morphllm";
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
 		isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
 			? "zai"
-			: isOpenRouter
+			: isOpenRouter || isMorph
 				? "openrouter"
 				: isQwen && isNvidiaNim
 					? "qwen-chat-template"
@@ -429,7 +439,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		reasoningEffortMap: isMimoReasoningEffortModel ? MIMO_REASONING_EFFORT_MAP : {},
+		reasoningEffortMap: isMimoReasoningEffortModel
+			? MIMO_REASONING_EFFORT_MAP
+			: isMorph
+				? MORPH_REASONING_EFFORT_MAP
+				: {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
 		// family classifier so OpenAI-compat proxies serving Gemini are covered.

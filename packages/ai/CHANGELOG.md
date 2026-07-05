@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Morph (`morphllm`) provider registry definition with API-key login and `chat-completions` validation against `https://api.morphllm.com/v1`.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

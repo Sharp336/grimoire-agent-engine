@@ -28,6 +28,7 @@ import {
 	lmStudioModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
+	morphModelManagerOptions,
 	nanoGptModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
@@ -256,6 +257,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => moonshotModelManagerOptions(config),
 		catalogDiscovery: { label: "Moonshot" },
+	},
+	{
+		id: "morphllm",
+		defaultModel: "morph-qwen35-397b",
+		envVars: ["MORPH_API_KEY", "MORPHLLM_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => morphModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "nanogpt",
