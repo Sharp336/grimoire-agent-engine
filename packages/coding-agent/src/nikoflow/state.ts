@@ -1,0 +1,84 @@
+export const NIKOFLOW_DEPTHS = ["tactical", "standard", "deep"] as const;
+export type NikoflowDepth = (typeof NIKOFLOW_DEPTHS)[number];
+
+export type NikoflowPhase = "grilling" | "adr" | "prd" | "tickets" | "execute" | "verify";
+
+export const NIKOFLOW_PHASES: Record<NikoflowDepth, readonly NikoflowPhase[]> = {
+	tactical: ["grilling", "execute", "verify"],
+	standard: ["grilling", "adr", "prd", "tickets", "execute", "verify"],
+	deep: ["grilling", "adr", "prd", "tickets", "execute", "verify"],
+} as const;
+
+export type NikoflowRole = "plan" | "default" | "advisor";
+
+export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
+	grilling: "plan",
+	adr: "plan",
+	prd: "plan",
+	tickets: "plan",
+	execute: "default",
+	verify: "advisor",
+} as const;
+
+export interface NikoflowState {
+	depth: NikoflowDepth;
+	phaseIndex: number;
+	gateRequestId: string | null;
+}
+
+export function createState(depth: NikoflowDepth): NikoflowState {
+	return { depth, phaseIndex: 0, gateRequestId: null };
+}
+
+export function materializePhases(depth: NikoflowDepth): NikoflowPhase[] {
+	return [...NIKOFLOW_PHASES[depth]];
+}
+
+export function inferDepthFromPrompt(prompt: string): NikoflowDepth | null {
+	const activation = /(?:\$?nikoflow|niko[\s-]+flow|nflow|нико[\s-]*флоу)/i.test(prompt);
+	if (!activation) return null;
+	const explicit = /(?:\$?nikoflow|niko[\s-]+flow|nflow|нико[\s-]*флоу)(?::|\s+)?(tactical|standard|deep)\b/i.exec(
+		prompt,
+	);
+	if (explicit?.[1]) return explicit[1].toLowerCase() as NikoflowDepth;
+	if (
+		/(?:не\s+(?:задавай\s+вопросов|спрашивай)|без\s+вопросов|no\s+questions|do\s+not\s+ask|don't\s+ask)/i.test(prompt)
+	) {
+		return "standard";
+	}
+	return null;
+}
+
+export function currentPhase(state: NikoflowState): NikoflowPhase | null {
+	return materializePhases(state.depth)[state.phaseIndex] ?? null;
+}
+
+export function currentRole(state: NikoflowState): NikoflowRole | null {
+	const phase = currentPhase(state);
+	return phase ? PHASE_ROLE[phase] : null;
+}
+
+export function advancePhase(state: NikoflowState): NikoflowState {
+	const nextIndex = Math.min(state.phaseIndex + 1, materializePhases(state.depth).length);
+	return { ...state, phaseIndex: nextIndex, gateRequestId: null };
+}
+
+export function isComplete(state: NikoflowState): boolean {
+	return state.phaseIndex >= materializePhases(state.depth).length;
+}
+
+export function mintGateRequest(state: NikoflowState, id: string): NikoflowState {
+	return { ...state, gateRequestId: id };
+}
+
+export function rotateGateRequest(state: NikoflowState, id: string): NikoflowState {
+	return mintGateRequest(state, id);
+}
+
+export function clearGateRequest(state: NikoflowState): NikoflowState {
+	return { ...state, gateRequestId: null };
+}
+
+export function gateMatches(state: NikoflowState, id: string | null | undefined): boolean {
+	return id != null && state.gateRequestId === id;
+}
