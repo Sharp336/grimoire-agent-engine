@@ -6,6 +6,18 @@ type OpenAICompatibleValidationOptions = {
 	apiKey: string;
 	baseUrl: string;
 	model: string;
+	/**
+	 * Output-token cap field for the probe. Defaults to `max_tokens`. Set to
+	 * `max_completion_tokens` for endpoints (e.g. ClinePass) whose runtime
+	 * requests route through that field so validation matches runtime.
+	 */
+	maxTokensField?: "max_tokens" | "max_completion_tokens";
+	/**
+	 * Probe output-token budget. Defaults to 1. Raise it for reasoning models
+	 * whose thinking consumes the whole budget and would otherwise return an
+	 * empty-content 5xx on a 1-token cap (e.g. ClinePass MiMo).
+	 */
+	maxTokens?: number;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
 };
@@ -59,7 +71,7 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 		body: JSON.stringify({
 			model: options.model,
 			messages: [{ role: "user", content: "ping" }],
-			max_tokens: 1,
+			[options.maxTokensField ?? "max_tokens"]: options.maxTokens ?? 1,
 			temperature: 0,
 		}),
 		signal,

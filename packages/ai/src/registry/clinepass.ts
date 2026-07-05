@@ -23,6 +23,12 @@ export const loginClinepass = createApiKeyLogin({
 		provider: "ClinePass",
 		baseUrl: "https://api.cline.bot/api/v1",
 		model: "cline-pass/glm-5.2",
+		// ClinePass routes runtime requests through `max_completion_tokens`, and its
+		// reasoning models 5xx with "empty response content" when a 1-token budget
+		// leaves no room after thinking. Validate with the runtime field and a real
+		// budget so a valid key is never rejected during /login.
+		maxTokensField: "max_completion_tokens",
+		maxTokens: 256,
 	},
 });
 
