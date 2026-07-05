@@ -208,6 +208,8 @@ Later project files sit closer to the end of the advisor prompt, so narrower dir
 
 `WATCHDOG.yml` (or `WATCHDOG.yaml`) is the advisor roster. Where `WATCHDOG.md` supplies review priorities, `WATCHDOG.yml` declares the advisors themselves — one entry per name, each with its own model, tool grant, and specialization prompt. The `/advisor configure` overlay edits this file in place. Files that fail to parse or fail schema validation are logged and skipped so one bad project config cannot kill the session.
 
+The roster is a set of **independent passive reviewers**, not a collaborating multi-agent system. Each entry gets its own model, its own `-advisor` tool session, and its own transcript; every advisor reviews the same primary-session deltas through `AdvisorRuntime` and can only surface notes through `advise`. Advisors cannot see, address, or coordinate with each other — and none of them is a peer of the primary agent (see [Transcript persistence and observability](#transcript-persistence-and-observability)). Use per-advisor models and tool scopes to make each reviewer cheaper or stronger, narrower or broader, for its role.
+
 Example:
 
 ```yaml
@@ -230,15 +232,35 @@ advisors:
 
 Fields:
 
-- `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
+- `instructions` (top level): shared baseline appended to every advisor's system prompt after the `WATCHDOG.md` blocks and before the advisor's own `instructions` (see [Prompt assembly](#prompt-assembly)). Concatenated across all discovered `WATCHDOG.yml` files.
 - `advisors[].name`: human label; slugified for the session id and the `<session>/__advisor.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted or empty → the default `read`/`grep`/`glob` subset. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools (`edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, `task`, `job`, and the memory tools). Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning. See [Tools and isolation](#tools-and-isolation) for the safety implications of granting mutating tools.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 
+### Prompt assembly
+
+Advisor-specific `instructions` are **appended**, never replacing the built-in advisor system prompt. Each advisor's system prompt is assembled in this order (see `#buildAdvisorRuntime` in [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)):
+
+1. built-in advisor system prompt
+2. project context files (AGENTS.md and friends) rendered for the advisor — the same standing instructions the primary agent receives, so the reviewer holds the agent to them
+3. `WATCHDOG.md` prompt blocks (user level first, then ancestors down toward `cwd`)
+4. top-level YAML `instructions` shared by every advisor
+5. that advisor's own `instructions`
+
+Later blocks sit closer to the end of the prompt, so an advisor's own specialization outranks shared guidance the same way narrower `WATCHDOG.md` files outrank broader ones.
+
 ### Discovery locations
 
 `WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same advisor slug.
+
+### Best practices
+
+- Keep a shared top-level `instructions:` block for project-wide review policy; give each advisor a small, role-specific `instructions:` block (architecture, security, tests, provider-specific API risks).
+- Keep the roster small — every advisor is another model loop and token/cost stream.
+- Leave `tools` omitted unless an advisor genuinely needs a narrower or broader scope; the read-only default keeps a reviewer from "fixing" things on a wrong hypothesis.
+- Use severity intentionally: `nit`/omitted for non-interrupting cleanup, `concern`/`blocker` only when the primary agent should be steered (see [the severity table](#tools-and-isolation)).
+- Tune `advisor.syncBacklog` for how synchronous review should be: `off` maximizes throughput, `1` is closest to synchronous review, `3`/`5` tolerate lag (see [Bounded catch-up](#bounded-catch-up-with-advisorsyncbacklog)).
 
 ## Subagents
 

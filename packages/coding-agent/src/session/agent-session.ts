@@ -2415,8 +2415,9 @@ export class AgentSession {
 			const emissionGuard = new AdvisorEmissionGuard();
 			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
 
-			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
-			// instructions; `config.instructions` adds this advisor's specialization.
+			// Assembly order (documented in docs/advisor-watchdog.md#prompt-assembly):
+			// built-in advisor prompt → project context → WATCHDOG.md blocks →
+			// YAML shared `instructions` → this advisor's specialization.
 			const systemPrompt = [advisorSystemPrompt];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
