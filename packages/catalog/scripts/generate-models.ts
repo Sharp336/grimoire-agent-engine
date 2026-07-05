@@ -191,7 +191,13 @@ function applyGlobalModelsDevFallback(
 		if (
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
-			model.provider === "baseten"
+			model.provider === "baseten" ||
+			// ClinePass ships a curated, no-discovery seed with bare ids (`glm-5.2`,
+			// `mimo-v2.5`, …) that collide with vision-capable same-id models from
+			// other providers. Without this guard the global fallback overwrites the
+			// seed's `input`/`name`/`reasoning`, e.g. advertising `image` support the
+			// ClinePass source of truth never declared. Keep the curated fields.
+			model.provider === "clinepass"
 		) {
 			return model;
 		}

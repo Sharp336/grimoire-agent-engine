@@ -168,4 +168,20 @@ describe("clinepass bundled catalog", () => {
 			expect(model.reasoning).toBe(true);
 		}
 	});
+
+	it("keeps the curated vision capability — only kimi-k2.7-code accepts images", () => {
+		// The global models.dev fallback matches bare ids against same-id models
+		// from other providers and would otherwise overwrite `input`, wrongly
+		// advertising `image` support on text-only ClinePass models. `clinepass`
+		// is excluded from that fallback, so the seed's capabilities survive.
+		expect(byId.get("kimi-k2.7-code")?.input).toEqual(["text", "image"]);
+		for (const id of ["glm-5.2", "kimi-k2.6", "deepseek-v4-pro", "mimo-v2.5", "minimax-m3", "qwen3.7-plus"]) {
+			expect(byId.get(id)?.input).toEqual(["text"]);
+		}
+	});
+
+	it("keeps the curated (ClinePass) display names — fallback does not strip the suffix", () => {
+		expect(byId.get("kimi-k2.6")?.name).toBe("Kimi K2.6 (ClinePass)");
+		expect(byId.get("minimax-m3")?.name).toBe("MiniMax M3 (ClinePass)");
+	});
 });
