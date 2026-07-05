@@ -1801,7 +1801,7 @@ export const CLINEPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[]
 		["text"],
 		CLINEPASS_MIMO_EFFORTS,
 	),
-	createClinepassStaticModel("minimax-m3", "MiniMax M3 (ClinePass)", 512000, 131072, ["text"], CLINEPASS_EFFORTS),
+	createClinepassStaticModel("minimax-m3", "MiniMax M3 (ClinePass)", 1_000_000, 131072, ["text"], CLINEPASS_EFFORTS),
 	createClinepassStaticModel("qwen3.7-max", "Qwen3.7 Max (ClinePass)", 1_000_000, 65536, ["text"], CLINEPASS_EFFORTS),
 	createClinepassStaticModel(
 		"qwen3.7-plus",

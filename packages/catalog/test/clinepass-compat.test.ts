@@ -203,11 +203,27 @@ describe("clinepass bundled catalog", () => {
 		}
 	});
 
-	it("uses the full MiMo v2.5 context window (1M), not the kimi-copied 262144", () => {
-		// Live upstream error confirmed mimo-v2.5's ceiling is 1048576, matching
-		// its mimo-v2.5-pro sibling and the first-party xiaomi entry.
-		expect(byId.get("mimo-v2.5")?.contextWindow).toBe(1_048_576);
-		expect(byId.get("mimo-v2.5-pro")?.contextWindow).toBe(1_048_576);
+	it("carries context windows cross-checked against live probes and upstream vendor specs", () => {
+		// Verified three ways: live input-ceiling probes against api.cline.bot,
+		// upstream vendor specs, and ClinePass's own docs (which under-report several
+		// — glm/qwen-max/mimo — so live+vendor win). Kimi caps at 262144; the rest
+		// are 1M-class. minimax-m3 accepts ~900K live (not the earlier 512000 guess);
+		// mimo is 1048576 (not the kimi-copied 262144).
+		const expected: Record<string, number> = {
+			"glm-5.2": 1_000_000,
+			"kimi-k2.7-code": 262_144,
+			"kimi-k2.6": 262_144,
+			"deepseek-v4-pro": 1_000_000,
+			"deepseek-v4-flash": 1_000_000,
+			"mimo-v2.5": 1_048_576,
+			"mimo-v2.5-pro": 1_048_576,
+			"minimax-m3": 1_000_000,
+			"qwen3.7-max": 1_000_000,
+			"qwen3.7-plus": 1_000_000,
+		};
+		for (const [id, ctx] of Object.entries(expected)) {
+			expect(byId.get(id)?.contextWindow).toBe(ctx);
+		}
 	});
 
 	it("keeps the curated (ClinePass) display names — fallback does not strip the suffix", () => {
