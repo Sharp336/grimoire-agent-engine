@@ -19,6 +19,7 @@ import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { parseAzureDeploymentNameMap, parseTextSignature } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { Api, AssistantMessage, FetchImpl, Message, Model } from "@oh-my-pi/pi-ai/types";
+import { messageToOpenAiChatMessage } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
@@ -49,6 +50,13 @@ export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
  * behind it). On timeout the caller falls back to local summarization.
  */
 export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
+
+/**
+ * For openai-completions API, the compact endpoint is /v1/chat/completions
+ * instead of /v1/responses/compact. The request body uses { messages } format
+ * and the response has { choices } instead of { output }.
+ */
+export const COMPLETION_COMPACTION_TIMEOUT_MS = 180_000;
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 
@@ -94,7 +102,7 @@ export interface RemoteCompactionResponse {
 // ============================================================================
 
 function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
-	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
+	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses" || api === "openai-completions";
 }
 
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
@@ -112,6 +120,10 @@ function resolveOpenAiCompactEndpoint(model: Model): string {
 	}
 	if (configuredEndpoint && configuredEndpoint.length > 0) return configuredEndpoint;
 	if (model.provider === "openai-codex" || compactionApi === "openai-codex-responses") {
+	if (compactionApi === "openai-completions") {
+		return resolveCompletionCompactEndpoint(model, configuredEndpoint);
+	}
+
 		return resolveOpenAiCodexCompactEndpoint(model.baseUrl);
 	}
 
@@ -150,6 +162,29 @@ function appendAzureApiVersion(endpoint: string): string {
 }
 
 function resolveOpenAiCompactModel(model: Model): string {
+
+/** Resolve the model name for openai-completions compaction. */
+function resolveCompletionCompactModel(model: Model): string {
+	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
+	return requestModel;
+}
+
+/**
+ * Resolve the compact endpoint for openai-completions API.
+ * Uses the configured remoteEndpoint or defaults to /v1/chat/completions.
+ */
+function resolveCompletionCompactEndpoint(model: Model, configuredEndpoint: string | undefined): string {
+	const rawBase =
+		configuredEndpoint && configuredEndpoint.length > 0
+			? configuredEndpoint
+			: model.baseUrl && model.baseUrl.length > 0
+			? model.baseUrl
+			: "https://api.openai.com/v1";
+	const normalizedBase = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
+	if (/\/v1\/chat\/completions$/.test(normalizedBase)) return normalizedBase;
+	if (/\/v1$/.test(normalizedBase)) return `${normalizedBase}/chat/completions`;
+	return `${normalizedBase}/chat/completions`;
+}
 	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
 	if (compactionApi !== "azure-openai-responses") return requestModel;
@@ -462,6 +497,73 @@ export async function requestOpenAiRemoteCompaction(
 	signal?: AbortSignal,
 	opts?: { fetch?: FetchImpl; timeoutMs?: number },
 ): Promise<OpenAiRemoteCompactionResponse> {
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+
+	if (compactionApi === "openai-completions") {
+		// For openai-completions, use the chat completions endpoint with
+		// a { messages } request body. The compactInput is already an
+		// array of Message objects from buildOpenAiNativeHistory().
+		// We convert them to OpenAI Chat Completions format.
+		const endpoint = resolveCompletionCompactEndpoint(model, model.remoteCompaction?.endpoint);
+		const requestModel = resolveCompletionCompactModel(model);
+
+		// Convert the native history items to OpenAI Chat Completions messages
+		const messages = buildMessagesForChatCompletion(compactInput);
+
+		const headers: Record<string, string> = {
+			"content-type": "application/json",
+			Authorization: `Bearer ${apiKey}`,
+			...(model.headers ?? {}),
+		};
+
+		const response = await (opts?.fetch ?? fetch)(endpoint, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				model: requestModel,
+				messages,
+				max_tokens: 4096,
+				stream: false,
+			}),
+			signal: withRequestTimeout(signal, opts?.timeoutMs ?? COMPLETION_COMPACTION_TIMEOUT_MS),
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => "");
+			logger.warn("OpenAI completion remote compaction failed", {
+				endpoint,
+				status: response.status,
+				statusText: response.statusText,
+				errorText,
+			});
+			throw new ProviderHttpError(
+				`Remote compaction failed (${response.status} ${response.statusText})`,
+				response.status,
+				{
+					headers: response.headers,
+				},
+			);
+		}
+
+		const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+		const content = data?.choices?.[0]?.message?.content;
+		if (!content) {
+			throw new Error("Remote compaction response missing choice message content");
+		}
+
+		// For openai-completions, the response is plain text — wrap it in
+		// the OpenAI remote compaction preserve data format so the caller
+		// can continue the compaction pipeline.
+		return {
+			provider: model.provider,
+			replacementHistory: [],
+			compactionItem: {
+				type: "compaction_summary",
+				summary: content,
+			},
+		};
+	}
+
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
 	const request: OpenAiRemoteCompactionRequest = {
@@ -583,4 +685,59 @@ export async function requestRemoteCompaction(
 	}
 
 	return data;
+}
+
+/**
+ * Convert native history items from buildOpenAiNativeHistory() into
+ * OpenAI Chat Completions messages format.
+ *
+ * The native history uses items like:
+ * - { type: "message", role: "user", content: [{ type: "input_text", text: ... }] }
+ * - { type: "message", role: "assistant", content: [{ type: "output_text", text: ... }] }
+ *
+ * The Chat Completions API expects:
+ * - { role: "user", content: "..." }
+ * - { role: "assistant", content: "..." }
+ */
+function buildMessagesForChatCompletion(
+	items: Array<Record<string, unknown>>,
+): Array<{ role: string; content: string }> {
+	const messages: Array<{ role: string; content: string }> = [];
+
+	for (const item of items) {
+		if (typeof item !== "object" || item === null) continue;
+		if (item.type !== "message") continue;
+
+		const role = typeof item.role === "string" ? item.role : undefined;
+		if (role !== "user" && role !== "developer" && role !== "assistant") continue;
+
+		const content = item.content;
+		if (typeof content === "string") {
+			if (content.trim().length > 0) {
+				messages.push({ role, content: content.toWellFormed() });
+			}
+			continue;
+		}
+		if (Array.isArray(content)) {
+			const textParts: string[] = [];
+			for (const block of content) {
+				if (typeof block !== "object" || block === null) continue;
+				if (block.type === "input_text" || block.type === "output_text") {
+					const text = typeof block.text === "string" ? block.text : undefined;
+					if (text && text.trim().length > 0) {
+						textParts.push(text.toWellFormed());
+					}
+				}
+				if (block.type === "thinking" && typeof block.thinking === "string") {
+					textParts.push(`<thinking>${block.thinking.toWellFormed()}</thinking>`);
+				}
+			}
+			if (textParts.length > 0) {
+				messages.push({ role, content: textParts.join("\n") });
+			}
+			continue;
+		}
+	}
+
+	return messages;
 }
