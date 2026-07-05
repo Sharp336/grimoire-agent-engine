@@ -346,6 +346,21 @@ Extra conditional behavior:
 
 `PI_NO_PTY` is also set internally when CLI `--no-pty` is used.
 
+## Project `.env` loading
+
+By default, omp eagerly loads `.env` files from the current working directory (along with `$PWD/.env`, `~/.omp/agent/.env`, `~/.omp/.env`, and `~/.env`). Project-level `.env` files commonly hold API keys for the project itself (database URLs, third-party service tokens), and omp will treat any `*_API_KEY` env var as a candidate provider credential — which can surface providers you did not intend to enable in that project.
+
+Set `PI_IGNORE_PROJECT_ENV=1` to skip the project-local `.env` (the `$PWD/.env` source only). The agent, config, and home `.env` files are still loaded, so omp-wide keys defined there continue to work. This is useful when:
+
+- A project `.env` contains service credentials omp should not auto-discover.
+- You want a stable provider set across all projects without per-project `.env` bleed.
+- You manage omp credentials centrally (`~/.omp/.env` or `~/.omp/agent/.env`).
+
+```sh
+# ~/.omp/.env
+PI_IGNORE_PROJECT_ENV=1
+```
+
 ---
 
 ## 6) Storage and config root paths

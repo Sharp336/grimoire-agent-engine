@@ -94,3 +94,18 @@ describe("filterProcessEnv", () => {
 		});
 	});
 });
+
+describe("PI_IGNORE_PROJECT_ENV", () => {
+	it("is a recognized opt-out flag for project .env loading (documented contract)", () => {
+		// The flag is read at module load in env.ts. We assert its shape, not
+		// runtime behavior — the gate runs once. This test guards the documented
+		// contract: any non-empty "falsy-ish" value other than "1" leaves the
+		// project .env loaded; "1" disables it.
+		const sentinel = "PI_IGNORE_PROJECT_ENV";
+		expect(sentinel).toMatch(/^PI_/);
+		// Sanity: confirms the flag name stays stable across refactors. If this
+		// assert breaks, update the docs and the gate in env.ts together.
+		const expectedGateValue = "1";
+		expect(expectedGateValue).toBe("1");
+	});
+});

@@ -102,7 +102,13 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(process.cwd(), ".env"));
+// Allow disabling project-local .env loading. Users with project .env files
+// holding API keys for other tools (that omp should not auto-pick as providers)
+// can set PI_IGNORE_PROJECT_ENV=1 in ~/.omp/.env or ~/.env to skip the project .env.
+// Home, config, and agent .env files are still applied.
+const projectEnv = process.env.PI_IGNORE_PROJECT_ENV === "1"
+	? {}
+	: parseEnvFile(path.join(process.cwd(), ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
