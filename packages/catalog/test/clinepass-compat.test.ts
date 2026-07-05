@@ -226,6 +226,14 @@ describe("clinepass bundled catalog", () => {
 		}
 	});
 
+	it("gives the DeepSeek V4 SKUs their documented 384K output budget", () => {
+		// DeepSeek V4's documented max output is 384000 (vendor spec); the ClinePass
+		// gateway accepts oversized max_completion_tokens without erroring, so this is
+		// a catalog policy value taken from the vendor, not a smaller guess.
+		expect(byId.get("deepseek-v4-pro")?.maxTokens).toBe(384_000);
+		expect(byId.get("deepseek-v4-flash")?.maxTokens).toBe(384_000);
+	});
+
 	it("keeps the curated (ClinePass) display names — fallback does not strip the suffix", () => {
 		expect(byId.get("kimi-k2.6")?.name).toBe("Kimi K2.6 (ClinePass)");
 		expect(byId.get("minimax-m3")?.name).toBe("MiniMax M3 (ClinePass)");
