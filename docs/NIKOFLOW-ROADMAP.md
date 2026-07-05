@@ -174,12 +174,27 @@ These attack the capability-rail directly at its seams; all verified against sou
   whitelisted, the advisor/reviewer reviews a **summary, not the real plan** → weak/blind
   gate. Fix: register nikoflow's artifact message types in the whitelist so the reviewer
   (and the executor) get them in full.
-- **H4 — The architectural plan is NOT protected from compaction.** Compaction protection
-  exists only for `local://PLAN.md` reads (`plan-protection.ts:25`). In a long deep run the
-  ADR/PRD/ticket decisions (made early by the strong model) can be **compacted away before
-  the cheap executor finishes**, leaving it drifting without its plan — defeating the whole
-  rail. Fix: persist nikoflow's plan artifacts as PLAN.md-style protected files and reuse
-  `plan-protection` so they survive compaction.
+- **H4 — The architectural plan is NOT protected from compaction (deep-audited).** There is
+  **no message pinning** in OMP compaction — any ADR/PRD/ticket-list/unapproved-plan that
+  lives only as transcript prose is evicted once behind the compaction cut
+  (`docs/compaction.md:81-99`). Default `snapcompact` bitmap-archives the discarded middle
+  and drops frames past 80 (`snapcompact.ts:735,414`) — an early plan lands in the lossy
+  foveated middle, recoverable only via degraded OCR-read; `context-full` LLM-summarizes it,
+  **possibly with a cheap model** (`compactionModel → current → modelRoles.smol → largest-
+  ctx`, `agent-session.ts:11672-11709`). So the strong architect's plan can be compacted
+  away — or summarized by a *weak* model — before the cheap executor finishes, defeating the
+  rail. `mnemopi` does NOT auto-persist it (manual only). **Only three things are durable:**
+  (a) **todo phase-state** — rebuilt from raw session entries (`todo.ts:155` +
+  `#syncTodoPhasesFromBranch`, re-injected `:7120-7155`), survives compaction; (b) an
+  **approved plan written to a `local://<slug>-plan.md` disk file** — re-read + re-injected
+  every turn (`approved-plan.ts:110`, proof `agent-session.ts:9700-9706`, issue #1246);
+  (c) the compaction summary itself. **Fix (load-bearing):** nikoflow must persist its plan
+  in the durable channels, never as transcript prose — **the ticket-DAG into the
+  compaction-durable todo-state (this makes TSK-018 a DURABILITY mechanism, not just UX)**
+  and the **ADR/PRD into `local://` disk files** via plan-mode's approved-plan machinery so
+  they re-inject each turn. Also: never configure a weak `compactionModel`/`modelRoles.smol`
+  when plan fidelity matters (a cheap model summarizing the strong architect's plan is
+  self-defeating).
 
 *(Further gaps from angles grilling-without-human / cheap-model instruction budget /
 collision with OMP advisor+hooks+swarm / ticket-failure escalation are under a running
