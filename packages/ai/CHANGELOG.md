@@ -5,8 +5,12 @@
 ### Added
 
 - Added ClinePass as a native `clinepass` provider with an API-key login flow (`CLINE_API_KEY`, `sk_…` keys). ClinePass is Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` that re-hosts open coding models (GLM, DeepSeek, Kimi, Qwen, MiMo, MiniMax) behind one OpenAI-compatible endpoint; its keys reject `/v1/models`, so login validation pings chat completions against the default model directly. Added a `clinepass` `wireModelIdMode` that translates the friendly bare catalog id (`glm-5.2`) to the `cline-pass/glm-5.2` wire form at request time. The compat is gated on the `clinepass` provider id (not the shared `api.cline.bot` host, which also serves generic passthrough model ids), forwards `reasoning_effort` verbatim across `minimal`..`xhigh` (the gateway 400s only on `max`), and reads streamed chain-of-thought from `delta.reasoning`.
+## [16.3.7] - 2026-07-05
+
 ### Fixed
 
+- Fixed formatting of demoted reasoning blocks to prevent accidental concatenation with prose
+- Fixed terminal whitespace issues in assistant messages that caused rejections by Anthropic API
 - Fixed Cursor provider handling of empty-pattern grep arguments to return a clear, actionable error instead of a generic error and a broken TUI rendering.
 - Fixed Google Cloud Code Assist API (Antigravity) and Gemini CLI to immediately bubble up underlying API errors (such as safety or recitation blocks) instead of incorrectly retrying and hiding them behind a generic empty-response message.
 - Fixed GitHub Copilot OpenAI Responses replay to prevent empty reasoning-only assistant turns from being persisted in history and poisoning subsequent requests.
