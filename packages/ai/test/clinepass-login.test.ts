@@ -45,6 +45,8 @@ describe("loginClinepass", () => {
 		// The runtime field + a budget that survives reasoning — NOT `max_tokens: 1`.
 		expect(capturedBody.max_completion_tokens).toBe(256);
 		expect(capturedBody.max_tokens).toBeUndefined();
+		// The probe reads only the response status, so it must not open an SSE stream.
+		expect(capturedBody.stream).toBe(false);
 	});
 
 	it("surfaces upstream auth failures with status and body", async () => {

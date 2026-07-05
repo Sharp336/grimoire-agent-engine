@@ -73,6 +73,11 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 			messages: [{ role: "user", content: "ping" }],
 			[options.maxTokensField ?? "max_tokens"]: options.maxTokens ?? 1,
 			temperature: 0,
+			// The probe only checks reachability/auth via the response status and never
+			// consumes the body, so force a single non-streaming JSON response. Without
+			// this, an endpoint that defaults `stream: true` would leave an abandoned SSE
+			// generation running and could deliver an error inside the stream we miss.
+			stream: false,
 		}),
 		signal,
 	});
