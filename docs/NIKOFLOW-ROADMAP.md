@@ -114,6 +114,42 @@ the judgment phases, the cheap model only executes within its frame.
   thinking on `plan`+`advisor`, GLM-flash/qwen-coder on `default`). GLM-5.2 + MiniMax-M3
   use `api=anthropic-messages` → honest named tool_choice (see the force caveat below).
 
+### Flexible model configuration — reuse OMP's existing surface, no new system
+OMP already ships exactly the flexible, explicit per-role config this needs; nikoflow
+must *expose its roles onto it*, not invent a config system:
+- **`modelRoles`** (settings, `settings.ts:576`, layered global `~/.omp/agent/settings.json`
+  → project `.omp/` → runtime override) — a `role → model-selector` map. The selector
+  carries thinking/effort (`model-resolver.ts:922`), e.g. `glm-5.2:high`.
+- **`WATCHDOG.yml`** — a roster of named reviewers, each with its own `model`, `tools`
+  subset, `instructions` — so architect-review vs security-review vs test-review can each
+  pin a different model.
+- **Custom models** (`models-config-schema.ts`: `baseUrl`, `thinking`, `effortMap`) — add
+  any provider/model.
+
+**Nikoflow config contract:**
+- Nikoflow roles map onto OMP roles (user-overridable): `architect → plan`,
+  `executor → default`, `reviewer/verifier → advisor` (+ optional named WATCHDOG reviewers
+  per gate dimension). A nikoflow settings block may re-point these.
+- **Explicit assignment is REQUIRED for the strong roles.** Because an unconfigured `plan`
+  silently falls to the primary (`model-resolver.ts:875-892`), nikoflow **fail-fast on
+  activation** if `architect`/`reviewer` resolve to the same model as `executor`, or are
+  unset. This is the guard that stops a mid-tier model (e.g. MiniMax-M3) doing architecture
+  *by accident* — the operator must name it, and the assignment is visible in the run.
+- **Authority is the operator's explicit pin, not auto-capability.** A soft advisory may
+  warn when the architect model lacks the catalog `reasoning` flag (`ai/types.ts:674`), but
+  the harness never auto-promotes/demotes a model — "strong enough" is the operator's call,
+  made explicit. MiniMax-M3 architects only if you write it into `architect`.
+
+Example (`.omp/settings.json` / nikoflow block):
+```jsonc
+{ "modelRoles": {
+    "plan":    "deepseek/deepseek-v4-pro:high",  // architect — strong reasoning, explicit
+    "default": "glm/glm-flash",                  // executor — cheap
+    "advisor": "openai/gpt-5.5"                   // reviewer — strong
+} }
+// nikoflow refuses to start if `plan` is unset or == `default`.
+```
+
 ### Design-drift inside Execute (rails don't reach here)
 Gates fire at phase boundaries; inside a ticket the cheap executor still decides *how* to
 implement, *whether* a test is green-enough, *how* to read an AC. Compress that space:
