@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an issue where `@` file-reference tokens in slash-command arguments incorrectly triggered prompt-composer autocompletion when the command did not define argument completions.
+- Fixed a memory leak caused by unbounded map growth in the image budget cache.
+
 ## [16.3.6] - 2026-07-04
 
 ### Added

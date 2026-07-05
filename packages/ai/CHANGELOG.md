@@ -5,6 +5,19 @@
 ### Added
 
 - Added ClinePass as a native `clinepass` provider with an API-key login flow (`CLINE_API_KEY`, `sk_…` keys). ClinePass is Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` that re-hosts open coding models (GLM, DeepSeek, Kimi, Qwen, MiMo, MiniMax) behind one OpenAI-compatible endpoint; its keys reject `/v1/models`, so login validation pings chat completions against the default model directly. Added a `clinepass` `wireModelIdMode` that translates the friendly bare catalog id (`glm-5.2`) to the `cline-pass/glm-5.2` wire form at request time. The compat is gated on the `clinepass` provider id (not the shared `api.cline.bot` host, which also serves generic passthrough model ids), forwards `reasoning_effort` verbatim across `minimal`..`xhigh` (the gateway 400s only on `max`), and reads streamed chain-of-thought from `delta.reasoning`.
+### Fixed
+
+- Fixed Cursor provider handling of empty-pattern grep arguments to return a clear, actionable error instead of a generic error and a broken TUI rendering.
+- Fixed Google Cloud Code Assist API (Antigravity) and Gemini CLI to immediately bubble up underlying API errors (such as safety or recitation blocks) instead of incorrectly retrying and hiding them behind a generic empty-response message.
+- Fixed GitHub Copilot OpenAI Responses replay to prevent empty reasoning-only assistant turns from being persisted in history and poisoning subsequent requests.
+- Fixed classification of provider gateway quota-insufficient errors so they are correctly identified as usage-limit errors rather than generic 403 failures.
+- Fixed OpenAI-compatible Responses models (such as DeepSeek endpoints) to preserve user-configured tool strictness settings unless strict mode is explicitly unsupported.
+- Fixed custom openai-codex-responses providers failing when no ChatGPT account ID claim is present by omitting the header when it cannot be derived.
+- Fixed token accounting for OpenAI Responses and Codex providers to correctly include provider-side orchestration tokens in billing totals without misclassifying them as uncached prompt input.
+- Fixed Google Gemini and Cloud Code Assist providers to preserve the requested reasoning tier when sending requests with hidden thinking summaries.
+- Fixed parallel OpenAI-compatible tool-call streaming to prevent argument data from bleeding across concurrent commands when identifiers are missing.
+- Fixed Anthropic Claude reasoning and thinking replay handling. Same-model replays now drop unsigned prior reasoning blocks to prevent reasoning-extraction refusals, while cross-model replays (including Bedrock cross-region profiles) correctly demote reasoning without emitting raw thinking tags or causing text-flattening formatting issues.
+- Fixed custom OpenAI-compatible relays serving standard OpenAI model IDs to be correctly classified as OpenAI-family targets for fast mode.
 
 ## [16.3.6] - 2026-07-04
 

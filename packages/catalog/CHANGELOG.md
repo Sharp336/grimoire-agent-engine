@@ -5,6 +5,9 @@
 ### Added
 
 - Added ClinePass (`clinepass`) as a native, bundled model provider — Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` (`CLINE_API_KEY`). ClinePass has no `/v1/models` endpoint, so the descriptor omits `catalogDiscovery` and `generate-models.ts` seeds the ten curated models (`glm-5.2`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `minimax-m3`, `qwen3.7-max`, `qwen3.7-plus`) from `CLINEPASS_STATIC_MODELS` as the source of truth, like Fire Pass. Added a `clinepass` `wireModelIdMode` that keeps friendly bare catalog ids (`glm-5.2`) while translating to the `cline-pass/glm-5.2` wire form at request time, so selection is `clinepass/glm-5.2` rather than a doubled prefix. Provider-id-gated compat (verified live against `api.cline.bot`) pins `reasoningContentField: "reasoning"` (ClinePass streams `delta.reasoning`), an identity `reasoningEffortMap` passthrough so `xhigh` is advertised without the family `xhigh → max` rewrite the gateway 400s on, and `thinkingFormat: "openai"` so the Qwen SKUs keep the full effort ladder.
+### Fixed
+
+- Fixed usage cost calculation to correctly account for provider orchestration token sidecars without misclassifying them as standard input, output, or cache tokens.
 
 ## [16.3.4] - 2026-07-03
 
