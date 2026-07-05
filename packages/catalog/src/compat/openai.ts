@@ -331,7 +331,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isZhipu ||
 		hostMatchesUrl(baseUrl, "chutes") ||
 		hostMatchesUrl(baseUrl, "fireworks") ||
-		isDirectDeepseekApi;
+		isDirectDeepseekApi ||
+		// Morph's OpenAI-compat endpoint advertises `max_tokens` in its model
+		// metadata and rejects `max_completion_tokens`; `/login` validation
+		// also uses `max_tokens`, so regular agent turns must match.
+		provider === "morphllm";
 
 	// Hosts whose chat-completions endpoints are known to accept multiple
 	// leading `system`/`developer` messages (preferred for KV-cache reuse).
