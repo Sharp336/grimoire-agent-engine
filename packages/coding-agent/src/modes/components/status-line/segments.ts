@@ -228,6 +228,16 @@ const pathSegment: StatusLineSegment = {
 	render(ctx) {
 		const opts = ctx.options.path ?? {};
 		const stripPrefix = opts.stripWorkPrefix !== false;
+		// basenameOnly: render just the final directory/project name, ignoring
+		// parent-path transforms (stripWorkPrefix, abbreviate, repo suffix).
+		// maxLength still clamps the basename itself.
+		if (opts.basenameOnly) {
+			const base = ctx.worktree ? ctx.worktree.projectName : path.basename(ctx.activeRepo?.cwd ?? getProjectDir());
+			const pwd = clampPathLength(base, opts.maxLength ?? 40);
+			const icon = ctx.worktree ? theme.icon.worktree : theme.icon.folder;
+			const content = withIcon(icon, pwd);
+			return { content: theme.fg("statusLinePath", content), visible: true };
+		}
 
 		// Linked git worktree: the on-disk path nests the worktree base, the
 		// project, and a worktree dir that usually duplicates the branch (already

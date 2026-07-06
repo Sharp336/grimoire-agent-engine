@@ -239,17 +239,17 @@ describe("status line path segment", () => {
 	});
 });
 
-describe("status line path segment in a linked worktree", () => {
-	function worktreeContext(
-		worktree: { projectName: string; worktreeName: string } | null,
-		branch: string | null,
-	): SegmentContext {
-		const ctx = createPathContext();
-		ctx.worktree = worktree;
-		ctx.git = { branch, status: null, pr: null };
-		return ctx;
-	}
+function worktreeContext(
+	worktree: { projectName: string; worktreeName: string } | null,
+	branch: string | null,
+): SegmentContext {
+	const ctx = createPathContext();
+	ctx.worktree = worktree;
+	ctx.git = { branch, status: null, pr: null };
+	return ctx;
+}
 
+describe("status line path segment in a linked worktree", () => {
 	it("collapses to the project name and drops the worktree dir when it equals the branch", () => {
 		const rendered = renderSegment("path", worktreeContext({ projectName: "pi", worktreeName: "xx" }, "xx"));
 		const content = Bun.stripANSI(rendered.content);
@@ -293,5 +293,119 @@ describe("status line path segment in a linked worktree", () => {
 		expect(label.length).toBeLessThanOrEqual(10);
 		expect(label.startsWith("…")).toBe(true);
 		expect(label.endsWith("feature")).toBe(true);
+	});
+});
+
+describe("status line path segment with basenameOnly", () => {
+	it("renders only the basename, ignoring parent path and transforms", () => {
+		// Nest under a scratch root so the existing scratch logic would render
+		// the trailing relative path (parent/basename), not just the basename.
+		// Only the basenameOnly short-circuit produces just the final name.
+		const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-bn-"));
+		const nestedDir = path.join(scratchRoot, "nested-project");
+		fs.mkdirSync(nestedDir);
+		try {
+			setProjectDir(nestedDir);
+			const ctx = createPathContext();
+			ctx.options.path = { basenameOnly: true, abbreviate: false, maxLength: 120, stripWorkPrefix: true };
+			const rendered = renderSegment("path", ctx);
+			const content = Bun.stripANSI(rendered.content);
+			expect(rendered.visible).toBe(true);
+			expect(content).toBe(`${theme.icon.folder} nested-project`);
+			// The scratch-root parent folder must not leak (it would without basenameOnly).
+			expect(content).not.toContain(path.basename(scratchRoot));
+			expect(content).not.toContain(theme.icon.scratchFolder);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchRoot);
+		}
+	});
+
+	it("ignores stripWorkPrefix: false (basenameOnly wins)", () => {
+		const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-bn-noprefix-"));
+		try {
+			setProjectDir(parentDir);
+			const ctx = createPathContext();
+			ctx.options.path = { basenameOnly: true, stripWorkPrefix: false };
+			const content = Bun.stripANSI(renderSegment("path", ctx).content);
+			expect(content).toBe(`${theme.icon.folder} ${path.basename(parentDir)}`);
+			expect(content).not.toContain(os.tmpdir());
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(parentDir);
+		}
+	});
+
+	it("ignores abbreviate: true (no home prefix from shortenPath)", () => {
+		// Under a fake home but outside ~/Projects, the existing logic would
+		// render ~/code/nested-project when abbreviate is enabled. basenameOnly
+		// must drop the home prefix entirely and show just the final name.
+		const { home } = createFakeHome();
+		const nestedDir = path.join(home, "code", "nested-project");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		try {
+			setProjectDir(nestedDir);
+			const ctx = createPathContext();
+			ctx.options.path = { basenameOnly: true, abbreviate: true };
+			const content = Bun.stripANSI(renderSegment("path", ctx).content);
+			expect(content).toBe(`${theme.icon.folder} nested-project`);
+			expect(content).not.toContain("~");
+			expect(content).not.toContain("code");
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(home);
+		}
+	});
+
+	it("clamps a long basename to maxLength", () => {
+		const longName = "a".repeat(50);
+		const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-status-line-bn-long-${longName}-`));
+		try {
+			setProjectDir(parentDir);
+			const ctx = createPathContext();
+			ctx.options.path = { basenameOnly: true, maxLength: 10 };
+			const rendered = renderSegment("path", ctx);
+			const content = Bun.stripANSI(rendered.content);
+			const label = content.slice(theme.icon.folder.length + 1);
+			expect(label.length).toBeLessThanOrEqual(10);
+			expect(label.startsWith("…")).toBe(true);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(parentDir);
+		}
+	});
+
+	it("drops the repo suffix when basenameOnly is enabled", () => {
+		const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-bn-repo-"));
+		const repoDir = path.join(parentDir, "pr-workspace");
+		fs.mkdirSync(repoDir);
+		try {
+			setProjectDir(parentDir);
+			const ctx = createPathContext();
+			ctx.activeRepo = {
+				cwd: parentDir,
+				repoRoot: repoDir,
+				relativeRepoRoot: "pr-workspace",
+				source: "single-direct-child-repo",
+			};
+			ctx.options.path = { basenameOnly: true };
+			const content = Bun.stripANSI(renderSegment("path", ctx).content);
+			expect(content).toBe(`${theme.icon.folder} ${path.basename(parentDir)}`);
+			expect(content).not.toContain("↳");
+			expect(content).not.toContain("pr-workspace");
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(parentDir);
+		}
+	});
+
+	it("uses projectName and worktree icon in a linked worktree", () => {
+		const ctx = worktreeContext({ projectName: "pi", worktreeName: "wt-icon" }, "icon");
+		ctx.options.path = { basenameOnly: true };
+		const content = Bun.stripANSI(renderSegment("path", ctx).content);
+		expect(content).toBe(`${theme.icon.worktree} pi`);
+		// Worktree dir is dropped; worktree icon is kept.
+		expect(content).not.toContain("wt-icon");
+		expect(content).not.toContain(theme.icon.folder);
 	});
 });

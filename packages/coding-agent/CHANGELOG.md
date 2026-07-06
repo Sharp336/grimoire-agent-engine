@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `statusLine.segmentOptions.path.basenameOnly` to render only the final directory/project name in the custom status-line `path` segment, ignoring parent-path transforms (`stripWorkPrefix`, `abbreviate`). `maxLength` still clamps the basename. Defaults to `false` ([#4700](https://github.com/can1357/oh-my-pi/issues/4700)).
+
 
 ## [16.3.10] - 2026-07-06
 
