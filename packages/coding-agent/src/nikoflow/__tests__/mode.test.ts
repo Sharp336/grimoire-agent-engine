@@ -12,7 +12,7 @@ import {
 	formatGateHoldMessage,
 	installNikoflowAgentSessionMode,
 	installNikoflowCallbacks,
-	isWriteTool,
+	isNikoflowReadOnlyPhaseToolAllowed,
 	type MinimalToolCallContext,
 	type NikoflowAdvisorReview,
 	type NikoflowAgentSessionHost,
@@ -34,8 +34,8 @@ import {
 } from "../state";
 import type { NikoflowTicket } from "../tickets";
 
-const readOnlyReason = (phase: string) =>
-	`Nikoflow ${phase} is read-only; write-capable tools are blocked until the Ticketization gate advances.`;
+const readOnlyReason = (phase: string, gate = "the Ticketization gate advances") =>
+	`Nikoflow ${phase} is read-only; only read/search/planning tools are allowed. Writes and code-execution tools are blocked until ${gate}.`;
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -113,29 +113,33 @@ describe("nikoflow mode callback helpers", () => {
 		expect(calls).toEqual(["previous", "nikoflow"]);
 	});
 
-	test("detects direct and shell writes", () => {
-		expect(isWriteTool(tool("apply_patch"))).toBe(true);
-		expect(isWriteTool(tool("bash", { command: "rg needle src" }))).toBe(false);
-		expect(isWriteTool(tool("bash", { command: "sed -i 's/a/b/' file.ts" }))).toBe(true);
-		expect(isWriteTool(tool("exec_command", { cmd: "echo hi > file.txt" }))).toBe(true);
+	test("allows only explicit read-only planning tools before execute", () => {
+		for (const name of ["read", "glob", "grep", "nikoflow_define_tickets"]) {
+			expect(isNikoflowReadOnlyPhaseToolAllowed(tool(name))).toBe(true);
+		}
+		for (const name of ["bash", "node_repl", "python_repl", "edit", "write", "unknown_tool"]) {
+			expect(isNikoflowReadOnlyPhaseToolAllowed(tool(name))).toBe(false);
+		}
 	});
 
-	test("blocks write-capable tools before execute", async () => {
+	test("blocks writes, code execution, and unknown tools before execute", async () => {
 		const state = createState("standard");
 		const before = createNikoflowBeforeToolCall(() => state);
-
-		expect(await before(tool("bash", { command: "rg needle src" }))).toBeUndefined();
-		expect(await before(tool("write"))).toEqual({
-			block: true,
-			reason: readOnlyReason("grilling"),
-		});
+		const blockedTools = ["bash", "node_repl", "python_repl", "edit", "write", "apply_patch", "unknown_tool"];
+		const allowedTools = ["read", "glob", "grep", "nikoflow_define_tickets"];
 
 		let preExecute = state;
-		for (const phase of ["adr", "prd", "tickets"] as const) {
-			preExecute = advancePhase(preExecute);
+		for (const phase of ["grilling", "adr", "prd", "tickets"] as const) {
 			expect(currentPhase(preExecute)).toBe(phase);
-			expect(nikoflowToolViolation(preExecute, tool("apply_patch"))).toBe(readOnlyReason(phase));
+			for (const name of allowedTools) {
+				expect(nikoflowToolViolation(preExecute, tool(name))).toBeNull();
+			}
+			for (const name of blockedTools) {
+				expect(nikoflowToolViolation(preExecute, tool(name))).toBe(readOnlyReason(phase));
+			}
+			preExecute = advancePhase(preExecute);
 		}
+		expect(await before(tool("write"))).toEqual({ block: true, reason: readOnlyReason("grilling") });
 	});
 
 	test("preserves a previous beforeToolCall block", async () => {
@@ -148,7 +152,16 @@ describe("nikoflow mode callback helpers", () => {
 
 	test("allows execute writes after grilling advances", () => {
 		const executeState = advancePhase(createState("tactical"));
-		expect(nikoflowToolViolation(executeState, tool("write"))).toBeNull();
+		for (const name of ["write", "edit", "apply_patch", "bash", "eval", "node_repl", "python_repl"]) {
+			expect(nikoflowToolViolation(executeState, tool(name))).toBeNull();
+		}
+	});
+
+	test("names the tactical grilling gate in read-only blocks", () => {
+		const grilling = createState("tactical");
+		expect(nikoflowToolViolation(grilling, tool("bash"))).toBe(
+			readOnlyReason("grilling", "grilling advances to execute"),
+		);
 	});
 
 	test("advances human gates only from later genuine user turns", async () => {

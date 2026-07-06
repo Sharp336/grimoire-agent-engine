@@ -246,31 +246,41 @@ export async function enterNikoflowPhase<
 	return { state: entered, advisorReview };
 }
 
-const DIRECT_WRITE_TOOLS = new Set(["apply_patch", "edit", "multi_edit", "str_replace_editor", "write", "write_file"]);
-
-const SHELL_TOOLS = new Set(["bash", "exec", "exec_command", "run_command", "shell", "terminal"]);
+const READ_ONLY_PHASE_ALLOWED_TOOLS = new Set([
+	"advise",
+	"ask",
+	"ast_grep",
+	"find",
+	"glob",
+	"grep",
+	"inspect_image",
+	"list",
+	"ls",
+	NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
+	"plan",
+	"question",
+	"read",
+	"report_finding",
+	"request_user_input",
+	"search",
+	"search_tool_bm25",
+	"todo",
+	"update_plan",
+	"web_search",
+	"yield",
+]);
 
 function toolName(context: MinimalToolCallContext): string {
 	return (context.toolCall.name ?? context.toolCall.toolName ?? "").toLowerCase();
 }
 
-function commandText(args: Record<string, unknown>): string {
-	const command = args.command ?? args.cmd ?? args.script;
-	return typeof command === "string" ? command : "";
+export function isNikoflowReadOnlyPhaseToolAllowed(context: MinimalToolCallContext): boolean {
+	return READ_ONLY_PHASE_ALLOWED_TOOLS.has(toolName(context));
 }
 
-export function isWriteTool(context: MinimalToolCallContext): boolean {
-	const name = toolName(context);
-	if (DIRECT_WRITE_TOOLS.has(name)) return true;
-	if (!SHELL_TOOLS.has(name)) return false;
-
-	const command = commandText(context.args);
-	return (
-		/(^|[;&|]\s*)(apply_patch|cat\s+>|chmod|chown|cp|mkdir|mv|rm|sed\s+-i|tee|touch)\b/.test(command) ||
-		/(^|[;&|]\s*)(bun|npm|pnpm|yarn)\s+(add|i|install|remove)\b/.test(command) ||
-		/(^|[;&|]\s*)git\s+(apply|checkout|clean|commit|merge|rebase|reset|switch)\b/.test(command) ||
-		/(^|[^<>])>>?($|[^>&])/.test(command)
-	);
+function readOnlyPhaseToolBlockReason(state: NikoflowState, phase: NikoflowPhase): string {
+	const gate = state.depth === "tactical" ? "grilling advances to execute" : "the Ticketization gate advances";
+	return `Nikoflow ${phase} is read-only; only read/search/planning tools are allowed. Writes and code-execution tools are blocked until ${gate}.`;
 }
 
 export function nikoflowToolViolation(
@@ -281,8 +291,8 @@ export function nikoflowToolViolation(
 	const phase = state ? currentPhase(state) : null;
 	if (!state || !phase) return null;
 
-	if (isHumanGatePhase(state) && isWriteTool(context)) {
-		return `Nikoflow ${phase} is read-only; write-capable tools are blocked until the Ticketization gate advances.`;
+	if (isHumanGatePhase(state) && !isNikoflowReadOnlyPhaseToolAllowed(context)) {
+		return readOnlyPhaseToolBlockReason(state, phase);
 	}
 	return null;
 }
