@@ -214,9 +214,11 @@ describe("nikoflow mode callback helpers", () => {
 				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
 					nextGateRequestId: () => "verify-gate",
 					now: () => 100,
+					requestAdvisorReview: false,
 				});
 				return result.advisorReview;
 			},
+			state => host.requestAdvisorReview?.(state),
 		);
 
 		await onBeforeYield();
@@ -488,9 +490,11 @@ describe("nikoflow mode callback helpers", () => {
 				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100,
+					requestAdvisorReview: false,
 				});
 				return result.advisorReview;
 			},
+			requestAdvisorReview: state => host.requestAdvisorReview?.(state),
 			advanceAdvisorGate: (current, review) => {
 				state = advanceNikoflowAdvisorGate(current, review);
 			},
@@ -526,6 +530,117 @@ describe("nikoflow mode callback helpers", () => {
 		expect(isComplete(state)).toBe(false);
 	});
 
+	test("stale empty-diff blocker from execute handoff does not block a fresh clean verify review", async () => {
+		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
+		const events: string[] = [];
+		const blocked: string[] = [];
+		const externalActions: string[] = [];
+		const host = phaseEntryHost(events, [], next => {
+			state = next;
+		});
+		const bundle = createNikoflowCallbackBundle<unknown[], undefined, string>({
+			getState: () => state,
+			isGateSatisfied: current => current.gateRequestId === null,
+			enqueueFollowUp: () => undefined,
+			advanceExecuteGate: async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
+					nextGateRequestId: () => "final-gate",
+					now: () => 100,
+					requestAdvisorReview: false,
+				});
+				return advisorReview("grilling-gate", "blocker", "Empty diff, acceptance not met, no code written");
+			},
+			requestAdvisorReview: current => advisorReview(current.gateRequestId ?? "none", "nit", "final diff clean"),
+			advanceAdvisorGate: (current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			onAdvisorBlock: (_current, review) => {
+				blocked.push(review.notes[0]?.note ?? "");
+			},
+			onGateNeedsExternalAction: (_state, message) => {
+				externalActions.push(message);
+			},
+		});
+
+		await bundle.onBeforeYield();
+
+		expect(isComplete(state)).toBe(true);
+		expect(blocked).toEqual([]);
+		expect(externalActions).toEqual([]);
+		expect(events).toEqual(["role:advisor", "state:verify:final-gate", "context:verify:final-gate"]);
+	});
+
+	test("fresh final-diff blocker holds the verify gate", async () => {
+		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
+		const blocked: string[] = [];
+		const host = phaseEntryHost([], [], next => {
+			state = next;
+		});
+		const bundle = createNikoflowCallbackBundle<unknown[], undefined, string>({
+			getState: () => state,
+			isGateSatisfied: current => current.gateRequestId === null,
+			enqueueFollowUp: () => undefined,
+			advanceExecuteGate: async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
+					nextGateRequestId: () => "final-gate",
+					now: () => 100,
+					requestAdvisorReview: false,
+				});
+			},
+			requestAdvisorReview: current => advisorReview(current.gateRequestId ?? "none", "blocker", "real diff fails"),
+			advanceAdvisorGate: (current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			onAdvisorBlock: (_current, review) => {
+				blocked.push(review.notes[0]?.note ?? "");
+			},
+		});
+
+		await bundle.onBeforeYield();
+
+		expect(currentPhase(state)).toBe("verify");
+		expect(state.gateRequestId).toBe("final-gate");
+		expect(isComplete(state)).toBe(false);
+		expect(blocked).toEqual(["real diff fails"]);
+	});
+
+	test("missing fresh verify review escalates instead of accepting stale handoff success", async () => {
+		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
+		const externalActions: string[] = [];
+		const host = phaseEntryHost([], [], next => {
+			state = next;
+		});
+		const bundle = createNikoflowCallbackBundle<unknown[], undefined, string>({
+			getState: () => state,
+			isGateSatisfied: current => current.gateRequestId === null,
+			enqueueFollowUp: () => undefined,
+			advanceExecuteGate: async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
+					nextGateRequestId: () => "final-gate",
+					now: () => 100,
+					requestAdvisorReview: false,
+				});
+				return advisorReview("final-gate", "nit", "stale handoff clean");
+			},
+			advanceAdvisorGate: (current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			onGateNeedsExternalAction: (_state, message) => {
+				externalActions.push(message);
+			},
+		});
+
+		await bundle.onBeforeYield();
+
+		expect(currentPhase(state)).toBe("verify");
+		expect(isComplete(state)).toBe(false);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
+	});
+
 	test("advisor blocker retry re-enters verify with a fresh gate and advisor review", async () => {
 		let gateCounter = 0;
 		let reviewerAttempt = 0;
@@ -553,10 +668,12 @@ describe("nikoflow mode callback helpers", () => {
 				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100 + gateCounter,
+					requestAdvisorReview: false,
 				});
 				return result.advisorReview;
 			},
 			requestAdvisorReview: async current => {
+				if (!current.phaseTurnStarted) return host.requestAdvisorReview?.(current);
 				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(current), current, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100 + gateCounter,

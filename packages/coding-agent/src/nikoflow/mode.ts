@@ -390,6 +390,7 @@ export function createNikoflowOnBeforeYield(
 	afterNikoflow?: OnBeforeYield,
 ): OnBeforeYield {
 	let followUpKey: string | null = null;
+	let requestedAdvisorReviewGateId: string | null = null;
 	let consecutiveGateHoldFollowUps = 0;
 	const queueGateHold = async (state: NikoflowState): Promise<void> => {
 		const key = `${state.depth}:${state.phaseIndex}:${state.gateRequestId ?? "no-gate"}`;
@@ -411,32 +412,32 @@ export function createNikoflowOnBeforeYield(
 	return async () => {
 		await previous?.();
 		let state = getState();
-		let advisorReviewResult: unknown | null | undefined;
 		if (state && currentPhase(state) === "execute") {
 			if (state.phaseTurnStarted) {
-				advisorReviewResult = await advanceExecuteGate?.(state);
+				await advanceExecuteGate?.(state);
 				state = getState();
 			}
 		}
 		let advisorBlockAlreadyQueued = false;
 		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
-			if (!advisorReviewResult && state.phaseTurnStarted) {
-				advisorReviewResult = await requestAdvisorReview?.(state);
+			if (state.phaseTurnStarted || state.gateRequestId !== requestedAdvisorReviewGateId) {
+				const advisorReviewResult = await requestAdvisorReview?.(state);
 				state = getState();
 				if (!state) return;
-			}
-			if (advisorReviewResult) {
-				const reviewerState = state;
-				const review = normalizeNikoflowAdvisorReview(advisorReviewResult, reviewerState);
-				if (review) {
-					if (nikoflowAdvisorReviewBlockers(review).length > 0) {
-						await onAdvisorBlock?.(reviewerState, review);
-						advisorBlockAlreadyQueued = true;
-					} else {
-						await advanceAdvisorGate?.(reviewerState, review);
+				if (currentPhase(state) === "verify") requestedAdvisorReviewGateId = state.gateRequestId;
+				if (advisorReviewResult) {
+					const reviewerState = state;
+					const review = normalizeNikoflowAdvisorReview(advisorReviewResult, reviewerState);
+					if (review) {
+						if (nikoflowAdvisorReviewBlockers(review).length > 0) {
+							await onAdvisorBlock?.(reviewerState, review);
+							advisorBlockAlreadyQueued = true;
+						} else {
+							await advanceAdvisorGate?.(reviewerState, review);
+						}
 					}
+					state = getState();
 				}
-				state = getState();
 			}
 		}
 		await afterNikoflow?.();

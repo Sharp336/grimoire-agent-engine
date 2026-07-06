@@ -6984,7 +6984,7 @@ export class AgentSession {
 			now: () => Date.now(),
 		});
 		if (next === state) return undefined;
-		return this.#enterNikoflowPhase(state, next, { mintGate: true });
+		return this.#enterNikoflowPhase(state, next, { mintGate: true, requestAdvisorReview: false });
 	}
 
 	#advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): void {
