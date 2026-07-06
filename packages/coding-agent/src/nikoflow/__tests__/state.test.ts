@@ -9,6 +9,7 @@ import {
 	inferDepthFromPrompt,
 	isComplete,
 	isHumanGatePhase,
+	markPhaseTurnStarted,
 	materializePhases,
 	mintGateRequest,
 	rotateGateRequest,
@@ -40,7 +41,7 @@ describe("nikoflow state", () => {
 		expect(currentRole(state)).toBe("default");
 		state = advancePhase(state);
 		expect(currentPhase(state)).toBe("verify");
-		expect(currentRole(state)).toBe("advisor");
+		expect(currentRole(state)).toBe("default");
 		state = advancePhase(state);
 		expect(isComplete(state)).toBe(true);
 		expect(currentPhase(state)).toBeNull();
@@ -85,5 +86,16 @@ describe("nikoflow state", () => {
 		expect(minted.gateRequestId).toBe("g1");
 		expect(advanced.gateRequestId).toBeNull();
 		expect(advanced.gateMintedAt).toBeNull();
+	});
+
+	test("tracks whether a model turn started in the current phase", () => {
+		const initial = createState("tactical");
+		const started = markPhaseTurnStarted(initial);
+		const execute = advancePhase(started);
+
+		expect(initial.phaseTurnStarted).toBe(false);
+		expect(started.phaseTurnStarted).toBe(true);
+		expect(execute.phaseTurnStarted).toBe(false);
+		expect(markPhaseTurnStarted(started)).toBe(started);
 	});
 });

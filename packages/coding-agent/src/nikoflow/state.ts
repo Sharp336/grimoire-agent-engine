@@ -17,7 +17,7 @@ export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
 	prd: "plan",
 	tickets: "plan",
 	execute: "default",
-	verify: "advisor",
+	verify: "default",
 } as const;
 
 export interface NikoflowState {
@@ -25,10 +25,11 @@ export interface NikoflowState {
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
+	phaseTurnStarted: boolean;
 }
 
 export function createState(depth: NikoflowDepth): NikoflowState {
-	return { depth, phaseIndex: 0, gateRequestId: null, gateMintedAt: null };
+	return { depth, phaseIndex: 0, gateRequestId: null, gateMintedAt: null, phaseTurnStarted: false };
 }
 
 export function materializePhases(depth: NikoflowDepth): NikoflowPhase[] {
@@ -66,7 +67,7 @@ export function isHumanGatePhase(state: NikoflowState): boolean {
 
 export function advancePhase(state: NikoflowState): NikoflowState {
 	const nextIndex = Math.min(state.phaseIndex + 1, materializePhases(state.depth).length);
-	return { ...state, phaseIndex: nextIndex, gateRequestId: null, gateMintedAt: null };
+	return { ...state, phaseIndex: nextIndex, gateRequestId: null, gateMintedAt: null, phaseTurnStarted: false };
 }
 
 export function isComplete(state: NikoflowState): boolean {
@@ -87,4 +88,8 @@ export function clearGateRequest(state: NikoflowState): NikoflowState {
 
 export function gateMatches(state: NikoflowState, id: string | null | undefined): boolean {
 	return id != null && state.gateRequestId === id;
+}
+
+export function markPhaseTurnStarted(state: NikoflowState): NikoflowState {
+	return state.phaseTurnStarted ? state : { ...state, phaseTurnStarted: true };
 }

@@ -239,7 +239,7 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
-import { parseReviewerVerdict } from "../nikoflow/gates";
+import { detectReviewerVerdict, parseReviewerVerdict } from "../nikoflow/gates";
 import {
 	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
@@ -255,7 +255,13 @@ import {
 import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
 import { buildReviewerPrompt } from "../nikoflow/reviewer";
 import { assertNikoflowRoleRails } from "../nikoflow/roles";
-import { createState, currentPhase, type NikoflowDepth, type NikoflowState } from "../nikoflow/state";
+import {
+	createState,
+	currentPhase,
+	markPhaseTurnStarted,
+	type NikoflowDepth,
+	type NikoflowState,
+} from "../nikoflow/state";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -1599,6 +1605,7 @@ export class AgentSession {
 	#nikoflowCallbacks: InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective> | undefined;
 	#nikoflowGateCounter = 0;
 	#nikoflowReviewerAttempts = new Map<string, number>();
+	#nikoflowContextSendPending = false;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -6889,7 +6896,31 @@ export class AgentSession {
 	}
 
 	setNikoflowState(state: NikoflowState | undefined): void {
+		const previous = this.#nikoflowState;
 		this.#nikoflowState = state;
+		if (previous && state && previous.phaseIndex !== state.phaseIndex && currentPhase(state)) {
+			this.#queueNikoflowContextForPhaseChange(state);
+		}
+	}
+
+	#queueNikoflowContextForPhaseChange(state: NikoflowState): void {
+		if (this.#nikoflowContextSendPending) return;
+		this.#nikoflowContextSendPending = true;
+		const deliverAs = currentPhase(state) === "execute" ? "followUp" : "nextTurn";
+		void this.sendNikoflowContext({ deliverAs })
+			.catch(error => {
+				logger.warn("Nikoflow phase context injection failed", { error: String(error) });
+			})
+			.finally(() => {
+				this.#nikoflowContextSendPending = false;
+			});
+	}
+
+	#markNikoflowPhaseTurnStarted(): void {
+		const state = this.#nikoflowState;
+		if (!state) return;
+		const next = markPhaseTurnStarted(state);
+		if (next !== state) this.setNikoflowState(next);
 	}
 
 	#nextNikoflowGateRequestId(): string {
@@ -6943,15 +6974,12 @@ export class AgentSession {
 		if (attempts >= NIKOFLOW_REVIEWER_MAX_ATTEMPTS) {
 			if (attempts === NIKOFLOW_REVIEWER_MAX_ATTEMPTS) {
 				this.#nikoflowReviewerAttempts.set(gateId, attempts + 1);
-				await this.sendCustomMessage(
-					{
-						customType: "nikoflow-reviewer-escalation",
-						content: `Nikoflow reviewer gate "${gateId}" reached ${NIKOFLOW_REVIEWER_MAX_ATTEMPTS} attempts. Escalate to the user; do not self-approve.`,
-						display: true,
-						attribution: "agent",
-					},
-					{ deliverAs: "followUp" },
-				);
+				await this.sendCustomMessage({
+					customType: "nikoflow-reviewer-escalation",
+					content: `Nikoflow reviewer gate "${gateId}" reached ${NIKOFLOW_REVIEWER_MAX_ATTEMPTS} attempts. Escalate to the user; do not self-approve.`,
+					display: true,
+					attribution: "agent",
+				});
 			}
 			return undefined;
 		}
@@ -6994,7 +7022,16 @@ export class AgentSession {
 
 		try {
 			await reviewerAgent.prompt("Return the structured Nikoflow reviewer verdict JSON now.");
-			return this.#nikoflowReviewerToolResult(gateId, this.#lastAssistantText(reviewerAgent.state.messages));
+			let toolResult = this.#nikoflowReviewerToolResult(
+				gateId,
+				this.#lastAssistantText(reviewerAgent.state.messages),
+			);
+			const firstVerdict = detectReviewerVerdict(toolResult, state);
+			if (firstVerdict.matched || firstVerdict.reason !== "missing_verdict") return toolResult;
+
+			await reviewerAgent.prompt("Reviewer output unparseable. Re-emit strict JSON only.");
+			toolResult = this.#nikoflowReviewerToolResult(gateId, this.#lastAssistantText(reviewerAgent.state.messages));
+			return toolResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return this.#nikoflowReviewerToolResult(gateId, `Reviewer failed: ${message}`, true);
@@ -7003,7 +7040,9 @@ export class AgentSession {
 
 	async #notifyNikoflowReviewerBlock(toolResult: unknown): Promise<void> {
 		const rec = toolResult && typeof toolResult === "object" ? (toolResult as Record<string, unknown>) : null;
-		const verdict = parseReviewerVerdict(rec?.content);
+		const details = rec && typeof rec.details === "object" ? (rec.details as Record<string, unknown>) : null;
+		const fallbackGateId = typeof details?.gateId === "string" ? details.gateId : undefined;
+		const verdict = parseReviewerVerdict(rec?.content, fallbackGateId);
 		const gateId = verdict?.gateId ?? "unknown";
 		const score = typeof verdict?.score === "number" ? ` Score: ${verdict.score}.` : "";
 		const reason = verdict?.reason?.trim() ? ` Reason: ${verdict.reason.trim()}` : "";
@@ -7386,6 +7425,14 @@ export class AgentSession {
 					session.#advanceNikoflowReviewerGate(state, verdict);
 				},
 				onReviewerBlock: (_state, toolResult) => session.#notifyNikoflowReviewerBlock(toolResult),
+				onGateNeedsExternalAction: async (_state, message) => {
+					await session.sendCustomMessage({
+						customType: "nikoflow-gate-needs-external-action",
+						content: message,
+						display: true,
+						attribution: "agent",
+					});
+				},
 			},
 		);
 	}
@@ -8047,6 +8094,7 @@ export class AgentSession {
 				cutoffCount: this.messages.length + messages.length,
 			});
 			try {
+				this.#markNikoflowPhaseTurnStarted();
 				await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#setPendingContextSnapshot(undefined);

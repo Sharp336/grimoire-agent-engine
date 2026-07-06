@@ -16,7 +16,15 @@ import {
 	type NikoflowCallbackHost,
 	nikoflowToolViolation,
 } from "../mode";
-import { advancePhase, createState, currentPhase, currentRole, isComplete, mintGateRequest } from "../state";
+import {
+	advancePhase,
+	createState,
+	currentPhase,
+	currentRole,
+	isComplete,
+	markPhaseTurnStarted,
+	mintGateRequest,
+} from "../state";
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -113,8 +121,9 @@ describe("nikoflow mode callback helpers", () => {
 		).toBe("nikoflow");
 	});
 
-	test("enqueues a follow-up when a gate is unmet", async () => {
+	test("yields human gates instead of queuing a follow-up", async () => {
 		const calls: string[] = [];
+		const externalActions: string[] = [];
 		const state = mintGateRequest(createState("standard"), "g1");
 		const onBeforeYield = createNikoflowOnBeforeYield(
 			() => state,
@@ -125,12 +134,49 @@ describe("nikoflow mode callback helpers", () => {
 			() => {
 				calls.push("previous");
 			},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
 		);
 
 		await onBeforeYield();
-		expect(calls[0]).toBe("previous");
-		expect(calls[1]).toContain("gate");
-		expect(calls[1]).toContain("grilling");
+		expect(calls).toEqual(["previous"]);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("human approval");
+	});
+
+	test("queues execute work once before execute can advance to verify", async () => {
+		let state = advancePhase(createState("tactical"));
+		const followUps: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => false,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			current => {
+				state = advanceNikoflowExecuteGate(current, {
+					nextGateRequestId: () => "verify-gate",
+					now: () => 100,
+				});
+			},
+		);
+
+		await onBeforeYield();
+		expect(currentPhase(state)).toBe("execute");
+		expect(followUps).toEqual([
+			"Nikoflow execute phase is active. Do the execute work now; do not skip straight to verify.",
+		]);
+
+		state = markPhaseTurnStarted(state);
+		await onBeforeYield();
+		expect(currentPhase(state)).toBe("verify");
+		expect(state.gateRequestId).toBe("verify-gate");
 	});
 
 	test("does not enqueue when there is no pending gate or the gate is satisfied", async () => {
@@ -186,7 +232,6 @@ describe("nikoflow mode callback helpers", () => {
 		expect(calls[0]).toBe("previous-turn");
 		expect(calls[1]).toBe("nikoflow-turn");
 		expect(calls[2]).toBe("previous-yield");
-		expect(calls[3]).toContain('phase "grilling"');
 	});
 
 	test("installs callbacks on a host and restores the previous hooks", async () => {
@@ -243,13 +288,7 @@ describe("nikoflow mode callback helpers", () => {
 		});
 		expect(installed.bundle.getToolChoice?.()).toBe("previous-choice");
 		expect(installedChoice?.()).toBe("previous-choice");
-		expect(calls).toEqual([
-			"previous-turn",
-			"nikoflow-turn",
-			"previous-yield",
-			'Nikoflow gate for phase "grilling" is not satisfied. Continue only by satisfying the current gate; do not self-approve it.',
-			"previous-before",
-		]);
+		expect(calls).toEqual(["previous-turn", "nikoflow-turn", "previous-yield", "previous-before"]);
 
 		installed.uninstall();
 		expect(host.beforeToolCall).toBe(previousBefore);
@@ -324,12 +363,11 @@ describe("nikoflow mode callback helpers", () => {
 		expect(appliedRoles).toEqual(["plan"]);
 
 		expect(await installedYield?.()).toBeUndefined();
-		expect(followUps).toHaveLength(1);
-		expect(followUps[0]).toContain('phase "grilling"');
+		expect(followUps).toEqual([]);
 
 		gateSatisfied = true;
 		expect(await installedYield?.()).toBeUndefined();
-		expect(followUps).toHaveLength(1);
+		expect(followUps).toEqual([]);
 
 		expect(await host.beforeToolCall?.(tool("write"))).toEqual({
 			block: true,
@@ -372,10 +410,17 @@ describe("nikoflow mode callback helpers", () => {
 		});
 
 		await bundle.onBeforeYield();
-		expect(currentPhase(state)).toBe("verify");
-		expect(currentRole(state)).toBe("advisor");
+		expect(currentPhase(state)).toBe("execute");
+		expect(currentRole(state)).toBe("default");
 		expect(isComplete(state)).toBe(false);
 		expect(followUps).toHaveLength(1);
+		expect(reviewerRequests).toEqual([]);
+
+		state = markPhaseTurnStarted(state);
+		await bundle.onBeforeYield();
+		expect(currentPhase(state)).toBe("verify");
+		expect(currentRole(state)).toBe("default");
+		expect(isComplete(state)).toBe(false);
 		const gateId = state.gateRequestId;
 		expect(gateId).toBe("gate-1");
 		expect(reviewerRequests).toEqual([gateId]);
@@ -404,5 +449,35 @@ describe("nikoflow mode callback helpers", () => {
 		reviewerResults.push({ type: "tool_result", content: { gateId, verdict: "pass", score: 9.4 } });
 		await bundle.onBeforeYield();
 		expect(isComplete(state)).toBe(true);
+	});
+
+	test("caps repeated reviewer-block follow-ups and then yields externally", async () => {
+		const state = mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1");
+		const followUps: string[] = [];
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => false,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			undefined,
+			() => ({ type: "tool_result", details: { gateId: "gate-1" }, content: { verdict: "block" } }),
+			undefined,
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+
+		expect(followUps).toHaveLength(3);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
 	});
 });

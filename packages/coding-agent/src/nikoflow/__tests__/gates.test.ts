@@ -13,6 +13,18 @@ describe("nikoflow gates", () => {
 		expect(parseReviewerVerdict({ verdict: "pass" })).toBeNull();
 	});
 
+	test("parses fenced or prose-prefixed reviewer JSON", () => {
+		expect(parseReviewerVerdict('```json\n{"gateId":"g1","verdict":"pass"}\n```')).toEqual({
+			gateId: "g1",
+			verdict: "pass",
+		});
+		expect(parseReviewerVerdict('Verdict:\n{"gateId":"g1","verdict":"block","reason":"fix it"}')).toEqual({
+			gateId: "g1",
+			verdict: "block",
+			reason: "fix it",
+		});
+	});
+
 	test("accepts only matching pass verdicts from tool_result content", () => {
 		const state = mintGateRequest(createState("standard"), "g1");
 		expect(detectReviewerVerdict({ gateId: "g1", verdict: "pass" }, state)).toEqual({
@@ -43,6 +55,19 @@ describe("nikoflow gates", () => {
 		expect(detectReviewerVerdict({ type: "tool_result", content: { gateId: "g1" } }, state)).toEqual({
 			matched: false,
 			reason: "missing_verdict",
+		});
+	});
+
+	test("uses harness-owned tool_result details for gate correlation", () => {
+		const state = mintGateRequest(createState("standard"), "g1");
+		expect(
+			detectReviewerVerdict(
+				{ role: "toolResult", details: { gateId: "g1" }, content: { verdict: "pass", reason: "ok" } },
+				state,
+			),
+		).toEqual({
+			matched: true,
+			verdict: { gateId: "g1", verdict: "pass", reason: "ok" },
 		});
 	});
 

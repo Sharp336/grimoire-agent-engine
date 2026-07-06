@@ -10,6 +10,8 @@ import {
 	type NikoflowState,
 } from "./state";
 
+const MAX_GATE_HOLD_FOLLOW_UPS = 3;
+
 export interface MinimalToolCallContext {
 	toolCall: { name?: string; toolName?: string };
 	args: Record<string, unknown>;
@@ -39,6 +41,7 @@ export type NikoflowReviewerRequest = (
 ) => Promise<unknown | null | undefined> | unknown | null | undefined;
 export type NikoflowReviewerGateAdvance = (state: NikoflowState, verdict: ReviewerVerdict) => Promise<void> | void;
 export type NikoflowReviewerBlock = (state: NikoflowState, toolResult: unknown) => Promise<void> | void;
+export type NikoflowGateExternalAction = (state: NikoflowState, message: string) => Promise<void> | void;
 
 export interface NikoflowToolPolicy {
 	hasFailingTest?: () => boolean;
@@ -60,6 +63,7 @@ export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = u
 	requestReviewer?: NikoflowReviewerRequest;
 	advanceReviewerGate?: NikoflowReviewerGateAdvance;
 	onReviewerBlock?: NikoflowReviewerBlock;
+	onGateNeedsExternalAction?: NikoflowGateExternalAction;
 	afterBeforeYield?: OnBeforeYield;
 }
 
@@ -194,6 +198,7 @@ export function advanceNikoflowExecuteGate(
 	options: Pick<NikoflowHumanGateAdvanceOptions<unknown>, "nextGateRequestId" | "now">,
 ): NikoflowState {
 	if (currentPhase(state) !== "execute") return state;
+	if (!state.phaseTurnStarted) return state;
 	return mintGateRequest(advancePhase(state), options.nextGateRequestId(), options.now());
 }
 
@@ -237,7 +242,20 @@ export function createNikoflowGetToolChoice<TDirective>(
 
 export function formatGateHoldMessage(state: NikoflowState): string {
 	const phase = currentPhase(state) ?? "complete";
-	return `Nikoflow gate for phase "${phase}" is not satisfied. Continue only by satisfying the current gate; do not self-approve it.`;
+	if (isHumanGatePhase(state)) {
+		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
+	}
+	if (phase === "execute") {
+		return "Nikoflow execute phase is active. Do the execute work now; do not skip straight to verify.";
+	}
+	if (phase === "verify") {
+		return "Nikoflow verify gate is waiting for an independent reviewer pass. Fix reviewer findings, then yield for another review; do not self-approve.";
+	}
+	return `Nikoflow phase "${phase}" needs external action before continuing.`;
+}
+
+export function formatGateExternalActionMessage(state: NikoflowState): string {
+	return `Nikoflow gate needs external action; yielding instead of queuing another follow-up. ${formatGateHoldMessage(state)}`;
 }
 
 export function createNikoflowOnBeforeYield(
@@ -249,15 +267,39 @@ export function createNikoflowOnBeforeYield(
 	requestReviewer?: NikoflowReviewerRequest,
 	advanceReviewerGate?: NikoflowReviewerGateAdvance,
 	onReviewerBlock?: NikoflowReviewerBlock,
+	onGateNeedsExternalAction?: NikoflowGateExternalAction,
 	afterNikoflow?: OnBeforeYield,
 ): OnBeforeYield {
+	let followUpKey: string | null = null;
+	let consecutiveGateHoldFollowUps = 0;
+	const queueGateHold = async (state: NikoflowState): Promise<void> => {
+		const key = `${state.depth}:${state.phaseIndex}:${state.gateRequestId ?? "no-gate"}`;
+		if (key !== followUpKey) {
+			followUpKey = key;
+			consecutiveGateHoldFollowUps = 0;
+		}
+		if (consecutiveGateHoldFollowUps >= MAX_GATE_HOLD_FOLLOW_UPS) {
+			await onGateNeedsExternalAction?.(state, formatGateExternalActionMessage(state));
+			return;
+		}
+		consecutiveGateHoldFollowUps++;
+		await enqueueFollowUp(formatGateHoldMessage(state));
+	};
+	const yieldForExternalAction = async (state: NikoflowState): Promise<void> => {
+		await onGateNeedsExternalAction?.(state, formatGateExternalActionMessage(state));
+	};
+
 	return async () => {
 		await previous?.();
 		let state = getState();
 		if (state && currentPhase(state) === "execute") {
-			await advanceExecuteGate?.(state);
-			state = getState();
+			if (state.phaseTurnStarted) {
+				await advanceExecuteGate?.(state);
+				state = getState();
+			}
 		}
+		let reviewerBlockNeedsModelWork = false;
+		let reviewerBlockAlreadyQueued = false;
 		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
 			const reviewerToolResult = await requestReviewer?.(state);
 			if (reviewerToolResult) {
@@ -265,15 +307,35 @@ export function createNikoflowOnBeforeYield(
 				if (result.matched) {
 					await advanceReviewerGate?.(state, result.verdict);
 				} else if (result.reason === "blocked") {
-					await onReviewerBlock?.(state, reviewerToolResult);
+					if (onReviewerBlock) {
+						await onReviewerBlock(state, reviewerToolResult);
+						reviewerBlockAlreadyQueued = true;
+					} else {
+						reviewerBlockNeedsModelWork = true;
+					}
 				}
 				state = getState();
 			}
 		}
 		await afterNikoflow?.();
 		state = getState();
-		if (!state?.gateRequestId || isGateSatisfied(state)) return;
-		await enqueueFollowUp(formatGateHoldMessage(state));
+		if (!state) return;
+		const phase = currentPhase(state);
+		if (phase === "execute" && !state.phaseTurnStarted) {
+			await queueGateHold(state);
+			return;
+		}
+		if (!state.gateRequestId || isGateSatisfied(state)) return;
+		if (isHumanGatePhase(state)) {
+			await yieldForExternalAction(state);
+			return;
+		}
+		if (phase === "verify" && reviewerBlockNeedsModelWork) {
+			await queueGateHold(state);
+			return;
+		}
+		if (phase === "verify" && reviewerBlockAlreadyQueued) return;
+		await yieldForExternalAction(state);
 	};
 }
 
@@ -303,6 +365,7 @@ export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unk
 			options.requestReviewer,
 			options.advanceReviewerGate,
 			options.onReviewerBlock,
+			options.onGateNeedsExternalAction,
 			options.afterBeforeYield,
 		),
 		...(onTurnEnd ? { onTurnEnd } : {}),

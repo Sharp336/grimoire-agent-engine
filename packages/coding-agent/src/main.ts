@@ -110,6 +110,12 @@ async function activateNikoflowFromInitialPrompt(
 	}
 }
 
+export function rejectNikoflowInNonInteractiveMode(message: string | undefined, explicitDepth?: NikoflowDepth): void {
+	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
+	if (!depth) return;
+	throw new Error("Nikoflow requires interactive mode; print/non-interactive runs cannot satisfy human gates.");
+}
+
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
@@ -1467,7 +1473,7 @@ export async function runRootCommand(
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();
-			await activateNikoflowFromInitialPrompt(session, initialMessage, initialArgs.nikoflowDepth);
+			rejectNikoflowInNonInteractiveMode(initialMessage, initialArgs.nikoflowDepth);
 			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,
