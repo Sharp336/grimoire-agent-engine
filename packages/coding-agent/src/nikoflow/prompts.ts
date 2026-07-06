@@ -3,7 +3,7 @@ import { getNextTicket } from "./tickets";
 
 const PHASE_PROMPTS: Record<string, string> = {
 	grilling:
-		"Grilling phase. Read code before asking. Confirm scope, risks, and success criteria. No implementation writes.",
+		'Grilling phase. Interrogate the user with specific, concrete questions about every material ambiguity, risk, and assumption before implementation. Do not exit grilling while any material question is unresolved. Each turn, maintain an explicit open_questions list; when it is genuinely empty, emit {"nikoflow_grilling":{"open_questions":[],"assumptions":[],"risks":[]}}. Do not fabricate convergence to end the phase. No implementation writes.',
 	adr: "ADR phase. Record only hard-to-reverse tradeoffs. Otherwise write a visible skip reason.",
 	prd: "PRD phase. Write user stories with Given/When/Then acceptance criteria and test seams.",
 	tickets:

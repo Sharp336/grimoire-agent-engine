@@ -1448,6 +1448,14 @@ function agentMessageTimestamp(message: AgentMessage): number | undefined {
 	return "timestamp" in message && typeof message.timestamp === "number" ? message.timestamp : undefined;
 }
 
+function assistantMessageText(message: AgentMessage): string | undefined {
+	if (message.role !== "assistant") return undefined;
+	return message.content
+		.filter((part): part is TextContent => part.type === "text")
+		.map(part => part.text)
+		.join("\n");
+}
+
 /** Custom-message types of the hidden magic-keyword notices that `#createMagicKeywordNotices`
  *  enqueues alongside a user prompt. Keep in sync with that method. */
 const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set([
@@ -7085,6 +7093,7 @@ export class AgentSession {
 		const next = advanceNikoflowHumanGate(state, messages, {
 			isGenuineUserTurn: isUserQueuedMessage,
 			messageTimestamp: agentMessageTimestamp,
+			messageText: assistantMessageText,
 			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
 			now: () => Date.now(),
 		});

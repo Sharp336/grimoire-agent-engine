@@ -1,4 +1,4 @@
-import { humanGateAccepted } from "./gates";
+import { humanGateAccepted, jsonRecordFromValue, normalizeNikoflowGrillingMarker } from "./gates";
 import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
@@ -128,6 +128,7 @@ export interface NikoflowSessionRoleEntry<TModel extends NikoflowSessionModel, T
 export interface NikoflowHumanGateAdvanceOptions<TMessage> {
 	isGenuineUserTurn: (message: TMessage) => boolean;
 	messageTimestamp: (message: TMessage) => number | undefined;
+	messageText?: (message: TMessage) => string | undefined;
 	nextGateRequestId: () => string;
 	now: () => number;
 }
@@ -316,13 +317,34 @@ export function advanceNikoflowHumanGate<TMessage>(
 		return state;
 	}
 	const gateMintedAt = state.gateMintedAt;
+	const phase = currentPhase(state);
+	const acceptedAfter =
+		phase === "grilling" ? grillingConvergenceMarkerAt(gateMintedAt, messages, options) : gateMintedAt;
+	if (acceptedAfter === null) return state;
 	const hasLaterUserTurn = messages.some(message => {
 		if (!options.isGenuineUserTurn(message)) return false;
-		return humanGateAccepted(gateMintedAt, options.messageTimestamp(message));
+		return humanGateAccepted(acceptedAfter, options.messageTimestamp(message));
 	});
 	if (!hasLaterUserTurn) return state;
-	if (currentPhase(state) === "tickets" && nikoflowTicketDagErrors(state).length > 0) return state;
+	if (phase === "tickets" && nikoflowTicketDagErrors(state).length > 0) return state;
 	return advancePhase(state);
+}
+
+function grillingConvergenceMarkerAt<TMessage>(
+	gateMintedAt: number,
+	messages: readonly TMessage[],
+	options: NikoflowHumanGateAdvanceOptions<TMessage>,
+): number | null {
+	if (!options.messageText) return null;
+	let convergedAt: number | null = null;
+	for (const message of messages) {
+		const timestamp = options.messageTimestamp(message);
+		if (!humanGateAccepted(gateMintedAt, timestamp)) continue;
+		const marker = normalizeNikoflowGrillingMarker(options.messageText(message));
+		if (!marker) continue;
+		convergedAt = marker.openQuestions.length === 0 ? (timestamp ?? null) : null;
+	}
+	return convergedAt;
 }
 
 export function advanceNikoflowExecuteGate(
@@ -373,12 +395,8 @@ function advanceNikoflowTicketAdvisorGate(state: NikoflowState, review: Nikoflow
 	};
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
 function normalizeAdvisorReviewNote(value: unknown): NikoflowAdvisorReviewNote | null {
-	const rec = asRecord(value);
+	const rec = jsonRecordFromValue(value);
 	if (!rec || typeof rec.note !== "string" || rec.note.trim().length === 0) return null;
 	const note: NikoflowAdvisorReviewNote = { note: rec.note };
 	if (rec.severity === "nit" || rec.severity === "concern" || rec.severity === "blocker") {
@@ -388,7 +406,7 @@ function normalizeAdvisorReviewNote(value: unknown): NikoflowAdvisorReviewNote |
 }
 
 export function normalizeNikoflowAdvisorReview(value: unknown, state: NikoflowState): NikoflowAdvisorReview | null {
-	const rec = asRecord(value);
+	const rec = jsonRecordFromValue(value);
 	if (rec?.reviewed !== true || typeof rec.gateId !== "string") return null;
 	if (state.gateRequestId !== rec.gateId) return null;
 	if (!Array.isArray(rec.notes)) return null;

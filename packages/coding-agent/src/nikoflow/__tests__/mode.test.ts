@@ -164,7 +164,7 @@ describe("nikoflow mode callback helpers", () => {
 		);
 	});
 
-	test("advances human gates only from later genuine user turns", async () => {
+	test("advances non-grilling human gates only from later genuine user turns", async () => {
 		type Message = { role: "user" | "assistant" | "toolResult"; timestamp: number };
 		const options = {
 			isGenuineUserTurn: (message: Message) => message.role === "user",
@@ -173,23 +173,142 @@ describe("nikoflow mode callback helpers", () => {
 			now: () => 20,
 		};
 
+		const adr = mintGateRequest(advancePhase(createState("standard")), "gate-1", 10);
+		const prd = advanceNikoflowHumanGate(adr, [{ role: "user", timestamp: 11 }], options);
+		expect(currentPhase(prd)).toBe("prd");
+		expect(prd.gateRequestId).toBeNull();
+
+		const assistantOnly = advanceNikoflowHumanGate(adr, [{ role: "assistant", timestamp: 11 }], options);
+		expect(currentPhase(assistantOnly)).toBe("adr");
+		expect(assistantOnly.gateRequestId).toBe("gate-1");
+
+		const toolOnly = advanceNikoflowHumanGate(adr, [{ role: "toolResult", timestamp: 11 }], options);
+		expect(currentPhase(toolOnly)).toBe("adr");
+		expect(toolOnly.gateRequestId).toBe("gate-1");
+
+		const staleUser = advanceNikoflowHumanGate(adr, [{ role: "user", timestamp: 9 }], options);
+		expect(currentPhase(staleUser)).toBe("adr");
+		expect(staleUser.gateRequestId).toBe("gate-1");
+	});
+
+	test("grilling gate does not advance without a convergence marker", () => {
+		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
 		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
-		const execute = advanceNikoflowHumanGate(grilling, [{ role: "user", timestamp: 11 }], options);
+		const next = advanceNikoflowHumanGate<Message>(grilling, [{ role: "user", timestamp: 12 }], {
+			isGenuineUserTurn: message => message.role === "user",
+			messageTimestamp: message => message.timestamp,
+			messageText: message => (message.role === "assistant" ? message.content : undefined),
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		});
+
+		expect(currentPhase(next)).toBe("grilling");
+		expect(next.gateRequestId).toBe("gate-1");
+	});
+
+	test("grilling gate does not advance while open questions remain", () => {
+		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+		const next = advanceNikoflowHumanGate<Message>(
+			grilling,
+			[
+				{
+					role: "assistant",
+					timestamp: 12,
+					content: JSON.stringify({
+						nikoflow_grilling: { open_questions: ["Which command proves this?"], assumptions: [], risks: [] },
+					}),
+				},
+				{ role: "user", timestamp: 13 },
+			],
+			{
+				isGenuineUserTurn: message => message.role === "user",
+				messageTimestamp: message => message.timestamp,
+				messageText: message => (message.role === "assistant" ? message.content : undefined),
+				nextGateRequestId: () => "next-gate",
+				now: () => 20,
+			},
+		);
+
+		expect(currentPhase(next)).toBe("grilling");
+		expect(next.gateRequestId).toBe("gate-1");
+	});
+
+	test("grilling gate advances only after empty-open-questions marker and later user turn", async () => {
+		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
+		const options = {
+			isGenuineUserTurn: (message: Message) => message.role === "user",
+			messageTimestamp: (message: Message) => message.timestamp,
+			messageText: (message: Message) => (message.role === "assistant" ? message.content : undefined),
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		};
+		const marker = [
+			"Converged.",
+			JSON.stringify({
+				nikoflow_grilling: { open_questions: [], assumptions: ["scope is limited"], risks: ["tests may fail"] },
+			}),
+		].join("\n");
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+
+		const markerOnly = advanceNikoflowHumanGate(
+			grilling,
+			[{ role: "assistant", timestamp: 12, content: marker }],
+			options,
+		);
+		expect(currentPhase(markerOnly)).toBe("grilling");
+
+		const userBeforeMarker = advanceNikoflowHumanGate(
+			grilling,
+			[
+				{ role: "user", timestamp: 11 },
+				{ role: "assistant", timestamp: 12, content: marker },
+			],
+			options,
+		);
+		expect(currentPhase(userBeforeMarker)).toBe("grilling");
+
+		const execute = advanceNikoflowHumanGate(
+			grilling,
+			[
+				{ role: "assistant", timestamp: 12, content: marker },
+				{ role: "user", timestamp: 13 },
+			],
+			options,
+		);
 		expect(currentPhase(execute)).toBe("execute");
 		expect(execute.gateRequestId).toBeNull();
 		expect(await createNikoflowBeforeToolCall(() => execute)(tool("write"))).toBeUndefined();
+	});
 
-		const assistantOnly = advanceNikoflowHumanGate(grilling, [{ role: "assistant", timestamp: 11 }], options);
-		expect(currentPhase(assistantOnly)).toBe("grilling");
-		expect(assistantOnly.gateRequestId).toBe("gate-1");
+	test("grilling gate rejects a fabricated convergence marker after questions remain", () => {
+		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
+		const options = {
+			isGenuineUserTurn: (message: Message) => message.role === "user",
+			messageTimestamp: (message: Message) => message.timestamp,
+			messageText: (message: Message) => (message.role === "assistant" ? message.content : undefined),
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		};
+		const empty = JSON.stringify({
+			nikoflow_grilling: { open_questions: [], assumptions: ["looks done"], risks: [] },
+		});
+		const unresolved = JSON.stringify({
+			nikoflow_grilling: { open_questions: ["Still unresolved"], assumptions: [], risks: [] },
+		});
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+		const next = advanceNikoflowHumanGate(
+			grilling,
+			[
+				{ role: "assistant", timestamp: 12, content: empty },
+				{ role: "assistant", timestamp: 13, content: unresolved },
+				{ role: "user", timestamp: 14 },
+			],
+			options,
+		);
 
-		const toolOnly = advanceNikoflowHumanGate(grilling, [{ role: "toolResult", timestamp: 11 }], options);
-		expect(currentPhase(toolOnly)).toBe("grilling");
-		expect(toolOnly.gateRequestId).toBe("gate-1");
-
-		const staleUser = advanceNikoflowHumanGate(grilling, [{ role: "user", timestamp: 9 }], options);
-		expect(currentPhase(staleUser)).toBe("grilling");
-		expect(staleUser.gateRequestId).toBe("gate-1");
+		expect(currentPhase(next)).toBe("grilling");
+		expect(next.gateRequestId).toBe("gate-1");
 	});
 
 	test("blocks ticketization approval until the ticket DAG is captured", () => {
