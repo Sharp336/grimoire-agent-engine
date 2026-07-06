@@ -1,5 +1,14 @@
+import { humanGateAccepted } from "./gates";
 import { assertNikoflowRoleRails } from "./roles";
-import { currentPhase, currentRole, type NikoflowRole, type NikoflowState } from "./state";
+import {
+	advancePhase,
+	currentPhase,
+	currentRole,
+	isHumanGatePhase,
+	mintGateRequest,
+	type NikoflowRole,
+	type NikoflowState,
+} from "./state";
 
 export interface MinimalToolCallContext {
 	toolCall: { name?: string; toolName?: string };
@@ -40,6 +49,7 @@ export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = u
 	onBeforeYield?: OnBeforeYield;
 	getToolChoice?: ToolChoiceGetter<TDirective>;
 	nikoflowToolChoice?: ToolChoiceGetter<TDirective>;
+	advanceHumanGate?: OnTurnEnd<TMessages, TContext>;
 }
 
 export interface NikoflowCallbackBundle<TMessages = unknown, TContext = unknown, TDirective = unknown> {
@@ -80,6 +90,13 @@ export interface NikoflowSessionRoleEntry<TModel extends NikoflowSessionModel, T
 	model: TModel;
 	thinkingLevel?: TThinking;
 	explicitThinkingLevel: boolean;
+}
+
+export interface NikoflowHumanGateAdvanceOptions<TMessage> {
+	isGenuineUserTurn: (message: TMessage) => boolean;
+	messageTimestamp: (message: TMessage) => number | undefined;
+	nextGateRequestId: () => string;
+	now: () => number;
 }
 
 export interface NikoflowAgentSessionHost<
@@ -123,7 +140,7 @@ export function isWriteTool(context: MinimalToolCallContext): boolean {
 export function nikoflowToolViolation(
 	state: NikoflowState | null | undefined,
 	context: MinimalToolCallContext,
-	policy: NikoflowToolPolicy = {},
+	_policy: NikoflowToolPolicy = {},
 ): string | null {
 	const phase = state ? currentPhase(state) : null;
 	if (!phase) return null;
@@ -131,10 +148,34 @@ export function nikoflowToolViolation(
 	if (phase === "grilling" && isWriteTool(context)) {
 		return "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.";
 	}
-	if (phase === "execute" && isWriteTool(context) && !policy.hasFailingTest?.()) {
-		return "Nikoflow execute requires a failing test before implementation writes.";
-	}
 	return null;
+}
+
+export function ensureNikoflowHumanGate<TMessage>(
+	state: NikoflowState,
+	options: Pick<NikoflowHumanGateAdvanceOptions<TMessage>, "nextGateRequestId" | "now">,
+): NikoflowState {
+	if (!isHumanGatePhase(state)) return state;
+	if (state.gateRequestId && state.gateMintedAt !== null) return state;
+	return mintGateRequest(state, options.nextGateRequestId(), options.now());
+}
+
+export function advanceNikoflowHumanGate<TMessage>(
+	state: NikoflowState,
+	messages: readonly TMessage[],
+	options: NikoflowHumanGateAdvanceOptions<TMessage>,
+): NikoflowState {
+	if (!isHumanGatePhase(state)) return state;
+	if (!state.gateRequestId || state.gateMintedAt === null) {
+		return ensureNikoflowHumanGate(state, options);
+	}
+	const gateMintedAt = state.gateMintedAt;
+	const hasLaterUserTurn = messages.some(message => {
+		if (!options.isGenuineUserTurn(message)) return false;
+		return humanGateAccepted(gateMintedAt, options.messageTimestamp(message));
+	});
+	if (!hasLaterUserTurn) return state;
+	return ensureNikoflowHumanGate(advancePhase(state), options);
 }
 
 export function createNikoflowBeforeToolCall(
@@ -281,6 +322,7 @@ export async function installNikoflowAgentSessionMode<
 		...options,
 		afterTurnEnd: async (messages, signal, context) => {
 			await options.afterTurnEnd?.(messages, signal, context);
+			await options.advanceHumanGate?.(messages, signal, context);
 			await applyCurrentRole();
 		},
 	});

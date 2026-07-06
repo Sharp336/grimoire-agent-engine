@@ -8,6 +8,7 @@ import {
 	gateMatches,
 	inferDepthFromPrompt,
 	isComplete,
+	isHumanGatePhase,
 	materializePhases,
 	mintGateRequest,
 	rotateGateRequest,
@@ -46,17 +47,30 @@ describe("nikoflow state", () => {
 		expect(currentRole(state)).toBeNull();
 	});
 
+	test("detects human-gate phases", () => {
+		let state = createState("standard");
+		expect(isHumanGatePhase(state)).toBe(true);
+		state = advancePhase(state);
+		expect(isHumanGatePhase(state)).toBe(true);
+		state = advancePhase(advancePhase(advancePhase(state)));
+		expect(currentPhase(state)).toBe("execute");
+		expect(isHumanGatePhase(state)).toBe(false);
+	});
+
 	test("gate ids mint, rotate, clear, and fail closed", () => {
 		const initial = createState("tactical");
-		const minted = mintGateRequest(initial, "g1");
-		const rotated = rotateGateRequest(minted, "g2");
+		const minted = mintGateRequest(initial, "g1", 123);
+		const rotated = rotateGateRequest(minted, "g2", 456);
 		const cleared = clearGateRequest(rotated);
 
 		expect(gateMatches(initial, "g1")).toBe(false);
 		expect(gateMatches(minted, "g1")).toBe(true);
+		expect(minted.gateMintedAt).toBe(123);
 		expect(gateMatches(rotated, "g1")).toBe(false);
 		expect(gateMatches(rotated, "g2")).toBe(true);
+		expect(rotated.gateMintedAt).toBe(456);
 		expect(gateMatches(cleared, "g2")).toBe(false);
+		expect(cleared.gateMintedAt).toBeNull();
 		expect(gateMatches(cleared, null)).toBe(false);
 	});
 
@@ -70,5 +84,6 @@ describe("nikoflow state", () => {
 		expect(initial.gateRequestId).toBeNull();
 		expect(minted.gateRequestId).toBe("g1");
 		expect(advanced.gateRequestId).toBeNull();
+		expect(advanced.gateMintedAt).toBeNull();
 	});
 });

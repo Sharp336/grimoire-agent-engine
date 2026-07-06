@@ -56,6 +56,7 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { inferDepthFromPrompt, type NikoflowDepth } from "./nikoflow/state";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
@@ -96,6 +97,17 @@ type RunRpcMode = (
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+async function activateNikoflowFromInitialPrompt(
+	session: AgentSession,
+	message: string | undefined,
+	explicitDepth?: NikoflowDepth,
+): Promise<void> {
+	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
+	if (depth) {
+		await session.activateNikoflowMode(depth, { deferHumanGateMint: message !== undefined });
+	}
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
@@ -409,6 +421,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	nikoflowDepth?: NikoflowDepth,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -490,6 +503,7 @@ async function runInteractiveMode(
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
+	await activateNikoflowFromInitialPrompt(session, initialMessage, nikoflowDepth);
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
@@ -1073,11 +1087,13 @@ export async function runRootCommand(
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
 	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
+	const advisorModel = parsedArgs.nikoflowQa;
+	if (smolModel || slowModel || planModel || advisorModel) {
 		settingsInstance.overrideModelRoles({
 			smol: smolModel,
 			slow: slowModel,
 			plan: planModel,
+			advisor: advisorModel,
 		});
 	}
 
@@ -1446,10 +1462,12 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				initialArgs.nikoflowDepth,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();
+			await activateNikoflowFromInitialPrompt(session, initialMessage, initialArgs.nikoflowDepth);
 			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,

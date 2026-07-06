@@ -79,6 +79,7 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
+import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -1906,6 +1907,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
+	#nikoflowDepthFromModeData(modeData: SessionContext["modeData"]): NikoflowDepth | undefined {
+		const depth = modeData?.depth;
+		return typeof depth === "string" && NIKOFLOW_DEPTHS.includes(depth as NikoflowDepth)
+			? (depth as NikoflowDepth)
+			: undefined;
+	}
+
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#goalTurnHadToolCalls = false;
@@ -1996,6 +2004,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #clearTransientModeState(): Promise<void> {
+		if (this.session.getNikoflowState()) {
+			this.session.deactivateNikoflowMode({ persist: false });
+		}
+
 		if (this.planModeEnabled || this.planModePaused) {
 			if (this.#planModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#planModePreviousTools);
@@ -2065,6 +2077,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.session.goalRuntime.clearAccounting();
+		if (sessionContext.mode === "nikoflow") {
+			const depth = this.#nikoflowDepthFromModeData(sessionContext.modeData);
+			if (!depth) {
+				this.sessionManager.appendModeChange("none");
+				return;
+			}
+			await this.session.activateNikoflowMode(depth, { persist: false, sendContext: false });
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -2733,6 +2754,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#enterPlanMode();
 		if (initialPrompt && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		}
+	}
+
+	async handleNikoflowCommand(rest?: string): Promise<void> {
+		try {
+			const text = (rest ?? "").trim();
+			if (this.planModeEnabled || this.planModePaused) {
+				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (this.goalModeEnabled || this.goalModePaused) {
+				this.showWarning("Exit goal mode first.");
+				return;
+			}
+			if (this.session.getNikoflowState() && !text) {
+				this.session.deactivateNikoflowMode();
+				this.showStatus("Nikoflow disabled.");
+				return;
+			}
+
+			const [first = "", ...tail] = text.split(/\s+/);
+			const hasDepth = NIKOFLOW_DEPTHS.includes(first as NikoflowDepth);
+			const depth = hasDepth ? (first as NikoflowDepth) : "standard";
+			const promptText = hasDepth ? tail.join(" ").trim() : text;
+
+			await this.session.activateNikoflowMode(depth, { deferHumanGateMint: promptText.length > 0 });
+			this.showStatus(`Nikoflow enabled (${depth}).`);
+			if (promptText && this.onInputCallback) {
+				this.onInputCallback(this.startPendingSubmission({ text: promptText }));
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 

@@ -24,10 +24,11 @@ export interface NikoflowState {
 	depth: NikoflowDepth;
 	phaseIndex: number;
 	gateRequestId: string | null;
+	gateMintedAt: number | null;
 }
 
 export function createState(depth: NikoflowDepth): NikoflowState {
-	return { depth, phaseIndex: 0, gateRequestId: null };
+	return { depth, phaseIndex: 0, gateRequestId: null, gateMintedAt: null };
 }
 
 export function materializePhases(depth: NikoflowDepth): NikoflowPhase[] {
@@ -58,25 +59,30 @@ export function currentRole(state: NikoflowState): NikoflowRole | null {
 	return phase ? PHASE_ROLE[phase] : null;
 }
 
+export function isHumanGatePhase(state: NikoflowState): boolean {
+	const phase = currentPhase(state);
+	return phase === "grilling" || phase === "adr" || phase === "prd" || phase === "tickets";
+}
+
 export function advancePhase(state: NikoflowState): NikoflowState {
 	const nextIndex = Math.min(state.phaseIndex + 1, materializePhases(state.depth).length);
-	return { ...state, phaseIndex: nextIndex, gateRequestId: null };
+	return { ...state, phaseIndex: nextIndex, gateRequestId: null, gateMintedAt: null };
 }
 
 export function isComplete(state: NikoflowState): boolean {
 	return state.phaseIndex >= materializePhases(state.depth).length;
 }
 
-export function mintGateRequest(state: NikoflowState, id: string): NikoflowState {
-	return { ...state, gateRequestId: id };
+export function mintGateRequest(state: NikoflowState, id: string, mintedAt: number | null = null): NikoflowState {
+	return { ...state, gateRequestId: id, gateMintedAt: mintedAt };
 }
 
-export function rotateGateRequest(state: NikoflowState, id: string): NikoflowState {
-	return mintGateRequest(state, id);
+export function rotateGateRequest(state: NikoflowState, id: string, mintedAt: number | null = null): NikoflowState {
+	return mintGateRequest(state, id, mintedAt);
 }
 
 export function clearGateRequest(state: NikoflowState): NikoflowState {
-	return { ...state, gateRequestId: null };
+	return { ...state, gateRequestId: null, gateMintedAt: null };
 }
 
 export function gateMatches(state: NikoflowState, id: string | null | undefined): boolean {

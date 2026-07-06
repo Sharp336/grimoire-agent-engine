@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	advanceNikoflowHumanGate,
 	createNikoflowBeforeToolCall,
 	createNikoflowCallbackBundle,
 	createNikoflowGetToolChoice,
@@ -13,7 +14,7 @@ import {
 	type NikoflowCallbackHost,
 	nikoflowToolViolation,
 } from "../mode";
-import { advancePhase, createState, mintGateRequest } from "../state";
+import { advancePhase, createState, currentPhase, mintGateRequest } from "../state";
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -62,10 +63,37 @@ describe("nikoflow mode callback helpers", () => {
 		expect(await before(tool("write"))).toEqual({ block: true, reason: "previous" });
 	});
 
-	test("blocks execute writes until a failing test exists", () => {
+	test("allows execute writes after grilling advances", () => {
 		const executeState = advancePhase(createState("tactical"));
-		expect(nikoflowToolViolation(executeState, tool("write"))).toContain("failing test");
-		expect(nikoflowToolViolation(executeState, tool("write"), { hasFailingTest: () => true })).toBeNull();
+		expect(nikoflowToolViolation(executeState, tool("write"))).toBeNull();
+	});
+
+	test("advances human gates only from later genuine user turns", async () => {
+		type Message = { role: "user" | "assistant" | "toolResult"; timestamp: number };
+		const options = {
+			isGenuineUserTurn: (message: Message) => message.role === "user",
+			messageTimestamp: (message: Message) => message.timestamp,
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		};
+
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+		const execute = advanceNikoflowHumanGate(grilling, [{ role: "user", timestamp: 11 }], options);
+		expect(currentPhase(execute)).toBe("execute");
+		expect(execute.gateRequestId).toBeNull();
+		expect(await createNikoflowBeforeToolCall(() => execute)(tool("write"))).toBeUndefined();
+
+		const assistantOnly = advanceNikoflowHumanGate(grilling, [{ role: "assistant", timestamp: 11 }], options);
+		expect(currentPhase(assistantOnly)).toBe("grilling");
+		expect(assistantOnly.gateRequestId).toBe("gate-1");
+
+		const toolOnly = advanceNikoflowHumanGate(grilling, [{ role: "toolResult", timestamp: 11 }], options);
+		expect(currentPhase(toolOnly)).toBe("grilling");
+		expect(toolOnly.gateRequestId).toBe("gate-1");
+
+		const staleUser = advanceNikoflowHumanGate(grilling, [{ role: "user", timestamp: 9 }], options);
+		expect(currentPhase(staleUser)).toBe("grilling");
+		expect(staleUser.gateRequestId).toBe("gate-1");
 	});
 
 	test("chains tool choice without swallowing the previous directive", () => {

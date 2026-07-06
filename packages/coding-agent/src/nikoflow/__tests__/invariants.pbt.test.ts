@@ -53,6 +53,7 @@ function stateWithGate(random: () => number, gateRequestId: string | null): Niko
 		depth: selectedDepth,
 		phaseIndex: int(random, materializePhases(selectedDepth).length + 5) - 2,
 		gateRequestId,
+		gateMintedAt: gateRequestId ? int(random, 1_000_000) : null,
 	};
 }
 

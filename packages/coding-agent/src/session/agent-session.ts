@@ -240,6 +240,8 @@ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
 import {
+	advanceNikoflowHumanGate,
+	ensureNikoflowHumanGate,
 	type InstalledNikoflowCallbacks,
 	installNikoflowAgentSessionMode,
 	type MinimalToolCallContext,
@@ -247,7 +249,9 @@ import {
 	type OnTurnEnd,
 	type ToolChoiceGetter,
 } from "../nikoflow/mode";
-import type { NikoflowState } from "../nikoflow/state";
+import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
+import { assertNikoflowRoleRails } from "../nikoflow/roles";
+import { createState, type NikoflowDepth, type NikoflowState } from "../nikoflow/state";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -857,12 +861,18 @@ export interface PromptOptions {
 }
 
 export interface AgentSessionNikoflowModeOptions {
-	getState: () => NikoflowState | null | undefined;
+	getState?: () => NikoflowState | null | undefined;
 	isGateSatisfied: (state: NikoflowState) => boolean;
 	enqueueFollowUp?: (message: string) => void | Promise<void>;
 	policy?: NikoflowToolPolicy;
 	afterTurnEnd?: OnTurnEnd<AgentMessage[], AgentTurnEndContext>;
 	nikoflowToolChoice?: ToolChoiceGetter<ToolChoiceDirective>;
+}
+
+export interface AgentSessionNikoflowActivationOptions {
+	persist?: boolean;
+	sendContext?: boolean;
+	deferHumanGateMint?: boolean;
 }
 
 /** Result from a handoff operation. */
@@ -1398,6 +1408,10 @@ function isUserQueuedMessage(message: AgentMessage): boolean {
 	return message.role === "custom" && message.attribution === "user" && message.display !== false;
 }
 
+function agentMessageTimestamp(message: AgentMessage): number | undefined {
+	return "timestamp" in message && typeof message.timestamp === "number" ? message.timestamp : undefined;
+}
+
 /** Custom-message types of the hidden magic-keyword notices that `#createMagicKeywordNotices`
  *  enqueues alongside a user prompt. Keep in sync with that method. */
 const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set([
@@ -1574,6 +1588,9 @@ export class AgentSession {
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#planModeState: PlanModeState | undefined;
+	#nikoflowState: NikoflowState | undefined;
+	#nikoflowCallbacks: InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective> | undefined;
+	#nikoflowGateCounter = 0;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -6859,6 +6876,97 @@ export class AgentSession {
 		}
 	}
 
+	getNikoflowState(): NikoflowState | undefined {
+		return this.#nikoflowState;
+	}
+
+	setNikoflowState(state: NikoflowState | undefined): void {
+		this.#nikoflowState = state;
+	}
+
+	#nextNikoflowGateRequestId(): string {
+		this.#nikoflowGateCounter++;
+		return `nikoflow-gate-${Date.now()}-${this.#nikoflowGateCounter}`;
+	}
+
+	#ensureNikoflowHumanGate(state: NikoflowState): NikoflowState {
+		return ensureNikoflowHumanGate(state, {
+			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
+			now: () => Date.now(),
+		});
+	}
+
+	#advanceNikoflowHumanGate(messages: readonly AgentMessage[]): void {
+		const state = this.#nikoflowState;
+		if (!state) return;
+		const next = advanceNikoflowHumanGate(state, messages, {
+			isGenuineUserTurn: isUserQueuedMessage,
+			messageTimestamp: agentMessageTimestamp,
+			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
+			now: () => Date.now(),
+		});
+		if (next !== state) {
+			this.setNikoflowState(next);
+		}
+	}
+
+	async sendNikoflowContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
+		const state = this.#nikoflowState;
+		if (!state) return;
+		await this.sendCustomMessage(
+			{
+				customType: "nikoflow-context",
+				content: getCurrentPhaseProtocol(state),
+				display: true,
+				details: {
+					depth: state.depth,
+					phaseIndex: state.phaseIndex,
+					gateRequestId: state.gateRequestId,
+					gateMintedAt: state.gateMintedAt,
+				},
+				attribution: "agent",
+			},
+			options ? { deliverAs: options.deliverAs } : undefined,
+		);
+	}
+
+	async activateNikoflowMode(
+		depth: NikoflowDepth,
+		options: AgentSessionNikoflowActivationOptions = {},
+	): Promise<void> {
+		assertNikoflowRoleRails(role => {
+			const model = this.resolveRoleModelWithThinking(role).model;
+			return model ? { provider: model.provider, model: model.id } : null;
+		});
+		this.#nikoflowCallbacks?.uninstall();
+		this.#nikoflowCallbacks = undefined;
+		const state = options.deferHumanGateMint ? createState(depth) : this.#ensureNikoflowHumanGate(createState(depth));
+		this.setNikoflowState(state);
+		try {
+			this.#nikoflowCallbacks = await this.installNikoflowMode({
+				isGateSatisfied: current => current.gateRequestId === null,
+			});
+		} catch (error) {
+			this.setNikoflowState(undefined);
+			throw error;
+		}
+		if (options.persist !== false) {
+			this.sessionManager.appendModeChange("nikoflow", { depth });
+		}
+		if (options.sendContext !== false) {
+			await this.sendNikoflowContext();
+		}
+	}
+
+	deactivateNikoflowMode(options: Pick<AgentSessionNikoflowActivationOptions, "persist"> = {}): void {
+		this.#nikoflowCallbacks?.uninstall();
+		this.#nikoflowCallbacks = undefined;
+		this.setNikoflowState(undefined);
+		if (options.persist !== false) {
+			this.sessionManager.appendModeChange("none");
+		}
+	}
+
 	getGoalModeState(): GoalModeState | undefined {
 		return this.#goalModeState;
 	}
@@ -7047,7 +7155,23 @@ export class AgentSession {
 			},
 			{
 				...options,
-				enqueueFollowUp: options.enqueueFollowUp ?? (message => session.followUp(message)),
+				getState: options.getState ?? (() => session.getNikoflowState()),
+				enqueueFollowUp:
+					options.enqueueFollowUp ??
+					(async message => {
+						await session.sendCustomMessage(
+							{
+								customType: "nikoflow-gate-hold",
+								content: message,
+								display: true,
+								attribution: "agent",
+							},
+							{ deliverAs: "followUp" },
+						);
+					}),
+				advanceHumanGate: messages => {
+					session.#advanceNikoflowHumanGate(messages);
+				},
 			},
 		);
 	}
