@@ -1,4 +1,4 @@
-import { humanGateAccepted } from "./gates";
+import { detectReviewerVerdict, humanGateAccepted, type ReviewerVerdict } from "./gates";
 import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
@@ -33,6 +33,12 @@ export type OnTurnEnd<TMessages = unknown, TContext = unknown> = (
 
 export type OnBeforeYield = () => Promise<void> | void;
 export type ToolChoiceGetter<TDirective = unknown> = () => TDirective | undefined;
+export type NikoflowStateGateAdvance = (state: NikoflowState) => Promise<void> | void;
+export type NikoflowReviewerRequest = (
+	state: NikoflowState,
+) => Promise<unknown | null | undefined> | unknown | null | undefined;
+export type NikoflowReviewerGateAdvance = (state: NikoflowState, verdict: ReviewerVerdict) => Promise<void> | void;
+export type NikoflowReviewerBlock = (state: NikoflowState, toolResult: unknown) => Promise<void> | void;
 
 export interface NikoflowToolPolicy {
 	hasFailingTest?: () => boolean;
@@ -50,6 +56,12 @@ export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = u
 	getToolChoice?: ToolChoiceGetter<TDirective>;
 	nikoflowToolChoice?: ToolChoiceGetter<TDirective>;
 	advanceHumanGate?: OnTurnEnd<TMessages, TContext>;
+	acceptReviewerVerdicts?: OnTurnEnd<TMessages, TContext>;
+	advanceExecuteGate?: NikoflowStateGateAdvance;
+	requestReviewer?: NikoflowReviewerRequest;
+	advanceReviewerGate?: NikoflowReviewerGateAdvance;
+	onReviewerBlock?: NikoflowReviewerBlock;
+	afterBeforeYield?: OnBeforeYield;
 }
 
 export interface NikoflowCallbackBundle<TMessages = unknown, TContext = unknown, TDirective = unknown> {
@@ -178,6 +190,21 @@ export function advanceNikoflowHumanGate<TMessage>(
 	return ensureNikoflowHumanGate(advancePhase(state), options);
 }
 
+export function advanceNikoflowExecuteGate(
+	state: NikoflowState,
+	options: Pick<NikoflowHumanGateAdvanceOptions<unknown>, "nextGateRequestId" | "now">,
+): NikoflowState {
+	if (currentPhase(state) !== "execute") return state;
+	return mintGateRequest(advancePhase(state), options.nextGateRequestId(), options.now());
+}
+
+export function advanceNikoflowReviewerGate(state: NikoflowState, verdict: ReviewerVerdict): NikoflowState {
+	if (currentPhase(state) !== "verify") return state;
+	if (verdict.verdict !== "pass") return state;
+	if (state.gateRequestId !== verdict.gateId) return state;
+	return advancePhase(state);
+}
+
 export function createNikoflowBeforeToolCall(
 	getState: () => NikoflowState | null | undefined,
 	previous?: BeforeToolCall,
@@ -219,10 +246,33 @@ export function createNikoflowOnBeforeYield(
 	isGateSatisfied: (state: NikoflowState) => boolean,
 	enqueueFollowUp: (message: string) => void | Promise<void>,
 	previous?: OnBeforeYield,
+	advanceExecuteGate?: NikoflowStateGateAdvance,
+	requestReviewer?: NikoflowReviewerRequest,
+	advanceReviewerGate?: NikoflowReviewerGateAdvance,
+	onReviewerBlock?: NikoflowReviewerBlock,
+	afterNikoflow?: OnBeforeYield,
 ): OnBeforeYield {
 	return async () => {
 		await previous?.();
-		const state = getState();
+		let state = getState();
+		if (state && currentPhase(state) === "execute") {
+			await advanceExecuteGate?.(state);
+			state = getState();
+		}
+		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
+			const reviewerToolResult = await requestReviewer?.(state);
+			if (reviewerToolResult) {
+				const result = detectReviewerVerdict(reviewerToolResult, state);
+				if (result.matched) {
+					await advanceReviewerGate?.(state, result.verdict);
+				} else if (result.reason === "blocked") {
+					await onReviewerBlock?.(state, reviewerToolResult);
+				}
+				state = getState();
+			}
+		}
+		await afterNikoflow?.();
+		state = getState();
 		if (!state?.gateRequestId || isGateSatisfied(state)) return;
 		await enqueueFollowUp(formatGateHoldMessage(state));
 	};
@@ -231,9 +281,15 @@ export function createNikoflowOnBeforeYield(
 export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unknown, TDirective = unknown>(
 	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
 ): NikoflowCallbackBundle<TMessages, TContext, TDirective> {
-	const onTurnEnd = options.afterTurnEnd
-		? createNikoflowOnTurnEnd(options.onTurnEnd, options.afterTurnEnd)
-		: options.onTurnEnd;
+	const afterTurnEnd =
+		options.afterTurnEnd || options.advanceHumanGate || options.acceptReviewerVerdicts
+			? async (messages: TMessages, signal?: AbortSignal, context?: TContext) => {
+					await options.afterTurnEnd?.(messages, signal, context);
+					await options.advanceHumanGate?.(messages, signal, context);
+					await options.acceptReviewerVerdicts?.(messages, signal, context);
+				}
+			: undefined;
+	const onTurnEnd = afterTurnEnd ? createNikoflowOnTurnEnd(options.onTurnEnd, afterTurnEnd) : options.onTurnEnd;
 	const getToolChoice = options.nikoflowToolChoice
 		? createNikoflowGetToolChoice(options.getToolChoice, options.nikoflowToolChoice)
 		: options.getToolChoice;
@@ -245,6 +301,11 @@ export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unk
 			options.isGateSatisfied,
 			options.enqueueFollowUp,
 			options.onBeforeYield,
+			options.advanceExecuteGate,
+			options.requestReviewer,
+			options.advanceReviewerGate,
+			options.onReviewerBlock,
+			options.afterBeforeYield,
 		),
 		...(onTurnEnd ? { onTurnEnd } : {}),
 		...(getToolChoice ? { getToolChoice } : {}),
@@ -318,11 +379,18 @@ export async function installNikoflowAgentSessionMode<
 
 	await applyCurrentRole();
 
+	const { acceptReviewerVerdicts, advanceHumanGate, afterBeforeYield, afterTurnEnd, ...callbackOptions } = options;
+
 	return installNikoflowCallbacks(host, {
-		...options,
+		...callbackOptions,
 		afterTurnEnd: async (messages, signal, context) => {
-			await options.afterTurnEnd?.(messages, signal, context);
-			await options.advanceHumanGate?.(messages, signal, context);
+			await afterTurnEnd?.(messages, signal, context);
+			await advanceHumanGate?.(messages, signal, context);
+			await acceptReviewerVerdicts?.(messages, signal, context);
+			await applyCurrentRole();
+		},
+		afterBeforeYield: async () => {
+			await afterBeforeYield?.();
 			await applyCurrentRole();
 		},
 	});

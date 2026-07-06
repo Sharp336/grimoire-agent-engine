@@ -239,8 +239,11 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { detectReviewerVerdict, parseReviewerVerdict } from "../nikoflow/gates";
 import {
+	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
+	advanceNikoflowReviewerGate,
 	ensureNikoflowHumanGate,
 	type InstalledNikoflowCallbacks,
 	installNikoflowAgentSessionMode,
@@ -250,8 +253,9 @@ import {
 	type ToolChoiceGetter,
 } from "../nikoflow/mode";
 import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
+import { buildReviewerPrompt } from "../nikoflow/reviewer";
 import { assertNikoflowRoleRails } from "../nikoflow/roles";
-import { createState, type NikoflowDepth, type NikoflowState } from "../nikoflow/state";
+import { createState, currentPhase, type NikoflowDepth, type NikoflowState } from "../nikoflow/state";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -416,6 +420,9 @@ const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
  *  thinking/response loop. Steers the model off the repeated content; never displayed. */
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
+const NIKOFLOW_REVIEWER_TOOL_NAME = "nikoflow-reviewer";
+const NIKOFLOW_REVIEWER_MAX_ATTEMPTS = 3;
+const NIKOFLOW_REVIEWER_DIFF_LIMIT = 120_000;
 
 function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") return content;
@@ -1591,6 +1598,7 @@ export class AgentSession {
 	#nikoflowState: NikoflowState | undefined;
 	#nikoflowCallbacks: InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective> | undefined;
 	#nikoflowGateCounter = 0;
+	#nikoflowReviewerAttempts = new Map<string, number>();
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -6910,6 +6918,187 @@ export class AgentSession {
 		}
 	}
 
+	#advanceNikoflowExecuteGate(state: NikoflowState): void {
+		const next = advanceNikoflowExecuteGate(state, {
+			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
+			now: () => Date.now(),
+		});
+		if (next !== state) this.setNikoflowState(next);
+	}
+
+	#advanceNikoflowReviewerGate(state: NikoflowState, verdict: { gateId: string; verdict: "pass" | "block" }): void {
+		const next = advanceNikoflowReviewerGate(state, verdict);
+		if (next === state) return;
+		this.#nikoflowReviewerAttempts.delete(verdict.gateId);
+		this.setNikoflowState(next);
+	}
+
+	#acceptNikoflowReviewerVerdicts(context: AgentTurnEndContext | undefined): void {
+		const state = this.#nikoflowState;
+		if (!state || currentPhase(state) !== "verify" || !state.gateRequestId) return;
+		for (const toolResult of context?.toolResults ?? []) {
+			const result = detectReviewerVerdict(toolResult, state);
+			if (!result.matched) continue;
+			this.#advanceNikoflowReviewerGate(state, result.verdict);
+			return;
+		}
+	}
+
+	async #requestNikoflowReviewer(
+		state: NikoflowState,
+	): Promise<Extract<AgentMessage, { role: "toolResult" }> | undefined> {
+		const gateId = state.gateRequestId;
+		if (currentPhase(state) !== "verify" || !gateId) return undefined;
+
+		const attempts = this.#nikoflowReviewerAttempts.get(gateId) ?? 0;
+		if (attempts >= NIKOFLOW_REVIEWER_MAX_ATTEMPTS) {
+			if (attempts === NIKOFLOW_REVIEWER_MAX_ATTEMPTS) {
+				this.#nikoflowReviewerAttempts.set(gateId, attempts + 1);
+				await this.sendCustomMessage(
+					{
+						customType: "nikoflow-reviewer-escalation",
+						content: `Nikoflow reviewer gate "${gateId}" reached ${NIKOFLOW_REVIEWER_MAX_ATTEMPTS} attempts. Escalate to the user; do not self-approve.`,
+						display: true,
+						attribution: "agent",
+					},
+					{ deliverAs: "followUp" },
+				);
+			}
+			return undefined;
+		}
+		this.#nikoflowReviewerAttempts.set(gateId, attempts + 1);
+
+		const resolved = this.resolveRoleModelWithThinking("advisor");
+		const model = resolved.model ?? this.model;
+		if (!model) return undefined;
+		const thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
+
+		const promptText = buildReviewerPrompt({
+			gateId,
+			phase: "verify",
+			task: this.#nikoflowOriginalTask(),
+			diff: await this.#nikoflowDiff(),
+			acceptance: this.#nikoflowAcceptance(),
+		});
+		const reviewerSessionId = this.sessionId ? `${this.sessionId}-${NIKOFLOW_REVIEWER_TOOL_NAME}` : undefined;
+		const reviewerAgent = new Agent({
+			initialState: {
+				systemPrompt: [promptText],
+				model,
+				thinkingLevel: toReasoningEffort(thinkingLevel),
+				tools: [],
+			},
+			sessionId: reviewerSessionId,
+			promptCacheKey: this.agent.promptCacheKey ?? reviewerSessionId,
+			providerSessionState: this.#providerSessionState,
+			preferWebsockets: this.#preferWebsockets,
+			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, reviewerSessionId),
+			streamFn: this.#advisorStreamFn,
+			onPayload: this.#onPayload,
+			onResponse: this.#onResponse,
+			onSseEvent: this.#onSseEvent,
+			transformProviderContext: this.#transformProviderContext,
+			intentTracing: false,
+		});
+		reviewerAgent.setDisableReasoning(shouldDisableReasoning(thinkingLevel));
+
+		try {
+			await reviewerAgent.prompt("Return the structured Nikoflow reviewer verdict JSON now.");
+			return this.#nikoflowReviewerToolResult(gateId, this.#lastAssistantText(reviewerAgent.state.messages));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return this.#nikoflowReviewerToolResult(gateId, `Reviewer failed: ${message}`, true);
+		}
+	}
+
+	async #notifyNikoflowReviewerBlock(toolResult: unknown): Promise<void> {
+		const rec = toolResult && typeof toolResult === "object" ? (toolResult as Record<string, unknown>) : null;
+		const verdict = parseReviewerVerdict(rec?.content);
+		const gateId = verdict?.gateId ?? "unknown";
+		const score = typeof verdict?.score === "number" ? ` Score: ${verdict.score}.` : "";
+		const reason = verdict?.reason?.trim() ? ` Reason: ${verdict.reason.trim()}` : "";
+		await this.sendCustomMessage(
+			{
+				customType: "nikoflow-reviewer-block",
+				content: `Nikoflow reviewer blocked gate "${gateId}".${score}${reason}\nFix the review finding, then yield for another independent review. Do not self-approve.`,
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "followUp" },
+		);
+	}
+
+	#nikoflowReviewerToolResult(
+		gateId: string,
+		text: string,
+		isError = false,
+	): Extract<AgentMessage, { role: "toolResult" }> {
+		return {
+			role: "toolResult",
+			toolCallId: `${NIKOFLOW_REVIEWER_TOOL_NAME}-${gateId}`,
+			toolName: NIKOFLOW_REVIEWER_TOOL_NAME,
+			content: [{ type: "text", text }],
+			details: { gateId },
+			isError,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	#nikoflowOriginalTask(): string {
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const text = this.#extractTextContent(entry.message.content).trim();
+			if (text) return text;
+		}
+		return "(not supplied)";
+	}
+
+	#nikoflowAcceptance(): string[] {
+		const fromTodos = this.getTodoPhases().flatMap(phase =>
+			phase.tasks.map(task => task.content.trim()).filter(Boolean),
+		);
+		if (fromTodos.length > 0) return fromTodos;
+		return [this.#nikoflowOriginalTask()];
+	}
+
+	async #nikoflowDiff(): Promise<string> {
+		const proc = Bun.spawn(["git", "diff", "--no-ext-diff", "--"], {
+			cwd: this.sessionManager.getCwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		if (exitCode !== 0) return `git diff failed: ${stderr.trim() || `exit ${exitCode}`}`;
+		const diff = stdout.trim() || "(empty)";
+		if (diff.length <= NIKOFLOW_REVIEWER_DIFF_LIMIT) return diff;
+		return `${diff.slice(0, NIKOFLOW_REVIEWER_DIFF_LIMIT)}\n\n[diff truncated for reviewer]`;
+	}
+
+	#lastAssistantText(messages: readonly AgentMessage[]): string {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "assistant") return this.#extractTextContent(message.content).trim();
+		}
+		return "";
+	}
+
+	#extractTextContent(content: unknown): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		const parts: string[] = [];
+		for (const item of content) {
+			if (!item || typeof item !== "object") continue;
+			const rec = item as Record<string, unknown>;
+			if (rec.type === "text" && typeof rec.text === "string") parts.push(rec.text);
+		}
+		return parts.join("");
+	}
+
 	async sendNikoflowContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
 		const state = this.#nikoflowState;
 		if (!state) return;
@@ -6938,6 +7127,7 @@ export class AgentSession {
 			const model = this.resolveRoleModelWithThinking(role).model;
 			return model ? { provider: model.provider, model: model.id } : null;
 		});
+		this.#nikoflowReviewerAttempts.clear();
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
 		const state = options.deferHumanGateMint ? createState(depth) : this.#ensureNikoflowHumanGate(createState(depth));
@@ -6961,6 +7151,7 @@ export class AgentSession {
 	deactivateNikoflowMode(options: Pick<AgentSessionNikoflowActivationOptions, "persist"> = {}): void {
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
+		this.#nikoflowReviewerAttempts.clear();
 		this.setNikoflowState(undefined);
 		if (options.persist !== false) {
 			this.sessionManager.appendModeChange("none");
@@ -7172,6 +7363,17 @@ export class AgentSession {
 				advanceHumanGate: messages => {
 					session.#advanceNikoflowHumanGate(messages);
 				},
+				acceptReviewerVerdicts: (_messages, _signal, context) => {
+					session.#acceptNikoflowReviewerVerdicts(context);
+				},
+				advanceExecuteGate: state => {
+					session.#advanceNikoflowExecuteGate(state);
+				},
+				requestReviewer: state => session.#requestNikoflowReviewer(state),
+				advanceReviewerGate: (state, verdict) => {
+					session.#advanceNikoflowReviewerGate(state, verdict);
+				},
+				onReviewerBlock: (_state, toolResult) => session.#notifyNikoflowReviewerBlock(toolResult),
 			},
 		);
 	}

@@ -6,6 +6,7 @@ describe("nikoflow reviewer", () => {
 		const prompt = buildReviewerPrompt({
 			gateId: "g1",
 			phase: "verify",
+			task: "Fix execute to verify transition.",
 			diff: "diff --git a/a b/a",
 			acceptance: ["tests pass"],
 			adr: "Use existing callback chain.",
@@ -15,6 +16,7 @@ describe("nikoflow reviewer", () => {
 
 		expect(prompt).toContain("primary agent did not author this prompt");
 		expect(prompt).toContain("Gate id: g1");
+		expect(prompt).toContain("Fix execute to verify transition.");
 		expect(prompt).toContain("1. tests pass");
 		expect(prompt).toContain("Use existing callback chain.");
 		expect(prompt).toContain("Return only JSON");

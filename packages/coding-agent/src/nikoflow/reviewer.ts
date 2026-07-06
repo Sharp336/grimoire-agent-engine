@@ -4,6 +4,7 @@ import type { NikoflowPhase } from "./state";
 export interface ReviewerPromptInput {
 	gateId: string;
 	phase: Extract<NikoflowPhase, "execute" | "verify">;
+	task: string;
 	diff: string;
 	acceptance: readonly string[];
 	adr?: string;
@@ -17,6 +18,9 @@ export function buildReviewerPrompt(input: ReviewerPromptInput): string {
 		"You are the independent Nikoflow reviewer. The primary agent did not author this prompt.",
 		`Gate id: ${input.gateId}`,
 		`Phase: ${input.phase}`,
+		"",
+		"Original task:",
+		input.task.trim() || "(not supplied)",
 		"",
 		"Acceptance criteria:",
 		acceptance,

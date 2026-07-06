@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { detectReviewerVerdict } from "../gates";
 import {
+	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
+	advanceNikoflowReviewerGate,
 	createNikoflowBeforeToolCall,
 	createNikoflowCallbackBundle,
 	createNikoflowGetToolChoice,
@@ -14,7 +17,7 @@ import {
 	type NikoflowCallbackHost,
 	nikoflowToolViolation,
 } from "../mode";
-import { advancePhase, createState, currentPhase, mintGateRequest } from "../state";
+import { advancePhase, createState, currentPhase, currentRole, isComplete, mintGateRequest } from "../state";
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -339,5 +342,64 @@ describe("nikoflow mode callback helpers", () => {
 		state = advancePhase(createState("tactical"));
 		await installedTurn?.([]);
 		expect(appliedRoles).toEqual(["plan", "default"]);
+	});
+
+	test("execute yields into verify and only a matching reviewer pass completes", async () => {
+		let gateCounter = 0;
+		let state = advancePhase(createState("tactical"));
+		const followUps: string[] = [];
+		const reviewerResults: unknown[] = [];
+		const bundle = createNikoflowCallbackBundle<unknown[], { toolResults?: unknown[] }, string>({
+			getState: () => state,
+			isGateSatisfied: current => current.gateRequestId === null,
+			enqueueFollowUp: message => {
+				followUps.push(message);
+			},
+			afterTurnEnd: () => undefined,
+			advanceExecuteGate: current => {
+				state = advanceNikoflowExecuteGate(current, {
+					nextGateRequestId: () => `gate-${++gateCounter}`,
+					now: () => 100,
+				});
+			},
+			requestReviewer: () => reviewerResults.shift(),
+			advanceReviewerGate: (current, verdict) => {
+				state = advanceNikoflowReviewerGate(current, verdict);
+			},
+			acceptReviewerVerdicts: (_messages, _signal, context) => {
+				for (const toolResult of context?.toolResults ?? []) {
+					const result = detectReviewerVerdict(toolResult, state);
+					if (result.matched) state = advanceNikoflowReviewerGate(state, result.verdict);
+				}
+			},
+		});
+
+		await bundle.onBeforeYield();
+		expect(currentPhase(state)).toBe("verify");
+		expect(currentRole(state)).toBe("advisor");
+		expect(isComplete(state)).toBe(false);
+		expect(followUps).toHaveLength(1);
+		const gateId = state.gateRequestId;
+		expect(gateId).toBe("gate-1");
+
+		await bundle.onTurnEnd?.([{ role: "assistant", content: [{ type: "text", text: "done" }] }]);
+		expect(currentPhase(state)).toBe("verify");
+		expect(isComplete(state)).toBe(false);
+
+		reviewerResults.push({ type: "tool_result", content: { gateId, verdict: "block", reason: "needs fixes" } });
+		await bundle.onBeforeYield();
+		expect(currentPhase(state)).toBe("verify");
+		expect(state.gateRequestId).toBe(gateId);
+		expect(followUps).toHaveLength(2);
+
+		reviewerResults.push({ type: "tool_result", content: { gateId: "stale", verdict: "pass" } });
+		await bundle.onBeforeYield();
+		expect(currentPhase(state)).toBe("verify");
+		expect(state.gateRequestId).toBe(gateId);
+
+		await bundle.onTurnEnd?.([], undefined, {
+			toolResults: [{ type: "tool_result", content: { gateId, verdict: "pass", score: 9.4 } }],
+		});
+		expect(isComplete(state)).toBe(true);
 	});
 });
