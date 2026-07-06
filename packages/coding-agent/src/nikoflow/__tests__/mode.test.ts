@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+	advanceNikoflowAdvisorGate,
 	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
-	advanceNikoflowReviewerGate,
 	createNikoflowBeforeToolCall,
 	createNikoflowCallbackBundle,
 	createNikoflowGetToolChoice,
@@ -48,7 +48,7 @@ function roleModel(role: string): MockModel {
 
 function phaseEntryHost(
 	events: string[],
-	reviewerResults: unknown[],
+	advisorReviews: unknown[],
 	setState: (state: NikoflowState) => void,
 ): NikoflowPhaseEntryHost<MockModel> {
 	return {
@@ -66,11 +66,15 @@ function phaseEntryHost(
 		sendNikoflowContext: state => {
 			events.push(`context:${currentPhase(state) ?? "complete"}:${state.gateRequestId ?? "none"}`);
 		},
-		requestReviewer: state => {
-			events.push(`reviewer:${state.gateRequestId ?? "none"}`);
-			return reviewerResults.shift();
+		requestAdvisorReview: state => {
+			events.push(`advisor:${state.gateRequestId ?? "none"}`);
+			return advisorReviews.shift();
 		},
 	};
+}
+
+function advisorReview(gateId: string, severity: "nit" | "concern" | "blocker" = "nit", note = "ok") {
+	return { gateId, reviewed: true, notes: [{ severity, note }] };
 }
 
 describe("nikoflow mode callback helpers", () => {
@@ -211,7 +215,7 @@ describe("nikoflow mode callback helpers", () => {
 					nextGateRequestId: () => "verify-gate",
 					now: () => 100,
 				});
-				return result.reviewerToolResult;
+				return result.advisorReview;
 			},
 		);
 
@@ -229,7 +233,7 @@ describe("nikoflow mode callback helpers", () => {
 			"role:advisor",
 			"state:verify:verify-gate",
 			"context:verify:verify-gate",
-			"reviewer:verify-gate",
+			"advisor:verify-gate",
 		]);
 	});
 
@@ -426,11 +430,11 @@ describe("nikoflow mode callback helpers", () => {
 		expect(appliedRoles).toEqual([]);
 	});
 
-	test("enters a phase with role, fresh context, gate mint, and verify reviewer in one driver", async () => {
+	test("enters a phase with role, fresh context, gate mint, and advisor review in one driver", async () => {
 		let state = createState("standard");
 		const events: string[] = [];
-		const reviewerResults: unknown[] = [{ type: "tool_result", content: { gateId: "verify-gate", verdict: "pass" } }];
-		const host = phaseEntryHost(events, reviewerResults, next => {
+		const advisorReviews: unknown[] = [advisorReview("verify-gate")];
+		const host = phaseEntryHost(events, advisorReviews, next => {
 			state = next;
 		});
 
@@ -449,26 +453,24 @@ describe("nikoflow mode callback helpers", () => {
 			now: () => 20,
 		});
 
-		expect(result.reviewerToolResult).toEqual({
-			type: "tool_result",
-			content: { gateId: "verify-gate", verdict: "pass" },
-		});
+		expect(result.advisorReview).toEqual(advisorReview("verify-gate"));
 		expect(currentRole(state)).toBe("advisor");
 		expect(events).toEqual([
 			"role:advisor",
 			"state:verify:verify-gate",
 			"context:verify:verify-gate",
-			"reviewer:verify-gate",
+			"advisor:verify-gate",
 		]);
 	});
 
-	test("execute completion enters verify through the driver and requests a reviewer", async () => {
+	test("execute completion enters verify through the driver and requests advisor review", async () => {
 		let gateCounter = 0;
 		let state = advancePhase(createState("tactical"));
 		const events: string[] = [];
 		const followUps: string[] = [];
-		const reviewerResults: unknown[] = [{ type: "tool_result", content: { gateId: "gate-1", verdict: "block" } }];
-		const host = phaseEntryHost(events, reviewerResults, next => {
+		const blocked: string[] = [];
+		const advisorReviews: unknown[] = [advisorReview("gate-1", "blocker", "needs fixes")];
+		const host = phaseEntryHost(events, advisorReviews, next => {
 			state = next;
 		});
 		const bundle = createNikoflowCallbackBundle<unknown[], { toolResults?: unknown[] }, string>({
@@ -487,10 +489,13 @@ describe("nikoflow mode callback helpers", () => {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100,
 				});
-				return result.reviewerToolResult;
+				return result.advisorReview;
 			},
-			advanceReviewerGate: (current, verdict) => {
-				state = advanceNikoflowReviewerGate(current, verdict);
+			advanceAdvisorGate: (current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			onAdvisorBlock: (_current, review) => {
+				blocked.push(review.notes[0]?.note ?? "");
 			},
 		});
 
@@ -508,8 +513,9 @@ describe("nikoflow mode callback helpers", () => {
 		expect(isComplete(state)).toBe(false);
 		const gateId = state.gateRequestId;
 		expect(gateId).toBe("gate-1");
-		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "reviewer:gate-1"]);
-		expect(followUps).toHaveLength(2);
+		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "advisor:gate-1"]);
+		expect(followUps).toHaveLength(1);
+		expect(blocked).toEqual(["needs fixes"]);
 
 		await bundle.onTurnEnd?.(
 			[{ role: "assistant", content: [{ type: "text", text: `{"gateId":"${gateId}","verdict":"pass"}` }] }],
@@ -520,7 +526,7 @@ describe("nikoflow mode callback helpers", () => {
 		expect(isComplete(state)).toBe(false);
 	});
 
-	test("reviewer block retry re-enters verify with a fresh gate and reviewer request", async () => {
+	test("advisor blocker retry re-enters verify with a fresh gate and advisor review", async () => {
 		let gateCounter = 0;
 		let reviewerAttempt = 0;
 		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
@@ -529,17 +535,14 @@ describe("nikoflow mode callback helpers", () => {
 		const host = phaseEntryHost(events, [], next => {
 			state = next;
 		});
-		host.requestReviewer = current => {
-			events.push(`reviewer:${current.gateRequestId ?? "none"}`);
+		host.requestAdvisorReview = current => {
+			events.push(`advisor:${current.gateRequestId ?? "none"}`);
 			reviewerAttempt++;
-			return {
-				type: "tool_result",
-				content: {
-					gateId: current.gateRequestId,
-					verdict: reviewerAttempt === 1 ? "block" : "pass",
-					reason: reviewerAttempt === 1 ? "needs fixes" : undefined,
-				},
-			};
+			return advisorReview(
+				current.gateRequestId ?? "none",
+				reviewerAttempt === 1 ? "blocker" : "nit",
+				reviewerAttempt === 1 ? "needs fixes" : "clean",
+			);
 		};
 		const bundle = createNikoflowCallbackBundle<unknown[], { toolResults?: unknown[] }, string>({
 			getState: () => state,
@@ -551,19 +554,19 @@ describe("nikoflow mode callback helpers", () => {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100 + gateCounter,
 				});
-				return result.reviewerToolResult;
+				return result.advisorReview;
 			},
-			requestReviewer: async current => {
+			requestAdvisorReview: async current => {
 				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(current), current, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100 + gateCounter,
 				});
-				return result.reviewerToolResult;
+				return result.advisorReview;
 			},
-			advanceReviewerGate: (current, verdict) => {
-				state = advanceNikoflowReviewerGate(current, verdict);
+			advanceAdvisorGate: (current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
 			},
-			onReviewerBlock: current => {
+			onAdvisorBlock: current => {
 				blocked.push(current.gateRequestId ?? "none");
 			},
 		});
@@ -572,7 +575,7 @@ describe("nikoflow mode callback helpers", () => {
 		expect(currentPhase(state)).toBe("verify");
 		expect(state.gateRequestId).toBe("gate-1");
 		expect(blocked).toEqual(["gate-1"]);
-		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "reviewer:gate-1"]);
+		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "advisor:gate-1"]);
 
 		state = markPhaseTurnStarted(state);
 		await bundle.onBeforeYield();
@@ -581,11 +584,62 @@ describe("nikoflow mode callback helpers", () => {
 			"role:advisor",
 			"state:verify:gate-2",
 			"context:verify:gate-2",
-			"reviewer:gate-2",
+			"advisor:gate-2",
 		]);
 	});
 
-	test("caps repeated reviewer-block follow-ups and then yields externally", async () => {
+	test("verify gate passes only after a clean native advisor review", async () => {
+		let state = markPhaseTurnStarted(mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"));
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => state.gateRequestId === null,
+			() => undefined,
+			undefined,
+			undefined,
+			() => advisorReview("gate-1", "concern", "non-blocking caveat"),
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(isComplete(state)).toBe(true);
+		expect(externalActions).toEqual([]);
+	});
+
+	test("primary text never satisfies the verify gate", async () => {
+		let state = markPhaseTurnStarted(mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"));
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => state.gateRequestId === null,
+			() => undefined,
+			undefined,
+			undefined,
+			() => ({ type: "tool_result", content: { gateId: "gate-1", verdict: "pass" } }),
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(currentPhase(state)).toBe("verify");
+		expect(isComplete(state)).toBe(false);
+		expect(externalActions).toHaveLength(1);
+	});
+
+	test("holds externally when advisor review is absent or down", async () => {
 		const state = markPhaseTurnStarted(
 			mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"),
 		);
@@ -599,7 +653,7 @@ describe("nikoflow mode callback helpers", () => {
 			},
 			undefined,
 			undefined,
-			() => ({ type: "tool_result", details: { gateId: "gate-1" }, content: { verdict: "block" } }),
+			() => undefined,
 			undefined,
 			undefined,
 			(_state, message) => {
@@ -612,8 +666,8 @@ describe("nikoflow mode callback helpers", () => {
 		await onBeforeYield();
 		await onBeforeYield();
 
-		expect(followUps).toHaveLength(3);
-		expect(externalActions).toHaveLength(1);
+		expect(followUps).toHaveLength(0);
+		expect(externalActions).toHaveLength(4);
 		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
 	});
 });

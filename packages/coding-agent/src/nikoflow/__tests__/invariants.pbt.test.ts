@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { detectReviewerVerdict } from "../gates";
+import { normalizeNikoflowAdvisorReview } from "../mode";
 import {
 	advancePhase,
 	createState,
@@ -110,7 +110,7 @@ describe("nikoflow hard invariants", () => {
 			expect(gateMatches(state, primary)).toBe(false);
 			expect(gateMatches(state, null)).toBe(false);
 			expect(gateMatches(state, gateId)).toBe(true);
-			expect(detectReviewerVerdict(primary, state)).toEqual({ matched: false, reason: "not_tool_result" });
+			expect(normalizeNikoflowAdvisorReview(primary, state)).toBeNull();
 		}
 	});
 

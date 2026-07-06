@@ -1,4 +1,4 @@
-import { detectReviewerVerdict, humanGateAccepted, type ReviewerVerdict } from "./gates";
+import { humanGateAccepted } from "./gates";
 import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
@@ -39,11 +39,24 @@ export type ToolChoiceGetter<TDirective = unknown> = () => TDirective | undefine
 export type NikoflowStateGateAdvance = (
 	state: NikoflowState,
 ) => Promise<unknown | null | undefined> | unknown | null | undefined;
-export type NikoflowReviewerRequest = (
+export type NikoflowAdvisorReviewSeverity = "nit" | "concern" | "blocker";
+
+export interface NikoflowAdvisorReviewNote {
+	note: string;
+	severity?: NikoflowAdvisorReviewSeverity;
+}
+
+export interface NikoflowAdvisorReview {
+	gateId: string;
+	reviewed: true;
+	notes: readonly NikoflowAdvisorReviewNote[];
+}
+
+export type NikoflowAdvisorReviewRequest = (
 	state: NikoflowState,
 ) => Promise<unknown | null | undefined> | unknown | null | undefined;
-export type NikoflowReviewerGateAdvance = (state: NikoflowState, verdict: ReviewerVerdict) => Promise<void> | void;
-export type NikoflowReviewerBlock = (state: NikoflowState, toolResult: unknown) => Promise<void> | void;
+export type NikoflowAdvisorGateAdvance = (state: NikoflowState, review: NikoflowAdvisorReview) => Promise<void> | void;
+export type NikoflowAdvisorBlock = (state: NikoflowState, review: NikoflowAdvisorReview) => Promise<void> | void;
 export type NikoflowGateExternalAction = (state: NikoflowState, message: string) => Promise<void> | void;
 
 export interface NikoflowToolPolicy {
@@ -63,9 +76,9 @@ export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = u
 	nikoflowToolChoice?: ToolChoiceGetter<TDirective>;
 	advanceHumanGate?: OnTurnEnd<TMessages, TContext>;
 	advanceExecuteGate?: NikoflowStateGateAdvance;
-	requestReviewer?: NikoflowReviewerRequest;
-	advanceReviewerGate?: NikoflowReviewerGateAdvance;
-	onReviewerBlock?: NikoflowReviewerBlock;
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest;
+	advanceAdvisorGate?: NikoflowAdvisorGateAdvance;
+	onAdvisorBlock?: NikoflowAdvisorBlock;
 	onGateNeedsExternalAction?: NikoflowGateExternalAction;
 	afterBeforeYield?: OnBeforeYield;
 }
@@ -141,7 +154,7 @@ export interface NikoflowPhaseEntryHost<
 	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
 	setState?: (state: NikoflowState) => Promise<void> | void;
 	sendNikoflowContext?: (state: NikoflowState, transition: NikoflowPhaseTransition) => Promise<void> | void;
-	requestReviewer?: NikoflowReviewerRequest;
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest;
 }
 
 export interface NikoflowPhaseEntryOptions {
@@ -149,12 +162,12 @@ export interface NikoflowPhaseEntryOptions {
 	now: () => number;
 	mintGate?: boolean;
 	sendContext?: boolean;
-	requestReviewer?: boolean;
+	requestAdvisorReview?: boolean;
 }
 
 export interface NikoflowPhaseEntryResult {
 	state: NikoflowState;
-	reviewerToolResult?: unknown | null;
+	advisorReview?: unknown | null;
 }
 
 export async function enterNikoflowPhase<
@@ -194,9 +207,11 @@ export async function enterNikoflowPhase<
 		await host.sendNikoflowContext?.(entered, transition);
 	}
 
-	const reviewerToolResult =
-		nextPhase === "verify" && options.requestReviewer !== false ? await host.requestReviewer?.(entered) : undefined;
-	return { state: entered, reviewerToolResult };
+	const advisorReview =
+		nextPhase === "verify" && options.requestAdvisorReview !== false
+			? await host.requestAdvisorReview?.(entered)
+			: undefined;
+	return { state: entered, advisorReview };
 }
 
 const DIRECT_WRITE_TOOLS = new Set(["apply_patch", "edit", "multi_edit", "str_replace_editor", "write", "write_file"]);
@@ -276,10 +291,40 @@ export function advanceNikoflowExecuteGate(
 	return advancePhase(state);
 }
 
-export function advanceNikoflowReviewerGate(state: NikoflowState, verdict: ReviewerVerdict): NikoflowState {
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function normalizeAdvisorReviewNote(value: unknown): NikoflowAdvisorReviewNote | null {
+	const rec = asRecord(value);
+	if (!rec || typeof rec.note !== "string" || rec.note.trim().length === 0) return null;
+	const note: NikoflowAdvisorReviewNote = { note: rec.note };
+	if (rec.severity === "nit" || rec.severity === "concern" || rec.severity === "blocker") {
+		note.severity = rec.severity;
+	}
+	return note;
+}
+
+export function normalizeNikoflowAdvisorReview(value: unknown, state: NikoflowState): NikoflowAdvisorReview | null {
+	const rec = asRecord(value);
+	if (rec?.reviewed !== true || typeof rec.gateId !== "string") return null;
+	if (state.gateRequestId !== rec.gateId) return null;
+	if (!Array.isArray(rec.notes)) return null;
+	const notes = rec.notes
+		.map(normalizeAdvisorReviewNote)
+		.filter((note): note is NikoflowAdvisorReviewNote => note !== null);
+	if (notes.length === 0) return null;
+	return { gateId: rec.gateId, reviewed: true, notes };
+}
+
+export function nikoflowAdvisorReviewBlockers(review: NikoflowAdvisorReview): string[] {
+	return review.notes.filter(note => note.severity === "blocker").map(note => note.note);
+}
+
+export function advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
 	if (currentPhase(state) !== "verify") return state;
-	if (verdict.verdict !== "pass") return state;
-	if (state.gateRequestId !== verdict.gateId) return state;
+	if (state.gateRequestId !== review.gateId) return state;
+	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
 	return advancePhase(state);
 }
 
@@ -338,9 +383,9 @@ export function createNikoflowOnBeforeYield(
 	enqueueFollowUp: (message: string) => void | Promise<void>,
 	previous?: OnBeforeYield,
 	advanceExecuteGate?: NikoflowStateGateAdvance,
-	requestReviewer?: NikoflowReviewerRequest,
-	advanceReviewerGate?: NikoflowReviewerGateAdvance,
-	onReviewerBlock?: NikoflowReviewerBlock,
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest,
+	advanceAdvisorGate?: NikoflowAdvisorGateAdvance,
+	onAdvisorBlock?: NikoflowAdvisorBlock,
 	onGateNeedsExternalAction?: NikoflowGateExternalAction,
 	afterNikoflow?: OnBeforeYield,
 ): OnBeforeYield {
@@ -366,32 +411,29 @@ export function createNikoflowOnBeforeYield(
 	return async () => {
 		await previous?.();
 		let state = getState();
-		let reviewerToolResult: unknown | null | undefined;
+		let advisorReviewResult: unknown | null | undefined;
 		if (state && currentPhase(state) === "execute") {
 			if (state.phaseTurnStarted) {
-				reviewerToolResult = await advanceExecuteGate?.(state);
+				advisorReviewResult = await advanceExecuteGate?.(state);
 				state = getState();
 			}
 		}
-		let reviewerBlockNeedsModelWork = false;
-		let reviewerBlockAlreadyQueued = false;
+		let advisorBlockAlreadyQueued = false;
 		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
-			if (!reviewerToolResult && state.phaseTurnStarted) {
-				reviewerToolResult = await requestReviewer?.(state);
+			if (!advisorReviewResult && state.phaseTurnStarted) {
+				advisorReviewResult = await requestAdvisorReview?.(state);
 				state = getState();
 				if (!state) return;
 			}
-			if (reviewerToolResult) {
+			if (advisorReviewResult) {
 				const reviewerState = state;
-				const result = detectReviewerVerdict(reviewerToolResult, reviewerState);
-				if (result.matched) {
-					await advanceReviewerGate?.(reviewerState, result.verdict);
-				} else if (result.reason === "blocked") {
-					if (onReviewerBlock) {
-						await onReviewerBlock(reviewerState, reviewerToolResult);
-						reviewerBlockAlreadyQueued = true;
+				const review = normalizeNikoflowAdvisorReview(advisorReviewResult, reviewerState);
+				if (review) {
+					if (nikoflowAdvisorReviewBlockers(review).length > 0) {
+						await onAdvisorBlock?.(reviewerState, review);
+						advisorBlockAlreadyQueued = true;
 					} else {
-						reviewerBlockNeedsModelWork = true;
+						await advanceAdvisorGate?.(reviewerState, review);
 					}
 				}
 				state = getState();
@@ -410,11 +452,7 @@ export function createNikoflowOnBeforeYield(
 			await yieldForExternalAction(state);
 			return;
 		}
-		if (phase === "verify" && reviewerBlockNeedsModelWork) {
-			await queueGateHold(state);
-			return;
-		}
-		if (phase === "verify" && reviewerBlockAlreadyQueued) return;
+		if (phase === "verify" && advisorBlockAlreadyQueued) return;
 		await yieldForExternalAction(state);
 	};
 }
@@ -442,9 +480,9 @@ export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unk
 			options.enqueueFollowUp,
 			options.onBeforeYield,
 			options.advanceExecuteGate,
-			options.requestReviewer,
-			options.advanceReviewerGate,
-			options.onReviewerBlock,
+			options.requestAdvisorReview,
+			options.advanceAdvisorGate,
+			options.onAdvisorBlock,
 			options.onGateNeedsExternalAction,
 			options.afterBeforeYield,
 		),
