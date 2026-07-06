@@ -40,6 +40,27 @@ function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): 
 	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
 }
 
+function formatControlSequenceForDebug(sequence: string): string {
+	return sequence
+		.replace(/\x1b\\/g, "<ST>")
+		.replace(/\x1b/g, "<ESC>")
+		.replace(/\x07/g, "<BEL>");
+}
+
+function writeThemeDebug(event: string, details: Record<string, unknown> = {}): void {
+	if ($env.OMP_THEME_DEBUG !== "1" && $env.PI_TUI_APPEARANCE_DEBUG !== "1") return;
+	const suffix = Object.keys(details).length > 0 ? ` ${JSON.stringify(details)}` : "";
+	const line = `[omp-theme-debug] terminal ${event}${suffix}\n`;
+	process.stderr.write(line);
+	const logPath = $env.OMP_THEME_DEBUG_LOG || $env.PI_TUI_APPEARANCE_DEBUG_LOG || "";
+	if (!logPath) return;
+	try {
+		fs.appendFileSync(logPath, line);
+	} catch {
+		// Debug logging must not break terminal startup.
+	}
+}
+
 /**
  * Maximum encoded UTF-8 bytes per `process.stdout.write` call on Windows.
  *
@@ -516,6 +537,12 @@ export class ProcessTerminal implements Terminal {
 
 	onAppearanceChange(callback: (appearance: TerminalAppearance) => void): void {
 		this.#appearanceCallbacks.push(callback);
+		if (!this.#appearance) return;
+		try {
+			callback(this.#appearance);
+		} catch {
+			/* ignore callback errors */
+		}
 	}
 
 	onPrivateModeReport(callback: (mode: number, supported: boolean) => void): void {
@@ -834,6 +861,7 @@ export class ProcessTerminal implements Terminal {
 					case "osc11": {
 						if (this.#osc11Pending) {
 							// DA1 arrived before the OSC 11 reply: terminal does not support OSC 11.
+							writeThemeDebug("osc11-unsupported-da1", { queued: this.#osc11QueryQueued });
 							this.#osc11Pending = false;
 							this.#osc11ResponseBuffer = "";
 						}
@@ -922,10 +950,11 @@ export class ProcessTerminal implements Terminal {
 					this.#osc11ResponseBuffer += sequence;
 					const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
 					if (!osc11Match) return;
+					const rawSequence = this.#osc11ResponseBuffer;
 					const [, rHex, gHex, bHex] = osc11Match;
 					this.#osc11Pending = false;
 					this.#osc11ResponseBuffer = "";
-					this.#handleOsc11Response(rHex!, gHex!, bHex!);
+					this.#handleOsc11Response(rHex!, gHex!, bHex!, rawSequence);
 					return;
 				}
 			}
@@ -948,6 +977,7 @@ export class ProcessTerminal implements Terminal {
 			// (Neovim convention — coalesces rapid notifications during transitions)
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
 			if (appearanceMatch) {
+				writeThemeDebug("mode2031-notification", { appearanceCode: appearanceMatch[1] });
 				if (this.#mode2031DebounceTimer) clearTimeout(this.#mode2031DebounceTimer);
 				this.#mode2031DebounceTimer = setTimeout(() => {
 					this.#mode2031DebounceTimer = undefined;
@@ -986,6 +1016,10 @@ export class ProcessTerminal implements Terminal {
 		// prematurely clear the new query's pending state.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
 			this.#osc11QueryQueued = true;
+			writeThemeDebug("osc11-query-queued", {
+				pending: this.#osc11Pending,
+				outstandingSentinel: this.#da1SentinelOwners.some(o => o.kind === "osc11"),
+			});
 			return;
 		}
 		this.#startOsc11Query();
@@ -997,6 +1031,7 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+		writeThemeDebug("osc11-query-sent", { query: formatControlSequenceForDebug("\x1b]11;?\x07") });
 	}
 
 	#shouldQueryOsc99Support(): boolean {
@@ -1049,15 +1084,30 @@ export class ProcessTerminal implements Terminal {
 	 * Parse an OSC 11 background color response and compute BT.601 luminance.
 	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
 	 */
-	#handleOsc11Response(rHex: string, gHex: string, bHex: string): void {
+	#handleOsc11Response(rHex: string, gHex: string, bHex: string, rawSequence?: string): void {
 		const normalize = (hex: string): number => {
 			const value = parseInt(hex, 16);
 			if (Number.isNaN(value)) return 0;
 			const max = 16 ** hex.length - 1;
 			return max > 0 ? value / max : 0;
 		};
-		const luminance = 0.299 * normalize(rHex) + 0.587 * normalize(gHex) + 0.114 * normalize(bHex);
+		const red = normalize(rHex);
+		const green = normalize(gHex);
+		const blue = normalize(bHex);
+		const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
+		writeThemeDebug("osc11-response", {
+			raw: rawSequence ? formatControlSequenceForDebug(rawSequence) : undefined,
+			rHex,
+			gHex,
+			bHex,
+			red,
+			green,
+			blue,
+			luminance,
+			appearance: mode,
+			previousAppearance: this.#appearance,
+		});
 		if (mode === this.#appearance) return;
 		this.#appearance = mode;
 		for (const cb of this.#appearanceCallbacks) {
@@ -1127,6 +1177,7 @@ export class ProcessTerminal implements Terminal {
 	#resolvePrivateMode(mode: number, supported: boolean): void {
 		if (this.#privateModeSupport.has(mode)) return;
 		this.#privateModeSupport.set(mode, supported);
+		if (mode === 2031) writeThemeDebug("mode2031-support", { supported });
 		for (const cb of this.#privateModeCallbacks) {
 			try {
 				cb(mode, supported);

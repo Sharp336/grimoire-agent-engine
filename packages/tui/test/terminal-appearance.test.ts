@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { extractPrintableText } from "@oh-my-pi/pi-tui/keys";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import {
@@ -17,7 +20,8 @@ const stdoutRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "ro
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
 const originalWslDistroName = Bun.env.WSL_DISTRO_NAME;
 const originalWslInterop = Bun.env.WSL_INTEROP;
-
+const originalThemeDebug = Bun.env.OMP_THEME_DEBUG;
+const originalThemeDebugLog = Bun.env.OMP_THEME_DEBUG_LOG;
 // These suites drive the real ProcessTerminal start()/probe pipeline, so they
 // opt out of the test-default headless suppression and restore it per case.
 let previousHeadless = false;
@@ -38,6 +42,15 @@ function restoreEnv(key: string, original: string | undefined): void {
 	Bun.env[key] = original;
 }
 
+function terminalDebugPayloads(stderr: string[], event: string): Record<string, unknown>[] {
+	const prefix = `[omp-theme-debug] terminal ${event} `;
+	return stderr
+		.join("")
+		.split("\n")
+		.filter(line => line.startsWith(prefix))
+		.map(line => JSON.parse(line.slice(prefix.length)) as Record<string, unknown>);
+}
+
 describe("ProcessTerminal OSC 11 appearance detection", () => {
 	beforeEach(() => {
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
@@ -56,6 +69,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreProperty(process, "platform", processPlatformDescriptor);
 		restoreEnv("WSL_INTEROP", originalWslInterop);
 		restoreEnv("WSL_DISTRO_NAME", originalWslDistroName);
+		restoreEnv("OMP_THEME_DEBUG", originalThemeDebug);
+		restoreEnv("OMP_THEME_DEBUG_LOG", originalThemeDebugLog);
 	});
 
 	function setupTerminal() {
@@ -142,6 +157,70 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(appearances).toEqual(["dark"]);
 
 		terminal.stop();
+	});
+
+	it("replays startup OSC 11 appearance to callbacks registered after the response", () => {
+		vi.useFakeTimers();
+		const { terminal } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:fafa/fafa/fafa\x07");
+		// Startup also has the kitty keyboard DA1 sentinel ahead of OSC 11 in the FIFO.
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		const appearances: string[] = [];
+		terminal.onAppearanceChange(a => appearances.push(a));
+
+		expect(terminal.appearance).toBe("light");
+		expect(appearances).toEqual(["light"]);
+
+		process.stdin.emit("data", "\x1b[?997;2n");
+		vi.advanceTimersByTime(100);
+		process.stdin.emit("data", "\x1b]11;rgb:fafa/fafa/fafa\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		expect(appearances).toEqual(["light"]);
+
+		terminal.stop();
+	});
+
+	it("persists sanitized OSC 11 response and light appearance in debug log", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-terminal-debug-"));
+		const logPath = path.join(tempDir, "terminal.log");
+		let terminal: ProcessTerminal | undefined;
+
+		try {
+			Bun.env.OMP_THEME_DEBUG = "1";
+			Bun.env.OMP_THEME_DEBUG_LOG = logPath;
+			const stderr: string[] = [];
+			vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+				stderr.push(typeof chunk === "string" ? chunk : chunk.toString());
+				return true;
+			});
+			({ terminal } = setupTerminal());
+
+			process.stdin.emit("data", "\x1b]11;rgb:fafa/fafa/fafa\x07");
+			process.stdin.emit("data", "\x1b[?1;2c");
+
+			expect(terminal.appearance).toBe("light");
+			expect(terminalDebugPayloads(stderr, "osc11-response")).toContainEqual(
+				expect.objectContaining({
+					raw: "<ESC>]11;rgb:fafa/fafa/fafa<BEL>",
+					rHex: "fafa",
+					gHex: "fafa",
+					bHex: "fafa",
+					appearance: "light",
+				}),
+			);
+
+			const log = fs.readFileSync(logPath, "utf8");
+			expect(log).toContain("[omp-theme-debug] terminal osc11-response");
+			expect(log).toContain('"raw":"<ESC>]11;rgb:fafa/fafa/fafa<BEL>"');
+			expect(log).toContain('"appearance":"light"');
+		} finally {
+			terminal?.stop();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("2-digit hex OSC 11 response is correctly normalized", () => {

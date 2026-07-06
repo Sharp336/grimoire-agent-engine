@@ -2111,6 +2111,19 @@ var terminalReportedAppearance: "dark" | "light" | undefined;
 /** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
 var macOSReportedAppearance: "dark" | "light" | undefined;
 
+function writeThemeDebug(event: string, details: Record<string, unknown> = {}): void {
+	if (Bun.env.OMP_THEME_DEBUG !== "1") return;
+	const suffix = Object.keys(details).length > 0 ? ` ${JSON.stringify(details)}` : "";
+	const line = `[omp-theme-debug] theme ${event}${suffix}\n`;
+	process.stderr.write(line);
+	if (!Bun.env.OMP_THEME_DEBUG_LOG) return;
+	try {
+		fs.appendFileSync(Bun.env.OMP_THEME_DEBUG_LOG, line);
+	} catch {
+		// Debug logging must not break startup.
+	}
+}
+
 function shouldUseMacOSAppearanceFallback(): boolean {
 	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
 	// appearance cannot be trusted there. Fall back to host macOS appearance
@@ -2121,6 +2134,7 @@ function shouldUseMacOSAppearanceFallback(): boolean {
 function detectTerminalBackground(): "dark" | "light" {
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
 	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
+		writeThemeDebug("selected-signal", { source: "osc11", appearance: terminalReportedAppearance });
 		return terminalReportedAppearance;
 	}
 
@@ -2130,22 +2144,43 @@ function detectTerminalBackground(): "dark" | "light" {
 		const parts = colorfgbg.split(";");
 		if (parts.length >= 2) {
 			const bg = parseInt(parts[1], 10);
-			if (!Number.isNaN(bg)) return bg < 8 ? "dark" : "light";
+			if (!Number.isNaN(bg)) {
+				const appearance = bg < 8 ? "dark" : "light";
+				writeThemeDebug("selected-signal", { source: "colorfgbg", colorfgbg, backgroundIndex: bg, appearance });
+				return appearance;
+			}
 		}
+		writeThemeDebug("ignored-signal", { source: "colorfgbg", colorfgbg, reason: "unparseable" });
 	}
 
 	// Tier 3: host macOS appearance for known-broken terminal paths only.
 	if (shouldUseMacOSAppearanceFallback()) {
 		const macAppearance = macOSReportedAppearance ?? detectMacOSAppearance();
-		if (macAppearance) return macAppearance;
+		if (macAppearance) {
+			writeThemeDebug("selected-signal", { source: "macos-zellij", appearance: macAppearance });
+			return macAppearance;
+		}
 	}
 
+	writeThemeDebug("selected-signal", {
+		source: "fallback-dark",
+		terminalReportedAppearance,
+		colorfgbg: colorfgbg || undefined,
+		macosFallback: shouldUseMacOSAppearanceFallback(),
+	});
 	return "dark";
 }
 
 function getDefaultTheme(): string {
 	const bg = detectTerminalBackground();
-	return bg === "light" ? autoLightTheme : autoDarkTheme;
+	const name = bg === "light" ? autoLightTheme : autoDarkTheme;
+	writeThemeDebug("selected-theme", {
+		appearance: bg,
+		theme: name,
+		darkTheme: autoDarkTheme,
+		lightTheme: autoLightTheme,
+	});
+	return name;
 }
 
 // ============================================================================
@@ -2301,7 +2336,11 @@ export function setAutoThemeMapping(mode: "dark" | "light", themeName: string): 
  * Mode 2031 notifications trigger re-queries rather than providing the value directly.
  */
 export function onTerminalAppearanceChange(mode: "dark" | "light"): void {
-	if (terminalReportedAppearance === mode) return;
+	if (terminalReportedAppearance === mode) {
+		writeThemeDebug("terminal-appearance-unchanged", { appearance: mode });
+		return;
+	}
+	writeThemeDebug("terminal-appearance", { previousAppearance: terminalReportedAppearance, appearance: mode });
 	terminalReportedAppearance = mode;
 	reevaluateAutoTheme("terminal appearance");
 }
