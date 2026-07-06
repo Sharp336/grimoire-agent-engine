@@ -849,6 +849,9 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
 	skipCompactionCheck?: boolean;
+	/** Sampling-temperature override for this single prompt, overriding the session
+	 *  temperature for one call only (a literal 0 is honored). Absent = session temperature. */
+	temperature?: number;
 }
 
 /** Options for AgentSession.followUp() */
@@ -7556,7 +7559,7 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "temperature"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 		},
@@ -7715,7 +7718,10 @@ export class AgentSession {
 				return;
 			}
 
-			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+			const agentPromptOptions =
+				options?.toolChoice !== undefined || options?.temperature !== undefined
+					? { toolChoice: options?.toolChoice, temperature: options?.temperature }
+					: undefined;
 			const nonMessageTokens = computeNonMessageTokens(this);
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
@@ -13753,7 +13759,10 @@ export class AgentSession {
 		this.#resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice; temperature?: number },
+	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			try {

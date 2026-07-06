@@ -318,6 +318,10 @@ export interface AgentOptions {
 
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
+	/** Sampling-temperature override for this prompt run only. Absent = the agent's
+	 *  configured `temperature`; a number (including a literal 0) overrides it for this
+	 *  run, leaving the agent's persistent temperature untouched. */
+	temperature?: number;
 }
 
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
@@ -1120,7 +1124,7 @@ export class Agent {
 			model,
 			reasoning,
 			disableReasoning: this.#state.disableReasoning,
-			temperature: this.#temperature,
+			temperature: options?.temperature ?? this.#temperature,
 			topP: this.#topP,
 			topK: this.#topK,
 			minP: this.#minP,
