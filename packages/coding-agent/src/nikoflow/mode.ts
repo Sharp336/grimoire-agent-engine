@@ -56,7 +56,6 @@ export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = u
 	getToolChoice?: ToolChoiceGetter<TDirective>;
 	nikoflowToolChoice?: ToolChoiceGetter<TDirective>;
 	advanceHumanGate?: OnTurnEnd<TMessages, TContext>;
-	acceptReviewerVerdicts?: OnTurnEnd<TMessages, TContext>;
 	advanceExecuteGate?: NikoflowStateGateAdvance;
 	requestReviewer?: NikoflowReviewerRequest;
 	advanceReviewerGate?: NikoflowReviewerGateAdvance;
@@ -282,11 +281,10 @@ export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unk
 	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
 ): NikoflowCallbackBundle<TMessages, TContext, TDirective> {
 	const afterTurnEnd =
-		options.afterTurnEnd || options.advanceHumanGate || options.acceptReviewerVerdicts
+		options.afterTurnEnd || options.advanceHumanGate
 			? async (messages: TMessages, signal?: AbortSignal, context?: TContext) => {
 					await options.afterTurnEnd?.(messages, signal, context);
 					await options.advanceHumanGate?.(messages, signal, context);
-					await options.acceptReviewerVerdicts?.(messages, signal, context);
 				}
 			: undefined;
 	const onTurnEnd = afterTurnEnd ? createNikoflowOnTurnEnd(options.onTurnEnd, afterTurnEnd) : options.onTurnEnd;
@@ -379,14 +377,13 @@ export async function installNikoflowAgentSessionMode<
 
 	await applyCurrentRole();
 
-	const { acceptReviewerVerdicts, advanceHumanGate, afterBeforeYield, afterTurnEnd, ...callbackOptions } = options;
+	const { advanceHumanGate, afterBeforeYield, afterTurnEnd, ...callbackOptions } = options;
 
 	return installNikoflowCallbacks(host, {
 		...callbackOptions,
 		afterTurnEnd: async (messages, signal, context) => {
 			await afterTurnEnd?.(messages, signal, context);
 			await advanceHumanGate?.(messages, signal, context);
-			await acceptReviewerVerdicts?.(messages, signal, context);
 			await applyCurrentRole();
 		},
 		afterBeforeYield: async () => {

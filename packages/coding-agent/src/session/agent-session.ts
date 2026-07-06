@@ -239,7 +239,7 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
-import { detectReviewerVerdict, parseReviewerVerdict } from "../nikoflow/gates";
+import { parseReviewerVerdict } from "../nikoflow/gates";
 import {
 	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
@@ -6933,17 +6933,6 @@ export class AgentSession {
 		this.setNikoflowState(next);
 	}
 
-	#acceptNikoflowReviewerVerdicts(context: AgentTurnEndContext | undefined): void {
-		const state = this.#nikoflowState;
-		if (!state || currentPhase(state) !== "verify" || !state.gateRequestId) return;
-		for (const toolResult of context?.toolResults ?? []) {
-			const result = detectReviewerVerdict(toolResult, state);
-			if (!result.matched) continue;
-			this.#advanceNikoflowReviewerGate(state, result.verdict);
-			return;
-		}
-	}
-
 	async #requestNikoflowReviewer(
 		state: NikoflowState,
 	): Promise<Extract<AgentMessage, { role: "toolResult" }> | undefined> {
@@ -6979,6 +6968,7 @@ export class AgentSession {
 			task: this.#nikoflowOriginalTask(),
 			diff: await this.#nikoflowDiff(),
 			acceptance: this.#nikoflowAcceptance(),
+			validation: this.#nikoflowValidationEvidence(),
 		});
 		const reviewerSessionId = this.sessionId ? `${this.sessionId}-${NIKOFLOW_REVIEWER_TOOL_NAME}` : undefined;
 		const reviewerAgent = new Agent({
@@ -7060,6 +7050,31 @@ export class AgentSession {
 		);
 		if (fromTodos.length > 0) return fromTodos;
 		return [this.#nikoflowOriginalTask()];
+	}
+
+	#nikoflowValidationEvidence(): string {
+		const snippets: string[] = [];
+		const validationPattern =
+			/\b(?:bun|npm|pnpm|yarn|test|tests|check|typecheck|lint|build|tsc|pass|passed|fail|failed|error|verification|verified)\b/i;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			let text = "";
+			if (message.role === "toolResult" || message.role === "custom") {
+				text = this.#extractTextContent(message.content).trim();
+			} else if (message.role === "bashExecution") {
+				text = `Ran ${message.command}\n${message.output}`.trim();
+			} else if (message.role === "pythonExecution") {
+				text = `Ran Python\n${message.output}`.trim();
+			}
+			if (!text || !validationPattern.test(text)) continue;
+			snippets.push(`${message.role}: ${text}`);
+		}
+
+		const evidence = snippets.slice(-6).join("\n\n");
+		if (!evidence) return "(not supplied)";
+		if (evidence.length <= 8_000) return evidence;
+		return `${evidence.slice(evidence.length - 8_000)}\n\n[validation truncated for reviewer]`;
 	}
 
 	async #nikoflowDiff(): Promise<string> {
@@ -7362,9 +7377,6 @@ export class AgentSession {
 					}),
 				advanceHumanGate: messages => {
 					session.#advanceNikoflowHumanGate(messages);
-				},
-				acceptReviewerVerdicts: (_messages, _signal, context) => {
-					session.#acceptNikoflowReviewerVerdicts(context);
 				},
 				advanceExecuteGate: state => {
 					session.#advanceNikoflowExecuteGate(state);
