@@ -9,6 +9,7 @@ import {
 	createNikoflowOnBeforeYield,
 	createNikoflowOnTurnEnd,
 	enterNikoflowPhase,
+	formatGateHoldMessage,
 	installNikoflowAgentSessionMode,
 	installNikoflowCallbacks,
 	isWriteTool,
@@ -162,6 +163,20 @@ describe("nikoflow mode callback helpers", () => {
 		expect(staleUser.gateRequestId).toBe("gate-1");
 	});
 
+	test("blocks ticketization approval until the ticket DAG is captured", () => {
+		const ticketsPhase = mintGateRequest(advancePhase(advancePhase(advancePhase(createState("standard")))), "g1", 10);
+		const next = advanceNikoflowHumanGate(ticketsPhase, [{ role: "user", timestamp: 11 }], {
+			isGenuineUserTurn: message => message.role === "user",
+			messageTimestamp: message => message.timestamp,
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		});
+
+		expect(currentPhase(next)).toBe("tickets");
+		expect(next.gateRequestId).toBe("g1");
+		expect(formatGateHoldMessage(next)).toContain("nikoflow_define_tickets");
+	});
+
 	test("chains tool choice without swallowing the previous directive", () => {
 		expect(
 			createNikoflowGetToolChoice(
@@ -297,6 +312,44 @@ describe("nikoflow mode callback helpers", () => {
 		expect(state.activeTicketId).toBe("TSK-002");
 		expect(currentPhase(state)).toBe("execute");
 		expect(followUps.at(-1)).toContain("Nikoflow execute ticket TSK-002.");
+	});
+
+	test("execute does not skip to verify when the captured DAG is missing", () => {
+		const execute = markPhaseTurnStarted(
+			advancePhase(advancePhase(advancePhase(advancePhase(createState("standard"))))),
+		);
+		const next = advanceNikoflowExecuteGate(execute);
+
+		expect(currentPhase(next)).toBe("execute");
+		expect(next.gateRequestId).toBeNull();
+		expect(formatGateHoldMessage(next)).toContain("return to Ticketization");
+	});
+
+	test("missing post-ticketization DAG yields externally without follow-up loop", async () => {
+		const state = advancePhase(advancePhase(advancePhase(advancePhase(createState("standard")))));
+		const followUps: string[] = [];
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => false,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(followUps).toEqual([]);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("nikoflow_define_tickets");
 	});
 
 	test("sends a blocked ticket to the block handler without aborting the run", async () => {

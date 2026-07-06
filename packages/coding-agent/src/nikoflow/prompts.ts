@@ -7,7 +7,7 @@ const PHASE_PROMPTS: Record<string, string> = {
 	adr: "ADR phase. Record only hard-to-reverse tradeoffs. Otherwise write a visible skip reason.",
 	prd: "PRD phase. Write user stories with Given/When/Then acceptance criteria and test seams.",
 	tickets:
-		"Ticketization phase. Split the PRD into dependency-ordered vertical tickets and persist them with todo. Use task lines exactly like `TSK-001: blocked_by=TSK-000 acceptance=Given/When/Then A | Given/When/Then B notes=implementation notes`; omit blocked_by when empty.",
+		"Ticketization phase. Split the PRD into dependency-ordered vertical tickets and call nikoflow_define_tickets with the full DAG. Do not write tickets as prose or todo text.",
 	execute:
 		"Execute phase. Work one unblocked ticket at a time. Start with a failing test, then implement the minimum code, then request independent review.",
 	verify:

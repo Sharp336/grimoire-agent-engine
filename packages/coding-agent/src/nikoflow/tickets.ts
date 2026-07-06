@@ -10,6 +10,20 @@ export interface NikoflowTicket {
 	status: TicketStatus;
 }
 
+export const NIKOFLOW_DEFINE_TICKETS_TOOL_NAME = "nikoflow_define_tickets";
+
+export interface NikoflowTicketInput {
+	id: string;
+	acceptance: string[];
+	blocked_by?: string[];
+	implementation_notes: string;
+}
+
+export interface NikoflowTicketDefinitionResult {
+	tickets: NikoflowTicket[];
+	errors: string[];
+}
+
 export interface TicketTodoTask {
 	content: string;
 	status: "pending" | "in_progress" | "completed" | "abandoned";
@@ -75,6 +89,38 @@ export function validateTicketDag(tickets: readonly NikoflowTicket[]): DagValida
 	}
 
 	return { ok: errors.length === 0, errors };
+}
+
+function cleanList(values: readonly string[]): string[] {
+	return values.map(value => value.trim()).filter(Boolean);
+}
+
+export function normalizeDefinedTickets(inputs: readonly NikoflowTicketInput[]): NikoflowTicketDefinitionResult {
+	const errors: string[] = [];
+	const tickets: NikoflowTicket[] = inputs.map((input, index) => {
+		const position = index + 1;
+		const id = input.id.trim();
+		const acceptance = cleanList(input.acceptance);
+		const blocked_by = cleanList(input.blocked_by ?? []);
+		const implementation_notes = input.implementation_notes.trim();
+
+		if (!id) errors.push(`ticket ${position} id is required`);
+		if (acceptance.length === 0) errors.push(`ticket ${id || position} acceptance must not be empty`);
+		if (!implementation_notes) errors.push(`ticket ${id || position} implementation_notes is required`);
+
+		return {
+			id,
+			acceptance,
+			blocked_by,
+			implementation_notes,
+			status: "todo",
+		};
+	});
+
+	if (tickets.length === 0) errors.push("ticket list must not be empty");
+	const validation = validateTicketDag(tickets);
+	errors.push(...validation.errors);
+	return { tickets, errors };
 }
 
 export function getNextTicket(tickets: readonly NikoflowTicket[]): NikoflowTicket | null {

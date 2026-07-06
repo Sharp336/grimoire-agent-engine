@@ -11,7 +11,7 @@ import {
 	type NikoflowState,
 	PHASE_ROLE,
 } from "./state";
-import { getNextTicket, markStatus, validateTicketDag } from "./tickets";
+import { getNextTicket, markStatus, NIKOFLOW_DEFINE_TICKETS_TOOL_NAME, validateTicketDag } from "./tickets";
 
 const MAX_GATE_HOLD_FOLLOW_UPS = 3;
 
@@ -172,8 +172,24 @@ export interface NikoflowPhaseEntryResult {
 	advisorReview?: unknown | null;
 }
 
+export function requiresTicketDag(state: NikoflowState): boolean {
+	return state.depth !== "tactical";
+}
+
+export function nikoflowTicketDagErrors(state: NikoflowState): string[] {
+	if (!requiresTicketDag(state)) return [];
+	if (state.tickets.length === 0) return ["ticket DAG is missing from Nikoflow state"];
+	return validateTicketDag(state.tickets).errors;
+}
+
 function isTicketLoopState(state: NikoflowState): boolean {
-	return state.depth !== "tactical" && state.tickets.length > 0;
+	return requiresTicketDag(state) && state.tickets.length > 0;
+}
+
+function shouldYieldForTicketDag(state: NikoflowState): boolean {
+	const phase = currentPhase(state);
+	if (phase !== "tickets" && phase !== "execute" && phase !== "verify") return false;
+	return nikoflowTicketDagErrors(state).length > 0;
 }
 
 function activateNextTicket(state: NikoflowState): NikoflowState {
@@ -295,6 +311,7 @@ export function advanceNikoflowHumanGate<TMessage>(
 		return humanGateAccepted(gateMintedAt, options.messageTimestamp(message));
 	});
 	if (!hasLaterUserTurn) return state;
+	if (currentPhase(state) === "tickets" && nikoflowTicketDagErrors(state).length > 0) return state;
 	return advancePhase(state);
 }
 
@@ -304,6 +321,7 @@ export function advanceNikoflowExecuteGate(
 ): NikoflowState {
 	if (currentPhase(state) !== "execute") return state;
 	if (!state.phaseTurnStarted) return state;
+	if (requiresTicketDag(state) && nikoflowTicketDagErrors(state).length > 0) return state;
 	if (!isTicketLoopState(state)) return advancePhase(state);
 
 	const validation = validateTicketDag(state.tickets);
@@ -416,6 +434,21 @@ export function createNikoflowGetToolChoice<TDirective>(
 
 export function formatGateHoldMessage(state: NikoflowState): string {
 	const phase = currentPhase(state) ?? "complete";
+	const ticketDagErrors = nikoflowTicketDagErrors(state);
+	if (phase === "tickets" && ticketDagErrors.length > 0) {
+		return [
+			"Nikoflow tickets gate is blocked; ticket DAG is not captured.",
+			...ticketDagErrors.map(error => `- ${error}`),
+			`Call ${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} with { tickets: [{ id, acceptance, blocked_by, implementation_notes }] } before asking for human approval.`,
+		].join("\n");
+	}
+	if ((phase === "execute" || phase === "verify") && ticketDagErrors.length > 0) {
+		return [
+			"Nikoflow ticket DAG is missing or invalid after Ticketization.",
+			...ticketDagErrors.map(error => `- ${error}`),
+			`Yield to the user; return to Ticketization and call ${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} instead of continuing.`,
+		].join("\n");
+	}
 	if (isHumanGatePhase(state)) {
 		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
 	}
@@ -523,6 +556,10 @@ export function createNikoflowOnBeforeYield(
 		state = getState();
 		if (!state) return;
 		const phase = currentPhase(state);
+		if (shouldYieldForTicketDag(state)) {
+			await yieldForExternalAction(state);
+			return;
+		}
 		if (phase === "execute" && !state.phaseTurnStarted) {
 			await queueGateHold(state);
 			return;

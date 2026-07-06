@@ -20,6 +20,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"job",
 	"irc",
 	"todo",
+	"nikoflow_define_tickets",
 	"web_search",
 	"search_tool_bm25",
 	"write",

@@ -250,6 +250,7 @@ import {
 	type MinimalToolCallContext,
 	type NikoflowAdvisorReview,
 	type NikoflowToolPolicy,
+	nikoflowTicketDagErrors,
 	type OnTurnEnd,
 	type ToolChoiceGetter,
 } from "../nikoflow/mode";
@@ -264,7 +265,15 @@ import {
 	type NikoflowState,
 	setTicketDag,
 } from "../nikoflow/state";
-import { type NikoflowTicket, ticketDagFromTodoPhases, validateTicketDag } from "../nikoflow/tickets";
+import {
+	NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
+	type NikoflowTicket,
+	type NikoflowTicketDefinitionResult,
+	type NikoflowTicketInput,
+	normalizeDefinedTickets,
+	ticketDagFromTodoPhases,
+	validateTicketDag,
+} from "../nikoflow/tickets";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -6931,11 +6940,19 @@ export class AgentSession {
 		return `nikoflow-gate-${Date.now()}-${this.#nikoflowGateCounter}`;
 	}
 
-	#nikoflowTicketDagFromTodoState(): { tickets: NikoflowTicket[]; errors: string[] } {
-		const tickets = ticketDagFromTodoPhases(getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()));
-		if (tickets.length === 0) return { tickets, errors: ["ticket DAG is missing from todo state"] };
-		const validation = validateTicketDag(tickets);
-		return { tickets, errors: validation.errors };
+	#nikoflowTicketDagFromPersistedState(): { tickets: NikoflowTicket[]; errors: string[] } {
+		const entries = this.sessionManager.getBranch();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type !== "custom" || entry.customType !== USER_TODO_EDIT_CUSTOM_TYPE) continue;
+			const data = entry.data as { phases?: unknown; source?: unknown } | undefined;
+			if (data?.source !== NIKOFLOW_DEFINE_TICKETS_TOOL_NAME || !Array.isArray(data.phases)) continue;
+			const tickets = ticketDagFromTodoPhases(data.phases as TodoPhase[]);
+			if (tickets.length === 0) return { tickets, errors: ["ticket DAG is missing from persisted Nikoflow state"] };
+			const validation = validateTicketDag(tickets);
+			return { tickets, errors: validation.errors };
+		}
+		return { tickets: [], errors: ["ticket DAG is missing from persisted Nikoflow state"] };
 	}
 
 	#persistNikoflowTicketDag(tickets: readonly NikoflowTicket[]): void {
@@ -6944,22 +6961,60 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
 			op: "init",
 			phases,
+			source: NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
 		});
 	}
 
 	async #notifyNikoflowTicketDagInvalid(errors: readonly string[]): Promise<void> {
 		await this.sendCustomMessage({
 			customType: "nikoflow-ticket-dag-invalid",
-			content: `Nikoflow ticket DAG is not executable:\n${errors.map(error => `- ${error}`).join("\n")}\nFix the ticket list in todo state, then get human approval again.`,
+			content: `Nikoflow ticket DAG is not executable:\n${errors.map(error => `- ${error}`).join("\n")}\nCall ${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} with a valid ticket DAG before human approval.`,
 			display: true,
 			attribution: "agent",
 		});
 	}
 
-	#withNikoflowTicketDagFromTodoState(state: NikoflowState): NikoflowState {
+	#withNikoflowTicketDagFromPersistedState(state: NikoflowState): NikoflowState {
 		if (state.depth === "tactical" || state.tickets.length > 0) return state;
-		const { tickets, errors } = this.#nikoflowTicketDagFromTodoState();
+		const { tickets, errors } = this.#nikoflowTicketDagFromPersistedState();
 		return errors.length === 0 ? setTicketDag(state, tickets) : state;
+	}
+
+	defineNikoflowTickets(tickets: readonly NikoflowTicketInput[]): NikoflowTicketDefinitionResult {
+		const state = this.#nikoflowState;
+		if (!state) return { tickets: [], errors: ["Nikoflow mode is not active"] };
+		const phase = currentPhase(state);
+		if (phase !== "tickets") {
+			return {
+				tickets: [],
+				errors: [
+					`${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} can only run during Ticketization; current phase is ${phase ?? "complete"}`,
+				],
+			};
+		}
+
+		const result = normalizeDefinedTickets(tickets);
+		if (result.errors.length > 0) return result;
+
+		const next = setTicketDag(state, result.tickets);
+		this.setNikoflowState(next);
+		this.#persistNikoflowTicketDag(next.tickets);
+		this.#toolChoiceQueue.removeByLabel("nikoflow-define-tickets");
+		return { tickets: next.tickets, errors: [] };
+	}
+
+	#queueNikoflowDefineTicketsToolChoice(state: NikoflowState): void {
+		if (currentPhase(state) !== "tickets" || state.tickets.length > 0) {
+			this.#toolChoiceQueue.removeByLabel("nikoflow-define-tickets");
+			return;
+		}
+		if (!this.getActiveToolNames().includes(NIKOFLOW_DEFINE_TICKETS_TOOL_NAME)) return;
+		const choice = buildNamedToolChoice(NIKOFLOW_DEFINE_TICKETS_TOOL_NAME, this.model);
+		if (!choice) return;
+		this.#toolChoiceQueue.removeByLabel("nikoflow-define-tickets");
+		this.#toolChoiceQueue.pushSequence([choice, "none"], {
+			label: "nikoflow-define-tickets",
+		});
 	}
 
 	async #enterNikoflowPhase(
@@ -6998,11 +7053,12 @@ export class AgentSession {
 		if (result.state.tickets.length > 0) {
 			this.#persistNikoflowTicketDag(result.state.tickets);
 		}
+		this.#queueNikoflowDefineTicketsToolChoice(result.state);
 		return result.advisorReview;
 	}
 
 	async #advanceNikoflowHumanGate(messages: readonly AgentMessage[]): Promise<void> {
-		const state = this.#nikoflowState;
+		let state = this.#nikoflowState;
 		if (!state) return;
 		const phase = currentPhase(state);
 		if (phase !== "grilling" && phase !== "adr" && phase !== "prd" && phase !== "tickets") return;
@@ -7010,6 +7066,22 @@ export class AgentSession {
 			await this.#enterNikoflowPhase(state, state, { mintGate: true });
 			return;
 		}
+		if (phase === "tickets") {
+			const current = this.#withNikoflowTicketDagFromPersistedState(state);
+			if (current !== state) {
+				this.setNikoflowState(current);
+				state = current;
+			}
+		}
+		const gateMintedAt = state.gateMintedAt;
+		const hasLaterUserTurn = messages.some(message => {
+			if (!isUserQueuedMessage(message)) return false;
+			return (
+				gateMintedAt !== null &&
+				agentMessageTimestamp(message) !== undefined &&
+				agentMessageTimestamp(message)! > gateMintedAt
+			);
+		});
 		const next = advanceNikoflowHumanGate(state, messages, {
 			isGenuineUserTurn: isUserQueuedMessage,
 			messageTimestamp: agentMessageTimestamp,
@@ -7018,21 +7090,24 @@ export class AgentSession {
 		});
 		if (next !== state) {
 			if (phase === "tickets") {
-				const { tickets, errors } = this.#nikoflowTicketDagFromTodoState();
+				const errors = nikoflowTicketDagErrors(state);
 				if (errors.length > 0) {
 					await this.#notifyNikoflowTicketDagInvalid(errors);
 					return;
 				}
-				this.#persistNikoflowTicketDag(tickets);
-				await this.#enterNikoflowPhase(state, setTicketDag(next, tickets), { mintGate: true });
+				this.#persistNikoflowTicketDag(state.tickets);
+				await this.#enterNikoflowPhase(state, next, { mintGate: true });
 				return;
 			}
 			await this.#enterNikoflowPhase(state, next, { mintGate: true });
+		} else if (phase === "tickets" && hasLaterUserTurn) {
+			const errors = nikoflowTicketDagErrors(state);
+			if (errors.length > 0) await this.#notifyNikoflowTicketDagInvalid(errors);
 		}
 	}
 
 	async #advanceNikoflowExecuteGate(state: NikoflowState): Promise<unknown | null | undefined> {
-		const current = this.#withNikoflowTicketDagFromTodoState(state);
+		const current = this.#withNikoflowTicketDagFromPersistedState(state);
 		if (current !== state) this.setNikoflowState(current);
 		const next = advanceNikoflowExecuteGate(current, {
 			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
