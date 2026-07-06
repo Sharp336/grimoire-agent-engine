@@ -61,4 +61,25 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 			argv: ["gc", "--apply"],
 		});
 	});
+
+	test("nikoflow colon depth dispatches to the nikoflow command", () => {
+		expect(resolveCliArgv(["nikoflow:tactical", "fix", "typo"])).toEqual({
+			argv: ["nikoflow", "--depth", "tactical", "fix", "typo"],
+		});
+		expect(resolveCliArgv(["nflow:deep", "--print", "audit"])).toEqual({
+			argv: ["nikoflow", "--depth", "deep", "--print", "audit"],
+		});
+		expect(resolveCliArgv(["--model", "gpt", "nikoflow:standard", "fix"])).toEqual({
+			argv: ["nikoflow", "--depth", "standard", "--model", "gpt", "fix"],
+		});
+		expect(resolveCliArgv(["nikoflow:wrong", "fix"])).toEqual({
+			error: "Invalid Nikoflow depth: wrong",
+		});
+		expect(resolveCliArgv(["--model", "gpt", "nikoflow:wrong", "fix"])).toEqual({
+			error: "Invalid Nikoflow depth: wrong",
+		});
+		expect(resolveCliArgv(["--model", "nikoflow:wrong"])).toEqual({
+			argv: ["launch", "--model", "nikoflow:wrong"],
+		});
+	});
 });

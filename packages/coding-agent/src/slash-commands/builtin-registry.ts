@@ -28,6 +28,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import { NIKOFLOW_DEPTHS } from "../nikoflow/state";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
@@ -247,6 +248,24 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "nikoflow",
+		aliases: ["nflow"],
+		description: "Toggle Nikoflow phase-gated mode",
+		inlineHint: "[tactical|standard|deep] [prompt]",
+		allowArgs: true,
+		subcommands: NIKOFLOW_DEPTHS.map(depth => ({ name: depth, description: `Start ${depth} Nikoflow` })),
+		getTuiAutocompleteDescription: runtime => {
+			if (runtime.ctx.planModeEnabled) return "Nikoflow: blocked by plan mode";
+			if (runtime.ctx.goalModeEnabled) return "Nikoflow: blocked by goal mode";
+			const state = runtime.ctx.session.getNikoflowState();
+			return state ? `Nikoflow: ${state.depth}` : "Nikoflow: off";
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleNikoflowCommand(command.args || undefined);
 			runtime.ctx.editor.setText("");
 		},
 	},

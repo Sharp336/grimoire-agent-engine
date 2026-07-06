@@ -10,6 +10,7 @@
  */
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
 import { flagConsumesValue } from "./cli/flag-tables";
+import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "./nikoflow/state";
 
 export const commands: CommandEntry[] = [
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
@@ -30,6 +31,7 @@ export const commands: CommandEntry[] = [
 	{ name: "install", load: () => import("./commands/install").then(m => m.default) },
 	{ name: "join", load: () => import("./commands/join").then(m => m.default) },
 	{ name: "models", load: () => import("./commands/models").then(m => m.default) },
+	{ name: "nikoflow", load: () => import("./commands/nikoflow").then(m => m.default), aliases: ["nflow"] },
 	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
 	{ name: "say", load: () => import("./commands/say").then(m => m.default) },
 	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
@@ -81,10 +83,28 @@ export function reservedTopLevelWordMessage(first: string | undefined, argc = 1)
  */
 export function isSubcommand(first: string | undefined): boolean {
 	if (!first || first.startsWith("-") || first.startsWith("@")) return false;
+	if (parseNikoflowColonCommand(first)) return true;
 	return commands.some(entry => entry.name === first || entry.aliases?.includes(first));
 }
 
 export type ResolvedCliArgv = { argv: string[] } | { error: string };
+
+function parseNikoflowColonCommand(first: string | undefined): { command: "nikoflow"; depth?: NikoflowDepth } | null {
+	const match = /^(nikoflow|nflow)(?::([^:\s]+))?$/i.exec(first ?? "");
+	if (!match) return null;
+	const rawDepth = match[2]?.toLowerCase();
+	if (!rawDepth) return { command: "nikoflow" };
+	return NIKOFLOW_DEPTHS.includes(rawDepth as NikoflowDepth)
+		? { command: "nikoflow", depth: rawDepth as NikoflowDepth }
+		: null;
+}
+
+function invalidNikoflowColonDepth(first: string | undefined): string | null {
+	const match = /^(?:nikoflow|nflow):([^:\s]+)$/i.exec(first ?? "");
+	if (!match) return null;
+	const depth = match[1].toLowerCase();
+	return NIKOFLOW_DEPTHS.includes(depth as NikoflowDepth) ? null : depth;
+}
 
 /**
  * Index of the first argv token that names a registered subcommand, skipping
@@ -103,6 +123,22 @@ function leadingSubcommandIndex(argv: string[]): number {
 	return -1;
 }
 
+function leadingInvalidNikoflowColonDepth(argv: string[]): string | null {
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (arg === "--") return null;
+		if (!arg.startsWith("-")) return invalidNikoflowColonDepth(arg);
+		if (flagConsumesValue(arg, argv[index + 1])) index += 1;
+	}
+	return null;
+}
+
+function rewriteNikoflowColonArgv(argv: string[], index: number): string[] | undefined {
+	const nikoflowColon = parseNikoflowColonCommand(argv[index]);
+	if (!nikoflowColon?.depth) return undefined;
+	return ["nikoflow", "--depth", nikoflowColon.depth, ...argv.slice(0, index), ...argv.slice(index + 1)];
+}
+
 /**
  * Decide what the CLI runner should do with raw argv: reject bare reserved
  * management words, pass help/version through untouched, route a recognized
@@ -117,14 +153,24 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	if (first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help") {
 		return { argv };
 	}
+	const nikoflowColon = parseNikoflowColonCommand(first);
+	if (nikoflowColon?.depth) {
+		return { argv: [nikoflowColon.command, "--depth", nikoflowColon.depth, ...argv.slice(1)] };
+	}
+	const invalidNikoflowDepth = invalidNikoflowColonDepth(first);
+	if (invalidNikoflowDepth) return { error: `Invalid Nikoflow depth: ${invalidNikoflowDepth}` };
 	if (isSubcommand(first)) return { argv };
 	// A subcommand can hide behind leading global option flags
 	// (`omp --approval-mode=yolo acp`). `run` dispatches strictly on argv[0], so
 	// hoist the subcommand to the front and keep the leading flags as its own
 	// argv; the command's parser then applies them. Genuine launch prompts (no
 	// trailing subcommand) are untouched.
+	const invalidLeadingNikoflowDepth = leadingInvalidNikoflowColonDepth(argv);
+	if (invalidLeadingNikoflowDepth) return { error: `Invalid Nikoflow depth: ${invalidLeadingNikoflowDepth}` };
 	const subIndex = leadingSubcommandIndex(argv);
 	if (subIndex >= 0) {
+		const nikoflowArgv = rewriteNikoflowColonArgv(argv, subIndex);
+		if (nikoflowArgv) return { argv: nikoflowArgv };
 		return { argv: [argv[subIndex], ...argv.slice(0, subIndex), ...argv.slice(subIndex + 1)] };
 	}
 	return { argv: ["launch", ...argv] };

@@ -3,6 +3,7 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -63,6 +64,10 @@ export interface Args {
 	noTitle?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
+	/** Hidden launcher field used by the `nikoflow` command to activate mode without polluting the prompt. */
+	nikoflowDepth?: NikoflowDepth;
+	/** Hidden launcher field used by the `nikoflow --qa` flag to set modelRoles.advisor. */
+	nikoflowQa?: string;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -244,6 +249,13 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noTitle = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
+		} else if (arg === "--nikoflow-depth" && i + 1 < args.length) {
+			const value = args[++i];
+			if (NIKOFLOW_DEPTHS.includes(value as NikoflowDepth)) {
+				result.nikoflowDepth = value as NikoflowDepth;
+			} else {
+				result.unrecognizedFlags.push(arg);
+			}
 		} else if (arg.startsWith("@")) {
 			let filePath = arg.slice(1);
 			if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length > 1) {
