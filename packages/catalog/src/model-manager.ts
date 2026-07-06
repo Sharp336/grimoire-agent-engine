@@ -159,18 +159,14 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			);
 	const dynamicModels = fetchedDynamicModels ?? [];
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
-	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels, dynamicModelsAuthoritative);
+	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
 	const models = collapseBuiltModelVariants(
 		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
-			const mergedSnapshot = mergeDynamicModels(
-				mergeModelSources(staticModels, modelsDevModels),
-				dynamicModels,
-				dynamicModelsAuthoritative,
-			);
+			const mergedSnapshot = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), dynamicModels);
 			const snapshotModels = dynamicModelsAuthoritative
 				? retainModelIds(mergedSnapshot, dynamicModels)
 				: mergedSnapshot;
@@ -296,7 +292,6 @@ function mergeModelSources<TApi extends Api>(...sources: readonly (readonly Mode
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
-	dynamicModelsAuthoritative = false,
 ): Model<TApi>[] {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
@@ -313,7 +308,7 @@ function mergeDynamicModels<TApi extends Api>(
 			merged.set(dynamicModel.id, dynamicModel);
 			continue;
 		}
-		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel, dynamicModelsAuthoritative));
+		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
 	}
 	return Array.from(merged.values());
 }
@@ -353,22 +348,12 @@ function fingerprintStatic<TApi extends Api>(
 	return fingerprint;
 }
 
-function mergeDynamicModel<TApi extends Api>(
-	existingModel: Model<TApi>,
-	dynamicModel: Model<TApi>,
-	dynamicModelsAuthoritative = false,
-): Model<TApi> {
+function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
 	// When discovery resolves the same model id to a different endpoint (e.g.
 	// a GitHub Copilot business/enterprise host), the bundled reference's
-	// capabilities are pinned to another endpoint and no longer apply. Copilot
-	// dynamic discovery also pre-applies the correct image fallback for omitted
-	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
-	// canonical bundled model. For other canonical hosts, honor the dynamic
-	// value alone; same-endpoint merges still OR-upgrade so a discovery that
-	// omits the capability flag does not drop bundled vision.
-	// For authoritative providers, the dynamic fetch's capability fields win
-	// outright (not OR'd) so stale committed bundles can't pin a model as
-	// reasoning when the live endpoint says it isn't (e.g. Neuralwatt -fast).
+	// capabilities are pinned to the canonical host and no longer apply —
+	// honour the dynamic value alone. Same-endpoint merges still OR-upgrade so
+	// a discovery that omits the capability flag doesn't drop bundled vision.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative =
 		endpointChanged || (existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
@@ -381,9 +366,7 @@ function mergeDynamicModel<TApi extends Api>(
 		...existingModel,
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
-		reasoning: dynamicModelsAuthoritative
-			? dynamicModel.reasoning
-			: existingModel.reasoning || dynamicModel.reasoning,
+		reasoning: existingModel.reasoning || dynamicModel.reasoning,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
