@@ -381,7 +381,7 @@ describe("nikoflow mode callback helpers", () => {
 		expect(appliedRoles).toEqual(["plan", "default"]);
 	});
 
-	test("execute yields into verify and only a matching reviewer pass completes", async () => {
+	test("execute waits for a completed execute turn before minting the verify gate", async () => {
 		let gateCounter = 0;
 		let state = advancePhase(createState("tactical"));
 		const followUps: string[] = [];
@@ -394,6 +394,9 @@ describe("nikoflow mode callback helpers", () => {
 				followUps.push(message);
 			},
 			afterTurnEnd: () => undefined,
+			advanceHumanGate: () => {
+				if (currentPhase(state) === "execute") state = markPhaseTurnStarted(state);
+			},
 			advanceExecuteGate: current => {
 				state = advanceNikoflowExecuteGate(current, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
@@ -416,7 +419,7 @@ describe("nikoflow mode callback helpers", () => {
 		expect(followUps).toHaveLength(1);
 		expect(reviewerRequests).toEqual([]);
 
-		state = markPhaseTurnStarted(state);
+		await bundle.onTurnEnd?.([], undefined, { toolResults: [] });
 		await bundle.onBeforeYield();
 		expect(currentPhase(state)).toBe("verify");
 		expect(currentRole(state)).toBe("default");

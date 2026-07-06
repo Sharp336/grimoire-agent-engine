@@ -6916,9 +6916,9 @@ export class AgentSession {
 			});
 	}
 
-	#markNikoflowPhaseTurnStarted(): void {
+	#markNikoflowExecuteTurnCompleted(): void {
 		const state = this.#nikoflowState;
-		if (!state) return;
+		if (!state || currentPhase(state) !== "execute") return;
 		const next = markPhaseTurnStarted(state);
 		if (next !== state) this.setNikoflowState(next);
 	}
@@ -7415,6 +7415,7 @@ export class AgentSession {
 						);
 					}),
 				advanceHumanGate: messages => {
+					session.#markNikoflowExecuteTurnCompleted();
 					session.#advanceNikoflowHumanGate(messages);
 				},
 				advanceExecuteGate: state => {
@@ -8094,7 +8095,6 @@ export class AgentSession {
 				cutoffCount: this.messages.length + messages.length,
 			});
 			try {
-				this.#markNikoflowPhaseTurnStarted();
 				await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#setPendingContextSnapshot(undefined);
