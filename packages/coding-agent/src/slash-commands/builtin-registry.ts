@@ -25,6 +25,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
+import { interceptSlashCommand } from "../i18n/interceptor";
 import { resolveMemoryBackend } from "../memory-backend";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
@@ -2524,9 +2525,23 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
+	const translated = interceptSlashCommand({
+		name: cmd.name,
+		description: cmd.description,
+		subcommands: cmd.subcommands,
+	});
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: translated.description,
+	};
+	if (translated.subcommands) {
+		materialized.subcommands = cmd.subcommands!.map((sub, i) => ({
+			...sub,
+			description: translated.subcommands![i].description,
+		}));
+	}
 	if (cmd.subcommands) {
-		materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
+		materialized.getArgumentCompletions = buildArgumentCompletions(materialized.subcommands!);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();

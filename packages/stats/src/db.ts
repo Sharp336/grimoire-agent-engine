@@ -822,28 +822,119 @@ function rowToMessageStats(row: any): MessageStats {
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(limit = 100, offset = 0, model?: string): MessageStats[] {
 	if (!db) return [];
+	if (model) {
+		const stmt = db.prepare(`
+			SELECT * FROM messages
+			WHERE model = ?
+			ORDER BY timestamp DESC
+			LIMIT ? OFFSET ?
+		`);
+		return (stmt.all(model, limit, offset) as any[]).map(rowToMessageStats);
+	}
 	const stmt = db.prepare(`
 		SELECT * FROM messages 
 		ORDER BY timestamp DESC 
-		LIMIT ?
+		LIMIT ? OFFSET ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
 }
 
-export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
+export function getRecentErrors(limit = 100, offset = 0, model?: string): MessageStats[] {
 	if (!db) return [];
-	const hasCutoff = cutoff !== undefined && cutoff !== null;
+	if (model) {
+		const stmt = db.prepare(`
+			SELECT * FROM messages
+			WHERE stop_reason = 'error' AND model = ?
+			ORDER BY timestamp DESC
+			LIMIT ? OFFSET ?
+		`);
+		return (stmt.all(model, limit, offset) as any[]).map(rowToMessageStats);
+	}
 	const stmt = db.prepare(`
 		SELECT * FROM messages
 		WHERE stop_reason = 'error'
+		ORDER BY timestamp DESC
+		LIMIT ? OFFSET ?
+	`);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+}
+
+export function countRecentRequests(model?: string): number {
+	if (!db) return 0;
+	if (model) {
+		const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE model = ?");
+		const row = stmt.get(model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages");
+	const row = stmt.get() as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function countRecentErrors(model?: string): number {
+	if (!db) return 0;
+	if (model) {
+		const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error' AND model = ?");
+		const row = stmt.get(model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error'");
+	const row = stmt.get() as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function getDistinctModels(): string[] {
+	if (!db) return [];
+	const stmt = db.prepare("SELECT DISTINCT model FROM messages ORDER BY model");
+	return (stmt.all() as { model: string }[]).map(row => row.model);
+	const stmt = db.prepare(`
+		SELECT * FROM messages
+		WHERE stop_reason = 'error'
+<<<<<<< HEAD
 		${hasCutoff ? "AND timestamp >= ?" : ""}
 		ORDER BY timestamp DESC
 		LIMIT ?
 	`);
 	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
 	return rows.map(rowToMessageStats);
+=======
+		ORDER BY timestamp DESC 
+		LIMIT ? OFFSET ?
+	`);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+}
+
+export function countRecentRequests(model?: string): number {
+	if (!db) return 0;
+	if (model) {
+		const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE model = ?");
+		const row = stmt.get(model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages");
+	const row = stmt.get() as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function countRecentErrors(model?: string): number {
+	if (!db) return 0;
+	if (model) {
+		const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error' AND model = ?");
+		const row = stmt.get(model) as { count: number } | undefined;
+		return row?.count ?? 0;
+	}
+	const stmt = db.prepare("SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error'");
+	const row = stmt.get() as { count: number } | undefined;
+	return row?.count ?? 0;
+}
+
+export function getDistinctModels(): string[] {
+	if (!db) return [];
+	const stmt = db.prepare("SELECT DISTINCT model FROM messages ORDER BY model");
+	return (stmt.all() as { model: string }[]).map(row => row.model);
+>>>>>>> 122c983a2 (feat(i18n): add runtime i18n system with full CLI integration)
 }
 
 export function getMessageById(id: number): MessageStats | null {

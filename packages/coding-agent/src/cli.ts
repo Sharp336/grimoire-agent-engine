@@ -28,6 +28,8 @@ import { declareWorkerHostEntry, installWorkerInbox } from "@oh-my-pi/pi-utils/w
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
+import { i18n } from "./i18n";
+import { cliTranslator } from "./i18n/interceptor";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -55,7 +57,7 @@ const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
 async function showHelp(config: CliConfig): Promise<void> {
 	const { renderRootHelp } = await import("@oh-my-pi/pi-utils/cli");
 	const { getExtraHelpText } = await import("./cli/args");
-	renderRootHelp(config);
+	renderRootHelp(config, cliTranslator);
 	const extra = getExtraHelpText();
 	if (extra.trim().length > 0) {
 		process.stdout.write(`\n${extra}\n`);
@@ -308,6 +310,14 @@ export async function runCli(argv: string[]): Promise<void> {
 			// profile instead of the default agent directory.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
 		}
+
+		// Initialize i18n system after profile is set
+		await i18n.init();
+		// Invalidate settings cache so labels are re-generated with translations
+		(await import("./modes/components/settings-defs")).invalidateSettingDefsCache();
+		// Invalidate tips cache so translated tips are picked up
+		(await import("./modes/components/welcome")).invalidateTipsCache();
+
 		if (extracted.aliasName !== undefined) {
 			const profile = extracted.profile ?? getActiveProfile();
 			if (!profile) {
@@ -373,7 +383,14 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, help: showHelp });
+	return run({
+		bin: APP_NAME,
+		version: VERSION,
+		argv: resolved.argv,
+		commands,
+		help: showHelp,
+		translator: cliTranslator,
+	});
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

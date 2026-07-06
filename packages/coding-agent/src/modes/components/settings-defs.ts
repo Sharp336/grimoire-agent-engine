@@ -24,6 +24,7 @@ import {
 	type SubmenuOption,
 	TAB_GROUPS,
 } from "../../config/settings-schema";
+import { interceptSettingDefs } from "../../i18n/interceptor";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -193,7 +194,12 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 /** Cache of generated definitions */
 let cachedDefs: SettingDef[] | null = null;
 
-/** Get all setting definitions with UI */
+/** Invalidate the settings definition cache (call after language change) */
+export function invalidateSettingDefsCache(): void {
+	cachedDefs = null;
+}
+
+/** Get all setting definitions with UI — translations intercepted at output boundary */
 export function getAllSettingDefs(): SettingDef[] {
 	if (cachedDefs) return cachedDefs;
 
@@ -204,8 +210,8 @@ export function getAllSettingDefs(): SettingDef[] {
 			if (def) defs.push(def);
 		}
 	}
-	cachedDefs = defs;
-	return defs;
+	cachedDefs = interceptSettingDefs(defs);
+	return cachedDefs;
 }
 
 /**

@@ -41,12 +41,19 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
+import { i18n } from "../../i18n";
+import {
+	interceptGroupLabel,
+	interceptPluginsLabel,
+	interceptTabLabel,
+	interceptUIString,
+} from "../../i18n/interceptor";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
-import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
+import { getSettingDef, getSettingsForTab, type SettingDef, type SubmenuSettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
 
@@ -350,9 +357,13 @@ function getSettingsTabs(): Tab[] {
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
+			return { id, label: `${icon} ${interceptTabLabel(id, meta.label)}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{
+			id: "plugins",
+			label: `${theme.icon.package} ${interceptPluginsLabel("Plugins")}`,
+			short: theme.icon.package,
+		},
 	];
 }
 
@@ -424,6 +435,8 @@ export class SettingsSelectorComponent implements Component {
 	#searchFirstMatch = new Map<string, string>();
 	#textInputActive = false;
 	#hasSectionJump = false;
+	/** Last rendered language, used to detect language changes for auto-refresh */
+	#lastLanguage = "";
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
 	#tabRowStart = 0;
@@ -513,6 +526,19 @@ export class SettingsSelectorComponent implements Component {
 	 * then a footer hint pinned above the bottom border.
 	 */
 	render(width: number): readonly string[] {
+		// Auto-refresh when language changes
+		const currentLang = i18n.getLanguage();
+		if (this.#lastLanguage && this.#lastLanguage !== currentLang) {
+			this.#lastLanguage = currentLang;
+			// Rebuild tabs and current tab content with new language
+			this.#tabBar.setTabs(getSettingsTabs(), this.#currentTabId);
+			if (this.#currentTabId !== "plugins") {
+				this.#showSettingsTab(this.#currentTabId);
+			}
+		} else if (!this.#lastLanguage) {
+			this.#lastLanguage = currentLang;
+		}
+
 		const height = Math.max(14, process.stdout.rows || 40);
 		const innerWidth = Math.max(1, width - 4);
 
@@ -538,7 +564,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, interceptUIString("ui.settings.title", "Settings")));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -644,7 +670,7 @@ export class SettingsSelectorComponent implements Component {
 			{
 				layout: "flat",
 				typeToSearch: false,
-				emptyText: "No matching settings",
+				emptyText: interceptUIString("ui.settings.noResults", "No matching settings"),
 				hint: "",
 			},
 		);
@@ -698,7 +724,7 @@ export class SettingsSelectorComponent implements Component {
 			const meta = TAB_METADATA[result.tab];
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
+				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${interceptTabLabel(result.tab, meta.label)}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -748,17 +774,26 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
-				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
+				matched.push({
+					id,
+					label: `${icon} ${interceptTabLabel(id, meta.label)} (${count})`,
+					short: `${icon} ${count}`,
+				});
 			}
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
+			empty.push({ id, label: `${icon} ${interceptTabLabel(id, meta.label)}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
+		empty.push({
+			id: "plugins",
+			label: `${theme.icon.package} ${interceptUIString("tabs.plugins.label", "Plugins")}`,
+			short: theme.icon.package,
+			muted: true,
+		});
 		return [...matched, ...empty];
 	}
 
@@ -827,7 +862,7 @@ export class SettingsSelectorComponent implements Component {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
+					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue, def as SubmenuSettingDef),
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
 					changed,
 				};
@@ -865,8 +900,13 @@ export class SettingsSelectorComponent implements Component {
 		return !Object.is(currentValue, getDefault(def.path));
 	}
 
-	#getSubmenuCurrentValue(path: SettingPath, value: unknown): string {
+	#getSubmenuCurrentValue(path: SettingPath, value: unknown, def?: SubmenuSettingDef): string {
 		const rawValue = String(value ?? "");
+		// Look up the label from submenu options for display
+		if (def?.options) {
+			const option = def.options.find(o => o.value === rawValue);
+			if (option?.label) return option.label;
+		}
 		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
@@ -1127,7 +1167,8 @@ export class SettingsSelectorComponent implements Component {
 			const item = this.#defToItem(def);
 			if (!item) continue;
 			if (def.group && def.group !== lastGroup) {
-				items.push({ id: `__heading:${def.group}`, label: def.group, currentValue: "", heading: true });
+				const translated = interceptGroupLabel(def.tab, def.group);
+				items.push({ id: `__heading:${def.group}`, label: translated, currentValue: "", heading: true });
 				lastGroup = def.group;
 			}
 			items.push(item);
