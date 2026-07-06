@@ -4,6 +4,8 @@ Execution blocks your turn: the call only returns once the work is completely fi
 
 # Delegation Strategy
 - **Maximize parallelism:** Break work into the widest possible {{#if batchEnabled}}array of `tasks[]`{{else}}set of parallel `task` calls{{/if}}. NEVER serialize work that can run concurrently. Tasks touching different files or independent refactors should run in parallel; agents resolve their own file collisions live.
+{{#if batchEnabled}}- **One shared context, one batch:** Keep work sharing the same context/contract in one `tasks[]` batch, even when items use different `agent` overrides. Split calls only for different context/contracts, not merely different agents.
+{{/if}}
 {{#when MAX_CONCURRENCY ">" 0}}
 - **Concurrency cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} run at once in this session — anything beyond that just queues, so a {{#if batchEnabled}}`tasks[]` batch{{else}}set of parallel `task` calls{{/if}} larger than {{MAX_CONCURRENCY}} only delays results. Keep the fan-out at or under the cap.
 {{/when}}
@@ -18,6 +20,7 @@ Execution blocks your turn: the call only returns once the work is completely fi
 {{#if batchEnabled}}
 - `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
 - `tasks[]`: Array of subagents to spawn.
+  - `agent`: Optional agent override for this item; defaults to the top-level `agent`.
   - `assignment`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
   - `id`: A stable CamelCase identifier (≤32 chars). Generated automatically if omitted.
   - `description`: A UI label only; the subagent NEVER sees it.

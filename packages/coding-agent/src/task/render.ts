@@ -37,7 +37,15 @@ import {
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
+import {
+	type AgentProgress,
+	oneLineLabel,
+	type SingleResult,
+	type TaskItem,
+	type TaskParams,
+	type TaskToolDetails,
+	type YieldItem,
+} from "./types";
 import { assembleYieldResult } from "./yield-assembly";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
@@ -677,6 +685,74 @@ function formatOutputInline(data: unknown, theme: Theme, maxWidth = 80): string 
 	return `Output: ${pairs.join(", ")}`;
 }
 
+const AGENT_LABEL_MAX_WIDTH = 24;
+const AGENT_HEADER_MAX_WIDTH = 56;
+const MIXED_AGENT_LABEL_LIMIT = 3;
+
+type AgentInputTask = Partial<TaskItem> & { agent?: unknown };
+
+function formatAgentLabel(value: unknown, maxWidth = AGENT_LABEL_MAX_WIDTH): string {
+	if (typeof value !== "string") return "";
+	const label = oneLineLabel(value, maxWidth);
+	return label ? truncateToWidth(replaceTabs(label), maxWidth) : "";
+}
+
+function appendAgentStatusLabel(line: string, agent: unknown, theme: Theme): string {
+	const label = formatAgentLabel(agent);
+	return label ? `${line}${theme.sep.dot}${theme.fg("dim", label)}` : line;
+}
+
+function summarizeAgentLabels(labels: readonly string[]): string {
+	const counts = new Map<string, number>();
+	for (const label of labels) {
+		if (!label) continue;
+		counts.set(label, (counts.get(label) ?? 0) + 1);
+	}
+	if (counts.size === 0) return "";
+	if (counts.size === 1) return counts.keys().next().value ?? "";
+
+	const parts = Array.from(counts)
+		.slice(0, MIXED_AGENT_LABEL_LIMIT)
+		.map(([label, count]) => `${label}×${count}`);
+	if (counts.size > MIXED_AGENT_LABEL_LIMIT) parts.push("…");
+	return truncateToWidth(`mixed (${parts.join(", ")})`, AGENT_HEADER_MAX_WIDTH);
+}
+
+function formatArgsAgentHeaderDescription(args: Partial<TaskParams> | undefined): string {
+	const defaultAgent = (args as { agent?: unknown } | undefined)?.agent;
+	const tasks = Array.isArray(args?.tasks) ? args.tasks : [];
+	if (tasks.length === 0) return summarizeAgentLabels([formatAgentLabel(defaultAgent)]);
+
+	const labels: string[] = [];
+	for (const task of tasks) {
+		const itemAgent = (task as AgentInputTask | undefined)?.agent;
+		const label = formatAgentLabel(itemAgent ?? defaultAgent);
+		if (label) labels.push(label);
+	}
+	return summarizeAgentLabels(labels);
+}
+
+function formatDetailsAgentHeaderDescription(details: TaskToolDetails | undefined): string {
+	if (!details) return "";
+	const items: Array<{ agent?: unknown }> =
+		details.progress && details.progress.length > 0 ? details.progress : details.results;
+	return summarizeAgentLabels(items.map(item => formatAgentLabel(item.agent)).filter(Boolean));
+}
+
+function shouldRenderTaskAgentLabels(tasks: TaskItem[] | undefined, defaultAgent: unknown): boolean {
+	if (!Array.isArray(tasks) || tasks.length === 0) return false;
+	const defaultLabel = formatAgentLabel(defaultAgent);
+	const labels = new Set<string>();
+	let hasOverride = false;
+	for (const task of tasks) {
+		const itemAgent = (task as AgentInputTask | undefined)?.agent;
+		if (itemAgent != null) hasOverride = true;
+		const label = formatAgentLabel(itemAgent ?? defaultAgent);
+		if (label) labels.add(label);
+	}
+	return hasOverride || !defaultLabel || labels.size > 1;
+}
+
 /**
  * Render the call preview lines for the single spawned agent. The
  * args stream in token by token, so every field access is defensive.
@@ -685,6 +761,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 	if (!args) return [];
 	const bullet = theme.fg("dim", "•");
 	const lines: string[] = [];
+	const defaultAgent = (args as { agent?: unknown } | undefined)?.agent;
 
 	const rawId = typeof args.id === "string" ? args.id.trim() : "";
 	const idLabel = rawId ? formatTaskId(rawId) : "";
@@ -696,7 +773,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 		}
 		lines.push(line);
 	}
-	lines.push(...renderTaskItemLines(args.tasks, theme));
+	lines.push(...renderTaskItemLines(args.tasks, defaultAgent, theme));
 	return lines;
 }
 
@@ -712,11 +789,12 @@ const COLLAPSED_AGENT_LIMIT = 4;
  * over time and trailing entries may be partially parsed — every field access
  * is defensive.
  */
-function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): string[] {
+function renderTaskItemLines(tasks: TaskItem[] | undefined, defaultAgent: unknown, theme: Theme): string[] {
 	if (!Array.isArray(tasks) || tasks.length === 0) return [];
 
 	const bullet = theme.fg("dim", "•");
 	const cap = Math.min(tasks.length, COLLAPSED_AGENT_LIMIT);
+	const showAgentLabels = shouldRenderTaskAgentLabels(tasks, defaultAgent);
 	const lines: string[] = [];
 	for (let i = 0; i < cap; i++) {
 		const task = tasks[i] as Partial<TaskItem> | undefined;
@@ -726,6 +804,10 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const desc = typeof task?.description === "string" ? task.description.trim() : "";
 		if (desc) {
 			line += `: ${theme.fg("muted", previewLine(desc, 64))}`;
+		}
+		if (showAgentLabels) {
+			const agentLabel = formatAgentLabel((task as AgentInputTask | undefined)?.agent ?? defaultAgent);
+			if (agentLabel) line += theme.fg("dim", ` [${agentLabel}]`);
 		}
 		if (task?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
@@ -794,8 +876,9 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	// Dispatch glyph from the first frame: spawning is non-blocking, so a
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
+	const agentLabel = formatArgsAgentHeaderDescription(args);
 	const header = renderStatusLine(
-		{ iconOverride: theme.styledSymbol("tool.task", "accent"), title: "Task", description: args.agent },
+		{ iconOverride: theme.styledSymbol("tool.task", "accent"), title: "Task", description: agentLabel || undefined },
 		theme,
 	);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
@@ -907,6 +990,7 @@ function renderAgentProgress(
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
+	statusLine = appendAgentStatusLabel(statusLine, progress.agent, theme);
 
 	lines.push(statusLine);
 
@@ -1235,6 +1319,7 @@ function renderAgentResult(
 	if (result.truncated) {
 		statusLine += ` ${theme.fg("warning", "[truncated]")}`;
 	}
+	statusLine = appendAgentStatusLabel(statusLine, result.agent, theme);
 
 	lines.push(statusLine);
 
@@ -1460,7 +1545,7 @@ export function renderResult(
 ): Component {
 	const fallbackText = result.content.find(c => c.type === "text")?.text ?? "";
 	const details = result.details;
-	const agentLabel = args?.agent?.trim() || undefined;
+	const agentLabel = formatDetailsAgentHeaderDescription(details) || formatArgsAgentHeaderDescription(args);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
 	const contextSection = createContextSectionRenderer(args, theme);
 
@@ -1468,12 +1553,12 @@ export function renderResult(
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
 		const header = errored
-			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
+			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel || undefined }, theme)
 			: renderStatusLine(
 					{
 						iconOverride: theme.styledSymbol("status.done", "accent"),
 						title: "Task",
-						description: agentLabel,
+						description: agentLabel || undefined,
 					},
 					theme,
 				);

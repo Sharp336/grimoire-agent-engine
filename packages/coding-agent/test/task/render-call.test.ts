@@ -25,6 +25,12 @@ describe("task renderer: streaming call preview", () => {
 		return Bun.stripANSI(component.render(160).join("\n"));
 	}
 
+	function findRenderedLine(out: string, needle: string): string {
+		const line = out.split("\n").find(renderedLine => renderedLine.includes(needle));
+		expect(line).toBeDefined();
+		return line!;
+	}
+
 	// The preview must surface the agent id + ui description so the user can
 	// see what is being dispatched while args stream in.
 	it("shows the agent id, description, and assignment preview", () => {
@@ -112,6 +118,35 @@ describe("task renderer: streaming call preview", () => {
 		expect(contextAt).toBeGreaterThanOrEqual(0);
 		expect(firstAgentAt).toBeGreaterThan(contextAt);
 		expect(out.indexOf("Fix02Setup")).toBeGreaterThan(firstAgentAt);
+	});
+
+	it("previews streamed item agents without rendering an undefined top-level agent", () => {
+		const args = {
+			context: "# Goal\nCatalog the library backlog.",
+			tasks: [{ id: "CatalogBooks", agent: "librarian", description: "Catalog rare books" }],
+		} as unknown as TaskParams;
+		const out = render(args);
+		const lines = out.split("\n");
+
+		expect(out).not.toContain("undefined");
+		expect(lines[0]).toContain("librarian");
+		expect(findRenderedLine(out, "CatalogBooks")).toContain("librarian");
+	});
+
+	it("summarizes mixed item agents in the header and labels each row", () => {
+		const args = {
+			agent: "task",
+			context: "# Goal\nSplit code and research work.",
+			tasks: [
+				{ id: "InspectCode", description: "Inspect code paths" },
+				{ id: "CatalogBooks", agent: "librarian", description: "Catalog rare books" },
+			],
+		} as unknown as TaskParams;
+		const out = render(args);
+
+		expect(out).toContain("mixed (task×1, librarian×1)");
+		expect(findRenderedLine(out, "InspectCode")).toContain("task");
+		expect(findRenderedLine(out, "CatalogBooks")).toContain("librarian");
 	});
 
 	// Early in the stream only `context` has parsed; the (empty) agent-list

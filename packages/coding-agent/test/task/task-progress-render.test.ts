@@ -180,6 +180,54 @@ describe("task progress rendering", () => {
 		expect(row).not.toContain(theme.fg("accent", titlePart));
 	});
 
+	it("renders resolved agent labels on mixed progress and result rows", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const progressOptions: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const progressDetails: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			progress: [
+				runningProgress({ index: 0, id: "InspectCode", agent: "task", description: "Inspect code paths" }),
+				runningProgress({
+					index: 1,
+					id: "CatalogBooks",
+					agent: "librarian",
+					description: "Catalog rare books",
+				}),
+			],
+		};
+
+		const progressComponent = taskToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "" }], details: progressDetails },
+			progressOptions,
+			theme,
+		);
+		expect(Bun.stripANSI(findRow(progressComponent, "InspectCode"))).toContain("task");
+		expect(Bun.stripANSI(findRow(progressComponent, "CatalogBooks"))).toContain("librarian");
+
+		const resultDetails: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [
+				finishedResult({ index: 0, id: "InspectCode", agent: "task", description: "Inspect code paths" }),
+				finishedResult({
+					index: 1,
+					id: "CatalogBooks",
+					agent: "librarian",
+					description: "Catalog rare books",
+				}),
+			],
+			totalDurationMs: 5,
+		};
+		const resultComponent = taskToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "" }], details: resultDetails },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		expect(Bun.stripANSI(findRow(resultComponent, "InspectCode"))).toContain("task");
+		expect(Bun.stripANSI(findRow(resultComponent, "CatalogBooks"))).toContain("librarian");
+	});
+
 	it("shows the dispatch glyph in the header while agents run, not a spinner", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };

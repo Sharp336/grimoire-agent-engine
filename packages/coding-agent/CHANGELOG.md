@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-task agent overrides for `task` tool batch items, defaulting omitted item agents to the top-level agent.
+
 ## [16.3.11] - 2026-07-06
 
 ### Changed

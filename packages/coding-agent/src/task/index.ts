@@ -317,7 +317,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * item's `isolated` (batch form) wins over the top-level flag (flat form).
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
-	const spawn: TaskParams = { agent: params.agent };
+	const spawn: TaskParams = { agent: item.agent ?? params.agent };
 	if (item.id !== undefined) spawn.id = item.id;
 	if (item.description !== undefined) spawn.description = item.description;
 	if (item.role !== undefined) spawn.role = item.role;
@@ -329,6 +329,83 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
 		spawn.isolated = params.isolated;
 	}
 	return spawn;
+}
+
+interface ResolvedSpawnItem {
+	item: TaskItem;
+	index: number;
+	agentName: string;
+	agent: AgentDefinition;
+}
+
+type SpawnItemAgentResolution = { ok: true; resolved: ResolvedSpawnItem[] } | { ok: false; error: string };
+
+function spawnItemTarget(item: TaskItem, index: number): string {
+	const id = item.id?.trim();
+	return id ? `task id \`${id}\`` : `index ${index + 1}`;
+}
+
+function resolveSpawnItemAgents(args: {
+	params: TaskParams;
+	items: TaskItem[];
+	agents: AgentDefinition[];
+	disabledAgents: string[];
+	blockedAgent?: string;
+	parentSpawns: string | boolean | null | undefined;
+}): SpawnItemAgentResolution {
+	const available = args.agents.map(agent => agent.name).join(", ") || "none";
+	const enabled = args.agents.filter(agent => !args.disabledAgents.includes(agent.name)).map(agent => agent.name);
+	const spawnPolicy = resolveSpawnPolicy(args.parentSpawns);
+	const resolved: ResolvedSpawnItem[] = [];
+
+	for (let index = 0; index < args.items.length; index++) {
+		const item = args.items[index];
+		const agentName = item.agent ?? args.params.agent ?? "";
+		const target = spawnItemTarget(item, index);
+		const agent = getAgent(args.agents, agentName);
+		if (!agent) {
+			return { ok: false, error: `Unknown agent "${agentName}" for ${target}. Available: ${available}` };
+		}
+		if (args.disabledAgents.length > 0 && args.disabledAgents.includes(agentName)) {
+			const enabledSuffix = enabled.length > 0 ? ` Enabled agents: ${enabled.join(", ")}` : "";
+			const message =
+				`Agent "${agentName}" for ${target} is disabled in settings. ` +
+				`Enable it via /agents, or use a different agent type.${enabledSuffix}`;
+			return { ok: false, error: message };
+		}
+		if (args.blockedAgent && agentName === args.blockedAgent) {
+			const message =
+				`Cannot spawn ${args.blockedAgent} agent for ${target} from within itself ` +
+				"(recursion prevention). Use a different agent type.";
+			return { ok: false, error: message };
+		}
+		const spawnAllowed =
+			spawnPolicy.enabled && (spawnPolicy.allowedAgents === null || spawnPolicy.allowedAgents.includes(agentName));
+		if (!spawnAllowed) {
+			return {
+				ok: false,
+				error: `Cannot spawn '${agentName}' for ${target}. Allowed: ${spawnPolicy.allowedErrorText}`,
+			};
+		}
+		resolved.push({ item, index, agentName, agent });
+	}
+
+	return { ok: true, resolved };
+}
+
+function summarizeResolvedAgents(spawns: readonly ResolvedSpawnItem[]): string {
+	const counts = new Map<string, number>();
+	for (const spawn of spawns) {
+		counts.set(spawn.agentName, (counts.get(spawn.agentName) ?? 0) + 1);
+	}
+	if (counts.size === 0) return "task";
+	if (counts.size === 1) return counts.keys().next().value ?? "task";
+	return `mixed (${Array.from(counts, ([agent, count]) => `${agent}×${count}`).join(", ")})`;
+}
+
+function commonResolvedAgentName(spawns: readonly ResolvedSpawnItem[]): string | undefined {
+	const first = spawns[0]?.agentName;
+	return first && spawns.every(spawn => spawn.agentName === first) ? first : undefined;
 }
 
 /** Generic worker agents whose output sharpens with a tailored `role` rather than the bare type. */
@@ -453,9 +530,48 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly name = "task";
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const params = args as Partial<TaskParams>;
+		const params = args && typeof args === "object" ? (args as Partial<TaskParams>) : {};
 		const lines: string[] = [];
-		if (typeof params.agent === "string") {
+		const tasks = Array.isArray(params.tasks) ? params.tasks : [];
+		const hasBatchTasks = tasks.length > 0;
+		const effectiveAgentFor = (task: unknown): string | undefined => {
+			const item = task && typeof task === "object" ? (task as Partial<TaskItem>) : {};
+			const effectiveAgent = (item.agent as unknown) ?? params.agent;
+			return typeof effectiveAgent === "string" ? effectiveAgent : undefined;
+		};
+		const hasAgentOverride = (task: unknown): boolean => {
+			const item = task && typeof task === "object" ? (task as Partial<TaskItem>) : {};
+			return typeof item.agent === "string";
+		};
+		const countEffectiveAgents = (items: readonly unknown[]): Map<string, number> => {
+			const counts = new Map<string, number>();
+			for (const item of items) {
+				const agent = effectiveAgentFor(item);
+				if (agent === undefined) continue;
+				counts.set(agent, (counts.get(agent) ?? 0) + 1);
+			}
+			return counts;
+		};
+		const formatAgentCounts = (counts: ReadonlyMap<string, number>): string =>
+			Array.from(counts, ([agent, count]) => `${truncateForPrompt(agent)}×${count}`).join(", ");
+		const formatHiddenAgentSummary = (counts: ReadonlyMap<string, number>): string | undefined => {
+			if (counts.size === 0) return undefined;
+			if (counts.size === 1) {
+				const first = counts.entries().next();
+				if (first.done) return undefined;
+				const [agent, count] = first.value;
+				return count === 1 ? `agent: ${truncateForPrompt(agent)}` : `agent: ${truncateForPrompt(agent)}×${count}`;
+			}
+			return `agents: ${formatAgentCounts(counts)}`;
+		};
+		const agentCounts = hasBatchTasks ? countEffectiveAgents(tasks) : new Map<string, number>();
+		const agentsMixed = agentCounts.size > 1;
+		if (hasBatchTasks && agentsMixed) {
+			lines.push(`Agents: mixed (${formatAgentCounts(agentCounts)})`);
+		} else if (hasBatchTasks && agentCounts.size === 1) {
+			const first = agentCounts.keys().next();
+			if (!first.done) lines.push(`Agent: ${truncateForPrompt(first.value)}`);
+		} else if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
 		if (typeof params.role === "string" && params.role.trim()) {
@@ -470,20 +586,37 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.context === "string" && params.context.trim()) {
 			lines.push(`Context:\n${truncateForPrompt(params.context)}`);
 		}
-		const tasks = Array.isArray(params.tasks) ? params.tasks : [];
 		const firstTask = tasks[0];
 		if (firstTask) {
-			if (typeof firstTask.id === "string" && firstTask.id.trim()) {
-				lines.push(`Task: ${truncateForPrompt(firstTask.id)}`);
+			const firstTaskParams = firstTask && typeof firstTask === "object" ? (firstTask as Partial<TaskItem>) : {};
+			const firstEffectiveAgent = effectiveAgentFor(firstTask);
+			const firstAgentSuffix =
+				(agentsMixed || hasAgentOverride(firstTask)) && firstEffectiveAgent !== undefined
+					? ` (agent: ${truncateForPrompt(firstEffectiveAgent)})`
+					: "";
+			if (typeof firstTaskParams.id === "string" && firstTaskParams.id.trim()) {
+				lines.push(`Task: ${truncateForPrompt(firstTaskParams.id)}${firstAgentSuffix}`);
+			} else if (firstAgentSuffix) {
+				lines.push(`Task:${firstAgentSuffix}`);
 			}
-			if (typeof firstTask.role === "string" && firstTask.role.trim()) {
-				lines.push(`Role: ${truncateForPrompt(firstTask.role)}`);
+			if (typeof firstTaskParams.role === "string" && firstTaskParams.role.trim()) {
+				lines.push(`Role: ${truncateForPrompt(firstTaskParams.role)}`);
 			}
-			if (typeof firstTask.assignment === "string") {
-				lines.push(`Assignment:\n${truncateForPrompt(firstTask.assignment)}`);
+			if (typeof firstTaskParams.assignment === "string") {
+				lines.push(`Assignment:\n${truncateForPrompt(firstTaskParams.assignment)}`);
 			}
 			if (tasks.length > 1) {
-				lines.push(`+${tasks.length - 1} more task${tasks.length === 2 ? "" : "s"}`);
+				const hiddenTasks = tasks.slice(1);
+				const hiddenAgentCounts = countEffectiveAgents(hiddenTasks);
+				const hiddenAgentSummary =
+					agentsMixed || hiddenTasks.some(hasAgentOverride) || hiddenAgentCounts.size > 1
+						? formatHiddenAgentSummary(hiddenAgentCounts)
+						: undefined;
+				lines.push(
+					`+${tasks.length - 1} more task${tasks.length === 2 ? "" : "s"}${
+						hiddenAgentSummary ? ` (${hiddenAgentSummary})` : ""
+					}`,
+				);
 			}
 		}
 		return lines;
@@ -590,7 +723,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		const spawnItems = resolveSpawnItems(params);
-		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
+		const { agents: freshAgents, projectAgentsDir } = await discoverAgents(this.session.cwd);
+		const preflight = resolveSpawnItemAgents({
+			params,
+			items: spawnItems,
+			agents: freshAgents,
+			disabledAgents: this.session.settings.get("task.disabledAgents") as string[],
+			blockedAgent: this.#blockedAgent,
+			parentSpawns: this.session.getSessionSpawns(),
+		});
+		if (!preflight.ok) {
+			return {
+				content: [{ type: "text", text: preflight.error }],
+				details: { projectAgentsDir, results: [], totalDurationMs: 0 },
+			};
+		}
+		const resolvedSpawns = preflight.resolved;
+		const hasBlockingAgent = resolvedSpawns.some(spawn => spawn.agent.blocking === true);
+		const commonAgentName = commonResolvedAgentName(resolvedSpawns);
+		const agentSummary = summarizeResolvedAgents(resolvedSpawns);
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
 		const depthCapacity = canSpawnAtDepth(
@@ -601,11 +752,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Coordination only makes sense when the siblings keep running after this
 		// call returns (async). In the sync fallback they have already completed,
 		// so a "coordinate while they run" hint would misfire.
-		const willRunAsync = !!manager && selectedAgent?.blocking !== true;
+		const willRunAsync = !!manager && !hasBlockingAgent;
 		const advisory = this.session.suppressSpawnAdvisory
 			? undefined
 			: composeSpawnAdvisory({
-					agentName: params.agent,
+					agentName: commonAgentName,
 					items: spawnItems,
 					depthCapacity,
 					ircEnabled,
@@ -627,7 +778,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (!appended) content.push({ type: "text", text: advisory });
 			return { ...result, content };
 		};
-		if (!asyncEnabled || !manager || selectedAgent?.blocking === true) {
+		if (!asyncEnabled || !manager || hasBlockingAgent) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or an agent definition that declares
 			// `blocking: true`. The session-scoped semaphore still bounds fan-out
@@ -641,21 +792,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Resolve agent ids up front so the immediate result can name them.
 		const outputManager =
 			this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
-		const agentLabel = params.agent ?? "task";
-		const agentSource = selectedAgent?.source ?? "bundled";
-		const spawns: Array<{ agentId: string; item: TaskItem; progress: AgentProgress }> = [];
-		for (let index = 0; index < spawnItems.length; index++) {
-			const item = spawnItems[index];
+		const spawns: Array<{ agentId: string; item: TaskItem; agentName: string; progress: AgentProgress }> = [];
+		for (const resolved of resolvedSpawns) {
+			const { item, index, agentName, agent } = resolved;
 			const agentId = await outputManager.allocate(item.id?.trim() || generateTaskName());
 			const assignment = (item.assignment ?? "").trim();
 			spawns.push({
 				agentId,
 				item,
+				agentName,
 				progress: {
 					index,
 					id: agentId,
-					agent: agentLabel,
-					agentSource,
+					agent: agentName,
+					agentSource: agent.source,
 					status: "pending",
 					task: renderSubagentUserPrompt(assignment),
 					assignment,
@@ -691,7 +841,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const started: Array<{ agentId: string; jobId: string; description?: string }> = [];
+		const started: Array<{ agentId: string; jobId: string; agentName: string; description?: string }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of spawns) {
 			try {
@@ -710,10 +860,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					},
 				});
 				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId, description: spawn.item.description });
+				started.push({
+					agentId: spawn.agentId,
+					jobId,
+					agentName: spawn.agentName,
+					description: spawn.item.description,
+				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				failedSchedules.push(`${spawn.agentId}: ${message}`);
+				failedSchedules.push(`${spawn.agentId} (${spawn.agentName}): ${message}`);
 				spawn.progress.status = "failed";
 				settledCount += 1;
 				failedCount += 1;
@@ -733,20 +888,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		if (single) {
-			const { agentId, jobId, description } = started[0];
+			const { agentId, jobId, agentName, description } = started[0];
 			const coordinationHint = ircEnabled
 				? `DM \`${agentId}\` via \`irc\` to coordinate while it runs; use \`job\` only to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task.`
 				: `Use \`job\` to inspect (\`list\`), wait (\`poll\`), or cancel a stuck task.`;
 			const descriptionSuffix = description ? ` — ${description}` : "";
 			onUpdate?.({
-				content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
+				content: [{ type: "text", text: `Spawned agent \`${agentId}\` using \`${agentName}\`...` }],
 				details: buildAsyncDetails("running", jobId),
 			});
 			return withAdvisory({
 				content: [
 					{
 						type: "text",
-						text: `Spawned agent \`${agentId}\` (job \`${jobId}\`)${descriptionSuffix}. The result will be delivered when it yields. ${coordinationHint}`,
+						text: `Spawned agent \`${agentId}\` using \`${agentName}\` (job \`${jobId}\`)${descriptionSuffix}. The result will be delivered when it yields. ${coordinationHint}`,
 					},
 				],
 				details: buildAsyncDetails("running", jobId),
@@ -761,8 +916,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
 		const startedListing = started
-			.map(({ agentId, jobId, description }) => {
-				const prefix = `- \`${agentId}\` (job \`${jobId}\`)`;
+			.map(({ agentId, jobId, agentName, description }) => {
+				const prefix = `- \`${agentId}\` using \`${agentName}\` (job \`${jobId}\`)`;
 				return description ? `${prefix} — ${description}` : prefix;
 			})
 			.join("\n");
@@ -774,7 +929,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			content: [
 				{
 					type: "text",
-					text: `Spawned ${started.length} background agents using ${agentLabel}.${scheduleFailureSummary} Each result will be delivered when that agent yields.\n${startedListing}\n${coordinationHint}`,
+					text: `Spawned ${started.length} background agents using ${agentSummary}.${scheduleFailureSummary} Each result will be delivered when that agent yields.\n${startedListing}\n${coordinationHint}`,
 				},
 			],
 			details: buildAsyncDetails("running", primaryJobId),

@@ -82,6 +82,7 @@ const ROLE_INPUT_SCHEMA = `string <= ${ROLE_INPUT_MAX}` as const;
 
 export const taskItemSchema = type({
 	"id?": "string",
+	"agent?": "string",
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	assignment: "string",
@@ -89,6 +90,7 @@ export const taskItemSchema = type({
 });
 const taskItemSchemaIsolated = type({
 	"id?": "string",
+	"agent?": "string",
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	assignment: "string",
@@ -100,6 +102,8 @@ const taskItemSchemaIsolated = type({
 export interface TaskItem {
 	/** Stable agent id; default = generated AdjectiveNoun. */
 	id?: string;
+	/** Agent type override for this item; default = top-level `agent`. */
+	agent?: string;
 	/** UI label, not seen by the subagent. */
 	description?: string;
 	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */

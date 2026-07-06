@@ -33,23 +33,51 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
+const librarianAgent: AgentDefinition = {
+	name: "librarian",
+	description: "Research librarian agent",
+	systemPrompt: "You are a librarian.",
+	source: "project",
+	blocking: true,
+};
+
 function createSession(
-	options: { manager?: AsyncJobManager; settings?: Record<string, unknown>; agentId?: string } = {},
+	options: {
+		manager?: AsyncJobManager;
+		settings?: Record<string, unknown>;
+		agentId?: string;
+		spawns?: string | null;
+	} = {},
 ): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? {}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionSpawns: () => options.spawns ?? "*",
 		getAgentId: () => options.agentId ?? null,
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
 }
 
 function getSchemaProperties(tool: TaskTool): Record<string, unknown> {
-	const wire = toolWireSchema(tool) as { properties?: Record<string, unknown> };
-	return wire.properties ?? {};
+	const wire = toolWireSchema(tool);
+	if (!isRecord(wire)) return {};
+	const properties = wire.properties;
+	return isRecord(properties) ? properties : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object";
+}
+
+function getTaskItemProperties(properties: Record<string, unknown>): Record<string, unknown> | undefined {
+	const tasks = properties.tasks;
+	if (!isRecord(tasks)) return undefined;
+	const items = tasks.items;
+	if (!isRecord(items)) return undefined;
+	const itemProperties = items.properties;
+	return isRecord(itemProperties) ? itemProperties : undefined;
 }
 
 function getFirstText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -76,9 +104,9 @@ function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleRe
 	};
 }
 
-function mockDiscovery(): void {
+function mockDiscovery(agents: AgentDefinition[] = [taskAgent]): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-		agents: [taskAgent],
+		agents,
 		projectAgentsDir: null,
 	});
 }
@@ -107,9 +135,18 @@ describe("task.batch schema gating", () => {
 		expect(onProperties.assignment).toBeUndefined();
 		expect(onProperties.id).toBeUndefined();
 		expect(onProperties.description).toBeUndefined();
-		const items = (onProperties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
-		expect(items?.properties?.assignment).toBeDefined();
-		expect(items?.properties?.id).toBeDefined();
+		const itemProperties = getTaskItemProperties(onProperties);
+		expect(itemProperties?.assignment).toBeDefined();
+		expect(itemProperties?.id).toBeDefined();
+	});
+
+	it("exposes per-item agent in the batch wire shape", async () => {
+		mockDiscovery([taskAgent, librarianAgent]);
+
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const itemProperties = getTaskItemProperties(getSchemaProperties(tool));
+
+		expect(itemProperties?.agent).toBeDefined();
 	});
 
 	it("places isolated per item in the batch shape when isolation is enabled", async () => {
@@ -118,10 +155,8 @@ describe("task.batch schema gating", () => {
 		const tool = await TaskTool.create(
 			createSession({ settings: { "task.batch": true, "task.isolation.mode": "auto" } }),
 		);
-		const properties = getSchemaProperties(tool);
-		expect(properties.isolated).toBeUndefined();
-		const items = (properties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
-		expect(items?.properties?.isolated).toBeDefined();
+		const itemProperties = getTaskItemProperties(getSchemaProperties(tool));
+		expect(itemProperties?.isolated).toBeDefined();
 	});
 
 	it("never exposes a per-call schema input", async () => {
@@ -201,6 +236,30 @@ describe("task.batch validation", () => {
 			{ "task.batch": true },
 		);
 		expect(text).toContain("Duplicate task id");
+	});
+});
+
+describe("task.batch approval details", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("surfaces mixed effective agents in batch approval details", async () => {
+		mockDiscovery([taskAgent, librarianAgent]);
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+
+		const details = tool.formatApprovalDetails({
+			agent: "task",
+			context: "# Goal\nRoute each task to the right specialist.",
+			tasks: [
+				{ id: "Scout", assignment: "Inspect the implementation." },
+				{ id: "Archivist", agent: "librarian", assignment: "Find the reference material." },
+			],
+		} as TaskParams);
+
+		expect(details).toContain("Agents: mixed (task×1, librarian×1)");
+		expect(details).toContain("Task: Scout (agent: task)");
+		expect(details).toContain("+1 more task (agent: librarian)");
 	});
 });
 
@@ -363,6 +422,131 @@ describe("task.batch spawning", () => {
 			"# Goal\nShared synchronous context.",
 			"# Goal\nShared synchronous context.",
 		]);
+	});
+
+	it("falls back to sync fanout when any resolved item agent is blocking", async () => {
+		mockDiscovery([taskAgent, librarianAgent]);
+		const seen: Array<{ id?: string; agent: string; context?: string }> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			seen.push({ id: options.id, agent: options.agent.name, context: options.context });
+			return makeResult(options.id ?? "?", { agent: options.agent.name, agentSource: options.agent.source });
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+		);
+
+		const result = await tool.execute("tc-mixed-blocking-batch", {
+			agent: "task",
+			context: "# Goal\nRoute each item to its effective agent.",
+			tasks: [
+				{ id: "Code", assignment: "Inspect the code paths." },
+				{ id: "Books", agent: "librarian", assignment: "Catalogue the references." },
+			],
+		} as unknown as TaskParams);
+
+		expect(result.details?.async).toBeUndefined();
+		expect(manager.getAllJobs()).toHaveLength(0);
+		expect(seen).toHaveLength(2);
+		expect(seen.map(spawn => spawn.context)).toEqual([
+			"# Goal\nRoute each item to its effective agent.",
+			"# Goal\nRoute each item to its effective agent.",
+		]);
+		expect(
+			seen.map(({ id, agent }) => ({ id, agent })).sort((a, b) => (a.id ?? "").localeCompare(b.id ?? "")),
+		).toEqual([
+			{ id: "Books", agent: "librarian" },
+			{ id: "Code", agent: "task" },
+		]);
+		expect(
+			result.details?.results.map(({ id, agent }) => ({ id, agent })).sort((a, b) => a.id.localeCompare(b.id)),
+		).toEqual([
+			{ id: "Books", agent: "librarian" },
+			{ id: "Code", agent: "task" },
+		]);
+	});
+
+	it("rejects invalid per-item agents before dispatching any batch job", async () => {
+		const batchWithOverride = (agent: string) => ({
+			agent: "task",
+			context: "# Goal\nValidate every effective agent before dispatch.",
+			tasks: [
+				{ id: "Default", assignment: "Use the inherited agent." },
+				{ id: "Override", agent, assignment: "Use the item override." },
+			],
+		});
+		const scenarios: Array<{
+			name: string;
+			params: unknown;
+			settings?: Record<string, unknown>;
+			spawns?: string;
+			blockedAgent?: string;
+			expected: string;
+		}> = [
+			{
+				name: "unknown item agent",
+				params: batchWithOverride("ghost"),
+				expected: 'Unknown agent "ghost"',
+			},
+			{
+				name: "disabled item agent",
+				params: batchWithOverride("librarian"),
+				settings: { "task.disabledAgents": ["librarian"] },
+				expected: 'Agent "librarian" for task id `Override` is disabled',
+			},
+			{
+				name: "self-recursive item agent",
+				params: batchWithOverride("librarian"),
+				blockedAgent: "librarian",
+				expected: "Cannot spawn librarian agent for task id `Override` from within itself",
+			},
+			{
+				name: "parent-spawn-disallowed item agent",
+				params: batchWithOverride("librarian"),
+				spawns: "task",
+				expected: "Cannot spawn 'librarian'",
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const previousBlockedAgent = Bun.env.PI_BLOCKED_AGENT;
+			try {
+				if (scenario.blockedAgent) {
+					Bun.env.PI_BLOCKED_AGENT = scenario.blockedAgent;
+				} else {
+					delete Bun.env.PI_BLOCKED_AGENT;
+				}
+				mockDiscovery([taskAgent, librarianAgent]);
+				const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+					return makeResult(options.id ?? "?", { agent: options.agent.name, agentSource: options.agent.source });
+				});
+				const manager = createManager();
+				const tool = await TaskTool.create(
+					createSession({
+						manager,
+						spawns: scenario.spawns,
+						settings: { "async.enabled": true, "task.batch": true, ...scenario.settings },
+					}),
+				);
+
+				const result = await tool.execute(
+					`tc-preflight-${scenario.name}`,
+					scenario.params as unknown as TaskParams,
+				);
+
+				expect(getFirstText(result)).toContain(scenario.expected);
+				expect(runSubprocess).not.toHaveBeenCalled();
+				expect(manager.getAllJobs()).toHaveLength(0);
+			} finally {
+				if (previousBlockedAgent === undefined) {
+					delete Bun.env.PI_BLOCKED_AGENT;
+				} else {
+					Bun.env.PI_BLOCKED_AGENT = previousBlockedAgent;
+				}
+				vi.restoreAllMocks();
+			}
+		}
 	});
 
 	it("settles the batch async aggregate when a queued spawn is cancelled mid-flight", async () => {
