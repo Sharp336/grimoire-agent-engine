@@ -1,5 +1,9 @@
 # Nikoflow → oh-my-pi — Implementation Spec (hand to Codex)
 
+> **AS-BUILT:** see `NIKOFLOW-STATUS.md` for what actually shipped. Key divergence: the binding
+> reviewer is the **native advisor**, not a spawned sub-agent (that mechanism proved unreliable
+> and was deleted). This file remains the design/build rationale.
+
 This is the **build order**. The full analysis + why is in `docs/NIKOFLOW-ROADMAP.md`
 (read its "READ FIRST — Reality check" section). This file tells you *what to build, where,
 in what order, and what must never break*. All architecture claims were audited against the
