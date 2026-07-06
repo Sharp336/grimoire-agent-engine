@@ -5,7 +5,7 @@
 ### Added
 
 - Added a `modelRoles.compaction` role for routing LLM summary compaction to a dedicated model when the active model does not define `compactionModel`.
-- Added `compaction.preferFastModel` to try a provider-local fast compaction model by default and fall back when the prepared input does not fit.
+- Added `compaction.preferFastModel` to try a provider-local fast compaction model by default and fall back when the prepared input does not fit. The inferred fast candidate is only used when it cannot regress prompt-cache economics: on the flat-rate `openai-codex-responses` wire, when the session model would not use provider-native history replay anyway, or when the fast model's input price does not exceed the session model's cached-input price. Explicit `compactionModel`/`modelRoles.compaction` targets bypass the gate.
 
 ## [16.3.6] - 2026-07-04
 

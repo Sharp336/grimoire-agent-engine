@@ -196,6 +196,25 @@ describe("AgentSession mid-run threshold compaction", () => {
 	});
 
 	it("uses the provider-local fast compaction model for auto mid-run compaction when it fits", async () => {
+		const currentModel = getBundledModel("openai-codex", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai-codex", "gpt-5.3-codex-spark");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const { session } = await createHarness(
+			{},
+			{ model: currentModel, authenticatedModels: [currentModel, fastModel] },
+		);
+		const compactSpy = mockCompaction("CODEX-FAST-MID-RUN-COMPACTED");
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
+	});
+
+	it("keeps the metered session model for auto mid-run compaction to preserve cached input pricing", async () => {
 		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
 		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
 		if (!currentModel || !fastModel) {
@@ -205,13 +224,13 @@ describe("AgentSession mid-run threshold compaction", () => {
 			{},
 			{ model: currentModel, authenticatedModels: [currentModel, fastModel] },
 		);
-		const compactSpy = mockCompaction("OPENAI-FAST-MID-RUN-COMPACTED");
+		const compactSpy = mockCompaction("OPENAI-METERED-MID-RUN-COMPACTED");
 
 		await session.prompt("work on the release");
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		const [, firstCandidate] = compactSpy.mock.calls[0]!;
-		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
+		expect(modelKey(firstCandidate)).toBe(modelKey(currentModel));
 	});
 
 	it("falls back to in-place compaction for mid-run handoff strategy", async () => {

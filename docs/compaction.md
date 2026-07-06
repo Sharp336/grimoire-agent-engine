@@ -242,12 +242,20 @@ LLM summary model selection:
 
 1. `currentModel.compactionModel`, if the active model metadata defines one.
 2. `modelRoles.compaction`, if configured.
-3. A provider-local fast compaction model such as `gpt-5.3-codex-spark`, when `compaction.preferFastModel !== false` and the prepared compaction input fits the fast model's context and modalities.
+3. A provider-local fast compaction model such as `gpt-5.3-codex-spark`, when `compaction.preferFastModel !== false`, the prepared compaction input fits the fast model's context and modalities, and rerouting cannot regress prompt-cache economics (see below).
 4. The active session model.
 5. Built-in fallback roles (`default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`).
 6. The remaining available model with the largest context window.
 
 Candidates without usable credentials are skipped. The inferred fast compaction candidate is skipped before any request when the prepared input is too large for its usable context window, so the chain falls through to the active model or later fallback. `/compact remote` keeps the same order but filters out provider-native non-remote-capable candidates when no `compaction.remoteEndpoint` is configured. Snapcompact does not use this chain because it archives history locally and requires the active model to support image input.
+
+The inferred candidate is additionally gated on prompt-cache economics. Provider-native remote compaction (V1 `/responses/compact` and V2 streaming) replays the session's exact native history — the prefix the provider has already cached for the live conversation — so on the session model most of that input bills at the roughly 10x cheaper `cacheRead` rate. Prefix caches do not transfer across models, so rerouting the replay to a fast model whose list price matches the session model's would silently turn a warm cached read into a full-price cold prefill. The inferred fast candidate is therefore only used when at least one of these holds:
+
+- the compaction wire is `openai-codex-responses` (the flat-rate ChatGPT subscription backend, where tokens are not metered),
+- the session model would not use provider-native replay anyway (remote compaction disabled or unsupported; the local summary prompt never shared a prefix with the session cache), or
+- the fast model's catalog input price does not exceed the session model's `cacheRead` price (no billing regression; also covers zero-cost catalogs).
+
+Explicitly configured targets (`compactionModel`, `modelRoles.compaction`) bypass this gate — a user who routes compaction to a specific model accepts the trade-off.
 
 Remote summarization modes:
 

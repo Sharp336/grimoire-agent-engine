@@ -522,7 +522,7 @@ memory:
 | `contextPromotion.enabled` | boolean | `true` | Promote relevant earlier context. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
-| `compaction.preferFastModel` | boolean | `true` | Try a provider-local fast model such as `gpt-5.3-codex-spark` for LLM summary compaction when no explicit compaction model is configured; skip it when the prepared input does not fit. |
+| `compaction.preferFastModel` | boolean | `true` | Try a provider-local fast model such as `gpt-5.3-codex-spark` for LLM summary compaction when no explicit compaction model is configured; skip it when the prepared input does not fit or when rerouting would forfeit cached input pricing on a metered provider (see [compaction](compaction.md)). |
 | `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
 | `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |
 | `compaction.thresholdTokens` | number | `-1` | Fixed token trigger when `> 0`. |

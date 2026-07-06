@@ -69,6 +69,7 @@ import {
 	type ShakeRegion,
 	type SummaryOptions,
 	shouldCompact,
+	shouldUseCompactionV2Streaming,
 	shouldUseOpenAiRemoteCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -11653,7 +11654,8 @@ export class AgentSession {
 			if (this.#getModelKey(model) === this.#getModelKey(currentModel)) return false;
 			if (!model.input.includes("text")) return false;
 			const parsed = parseKnownModel(model.id);
-			return parsed.family === "openai" && parsed.variant === "codex-spark";
+			if (parsed.family !== "openai" || parsed.variant !== "codex-spark") return false;
+			return this.#inferredFastCompactionIsCacheSafe(currentModel, model);
 		});
 		candidates.sort((a, b) => {
 			const rankDiff = this.#defaultFastCompactionRank(a) - this.#defaultFastCompactionRank(b);
@@ -11665,6 +11667,44 @@ export class AgentSession {
 			return this.#getModelKey(a).localeCompare(this.#getModelKey(b));
 		});
 		return candidates[0];
+	}
+
+	/**
+	 * Whether inferring `candidate` as the default fast compaction model cannot
+	 * regress prompt-cache economics for `currentModel`'s sessions. Provider
+	 * prefix caches don't transfer across models, and provider-native remote
+	 * compaction replays the session's exact native history — input the session
+	 * model would serve mostly at the ~10x cheaper cacheRead rate. Rerouting
+	 * that replay is only safe when tokens aren't metered (the ChatGPT
+	 * subscription codex wire), when no cache-friendly replay would happen
+	 * anyway (the local summary prompt never shared a prefix with the session
+	 * cache), or when the candidate's list price doesn't exceed the session
+	 * model's cached-input price. Explicit compactionModel/modelRoles.compaction
+	 * targets never pass through this gate.
+	 */
+	#inferredFastCompactionIsCacheSafe(currentModel: Model, candidate: Model): boolean {
+		const compactionApi = currentModel.remoteCompaction?.api ?? currentModel.api;
+		if (compactionApi === "openai-codex-responses") return true;
+		if (!this.#sessionCompactionUsesNativeReplay(currentModel)) return true;
+		if (candidate.cost.input <= currentModel.cost.cacheRead) return true;
+		logger.debug("Skipping default fast compaction model to keep the session model's cached input pricing", {
+			model: this.#getModelKey(candidate),
+			candidateInputCost: candidate.cost.input,
+			currentCacheReadCost: currentModel.cost.cacheRead,
+		});
+		return false;
+	}
+
+	/** Mirrors the V2-then-V1 remote gating in `compact()` for the session model. */
+	#sessionCompactionUsesNativeReplay(currentModel: Model): boolean {
+		if (this.settings.get("compaction.remoteEnabled") === false) return false;
+		if (
+			this.settings.get("compaction.remoteStreamingV2Enabled") !== false &&
+			shouldUseCompactionV2Streaming(currentModel)
+		) {
+			return true;
+		}
+		return shouldUseOpenAiRemoteCompaction(currentModel);
 	}
 
 	#defaultFastCompactionRank(model: Model): number {

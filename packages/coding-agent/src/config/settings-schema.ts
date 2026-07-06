@@ -1902,7 +1902,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Prefer Fast Compaction Model",
 			description:
-				"Use a provider-local fast model for LLM summary compaction when no explicit compaction model is configured; falls back when the prepared compaction input does not fit",
+				"Use a provider-local fast model for LLM summary compaction when no explicit compaction model is configured; falls back when the prepared compaction input does not fit or when rerouting would forfeit cached input pricing on a metered provider",
 		},
 	},
 

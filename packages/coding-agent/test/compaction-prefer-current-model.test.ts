@@ -142,9 +142,9 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(activeModelKey()).toBe(modelKey(currentModel));
 	});
 
-	it("uses the provider-local fast compaction model before the active OpenAI model by default", async () => {
-		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
-		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+	it("uses the provider-local fast compaction model before the active Codex subscription model by default", async () => {
+		const currentModel = getBundledModel("openai-codex", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai-codex", "gpt-5.3-codex-spark");
 		if (!currentModel || !fastModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
@@ -161,9 +161,96 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(activeModelKey()).toBe(modelKey(currentModel));
 	});
 
-	it("uses the active OpenAI model when the fast compaction default is disabled", async () => {
+	it("keeps the active metered OpenAI model when the inferred fast model would forfeit cached input pricing", async () => {
+		// API-key OpenAI compaction replays the session's native history, which
+		// bills mostly at the 10x-cheaper cacheRead rate on the session model.
+		// Spark shares codex's list price, so rerouting the replay to it would be
+		// a pure cost regression — the inferred default must not do that silently.
 		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
 		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		await createCompactionSession(currentModel, settings, [currentModel, fastModel]);
+		const compactSpy = mockCompaction();
+
+		await session.compact();
+
+		expect(compactSpy).toHaveBeenCalled();
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(currentModel));
+		expect(activeModelKey()).toBe(modelKey(currentModel));
+	});
+
+	it("uses the inferred fast model on a metered provider when remote compaction is disabled", async () => {
+		// With provider-native replay off, the summary request serializes the
+		// conversation under a dedicated system prompt and never shared a prefix
+		// with the session cache — rerouting it costs nothing extra.
+		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.remoteEnabled": false,
+			"compaction.strategy": "context-full",
+		});
+		await createCompactionSession(currentModel, settings, [currentModel, fastModel]);
+		const compactSpy = mockCompaction();
+
+		await session.compact();
+
+		expect(compactSpy).toHaveBeenCalled();
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
+	});
+
+	it("uses the inferred fast model on a zero-cost catalog", async () => {
+		const currentModel = getBundledModel("cursor", "gpt-5.3-codex");
+		const fastModel = getBundledModel("cursor", "gpt-5.3-codex-spark-preview");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		await createCompactionSession(currentModel, settings, [currentModel, fastModel]);
+		const compactSpy = mockCompaction();
+
+		await session.compact();
+
+		expect(compactSpy).toHaveBeenCalled();
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
+	});
+
+	it("honors an explicit modelRoles.compaction fast model on a metered provider", async () => {
+		// The cache-economics gate only guards the *inferred* default; a user who
+		// explicitly routes compaction to spark accepts the cache trade-off.
+		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+		if (!currentModel || !fastModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		settings.setModelRole("compaction", modelKey(fastModel));
+		await createCompactionSession(currentModel, settings, [currentModel, fastModel]);
+		const compactSpy = mockCompaction();
+
+		await session.compact();
+
+		expect(compactSpy).toHaveBeenCalled();
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(modelKey(firstCandidate)).toBe(modelKey(fastModel));
+	});
+
+	it("uses the active Codex model when the fast compaction default is disabled", async () => {
+		const currentModel = getBundledModel("openai-codex", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai-codex", "gpt-5.3-codex-spark");
 		if (!currentModel || !fastModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
@@ -184,8 +271,8 @@ describe("compaction prefers the current session model over modelRoles.default",
 	});
 
 	it("skips the default fast compaction model when the prepared input exceeds its context", async () => {
-		const currentModel = getBundledModel("openai", "gpt-5.3-codex");
-		const fastModel = getBundledModel("openai", "gpt-5.3-codex-spark");
+		const currentModel = getBundledModel("openai-codex", "gpt-5.3-codex");
+		const fastModel = getBundledModel("openai-codex", "gpt-5.3-codex-spark");
 		if (!currentModel || !fastModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
