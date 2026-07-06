@@ -75,6 +75,16 @@ describe("nikoflow state", () => {
 		expect(gateMatches(cleared, null)).toBe(false);
 	});
 
+	test("tracks autonomous batch mode in state", () => {
+		const interactive = createState("standard");
+		const batch = createState("standard", { autonomous: true });
+		const ready = { ...batch, batchGateAcceptedAt: 123 };
+
+		expect(interactive.autonomous).toBe(false);
+		expect(batch.autonomous).toBe(true);
+		expect(advancePhase(ready).batchGateAcceptedAt).toBeNull();
+	});
+
 	test("mutators return new objects", () => {
 		const initial = createState("tactical");
 		const minted = mintGateRequest(initial, "g1");

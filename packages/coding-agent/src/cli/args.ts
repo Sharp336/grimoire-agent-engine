@@ -66,6 +66,8 @@ export interface Args {
 	approvalMode?: "always-ask" | "write" | "yolo";
 	/** Hidden launcher field used by the `nikoflow` command to activate mode without polluting the prompt. */
 	nikoflowDepth?: NikoflowDepth;
+	/** Hidden launcher field used by `nikoflow --batch` and print-mode Nikoflow. */
+	nikoflowBatch?: boolean;
 	/** Hidden launcher field used by the `nikoflow --qa` flag to set modelRoles.advisor. */
 	nikoflowQa?: string;
 	messages: string[];
@@ -249,6 +251,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noTitle = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
+		} else if (arg === "--nikoflow-batch") {
+			result.nikoflowBatch = true;
 		} else if (arg === "--nikoflow-depth" && i + 1 < args.length) {
 			const value = args[++i];
 			if (NIKOFLOW_DEPTHS.includes(value as NikoflowDepth)) {

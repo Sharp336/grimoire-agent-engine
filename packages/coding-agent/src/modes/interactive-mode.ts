@@ -1914,6 +1914,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			: undefined;
 	}
 
+	#nikoflowAutonomousFromModeData(modeData: SessionContext["modeData"]): boolean {
+		return modeData?.autonomous === true;
+	}
+
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#goalTurnHadToolCalls = false;
@@ -2083,7 +2087,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.sessionManager.appendModeChange("none");
 				return;
 			}
-			await this.session.activateNikoflowMode(depth, { persist: false, sendContext: false });
+			await this.session.activateNikoflowMode(depth, {
+				persist: false,
+				sendContext: false,
+				autonomous: this.#nikoflowAutonomousFromModeData(sessionContext.modeData),
+			});
 			return;
 		}
 		if (!this.session.settings.get("plan.enabled")) {
@@ -2774,13 +2782,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 
-			const [first = "", ...tail] = text.split(/\s+/);
+			const parts = text.split(/\s+/).filter(Boolean);
+			const autonomous = parts.includes("--batch");
+			const filtered = parts.filter(part => part !== "--batch");
+			const [first = "", ...tail] = filtered;
 			const hasDepth = NIKOFLOW_DEPTHS.includes(first as NikoflowDepth);
 			const depth = hasDepth ? (first as NikoflowDepth) : "standard";
-			const promptText = hasDepth ? tail.join(" ").trim() : text;
+			const promptText = hasDepth ? tail.join(" ").trim() : filtered.join(" ").trim();
 
-			await this.session.activateNikoflowMode(depth, { deferHumanGateMint: promptText.length > 0 });
-			this.showStatus(`Nikoflow enabled (${depth}).`);
+			await this.session.activateNikoflowMode(depth, {
+				autonomous,
+				deferHumanGateMint: promptText.length > 0 && !autonomous,
+			});
+			this.showStatus(`Nikoflow enabled (${depth}${autonomous ? ", batch" : ""}).`);
 			if (promptText && this.onInputCallback) {
 				this.onInputCallback(this.startPendingSubmission({ text: promptText }));
 			}

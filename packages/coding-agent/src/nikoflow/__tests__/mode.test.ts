@@ -281,6 +281,72 @@ describe("nikoflow mode callback helpers", () => {
 		expect(await createNikoflowBeforeToolCall(() => execute)(tool("write"))).toBeUndefined();
 	});
 
+	test("batch grilling advances on clean advisor review, not primary text alone", () => {
+		type Message = { role: "assistant"; timestamp: number; content: string };
+		const options = {
+			isGenuineUserTurn: () => false,
+			messageTimestamp: (message: Message) => message.timestamp,
+			messageText: (message: Message) => message.content,
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		};
+		const marker = JSON.stringify({
+			nikoflow_grilling: {
+				open_questions: [],
+				assumptions: ["human-unverified: default to existing behavior"],
+				risks: ["needs tests"],
+			},
+		});
+		const grilling = mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10);
+		const ready = advanceNikoflowHumanGate(
+			grilling,
+			[{ role: "assistant", timestamp: 12, content: marker }],
+			options,
+		);
+
+		expect(currentPhase(ready)).toBe("grilling");
+		expect(ready.batchGateAcceptedAt).toBe(12);
+
+		const next = advanceNikoflowAdvisorGate(ready, advisorReview("gate-1"));
+		expect(currentPhase(next)).toBe("execute");
+		expect(next.gateRequestId).toBeNull();
+	});
+
+	test("batch grilling blocks non-empty open questions even with a clean advisor review", () => {
+		const grilling = mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10);
+		const blocked = advanceNikoflowHumanGate(
+			grilling,
+			[
+				{
+					role: "assistant",
+					timestamp: 12,
+					content: JSON.stringify({
+						nikoflow_grilling: {
+							open_questions: ["Which tests prove this?"],
+							assumptions: ["human-unverified: use the smallest test"],
+							risks: [],
+						},
+					}),
+				},
+			],
+			{
+				isGenuineUserTurn: () => false,
+				messageTimestamp: message => message.timestamp,
+				messageText: message => message.content,
+				nextGateRequestId: () => "next-gate",
+				now: () => 20,
+			},
+		);
+
+		expect(blocked.batchGateAcceptedAt).toBeNull();
+		expect(currentPhase(advanceNikoflowAdvisorGate(blocked, advisorReview("gate-1")))).toBe("grilling");
+	});
+
+	test("interactive human gates ignore advisor reviews", () => {
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+		expect(advanceNikoflowAdvisorGate(grilling, advisorReview("gate-1"))).toBe(grilling);
+	});
+
 	test("grilling gate rejects a fabricated convergence marker after questions remain", () => {
 		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
 		const options = {
@@ -323,6 +389,20 @@ describe("nikoflow mode callback helpers", () => {
 		expect(currentPhase(next)).toBe("tickets");
 		expect(next.gateRequestId).toBe("g1");
 		expect(formatGateHoldMessage(next)).toContain("nikoflow_define_tickets");
+	});
+
+	test("batch ADR gate advances through advisor review instead of a human turn", () => {
+		const adr = mintGateRequest(advancePhase(createState("standard", { autonomous: true })), "adr-gate", 10);
+		const ready = advanceNikoflowHumanGate(adr, [], {
+			isGenuineUserTurn: () => false,
+			messageTimestamp: () => undefined,
+			nextGateRequestId: () => "next-gate",
+			now: () => 20,
+		});
+
+		expect(currentPhase(ready)).toBe("adr");
+		expect(ready.batchGateAcceptedAt).toBe(10);
+		expect(currentPhase(advanceNikoflowAdvisorGate(ready, advisorReview("adr-gate")))).toBe("prd");
 	});
 
 	test("chains tool choice without swallowing the previous directive", () => {
@@ -1173,5 +1253,71 @@ describe("nikoflow mode callback helpers", () => {
 		expect(followUps).toHaveLength(0);
 		expect(externalActions).toHaveLength(4);
 		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
+	});
+
+	test("batch advisor blocker holds and stops boundedly when review cannot approve", async () => {
+		let state = markPhaseTurnStarted(
+			advanceNikoflowHumanGate(
+				mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10),
+				[
+					{
+						role: "assistant",
+						timestamp: 12,
+						content: JSON.stringify({
+							nikoflow_grilling: {
+								open_questions: [],
+								assumptions: ["human-unverified: minimal path"],
+								risks: ["review may block"],
+							},
+						}),
+					},
+				],
+				{
+					isGenuineUserTurn: () => false,
+					messageTimestamp: message => message.timestamp,
+					messageText: message => message.content,
+					nextGateRequestId: () => "next-gate",
+					now: () => 20,
+				},
+			),
+		);
+		let attempts = 0;
+		const blocks: string[] = [];
+		const externalActions: string[] = [];
+		const followUps: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => state.gateRequestId === null,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			undefined,
+			() => {
+				attempts++;
+				if (attempts > 3) return undefined;
+				return advisorReview("gate-1", "blocker", `blocked ${attempts}`);
+			},
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			(_current, review) => {
+				blocks.push(review.notes[0]?.note ?? "");
+			},
+			(_current, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+
+		expect(blocks).toEqual(["blocked 1", "blocked 2", "blocked 3"]);
+		expect(followUps).toEqual([]);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("Nikoflow batch gate stopped for human resume");
+		expect(currentPhase(state)).toBe("grilling");
 	});
 });

@@ -103,16 +103,24 @@ async function activateNikoflowFromInitialPrompt(
 	session: AgentSession,
 	message: string | undefined,
 	explicitDepth?: NikoflowDepth,
+	autonomous = false,
 ): Promise<void> {
 	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
 	if (depth) {
-		await session.activateNikoflowMode(depth, { deferHumanGateMint: message !== undefined });
+		await session.activateNikoflowMode(depth, {
+			autonomous,
+			deferHumanGateMint: message !== undefined && !autonomous,
+		});
 	}
 }
 
-export function rejectNikoflowInNonInteractiveMode(message: string | undefined, explicitDepth?: NikoflowDepth): void {
+export function rejectNikoflowInNonInteractiveMode(
+	message: string | undefined,
+	explicitDepth?: NikoflowDepth,
+	autonomous = false,
+): void {
 	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
-	if (!depth) return;
+	if (!depth || autonomous) return;
 	throw new Error("Nikoflow requires interactive mode; print/non-interactive runs cannot satisfy human gates.");
 }
 
@@ -428,6 +436,7 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	joinLink?: string,
 	nikoflowDepth?: NikoflowDepth,
+	nikoflowBatch = false,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -509,7 +518,7 @@ async function runInteractiveMode(
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
-	await activateNikoflowFromInitialPrompt(session, initialMessage, nikoflowDepth);
+	await activateNikoflowFromInitialPrompt(session, initialMessage, nikoflowDepth, nikoflowBatch);
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
@@ -1469,11 +1478,14 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				initialArgs.nikoflowDepth,
+				initialArgs.nikoflowBatch === true,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();
-			rejectNikoflowInNonInteractiveMode(initialMessage, initialArgs.nikoflowDepth);
+			const nikoflowBatch = initialArgs.nikoflowBatch === true || initialArgs.print === true;
+			rejectNikoflowInNonInteractiveMode(initialMessage, initialArgs.nikoflowDepth, nikoflowBatch);
+			await activateNikoflowFromInitialPrompt(session, initialMessage, initialArgs.nikoflowDepth, nikoflowBatch);
 			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,

@@ -1,6 +1,6 @@
 import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
 
-export type ParsedNikoflowArgs = { depth: NikoflowDepth; argv: string[] } | { error: string };
+export type ParsedNikoflowArgs = { depth: NikoflowDepth; autonomous: boolean; argv: string[] } | { error: string };
 
 const ROLE_FLAGS: Record<string, string> = {
 	"--exec": "--model",
@@ -17,6 +17,8 @@ function parseDepth(value: string | undefined): NikoflowDepth | undefined {
 
 export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs {
 	let depth: NikoflowDepth = "standard";
+	let autonomous = false;
+	let sawPositional = false;
 	const rest: string[] = [];
 
 	for (let index = 0; index < argv.length; index++) {
@@ -31,10 +33,11 @@ export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs
 			if (equalsIndex === -1) index += 1;
 			continue;
 		}
-		if (index === 0) {
+		if (!sawPositional) {
 			const positionalDepth = parseDepth(arg);
 			if (positionalDepth) {
 				depth = positionalDepth;
+				sawPositional = true;
 				continue;
 			}
 		}
@@ -43,6 +46,7 @@ export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs
 			const parsed = parseDepth(next);
 			if (!parsed) return { error: `Invalid Nikoflow depth: ${next ?? ""}` };
 			depth = parsed;
+			sawPositional = true;
 			index += 1;
 			continue;
 		}
@@ -50,10 +54,16 @@ export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs
 			const parsed = parseDepth(arg.slice("--depth=".length));
 			if (!parsed) return { error: `Invalid Nikoflow depth: ${arg.slice("--depth=".length)}` };
 			depth = parsed;
+			sawPositional = true;
 			continue;
 		}
+		if (arg === "--batch") {
+			autonomous = true;
+			continue;
+		}
+		sawPositional = true;
 		rest.push(arg);
 	}
 
-	return { depth, argv: rest };
+	return { depth, autonomous, argv: rest };
 }

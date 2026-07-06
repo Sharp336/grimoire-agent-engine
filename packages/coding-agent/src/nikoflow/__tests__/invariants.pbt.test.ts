@@ -51,9 +51,11 @@ function stateWithGate(random: () => number, gateRequestId: string | null): Niko
 	const selectedDepth = depth(random);
 	return {
 		depth: selectedDepth,
+		autonomous: false,
 		phaseIndex: int(random, materializePhases(selectedDepth).length + 5) - 2,
 		gateRequestId,
 		gateMintedAt: gateRequestId ? int(random, 1_000_000) : null,
+		batchGateAcceptedAt: null,
 		phaseTurnStarted: Boolean(int(random, 2)),
 		tickets: [],
 		activeTicketId: null,

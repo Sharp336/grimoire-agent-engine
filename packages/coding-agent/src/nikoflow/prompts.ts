@@ -14,6 +14,23 @@ const PHASE_PROMPTS: Record<string, string> = {
 		"Verify phase. Run local validation and require an independent structured reviewer verdict. No primary self-approval.",
 };
 
+function phasePrompt(state: NikoflowState, phase: string): string {
+	if (!state.autonomous) return PHASE_PROMPTS[phase] ?? "";
+	if (phase === "grilling") {
+		return [
+			"Batch grilling phase. There is no human to interrogate.",
+			"Write a spec-completeness artifact with assumptions, risks, and open questions.",
+			"Resolve every open question as an explicit flagged assumption because batch assumptions are unverified by a human.",
+			'When complete, emit {"nikoflow_grilling":{"open_questions":[],"assumptions":["human-unverified: ..."],"risks":[]}}.',
+			"Then yield for independent advisor review. The primary must not self-approve.",
+		].join(" ");
+	}
+	if (phase === "adr" || phase === "prd" || phase === "tickets") {
+		return `${PHASE_PROMPTS[phase]} Batch mode: yield for independent advisor review; the primary must not self-approve.`;
+	}
+	return PHASE_PROMPTS[phase] ?? "";
+}
+
 export function getPhasePrompt(state: NikoflowState): string {
 	const phase = currentPhase(state);
 	if (!phase) return "Nikoflow is complete.";
@@ -29,8 +46,9 @@ export function getPhasePrompt(state: NikoflowState): string {
 	return [
 		`Nikoflow phase: ${phase}`,
 		`Required role: ${currentRole(state)}`,
+		`Mode: ${state.autonomous ? "batch" : "interactive"}`,
 		`Gate request: ${state.gateRequestId ?? "none"}`,
-		PHASE_PROMPTS[phase],
+		phasePrompt(state, phase),
 		...ticketContext,
 		"Visible artifacts only. Do not rely on hidden reasoning across phase boundaries.",
 	].join("\n");

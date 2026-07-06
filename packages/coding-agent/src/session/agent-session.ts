@@ -260,6 +260,7 @@ import {
 	createState,
 	currentPhase,
 	currentTicket,
+	isHumanGatePhase,
 	markPhaseTurnStarted,
 	type NikoflowDepth,
 	type NikoflowState,
@@ -445,6 +446,7 @@ const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
 const NIKOFLOW_ADVISOR_REVIEW_MAX_ATTEMPTS = 3;
+const NIKOFLOW_ADVISOR_REVIEW_ARTIFACT_LIMIT = 8_000;
 const NIKOFLOW_ADVISOR_REVIEW_DIFF_LIMIT = 120_000;
 
 function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
@@ -903,6 +905,7 @@ export interface AgentSessionNikoflowActivationOptions {
 	persist?: boolean;
 	sendContext?: boolean;
 	deferHumanGateMint?: boolean;
+	autonomous?: boolean;
 }
 
 /** Result from a handoff operation. */
@@ -6938,7 +6941,7 @@ export class AgentSession {
 		const state = this.#nikoflowState;
 		if (!state) return;
 		const phase = currentPhase(state);
-		if (phase !== "execute" && phase !== "verify") return;
+		if (phase !== "execute" && phase !== "verify" && !(state.autonomous && isHumanGatePhase(state))) return;
 		const next = markPhaseTurnStarted(state);
 		if (next !== state) this.setNikoflowState(next);
 	}
@@ -7098,6 +7101,10 @@ export class AgentSession {
 			now: () => Date.now(),
 		});
 		if (next !== state) {
+			if (currentPhase(next) === phase) {
+				this.setNikoflowState(next);
+				return;
+			}
 			if (phase === "tickets") {
 				const errors = nikoflowTicketDagErrors(state);
 				if (errors.length > 0) {
@@ -7146,7 +7153,9 @@ export class AgentSession {
 	async #requestNikoflowAdvisorReview(state: NikoflowState): Promise<NikoflowAdvisorReview | undefined> {
 		const gateId = state.gateRequestId;
 		const phase = currentPhase(state);
-		if ((phase !== "verify" && phase !== "execute") || !gateId) return undefined;
+		if ((phase !== "verify" && phase !== "execute" && !(state.autonomous && isHumanGatePhase(state))) || !gateId) {
+			return undefined;
+		}
 
 		const attempts = this.#nikoflowAdvisorReviewAttempts.get(gateId) ?? 0;
 		if (attempts >= NIKOFLOW_ADVISOR_REVIEW_MAX_ATTEMPTS) {
@@ -7233,12 +7242,15 @@ export class AgentSession {
 	}
 
 	async #nikoflowAdvisorReviewPrompt(gateId: string, state: NikoflowState): Promise<string> {
+		const phase = currentPhase(state) ?? "complete";
 		return prompt.render(nikoflowAdvisorVerifyPrompt, {
 			gateId,
+			phase,
 			task: this.#nikoflowOriginalTask(state),
 			acceptance: this.#nikoflowAcceptance(state)
 				.map((item, index) => `${index + 1}. ${item}`)
 				.join("\n"),
+			artifact: this.#nikoflowPhaseArtifact(state),
 			validation: this.#nikoflowValidationEvidence(),
 			diff: await this.#nikoflowDiff(),
 		});
@@ -7268,6 +7280,42 @@ export class AgentSession {
 		);
 		if (fromTodos.length > 0) return fromTodos;
 		return [this.#nikoflowOriginalTask()];
+	}
+
+	#nikoflowPhaseArtifact(state: NikoflowState): string {
+		if (currentPhase(state) === "tickets" && state.tickets.length > 0) {
+			return state.tickets
+				.map(ticket =>
+					[
+						`- ${ticket.id}`,
+						`  acceptance: ${ticket.acceptance.join("; ") || "(not supplied)"}`,
+						`  blocked_by: ${ticket.blocked_by.join(", ") || "(none)"}`,
+						`  implementation_notes: ${ticket.implementation_notes || "(not supplied)"}`,
+					].join("\n"),
+				)
+				.join("\n");
+		}
+
+		const snippets: string[] = [];
+		for (const entry of this.sessionManager.getBranch()) {
+			const entryTime = Date.parse(entry.timestamp);
+			if (state.gateMintedAt !== null && Number.isFinite(entryTime) && entryTime <= state.gateMintedAt) continue;
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				const text = assistantMessageText(entry.message)?.trim();
+				if (text) snippets.push(`assistant:\n${text}`);
+			} else if (
+				entry.type === "custom_message" &&
+				(entry.customType === "nikoflow-adr" || entry.customType === "nikoflow-prd")
+			) {
+				const text = this.#extractTextContent(entry.content).trim();
+				if (text) snippets.push(`${entry.customType}:\n${text}`);
+			}
+		}
+
+		const artifact = snippets.slice(-4).join("\n\n");
+		if (!artifact) return "(not supplied)";
+		if (artifact.length <= NIKOFLOW_ADVISOR_REVIEW_ARTIFACT_LIMIT) return artifact;
+		return `${artifact.slice(artifact.length - NIKOFLOW_ADVISOR_REVIEW_ARTIFACT_LIMIT)}\n\n[artifact truncated for reviewer]`;
 	}
 
 	#nikoflowValidationEvidence(): string {
@@ -7335,9 +7383,11 @@ export class AgentSession {
 				display: true,
 				details: {
 					depth: state.depth,
+					autonomous: state.autonomous,
 					phaseIndex: state.phaseIndex,
 					gateRequestId: state.gateRequestId,
 					gateMintedAt: state.gateMintedAt,
+					batchGateAcceptedAt: state.batchGateAcceptedAt,
 				},
 				attribution: "agent",
 			},
@@ -7362,7 +7412,7 @@ export class AgentSession {
 		this.#nikoflowAdvisorReviewAttempts.clear();
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
-		const state = createState(depth);
+		const state = createState(depth, { autonomous: options.autonomous });
 		try {
 			this.#nikoflowCallbacks = await this.installNikoflowMode({
 				isGateSatisfied: current => current.gateRequestId === null,
@@ -7379,7 +7429,7 @@ export class AgentSession {
 			throw error;
 		}
 		if (options.persist !== false) {
-			this.sessionManager.appendModeChange("nikoflow", { depth });
+			this.sessionManager.appendModeChange("nikoflow", { depth, autonomous: state.autonomous });
 		}
 	}
 

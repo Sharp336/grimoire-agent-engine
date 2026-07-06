@@ -24,20 +24,24 @@ export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
 
 export interface NikoflowState {
 	depth: NikoflowDepth;
+	autonomous: boolean;
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
+	batchGateAcceptedAt: number | null;
 	phaseTurnStarted: boolean;
 	tickets: NikoflowTicket[];
 	activeTicketId: string | null;
 }
 
-export function createState(depth: NikoflowDepth): NikoflowState {
+export function createState(depth: NikoflowDepth, options: { autonomous?: boolean } = {}): NikoflowState {
 	return {
 		depth,
+		autonomous: options.autonomous === true,
 		phaseIndex: 0,
 		gateRequestId: null,
 		gateMintedAt: null,
+		batchGateAcceptedAt: null,
 		phaseTurnStarted: false,
 		tickets: [],
 		activeTicketId: null,
@@ -85,6 +89,7 @@ export function advancePhase(state: NikoflowState): NikoflowState {
 		phaseIndex: nextIndex,
 		gateRequestId: null,
 		gateMintedAt: null,
+		batchGateAcceptedAt: null,
 		phaseTurnStarted: false,
 		activeTicketId: nextPhase === "execute" ? state.activeTicketId : null,
 	};
@@ -95,7 +100,7 @@ export function isComplete(state: NikoflowState): boolean {
 }
 
 export function mintGateRequest(state: NikoflowState, id: string, mintedAt: number | null = null): NikoflowState {
-	return { ...state, gateRequestId: id, gateMintedAt: mintedAt };
+	return { ...state, gateRequestId: id, gateMintedAt: mintedAt, batchGateAcceptedAt: null };
 }
 
 export function rotateGateRequest(state: NikoflowState, id: string, mintedAt: number | null = null): NikoflowState {

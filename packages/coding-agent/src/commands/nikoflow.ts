@@ -21,6 +21,7 @@ export default class Nikoflow extends Command {
 	};
 	static flags = {
 		depth: Flags.string({ description: "Nikoflow depth", options: [...NIKOFLOW_DEPTHS] }),
+		batch: Flags.boolean({ description: "Run Nikoflow gates autonomously through advisor review" }),
 		exec: Flags.string({ description: "Executor model (maps to modelRoles.default)" }),
 		architect: Flags.string({ description: "Architect model (maps to modelRoles.plan)" }),
 		qa: Flags.string({ description: "QA model (maps to modelRoles.advisor)" }),
@@ -39,7 +40,12 @@ export default class Nikoflow extends Command {
 			process.exit(2);
 		}
 
-		const rawArgs = ["--nikoflow-depth", normalized.depth, ...normalized.argv];
+		const rawArgs = [
+			"--nikoflow-depth",
+			normalized.depth,
+			...(normalized.autonomous ? ["--nikoflow-batch"] : []),
+			...normalized.argv,
+		];
 		const parsed = parseArgs(rawArgs);
 		await runRootCommand(parsed, rawArgs);
 	}

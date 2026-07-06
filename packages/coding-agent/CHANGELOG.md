@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Nikoflow batch mode so non-interactive runs can advance human-gated phases through independent advisor review instead of requiring a later user turn.
+
 ### Fixed
 
 - Fixed Nikoflow verify gates to require an independent native advisor review of the final diff before passing, holding on advisor blockers or unavailable advisor runs instead of relying on the removed harness-spawned reviewer.

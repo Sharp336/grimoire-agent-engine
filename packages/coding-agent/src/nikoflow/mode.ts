@@ -193,6 +193,18 @@ function shouldYieldForTicketDag(state: NikoflowState): boolean {
 	return nikoflowTicketDagErrors(state).length > 0;
 }
 
+function isBatchHumanGateReadyForAdvisorReview(state: NikoflowState): boolean {
+	if (!state.autonomous || !isHumanGatePhase(state)) return false;
+	if (state.batchGateAcceptedAt === null) return false;
+	if (currentPhase(state) === "tickets" && nikoflowTicketDagErrors(state).length > 0) return false;
+	return true;
+}
+
+function isAdvisorReviewedGate(state: NikoflowState): boolean {
+	const phase = currentPhase(state);
+	return phase === "verify" || phase === "execute" || isBatchHumanGateReadyForAdvisorReview(state);
+}
+
 function activateNextTicket(state: NikoflowState): NikoflowState {
 	if (currentPhase(state) !== "execute" || !isTicketLoopState(state)) return state;
 	const active = currentTicket(state);
@@ -320,7 +332,15 @@ export function advanceNikoflowHumanGate<TMessage>(
 	const phase = currentPhase(state);
 	const acceptedAfter =
 		phase === "grilling" ? grillingConvergenceMarkerAt(gateMintedAt, messages, options) : gateMintedAt;
-	if (acceptedAfter === null) return state;
+	if (acceptedAfter === null) {
+		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
+	}
+	if (state.autonomous) {
+		if (phase === "tickets" && nikoflowTicketDagErrors(state).length > 0) {
+			return state.batchGateAcceptedAt === null ? state : { ...state, batchGateAcceptedAt: null };
+		}
+		return state.batchGateAcceptedAt === acceptedAfter ? state : { ...state, batchGateAcceptedAt: acceptedAfter };
+	}
 	const hasLaterUserTurn = messages.some(message => {
 		if (!options.isGenuineUserTurn(message)) return false;
 		return humanGateAccepted(acceptedAfter, options.messageTimestamp(message));
@@ -423,7 +443,12 @@ export function nikoflowAdvisorReviewBlockers(review: NikoflowAdvisorReview): st
 
 export function advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
 	if (currentPhase(state) === "execute") return advanceNikoflowTicketAdvisorGate(state, review);
-	if (currentPhase(state) !== "verify") return state;
+	if (currentPhase(state) !== "verify") {
+		if (!isBatchHumanGateReadyForAdvisorReview(state)) return state;
+		if (state.gateRequestId !== review.gateId) return state;
+		if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
+		return advancePhase(state);
+	}
 	if (state.gateRequestId !== review.gateId) return state;
 	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
 	return advancePhase(state);
@@ -478,6 +503,16 @@ export function formatGateHoldMessage(state: NikoflowState): string {
 		].join("\n");
 	}
 	if (isHumanGatePhase(state)) {
+		if (state.autonomous) {
+			if (currentPhase(state) === "grilling" && state.batchGateAcceptedAt === null) {
+				return [
+					"Nikoflow batch grilling gate is blocked; write the spec-completeness artifact.",
+					'Resolve every open question as an explicit human-unverified assumption, record risks, then emit {"nikoflow_grilling":{"open_questions":[],"assumptions":[...],"risks":[...]}}.',
+					"Yield for independent advisor review; do not self-approve.",
+				].join("\n");
+			}
+			return `Nikoflow batch ${phase} gate is waiting for a clean independent advisor review. Do not self-approve.`;
+		}
 		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
 	}
 	if (phase === "execute") {
@@ -505,6 +540,9 @@ export function formatGateHoldMessage(state: NikoflowState): string {
 }
 
 export function formatGateExternalActionMessage(state: NikoflowState): string {
+	if (state.autonomous && isHumanGatePhase(state)) {
+		return `Nikoflow batch gate stopped for human resume. ${formatGateHoldMessage(state)}`;
+	}
 	return `Nikoflow gate needs external action; yielding instead of queuing another follow-up. ${formatGateHoldMessage(state)}`;
 }
 
@@ -550,17 +588,20 @@ export function createNikoflowOnBeforeYield(
 			}
 		}
 		let advisorBlockAlreadyQueued = false;
+		let advisorReviewUnavailable = false;
 		for (let reviewPass = 0; reviewPass < 2; reviewPass++) {
 			if (!state?.gateRequestId || isGateSatisfied(state)) break;
-			const reviewPhase = currentPhase(state);
-			if (reviewPhase !== "verify" && reviewPhase !== "execute") break;
+			if (!isAdvisorReviewedGate(state)) break;
 			if (state.phaseTurnStarted || state.gateRequestId !== requestedAdvisorReviewGateId) {
 				const advisorReviewResult = await requestAdvisorReview?.(state);
 				state = getState();
 				if (!state) return;
-				const currentReviewPhase = currentPhase(state);
-				if (currentReviewPhase === "verify" || currentReviewPhase === "execute") {
+				if (isAdvisorReviewedGate(state)) {
 					requestedAdvisorReviewGateId = state.gateRequestId;
+				}
+				if (!advisorReviewResult) {
+					advisorReviewUnavailable = true;
+					break;
 				}
 				if (advisorReviewResult) {
 					const reviewerState = state;
@@ -593,11 +634,24 @@ export function createNikoflowOnBeforeYield(
 			return;
 		}
 		if (!state.gateRequestId || isGateSatisfied(state)) return;
-		if (isHumanGatePhase(state)) {
+		if (advisorReviewUnavailable && isAdvisorReviewedGate(state)) {
 			await yieldForExternalAction(state);
 			return;
 		}
-		if ((phase === "verify" || phase === "execute") && advisorBlockAlreadyQueued) return;
+		if (
+			(phase === "verify" || phase === "execute" || (state.autonomous && isHumanGatePhase(state))) &&
+			advisorBlockAlreadyQueued
+		) {
+			return;
+		}
+		if (isHumanGatePhase(state)) {
+			if (state.autonomous) {
+				await queueGateHold(state);
+				return;
+			}
+			await yieldForExternalAction(state);
+			return;
+		}
 		await yieldForExternalAction(state);
 	};
 }
