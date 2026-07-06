@@ -2,7 +2,7 @@ import { createApiKeyLogin } from "./api-key-login";
 import type { OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
-const loginNeuralwatt = createApiKeyLogin({
+export const loginNeuralwatt = createApiKeyLogin({
 	providerLabel: "Neuralwatt",
 	authUrl: "https://portal.neuralwatt.com",
 	instructions: "Create or copy your API key from your Neuralwatt dashboard",

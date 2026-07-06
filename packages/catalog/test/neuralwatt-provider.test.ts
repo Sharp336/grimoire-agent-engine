@@ -2,19 +2,28 @@ import { describe, expect, test } from "bun:test";
 import { neuralwattModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
-function makeNeuralwattFetchMock(models: unknown[]): FetchImpl {
-	return async (input: string | URL | Request, init?: RequestInit) => {
+function makeNeuralwattFetchMock(models: unknown[]): {
+	fetchImpl: FetchImpl;
+	calls: Array<{ url: string; authorization: string | null }>;
+} {
+	const calls: Array<{ url: string; authorization: string | null }> = [];
+	const fetchImpl: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
 		const headers = new Headers(init?.headers);
+		calls.push({
+			url: String(input),
+			authorization: headers.get("authorization"),
+		});
 		return new Response(JSON.stringify({ data: models }), {
 			status: 200,
 			headers: { "content-type": "application/json" },
 		});
 	};
+	return { fetchImpl, calls };
 }
 
 describe("Neuralwatt provider discovery", () => {
 	test("sets supportsReasoningEffort from metadata.capabilities.reasoning_effort", async () => {
-		const fetchMock = makeNeuralwattFetchMock([
+		const { fetchImpl, calls } = makeNeuralwattFetchMock([
 			{
 				id: "glm-5.2",
 				object: "model",
@@ -66,15 +75,21 @@ describe("Neuralwatt provider discovery", () => {
 
 		const options = neuralwattModelManagerOptions({
 			apiKey: "neuralwatt-test-key",
-			fetch: fetchMock,
+			fetch: fetchImpl,
 		});
 		const models = await options.fetchDynamicModels?.();
 
+		expect(calls).toEqual([
+			{
+				url: "https://api.neuralwatt.com/v1/models",
+				authorization: "Bearer neuralwatt-test-key",
+			},
+		]);
 		expect(models).toBeDefined();
 		expect(models).toHaveLength(3);
 
 		// GLM-5.2: reasoning_effort: true → supportsReasoningEffort: true
-		const glm = models!.find(m => m.id === "glm-5.2");
+		const glm = models?.find(m => m.id === "glm-5.2");
 		expect(glm).toBeDefined();
 		expect(glm).toMatchObject({
 			provider: "neuralwatt",
@@ -90,7 +105,7 @@ describe("Neuralwatt provider discovery", () => {
 
 		// Kimi-K2.6: reasoning_effort: false → supportsReasoningEffort: false
 		// (reasoning model, but does not accept the reasoning_effort wire param)
-		const kimi = models!.find(m => m.id === "kimi-k2.6");
+		const kimi = models?.find(m => m.id === "kimi-k2.6");
 		expect(kimi).toBeDefined();
 		expect(kimi).toMatchObject({
 			reasoning: true,
@@ -99,21 +114,27 @@ describe("Neuralwatt provider discovery", () => {
 		expect(kimi?.compat?.supportsReasoningEffort).toBe(false);
 
 		// Qwen fast alias: no reasoning_effort field → defaults to false
-		const qwen = models!.find(m => m.id === "qwen3.6-fast");
+		const qwen = models?.find(m => m.id === "qwen3.6-fast");
 		expect(qwen).toBeDefined();
 		expect(qwen).toMatchObject({ reasoning: false });
 		expect(qwen?.compat?.supportsReasoningEffort).toBe(false);
 	});
 
 	test("defaults supportsReasoningEffort to false when capabilities metadata is absent", async () => {
-		const fetchMock = makeNeuralwattFetchMock([{ id: "glm-5.2", object: "model" }]);
+		const { fetchImpl, calls } = makeNeuralwattFetchMock([{ id: "glm-5.2", object: "model" }]);
 
 		const options = neuralwattModelManagerOptions({
 			apiKey: "neuralwatt-test-key",
-			fetch: fetchMock,
+			fetch: fetchImpl,
 		});
 		const models = await options.fetchDynamicModels?.();
 
+		expect(calls).toEqual([
+			{
+				url: "https://api.neuralwatt.com/v1/models",
+				authorization: "Bearer neuralwatt-test-key",
+			},
+		]);
 		expect(models).toBeDefined();
 		expect(models).toHaveLength(1);
 		expect(models?.[0]?.compat?.supportsReasoningEffort).toBe(false);
