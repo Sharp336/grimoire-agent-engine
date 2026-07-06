@@ -17,7 +17,7 @@ export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
 	prd: "plan",
 	tickets: "plan",
 	execute: "default",
-	verify: "default",
+	verify: "advisor",
 } as const;
 
 export interface NikoflowState {

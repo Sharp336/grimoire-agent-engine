@@ -8,12 +8,14 @@ import {
 	createNikoflowGetToolChoice,
 	createNikoflowOnBeforeYield,
 	createNikoflowOnTurnEnd,
+	enterNikoflowPhase,
 	installNikoflowAgentSessionMode,
 	installNikoflowCallbacks,
 	isWriteTool,
 	type MinimalToolCallContext,
 	type NikoflowAgentSessionHost,
 	type NikoflowCallbackHost,
+	type NikoflowPhaseEntryHost,
 	nikoflowToolViolation,
 } from "../mode";
 import {
@@ -24,12 +26,52 @@ import {
 	isComplete,
 	markPhaseTurnStarted,
 	mintGateRequest,
+	type NikoflowState,
 } from "../state";
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
 	args,
 });
+
+interface MockModel {
+	provider: string;
+	id: string;
+}
+
+function roleModel(role: string): MockModel {
+	return {
+		provider: "mock",
+		id: role === "plan" ? "strong" : role,
+	};
+}
+
+function phaseEntryHost(
+	events: string[],
+	reviewerResults: unknown[],
+	setState: (state: NikoflowState) => void,
+): NikoflowPhaseEntryHost<MockModel> {
+	return {
+		resolveRoleModelWithThinking: role => ({
+			model: roleModel(role),
+			explicitThinkingLevel: false,
+		}),
+		applyRoleModel: entry => {
+			events.push(`role:${entry.role}`);
+		},
+		setState: state => {
+			setState(state);
+			events.push(`state:${currentPhase(state) ?? "complete"}:${state.gateRequestId ?? "none"}`);
+		},
+		sendNikoflowContext: state => {
+			events.push(`context:${currentPhase(state) ?? "complete"}:${state.gateRequestId ?? "none"}`);
+		},
+		requestReviewer: state => {
+			events.push(`reviewer:${state.gateRequestId ?? "none"}`);
+			return reviewerResults.shift();
+		},
+	};
+}
 
 describe("nikoflow mode callback helpers", () => {
 	test("chains onTurnEnd after the previous handler", async () => {
@@ -151,7 +193,11 @@ describe("nikoflow mode callback helpers", () => {
 
 	test("queues execute work once before execute can advance to verify", async () => {
 		let state = advancePhase(createState("tactical"));
+		const events: string[] = [];
 		const followUps: string[] = [];
+		const host = phaseEntryHost(events, [], next => {
+			state = next;
+		});
 		const onBeforeYield = createNikoflowOnBeforeYield(
 			() => state,
 			() => false,
@@ -159,11 +205,13 @@ describe("nikoflow mode callback helpers", () => {
 				followUps.push(message);
 			},
 			undefined,
-			current => {
-				state = advanceNikoflowExecuteGate(current, {
+			async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
 					nextGateRequestId: () => "verify-gate",
 					now: () => 100,
 				});
+				return result.reviewerToolResult;
 			},
 		);
 
@@ -177,6 +225,12 @@ describe("nikoflow mode callback helpers", () => {
 		await onBeforeYield();
 		expect(currentPhase(state)).toBe("verify");
 		expect(state.gateRequestId).toBe("verify-gate");
+		expect(events).toEqual([
+			"role:advisor",
+			"state:verify:verify-gate",
+			"context:verify:verify-gate",
+			"reviewer:verify-gate",
+		]);
 	});
 
 	test("does not enqueue when there is no pending gate or the gate is satisfied", async () => {
@@ -298,11 +352,6 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("attaches to an AgentSession-like host without clobbering existing handlers", async () => {
-		interface MockModel {
-			provider: string;
-			id: string;
-		}
-
 		const calls: string[] = [];
 		const followUps: string[] = [];
 		const appliedRoles: string[] = [];
@@ -316,10 +365,6 @@ describe("nikoflow mode callback helpers", () => {
 		};
 		let installedChoice: (() => string | undefined) | undefined = () => "previous-choice";
 
-		const roleModel = (role: string): MockModel => ({
-			provider: "mock",
-			id: role === "plan" ? "strong" : role,
-		});
 		const host: NikoflowAgentSessionHost<string[], undefined, string, MockModel> = {
 			beforeToolCall: () => {
 				calls.push("previous-before");
@@ -360,7 +405,7 @@ describe("nikoflow mode callback helpers", () => {
 
 		await installedTurn?.([]);
 		expect(calls.slice(0, 2)).toEqual(["advisor-turn", "nikoflow-turn"]);
-		expect(appliedRoles).toEqual(["plan"]);
+		expect(appliedRoles).toEqual([]);
 
 		expect(await installedYield?.()).toBeUndefined();
 		expect(followUps).toEqual([]);
@@ -378,15 +423,54 @@ describe("nikoflow mode callback helpers", () => {
 
 		state = advancePhase(createState("tactical"));
 		await installedTurn?.([]);
-		expect(appliedRoles).toEqual(["plan", "default"]);
+		expect(appliedRoles).toEqual([]);
 	});
 
-	test("execute waits for a completed execute turn before minting the verify gate", async () => {
+	test("enters a phase with role, fresh context, gate mint, and verify reviewer in one driver", async () => {
+		let state = createState("standard");
+		const events: string[] = [];
+		const reviewerResults: unknown[] = [{ type: "tool_result", content: { gateId: "verify-gate", verdict: "pass" } }];
+		const host = phaseEntryHost(events, reviewerResults, next => {
+			state = next;
+		});
+
+		await enterNikoflowPhase(host, null, "grilling", state, {
+			nextGateRequestId: () => "human-gate",
+			now: () => 10,
+		});
+		expect(events).toEqual(["role:plan", "state:grilling:human-gate", "context:grilling:human-gate"]);
+		expect(state.gateRequestId).toBe("human-gate");
+
+		events.length = 0;
+		const execute = markPhaseTurnStarted(advancePhase(createState("tactical")));
+		const verify = advanceNikoflowExecuteGate(execute);
+		const result = await enterNikoflowPhase(host, "execute", "verify", verify, {
+			nextGateRequestId: () => "verify-gate",
+			now: () => 20,
+		});
+
+		expect(result.reviewerToolResult).toEqual({
+			type: "tool_result",
+			content: { gateId: "verify-gate", verdict: "pass" },
+		});
+		expect(currentRole(state)).toBe("advisor");
+		expect(events).toEqual([
+			"role:advisor",
+			"state:verify:verify-gate",
+			"context:verify:verify-gate",
+			"reviewer:verify-gate",
+		]);
+	});
+
+	test("execute completion enters verify through the driver and requests a reviewer", async () => {
 		let gateCounter = 0;
 		let state = advancePhase(createState("tactical"));
+		const events: string[] = [];
 		const followUps: string[] = [];
-		const reviewerRequests: Array<string | null> = [];
-		const reviewerResults: unknown[] = [];
+		const reviewerResults: unknown[] = [{ type: "tool_result", content: { gateId: "gate-1", verdict: "block" } }];
+		const host = phaseEntryHost(events, reviewerResults, next => {
+			state = next;
+		});
 		const bundle = createNikoflowCallbackBundle<unknown[], { toolResults?: unknown[] }, string>({
 			getState: () => state,
 			isGateSatisfied: current => current.gateRequestId === null,
@@ -397,15 +481,13 @@ describe("nikoflow mode callback helpers", () => {
 			advanceHumanGate: () => {
 				if (currentPhase(state) === "execute") state = markPhaseTurnStarted(state);
 			},
-			advanceExecuteGate: current => {
-				state = advanceNikoflowExecuteGate(current, {
+			advanceExecuteGate: async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
 					nextGateRequestId: () => `gate-${++gateCounter}`,
 					now: () => 100,
 				});
-			},
-			requestReviewer: current => {
-				reviewerRequests.push(current.gateRequestId);
-				return reviewerResults.shift();
+				return result.reviewerToolResult;
 			},
 			advanceReviewerGate: (current, verdict) => {
 				state = advanceNikoflowReviewerGate(current, verdict);
@@ -417,16 +499,17 @@ describe("nikoflow mode callback helpers", () => {
 		expect(currentRole(state)).toBe("default");
 		expect(isComplete(state)).toBe(false);
 		expect(followUps).toHaveLength(1);
-		expect(reviewerRequests).toEqual([]);
+		expect(events).toEqual([]);
 
 		await bundle.onTurnEnd?.([], undefined, { toolResults: [] });
 		await bundle.onBeforeYield();
 		expect(currentPhase(state)).toBe("verify");
-		expect(currentRole(state)).toBe("default");
+		expect(currentRole(state)).toBe("advisor");
 		expect(isComplete(state)).toBe(false);
 		const gateId = state.gateRequestId;
 		expect(gateId).toBe("gate-1");
-		expect(reviewerRequests).toEqual([gateId]);
+		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "reviewer:gate-1"]);
+		expect(followUps).toHaveLength(2);
 
 		await bundle.onTurnEnd?.(
 			[{ role: "assistant", content: [{ type: "text", text: `{"gateId":"${gateId}","verdict":"pass"}` }] }],
@@ -435,27 +518,77 @@ describe("nikoflow mode callback helpers", () => {
 		);
 		expect(currentPhase(state)).toBe("verify");
 		expect(isComplete(state)).toBe(false);
+	});
 
-		reviewerResults.push({ type: "tool_result", content: { gateId, verdict: "block", reason: "needs fixes" } });
+	test("reviewer block retry re-enters verify with a fresh gate and reviewer request", async () => {
+		let gateCounter = 0;
+		let reviewerAttempt = 0;
+		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
+		const events: string[] = [];
+		const blocked: string[] = [];
+		const host = phaseEntryHost(events, [], next => {
+			state = next;
+		});
+		host.requestReviewer = current => {
+			events.push(`reviewer:${current.gateRequestId ?? "none"}`);
+			reviewerAttempt++;
+			return {
+				type: "tool_result",
+				content: {
+					gateId: current.gateRequestId,
+					verdict: reviewerAttempt === 1 ? "block" : "pass",
+					reason: reviewerAttempt === 1 ? "needs fixes" : undefined,
+				},
+			};
+		};
+		const bundle = createNikoflowCallbackBundle<unknown[], { toolResults?: unknown[] }, string>({
+			getState: () => state,
+			isGateSatisfied: current => current.gateRequestId === null,
+			enqueueFollowUp: () => undefined,
+			advanceExecuteGate: async current => {
+				const next = advanceNikoflowExecuteGate(current);
+				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(next), next, {
+					nextGateRequestId: () => `gate-${++gateCounter}`,
+					now: () => 100 + gateCounter,
+				});
+				return result.reviewerToolResult;
+			},
+			requestReviewer: async current => {
+				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(current), current, {
+					nextGateRequestId: () => `gate-${++gateCounter}`,
+					now: () => 100 + gateCounter,
+				});
+				return result.reviewerToolResult;
+			},
+			advanceReviewerGate: (current, verdict) => {
+				state = advanceNikoflowReviewerGate(current, verdict);
+			},
+			onReviewerBlock: current => {
+				blocked.push(current.gateRequestId ?? "none");
+			},
+		});
+
 		await bundle.onBeforeYield();
 		expect(currentPhase(state)).toBe("verify");
-		expect(state.gateRequestId).toBe(gateId);
-		expect(followUps).toHaveLength(2);
-		expect(reviewerRequests).toEqual([gateId, gateId]);
+		expect(state.gateRequestId).toBe("gate-1");
+		expect(blocked).toEqual(["gate-1"]);
+		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "reviewer:gate-1"]);
 
-		reviewerResults.push({ type: "tool_result", content: { gateId: "stale", verdict: "pass" } });
-		await bundle.onBeforeYield();
-		expect(currentPhase(state)).toBe("verify");
-		expect(state.gateRequestId).toBe(gateId);
-		expect(reviewerRequests).toEqual([gateId, gateId, gateId]);
-
-		reviewerResults.push({ type: "tool_result", content: { gateId, verdict: "pass", score: 9.4 } });
+		state = markPhaseTurnStarted(state);
 		await bundle.onBeforeYield();
 		expect(isComplete(state)).toBe(true);
+		expect(events.slice(4)).toEqual([
+			"role:advisor",
+			"state:verify:gate-2",
+			"context:verify:gate-2",
+			"reviewer:gate-2",
+		]);
 	});
 
 	test("caps repeated reviewer-block follow-ups and then yields externally", async () => {
-		const state = mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1");
+		const state = markPhaseTurnStarted(
+			mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"),
+		);
 		const followUps: string[] = [];
 		const externalActions: string[] = [];
 		const onBeforeYield = createNikoflowOnBeforeYield(

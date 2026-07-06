@@ -41,7 +41,7 @@ describe("nikoflow state", () => {
 		expect(currentRole(state)).toBe("default");
 		state = advancePhase(state);
 		expect(currentPhase(state)).toBe("verify");
-		expect(currentRole(state)).toBe("default");
+		expect(currentRole(state)).toBe("advisor");
 		state = advancePhase(state);
 		expect(isComplete(state)).toBe(true);
 		expect(currentPhase(state)).toBeNull();

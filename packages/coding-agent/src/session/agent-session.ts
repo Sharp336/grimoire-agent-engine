@@ -244,7 +244,7 @@ import {
 	advanceNikoflowExecuteGate,
 	advanceNikoflowHumanGate,
 	advanceNikoflowReviewerGate,
-	ensureNikoflowHumanGate,
+	enterNikoflowPhase,
 	type InstalledNikoflowCallbacks,
 	installNikoflowAgentSessionMode,
 	type MinimalToolCallContext,
@@ -1605,7 +1605,6 @@ export class AgentSession {
 	#nikoflowCallbacks: InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective> | undefined;
 	#nikoflowGateCounter = 0;
 	#nikoflowReviewerAttempts = new Map<string, number>();
-	#nikoflowContextSendPending = false;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -6896,29 +6895,14 @@ export class AgentSession {
 	}
 
 	setNikoflowState(state: NikoflowState | undefined): void {
-		const previous = this.#nikoflowState;
 		this.#nikoflowState = state;
-		if (previous && state && previous.phaseIndex !== state.phaseIndex && currentPhase(state)) {
-			this.#queueNikoflowContextForPhaseChange(state);
-		}
 	}
 
-	#queueNikoflowContextForPhaseChange(state: NikoflowState): void {
-		if (this.#nikoflowContextSendPending) return;
-		this.#nikoflowContextSendPending = true;
-		const deliverAs = currentPhase(state) === "execute" ? "followUp" : "nextTurn";
-		void this.sendNikoflowContext({ deliverAs })
-			.catch(error => {
-				logger.warn("Nikoflow phase context injection failed", { error: String(error) });
-			})
-			.finally(() => {
-				this.#nikoflowContextSendPending = false;
-			});
-	}
-
-	#markNikoflowExecuteTurnCompleted(): void {
+	#markNikoflowModelTurnCompleted(): void {
 		const state = this.#nikoflowState;
-		if (!state || currentPhase(state) !== "execute") return;
+		if (!state) return;
+		const phase = currentPhase(state);
+		if (phase !== "execute" && phase !== "verify") return;
 		const next = markPhaseTurnStarted(state);
 		if (next !== state) this.setNikoflowState(next);
 	}
@@ -6928,16 +6912,51 @@ export class AgentSession {
 		return `nikoflow-gate-${Date.now()}-${this.#nikoflowGateCounter}`;
 	}
 
-	#ensureNikoflowHumanGate(state: NikoflowState): NikoflowState {
-		return ensureNikoflowHumanGate(state, {
-			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
-			now: () => Date.now(),
-		});
+	async #enterNikoflowPhase(
+		previous: NikoflowState | undefined,
+		next: NikoflowState,
+		options: {
+			mintGate?: boolean;
+			sendContext?: boolean;
+			requestReviewer?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn" | null;
+		} = {},
+	): Promise<unknown | null | undefined> {
+		const nextPhase = currentPhase(next);
+		const defaultDeliverAs = nextPhase === "execute" ? "followUp" : "nextTurn";
+		const deliverAs = options.deliverAs === undefined ? defaultDeliverAs : options.deliverAs;
+		const result = await enterNikoflowPhase(
+			{
+				resolveRoleModelWithThinking: role => this.resolveRoleModelWithThinking(role),
+				applyRoleModel: entry => this.applyRoleModel(entry),
+				setState: state => this.setNikoflowState(state),
+				sendNikoflowContext: state =>
+					this.#sendNikoflowContextForState(state, deliverAs ? { deliverAs } : undefined),
+				requestReviewer: state => this.#requestNikoflowReviewer(state),
+			},
+			previous ? currentPhase(previous) : null,
+			nextPhase,
+			next,
+			{
+				nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
+				now: () => Date.now(),
+				mintGate: options.mintGate,
+				sendContext: options.sendContext,
+				requestReviewer: options.requestReviewer,
+			},
+		);
+		return result.reviewerToolResult;
 	}
 
-	#advanceNikoflowHumanGate(messages: readonly AgentMessage[]): void {
+	async #advanceNikoflowHumanGate(messages: readonly AgentMessage[]): Promise<void> {
 		const state = this.#nikoflowState;
 		if (!state) return;
+		const phase = currentPhase(state);
+		if (phase !== "grilling" && phase !== "adr" && phase !== "prd" && phase !== "tickets") return;
+		if (!state.gateRequestId || state.gateMintedAt === null) {
+			await this.#enterNikoflowPhase(state, state, { mintGate: true });
+			return;
+		}
 		const next = advanceNikoflowHumanGate(state, messages, {
 			isGenuineUserTurn: isUserQueuedMessage,
 			messageTimestamp: agentMessageTimestamp,
@@ -6945,16 +6964,17 @@ export class AgentSession {
 			now: () => Date.now(),
 		});
 		if (next !== state) {
-			this.setNikoflowState(next);
+			await this.#enterNikoflowPhase(state, next, { mintGate: true });
 		}
 	}
 
-	#advanceNikoflowExecuteGate(state: NikoflowState): void {
+	async #advanceNikoflowExecuteGate(state: NikoflowState): Promise<unknown | null | undefined> {
 		const next = advanceNikoflowExecuteGate(state, {
 			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
 			now: () => Date.now(),
 		});
-		if (next !== state) this.setNikoflowState(next);
+		if (next === state) return undefined;
+		return this.#enterNikoflowPhase(state, next, { mintGate: true });
 	}
 
 	#advanceNikoflowReviewerGate(state: NikoflowState, verdict: { gateId: string; verdict: "pass" | "block" }): void {
@@ -7153,9 +7173,10 @@ export class AgentSession {
 		return parts.join("");
 	}
 
-	async sendNikoflowContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
-		const state = this.#nikoflowState;
-		if (!state) return;
+	async #sendNikoflowContextForState(
+		state: NikoflowState,
+		options?: { deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void> {
 		await this.sendCustomMessage(
 			{
 				customType: "nikoflow-context",
@@ -7173,6 +7194,12 @@ export class AgentSession {
 		);
 	}
 
+	async sendNikoflowContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
+		const state = this.#nikoflowState;
+		if (!state) return;
+		await this.#sendNikoflowContextForState(state, options);
+	}
+
 	async activateNikoflowMode(
 		depth: NikoflowDepth,
 		options: AgentSessionNikoflowActivationOptions = {},
@@ -7184,21 +7211,24 @@ export class AgentSession {
 		this.#nikoflowReviewerAttempts.clear();
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
-		const state = options.deferHumanGateMint ? createState(depth) : this.#ensureNikoflowHumanGate(createState(depth));
-		this.setNikoflowState(state);
+		const state = createState(depth);
 		try {
 			this.#nikoflowCallbacks = await this.installNikoflowMode({
 				isGateSatisfied: current => current.gateRequestId === null,
 			});
+			await this.#enterNikoflowPhase(undefined, state, {
+				mintGate: !options.deferHumanGateMint,
+				sendContext: options.sendContext !== false,
+				deliverAs: null,
+			});
 		} catch (error) {
+			this.#nikoflowCallbacks?.uninstall();
+			this.#nikoflowCallbacks = undefined;
 			this.setNikoflowState(undefined);
 			throw error;
 		}
 		if (options.persist !== false) {
 			this.sessionManager.appendModeChange("nikoflow", { depth });
-		}
-		if (options.sendContext !== false) {
-			await this.sendNikoflowContext();
 		}
 	}
 
@@ -7415,13 +7445,13 @@ export class AgentSession {
 						);
 					}),
 				advanceHumanGate: messages => {
-					session.#markNikoflowExecuteTurnCompleted();
-					session.#advanceNikoflowHumanGate(messages);
+					session.#markNikoflowModelTurnCompleted();
+					return session.#advanceNikoflowHumanGate(messages);
 				},
 				advanceExecuteGate: state => {
-					session.#advanceNikoflowExecuteGate(state);
+					return session.#advanceNikoflowExecuteGate(state);
 				},
-				requestReviewer: state => session.#requestNikoflowReviewer(state),
+				requestReviewer: state => session.#enterNikoflowPhase(state, state, { mintGate: true }),
 				advanceReviewerGate: (state, verdict) => {
 					session.#advanceNikoflowReviewerGate(state, verdict);
 				},

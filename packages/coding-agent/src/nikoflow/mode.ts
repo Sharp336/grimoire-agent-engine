@@ -3,11 +3,12 @@ import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
 	currentPhase,
-	currentRole,
 	isHumanGatePhase,
 	mintGateRequest,
+	type NikoflowPhase,
 	type NikoflowRole,
 	type NikoflowState,
+	PHASE_ROLE,
 } from "./state";
 
 const MAX_GATE_HOLD_FOLLOW_UPS = 3;
@@ -35,7 +36,9 @@ export type OnTurnEnd<TMessages = unknown, TContext = unknown> = (
 
 export type OnBeforeYield = () => Promise<void> | void;
 export type ToolChoiceGetter<TDirective = unknown> = () => TDirective | undefined;
-export type NikoflowStateGateAdvance = (state: NikoflowState) => Promise<void> | void;
+export type NikoflowStateGateAdvance = (
+	state: NikoflowState,
+) => Promise<unknown | null | undefined> | unknown | null | undefined;
 export type NikoflowReviewerRequest = (
 	state: NikoflowState,
 ) => Promise<unknown | null | undefined> | unknown | null | undefined;
@@ -125,6 +128,77 @@ export interface NikoflowAgentSessionHost<
 	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
 }
 
+export interface NikoflowPhaseTransition {
+	prevPhase: NikoflowPhase | null;
+	nextPhase: NikoflowPhase;
+}
+
+export interface NikoflowPhaseEntryHost<
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+> {
+	resolveRoleModelWithThinking: (role: NikoflowRole) => NikoflowSessionResolvedRole<TModel, TThinking>;
+	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
+	setState?: (state: NikoflowState) => Promise<void> | void;
+	sendNikoflowContext?: (state: NikoflowState, transition: NikoflowPhaseTransition) => Promise<void> | void;
+	requestReviewer?: NikoflowReviewerRequest;
+}
+
+export interface NikoflowPhaseEntryOptions {
+	nextGateRequestId: () => string;
+	now: () => number;
+	mintGate?: boolean;
+	sendContext?: boolean;
+	requestReviewer?: boolean;
+}
+
+export interface NikoflowPhaseEntryResult {
+	state: NikoflowState;
+	reviewerToolResult?: unknown | null;
+}
+
+export async function enterNikoflowPhase<
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+>(
+	host: NikoflowPhaseEntryHost<TModel, TThinking>,
+	prevPhase: NikoflowPhase | null,
+	nextPhase: NikoflowPhase | null,
+	state: NikoflowState,
+	options: NikoflowPhaseEntryOptions,
+): Promise<NikoflowPhaseEntryResult> {
+	if (!nextPhase) {
+		await host.setState?.(state);
+		return { state };
+	}
+
+	const role = PHASE_ROLE[nextPhase];
+	const resolved = host.resolveRoleModelWithThinking(role);
+	if (resolved.model) {
+		await host.applyRoleModel({
+			role,
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			explicitThinkingLevel: resolved.explicitThinkingLevel,
+		});
+	}
+
+	let entered = { ...state, phaseTurnStarted: false };
+	if (options.mintGate !== false && (isHumanGatePhase(entered) || nextPhase === "verify")) {
+		entered = mintGateRequest(entered, options.nextGateRequestId(), options.now());
+	}
+
+	await host.setState?.(entered);
+	const transition = { prevPhase, nextPhase };
+	if (options.sendContext !== false) {
+		await host.sendNikoflowContext?.(entered, transition);
+	}
+
+	const reviewerToolResult =
+		nextPhase === "verify" && options.requestReviewer !== false ? await host.requestReviewer?.(entered) : undefined;
+	return { state: entered, reviewerToolResult };
+}
+
 const DIRECT_WRITE_TOOLS = new Set(["apply_patch", "edit", "multi_edit", "str_replace_editor", "write", "write_file"]);
 
 const SHELL_TOOLS = new Set(["bash", "exec", "exec_command", "run_command", "shell", "terminal"]);
@@ -182,7 +256,7 @@ export function advanceNikoflowHumanGate<TMessage>(
 ): NikoflowState {
 	if (!isHumanGatePhase(state)) return state;
 	if (!state.gateRequestId || state.gateMintedAt === null) {
-		return ensureNikoflowHumanGate(state, options);
+		return state;
 	}
 	const gateMintedAt = state.gateMintedAt;
 	const hasLaterUserTurn = messages.some(message => {
@@ -190,16 +264,16 @@ export function advanceNikoflowHumanGate<TMessage>(
 		return humanGateAccepted(gateMintedAt, options.messageTimestamp(message));
 	});
 	if (!hasLaterUserTurn) return state;
-	return ensureNikoflowHumanGate(advancePhase(state), options);
+	return advancePhase(state);
 }
 
 export function advanceNikoflowExecuteGate(
 	state: NikoflowState,
-	options: Pick<NikoflowHumanGateAdvanceOptions<unknown>, "nextGateRequestId" | "now">,
+	_options?: Pick<NikoflowHumanGateAdvanceOptions<unknown>, "nextGateRequestId" | "now">,
 ): NikoflowState {
 	if (currentPhase(state) !== "execute") return state;
 	if (!state.phaseTurnStarted) return state;
-	return mintGateRequest(advancePhase(state), options.nextGateRequestId(), options.now());
+	return advancePhase(state);
 }
 
 export function advanceNikoflowReviewerGate(state: NikoflowState, verdict: ReviewerVerdict): NikoflowState {
@@ -292,23 +366,29 @@ export function createNikoflowOnBeforeYield(
 	return async () => {
 		await previous?.();
 		let state = getState();
+		let reviewerToolResult: unknown | null | undefined;
 		if (state && currentPhase(state) === "execute") {
 			if (state.phaseTurnStarted) {
-				await advanceExecuteGate?.(state);
+				reviewerToolResult = await advanceExecuteGate?.(state);
 				state = getState();
 			}
 		}
 		let reviewerBlockNeedsModelWork = false;
 		let reviewerBlockAlreadyQueued = false;
 		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
-			const reviewerToolResult = await requestReviewer?.(state);
+			if (!reviewerToolResult && state.phaseTurnStarted) {
+				reviewerToolResult = await requestReviewer?.(state);
+				state = getState();
+				if (!state) return;
+			}
 			if (reviewerToolResult) {
-				const result = detectReviewerVerdict(reviewerToolResult, state);
+				const reviewerState = state;
+				const result = detectReviewerVerdict(reviewerToolResult, reviewerState);
 				if (result.matched) {
-					await advanceReviewerGate?.(state, result.verdict);
+					await advanceReviewerGate?.(reviewerState, result.verdict);
 				} else if (result.reason === "blocked") {
 					if (onReviewerBlock) {
-						await onReviewerBlock(state, reviewerToolResult);
+						await onReviewerBlock(reviewerState, reviewerToolResult);
 						reviewerBlockAlreadyQueued = true;
 					} else {
 						reviewerBlockNeedsModelWork = true;
@@ -420,26 +500,6 @@ export async function installNikoflowAgentSessionMode<
 		return resolved.model ? { provider: resolved.model.provider, model: resolved.model.id } : null;
 	});
 
-	let appliedRole: NikoflowRole | null = null;
-	const applyCurrentRole = async () => {
-		const state = options.getState();
-		const role = state ? currentRole(state) : null;
-		if (!role || role === appliedRole) return;
-
-		const resolved = host.resolveRoleModelWithThinking(role);
-		if (!resolved.model) return;
-
-		await host.applyRoleModel({
-			role,
-			model: resolved.model,
-			thinkingLevel: resolved.thinkingLevel,
-			explicitThinkingLevel: resolved.explicitThinkingLevel,
-		});
-		appliedRole = role;
-	};
-
-	await applyCurrentRole();
-
 	const { advanceHumanGate, afterBeforeYield, afterTurnEnd, ...callbackOptions } = options;
 
 	return installNikoflowCallbacks(host, {
@@ -447,11 +507,9 @@ export async function installNikoflowAgentSessionMode<
 		afterTurnEnd: async (messages, signal, context) => {
 			await afterTurnEnd?.(messages, signal, context);
 			await advanceHumanGate?.(messages, signal, context);
-			await applyCurrentRole();
 		},
 		afterBeforeYield: async () => {
 			await afterBeforeYield?.();
-			await applyCurrentRole();
 		},
 	});
 }

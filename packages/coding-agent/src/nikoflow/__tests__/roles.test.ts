@@ -14,7 +14,7 @@ describe("nikoflow roles", () => {
 		expect(roleForPhase("prd")).toBe("plan");
 		expect(roleForPhase("tickets")).toBe("plan");
 		expect(roleForPhase("execute")).toBe("default");
-		expect(roleForPhase("verify")).toBe("default");
+		expect(roleForPhase("verify")).toBe("advisor");
 	});
 
 	test("fails fast when plan is unset or equals default", () => {
