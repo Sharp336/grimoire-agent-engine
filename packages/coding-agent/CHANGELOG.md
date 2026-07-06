@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Astral `ty` as a built-in Python primary LSP server (`ty server`), ordered behind `pyright`/`basedpyright`/`pylsp` so it becomes the primary Python LSP only when the existing servers are unavailable. `ruff` remains the Python linter and coexists alongside `ty` ([#4617](https://github.com/can1357/oh-my-pi/issues/4617)).
+
 ## [16.3.10] - 2026-07-06
 
 ### Changed
