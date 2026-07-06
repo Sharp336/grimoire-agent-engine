@@ -14,11 +14,13 @@ import {
 	installNikoflowCallbacks,
 	isWriteTool,
 	type MinimalToolCallContext,
+	type NikoflowAdvisorReview,
 	type NikoflowAgentSessionHost,
 	type NikoflowCallbackHost,
 	type NikoflowPhaseEntryHost,
 	nikoflowToolViolation,
 } from "../mode";
+import { getPhasePrompt } from "../prompts";
 import {
 	advancePhase,
 	createState,
@@ -31,6 +33,9 @@ import {
 	setTicketDag,
 } from "../state";
 import type { NikoflowTicket } from "../tickets";
+
+const readOnlyReason = (phase: string) =>
+	`Nikoflow ${phase} is read-only; write-capable tools are blocked until the Ticketization gate advances.`;
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -76,7 +81,11 @@ function phaseEntryHost(
 	};
 }
 
-function advisorReview(gateId: string, severity: "nit" | "concern" | "blocker" = "nit", note = "ok") {
+function advisorReview(
+	gateId: string,
+	severity: "nit" | "concern" | "blocker" = "nit",
+	note = "ok",
+): NikoflowAdvisorReview {
 	return { gateId, reviewed: true, notes: [{ severity, note }] };
 }
 
@@ -111,15 +120,22 @@ describe("nikoflow mode callback helpers", () => {
 		expect(isWriteTool(tool("exec_command", { cmd: "echo hi > file.txt" }))).toBe(true);
 	});
 
-	test("blocks write-capable tools in grilling", async () => {
+	test("blocks write-capable tools before execute", async () => {
 		const state = createState("standard");
 		const before = createNikoflowBeforeToolCall(() => state);
 
 		expect(await before(tool("bash", { command: "rg needle src" }))).toBeUndefined();
 		expect(await before(tool("write"))).toEqual({
 			block: true,
-			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
+			reason: readOnlyReason("grilling"),
 		});
+
+		let preExecute = state;
+		for (const phase of ["adr", "prd", "tickets"] as const) {
+			preExecute = advancePhase(preExecute);
+			expect(currentPhase(preExecute)).toBe(phase);
+			expect(nikoflowToolViolation(preExecute, tool("apply_patch"))).toBe(readOnlyReason(phase));
+		}
 	});
 
 	test("preserves a previous beforeToolCall block", async () => {
@@ -314,6 +330,92 @@ describe("nikoflow mode callback helpers", () => {
 		expect(followUps.at(-1)).toContain("Nikoflow execute ticket TSK-002.");
 	});
 
+	test("execute exposes only the active ticket until advisor review marks it done", async () => {
+		let state = advancePhase(advancePhase(advancePhase(advancePhase(createState("standard")))));
+		state = setTicketDag(state, [ticket("TSK-001"), ticket("TSK-002", ["TSK-001"])]);
+		const host = phaseEntryHost([], [], next => {
+			state = next;
+		});
+		state = (
+			await enterNikoflowPhase(host, "tickets", "execute", state, {
+				nextGateRequestId: () => "unused",
+				now: () => 100,
+				requestAdvisorReview: false,
+			})
+		).state;
+
+		expect(getPhasePrompt(state)).toContain("Active ticket: TSK-001");
+		expect(getPhasePrompt(state)).not.toContain("TSK-002");
+
+		state = advanceNikoflowExecuteGate(markPhaseTurnStarted(state), {
+			nextGateRequestId: () => "ticket-gate",
+			now: () => 200,
+		});
+		expect(state.activeTicketId).toBe("TSK-001");
+		expect(state.tickets.map(item => [item.id, item.status])).toEqual([
+			["TSK-001", "review"],
+			["TSK-002", "todo"],
+		]);
+		expect(getPhasePrompt(state)).toContain("Active ticket: TSK-001");
+		expect(getPhasePrompt(state)).not.toContain("Active ticket: TSK-002");
+
+		const blocked = advanceNikoflowAdvisorGate(state, advisorReview("ticket-gate", "blocker", "missing test"));
+		expect(blocked).toBe(state);
+		expect(blocked.activeTicketId).toBe("TSK-001");
+
+		state = advanceNikoflowAdvisorGate(state, advisorReview("ticket-gate"));
+		expect(state.tickets.map(item => [item.id, item.status])).toEqual([
+			["TSK-001", "done"],
+			["TSK-002", "red"],
+		]);
+		expect(getPhasePrompt(state)).toContain("Active ticket: TSK-002");
+	});
+
+	test("a stuck active ticket escalates boundedly without aborting execute", async () => {
+		let state = advancePhase(advancePhase(advancePhase(advancePhase(createState("standard")))));
+		state = setTicketDag(state, [ticket("TSK-001"), ticket("TSK-002", ["TSK-001"])]);
+		const host = phaseEntryHost([], [], next => {
+			state = next;
+		});
+		state = (
+			await enterNikoflowPhase(host, "tickets", "execute", state, {
+				nextGateRequestId: () => "unused",
+				now: () => 100,
+				requestAdvisorReview: false,
+			})
+		).state;
+		const followUps: string[] = [];
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => false,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+		await onBeforeYield();
+
+		expect(followUps).toHaveLength(3);
+		expect(followUps.every(message => message.includes("Nikoflow execute ticket TSK-001."))).toBe(true);
+		expect(followUps.some(message => message.includes("TSK-002"))).toBe(false);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
+		expect(currentPhase(state)).toBe("execute");
+		expect(state.activeTicketId).toBe("TSK-001");
+	});
+
 	test("execute does not skip to verify when the captured DAG is missing", () => {
 		const execute = markPhaseTurnStarted(
 			advancePhase(advancePhase(advancePhase(advancePhase(createState("standard"))))),
@@ -439,7 +541,7 @@ describe("nikoflow mode callback helpers", () => {
 
 		expect(await bundle.beforeToolCall(tool("write"))).toEqual({
 			block: true,
-			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
+			reason: readOnlyReason("grilling"),
 		});
 		expect(bundle.getToolChoice?.()).toBe("previous-choice");
 		expect(calls[0]).toBe("previous-turn");
@@ -497,7 +599,7 @@ describe("nikoflow mode callback helpers", () => {
 
 		expect(await host.beforeToolCall?.(tool("write"))).toEqual({
 			block: true,
-			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
+			reason: readOnlyReason("grilling"),
 		});
 		expect(installed.bundle.getToolChoice?.()).toBe("previous-choice");
 		expect(installedChoice?.()).toBe("previous-choice");
@@ -575,7 +677,7 @@ describe("nikoflow mode callback helpers", () => {
 
 		expect(await host.beforeToolCall?.(tool("write"))).toEqual({
 			block: true,
-			reason: "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.",
+			reason: readOnlyReason("grilling"),
 		});
 		expect(calls).toContain("previous-before");
 		expect(installedChoice?.()).toBe("previous-choice");

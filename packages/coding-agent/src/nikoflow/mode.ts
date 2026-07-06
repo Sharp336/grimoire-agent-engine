@@ -279,10 +279,10 @@ export function nikoflowToolViolation(
 	_policy: NikoflowToolPolicy = {},
 ): string | null {
 	const phase = state ? currentPhase(state) : null;
-	if (!phase) return null;
+	if (!state || !phase) return null;
 
-	if (phase === "grilling" && isWriteTool(context)) {
-		return "Nikoflow grilling is read-only; write-capable tools are blocked until the plan gate advances.";
+	if (isHumanGatePhase(state) && isWriteTool(context)) {
+		return `Nikoflow ${phase} is read-only; write-capable tools are blocked until the Ticketization gate advances.`;
 	}
 	return null;
 }
