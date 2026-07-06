@@ -6,7 +6,7 @@ import {
 	renderTicketTodoPhases,
 	slugifyArtifactTitle,
 } from "../artifacts";
-import type { NikoflowTicket } from "../tickets";
+import { type NikoflowTicket, ticketDagFromTodoPhases } from "../tickets";
 
 describe("nikoflow artifacts", () => {
 	test("renders stable local artifact urls", () => {
@@ -50,5 +50,26 @@ describe("nikoflow artifacts", () => {
 				],
 			},
 		]);
+	});
+
+	test("ticket DAG survives a todo-state round trip", () => {
+		const tickets: NikoflowTicket[] = [
+			{
+				id: "TSK-001",
+				acceptance: ["base works"],
+				blocked_by: [],
+				implementation_notes: "base",
+				status: "done",
+			},
+			{
+				id: "TSK-002",
+				acceptance: ["next works"],
+				blocked_by: ["TSK-001"],
+				implementation_notes: "next",
+				status: "todo",
+			},
+		];
+
+		expect(ticketDagFromTodoPhases(renderTicketTodoPhases(tickets))).toEqual(tickets);
 	});
 });

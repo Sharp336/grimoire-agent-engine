@@ -10,9 +10,29 @@ export interface NikoflowTicket {
 	status: TicketStatus;
 }
 
+export interface TicketTodoTask {
+	content: string;
+	status: "pending" | "in_progress" | "completed" | "abandoned";
+}
+
+export interface TicketTodoPhase {
+	name: string;
+	tasks: TicketTodoTask[];
+}
+
 export interface DagValidation {
 	ok: boolean;
 	errors: string[];
+}
+
+export function cloneTickets(tickets: readonly NikoflowTicket[]): NikoflowTicket[] {
+	return tickets.map(ticket => ({
+		id: ticket.id,
+		acceptance: [...ticket.acceptance],
+		blocked_by: [...ticket.blocked_by],
+		implementation_notes: ticket.implementation_notes,
+		status: ticket.status,
+	}));
 }
 
 function ticketSet(tickets: readonly NikoflowTicket[]): Set<string> {
@@ -64,4 +84,57 @@ export function getNextTicket(tickets: readonly NikoflowTicket[]): NikoflowTicke
 
 export function markStatus(tickets: readonly NikoflowTicket[], id: string, status: TicketStatus): NikoflowTicket[] {
 	return tickets.map(ticket => (ticket.id === id ? { ...ticket, status } : ticket));
+}
+
+function todoStatus(status: TicketTodoTask["status"]): TicketStatus {
+	if (status === "completed") return "done";
+	if (status === "in_progress") return "review";
+	return "todo";
+}
+
+export function parseTicketTodoContent(
+	content: string,
+	status: TicketTodoTask["status"] = "pending",
+): NikoflowTicket | null {
+	const separator = content.indexOf(":");
+	if (separator <= 0) return null;
+	const id = content.slice(0, separator).trim();
+	const body = content.slice(separator + 1).trim();
+	if (!id) return null;
+	if (!/\b(?:acceptance|notes)=/.test(body)) return null;
+
+	const notesMarker = " notes=";
+	const notesIndex = body.lastIndexOf(notesMarker);
+	const fields = notesIndex >= 0 ? body.slice(0, notesIndex).trim() : body;
+	const implementation_notes = notesIndex >= 0 ? body.slice(notesIndex + notesMarker.length).trim() : "";
+	const blockedMatch = /(?:^|\s)blocked_by=([^\s]+)/.exec(fields);
+	const acceptanceMatch = /(?:^|\s)acceptance=(.*)$/.exec(fields);
+	const acceptance =
+		acceptanceMatch?.[1]
+			?.split(" | ")
+			.map(item => item.trim())
+			.filter(Boolean) ?? [];
+
+	return {
+		id,
+		acceptance,
+		blocked_by:
+			blockedMatch?.[1]
+				.split(",")
+				.map(dep => dep.trim())
+				.filter(Boolean) ?? [],
+		implementation_notes,
+		status: todoStatus(status),
+	};
+}
+
+export function ticketDagFromTodoPhases(phases: readonly TicketTodoPhase[]): NikoflowTicket[] {
+	const tickets: NikoflowTicket[] = [];
+	for (const phase of phases) {
+		for (const task of phase.tasks) {
+			const ticket = parseTicketTodoContent(task.content, task.status);
+			if (ticket) tickets.push(ticket);
+		}
+	}
+	return tickets;
 }

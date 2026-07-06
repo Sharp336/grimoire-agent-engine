@@ -3,6 +3,7 @@ import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
 	currentPhase,
+	currentTicket,
 	isHumanGatePhase,
 	mintGateRequest,
 	type NikoflowPhase,
@@ -10,6 +11,7 @@ import {
 	type NikoflowState,
 	PHASE_ROLE,
 } from "./state";
+import { getNextTicket, markStatus, validateTicketDag } from "./tickets";
 
 const MAX_GATE_HOLD_FOLLOW_UPS = 3;
 
@@ -170,6 +172,20 @@ export interface NikoflowPhaseEntryResult {
 	advisorReview?: unknown | null;
 }
 
+function isTicketLoopState(state: NikoflowState): boolean {
+	return state.depth !== "tactical" && state.tickets.length > 0;
+}
+
+function activateNextTicket(state: NikoflowState): NikoflowState {
+	if (currentPhase(state) !== "execute" || !isTicketLoopState(state)) return state;
+	const active = currentTicket(state);
+	if (active && active.status !== "done") return state;
+	const nextTicket = getNextTicket(state.tickets);
+	if (!nextTicket) return state;
+	const tickets = nextTicket.status === "todo" ? markStatus(state.tickets, nextTicket.id, "red") : state.tickets;
+	return { ...state, tickets, activeTicketId: nextTicket.id };
+}
+
 export async function enterNikoflowPhase<
 	TModel extends NikoflowSessionModel = NikoflowSessionModel,
 	TThinking = unknown,
@@ -196,7 +212,7 @@ export async function enterNikoflowPhase<
 		});
 	}
 
-	let entered = { ...state, phaseTurnStarted: false };
+	let entered = activateNextTicket({ ...state, phaseTurnStarted: false });
 	if (options.mintGate !== false && (isHumanGatePhase(entered) || nextPhase === "verify")) {
 		entered = mintGateRequest(entered, options.nextGateRequestId(), options.now());
 	}
@@ -288,7 +304,45 @@ export function advanceNikoflowExecuteGate(
 ): NikoflowState {
 	if (currentPhase(state) !== "execute") return state;
 	if (!state.phaseTurnStarted) return state;
-	return advancePhase(state);
+	if (!isTicketLoopState(state)) return advancePhase(state);
+
+	const validation = validateTicketDag(state.tickets);
+	if (!validation.ok) return state;
+
+	const active = currentTicket(state);
+	const ticket = active && active.status !== "done" ? active : getNextTicket(state.tickets);
+	if (!ticket) return advancePhase(state);
+	if (state.gateRequestId) return state;
+	if (!_options?.nextGateRequestId) return state;
+	const tickets = markStatus(state.tickets, ticket.id, "review");
+	return mintGateRequest(
+		{ ...state, tickets, activeTicketId: ticket.id },
+		_options.nextGateRequestId(),
+		_options.now?.() ?? null,
+	);
+}
+
+function advanceNikoflowTicketAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
+	if (currentPhase(state) !== "execute") return state;
+	if (state.gateRequestId !== review.gateId) return state;
+	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
+
+	const active = currentTicket(state);
+	if (!active) return state;
+	const doneTickets = markStatus(state.tickets, active.id, "done");
+	const nextTicket = getNextTicket(doneTickets);
+	if (!nextTicket) {
+		return advancePhase({ ...state, tickets: doneTickets, activeTicketId: null });
+	}
+	const tickets = nextTicket.status === "todo" ? markStatus(doneTickets, nextTicket.id, "red") : doneTickets;
+	return {
+		...state,
+		tickets,
+		activeTicketId: nextTicket.id,
+		gateRequestId: null,
+		gateMintedAt: null,
+		phaseTurnStarted: false,
+	};
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -322,6 +376,7 @@ export function nikoflowAdvisorReviewBlockers(review: NikoflowAdvisorReview): st
 }
 
 export function advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
+	if (currentPhase(state) === "execute") return advanceNikoflowTicketAdvisorGate(state, review);
 	if (currentPhase(state) !== "verify") return state;
 	if (state.gateRequestId !== review.gateId) return state;
 	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
@@ -365,6 +420,21 @@ export function formatGateHoldMessage(state: NikoflowState): string {
 		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
 	}
 	if (phase === "execute") {
+		if (state.depth !== "tactical") {
+			const ticket = currentTicket(state) ?? getNextTicket(state.tickets);
+			if (!ticket) {
+				return "Nikoflow execute phase has no valid unblocked ticket. Yield now; ticket DAG needs plan/human repair.";
+			}
+			const acceptance = ticket.acceptance.map(item => `- ${item}`).join("\n") || "- (not supplied)";
+			return [
+				`Nikoflow execute ticket ${ticket.id}.`,
+				"Implement ONLY this ticket.",
+				"Acceptance:",
+				acceptance,
+				`Implementation notes: ${ticket.implementation_notes || "(not supplied)"}`,
+				"After implementation, yield for an independent advisor review; do not self-approve.",
+			].join("\n");
+		}
 		return "Nikoflow execute phase is active. Do the execute work now; do not skip straight to verify.";
 	}
 	if (phase === "verify") {
@@ -419,12 +489,18 @@ export function createNikoflowOnBeforeYield(
 			}
 		}
 		let advisorBlockAlreadyQueued = false;
-		if (state && currentPhase(state) === "verify" && state.gateRequestId && !isGateSatisfied(state)) {
+		for (let reviewPass = 0; reviewPass < 2; reviewPass++) {
+			if (!state?.gateRequestId || isGateSatisfied(state)) break;
+			const reviewPhase = currentPhase(state);
+			if (reviewPhase !== "verify" && reviewPhase !== "execute") break;
 			if (state.phaseTurnStarted || state.gateRequestId !== requestedAdvisorReviewGateId) {
 				const advisorReviewResult = await requestAdvisorReview?.(state);
 				state = getState();
 				if (!state) return;
-				if (currentPhase(state) === "verify") requestedAdvisorReviewGateId = state.gateRequestId;
+				const currentReviewPhase = currentPhase(state);
+				if (currentReviewPhase === "verify" || currentReviewPhase === "execute") {
+					requestedAdvisorReviewGateId = state.gateRequestId;
+				}
 				if (advisorReviewResult) {
 					const reviewerState = state;
 					const review = normalizeNikoflowAdvisorReview(advisorReviewResult, reviewerState);
@@ -432,13 +508,16 @@ export function createNikoflowOnBeforeYield(
 						if (nikoflowAdvisorReviewBlockers(review).length > 0) {
 							await onAdvisorBlock?.(reviewerState, review);
 							advisorBlockAlreadyQueued = true;
+							break;
 						} else {
 							await advanceAdvisorGate?.(reviewerState, review);
 						}
 					}
 					state = getState();
 				}
+				continue;
 			}
+			break;
 		}
 		await afterNikoflow?.();
 		state = getState();
@@ -453,7 +532,7 @@ export function createNikoflowOnBeforeYield(
 			await yieldForExternalAction(state);
 			return;
 		}
-		if (phase === "verify" && advisorBlockAlreadyQueued) return;
+		if ((phase === "verify" || phase === "execute") && advisorBlockAlreadyQueued) return;
 		await yieldForExternalAction(state);
 	};
 }

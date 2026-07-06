@@ -27,7 +27,9 @@ import {
 	markPhaseTurnStarted,
 	mintGateRequest,
 	type NikoflowState,
+	setTicketDag,
 } from "../state";
+import type { NikoflowTicket } from "../tickets";
 
 const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
 	toolCall: { name },
@@ -76,6 +78,14 @@ function phaseEntryHost(
 function advisorReview(gateId: string, severity: "nit" | "concern" | "blocker" = "nit", note = "ok") {
 	return { gateId, reviewed: true, notes: [{ severity, note }] };
 }
+
+const ticket = (id: string, blocked_by: string[] = [], status: NikoflowTicket["status"] = "todo"): NikoflowTicket => ({
+	id,
+	acceptance: [`${id} acceptance`],
+	blocked_by,
+	implementation_notes: `${id} notes`,
+	status,
+});
 
 describe("nikoflow mode callback helpers", () => {
 	test("chains onTurnEnd after the previous handler", async () => {
@@ -237,6 +247,96 @@ describe("nikoflow mode callback helpers", () => {
 			"context:verify:verify-gate",
 			"advisor:verify-gate",
 		]);
+	});
+
+	test("runs a standard-depth ticket through execute, advisor review, and done", async () => {
+		let state = createState("standard");
+		state = advancePhase(advancePhase(advancePhase(advancePhase(state))));
+		state = setTicketDag(state, [ticket("TSK-001"), ticket("TSK-002", ["TSK-001"])]);
+		const events: string[] = [];
+		const followUps: string[] = [];
+		const host = phaseEntryHost(events, [], next => {
+			state = next;
+		});
+		const entered = await enterNikoflowPhase(host, "tickets", "execute", state, {
+			nextGateRequestId: () => "unused",
+			now: () => 100,
+			requestAdvisorReview: false,
+		});
+		state = entered.state;
+
+		expect(state.activeTicketId).toBe("TSK-001");
+		expect(state.tickets[0].status).toBe("red");
+
+		state = markPhaseTurnStarted(state);
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			current => current.gateRequestId === null,
+			message => {
+				followUps.push(message);
+			},
+			undefined,
+			current => {
+				state = advanceNikoflowExecuteGate(current, {
+					nextGateRequestId: () => "ticket-gate",
+					now: () => 200,
+				});
+			},
+			current => advisorReview(current.gateRequestId ?? "missing"),
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(state.tickets.map(item => [item.id, item.status])).toEqual([
+			["TSK-001", "done"],
+			["TSK-002", "red"],
+		]);
+		expect(state.activeTicketId).toBe("TSK-002");
+		expect(currentPhase(state)).toBe("execute");
+		expect(followUps.at(-1)).toContain("Nikoflow execute ticket TSK-002.");
+	});
+
+	test("sends a blocked ticket to the block handler without aborting the run", async () => {
+		let state = createState("standard");
+		state = advancePhase(advancePhase(advancePhase(advancePhase(state))));
+		state = setTicketDag(state, [ticket("TSK-001")]);
+		state = { ...state, activeTicketId: "TSK-001", phaseTurnStarted: true };
+		const blocks: string[] = [];
+		const externalActions: string[] = [];
+
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			current => current.gateRequestId === null,
+			() => {},
+			undefined,
+			current => {
+				state = advanceNikoflowExecuteGate(current, {
+					nextGateRequestId: () => "ticket-gate",
+					now: () => 200,
+				});
+			},
+			current => advisorReview(current.gateRequestId ?? "missing", "blocker", "acceptance missing"),
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			(_current, review) => {
+				blocks.push(review.notes[0]?.note ?? "");
+			},
+			(_current, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(blocks).toEqual(["acceptance missing"]);
+		expect(externalActions).toEqual([]);
+		expect(currentPhase(state)).toBe("execute");
+		expect(state.activeTicketId).toBe("TSK-001");
+		expect(state.tickets[0].status).toBe("review");
 	});
 
 	test("does not enqueue when there is no pending gate or the gate is satisfied", async () => {

@@ -1,3 +1,5 @@
+import { cloneTickets, type NikoflowTicket } from "./tickets";
+
 export const NIKOFLOW_DEPTHS = ["tactical", "standard", "deep"] as const;
 export type NikoflowDepth = (typeof NIKOFLOW_DEPTHS)[number];
 
@@ -26,10 +28,20 @@ export interface NikoflowState {
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
 	phaseTurnStarted: boolean;
+	tickets: NikoflowTicket[];
+	activeTicketId: string | null;
 }
 
 export function createState(depth: NikoflowDepth): NikoflowState {
-	return { depth, phaseIndex: 0, gateRequestId: null, gateMintedAt: null, phaseTurnStarted: false };
+	return {
+		depth,
+		phaseIndex: 0,
+		gateRequestId: null,
+		gateMintedAt: null,
+		phaseTurnStarted: false,
+		tickets: [],
+		activeTicketId: null,
+	};
 }
 
 export function materializePhases(depth: NikoflowDepth): NikoflowPhase[] {
@@ -67,7 +79,15 @@ export function isHumanGatePhase(state: NikoflowState): boolean {
 
 export function advancePhase(state: NikoflowState): NikoflowState {
 	const nextIndex = Math.min(state.phaseIndex + 1, materializePhases(state.depth).length);
-	return { ...state, phaseIndex: nextIndex, gateRequestId: null, gateMintedAt: null, phaseTurnStarted: false };
+	const nextPhase = materializePhases(state.depth)[nextIndex] ?? null;
+	return {
+		...state,
+		phaseIndex: nextIndex,
+		gateRequestId: null,
+		gateMintedAt: null,
+		phaseTurnStarted: false,
+		activeTicketId: nextPhase === "execute" ? state.activeTicketId : null,
+	};
 }
 
 export function isComplete(state: NikoflowState): boolean {
@@ -92,4 +112,12 @@ export function gateMatches(state: NikoflowState, id: string | null | undefined)
 
 export function markPhaseTurnStarted(state: NikoflowState): NikoflowState {
 	return state.phaseTurnStarted ? state : { ...state, phaseTurnStarted: true };
+}
+
+export function setTicketDag(state: NikoflowState, tickets: readonly NikoflowTicket[]): NikoflowState {
+	return { ...state, tickets: cloneTickets(tickets), activeTicketId: null };
+}
+
+export function currentTicket(state: NikoflowState): NikoflowTicket | null {
+	return state.tickets.find(ticket => ticket.id === state.activeTicketId) ?? null;
 }

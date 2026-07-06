@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { getNextTicket, markStatus, type NikoflowTicket, validateTicketDag } from "../tickets";
+import {
+	getNextTicket,
+	markStatus,
+	type NikoflowTicket,
+	parseTicketTodoContent,
+	ticketDagFromTodoPhases,
+	validateTicketDag,
+} from "../tickets";
 
 const ticket = (id: string, blocked_by: string[] = [], status: NikoflowTicket["status"] = "todo"): NikoflowTicket => ({
 	id,
@@ -40,5 +47,35 @@ describe("nikoflow tickets", () => {
 		expect(updated[0]).not.toBe(tickets[0]);
 		expect(tickets[0].status).toBe("todo");
 		expect(updated[0].status).toBe("green");
+	});
+
+	test("parses ticket DAG from todo state", () => {
+		expect(
+			parseTicketTodoContent(
+				"TSK-002: blocked_by=TSK-001 acceptance=Given A | Then B notes=touch one file",
+				"in_progress",
+			),
+		).toEqual({
+			id: "TSK-002",
+			acceptance: ["Given A", "Then B"],
+			blocked_by: ["TSK-001"],
+			implementation_notes: "touch one file",
+			status: "review",
+		});
+
+		const tickets = ticketDagFromTodoPhases([
+			{
+				name: "Nikoflow Tickets",
+				tasks: [
+					{ content: "TSK-001: acceptance=base works notes=base", status: "completed" },
+					{ content: "TSK-002: blocked_by=TSK-001 acceptance=next works notes=next", status: "pending" },
+				],
+			},
+		]);
+		expect(validateTicketDag(tickets).ok).toBe(true);
+		expect(tickets.map(item => [item.id, item.status])).toEqual([
+			["TSK-001", "done"],
+			["TSK-002", "todo"],
+		]);
 	});
 });

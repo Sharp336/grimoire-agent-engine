@@ -55,6 +55,8 @@ function stateWithGate(random: () => number, gateRequestId: string | null): Niko
 		gateRequestId,
 		gateMintedAt: gateRequestId ? int(random, 1_000_000) : null,
 		phaseTurnStarted: Boolean(int(random, 2)),
+		tickets: [],
+		activeTicketId: null,
 	};
 }
 
