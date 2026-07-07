@@ -14,6 +14,10 @@ const [crossPlatform, crossArch] = crossTarget ? crossTarget.split("-") : [null,
 const bunTarget = crossTarget ? (crossTarget === "linux-x64" ? "bun-linux-x64-baseline" : `bun-${crossTarget}`) : null;
 const outName = crossTarget ? `omp-${crossTarget}` : "omp";
 const outputPath = path.join(packageDir, "dist", outName);
+const legacyRegistryPaths = [
+	path.join(packageDir, "src/extensibility/plugins/legacy-pi-bundled-registry.ts"),
+	path.join(packageDir, "src/extensibility/plugins/legacy-pi-bundled-keys.ts"),
+] as const;
 
 // Transformers.js is an optional, native-heavy dependency that is never bundled
 // into the binary; the tiny-model worker `bun install`s it into a runtime cache
@@ -46,8 +50,9 @@ async function runCommand(
 }
 
 async function main(): Promise<void> {
+	const legacyRegistrySnapshot = await Promise.all(legacyRegistryPaths.map(file => Bun.file(file).text()));
 	// Generate inside the try so the finally always restores the empty checked-in
-	// placeholders (stats client archive, docs index) even on failure.
+	// placeholders (stats client archive, docs index) and generated registry.
 	try {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
 		await runCommand(["bun", "run", "gen:docs"]);
@@ -129,6 +134,7 @@ async function main(): Promise<void> {
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 		await runCommand(["bun", "run", "gen:docs:reset"]);
+		await Promise.all(legacyRegistryPaths.map((file, index) => Bun.write(file, legacyRegistrySnapshot[index] ?? "")));
 	}
 }
 

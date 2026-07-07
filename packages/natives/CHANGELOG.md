@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- Fixed native builds leaving generated TypeScript declarations dirty in the source checkout.
+
+## [16.3.11-zen.1] - 2026-07-07
+
+### Added
+
+- Added embedded zpix TrueType font support to `renderSnapcompactPng`, including binary indexed rasterization with a coverage threshold for Unicode Snapcompact frames.
+
+### Fixed
+
 - Fixed the native build script failing to locate the `@napi-rs/cli` `napi` binary on Windows because the `PATH` lookup joined entries with a Unix `:` separator instead of the platform delimiter (`path.delimiter`).
 
 ## [16.3.6] - 2026-07-04

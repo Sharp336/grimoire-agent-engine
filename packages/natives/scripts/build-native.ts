@@ -8,6 +8,7 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
+const nativeDtsPath = path.join(nativeDir, "index.d.ts");
 
 const crossTarget = Bun.env.CROSS_TARGET;
 const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
@@ -182,9 +183,8 @@ function resolveBuildOutputDirPrefix(profileLabel: string): string {
 
 async function installGeneratedBindings(outputDir: string): Promise<void> {
 	const sourcePath = path.join(outputDir, "index.d.ts");
-	const destPath = path.join(nativeDir, "index.d.ts");
 	try {
-		await fs.copyFile(sourcePath, destPath);
+		await fs.copyFile(sourcePath, nativeDtsPath);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);
@@ -377,6 +377,7 @@ await fs.mkdir(nativeDir, { recursive: true });
 await cleanupStaleTemps(nativeDir);
 await fs.mkdir(path.join(nativeDir, ".build"), { recursive: true });
 const buildOutputDir = await fs.mkdtemp(buildOutputDirPrefix);
+const nativeDtsSnapshot = await Bun.file(nativeDtsPath).text();
 napiArgs[10] = buildOutputDir;
 
 // Resolve napi bin directly: `bunx @napi-rs/cli` can pick up the wrong bin on
@@ -415,6 +416,7 @@ async function runNapiBuildWithSccacheFallback() {
 	return { buildResult, stderr };
 }
 
+let nativeDtsStale = false;
 try {
 	const { buildResult, stderr } = await runNapiBuildWithSccacheFallback();
 	if (buildResult.exitCode !== 0) {
@@ -434,5 +436,14 @@ try {
 
 	console.log("Build complete.");
 } finally {
+	const nativeDtsAfterBuild = await Bun.file(nativeDtsPath).text();
+	const updateNativeDts = Bun.env.OMP_UPDATE_NATIVE_DTS === "1";
+	if (!updateNativeDts) await Bun.write(nativeDtsPath, nativeDtsSnapshot);
 	await fs.rm(buildOutputDir, { recursive: true, force: true });
+	nativeDtsStale = !updateNativeDts && nativeDtsAfterBuild !== nativeDtsSnapshot;
+}
+if (nativeDtsStale) {
+	throw new Error(
+		"native/index.d.ts is stale; rerun with OMP_UPDATE_NATIVE_DTS=1 and commit the generated declaration update",
+	);
 }

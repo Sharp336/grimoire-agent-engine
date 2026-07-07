@@ -5,6 +5,25 @@
 ### Changed
 
 - Memoized non-message token totals (system prompt, tool schemas, skills) so the per-turn compaction and context-threshold paths recompute them at most once per input change instead of on every call. `getContextBreakdown` and `#estimateStoredContextTokens` previously re-tokenized the system prompt and every tool's wire schema (per-tool `JSON.stringify`) several times per turn over inputs that change at most once per turn.
+- Added `omp auth-broker import` support for CPA Codex access-token-only JSON credentials.
+
+### Fixed
+
+- Fixed binary builds leaving generated legacy plugin registry files dirty in the source checkout.
+
+## [16.3.11-zen.1] - 2026-07-07
+
+### Added
+
+- Added ordered model role chains: comma-separated `modelRoles.<role>` entries now act as provider fallback chains, and the model selector shows/edit them with zero-based badges like `ROLE#0`, `ROLE#1`, etc.
+- Added `statusLine.segmentOptions.model.showProvider` so custom-provider model names can render as `provider/Model Name` in the status line.
+- Added `anysearch` web search provider, supporting both credentials-based and anonymous MCP search fallbacks.
+
+### Fixed
+
+- Fixed `omitThinking` settings propagation so settings-aware streams request hidden thinking summaries when users explicitly enable the option.
+- Fixed Zen prerelease builds checking the upstream `@oh-my-pi/pi-coding-agent` stable channel and falsely reporting `16.3.6` as newer than `16.3.6-zen.N`.
+- Fixed the model selector offering `Add ROLE fallback` for a model that is already present in that role's ordered fallback chain.
 
 ## [16.3.11] - 2026-07-06
 
