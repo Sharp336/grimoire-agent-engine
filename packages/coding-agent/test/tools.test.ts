@@ -759,6 +759,40 @@ describe("Coding Agent Tools", () => {
 			});
 		}
 
+		for (const archiveCase of [
+			{
+				label: ".tar",
+				path: "dot-prefix.tar",
+				create: (entries: ArchiveFixtureEntry[]) => createTarArchive(entries),
+			},
+			{
+				label: ".tar.gz",
+				path: "dot-prefix.tar.gz",
+				create: (entries: ArchiveFixtureEntry[]) => zlib.gzipSync(createTarArchive(entries)),
+			},
+		]) {
+			it(`should normalize ./-prefixed member paths when reading ${archiveCase.label} archives`, async () => {
+				const archivePath = path.join(testDir, archiveCase.path);
+				fs.writeFileSync(
+					archivePath,
+					archiveCase.create([
+						{ path: "./README.md", content: "# Dot Prefix README\nLine 2\n" },
+						{ path: "pkg/model_manifest.json", content: '{"model":"pi"}\n' },
+					]),
+				);
+
+				const normalizedResult = await readTool.execute("test-call-archive-dot-prefix-normalized", {
+					path: `${archivePath}:README.md`,
+				});
+				const literalResult = await readTool.execute("test-call-archive-dot-prefix-literal", {
+					path: `${archivePath}:./README.md`,
+				});
+
+				expect(getTextOutput(normalizedResult)).toContain("# Dot Prefix README");
+				expect(getTextOutput(literalResult)).toContain("# Dot Prefix README");
+			});
+		}
+
 		it("should treat a selector-shaped archive subpath as a root listing selector", async () => {
 			const archivePath = path.join(testDir, "root-selector.tar");
 			fs.writeFileSync(
