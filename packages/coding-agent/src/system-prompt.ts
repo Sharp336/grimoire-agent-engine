@@ -251,7 +251,19 @@ async function getCachedGpu(): Promise<string | undefined> {
 }
 
 async function getCpuModel(): Promise<string | undefined> {
-	if (process.platform !== "linux") return undefined;
+	if (process.platform !== "linux") {
+		// #4717 switched Linux to /proc/cpuinfo to avoid an os.cpus() startup
+		// stall (#4712). On macOS/Windows the os.cpus() stall does not occur,
+		// so fall back to it here to keep the CPU model populated on every
+		// platform — otherwise the workstation block drops `CPU:` on non-Linux
+		// hosts (#4755).
+		try {
+			return os.cpus()[0]?.model || undefined;
+		} catch (error) {
+			logger.debug("Could not read CPU model via os.cpus()", { error: String(error) });
+			return undefined;
+		}
+	}
 	try {
 		const cpuInfo = await Bun.file("/proc/cpuinfo").text();
 		const match = /^model name\s*:\s*(.+)$/m.exec(cpuInfo);

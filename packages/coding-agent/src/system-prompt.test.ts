@@ -189,3 +189,41 @@ describe.skipIf(process.platform !== "linux")("system prompt CPU model", () => {
 		}
 	});
 });
+
+// #4755: on non-Linux hosts getCpuModel must fall back to os.cpus()[0].model
+// (Linux keeps the /proc/cpuinfo path from #4717 to avoid the #4712 stall).
+describe.skipIf(process.platform === "linux")("system prompt CPU model on non-Linux", () => {
+	it("populates CPU model via os.cpus() on macOS/Windows", async () => {
+		const cpus = spyOn(os, "cpus").mockImplementation(() => [
+			{
+				model: "Synthetic Non-Linux CPU",
+				speed: 0,
+				times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 },
+			},
+		]);
+		try {
+			const result = await buildSystemPrompt({
+				resolvedCustomPrompt: "Base prompt",
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				workspaceTree: {
+					rootPath: import.meta.dir,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				activeRepoContext: null,
+			});
+
+			expect(cpus).toHaveBeenCalled();
+			// CPU model is rendered into the environment/workstation block in
+			// the systemPrompt string array, not returned as a separate field.
+			const blockWithCpu = result.systemPrompt.find(s => s.includes("Synthetic Non-Linux CPU"));
+			expect(blockWithCpu).toBeDefined();
+		} finally {
+			cpus.mockRestore();
+		}
+	});
+});
