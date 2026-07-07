@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed access-token-only OAuth credentials attempting token refresh with an empty refresh token after expiry.
+
+## [16.3.11-zen.1] - 2026-07-07
+
+### Added
+
+- Added `anysearch` registry provider definition and interactive credentials login support.
+
+### Fixed
+
+- Fixed plain-text 5xx provider status messages (including relay `520` HTML pages) being left as non-retryable numeric statuses instead of transient retryable errors.
+- Fixed relay `insufficient_user_*` quota errors being classified as generic 403 auth failures instead of retryable usage-limit errors.
+
 ## [16.3.11] - 2026-07-06
 
 ### Fixed

@@ -100,6 +100,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(after).toBe("minted-access");
 	});
 
+	test("access-token-only OAuth works until the refresh window, then skips refresh", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const refreshes: string[] = [];
+		registerOAuthProvider({
+			id: PROVIDER,
+			name: "Rotate Unit",
+			sourceId: SOURCE,
+			async login() {
+				return { access: "login", refresh: "login", expires: farExpiry() };
+			},
+			async refreshToken(credentials) {
+				refreshes.push(credentials.refresh);
+				return { ...credentials, access: "minted", refresh: "minted", expires: farExpiry() };
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "token-only-fresh", refresh: "", expires: farExpiry() },
+		]);
+
+		expect(await authStorage.getApiKey(PROVIDER, "fresh")).toBe("token-only-fresh");
+		expect(refreshes).toEqual([]);
+
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "token-only-expired", refresh: "", expires: Date.now() - 1_000 },
+			{ type: "oauth", access: "sibling", refresh: "sibling-refresh", expires: farExpiry() },
+		]);
+		expect(await authStorage.getApiKey(PROVIDER, "sibling")).toBe("sibling");
+		expect(refreshes).toEqual([]);
+
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "token-only-expired", refresh: "", expires: Date.now() - 1_000 },
+		]);
+		await expect(authStorage.getApiKey(PROVIDER, "expired")).rejects.toThrow("access-token-only and expired");
+		expect(refreshes).toEqual([]);
+	});
+
 	test("rotateSessionCredential(401) blocks + clears the sticky and rotates to a sibling", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();

@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Changed
+### Added
+
+- Added `omp auth-broker import` support for CPA Codex access-token-only JSON credentials.
+
+## [16.3.11-zen.1] - 2026-07-07
 
 - Memoized non-message token totals (system prompt, tool schemas, skills) so the per-turn compaction and context-threshold paths recompute them at most once per input change instead of on every call. `getContextBreakdown` and `#estimateStoredContextTokens` previously re-tokenized the system prompt and every tool's wire schema (per-tool `JSON.stringify`) several times per turn over inputs that change at most once per turn.
 

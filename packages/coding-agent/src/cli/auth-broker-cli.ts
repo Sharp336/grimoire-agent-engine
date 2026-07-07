@@ -454,6 +454,8 @@ interface ImportPlanEntry {
 	accountId: string | null;
 	expiresAt: number;
 	disabled: boolean;
+	refreshable: boolean;
+	accessTokenOnly: boolean;
 	credential: OAuthCredential;
 }
 
@@ -523,8 +525,17 @@ async function loadImportPlan(
 			});
 			continue;
 		}
-		if (!json.access_token || !json.refresh_token) {
-			skipped.push({ file, reason: "missing access_token or refresh_token" });
+		if (!json.access_token) {
+			skipped.push({ file, reason: "missing access_token" });
+			continue;
+		}
+		const refreshToken = typeof json.refresh_token === "string" ? json.refresh_token : "";
+		const accessTokenOnly = refreshToken.trim().length === 0;
+		if (accessTokenOnly && provider !== "openai-codex") {
+			skipped.push({
+				file,
+				reason: "missing refresh_token; access-token-only import is currently supported only for openai-codex",
+			});
 			continue;
 		}
 		const expiresAt = parseCliProxyExpiry(json.expired);
@@ -537,7 +548,7 @@ async function loadImportPlan(
 		const credential: OAuthCredential = {
 			type: "oauth",
 			access: json.access_token,
-			refresh: json.refresh_token,
+			refresh: refreshToken,
 			expires: expiresAt,
 			...(email !== null ? { email } : {}),
 			...(accountId !== null ? { accountId } : {}),
@@ -549,6 +560,8 @@ async function loadImportPlan(
 			accountId,
 			expiresAt,
 			disabled: json.disabled === true,
+			refreshable: !accessTokenOnly,
+			accessTokenOnly,
 			credential,
 		});
 	}
@@ -557,9 +570,10 @@ async function loadImportPlan(
 
 function describeImportEntry(entry: ImportPlanEntry): string {
 	const ident = entry.email ?? entry.accountId ?? "(no identity)";
+	const mode = entry.accessTokenOnly ? " [access-token-only]" : "";
 	const stale = entry.expiresAt < Date.now() ? " [expired]" : "";
 	const disabled = entry.disabled ? " [disabled]" : "";
-	return `${entry.provider}: ${ident}${stale}${disabled} from ${entry.sourceFile}`;
+	return `${entry.provider}: ${ident}${mode}${stale}${disabled} from ${entry.sourceFile}`;
 }
 
 async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
@@ -583,6 +597,8 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 					accountId: e.accountId,
 					expiresAt: e.expiresAt,
 					disabled: e.disabled,
+					refreshable: e.refreshable,
+					accessTokenOnly: e.accessTokenOnly,
 					file: e.sourceFile,
 				})),
 				skipped,

@@ -136,6 +136,90 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 		expect(parsed.plan[0].provider).toBe("anthropic");
 	});
 
+	test("imports Codex access-token-only CPA JSON without persisting session_token", async () => {
+		await writeCliProxyJson("codex-token-only.json", {
+			type: "codex",
+			email: "user@example.com",
+			expired: "2099-12-31 23:59:59 +0000",
+			account_id: "00000000-0000-4000-8000-000000000001",
+			access_token: "codex-access-only",
+			session_token: "ignored-session-token",
+			refresh_token: "",
+		});
+		await writeCliProxyJson("codex-missing-refresh.json", {
+			type: "codex",
+			email: "missing-refresh@example.com",
+			expired: "2099-12-31T23:59:59Z",
+			access_token: "codex-missing-refresh",
+		});
+
+		let restore = silenceStdout();
+		await runAuthBrokerCommand({
+			action: "import",
+			flags: { source: cliproxyDir, dryRun: true, json: true },
+		});
+		const dryRun = JSON.parse(restore().trim().split("\n").pop() ?? "{}");
+		expect(dryRun.plan).toHaveLength(2);
+		expect(dryRun.plan.map((entry: { email: string }) => entry.email).sort()).toEqual([
+			"missing-refresh@example.com",
+			"user@example.com",
+		]);
+		for (const entry of dryRun.plan) {
+			expect(entry).toMatchObject({
+				provider: "openai-codex",
+				refreshable: false,
+				accessTokenOnly: true,
+			});
+		}
+
+		restore = silenceStdout();
+		await runAuthBrokerCommand({
+			action: "import",
+			flags: { source: cliproxyDir },
+		});
+		const text = restore();
+		expect(text).toContain("[access-token-only]");
+
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			const rows = store.listAuthCredentials("openai-codex");
+			expect(rows).toHaveLength(2);
+			const row = rows.find(
+				entry => entry.credential.type === "oauth" && entry.credential.email === "user@example.com",
+			);
+			if (!row) throw new Error("missing imported Codex token-only credential");
+			expect(row.credential.type).toBe("oauth");
+			if (row.credential.type === "oauth") {
+				expect(row.credential.access).toBe("codex-access-only");
+				expect(row.credential.refresh).toBe("");
+				expect(row.credential.accountId).toBe("00000000-0000-4000-8000-000000000001");
+				expect("session_token" in row.credential).toBe(false);
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	test("skips access-token-only JSON for non-Codex providers", async () => {
+		await writeCliProxyJson("claude-token-only.json", {
+			type: "claude",
+			access_token: "claude-access-only",
+			expired: "2099-12-31T23:59:59Z",
+			refresh_token: "",
+		});
+
+		const restore = silenceStdout();
+		await runAuthBrokerCommand({
+			action: "import",
+			flags: { source: cliproxyDir, dryRun: true, json: true },
+		});
+		const parsed = JSON.parse(restore().trim().split("\n").pop() ?? "{}");
+		expect(parsed.plan).toHaveLength(0);
+		expect(parsed.skipped[0].reason).toContain(
+			"access-token-only import is currently supported only for openai-codex",
+		);
+	});
+
 	test("--provider override forces a provider id when the JSON type is unrecognized", async () => {
 		await writeCliProxyJson("weird.json", {
 			type: "some-future-type",
