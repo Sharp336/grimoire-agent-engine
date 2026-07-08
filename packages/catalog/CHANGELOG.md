@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub Coding Plan (DevPass) catalog support with bundled `kimi-k2.6:dev` and `minimax-m2.7:dev` models plus runtime discovery filtered to DevPass-only models.
+
 ## [16.3.11] - 2026-07-06
 
 ### Added

@@ -17456,6 +17456,73 @@
 			"maxTokens": 64000
 		}
 	},
+	"electronhub": {
+		"kimi-k2.6:dev": {
+			"id": "kimi-k2.6:dev",
+			"name": "Kimi K2.6 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 240000,
+			"maxTokens": null,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"minimax-m2.7:dev": {
+			"id": "minimax-m2.7:dev",
+			"name": "MiniMax M2.7 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 180000,
+			"maxTokens": null,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				],
+				"requiresEffort": true
+			}
+		}
+	},
 	"firepass": {
 		"kimi-k2.6-turbo": {
 			"id": "kimi-k2.6-turbo",

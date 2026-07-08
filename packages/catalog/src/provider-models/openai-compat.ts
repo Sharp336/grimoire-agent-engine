@@ -1683,7 +1683,118 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.7 Wafer Serverless
+// 7.7 ElectronHub Coding Plan (DevPass)
+// ---------------------------------------------------------------------------
+
+export interface ElectronHubModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const ELECTRONHUB_API_BASE_URL = "https://api.electronhub.ai/v1";
+const ELECTRONHUB_OPENAI_COMPAT = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+} as const satisfies ModelSpec<"openai-completions">["compat"];
+
+export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "kimi-k2.6:dev",
+		name: "Kimi K2.6 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 240_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "minimax-m2.7:dev",
+		name: "MiniMax M2.7 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 180_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+];
+
+function isElectronHubDevpassModel(entry: OpenAICompatibleModelRecord, id: string): boolean {
+	if (id.endsWith(":dev")) return true;
+	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+	return metadata?.devpass_only === true;
+}
+
+function toElectronHubModelName(name: string): string {
+	const separator = name.indexOf(": ");
+	return separator > 0 ? name.slice(separator + 2) : name;
+}
+
+function mapElectronHubDevpassModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const base = mapWithBundledReference(entry, defaults, reference);
+	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	const input: ("text" | "image")[] =
+		metadata?.vision === true ? ["text", "image"] : metadata?.vision === false ? ["text"] : base.input;
+	return {
+		...base,
+		name: toElectronHubModelName(base.name),
+		reasoning: metadata?.reasoning === true || base.reasoning,
+		input,
+		cost: {
+			input: toNumber(pricing?.input) ?? base.cost.input,
+			output: toNumber(pricing?.output) ?? base.cost.output,
+			cacheRead: toNumber(pricing?.cache_read) ?? base.cost.cacheRead,
+			cacheWrite: toNumber(pricing?.cache_write) ?? base.cost.cacheWrite,
+		},
+		contextWindow: toPositiveNumber(entry.tokens, base.contextWindow),
+		...(metadata?.function_call === false ? { supportsTools: false } : {}),
+		compat: { ...(base.compat ?? {}), ...ELECTRONHUB_OPENAI_COMPAT },
+	};
+}
+
+export function electronHubModelManagerOptions(
+	config?: ElectronHubModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? ELECTRONHUB_API_BASE_URL;
+	return {
+		providerId: "electronhub",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "electronhub",
+					baseUrl,
+					apiKey,
+					filterModel: (entry, model) => isElectronHubDevpassModel(entry, model.id),
+					mapModel: (entry, defaults) =>
+						mapElectronHubDevpassModel(
+							entry,
+							defaults,
+							ELECTRONHUB_DEVPASS_STATIC_MODELS.find(model => model.id === defaults.id),
+						),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 7.8 Wafer Serverless
 // ---------------------------------------------------------------------------
 
 export interface WaferModelManagerConfig {

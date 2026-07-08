@@ -11,6 +11,7 @@ import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { electronHubProvider } from "./electronhub";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -84,6 +85,7 @@ const ALL = [
 	githubCopilotProvider,
 	cursorProvider,
 	devinProvider,
+	electronHubProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,

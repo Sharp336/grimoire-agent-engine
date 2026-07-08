@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub Coding Plan (DevPass) as a `/login electronhub` API-key provider, validating `ek-dev-…` keys against `kimi-k2.6:dev` on `https://api.electronhub.ai/v1`.
+
 ## [16.3.11] - 2026-07-06
 
 ### Fixed

@@ -34,6 +34,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	ELECTRONHUB_DEVPASS_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -343,6 +344,17 @@ function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[]
 	});
 }
 
+/**
+ * ElectronHub exposes a model-wide `tokens` context field on `/v1/models`, but
+ * not a documented output-token ceiling. Keep `maxTokens` unknown instead of
+ * borrowing caps from same-family models on other providers.
+ */
+function preserveElectronHubUnknownMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model =>
+		model.provider === "electronhub" && model.maxTokens !== null ? { ...model, maxTokens: null } : model,
+	);
+}
+
 const ANTIGRAVITY_ENDPOINT = ANTIGRAVITY_PRIMARY_ENDPOINT;
 
 async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuthAccess | null> {
@@ -516,6 +528,11 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
+	// Seed ElectronHub DevPass models so `/login electronhub` has a usable
+	// offline catalog even when generation runs without an ElectronHub key.
+	if (!authoritativeCatalogProviders.has("electronhub")) {
+		allModels.push(...ELECTRONHUB_DEVPASS_STATIC_MODELS);
+	}
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -592,8 +609,10 @@ async function generateModels() {
 	// previous-snapshot raw members into their logical families.
 	allModels = collapseEffortVariantsAcrossProviders(allModels);
 	// Fill remaining null endpoint limits from each model's canonical-family
-	// reference. Runs last so canonical ids and explicit policy limits are final.
+	// reference, then restore provider-specific unknowns where cross-provider
+	// caps would be misleading.
 	applyCanonicalLimitFallback(allModels);
+	allModels = preserveElectronHubUnknownMaxTokens(allModels);
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);
