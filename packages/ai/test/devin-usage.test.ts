@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
-import { usageReportSchema } from "@oh-my-pi/pi-ai/usage";
+import { type UsageFetchParams, usageReportSchema } from "@oh-my-pi/pi-ai/usage";
 import { devinUsageProvider, fetchDevinConsumption } from "@oh-my-pi/pi-ai/usage/devin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
@@ -108,14 +108,14 @@ describe("devinUsageProvider", () => {
 		};
 
 		const report = await devinUsageProvider.fetchUsage(
-			{ provider: "devin", credential: { type: "api_key", apiKey: "devin-session-token$devin-token" } },
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_test-token" } },
 			{ fetch: fetchImpl },
 		);
 
 		if (!report) throw new Error("expected Devin usage report");
 		expect(calls).toEqual([
-			{ path: "/v3/enterprise/consumption/daily", authorization: "Bearer devin-token" },
-			{ path: "/v3/enterprise/metrics/usage", authorization: "Bearer devin-token" },
+			{ path: "/v3/enterprise/consumption/daily", authorization: "Bearer cog_test-token" },
+			{ path: "/v3/enterprise/metrics/usage", authorization: "Bearer cog_test-token" },
 		]);
 		expect(report.provider).toBe("devin");
 		expect(report.limits.map(limit => [limit.id, limit.amount.used, limit.amount.unit])).toEqual([
@@ -131,6 +131,36 @@ describe("devinUsageProvider", () => {
 		});
 		const validatedReport = usageReportSchema(report);
 		expect(validatedReport).not.toBeInstanceOf(type.errors);
+	});
+
+	it("only supports Devin v3 API key credentials", () => {
+		const supportedApiKey: UsageFetchParams = {
+			provider: "devin",
+			credential: { type: "api_key", apiKey: "cog_valid-token" },
+		};
+		const unsupportedApiKey: UsageFetchParams = {
+			provider: "devin",
+			credential: { type: "api_key", apiKey: "devin-session-token$devin-token" },
+		};
+		const unsupportedOauth: UsageFetchParams = {
+			provider: "devin",
+			credential: { type: "oauth", accessToken: "devin-oauth-token" },
+		};
+
+		expect(devinUsageProvider.supports?.(supportedApiKey)).toBe(true);
+		expect(devinUsageProvider.supports?.(unsupportedApiKey)).toBe(false);
+		expect(devinUsageProvider.supports?.(unsupportedOauth)).toBe(false);
+	});
+
+	it("throws definitive auth failures so credential checks fail", async () => {
+		const fetchImpl: FetchImpl = async () => new Response("unauthorized", { status: 401 });
+
+		await expect(
+			devinUsageProvider.fetchUsage(
+				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_bad-token" } },
+				{ fetch: fetchImpl },
+			),
+		).rejects.toThrow("Devin consumption request failed: 401 unauthorized");
 	});
 
 	it("uses org-scoped endpoints and falls back to enterprise org endpoints", async () => {
@@ -162,7 +192,7 @@ describe("devinUsageProvider", () => {
 		};
 
 		const report = await devinUsageProvider.fetchUsage(
-			{ provider: "devin", credential: { type: "api_key", apiKey: "cog-token" } },
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_token" } },
 			{ fetch: fetchImpl },
 		);
 
@@ -194,7 +224,7 @@ describe("fetchDevinConsumption", () => {
 		};
 
 		const summary = await fetchDevinConsumption({
-			apiKey: "cog-token",
+			apiKey: "cog_token",
 			baseUrl: "https://api.example.test/",
 			orgId: "org-xyz",
 			timeAfter: new Date("2026-01-01T00:00:00.000Z"),

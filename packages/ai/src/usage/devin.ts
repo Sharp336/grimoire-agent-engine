@@ -5,7 +5,7 @@ import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, Us
 import { toNumber } from "./shared";
 
 const DEFAULT_DEVIN_API_BASE_URL = "https://api.devin.ai";
-const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
+const DEVIN_API_KEY_PREFIX = "cog_";
 
 export interface DevinUsageQuery {
 	/** Unix seconds, Unix milliseconds, or a Date passed through as `time_after`. */
@@ -16,7 +16,6 @@ export interface DevinUsageQuery {
 
 export interface DevinUsageAuth extends DevinUsageQuery {
 	apiKey?: string;
-	accessToken?: string;
 	baseUrl?: string;
 	orgId?: string;
 	fetch: FetchImpl;
@@ -54,6 +53,28 @@ interface FetchJsonResult {
 	payload: unknown;
 }
 
+interface DevinHttpFailure {
+	url: string;
+	status: number;
+	body: string;
+}
+
+class DevinUsageRequestError extends Error {
+	readonly url: string;
+	readonly status: number;
+
+	constructor(label: string, failure: DevinHttpFailure) {
+		super(`Devin ${label} request failed: ${failure.status} ${failure.body}`.trim());
+		this.name = "DevinUsageRequestError";
+		this.url = failure.url;
+		this.status = failure.status;
+	}
+}
+
+function isDevinAuthFailure(error: unknown): boolean {
+	return error instanceof DevinUsageRequestError && (error.status === 401 || error.status === 403);
+}
+
 function normalizeBaseUrl(baseUrl?: string): string {
 	const trimmed = baseUrl?.trim();
 	if (!trimmed) return DEFAULT_DEVIN_API_BASE_URL;
@@ -68,14 +89,9 @@ function normalizeBaseUrl(baseUrl?: string): string {
 	return trimmed.replace(/\/+$/, "");
 }
 
-function normalizeBearerToken(token: string | undefined): string | undefined {
-	const trimmed = token?.trim();
-	if (!trimmed) return undefined;
-	return trimmed.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? trimmed.slice(DEVIN_SESSION_TOKEN_PREFIX.length) : trimmed;
-}
-
-function resolveToken(auth: Pick<DevinUsageAuth, "apiKey" | "accessToken">): string | undefined {
-	return normalizeBearerToken(auth.apiKey ?? auth.accessToken);
+function normalizeDevinApiKey(apiKey: string | undefined): string | undefined {
+	const trimmed = apiKey?.trim();
+	return trimmed?.startsWith(DEVIN_API_KEY_PREFIX) ? trimmed : undefined;
 }
 
 function toUnixSeconds(value: number | Date | undefined): number | undefined {
@@ -114,10 +130,10 @@ function buildMetricsPaths(orgId: string | undefined): string[] {
 }
 
 async function fetchFirstJson(auth: DevinUsageAuth, paths: string[], label: string): Promise<FetchJsonResult | null> {
-	const token = resolveToken(auth);
+	const token = normalizeDevinApiKey(auth.apiKey);
 	if (!token) return null;
 	const baseUrl = normalizeBaseUrl(auth.baseUrl);
-	let lastFailure: { url: string; status: number; body: string } | undefined;
+	let lastFailure: DevinHttpFailure | undefined;
 	for (const path of paths) {
 		const url = withUsageQuery(`${baseUrl}${path}`, auth);
 		let response: Response;
@@ -146,7 +162,7 @@ async function fetchFirstJson(auth: DevinUsageAuth, paths: string[], label: stri
 	}
 
 	if (lastFailure) {
-		throw new Error(`Devin ${label} request failed: ${lastFailure.status} ${lastFailure.body}`.trim());
+		throw new DevinUsageRequestError(label, lastFailure);
 	}
 	return null;
 }
@@ -328,9 +344,8 @@ function metadataFromParams(
 async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "devin") return null;
 	const { credential } = params;
-	const apiKey = credential.type === "api_key" ? credential.apiKey : undefined;
-	const accessToken = credential.type === "oauth" ? credential.accessToken : undefined;
-	if (!apiKey && !accessToken) return null;
+	const apiKey = credential.type === "api_key" ? normalizeDevinApiKey(credential.apiKey) : undefined;
+	if (!apiKey) return null;
 
 	const baseUrl = params.baseUrl ?? credential.apiEndpoint;
 	const orgId = readOrgId({
@@ -338,7 +353,6 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	});
 	const auth: DevinUsageAuth = {
 		apiKey,
-		accessToken,
 		baseUrl,
 		orgId,
 		fetch: ctx.fetch,
@@ -349,6 +363,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	try {
 		consumption = await fetchDevinConsumption(auth);
 	} catch (error) {
+		if (isDevinAuthFailure(error)) throw error;
 		ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(error) });
 	}
 
@@ -356,6 +371,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	try {
 		metrics = await fetchDevinUsageMetrics(auth);
 	} catch (error) {
+		if (isDevinAuthFailure(error)) throw error;
 		ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(error) });
 	}
 
@@ -380,6 +396,8 @@ export const devinUsageProvider: UsageProvider = {
 	id: "devin",
 	fetchUsage: fetchDevinUsage,
 	supports: params =>
-		params.provider === "devin" && (params.credential.type === "api_key" || params.credential.type === "oauth"),
+		params.provider === "devin" &&
+		params.credential.type === "api_key" &&
+		normalizeDevinApiKey(params.credential.apiKey) !== undefined,
 	validatesCredentials: true,
 };
