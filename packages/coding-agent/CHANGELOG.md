@@ -6,6 +6,10 @@
 
 - Memoized non-message token totals (system prompt, tool schemas, skills) so the per-turn compaction and context-threshold paths recompute them at most once per input change instead of on every call. `getContextBreakdown` and `#estimateStoredContextTokens` previously re-tokenized the system prompt and every tool's wire schema (per-tool `JSON.stringify`) several times per turn over inputs that change at most once per turn.
 
+### Fixed
+
+- Fixed `fuzzy_find` to stop following directory symlinks and to cap retained matches before sorting, preventing broad queries from allocating memory for every matching line.
+
 ## [16.3.11] - 2026-07-06
 
 ### Changed

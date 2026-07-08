@@ -5,7 +5,11 @@
 //! but not full edit-distance typo correction. Complements the exact-regex
 //! `grep` tool.
 
-use std::path::{Path, PathBuf};
+use std::{
+	cmp::Ordering,
+	collections::BinaryHeap,
+	path::{Path, PathBuf},
+};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -69,6 +73,123 @@ struct FuzzyContentConfig {
 	line_char_limit: Option<u32>,
 }
 
+/// Internal wrapper so `BinaryHeap` can order matches by worst-first.
+struct ScoredMatch(FuzzyContentMatch);
+
+impl ScoredMatch {
+	fn new(path: &str, line: u32, score: u32, content: String) -> Self {
+		Self(FuzzyContentMatch { path: path.to_string(), line, content, score })
+	}
+}
+
+impl PartialEq for ScoredMatch {
+	fn eq(&self, other: &Self) -> bool {
+		self.0.score == other.0.score && self.0.path == other.0.path && self.0.line == other.0.line
+	}
+}
+
+impl Eq for ScoredMatch {}
+
+impl Ord for ScoredMatch {
+	/// Order by worst match first: lower score, then higher path, then higher
+	/// line. This turns the max-heap into a min-heap for the eviction
+	/// candidate.
+	fn cmp(&self, other: &Self) -> Ordering {
+		self
+			.0
+			.score
+			.cmp(&other.0.score)
+			.reverse()
+			.then_with(|| self.0.path.cmp(&other.0.path).reverse())
+			.then_with(|| self.0.line.cmp(&other.0.line).reverse())
+	}
+}
+
+impl PartialOrd for ScoredMatch {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+/// Keep only the top `capacity` scored matches while still counting every
+/// match.
+struct BoundedMatchCollector {
+	capacity:      usize,
+	heap:          BinaryHeap<ScoredMatch>,
+	total_matches: u64,
+}
+
+impl BoundedMatchCollector {
+	const fn new(capacity: usize) -> Self {
+		Self { capacity, heap: BinaryHeap::new(), total_matches: 0 }
+	}
+
+	fn consider(
+		&mut self,
+		line: &str,
+		path: &str,
+		line_index: usize,
+		score: u32,
+		line_char_limit: usize,
+	) {
+		self.total_matches = self.total_matches.saturating_add(1);
+		if self.capacity == 0 {
+			return;
+		}
+
+		if self.heap.len() < self.capacity {
+			self
+				.heap
+				.push(Self::make_match(line, path, line_index, score, line_char_limit));
+			return;
+		}
+
+		// Compare without allocating the content string; only build it if we evict the
+		// worst entry.
+		let candidate = ScoredMatch::new(
+			path,
+			crate::utils::clamp_u32((line_index as u64).saturating_add(1)),
+			score,
+			String::new(),
+		);
+		if let Some(mut worst) = self.heap.peek_mut()
+			&& worst.cmp(&candidate) == Ordering::Greater
+		{
+			*worst = Self::make_match(line, path, line_index, score, line_char_limit);
+		}
+	}
+
+	fn make_match(
+		line: &str,
+		path: &str,
+		line_index: usize,
+		score: u32,
+		line_char_limit: usize,
+	) -> ScoredMatch {
+		let content = if line.chars().count() > line_char_limit {
+			line.chars().take(line_char_limit).collect()
+		} else {
+			line.to_string()
+		};
+		ScoredMatch::new(
+			path,
+			crate::utils::clamp_u32((line_index as u64).saturating_add(1)),
+			score,
+			content,
+		)
+	}
+
+	fn into_sorted(self) -> (Vec<FuzzyContentMatch>, u64) {
+		let mut matches: Vec<_> = self.heap.into_iter().map(|entry| entry.0).collect();
+		matches.sort_by(|a, b| {
+			b.score
+				.cmp(&a.score)
+				.then_with(|| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)))
+		});
+		(matches, self.total_matches)
+	}
+}
+
 /// Score a single line against the lowercased query and its normalized
 /// subsequence characters.
 fn score_fuzzy_line(line: &str, query_lower: &str, query_chars: &[char]) -> u32 {
@@ -90,14 +211,14 @@ fn score_fuzzy_line(line: &str, query_lower: &str, query_chars: &[char]) -> u32 
 	if fuzzy > 0 { 20 + fuzzy } else { 0 }
 }
 
-/// Search a single file's contents and append scored matches to `matches`.
+/// Search a single file's contents and feed scored matches into `collector`.
 fn search_file(
 	abs_path: &Path,
 	relative_path: &str,
 	query_lower: &str,
 	query_chars: &[char],
 	line_char_limit: usize,
-	matches: &mut Vec<FuzzyContentMatch>,
+	collector: &mut BoundedMatchCollector,
 	ct: &task::CancelToken,
 ) -> Result<()> {
 	let bytes = match grep::read_file_bytes(abs_path) {
@@ -115,17 +236,7 @@ fn search_file(
 		if score == 0 {
 			continue;
 		}
-		let content = if line.chars().count() > line_char_limit {
-			line.chars().take(line_char_limit).collect()
-		} else {
-			line.to_string()
-		};
-		matches.push(FuzzyContentMatch {
-			path: relative_path.to_string(),
-			line: crate::utils::clamp_u32((line_index as u64).saturating_add(1)),
-			content,
-			score,
-		});
+		collector.consider(line, relative_path, line_index, score, line_char_limit);
 	}
 	Ok(())
 }
@@ -158,7 +269,7 @@ fn fuzzy_content_search_sync(
 	}
 	let query_chars: Vec<char> = normalized_query.chars().collect();
 
-	let mut all_matches: Vec<FuzzyContentMatch> = Vec::new();
+	let mut collector = BoundedMatchCollector::new(max_results);
 	let mut files_searched: u64 = 0;
 
 	match std::fs::metadata(&root) {
@@ -170,7 +281,7 @@ fn fuzzy_content_search_sync(
 				&query_lower,
 				&query_chars,
 				line_char_limit,
-				&mut all_matches,
+				&mut collector,
 				&ct,
 			)?;
 		},
@@ -182,7 +293,7 @@ fn fuzzy_content_search_sync(
 				.gitignore(respect_gitignore)
 				.skip_git(true)
 				.skip_node_modules(true)
-				.follow_links(pi_walker::FollowLinks::Always)
+				.follow_links(pi_walker::FollowLinks::Never)
 				.detail(pi_walker::WalkDetail::Minimal)
 				.order(pi_walker::WalkOrder::Path)
 				.emit_root(false)
@@ -207,7 +318,7 @@ fn fuzzy_content_search_sync(
 					&query_lower,
 					&query_chars,
 					line_char_limit,
-					&mut all_matches,
+					&mut collector,
 					&ct,
 				)?;
 			}
@@ -223,17 +334,10 @@ fn fuzzy_content_search_sync(
 		},
 	}
 
-	all_matches.sort_by(|a, b| {
-		b.score
-			.cmp(&a.score)
-			.then_with(|| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)))
-	});
-
-	let total_matches = crate::utils::clamp_u32(all_matches.len() as u64);
-	let matches = all_matches.into_iter().take(max_results).collect();
+	let (matches, total_matches) = collector.into_sorted();
 	Ok(FuzzyContentResult {
 		matches,
-		total_matches,
+		total_matches: crate::utils::clamp_u32(total_matches),
 		files_searched: crate::utils::clamp_u32(files_searched),
 	})
 }
@@ -290,6 +394,140 @@ mod tests {
 	#[test]
 	fn empty_query_scores_zero() {
 		assert_eq!(score_fuzzy_line("hello world", "", &[]), 0);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn fuzzy_content_search_caps_retained_matches() {
+		use std::{
+			fs,
+			path::{Path, PathBuf},
+			sync::atomic::{AtomicU64, Ordering},
+			time::{SystemTime, UNIX_EPOCH},
+		};
+
+		struct TempDir(PathBuf);
+		impl TempDir {
+			fn new() -> Self {
+				static COUNTER: AtomicU64 = AtomicU64::new(0);
+				let nanos = SystemTime::now()
+					.duration_since(UNIX_EPOCH)
+					.expect("system time")
+					.as_nanos();
+				let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+				let pid = std::process::id();
+				let path =
+					std::env::temp_dir().join(format!("pi-fuzzy-content-test-{pid}-{nanos}-{seq}"));
+				fs::create_dir_all(&path).expect("create temp dir");
+				Self(path)
+			}
+
+			fn path(&self) -> &Path {
+				&self.0
+			}
+		}
+		impl Drop for TempDir {
+			fn drop(&mut self) {
+				let _ = fs::remove_dir_all(&self.0);
+			}
+		}
+
+		let root = TempDir::new();
+		let file = root.path().join("lines.txt");
+		let contents: String = (0..50).map(|i| format!("line {i}\n")).collect();
+		fs::write(&file, contents).expect("write file");
+
+		let result = fuzzy_content_search_sync(
+			FuzzyContentConfig {
+				query:           "line".to_string(),
+				path:            root.path().to_string_lossy().into_owned(),
+				hidden:          Some(false),
+				gitignore:       Some(false),
+				max_results:     Some(5),
+				line_char_limit: Some(1000),
+			},
+			task::CancelToken::default(),
+		)
+		.expect("search succeeds");
+
+		assert_eq!(result.total_matches, 50);
+		assert_eq!(result.matches.len(), 5);
+		assert_eq!(result.files_searched, 1);
+		assert!(
+			result
+				.matches
+				.iter()
+				.zip(result.matches.iter().skip(1))
+				.all(|(a, b)| {
+					a.score > b.score
+						|| (a.score == b.score && a.path.cmp(&b.path).then(a.line.cmp(&b.line)).is_le())
+				})
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn fuzzy_content_search_skips_symlinked_directories() {
+		use std::{
+			fs,
+			os::unix::fs::symlink,
+			path::{Path, PathBuf},
+			sync::atomic::{AtomicU64, Ordering},
+			time::{SystemTime, UNIX_EPOCH},
+		};
+
+		struct TempDir(PathBuf);
+		impl TempDir {
+			fn new() -> Self {
+				static COUNTER: AtomicU64 = AtomicU64::new(0);
+				let nanos = SystemTime::now()
+					.duration_since(UNIX_EPOCH)
+					.expect("system time")
+					.as_nanos();
+				let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+				let pid = std::process::id();
+				let path =
+					std::env::temp_dir().join(format!("pi-fuzzy-content-test-{pid}-{nanos}-{seq}"));
+				fs::create_dir_all(&path).expect("create temp dir");
+				Self(path)
+			}
+
+			fn path(&self) -> &Path {
+				&self.0
+			}
+		}
+		impl Drop for TempDir {
+			fn drop(&mut self) {
+				let _ = fs::remove_dir_all(&self.0);
+			}
+		}
+
+		let root = TempDir::new();
+		let outside = TempDir::new();
+		let real_dir = root.path().join("real");
+		fs::create_dir_all(&real_dir).expect("create real dir");
+		fs::write(real_dir.join("a.txt"), "hello world\n").expect("write a");
+		fs::write(outside.path().join("b.txt"), "hello world\n").expect("write b");
+		let symlink_path = root.path().join("link");
+		symlink(outside.path(), &symlink_path).expect("create symlink");
+
+		let result = fuzzy_content_search_sync(
+			FuzzyContentConfig {
+				query:           "hello".to_string(),
+				path:            root.path().to_string_lossy().into_owned(),
+				hidden:          Some(false),
+				gitignore:       Some(false),
+				max_results:     Some(10),
+				line_char_limit: Some(1000),
+			},
+			task::CancelToken::default(),
+		)
+		.expect("search succeeds");
+
+		assert_eq!(result.files_searched, 1);
+		assert_eq!(result.total_matches, 1);
+		assert_eq!(result.matches.len(), 1);
+		assert!(result.matches[0].path.ends_with("a.txt"));
 	}
 
 	#[cfg(unix)]

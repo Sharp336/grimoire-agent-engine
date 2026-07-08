@@ -289,6 +289,7 @@ import * as bundledPiCodingAgentCommit from "@oh-my-pi/pi-coding-agent/commit";
 import * as bundledPiCodingAgentCommitAgentic from "@oh-my-pi/pi-coding-agent/commit/agentic";
 import * as bundledPiCodingAgentCommitAgenticAgent from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
 import * as bundledPiCodingAgentCommitAgenticFallback from "@oh-my-pi/pi-coding-agent/commit/agentic/fallback";
+import * as bundledPiCodingAgentCommitAgenticLockFiles from "@oh-my-pi/pi-coding-agent/commit/agentic/lock-files";
 import * as bundledPiCodingAgentCommitAgenticState from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
 import * as bundledPiCodingAgentCommitAgenticTools from "@oh-my-pi/pi-coding-agent/commit/agentic/tools";
 import * as bundledPiCodingAgentCommitAgenticToolsAnalyzeFile from "@oh-my-pi/pi-coding-agent/commit/agentic/tools/analyze-file";
@@ -816,7 +817,7 @@ import * as bundledPiCodingAgentToolsEvalRender from "@oh-my-pi/pi-coding-agent/
 import * as bundledPiCodingAgentToolsFetch from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import * as bundledPiCodingAgentToolsFileRecorder from "@oh-my-pi/pi-coding-agent/tools/file-recorder";
 import * as bundledPiCodingAgentToolsFsCacheInvalidation from "@oh-my-pi/pi-coding-agent/tools/fs-cache-invalidation";
-import * as bundledPiCodingAgentToolsFuzzyContent from "@oh-my-pi/pi-coding-agent/tools/fuzzy-content";
+import * as bundledPiCodingAgentToolsFuzzyFind from "@oh-my-pi/pi-coding-agent/tools/fuzzy-find";
 import * as bundledPiCodingAgentToolsGh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as bundledPiCodingAgentToolsGhCacheInvalidation from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
 import * as bundledPiCodingAgentToolsGhFormat from "@oh-my-pi/pi-coding-agent/tools/gh-format";
@@ -1780,6 +1781,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@oh-my-pi/pi-coding-agent/commit/agentic/fallback":
 		bundledPiCodingAgentCommitAgenticFallback as unknown as Readonly<Record<string, unknown>>,
+	"@oh-my-pi/pi-coding-agent/commit/agentic/lock-files":
+		bundledPiCodingAgentCommitAgenticLockFiles as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/commit/agentic/state": bundledPiCodingAgentCommitAgenticState as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2952,7 +2955,7 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/fs-cache-invalidation":
 		bundledPiCodingAgentToolsFsCacheInvalidation as unknown as Readonly<Record<string, unknown>>,
-	"@oh-my-pi/pi-coding-agent/tools/fuzzy-content": bundledPiCodingAgentToolsFuzzyContent as unknown as Readonly<
+	"@oh-my-pi/pi-coding-agent/tools/fuzzy-find": bundledPiCodingAgentToolsFuzzyFind as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation":

@@ -9,7 +9,7 @@ import type {
 import { fuzzyContentSearch } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import fuzzyContentDescription from "../prompts/tools/fuzzy-content.md" with { type: "text" };
+import fuzzyFindDescription from "../prompts/tools/fuzzy-find.md" with { type: "text" };
 import { fileHyperlink, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import type { OutputMeta } from "./output-meta";
@@ -22,7 +22,7 @@ const DEFAULT_MAX_RESULTS = 20;
 const DEFAULT_LINE_CHAR_LIMIT = 1000;
 const LINE_TRUNCATE_LEN = 240;
 
-const fuzzyContentSchema = type({
+const fuzzyFindSchema = type({
 	query: type("string").describe("Fuzzy query to match against file contents."),
 	"path?": type("string").describe("File or directory to search. Defaults to the current working directory."),
 	"maxResults?": type("number").describe("Maximum matches to return (default 20)."),
@@ -30,9 +30,9 @@ const fuzzyContentSchema = type({
 	"hidden?": type("boolean").describe("Include hidden files (default false)."),
 });
 
-type FuzzyContentParams = typeof fuzzyContentSchema.infer;
+type FuzzyFindParams = typeof fuzzyFindSchema.infer;
 
-export interface FuzzyContentDetails {
+export interface FuzzyFindDetails {
 	query: string;
 	scopePath?: string;
 	matchCount?: number;
@@ -58,27 +58,27 @@ function formatMatch(
 	return `${prefix}: ${truncated}`;
 }
 
-export class FuzzyContentTool implements AgentTool<typeof fuzzyContentSchema, FuzzyContentDetails> {
+export class FuzzyFindTool implements AgentTool<typeof fuzzyFindSchema, FuzzyFindDetails> {
 	readonly name = "fuzzy_find";
 	readonly approval: ToolTier = "read";
 	readonly loadMode = "essential";
 	readonly label = "FuzzyFind";
 	readonly summary = "Fuzzy search file contents";
 	readonly description: string;
-	readonly parameters = fuzzyContentSchema;
+	readonly parameters = fuzzyFindSchema;
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(fuzzyContentDescription);
+		this.description = prompt.render(fuzzyFindDescription);
 	}
 
 	async execute(
 		_toolCallId: string,
-		params: FuzzyContentParams,
+		params: FuzzyFindParams,
 		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<FuzzyContentDetails>,
+		_onUpdate?: AgentToolUpdateCallback<FuzzyFindDetails>,
 		_context?: AgentToolContext,
-	): Promise<AgentToolResult<FuzzyContentDetails>> {
+	): Promise<AgentToolResult<FuzzyFindDetails>> {
 		const { query, path: pathInput, maxResults, gitignore, hidden } = params;
 
 		return untilAborted(signal, async () => {
@@ -100,7 +100,7 @@ export class FuzzyContentTool implements AgentTool<typeof fuzzyContentSchema, Fu
 				signal,
 			});
 
-			const details: FuzzyContentDetails = {
+			const details: FuzzyFindDetails = {
 				query: query.trim(),
 				scopePath,
 				matchCount: result.matches.length,

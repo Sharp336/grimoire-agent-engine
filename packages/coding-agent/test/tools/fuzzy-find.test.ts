@@ -17,7 +17,7 @@ function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = 
 	};
 }
 
-describe("fuzzy_content", () => {
+describe("fuzzy_find", () => {
 	it("finds subsequence matches across files", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fuzzy-content-"));
 		try {

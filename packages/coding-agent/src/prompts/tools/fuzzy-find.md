@@ -2,7 +2,7 @@
 
 Search file contents using fuzzy (subsequence) matching.
 
-Use `fuzzy_content` when:
+Use `fuzzy_find` when:
 
 - The exact text is unknown or may contain typos or missing characters.
 - You only remember fragments of a variable, function, message string, or log line.
@@ -11,4 +11,4 @@ Use `fuzzy_content` when:
 Prefer `grep` or `search` when you know the exact pattern or need precise regex control.
 
 Example:
-  fuzzy_content "dbmigrate" path="src"
+  fuzzy_find "dbmigrate" path="src"
