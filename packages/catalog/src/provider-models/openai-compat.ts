@@ -960,14 +960,24 @@ interface XAICuratedModel {
 
 // Source of truth for the xai-oauth chat picker. Top of list = headline.
 // Context windows from hermes-agent/agent/model_metadata.py:205-220
-// ("Values sourced from models.dev (2026-04)"). grok-build is xAI's
-// coding-fine-tuned chat model; 512K context per user spec (2026-05-17).
+// ("Values sourced from models.dev (2026-04)"), plus xAI docs for newer
+// SKUs (e.g. grok-4.5 @ 500k — docs.x.ai/developers/models/grok-4.5).
+// grok-build is xAI's coding-fine-tuned chat model; 512K context per user
+// spec (2026-05-17).
 //
 // supportsReasoningEffort=false entries reason natively but reject the wire
 // `reasoning.effort` param (api.x.ai returns HTTP 400). The corresponding
 // omit/include/history replay defaults live in catalog compat so every
 // OpenAI-family endpoint consumes the same constraint.
 export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
+	// Flagship (2026-06): reasoning + vision, 500k context (xAI docs + models.dev).
+	// On the effort-capable allowlist so the picker exposes reasoning levels.
+	{
+		id: "grok-4.5",
+		contextWindow: 500_000,
+		name: "Grok 4.5",
+		input: ["text", "image"],
+	},
 	{
 		id: "grok-build",
 		contextWindow: 512_000,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `grok-4.5` to the xAI Grok OAuth (SuperGrok) curated catalog: reasoning + vision, 500K context (xAI docs + models.dev), with the reasoning-effort dial enabled via `isGrokReasoningEffortCapable`. Paid `xai` and SuperGrok defaults now point at `grok-4.5`. ([#4859](https://github.com/can1357/oh-my-pi/issues/4859))
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

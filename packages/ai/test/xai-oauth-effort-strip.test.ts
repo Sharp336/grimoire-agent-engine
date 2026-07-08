@@ -28,6 +28,14 @@ describe("effort-dial-less reasoner encoding (regression)", () => {
 		expect(getSupportedEfforts(grok43).length).toBeGreaterThan(0);
 	});
 
+	test("xai-oauth/grok-4.5 keeps its effort dial", () => {
+		const grok45 = getBundledModel("xai-oauth", "grok-4.5");
+		if (!grok45) throw new Error("xai-oauth/grok-4.5 must be in bundled models.json");
+		expect(grok45.reasoning).toBe(true);
+		expect(grok45.thinking).toBeDefined();
+		expect(getSupportedEfforts(grok45).length).toBeGreaterThan(0);
+	});
+
 	test("xai-oauth/grok-4.20-0309-reasoning reasons but carries no thinking config", () => {
 		const grokR = getBundledModel("xai-oauth", "grok-4.20-0309-reasoning");
 		if (!grokR) throw new Error("xai-oauth/grok-4.20-0309-reasoning must be in bundled models.json");

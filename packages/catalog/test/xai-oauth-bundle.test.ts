@@ -41,10 +41,24 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		});
 	}
 
-	// Absolute contract for the user-specified SuperGrok addition. The parity
-	// loop above can't catch a value typo (e.g. 2_000_000) or a flipped
-	// reasoning flag — both sides regenerate from the same seed together — so
-	// pin the literal attributes here.
+	// Absolute contract for flagship SuperGrok SKUs. The parity loop above
+	// can't catch a value typo (e.g. 2_000_000) or a flipped reasoning flag —
+	// both sides regenerate from the same seed together — so pin the literal
+	// attributes here.
+	it("exposes grok-4.5 as a reasoning 500K vision model with effort dial", () => {
+		const flagship = seed.find(model => model.id === "grok-4.5");
+		expect(flagship, "grok-4.5 must be in the SuperGrok curated seed").toBeDefined();
+		expect(flagship!.reasoning).toBe(true);
+		expect(flagship!.contextWindow).toBe(500_000);
+		expect(flagship!.maxTokens).toBe(500_000);
+		expect(flagship!.input).toEqual(["text", "image"]);
+		// Effort-capable allowlist (identity/family.ts) + curated merge must
+		// surface the dial — issue #4859 explicitly needs reasoning levels.
+		expect(flagship!.compat?.supportsReasoningEffort).not.toBe(false);
+		expect(flagship!.compat?.omitReasoningEffort).toBe(false);
+		expect(bundled["grok-4.5"]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
 	it("exposes grok-composer-2.5-fast as a non-reasoning 200K text model", () => {
 		const composer = seed.find(model => model.id === "grok-composer-2.5-fast");
 		expect(composer, "grok-composer-2.5-fast must be in the SuperGrok curated seed").toBeDefined();
