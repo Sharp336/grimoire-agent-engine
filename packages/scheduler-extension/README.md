@@ -1,16 +1,16 @@
-# scheduler — session-quota-aware prompt queue for oh-my-pi
+# @oh-my-pi/scheduler-extension
 
-Queue up prompts before bed. `scheduler` drains them unattended: it dispatches
-the next task whenever the agent goes idle, tracks Claude's **5-hour session
-windows** (max **4 per rolling 24 h**) when the active model runs on Claude
-subscription auth, dispatches ungated for every other provider, waits for the
-next window when a gated quota is exhausted — and when a task dies mid-flight
-(rate limit, error, abort, crash) it **resumes that task instead of skipping
-it**.
+Session-quota-aware prompt queue for [oh-my-pi](https://github.com/can1357/oh-my-pi)
+(omp). Queue prompts before bed; `/scheduler` drains them unattended: it
+dispatches the next task whenever the agent goes idle, tracks Claude's
+**5-hour session windows** (max **4 per rolling 24 h**) when the active model
+runs on Claude subscription auth, dispatches ungated for every other
+provider, waits out provider-declared rate limits and network outages — and
+when a task dies mid-flight (rate limit, error, abort, crash) it **resumes
+that task instead of skipping it**.
 
-It is a single-file [oh-my-pi](https://github.com/oh-my-pi) (omp) extension:
-no daemon, no external process, no RPC client. It runs inside your omp
-session and adds one slash command: `/scheduler`.
+One extension entry (`src/extension.ts`), no daemon, no external process, no
+new dependencies. It adds one slash command: `/scheduler`.
 
 ## Why
 
@@ -21,45 +21,27 @@ work for the hours you are asleep:
 
 1. Queue tasks with `/scheduler add ...`.
 2. `/scheduler start` and go to bed.
-3. The extension sends the next prompt each time the agent goes idle,
-   opens session windows only when the quota allows it, sleeps until the next
-   window when it doesn't, and retries interrupted tasks with a
-   "continue where you left off" preamble.
+3. The extension sends the next prompt each time the agent goes idle, opens
+   session windows only when the quota allows it, sleeps until the next
+   window (or until a provider-named rate-limit reset) when it doesn't, and
+   retries interrupted tasks with a "continue where you left off" preamble.
 4. Wake up, read `/scheduler log`.
 
-## Install
+## Enabling
 
-> **Requires**: [oh-my-pi](https://github.com/oh-my-pi) with the extension
-> runtime (`~/.omp/agent/extensions/` support) and Bun (omp ships with it).
-
-**Option A — copy/symlink into the user extensions directory** (loaded on
-every omp launch; see omp's `extension-loading` docs — a one-level
-subdirectory with a `package.json` manifest or `index.ts` is discovered
-automatically):
-
-```bash
-# macOS/Linux
-git clone https://github.com/YOU/scheduler ~/.omp/agent/extensions/scheduler
-
-# Windows (PowerShell) — copy…
-git clone https://github.com/YOU/scheduler "$env:USERPROFILE\.omp\agent\extensions\scheduler"
-# …or symlink a working checkout (needs Developer Mode or admin):
-New-Item -ItemType SymbolicLink `
-  -Path "$env:USERPROFILE\.omp\agent\extensions\scheduler" `
-  -Target "D:\Projects\scheduler"
-```
-
-**Option B — reference it from settings** (`~/.omp/agent/config.yml`):
+The package manifest declares the extension under the `omp.extensions` key,
+so pointing omp at this package is enough:
 
 ```yaml
+# ~/.omp/agent/config.yml
 extensions:
-  - D:/Projects/scheduler
+  - /path/to/oh-my-pi/packages/scheduler-extension
 ```
 
-**Option C — load once via CLI flag:**
+or per launch:
 
 ```bash
-omp --extension D:/Projects/scheduler
+omp --extension packages/scheduler-extension
 ```
 
 Restart omp. `/scheduler` (with no arguments) prints usage.
@@ -93,8 +75,10 @@ process; a sleeping laptop dispatches nothing.
 /scheduler start               begin draining the queue when the agent is idle
 /scheduler pause               finish the current task, then hold
 /scheduler stop                abort the current task (kept as resumable) and hold
-/scheduler remove <id>         remove one queued task
+/scheduler remove <id>         remove one task (not the in-flight one)
+/scheduler retry [id]          re-queue failed task(s) with a fresh attempt budget
 /scheduler clear               remove all pending tasks
+/scheduler export [path]       write the queue to markdown (default scheduler-queue.md)
 /scheduler log [n]             show the last n JSONL log entries (default 10)
 /scheduler config              show the config file path and current values
 ```
@@ -128,15 +112,18 @@ context: 45% of 200k tokens
 flowchart TD
     A[/scheduler start/] --> B{agent idle?}
     B -- no --> W1[wait for agent_end] --> B
-    B -- yes --> P{quota profile\ngated?}
+    B -- yes --> H{provider hold\nactive?}
+    H -- "yes (429 retry-after)" --> T2[sleep until provider\nreset clock] --> B
+    H -- no --> P{quota profile\ngated?}
     P -- "no (openai, local, …)" --> D[dispatch next task\nwith unattended preamble]
     P -- "yes (anthropic/claude)" --> C{session window\navailable?}
     C -- "no (4/4 in 24h)" --> T[arm timer for\nnext window] --> C
     C -- yes --> D
     D --> E{turn outcome}
     E -- success --> F[mark done] --> B
-    E -- "error / rate limit / abort / crash" --> G[mark interrupted]
-    G --> H[re-dispatch same task\nwith RESUME preamble] --> E
+    E -- "rate limit / outage" --> R[refund attempt,\nhold or back off] --> B
+    E -- "user abort" --> U[pause queue,\nkeep task resumable]
+    E -- "error / crash" --> G[mark interrupted] --> B
 ```
 
 - **Dispatch loop** — the extension listens to omp's `agent_start` /
@@ -153,13 +140,29 @@ flowchart TD
   timer fires at the moment the oldest window ages out (+ configurable
   slack) and dispatching resumes automatically. Ungated models record no
   windows and dispatch whenever the agent is idle.
-- **Resume, not skip** — a task whose turn ends in an error/abort (or whose
-  provider retries are exhausted — `auto_retry_end`) is marked
-  `interrupted`. It keeps its place at the head of the queue and is re-sent
+- **Provider rate limits are ground truth** — when provider retries are
+  exhausted on a 429 (`auto_retry_end`), the `retry-after` in the error is
+  parsed and **all** dispatch is held until the provider's own reset clock
+  (persisted in `state.json`, so the hold survives restarts). The attempt is
+  refunded: an exhausted quota elsewhere can never burn a task's attempt
+  budget. Any turn that later ends healthy clears the hold early.
+- **Outage backoff** — transport/DNS/timeout/5xx failures probe on
+  exponential backoff (default 30 s doubling to a 15 min cap, forever), so an
+  overnight outage resumes work instead of failing the queue. Outage
+  interruptions don't count attempts either.
+- **Watchdog** — a low-frequency interval re-arms lost timers and re-queues a
+  dispatched task whose turn never materialized (agent idle past the stall
+  timeout). `running` can never silently stall for hours.
+- **Resume, not skip** — a task whose turn ends in a genuine error is marked
+  `interrupted`, keeps its place at the head of the queue, and is re-sent
   with a resume preamble ("Continue exactly where you left off; do not
-  repeat completed work"). After `maxAttempts` total attempts it is marked
-  `failed` and the queue moves on. Tasks left `running` by a crashed or
-  closed omp process are recovered as `interrupted` on the next launch.
+  repeat completed work"). After `maxAttempts` such attempts it is marked
+  `failed` and the queue moves on (`/scheduler retry` revives it). Tasks left
+  `running` by a crashed or closed omp process are recovered as
+  `interrupted` on the next launch.
+- **The human wins** — aborting a *scheduled* turn (Esc) pauses the queue
+  instead of re-dispatching over you; the task stays resumable and the
+  attempt is refunded. `/scheduler start` resumes.
 - **Prompt wrapper** — every dispatched prompt is prefixed with a
   token-efficiency/autonomy preamble (no summaries, no progress narration,
   never ask questions — decide autonomously and note assumptions in a final
@@ -214,9 +217,13 @@ The file is created with defaults on first load and re-read on every
 | Key | Default | Meaning |
 |---|---|---|
 | `quotaProfiles` | anthropic/claude → 5h×4, `.*` → unlimited | Ordered provider/model → window-policy map; see [Model awareness](#model-awareness). |
-| `maxAttempts` | `3` | Total attempts (first + resumes) before a task is marked `failed`. |
+| `maxAttempts` | `3` | Genuine-error attempts (first + resumes) before a task is marked `failed`. Rate-limit/outage/abort interruptions are refunded and never count. |
 | `dispatchDelayMs` | `4000` | Idle settle delay before dispatching the next task. |
-| `windowSlackMs` | `60000` | Extra wait added to the next-window resume timer. |
+| `windowSlackMs` | `60000` | Extra wait added to next-window and rate-limit resume timers. |
+| `outageBackoffBaseMs` | `30000` | First retry delay after a network/provider outage. |
+| `outageBackoffMaxMs` | `900000` | Outage backoff ceiling (doubles each consecutive outage up to this). |
+| `watchdogIntervalMs` | `60000` | Watchdog tick interval; self-heals lost timers and stalled dispatches. |
+| `stallTimeoutMs` | `600000` | How long a dispatched task may sit with an idle agent before the watchdog re-queues it. |
 | `promptPreamble` | see file | Prepended to **every** dispatched prompt. |
 | `resumePreamble` | see file | Additionally prepended when resuming an interrupted task. |
 
@@ -227,9 +234,9 @@ Everything lives under `~/.omp/agent/scheduler/`
 
 | File | Contents |
 |---|---|
-| `state.json` | Queue, task statuses/attempts, run mode, observed session-window start times (each tagged with its quota profile), in-flight task id. Written atomically on every change; survives restarts. |
+| `state.json` | Queue, task statuses/attempts, run mode, observed session-window start times (each tagged with its quota profile), in-flight task id, provider rate-limit hold (`rateLimitedUntil`). Written atomically on every change; survives restarts. |
 | `config.json` | User-editable configuration (table above). |
-| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, error, duration), `blocked` (with resume time), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice` (e.g. undetectable provider → ungated). `/scheduler log [n]` pretty-prints the tail. |
+| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, error, duration), `blocked` (quota, rate limit, or outage, with resume time), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice`. `/scheduler log [n]` pretty-prints the tail. |
 
 Deleting `state.json` resets the queue and window history; deleting
 `config.json` restores defaults on next load.
@@ -244,11 +251,11 @@ cannot express:
    (gated profiles only; ungated models record nothing). Usage from other
    machines, the Claude apps, or other omp instances is invisible;
    Anthropic's server is the source of truth. If you burned windows
-   elsewhere, the scheduler may dispatch into a rate limit — that turn is
-   then marked `interrupted` and retried in the next window, so work is
-   still not lost. The auth mode is equally invisible: profiles match on
-   provider/model id, not on subscription-vs-API-key, so API-key Anthropic
-   users should edit `quotaProfiles` (see
+   elsewhere, the scheduler dispatches into a 429 — the provider's
+   `retry-after` then becomes the hold clock, the attempt is refunded, and
+   work is still not lost. The auth mode is equally invisible: profiles
+   match on provider/model id, not on subscription-vs-API-key, so API-key
+   Anthropic users should edit `quotaProfiles` (see
    [Model awareness](#model-awareness)).
 2. **Turn-failure detection is best-effort.** omp documents `agent_end` as a
    notification-only lifecycle event and does not specify a typed error
@@ -269,28 +276,22 @@ cannot express:
    feature; occasionally not). Long nights may trigger omp's automatic
    compaction — that is normal and handled by omp itself.
 6. **Manual use while running.** The dispatcher fires after *any* agent turn
-   ends. If you interact manually while the scheduler is running, your turn
-   ending can trigger the next queued task. `/scheduler pause` first.
+   ends, so finishing a manual turn can trigger the next queued task
+   (aborting a scheduled turn pauses the queue, but a *completed* manual
+   turn does not). Interacting for a while? `/scheduler pause` first.
 
 ## Development
 
 ```bash
-bun run check     # syntax/transpile check (bun build --no-bundle)
-bun run smoke     # behavioral smoke test against a mocked ExtensionAPI
+bun run check     # biome + typecheck (tsgo --noEmit)
+bun run test      # behavioral smoke test against a mocked ExtensionAPI
 ```
 
 The smoke test (`test/smoke.ts`) uses a throwaway `PI_CODING_AGENT_DIR`, so
-it never touches your real queue or config.
-
-## Contributing
-
-Issues and PRs welcome. Keep it a single-file extension (`index.ts`), cite
-the omp doc section for every runtime API you use (see the existing code
-comments), run `bun run check` and `bun run smoke` before submitting, and
-update the config/state tables in this README when you change the schema.
-Interested in getting this into omp itself? See
-[CONTRIBUTING-UPSTREAM.md](./CONTRIBUTING-UPSTREAM.md).
+it never touches your real queue or config. It covers dispatch/settle flow,
+quota gating and window accounting, rate-limit holds, outage backoff,
+watchdog recovery, abort-pause, crash recovery, retry, and export.
 
 ## License
 
-[MIT](./LICENSE)
+MIT — see the repository root [LICENSE](../../LICENSE).

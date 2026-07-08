@@ -1330,7 +1330,13 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const st = getState();
 		const targets = st.tasks.filter(t => t.status === "failed" && (!id || t.id === id));
 		if (targets.length === 0) {
-			notify(ctx, id ? `scheduler: no failed task ${id}` : "scheduler: no failed tasks to retry", "warning");
+			const existing = id ? st.tasks.find(t => t.id === id) : undefined;
+			const msg = existing
+				? `scheduler: ${id} is ${existing.status} — only failed tasks can be retried`
+				: id
+					? `scheduler: no failed task ${id}`
+					: "scheduler: no failed tasks to retry";
+			notify(ctx, msg, "warning");
 			return;
 		}
 		for (const t of targets) {
