@@ -348,6 +348,31 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("0.40× quota left");
 	});
 
+	it("renders Devin ACU consumption without requiring a quota limit", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "devin",
+				fetchedAt: now,
+				metadata: { orgId: "org-abc123" },
+				limits: [
+					{
+						id: "devin:acus:total",
+						label: "Devin ACU consumption",
+						scope: { provider: "devin", orgId: "org-abc123", shared: true },
+						amount: { unit: "acus", used: 12.5 },
+						status: "ok",
+					},
+				],
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("Devin");
+		expect(text).toContain("Devin ACU consumption");
+		expect(text).toContain("12.5 ACU used");
+	});
+
 	it("renders Cursor request quotas in the usage breakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports: UsageReport[] = [

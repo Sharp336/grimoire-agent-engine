@@ -1,7 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { usageReportSchema } from "@oh-my-pi/pi-ai/usage";
+import { devinUsageProvider, fetchDevinConsumption } from "@oh-my-pi/pi-ai/usage/devin";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
 import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
@@ -9,6 +11,7 @@ import {
 	ModelUsageStatsSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/codeium_common_pb/codeium_common_pb";
+import { type } from "arktype";
 
 function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	const out = new Uint8Array(5 + payload.length);
@@ -33,6 +36,15 @@ const devinModel: Model<"devin-agent"> = buildModel({
 });
 
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+const ORIGINAL_DEVIN_ORG_ID = Bun.env.DEVIN_ORG_ID;
+const ORIGINAL_DEVIN_USAGE_ORG_ID = Bun.env.DEVIN_USAGE_ORG_ID;
+
+afterEach(() => {
+	if (ORIGINAL_DEVIN_ORG_ID === undefined) delete Bun.env.DEVIN_ORG_ID;
+	else Bun.env.DEVIN_ORG_ID = ORIGINAL_DEVIN_ORG_ID;
+	if (ORIGINAL_DEVIN_USAGE_ORG_ID === undefined) delete Bun.env.DEVIN_USAGE_ORG_ID;
+	else Bun.env.DEVIN_USAGE_ORG_ID = ORIGINAL_DEVIN_USAGE_ORG_ID;
+});
 
 describe("streamDevin usage", () => {
 	it("includes cached tokens in totalTokens", async () => {
@@ -62,5 +74,138 @@ describe("streamDevin usage", () => {
 			cacheWrite: 13,
 			totalTokens: 131,
 		});
+	});
+});
+
+describe("devinUsageProvider", () => {
+	it("fetches enterprise ACU consumption and usage metrics with bearer auth", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const calls: Array<{ path: string; authorization: string | null }> = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = String(input instanceof Request ? input.url : input);
+			const parsed = new URL(url);
+			calls.push({ path: parsed.pathname, authorization: new Headers(init?.headers).get("authorization") });
+			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
+				return new Response(
+					JSON.stringify({
+						total_acus: 12.5,
+						consumption_by_date: [
+							{ date: 1733385600, acus: 7.5, acus_by_product: { devin: 5, cascade: 2.5, terminal: 0 } },
+							{ date: 1733472000, acus: 5, acus_by_product: { devin: 3, terminal: 2 } },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (parsed.pathname === "/v3/enterprise/metrics/usage") {
+				return new Response(
+					JSON.stringify({ sessions_count: 4, searches_count: 3, prs_created_count: 2, prs_merged_count: 1 }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("unexpected Devin URL", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "devin-session-token$devin-token" } },
+			{ fetch: fetchImpl },
+		);
+
+		if (!report) throw new Error("expected Devin usage report");
+		expect(calls).toEqual([
+			{ path: "/v3/enterprise/consumption/daily", authorization: "Bearer devin-token" },
+			{ path: "/v3/enterprise/metrics/usage", authorization: "Bearer devin-token" },
+		]);
+		expect(report.provider).toBe("devin");
+		expect(report.limits.map(limit => [limit.id, limit.amount.used, limit.amount.unit])).toEqual([
+			["devin:acus:total", 12.5, "acus"],
+			["devin:acus:product:cascade", 2.5, "acus"],
+			["devin:acus:product:devin", 8, "acus"],
+			["devin:acus:product:terminal", 2, "acus"],
+		]);
+		expect(report.metadata).toMatchObject({
+			totalAcus: 12.5,
+			acusByProduct: { cascade: 2.5, devin: 8, terminal: 2 },
+			metrics: { sessionsCount: 4, searchesCount: 3, prsCreatedCount: 2, prsMergedCount: 1 },
+		});
+		const validatedReport = usageReportSchema(report);
+		expect(validatedReport).not.toBeInstanceOf(type.errors);
+	});
+
+	it("uses org-scoped endpoints and falls back to enterprise org endpoints", async () => {
+		Bun.env.DEVIN_ORG_ID = "org-abc123";
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/organizations/org-abc123/consumption/daily") {
+				return new Response("org-scope denied", { status: 403 });
+			}
+			if (parsed.pathname === "/v3/enterprise/consumption/daily/organizations/org-abc123") {
+				return new Response(JSON.stringify({ total_acus: 3, consumption_by_date: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (parsed.pathname === "/v3/organizations/org-abc123/metrics/usage") {
+				return new Response("org-scope denied", { status: 403 });
+			}
+			if (parsed.pathname === "/v3/enterprise/organizations/org-abc123/metrics/usage") {
+				return new Response(JSON.stringify({ sessions_count: 1 }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("unexpected Devin URL", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog-token" } },
+			{ fetch: fetchImpl },
+		);
+
+		if (!report) throw new Error("expected Devin usage report");
+		expect(paths).toEqual([
+			"/v3/organizations/org-abc123/consumption/daily",
+			"/v3/enterprise/consumption/daily/organizations/org-abc123",
+			"/v3/organizations/org-abc123/metrics/usage",
+			"/v3/enterprise/organizations/org-abc123/metrics/usage",
+		]);
+		expect(report.metadata).toMatchObject({
+			orgId: "org-abc123",
+			totalAcus: 3,
+			metrics: { sessionsCount: 1 },
+		});
+	});
+});
+
+describe("fetchDevinConsumption", () => {
+	it("passes date query parameters to the selected org endpoint", async () => {
+		const urls: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const url = String(input instanceof Request ? input.url : input);
+			urls.push(url);
+			return new Response(JSON.stringify({ total_acus: 2, consumption_by_date: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const summary = await fetchDevinConsumption({
+			apiKey: "cog-token",
+			baseUrl: "https://api.example.test/",
+			orgId: "org-xyz",
+			timeAfter: new Date("2026-01-01T00:00:00.000Z"),
+			timeBefore: 1767312000,
+			fetch: fetchImpl,
+		});
+
+		if (!summary) throw new Error("expected Devin consumption summary");
+		expect(summary.totalAcus).toBe(2);
+		expect(urls).toEqual([
+			"https://api.example.test/v3/organizations/org-xyz/consumption/daily?time_after=1767225600&time_before=1767312000",
+		]);
 	});
 });

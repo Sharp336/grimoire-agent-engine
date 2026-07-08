@@ -7,18 +7,17 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
+import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import {
-	type AuthStorage,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
-} from "@oh-my-pi/pi-ai";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-ai/usage";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils/format";
+import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import chalk from "chalk";
-import { ModelRegistry } from "../config/model-registry";
-import { discoverAuthStorage } from "../sdk";
 
 const BAR_WIDTH = 28;
 
@@ -31,6 +30,11 @@ export interface UsageCommandArgs {
 	history?: boolean;
 	/** History window in days (with `history`). */
 	days?: number;
+}
+
+export interface UsageCommandDeps {
+	discoverAuthStorage: () => Promise<AuthStorage>;
+	createBaseUrlResolver: (authStorage: AuthStorage) => (provider: string) => string | undefined;
 }
 
 /** Identity slice of a stored credential, for "every account" coverage. */
@@ -199,6 +203,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	requests: " requests",
 	minutes: " min",
 	bytes: " bytes",
+	acus: " ACU",
 	percent: "",
 	usd: "",
 	unknown: "",
@@ -213,6 +218,8 @@ function describeAmount(limit: UsageLimit): string {
 		parts.push(
 			`${formatUnitValue(amount.used, amount.unit)} / ${formatUnitValue(amount.limit, amount.unit)}${UNIT_SUFFIX[amount.unit]}`,
 		);
+	} else if (absoluteUnit && amount.used !== undefined) {
+		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	} else if (absoluteUnit && amount.remaining !== undefined) {
 		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
 	} else if (
@@ -813,8 +820,8 @@ function redactReportForJson(
 	return { ...report, metadata, limits };
 }
 
-export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
-	const authStorage = await discoverAuthStorage();
+export async function runUsageCommand(cmd: UsageCommandArgs, deps: UsageCommandDeps): Promise<void> {
+	const authStorage = await deps.discoverAuthStorage();
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
@@ -857,10 +864,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
-		const modelRegistry = new ModelRegistry(authStorage);
+		const baseUrlResolver = deps.createBaseUrlResolver(authStorage);
 		const reports =
 			(await authStorage.fetchUsageReports({
-				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+				baseUrlResolver,
 			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(

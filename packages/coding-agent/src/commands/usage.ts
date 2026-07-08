@@ -3,6 +3,8 @@
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runUsageCommand } from "../cli/usage-cli";
+import { ModelRegistry } from "../config/model-registry";
+import { discoverAuthStorage } from "../sdk";
 
 export default class Usage extends Command {
 	static description = "Show provider usage limits for every authenticated account";
@@ -42,13 +44,22 @@ export default class Usage extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Usage);
-		await runUsageCommand({
-			action: args.action,
-			json: flags.json,
-			provider: flags.provider,
-			redact: flags.redact,
-			history: flags.history,
-			days: flags.days,
-		});
+		await runUsageCommand(
+			{
+				action: args.action,
+				json: flags.json,
+				provider: flags.provider,
+				redact: flags.redact,
+				history: flags.history,
+				days: flags.days,
+			},
+			{
+				discoverAuthStorage,
+				createBaseUrlResolver: authStorage => {
+					const modelRegistry = new ModelRegistry(authStorage);
+					return provider => modelRegistry.getProviderBaseUrl(provider);
+				},
+			},
+		);
 	}
 }
