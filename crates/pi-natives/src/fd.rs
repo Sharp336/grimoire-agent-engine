@@ -51,7 +51,7 @@ pub struct FuzzyFindResult {
 	pub total_matches: u32,
 }
 
-fn normalize_fuzzy_text(value: &str) -> String {
+pub(crate) fn normalize_fuzzy_text(value: &str) -> String {
 	value
 		.chars()
 		.filter(|ch| !ch.is_whitespace() && !matches!(ch, '/' | '\\' | '.' | '_' | '-'))
@@ -59,7 +59,7 @@ fn normalize_fuzzy_text(value: &str) -> String {
 		.collect()
 }
 
-fn fuzzy_subsequence_score(query_chars: &[char], target: &str) -> u32 {
+pub(crate) fn fuzzy_subsequence_score(query_chars: &[char], target: &str) -> u32 {
 	if query_chars.is_empty() {
 		return 1;
 	}

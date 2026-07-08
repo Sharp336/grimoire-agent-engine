@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed the native build script failing to locate the `@napi-rs/cli` `napi` binary on Windows because the `PATH` lookup joined entries with a Unix `:` separator instead of the platform delimiter (`path.delimiter`).
+### Added
+
+- Added native `fuzzyContentSearch` function for fuzzy (subsequence) content search over files.
 
 ## [16.3.6] - 2026-07-04
 

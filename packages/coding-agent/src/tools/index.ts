@@ -44,6 +44,7 @@ import { type CheckpointState, CheckpointTool, type CompletedRewindState, Rewind
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
+import { FuzzyContentTool } from "./fuzzy-content";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
@@ -82,6 +83,7 @@ export * from "./checkpoint";
 export * from "./debug";
 export * from "./eval";
 export * from "./eval-backends";
+export * from "./fuzzy-content";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
@@ -453,6 +455,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
+	fuzzy_find: s => new FuzzyContentTool(s),
 	lsp: LspTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),

@@ -120,6 +120,9 @@
 - Aborted underlying MCP calls when proxy tool timeouts fire.
 - Surfaced unexpected JS eval worker exits via close listeners to prevent silent hangs.
 - Cached failed `!command` config resolutions and timed out extension dynamic model fetches after 15 seconds.
+### Added
+
+- Added built-in `fuzzy_find` tool for fuzzy (subsequence) search over file contents.
 
 ## [16.3.6] - 2026-07-04
 

@@ -32,8 +32,8 @@ use smallvec::SmallVec;
 
 use crate::{glob_util, iofs, task};
 
-const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
-const SMALL_FILE_READ_BYTES: u64 = 128 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const SMALL_FILE_READ_BYTES: u64 = 128 * 1024;
 
 /// Output mode for [`search`] and [`grep`] (string values match JS callers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,13 +263,13 @@ struct FileSearchResult {
 	limit_reached: bool,
 }
 
-enum FileBytes {
+pub(crate) enum FileBytes {
 	Mapped(memmap2::Mmap),
 	Owned(Vec<u8>),
 }
 
 /// Outcome of attempting to read a file for searching.
-enum ReadFile {
+pub(crate) enum ReadFile {
 	Bytes(FileBytes),
 	/// File exceeds [`MAX_FILE_BYTES`]; callers count these so the skip can be
 	/// surfaced instead of silently returning no matches.
@@ -279,7 +279,7 @@ enum ReadFile {
 }
 
 impl FileBytes {
-	fn as_slice(&self) -> &[u8] {
+	pub(crate) fn as_slice(&self) -> &[u8] {
 		match self {
 			Self::Mapped(mapped) => mapped.as_ref(),
 			Self::Owned(bytes) => bytes.as_slice(),
@@ -324,7 +324,7 @@ fn truncate_line(line: String, max_columns: Option<usize>) -> (String, bool) {
 	}
 }
 
-fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_trimmed_string(bytes: &[u8]) -> String {
 	match std::str::from_utf8(bytes) {
 		Ok(text) => text.trim_end().to_string(),
 		Err(_) => String::from_utf8_lossy(bytes).trim_end().to_string(),
@@ -615,17 +615,20 @@ fn build_searcher(
 		.build()
 }
 
-fn file_len_exceeds_limit(len: usize) -> bool {
+pub(crate) fn file_len_exceeds_limit(len: usize) -> bool {
 	u64::try_from(len).map_or(true, |len| len > MAX_FILE_BYTES)
 }
 
 /// Read file bytes, distinguishing oversized files from other skips.
-fn read_file_bytes(path: &Path) -> io::Result<ReadFile> {
+pub(crate) fn read_file_bytes(path: &Path) -> io::Result<ReadFile> {
 	read_file_bytes_with_size(path, None)
 }
 
 /// Read file bytes with an optional size hint from directory traversal.
-fn read_file_bytes_with_size(path: &Path, size_hint: Option<u64>) -> io::Result<ReadFile> {
+pub(crate) fn read_file_bytes_with_size(
+	path: &Path,
+	size_hint: Option<u64>,
+) -> io::Result<ReadFile> {
 	let file = match File::open(path) {
 		Ok(file) => file,
 		Err(err)

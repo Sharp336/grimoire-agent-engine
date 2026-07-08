@@ -28,6 +28,7 @@ pub mod block;
 pub mod clipboard;
 pub mod crash_handler;
 pub mod fd;
+pub mod fuzzy_content;
 pub mod glob;
 pub mod glob_util;
 pub mod grep;
