@@ -185,10 +185,13 @@ export function buildSessionContext(
 		};
 	}
 
-	// Walk from leaf to root, collecting path
+	// Walk from leaf to root, collecting path. Corrupt/pre-fix files can contain
+	// parent cycles; stop at the first repeat so session load is bounded.
 	const path: SessionEntry[] = [];
+	const seenPathIds = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
-	while (current) {
+	while (current && !seenPathIds.has(current.id)) {
+		seenPathIds.add(current.id);
 		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
@@ -473,6 +476,18 @@ export function buildSessionContext(
 			}
 		} else {
 			messages[i] = { ...message, content: normalized };
+		}
+	}
+
+	// A terminal error/abort is a transcript event, not a safe assistant turn to
+	// replay into the next provider request. Keeping it in active context leaves
+	// resumed sessions tailed by `assistant`, so queued retries/continues can loop
+	// on "Cannot continue from message role: assistant" and repeatedly grow state.
+	// Display transcript mode keeps the entry visible.
+	if (!options?.transcript && messages.length > 0) {
+		const lastMessage = messages[messages.length - 1]!;
+		if (lastMessage.role === "assistant" && (lastMessage.stopReason === "aborted" || lastMessage.stopReason === "error")) {
+			messages.pop();
 		}
 	}
 
