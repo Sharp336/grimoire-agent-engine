@@ -209,6 +209,39 @@ describe("devinUsageProvider", () => {
 			metrics: { sessionsCount: 1 },
 		});
 	});
+
+	it("keeps ACU consumption when metrics permission is forbidden", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
+				return new Response(JSON.stringify({ total_acus: 4.5, consumption_by_date: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (parsed.pathname === "/v3/enterprise/metrics/usage") {
+				return new Response("forbidden", { status: 403 });
+			}
+			return new Response("unexpected Devin URL", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_consumption-only" } },
+			{ fetch: fetchImpl },
+		);
+
+		if (!report) throw new Error("expected Devin usage report");
+		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(report.limits.map(limit => [limit.id, limit.amount.used, limit.amount.unit])).toEqual([
+			["devin:acus:total", 4.5, "acus"],
+		]);
+		expect(report.metadata).toMatchObject({ totalAcus: 4.5 });
+		expect(report.metadata?.metrics).toBeUndefined();
+	});
 });
 
 describe("fetchDevinConsumption", () => {

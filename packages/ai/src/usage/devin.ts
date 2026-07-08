@@ -371,7 +371,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	try {
 		metrics = await fetchDevinUsageMetrics(auth);
 	} catch (error) {
-		if (isDevinAuthFailure(error)) throw error;
+		if (!consumption && isDevinAuthFailure(error)) throw error;
 		ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(error) });
 	}
 
