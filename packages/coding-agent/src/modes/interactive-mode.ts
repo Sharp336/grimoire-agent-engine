@@ -58,7 +58,7 @@ import * as restartProcess from "../cli/restart";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -107,6 +107,7 @@ import {
 import type { CompactMode } from "../session/compact-modes";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
@@ -255,14 +256,18 @@ export interface InteractiveRestartCommandInput {
 	liveProviderSessionId: string;
 	liveAdvisorEnabled: boolean;
 	liveHideThinkingBlock: boolean;
-	liveModel?: Pick<Model, "provider" | "id">;
+	liveModel?: Model;
+	liveModelChangeRole?: string;
 }
 
 /** Build `/restart` options with live session state overriding stale launch-time flags. */
 export function buildInteractiveRestartCommandOptions(
 	options: InteractiveRestartCommandInput,
 ): restartProcess.BuildRestartCommandOptions {
-	const liveModelSelector = options.liveModel ? `${options.liveModel.provider}/${options.liveModel.id}` : undefined;
+	const liveModelSelector =
+		options.liveModel && options.liveModelChangeRole !== EPHEMERAL_MODEL_CHANGE_ROLE
+			? formatModelStringWithRouting(options.liveModel)
+			: undefined;
 	return {
 		sessionId: options.sessionId,
 		cwd: options.cwd,
@@ -4077,6 +4082,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				liveAdvisorEnabled: this.session.isAdvisorEnabled(),
 				liveHideThinkingBlock: this.hideThinkingBlock,
 				liveModel: this.session.model,
+				liveModelChangeRole: this.sessionManager.getLastModelChangeRole(),
 				liveProviderSessionId: this.session.sessionId,
 			}),
 		);

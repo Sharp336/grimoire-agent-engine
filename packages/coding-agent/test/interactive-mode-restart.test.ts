@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	buildInteractiveRestartCommandOptions,
 	hasRestartBlockingWork,
@@ -10,6 +11,21 @@ type RestartBlockingSessionState = Pick<
 	AgentSession,
 	"isStreaming" | "isCompacting" | "hasPostPromptWork" | "isBashRunning" | "isEvalRunning" | "getAsyncJobSnapshot"
 >;
+
+function restartModel(overrides: Pick<Model, "provider" | "id"> & Partial<Model>): Model {
+	return {
+		name: overrides.id,
+		api: "openai-completions",
+		baseUrl: "",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: null,
+		maxTokens: null,
+		compat: {},
+		...overrides,
+	} as Model;
+}
 
 function sessionState(overrides: Partial<RestartBlockingSessionState> = {}): RestartBlockingSessionState {
 	return {
@@ -74,12 +90,51 @@ describe("restart command options", () => {
 			launchFlags: { provider: "anthropic", model: "claude-launch" },
 			liveAdvisorEnabled: false,
 			liveHideThinkingBlock: false,
-			liveModel: { provider: "openai", id: "gpt-5-live" },
+			liveModel: restartModel({ provider: "openai", id: "gpt-5-live" }),
 			liveProviderSessionId: "provider-session",
 		});
 
 		expect(options.provider).toBeUndefined();
 		expect(options.model).toBe("openai/gpt-5-live");
+	});
+
+	test("preserves routed live model selectors", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { provider: "openrouter", model: "z-ai/glm-4.7" },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveModel: restartModel({
+				provider: "openrouter",
+				id: "z-ai/glm-4.7",
+				compat: { openRouterRouting: { only: ["cerebras"] } } as Model["compat"],
+			}),
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(options.provider).toBeUndefined();
+		expect(options.model).toBe("openrouter/z-ai/glm-4.7@cerebras");
+	});
+
+	test("keeps launch model when the live model is an ephemeral fallback", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { provider: "anthropic", model: "claude-launch" },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveModel: restartModel({ provider: "openrouter", id: "fallback-live" }),
+			liveModelChangeRole: "fallback",
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(options.provider).toBe("anthropic");
+		expect(options.model).toBe("claude-launch");
 	});
 
 	test("uses the live advisor state after stale launch flags", () => {
