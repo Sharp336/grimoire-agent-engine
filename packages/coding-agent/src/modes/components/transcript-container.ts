@@ -101,6 +101,8 @@ interface BlockSegment {
 	sep: number;
 	/** Whether the block reported finalized when this segment was rendered. */
 	finalized: boolean;
+	/** Safe to drop after commit: produced while finalized, without post-finalize version tracking. */
+	compactable: boolean;
 	/** Block version observed when this segment was rendered (see {@link FinalizableBlock}). */
 	version: number | undefined;
 }
@@ -154,6 +156,11 @@ export class TranscriptContainer
 	// Finalized blocks wholly before this boundary are immutable on-screen history;
 	// their previous contribution can be replayed without calling render().
 	#committedRows = 0;
+	// Leading children whose rows were already handed to native scrollback and
+	// dropped from the local render frame. They remain in `children` so session
+	// ownership and external references stay intact, but this container no
+	// longer renders or retains their row arrays.
+	#compactedChildStart = 0;
 	// Stable-prefix floor accumulated across renders since the last
 	// getRenderStablePrefixRows() read (see RenderStablePrefix: reading
 	// consumes the report and re-bases the baseline). Out-of-band renders
@@ -168,6 +175,8 @@ export class TranscriptContainer
 
 	override clear(): void {
 		this.#generation++;
+		this.#compactedChildStart = 0;
+		this.#committedRows = 0;
 		super.clear();
 	}
 
@@ -195,6 +204,8 @@ export class TranscriptContainer
 	 * committed rows and is safely removable.
 	 */
 	isBlockUncommitted(component: Component): boolean {
+		const index = this.children.indexOf(component);
+		if (index >= 0 && index < this.#compactedChildStart) return false;
 		for (const segment of this.#segments) {
 			if (segment.component !== component) continue;
 			return segment.rowCount === 0 || segment.startRow >= this.#committedRows;
@@ -250,7 +261,7 @@ export class TranscriptContainer
 		if (maxRows <= 0) return EMPTY_TAIL;
 		const collected: (readonly string[])[] = [];
 		let total = 0;
-		for (let i = this.children.length - 1; i >= 0 && total < maxRows; i--) {
+		for (let i = this.children.length - 1; i >= this.#compactedChildStart && total < maxRows; i--) {
 			const contribution = stripPlainBlankEdges(this.children[i]!.render(width));
 			if (contribution.length === 0) continue;
 			// One blank separator sits between this block and the (already
@@ -274,6 +285,7 @@ export class TranscriptContainer
 		this.#nativeScrollbackLiveRegionStart = undefined;
 
 		const count = this.children.length;
+		if (this.#compactedChildStart > count) this.#compactedChildStart = count;
 
 		// The commit boundary stops at the earliest still-mutating block. A
 		// block that has not finalized must gate it: out-of-band inserts
@@ -283,7 +295,7 @@ export class TranscriptContainer
 		// reaches.
 		let liveStartIndex = -1;
 		let hasLiveBlock = false;
-		for (let i = 0; i < count; i++) {
+		for (let i = this.#compactedChildStart; i < count; i++) {
 			if (!isBlockFinalized(this.children[i]!)) {
 				liveStartIndex = i;
 				hasLiveBlock = true;
@@ -315,7 +327,7 @@ export class TranscriptContainer
 		// Frame row cursor: rows emitted (reused or pushed) so far.
 		let row = 0;
 		let stableRows = 0;
-		for (let i = 0; i < count; i++) {
+		for (let i = this.#compactedChildStart; i < count; i++) {
 			const child = this.children[i]!;
 
 			// This child's contribution: its current render with plain-blank
@@ -356,6 +368,7 @@ export class TranscriptContainer
 					previous.width === width &&
 					previous.generation === this.#generation);
 			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
+			const compactable = finalized && version === undefined && previous?.finalized !== false;
 
 			// Empty (or stripped-to-nothing) children contribute nothing and never
 			// affect spacing. An empty still-live child still gates the commit
@@ -380,6 +393,7 @@ export class TranscriptContainer
 					rowCount: 0,
 					sep: 0,
 					finalized,
+					compactable,
 					version,
 				};
 				continue;
@@ -431,6 +445,7 @@ export class TranscriptContainer
 				rowCount,
 				sep,
 				finalized,
+				compactable,
 				version,
 			};
 			row += rowCount;
@@ -440,7 +455,69 @@ export class TranscriptContainer
 		if (lines.length !== row) lines.length = row;
 		this.#segments = segments;
 		this.#stableRowsFloor = Math.min(stableFloorBefore, stableRows, row);
+		this.#compactCommittedPrefix();
 		return lines;
+	}
+
+	#compactCommittedPrefix(): void {
+		if (this.#committedRows <= 0 || this.#compactedChildStart >= this.children.length) return;
+		const lines = this.#lines;
+		const segments = this.#segments;
+		let dropRows = 0;
+		let dropUntil = this.#compactedChildStart;
+		for (let i = this.#compactedChildStart; i < segments.length; i++) {
+			const segment = segments[i];
+			if (segment === undefined) break;
+			if (!segment.compactable) break;
+			const segmentEnd = segment.startRow + segment.rowCount;
+			if (segmentEnd > this.#committedRows) break;
+			dropRows = segmentEnd;
+			dropUntil = i + 1;
+		}
+		const retained = segments[dropUntil];
+		if (retained !== undefined && retained.sep > 0) {
+			const committedSeparatorRows = this.#committedRows - retained.startRow;
+			if (committedSeparatorRows <= 0) {
+				dropRows = 0;
+				dropUntil = this.#compactedChildStart;
+			} else {
+				const trim = Math.min(retained.sep, committedSeparatorRows);
+				dropRows += trim;
+				retained.sep -= trim;
+				retained.rowCount -= trim;
+			}
+		}
+		if (dropRows === 0) return;
+
+		lines.splice(0, dropRows);
+		for (let i = this.#compactedChildStart; i < dropUntil; i++) {
+			const segment = segments[i];
+			if (segment === undefined) continue;
+			segments[i] = {
+				component: segment.component,
+				rawRef: EMPTY_TAIL,
+				contribution: EMPTY_TAIL,
+				width: segment.width,
+				generation: segment.generation,
+				startRow: 0,
+				rowCount: 0,
+				sep: 0,
+				finalized: true,
+				compactable: false,
+				version: segment.version,
+			};
+		}
+		for (let i = dropUntil; i < segments.length; i++) {
+			const segment = segments[i];
+			if (segment === undefined) continue;
+			segment.startRow -= dropRows;
+		}
+		this.#compactedChildStart = dropUntil;
+		this.#committedRows = Math.max(0, this.#committedRows - dropRows);
+		this.#stableRowsFloor = 0;
+		if (this.#nativeScrollbackLiveRegionStart !== undefined) {
+			this.#nativeScrollbackLiveRegionStart = Math.max(0, this.#nativeScrollbackLiveRegionStart - dropRows);
+		}
 	}
 }
 

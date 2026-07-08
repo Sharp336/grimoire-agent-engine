@@ -6,6 +6,10 @@
 
 - Memoized non-message token totals (system prompt, tool schemas, skills) so the per-turn compaction and context-threshold paths recompute them at most once per input change instead of on every call. `getContextBreakdown` and `#estimateStoredContextTokens` previously re-tokenized the system prompt and every tool's wire schema (per-tool `JSON.stringify`) several times per turn over inputs that change at most once per turn.
 
+### Fixed
+
+- Bounded transcript render retention after finalized rows enter native scrollback, so long resumed TUI sessions no longer keep the full committed transcript row arrays live in JavaScript ([#4820](https://github.com/can1357/oh-my-pi/issues/4820)).
+
 ## [16.3.11] - 2026-07-06
 
 ### Changed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Changed the Markdown render cache to use weighted size limits, preventing very large rendered documents from occupying normal cache slots indefinitely ([#4820](https://github.com/can1357/oh-my-pi/issues/4820)).
+
 ## [16.3.10] - 2026-07-06
 
 ### Fixed

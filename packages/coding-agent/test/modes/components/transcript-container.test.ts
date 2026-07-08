@@ -348,6 +348,18 @@ describe("TranscriptContainer", () => {
 		expect(container.render(40)).toEqual(["history", "", "live", "", "finalized-below-0", "finalized-below-1"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(2);
 	});
+	it("omits finalized head rows already committed to native scrollback from subsequent renders", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new StreamingBlock(["committed-history"], true));
+		container.addChild(new StreamingBlock(["retained-tail"], true));
+
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+
+		container.setNativeScrollbackCommittedRows(2);
+
+		expect(container.render(40)).toEqual(["retained-tail"]);
+	});
+
 	it("does not re-render finalized rows already committed to native scrollback", () => {
 		const container = new TranscriptContainer();
 		const committed = new CountingFinalizedBlock(["committed"]);
@@ -653,6 +665,19 @@ describe("TranscriptContainer isBlockUncommitted", () => {
 
 		container.setNativeScrollbackCommittedRows(3);
 		expect(container.isBlockUncommitted(block)).toBe(false);
+	});
+
+	it("keeps compacted committed blocks marked committed", () => {
+		const container = new TranscriptContainer();
+		const committed = new StreamingBlock(["committed"], true);
+		container.addChild(committed);
+		container.addChild(new StreamingBlock(["tail"], true));
+
+		expect(container.render(40)).toEqual(["committed", "", "tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["tail"]);
+
+		expect(container.isBlockUncommitted(committed)).toBe(false);
 	});
 
 	it("keeps empty-render blocks uncommitted after committed rows advance", () => {
