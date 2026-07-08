@@ -101,6 +101,9 @@
 - Fixed LiteLLM discovery stopping at `/model_group/info` when that endpoint omitted `supports_vision`; it now continues to `/model/info` and preserves `model_info.supports_vision=true` for vision-capable proxy models. ([#4747](https://github.com/can1357/oh-my-pi/issues/4747))
 - Fixed LiteLLM discovery to fall back to bundled catalog metadata when `models.dev` lacks a model reference, preserving reasoning and thinking support for models such as `glm-5.2`. ([#4695](https://github.com/can1357/oh-my-pi/issues/4695))
 - Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
+### Added
+
+- Added ElectronHub Coding Plan (DevPass) catalog support with bundled `kimi-k2.6:dev` and `minimax-m2.7:dev` models plus runtime discovery filtered to DevPass-only models.
 
 ## [16.3.11] - 2026-07-06
 
