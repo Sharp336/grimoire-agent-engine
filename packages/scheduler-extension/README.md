@@ -44,6 +44,15 @@ or per launch:
 omp --extension packages/scheduler-extension
 ```
 
+> **Windows path gotcha:** in a **bash** shell (Git Bash/WSL/MSYS), an
+> unquoted backslash path is mangled before omp ever sees it —
+> `omp --extension D:\Projects\oh-my-pi\packages\scheduler-extension`
+> arrives as `D:Projectsoh-my-pi...` (`\P`, `\o`, … are escape sequences)
+> and the extension silently fails to load (the error only lands in
+> `~/.omp/logs/`). Use **forward slashes** — they work in every shell on
+> Windows (`D:/Projects/oh-my-pi/packages/scheduler-extension`) — or quote
+> the path. cmd/PowerShell pass backslashes through fine.
+
 Restart omp. `/scheduler` (with no arguments) prints usage.
 
 ## ⚠️ Prerequisite: approval mode must be `yolo`
