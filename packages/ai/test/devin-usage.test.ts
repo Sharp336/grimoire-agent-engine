@@ -208,6 +208,8 @@ describe("devinUsageProvider", () => {
 			totalAcus: 3,
 			metrics: { sessionsCount: 1 },
 		});
+		expect(report.metadata?.endpoint).toBeUndefined();
+		expect(report.metadata?.metricsEndpoint).toBeUndefined();
 	});
 
 	it("keeps ACU consumption when metrics permission is forbidden", async () => {

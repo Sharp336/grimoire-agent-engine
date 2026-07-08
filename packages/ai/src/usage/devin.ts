@@ -324,13 +324,11 @@ function metadataFromParams(
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (orgId) metadata.orgId = orgId;
 	if (consumption) {
-		metadata.endpoint = consumption.endpoint;
 		metadata.totalAcus = consumption.totalAcus;
 		metadata.acusByProduct = consumption.acusByProduct;
 		metadata.consumptionByDate = consumption.entries;
 	}
 	if (metrics) {
-		metadata.metricsEndpoint = metrics.endpoint;
 		metadata.metrics = {
 			sessionsCount: metrics.sessionsCount,
 			searchesCount: metrics.searchesCount,
