@@ -69,7 +69,7 @@ process; a sleeping laptop dispatches nothing.
 
 ```text
 /scheduler add <prompt>        queue a task
-/scheduler add-file <path>     queue a task whose prompt is the file's content
+/scheduler add-file <path>     queue task(s) from a file (single prompt or batch)
 /scheduler list                show queue, current task, session-window state
 /scheduler status              alias of list
 /scheduler start               begin draining the queue when the agent is idle
@@ -91,6 +91,27 @@ Examples:
 /scheduler start
 /scheduler status
 ```
+
+### Batch files
+
+`add-file` accepts two formats. A **plain-text file** queues one task whose
+prompt is the whole file. A **batch file** queues up to **30** tasks at once:
+a comma-separated sequence of `{prompt: "..."}` objects —
+
+```text
+{prompt: "Refactor src/parser.ts to recursive descent"},
+{prompt: "Write integration tests for the auth flow"},{prompt: "Port CI to GitHub Actions"},
+  {prompt: "Update the architecture doc.\nMention the new parser."},
+```
+
+- Newlines/spaces between objects are irrelevant; a trailing comma and a
+  surrounding `[...]` are both fine; the `prompt` key may be bare or quoted.
+- Prompt values are JSON strings: use `\n` for a newline inside a prompt.
+- The file is syntax-checked first and queued **atomically** — a malformed
+  batch (bad syntax, wrong key, empty prompt, >30 entries) queues nothing
+  and reports the exact offending entry.
+- A plain prompt that merely starts with `{` is still treated as a single
+  task; batch parsing only kicks in when the content names a `prompt` key.
 
 `status` output looks like:
 

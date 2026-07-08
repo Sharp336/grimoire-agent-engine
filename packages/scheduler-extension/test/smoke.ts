@@ -707,5 +707,101 @@ assert.ok(fs.existsSync(defaultExport), "default export file created");
 await w.command("export custom-dump.md", ctxW);
 assert.ok(fs.existsSync(path.join(tmpCwd, "custom-dump.md")), "explicit export path honored");
 
+// 20. add-file batch: comma-separated {prompt: "..."} objects — whitespace/
+// newline tolerant, bare or quoted keys, syntax-verified, capped at 30.
+const p = makeMockPi();
+const ctxP = makeCtx(tmpCwd);
+schedulerExtension(p.api);
+await p.emit("session_start", {}, ctxP);
+const batchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-batch-"));
+const seqBefore = readState().nextTaskSeq;
+
+// valid batch: messy separators (newline / no space / spaces), bare keys,
+// a quoted key, a trailing comma, and an escaped \n inside a prompt.
+const validBatch = path.join(batchDir, "batch.txt");
+fs.writeFileSync(
+	validBatch,
+	'{prompt: "task one"},\n{prompt: "task two"},{prompt: "task three"} ,\n\n  {"prompt": "task four"},{prompt: "task five\\nline two"},',
+	"utf8",
+);
+await p.command(`add-file ${validBatch}`, ctxP);
+{
+	const st = readState();
+	assert.equal(st.nextTaskSeq, seqBefore + 5, "five tasks queued from batch");
+	const batched = st.tasks.filter(t => t.sourceFile === validBatch);
+	assert.equal(batched.length, 5);
+	assert.deepEqual(
+		batched.map(t => t.prompt),
+		["task one", "task two", "task three", "task four", "task five\nline two"],
+		"prompts parsed in order, whitespace stripped, \\n honored",
+	);
+	assert.ok(batched.every(t => t.status === "queued"));
+	assert.match(ctxP.notifications.at(-1) ?? "", /queued 5 task\(s\) from batch file \(t\d+…t\d+\)/);
+}
+
+// syntax error: batch-shaped but broken JSON — refused atomically.
+const brokenBatch = path.join(batchDir, "broken.txt");
+fs.writeFileSync(brokenBatch, '{prompt: "unterminated}, {prompt: "ok"}', "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${brokenBatch}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /invalid batch syntax.*nothing queued/s);
+	assert.equal(readState().nextTaskSeq, before, "broken batch queues nothing");
+}
+
+// shape error: entry with a wrong key.
+const badShape = path.join(batchDir, "shape.txt");
+fs.writeFileSync(badShape, '{prompt: "fine"}, {task: "wrong key"}', "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${badShape}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /expected a "prompt" key/);
+	assert.equal(readState().nextTaskSeq, before, "bad shape queues nothing");
+}
+
+// empty prompt inside the batch.
+const emptyPrompt = path.join(batchDir, "empty.txt");
+fs.writeFileSync(emptyPrompt, '{prompt: "a"}, {prompt: "   "}', "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${emptyPrompt}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /entry 2: empty prompt/);
+	assert.equal(readState().nextTaskSeq, before, "empty prompt queues nothing");
+}
+
+// over the cap: 31 prompts refused outright.
+const bigBatch = path.join(batchDir, "big.txt");
+fs.writeFileSync(bigBatch, Array.from({ length: 31 }, (_, i) => `{prompt: "task ${i}"}`).join(",\n"), "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${bigBatch}`, ctxP);
+	assert.match(ctxP.notifications.at(-1) ?? "", /more than 30 prompts — max 30/);
+	assert.equal(readState().nextTaskSeq, before, "oversized batch queues nothing");
+}
+
+// exactly 30 is fine.
+const maxBatch = path.join(batchDir, "max.txt");
+fs.writeFileSync(maxBatch, `[${Array.from({ length: 30 }, (_, i) => `{prompt: "task ${i}"}`).join(",")}]`, "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${maxBatch}`, ctxP);
+	assert.equal(readState().nextTaskSeq, before + 30, "30-prompt batch (bracketed form) accepted");
+}
+
+// plain-text file that merely starts with "{" still queues as ONE prompt
+// (no prompt-key probe match) — pre-batch behavior preserved.
+const plainCurly = path.join(batchDir, "plain.txt");
+fs.writeFileSync(plainCurly, "{a: 1} is the config shape I want; explain why", "utf8");
+{
+	const before = readState().nextTaskSeq;
+	await p.command(`add-file ${plainCurly}`, ctxP);
+	const st = readState();
+	assert.equal(st.nextTaskSeq, before + 1, "plain file = single task");
+	assert.equal(
+		st.tasks.find(t => t.sourceFile === plainCurly)?.prompt,
+		"{a: 1} is the config shape I want; explain why",
+	);
+}
+
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);

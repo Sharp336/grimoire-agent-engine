@@ -560,6 +560,104 @@ function isTransientNetworkError(error: string): boolean {
 	);
 }
 
+/** Hard cap on prompts loaded from one batch file. */
+const MAX_BATCH_PROMPTS = 30;
+
+/**
+ * Parse a multi-prompt batch file: a comma-separated sequence of
+ * `{prompt: "..."}` objects. Whitespace/newlines between tokens are
+ * irrelevant; the `prompt` key may be bare or quoted; a surrounding
+ * `[...]` and a trailing comma are tolerated. Values are JSON strings
+ * (use \n for a newline inside a prompt).
+ *
+ * Hand-rolled scanner rather than regex-normalize-then-JSON.parse: a
+ * prompt whose *text* contains `{prompt:` or `, }` must never be mangled
+ * by normalization, so string contents are only ever consumed by the
+ * JSON string rules.
+ *
+ * Returns:
+ *   - string[]        parsed prompts (1..MAX_BATCH_PROMPTS, each non-empty)
+ *   - {error}         batch-shaped content that fails syntax/shape checks
+ *   - null            not batch-shaped — treat the file as one plain prompt
+ */
+function parsePromptBatch(content: string): string[] | { error: string } | null {
+	const s = content.trim();
+	// Batch detection: starts like an object/array AND names a prompt key.
+	// A plain-text prompt that merely begins with "{" won't match the key
+	// probe and still queues as a single task.
+	if (!/^[[{]/.test(s) || !/[[{,]\s*["']?prompt["']?\s*:/.test(s)) return null;
+	let i = 0;
+	const ws = () => {
+		while (i < s.length && /\s/.test(s[i])) i++;
+	};
+	const fail = (msg: string) => ({ error: `invalid batch syntax at offset ${i}: ${msg}` });
+	const prompts: string[] = [];
+	ws();
+	const bracketed = s[i] === "[";
+	if (bracketed) {
+		i++;
+		ws();
+	}
+	for (;;) {
+		if (i >= s.length) {
+			if (bracketed) return fail('expected "]"');
+			break; // trailing comma after the last object is fine
+		}
+		if (bracketed && s[i] === "]") {
+			i++;
+			break;
+		}
+		if (s[i] !== "{") return fail('expected "{"');
+		i++;
+		ws();
+		const key = /^(?:"prompt"|'prompt'|prompt)/.exec(s.slice(i));
+		if (!key) return fail('expected a "prompt" key');
+		i += key[0].length;
+		ws();
+		if (s[i] !== ":") return fail('expected ":"');
+		i++;
+		ws();
+		if (s[i] !== '"') return fail("expected a double-quoted string value");
+		const strStart = i;
+		i++;
+		while (i < s.length && s[i] !== '"') i += s[i] === "\\" ? 2 : 1;
+		if (i >= s.length) return fail("unterminated string");
+		i++;
+		let value: string;
+		try {
+			value = JSON.parse(s.slice(strStart, i)) as string;
+		} catch {
+			return fail("bad escape sequence in string");
+		}
+		ws();
+		if (s[i] !== "}") return fail('expected "}" (exactly one "prompt" key per object)');
+		i++;
+		ws();
+		const prompt = value.trim();
+		if (!prompt) return { error: `batch entry ${prompts.length + 1}: empty prompt` };
+		if (prompts.length >= MAX_BATCH_PROMPTS)
+			return { error: `batch has more than ${MAX_BATCH_PROMPTS} prompts — max ${MAX_BATCH_PROMPTS} per file` };
+		prompts.push(prompt);
+		if (s[i] === ",") {
+			i++;
+			ws();
+			continue;
+		}
+		if (bracketed) {
+			if (s[i] === "]") {
+				i++;
+				break;
+			}
+			return fail('expected "," or "]"');
+		}
+		break; // unbracketed: end of input expected next
+	}
+	ws();
+	if (i < s.length) return fail("unexpected trailing content");
+	if (prompts.length === 0) return { error: "batch contains no prompts" };
+	return prompts;
+}
+
 // ---------------------------------------------------------------------------
 // Extension factory
 // ---------------------------------------------------------------------------
@@ -1074,7 +1172,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 						[
 							"scheduler — session-quota-aware prompt queue",
 							"  /scheduler add <prompt>      queue a task",
-							"  /scheduler add-file <path>   queue a task from a file",
+							'  /scheduler add-file <path>   queue task(s) from a file (multi: {prompt: "…"}, {prompt: "…"})',
 							"  /scheduler list | status     queue + session-window state",
 							"  /scheduler start             begin draining the queue when idle",
 							"  /scheduler pause             finish current task, then hold",
@@ -1093,11 +1191,8 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	// ---- subcommand implementations -----------------------------------------
 
-	function cmdAdd(ctx: CtxLike, prompt: string, sourceFile: string | undefined): void {
-		if (!prompt) {
-			notify(ctx, "scheduler: usage — /scheduler add <prompt>", "warning");
-			return;
-		}
+	/** Create + queue one task; caller is responsible for saveState/notify. */
+	function enqueueTask(prompt: string, sourceFile: string | undefined): SchedulerTask {
 		const st = getState();
 		const task: SchedulerTask = {
 			id: `t${st.nextTaskSeq++}`,
@@ -1109,6 +1204,16 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		};
 		st.tasks.push(task);
 		emptyQueueNotified = false;
+		return task;
+	}
+
+	function cmdAdd(ctx: CtxLike, prompt: string, sourceFile: string | undefined): void {
+		if (!prompt) {
+			notify(ctx, "scheduler: usage — /scheduler add <prompt>", "warning");
+			return;
+		}
+		const st = getState();
+		const task = enqueueTask(prompt, sourceFile);
 		saveState();
 		notify(
 			ctx,
@@ -1136,7 +1241,27 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			notify(ctx, `scheduler: ${resolved} is empty`, "warning");
 			return;
 		}
-		cmdAdd(ctx, content, resolved);
+		const batch = parsePromptBatch(content);
+		if (batch === null) {
+			cmdAdd(ctx, content, resolved); // plain file = one prompt (unchanged behavior)
+			return;
+		}
+		if (!Array.isArray(batch)) {
+			// Batch-shaped but broken: refuse the whole file — queueing a
+			// malformed batch as one giant prompt would waste a real turn.
+			notify(ctx, `scheduler: ${resolved}: ${batch.error} — nothing queued`, "error");
+			return;
+		}
+		const st = getState();
+		const tasks = batch.map(p => enqueueTask(p, resolved));
+		saveState();
+		const idRange = tasks.length === 1 ? tasks[0].id : `${tasks[0].id}…${tasks[tasks.length - 1].id}`;
+		notify(
+			ctx,
+			`scheduler: queued ${tasks.length} task(s) from batch file (${idRange})${st.run === "stopped" ? " (scheduler stopped; /scheduler start to begin)" : ""}`,
+		);
+		if (st.run === "running") scheduleDispatch(cfg.dispatchDelayMs);
+		updateStatus();
 	}
 
 	function cmdStatus(ctx: CtxLike): void {
