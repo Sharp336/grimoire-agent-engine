@@ -1,6 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import { $env, isBunTestRuntime, isTerminalHeadless, logger } from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
 import {
@@ -33,6 +33,11 @@ export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
 		return 2;
 	}
 	return "platform";
+}
+
+function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
+	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
 }
 
 /**
@@ -156,6 +161,15 @@ let terminalEverStarted = false;
 // jumps to the viewport home, dropping the parent shell prompt on top of the
 // dead frame after exit.
 let altScreenActive = false;
+let terminalRestoreRegistered = false;
+
+function registerPostmortemTerminalRestore(): void {
+	if (terminalRestoreRegistered) return;
+	terminalRestoreRegistered = true;
+	postmortem.register("terminal-restore", () => {
+		emergencyTerminalRestore();
+	});
+}
 
 /** Record alternate-screen state (called by the TUI on `?1049h`/`?1049l` writes). */
 export function setAltScreenActive(active: boolean): void {
@@ -336,6 +350,16 @@ export interface Terminal {
 	// so the TUI re-pushes this after entering the alternate screen.
 	get kittyEnableSequence(): string | null;
 
+	// The active modified-key reporting sequence to reassert on alternate-screen
+	// entry, or null when no enhanced keyboard mode is active. Optional so custom
+	// Terminals built against older pi-tui versions keep working.
+	readonly keyboardEnhancementEnterSequence?: string | null;
+
+	// The sequence that cleanly disables the active enhanced keyboard mode on
+	// alternate-screen exit, or null when no exit handshake is required. Optional
+	// so custom Terminals built against older pi-tui versions keep working.
+	readonly keyboardEnhancementExitSequence?: string | null;
+
 	// Cursor positioning (relative to current position)
 	moveBy(lines: number): void; // Move cursor up (negative) or down (positive) by N lines
 
@@ -472,6 +496,20 @@ export class ProcessTerminal implements Terminal {
 		return this.#kittyProtocolActive ? this.#kittyEnableSeq : null;
 	}
 
+	get keyboardEnhancementEnterSequence(): string | null {
+		if (this.#kittyProtocolActive) return this.#kittyEnableSeq;
+		return this.#modifyOtherKeysActive ? "\x1b[>4;2m" : null;
+	}
+
+	get keyboardEnhancementExitSequence(): string | null {
+		// kitty is a stack push (per-screen), so the matching pop balances alt-screen
+		// entry. xterm modifyOtherKeys is a single global flag with no per-screen
+		// stack — emitting `>4;0m` here would clear it on the normal screen too,
+		// breaking the composer between overlays. terminal.stop() still disables it
+		// globally on graceful exit; the emergency-restore path mirrors that.
+		return this.#kittyProtocolActive ? "\x1b[<u" : null;
+	}
+
 	get appearance(): TerminalAppearance | undefined {
 		return this.#appearance;
 	}
@@ -494,6 +532,7 @@ export class ProcessTerminal implements Terminal {
 		// escapes never reach the developer's terminal during `bun test`.
 		this.#headless = isTerminalHeadless();
 		if (this.#headless) return;
+		registerPostmortemTerminalRestore();
 
 		// Register for emergency cleanup
 		activeTerminal = this;
@@ -667,8 +706,28 @@ export class ProcessTerminal implements Terminal {
 		// In-band resize report (DEC mode 2048): \x1b[48;rows;cols;yPixels;xPixels t
 		const inBandResizePattern = /^\x1b\[48;(\d+);(\d+);(\d+);(\d+)t$/;
 
-		// Forward individual sequences to the input handler
 		this.#stdinBuffer.on("data", (sequence: string) => {
+			// Fast path for plain-text bytes: every escape-probe regex below
+			// anchors on `^\x1b…`, so a byte that is not ESC can never match. A
+			// non-bracketed paste of N printable chars arrives as N per-scalar
+			// `data` events; running the full probe suite per event turns a
+			// 100 KB paste into ~600K regex executions and blocks the event
+			// loop. Skip straight to the input handler when no reassembly
+			// buffer is holding state that a non-ESC continuation could feed
+			// (issue #4073 case C).
+			if (
+				(sequence.length === 0 || sequence.charCodeAt(0) !== 0x1b) &&
+				this.#privateCsiResponseBuffer.length === 0 &&
+				this.#inBandResizeBuffer.length === 0 &&
+				this.#osc11ResponseBuffer.length === 0 &&
+				this.#osc99ResponseBuffer.length === 0
+			) {
+				if (this.#inputHandler) {
+					this.#inputHandler(sequence);
+				}
+				return;
+			}
+
 			// Reassemble split private CSI responses (DA1, kitty keyboard, Mode 2031).
 			// When the terminal writes the response slowly enough that the StdinBuffer's
 			// flush timeout elapses mid-sequence, the prefix `\x1b[?<digits>` arrives as
@@ -796,13 +855,13 @@ export class ProcessTerminal implements Terminal {
 						break;
 					}
 					case "keyboard": {
-						// Keyboard probe sentinel: kitty reply never arrived → fall back to modifyOtherKeys.
-						if (!this.#kittyProtocolActive && !this.#modifyOtherKeysActive && this.#modifyOtherKeysTimeout) {
+						// Keyboard probe sentinel: kitty reply never arrived → fall back to modifyOtherKeys
+						// only where the resolved terminal is known enough to tolerate it.
+						if (this.#modifyOtherKeysTimeout) {
 							clearTimeout(this.#modifyOtherKeysTimeout);
 							this.#modifyOtherKeysTimeout = undefined;
-							this.#safeWrite("\x1b[>4;2m");
-							this.#modifyOtherKeysActive = true;
 						}
+						this.#enableModifyOtherKeysFallback();
 						break;
 					}
 					case "osc99Probe": {
@@ -1010,6 +1069,13 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	#enableModifyOtherKeysFallback(): void {
+		if (this.#kittyProtocolActive || this.#modifyOtherKeysActive) return;
+		if (!shouldEnableModifyOtherKeysFallback()) return;
+		this.#safeWrite("\x1b[>4;2m");
+		this.#modifyOtherKeysActive = true;
+	}
+
 	/**
 	 * Query terminal for Kitty keyboard protocol support and enable if available.
 	 *
@@ -1029,11 +1095,7 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite("\x1b[?u\x1b[c");
 		this.#modifyOtherKeysTimeout = setTimeout(() => {
 			this.#modifyOtherKeysTimeout = undefined;
-			if (this.#kittyProtocolActive || this.#modifyOtherKeysActive) {
-				return;
-			}
-			this.#safeWrite("\x1b[>4;2m");
-			this.#modifyOtherKeysActive = true;
+			this.#enableModifyOtherKeysFallback();
 		}, 150);
 	}
 

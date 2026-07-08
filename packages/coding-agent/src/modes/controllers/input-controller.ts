@@ -13,15 +13,17 @@ import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
-import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { isLowSignalTitleInput } from "../../tiny/text";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { vocalizer } from "../../tts/vocalizer";
 import {
 	copyToClipboard,
 	readImageFromClipboard,
@@ -32,7 +34,7 @@ import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
 import { resizeImage } from "../../utils/image-resize";
-import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import { generateSessionTitle } from "../../utils/title-generator";
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -84,6 +86,20 @@ function hasPasteText(value: unknown): value is PasteTarget {
 	return typeof value === "object" && value !== null && typeof (value as PasteTarget).pasteText === "function";
 }
 
+const SHELL_PROMPT_COMMAND_RE =
+	/^(?:\.{0,2}\/|~\/|cd(?:\s|$)|sudo(?:\s|$)|git(?:\s|$)|bun(?:\s|$)|npm(?:\s|$)|pnpm(?:\s|$)|yarn(?:\s|$)|node(?:\s|$)|python\d*(?:\s|$)|cargo(?:\s|$)|go(?:\s|$)|make(?:\s|$)|docker(?:\s|$)|kubectl(?:\s|$))/;
+const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/;
+const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
+
+function looksLikePastedShellPrompt(code: string): boolean {
+	const firstLine = code.split("\n", 1)[0]?.trimStart() ?? "";
+	return (
+		SHELL_PROMPT_COMMAND_RE.test(firstLine) ||
+		SHELL_PROMPT_OPERATOR_RE.test(firstLine) ||
+		OMP_STATUS_LINE_RE.test(code)
+	);
+}
+
 function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
 	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
@@ -98,8 +114,10 @@ function parsePythonCommandInput(text: string): { code: string; isExcluded: bool
 	const trimmed = text.trimStart();
 	const prefixLength = pythonCommandPrefixLength(trimmed);
 	if (prefixLength === 0) return undefined;
+	const code = trimmed.slice(prefixLength).trim();
+	if (prefixLength === 1 && looksLikePastedShellPrompt(code)) return undefined;
 	return {
-		code: trimmed.slice(prefixLength).trim(),
+		code,
 		isExcluded: prefixLength === 2,
 	};
 }
@@ -107,6 +125,17 @@ function parsePythonCommandInput(text: string): { code: string; isExcluded: bool
 /** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
 function wrapPasteInAttachmentBlock(content: string): string {
 	return `<attachment>\n${content}\n</attachment>`;
+}
+
+/** Run a teardown abort that must never throw (Esc / Ctrl+C path). A thrown
+ *  error is logged at debug instead of silently swallowed, so a failing abort
+ *  stays diagnosable without disturbing teardown ordering. */
+function safeAbort(label: string, fn: () => void): void {
+	try {
+		fn();
+	} catch (err) {
+		logger.debug(`Failed to abort ${label}`, { error: err instanceof Error ? err.message : String(err) });
+	}
 }
 
 const TINY_TITLE_PROGRESS_DONE_TTL_MS = 3_000;
@@ -305,21 +334,15 @@ export class InputController {
 				const viewSession = this.ctx.viewSession;
 				let aborted = false;
 				if (viewSession.isCompacting) {
-					try {
-						viewSession.abortCompaction();
-					} catch {}
+					safeAbort("compaction", () => viewSession.abortCompaction());
 					aborted = true;
 				}
 				if (viewSession.isGeneratingHandoff) {
-					try {
-						viewSession.abortHandoff();
-					} catch {}
+					safeAbort("handoff", () => viewSession.abortHandoff());
 					aborted = true;
 				}
 				if (viewSession.isRetrying) {
-					try {
-						viewSession.abortRetry();
-					} catch {}
+					safeAbort("retry", () => viewSession.abortRetry());
 					aborted = true;
 				}
 				if (aborted) return;
@@ -381,11 +404,16 @@ export class InputController {
 			} else if (this.ctx.session.isStreaming) {
 				this.#handleStreamingEscape();
 			} else if (this.ctx.editor.getText().trim()) {
-				// Esc with typed text clears the draft instead of (or before) any double-Esc action
-				this.ctx.editor.setText("");
-				this.ctx.ui.requestRender();
+				// Esc must not destroy an in-progress draft; it only disarms a previous empty-editor Esc.
 				this.ctx.lastEscapeTime = 0;
 				this.#clearStreamingEscapeArm();
+			} else if (vocalizer.isSpeaking()) {
+				// TTS buffers seconds of PCM past the streaming abort, so an Esc
+				// arriving after the model stopped would otherwise fall through to
+				// the double-Esc gesture while Kokoro reads on. Silence first;
+				// tree/branch stays reachable via a second Esc.
+				vocalizer.clear();
+				this.ctx.lastEscapeTime = 0;
 			} else {
 				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
 				const action = settings.get("doubleEscapeAction");
@@ -524,7 +552,7 @@ export class InputController {
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
 			this.ctx.isBashMode = trimmed.startsWith("!");
-			this.ctx.isPythonMode = pythonCommandPrefixLength(trimmed) > 0;
+			this.ctx.isPythonMode = parsePythonCommandInput(trimmed) !== undefined;
 			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
 				this.ctx.updateEditorBorderColor();
 			}
@@ -715,11 +743,18 @@ export class InputController {
 			}
 
 			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
-			// free-text Enter semantics applied a few lines below at the streaming
-			// branch). Ctrl+Enter routes through `handleFollowUp` and dispatches the
-			// same helper with `"followUp"`.
-			if (text && (await this.#invokeSkillCommand(text, "steer"))) {
-				return;
+			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
+			// During compaction, queue immediately so bash/python/loop-mode branches do
+			// not consume the skill before the compaction-resume path re-parses it.
+			if (text && isKnownSkillCommand(this.ctx, text)) {
+				if (this.ctx.session.isCompacting) {
+					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+					this.ctx.queueCompactionMessage(text, "steer", images);
+					return;
+				}
+				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+					return;
+				}
 			}
 
 			// Handle bash command (! for normal, !! for excluded from context)
@@ -828,20 +863,14 @@ export class InputController {
 					this.ctx.session.sessionId,
 					this.ctx.session.model,
 					provider => this.ctx.session.agent.metadataForProvider(provider),
-					this.ctx.titleSystemPrompt,
+					this.ctx.session.titleSystemPrompt,
 				)
 					.then(async title => {
 						// Re-check: a concurrent attempt for an earlier message may have
-						// already named the session. Don't clobber it.
+						// already named the session. Don't clobber it. Terminal title and
+						// accent updates fire from the onSessionNameChanged listener.
 						if (title && !this.ctx.sessionManager.getSessionName()) {
-							const applied = await this.ctx.sessionManager.setSessionName(title, "auto");
-							if (applied) {
-								setSessionTerminalTitle(
-									this.ctx.sessionManager.getSessionName()!,
-									this.ctx.sessionManager.getCwd(),
-								);
-								this.ctx.updateEditorBorderColor();
-							}
+							await this.ctx.sessionManager.setSessionName(title, "auto");
 						}
 					})
 					.catch(err => {
@@ -1074,59 +1103,52 @@ export class InputController {
 
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
-	 * using the supplied `streamingBehavior`. Returns true if the text was a
-	 * recognised skill command and was dispatched. A failure to load the skill
-	 * file is surfaced via `showError` but still returns true — the editor was
-	 * already cleared on the success path, so falling through to plain-text
-	 * handling at that point would double-submit. Returns false when the text
-	 * isn't a `/skill:` prefix or the command name isn't a registered skill,
-	 * so the caller can fall through to plain-text handling (this branch
-	 * leaves the editor state untouched). `streamingBehavior` is only consulted
-	 * while the agent is streaming; the idle path of `promptCustomMessage`
-	 * ignores it.
+	 * using the supplied `streamingBehavior`. Returns false when the text is not
+	 * a registered skill command and leaves the editor state untouched. Registered
+	 * skills consume the full composer draft (text plus pending images) before
+	 * dispatch; if dispatch rejects, the draft is restored so the user can retry.
 	 */
-	async #invokeSkillCommand(text: string, streamingBehavior: "steer" | "followUp"): Promise<boolean> {
-		if (!text.startsWith("/skill:")) return false;
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-		const skillPath = this.ctx.skillCommands?.get(commandName);
-		if (!skillPath) return false;
-		this.ctx.editor.addToHistory(text);
-		this.ctx.editor.setText("");
-		try {
-			const content = await Bun.file(skillPath).text();
-			const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-			const metaLines = [`Skill: ${skillPath}`];
-			if (args) {
-				metaLines.push(`User: ${args}`);
+	async #invokeSkillCommand(
+		text: string,
+		streamingBehavior: "steer" | "followUp",
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+	): Promise<boolean> {
+		if (!isKnownSkillCommand(this.ctx, text)) return false;
+		const draftImages = images && images.length > 0 ? [...images] : undefined;
+		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
+		const restoreDraft = () => {
+			this.ctx.editor.setText(text);
+			if (draftImages && draftImages.length > 0) {
+				this.ctx.editor.pendingImages = [...draftImages];
+				this.ctx.editor.pendingImageLinks = draftImageLinks
+					? [...draftImageLinks]
+					: draftImages.map(() => undefined);
+				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 			}
-			const message = `${body}\n\n---\n\n${metaLines.join("\n")}`;
-			const skillName = commandName.slice("skill:".length);
-			const details: SkillPromptDetails = {
-				name: skillName || commandName,
-				path: skillPath,
-				args: args || undefined,
-				lineCount: body ? body.split("\n").length : 0,
-			};
-			await this.ctx.session.promptCustomMessage(
-				{
-					customType: SKILL_PROMPT_MESSAGE_TYPE,
-					content: message,
-					display: true,
-					details,
-					attribution: "user",
-				},
-				{ streamingBehavior, queueChipText: text },
-			);
+		};
+
+		this.ctx.editor.clearDraft(text);
+		try {
+			const handled = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
+				images: draftImages,
+				propagateErrors: true,
+			});
+			if (!handled) {
+				restoreDraft();
+				return false;
+			}
+			return true;
+		} catch (error) {
+			restoreDraft();
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return true;
+		} finally {
 			if (this.ctx.session.isStreaming) {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-		} catch (err) {
-			this.ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
 		}
-		return true;
 	}
 
 	async handleRetry(): Promise<void> {
@@ -1144,7 +1166,7 @@ export class InputController {
 
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
-		let text = this.ctx.editor.getText().trim();
+		let text = this.ctx.editor.getExpandedText().trim();
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
@@ -1159,9 +1181,8 @@ export class InputController {
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
-		// `promptCustomMessage`. The skill text is queued verbatim; whether
-		// the queued entry is later re-parsed into a skill invocation is a
-		// separate concern owned by the compaction-resume path.
+		// `promptCustomMessage`. The compaction-resume path re-parses the
+		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
 			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 			this.ctx.queueCompactionMessage(text, "followUp", images);
@@ -1187,7 +1208,7 @@ export class InputController {
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp"))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks))) {
 			return;
 		}
 
@@ -1739,14 +1760,14 @@ export class InputController {
 	}
 
 	toggleThinkingBlockVisibility(): void {
-		// When thinking is "off", thinking blocks are always hidden (some
-		// providers return them regardless). The toggle is meaningless in
-		// that state — inform the user instead of silently flipping the
-		// persisted value. When thinking is on, the toggle works normally
-		// even if blocks are already hidden (user may want to show them).
+		// When thinking is "off" and the session has not produced reasoning
+		// content, thinking blocks stay auto-hidden; the toggle would only corrupt
+		// the persisted preference. OpenAI-compatible servers can stream reasoning
+		// without advertising model support, so observed thinking content unlocks
+		// the display toggle.
 		const thinkingOff =
 			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
-		if (thinkingOff) {
+		if (thinkingOff && !this.ctx.hasDisplayableThinkingContent) {
 			this.ctx.showStatus("Thinking is off — enable thinking to show blocks");
 			return;
 		}

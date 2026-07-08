@@ -11,7 +11,7 @@ const JULIA_TEST_TIMEOUT_MS = JULIA_EXECUTION_TIMEOUT_MS + 15_000;
 describe.skipIf(!HAS_JULIA)("eval Julia prelude helpers", () => {
 	afterEach(async () => {
 		await disposeJuliaKernelSessionsByOwner(OWNER_ID);
-	});
+	}, 30_000);
 
 	it(
 		"supports output ranges, JSON queries, metadata, and ANSI stripping",

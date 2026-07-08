@@ -1,4 +1,5 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Api, Model } from "../../types";
 
@@ -14,7 +15,7 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	reasoningEffort?: ReasoningConfig["effort"];
 	reasoningSummary?: ReasoningConfig["summary"] | null;
-	/** Explicit `reasoning.context` override; defaults to `all_turns` for every Codex request when unset. */
+	/** Explicit `reasoning.context` override; defaults to `all_turns` when unset. The `all_turns` value is gated to gpt-5.4+ Codex models — older ids reject it, so it is suppressed and `context` omitted. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
@@ -84,7 +85,12 @@ function getReasoningConfig(model: Model<Api>, options: CodexRequestOptions): Re
 		effort:
 			options.reasoningEffort === "none" ? "none" : requireSupportedEffort(model, options.reasoningEffort as Effort),
 	};
-	if (options.reasoningSummary !== null) {
+	// `reasoning.summary` is accepted only from gpt-5.4 onward; earlier Codex ids
+	// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
+	// "Unsupported parameter: 'reasoning.summary' is not supported with this model".
+	// Mirrors the all_turns gate: an explicit summary is suppressed on unsupported
+	// ids, letting the server skip the human-readable summary stream.
+	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
 		config.summary = options.reasoningSummary ?? "detailed";
 	}
 	return config;
@@ -224,16 +230,61 @@ export async function transformRequestBody(
 		}
 	}
 
-	if (prompt?.developerMessages && prompt.developerMessages.length > 0 && Array.isArray(body.input)) {
-		const developerMessages = prompt.developerMessages.map(
-			text =>
-				({
+	if (prompt?.developerMessages && prompt.developerMessages.length > 0) {
+		const developerMessages: InputItem[] = prompt.developerMessages.map(text => ({
+			type: "message",
+			role: "developer",
+			content: [{ type: "input_text", text }],
+		}));
+		const input = Array.isArray(body.input) ? body.input : [];
+		body.input = [...developerMessages, ...input];
+	}
+
+	let finalInstruction = prompt?.developerMessages.findLast(text => text.trim().length > 0);
+	if (finalInstruction === undefined && Array.isArray(body.input)) {
+		for (let itemIndex = body.input.length - 1; itemIndex >= 0; itemIndex -= 1) {
+			const item = body.input[itemIndex];
+			if (item.role !== "developer" || !Array.isArray(item.content)) continue;
+			for (let partIndex = item.content.length - 1; partIndex >= 0; partIndex -= 1) {
+				const part = item.content[partIndex];
+				if (
+					part &&
+					typeof part === "object" &&
+					"type" in part &&
+					part.type === "input_text" &&
+					"text" in part &&
+					typeof part.text === "string" &&
+					part.text.trim().length > 0
+				) {
+					finalInstruction = part.text;
+					break;
+				}
+			}
+			if (finalInstruction !== undefined) break;
+		}
+	}
+	if (finalInstruction === undefined && typeof body.instructions === "string" && body.instructions.trim().length > 0) {
+		finalInstruction = body.instructions;
+	}
+	if (finalInstruction !== undefined) {
+		const input = Array.isArray(body.input) ? body.input : [];
+		let hasVisibleInput = false;
+		for (const item of input) {
+			if (item.role !== "developer") {
+				hasVisibleInput = true;
+				break;
+			}
+		}
+		if (!hasVisibleInput) {
+			body.input = [
+				...input,
+				{
 					type: "message",
-					role: "developer",
-					content: [{ type: "input_text", text }],
-				}) as InputItem,
-		);
-		body.input = [...developerMessages, ...body.input];
+					role: "user",
+					content: [{ type: "input_text", text: finalInstruction }],
+				},
+			];
+		}
 	}
 
 	const responsesLite = shouldUseCodexResponsesLite(body, options.responsesLite);
@@ -254,9 +305,21 @@ export async function transformRequestBody(
 			...body.reasoning,
 			...reasoningConfig,
 		};
-		// Default reasoning replay to `all_turns` for every Codex request,
-		// mirroring codex-rs; an explicit `reasoningContext` overrides it.
-		body.reasoning.context = options.reasoningContext ?? "all_turns";
+		// Default reasoning replay to `all_turns`, mirroring codex-rs; an
+		// explicit `reasoningContext` overrides the default. The `all_turns`
+		// value is only accepted from gpt-5.4 onward — earlier Codex ids
+		// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
+		// "Unsupported value: 'all_turns' is not supported with this model".
+		// For those, drop `context` so the server applies its `current_turn`
+		// default. The version gate is authoritative: even an explicit
+		// `all_turns` override is suppressed on unsupported models, while
+		// `current_turn`/`auto` (universally supported) always pass through.
+		const context = options.reasoningContext ?? "all_turns";
+		if (context === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
+			delete body.reasoning.context;
+		} else {
+			body.reasoning.context = context;
+		}
 	} else {
 		delete body.reasoning;
 	}
