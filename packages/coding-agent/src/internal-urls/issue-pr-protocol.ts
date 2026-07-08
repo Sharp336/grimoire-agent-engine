@@ -23,6 +23,7 @@ import {
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
+	getOrFetchPrLean,
 	githubIssueJsonWithStateReasonFallback,
 	type PrDiffFile,
 	parsePositiveDecimalInt,
@@ -39,6 +40,8 @@ interface ParsedSingle {
 	repo?: string;
 	number: number;
 	comments: boolean;
+	/** When true, render with compact YAML lean renderer; skip review-comment subprocess. */
+	lean: boolean;
 }
 
 interface ParsedPrDiff {
@@ -185,10 +188,17 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	}
 
 	if (diffParts.length === 0) {
+		const leanParam = url.searchParams.get("lean");
+		const lean = leanParam !== null && leanParam !== "0" && leanParam.toLowerCase() !== "false";
 		const commentsParam = url.searchParams.get("comments");
-		const comments =
-			commentsParam === null ? true : !(commentsParam === "0" || commentsParam.toLowerCase() === "false");
-		return { kind: "single", repo, number: num, comments };
+		// Lean mode skips the extra review-comments subprocess, so comments is
+		// always false in that path regardless of the ?comments= param.
+		const comments = lean
+			? false
+			: commentsParam === null
+				? true
+				: !(commentsParam === "0" || commentsParam.toLowerCase() === "false");
+		return { kind: "single", repo, number: num, comments, lean };
 	}
 
 	// diffParts has already been validated above; scheme is `pr`.
@@ -359,6 +369,8 @@ interface BuildSingleArgs {
 	fetchedAt: number;
 	/** Resolved repo (post short-form expansion) — used for the PR-only diff hint. */
 	repo?: string;
+	/** Defaults to `"text/markdown"`; pass `"text/plain"` for lean YAML output. */
+	contentType?: "text/markdown" | "application/json" | "text/plain";
 }
 
 function buildSingleResource({
@@ -369,9 +381,14 @@ function buildSingleResource({
 	status,
 	fetchedAt,
 	repo,
+	contentType = "text/markdown",
 }: BuildSingleArgs): InternalResource {
 	const notes: string[] = [formatFreshnessNote(status, fetchedAt)];
-	if (!parsed.comments) notes.push("Comments disabled");
+	if (parsed.lean) {
+		notes.push("Lean mode: review/comment bodies omitted. Read pr://<owner>/<repo>/<n> for full view.");
+	} else if (!parsed.comments) {
+		notes.push("Comments disabled");
+	}
 	if (scheme === "pr") {
 		const repoSegment = repo ?? parsed.repo;
 		const diffUrl = repoSegment ? `pr://${repoSegment}/${parsed.number}/diff` : `pr://${parsed.number}/diff`;
@@ -384,7 +401,7 @@ function buildSingleResource({
 	return {
 		url: url.href,
 		content,
-		contentType: "text/markdown",
+		contentType,
 		size: Buffer.byteLength(content, "utf-8"),
 		notes,
 	};
@@ -569,6 +586,25 @@ export class PrProtocolHandler implements ProtocolHandler {
 			}
 		}
 		try {
+			if (parsed.lean) {
+				const lookup = await getOrFetchPrLean({
+					cwd,
+					repo,
+					number: parsed.number,
+					signal: context?.signal,
+					settings: settingsFromContext(context),
+				});
+				return buildSingleResource({
+					url,
+					scheme: "pr",
+					parsed,
+					rendered: lookup.rendered,
+					status: lookup.status,
+					fetchedAt: lookup.fetchedAt,
+					repo,
+					contentType: "text/plain",
+				});
+			}
 			const lookup = await getOrFetchPr({
 				cwd,
 				repo,

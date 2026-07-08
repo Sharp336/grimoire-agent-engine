@@ -28,7 +28,7 @@ import { ToolAbortError } from "./tool-errors";
 // Storage layer
 // ────────────────────────────────────────────────────────────────────────────
 
-export type CacheKind = "issue" | "pr" | "pr-diff";
+export type CacheKind = "issue" | "pr" | "pr-lean" | "pr-diff";
 
 const DEFAULT_CACHE_AUTH_KEY = "default";
 

@@ -17,6 +17,7 @@ import githubDescription from "../prompts/tools/github.md" with { type: "text" }
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
+import { formatPrLean } from "./pr-lean-renderer";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
 import type { OutputMeta } from "./output-meta";
 import { ToolError, throwIfAborted } from "./tool-errors";
@@ -2664,6 +2665,51 @@ export async function getOrFetchPr(options: PrViewLookupOptions): Promise<ViewLo
 		kind: "pr",
 		number: options.number,
 		includeComments,
+		settings: options.settings,
+		authKey,
+		fetchFresh: doFetch,
+	});
+	return {
+		rendered: lookup.rendered,
+		sourceUrl: lookup.sourceUrl,
+		payload: lookup.payload,
+		status: lookup.status,
+		fetchedAt: lookup.fetchedAt,
+	};
+}
+
+async function fetchPrLeanFresh(
+	cwd: string,
+	repo: string,
+	number: number,
+	signal: AbortSignal | undefined,
+): Promise<{ rendered: string; sourceUrl: string | undefined; payload: GhPrViewData }> {
+	const args = ["pr", "view", String(number)];
+	appendRepoFlag(args, repo, String(number));
+	// No `comments` field and no second subprocess — that is the lean contract.
+	args.push("--json", GH_PR_FIELDS_NO_COMMENTS.join(","));
+	const data = await git.github.json<GhPrViewData>(cwd, args, signal, { repoProvided: true });
+	const rendered = formatPrLean(data);
+	return { rendered, sourceUrl: data.url, payload: data };
+}
+
+/**
+ * Cache-aware lean PR view fetcher.
+ *
+ * Returns compact YAML output (see {@link formatPrLean}) with a single `gh pr
+ * view` call — no extra subprocess for inline review comments. Uses the
+ * `pr-lean` cache kind so lean and full views never stomp each other's rows.
+ *
+ * Surfaced via `pr://owner/repo/<N>?lean=1`.
+ */
+export async function getOrFetchPrLean(options: PrViewLookupOptions): Promise<ViewLookupResult<GhPrViewData>> {
+	const authKey = options.cacheAuthKey === undefined ? (resolveGithubCacheAuthKey() ?? null) : options.cacheAuthKey;
+	const doFetch = () => fetchPrLeanFresh(options.cwd, options.repo, options.number, options.signal);
+	const lookup = await getOrFetchView<GhPrViewData>({
+		repo: options.repo,
+		kind: "pr-lean",
+		number: options.number,
+		includeComments: false,
 		settings: options.settings,
 		authKey,
 		fetchFresh: doFetch,
