@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `grok-4.5` to the bundled xAI catalog (`xai` + SuperGrok `xai-oauth`): reasoning, vision-capable, 500K context; OAuth seed also keeps the effort dial on the allowlist.
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed
