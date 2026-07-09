@@ -328,6 +328,10 @@ function decodeLiteralPromptInput(input: string): string | undefined {
 	}
 }
 
+export function isEncodedLiteralPromptInput(input: string): boolean {
+	return decodeLiteralPromptInput(input) !== undefined;
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {

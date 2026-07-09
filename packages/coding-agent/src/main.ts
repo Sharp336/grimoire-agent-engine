@@ -90,7 +90,12 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, encodeLiteralPromptInput, resolvePromptInput } from "./system-prompt";
+import {
+	discoverTitleSystemPromptFile,
+	encodeLiteralPromptInput,
+	isEncodedLiteralPromptInput,
+	resolvePromptInput,
+} from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { AUTO_THINKING, concreteThinkingLevel, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -438,7 +443,7 @@ export async function resolveRestartPromptLaunchValue(
 	fallbackValue?: string,
 ): Promise<string | undefined> {
 	const source = value ?? fallbackValue;
-	if (!source || source.includes("\n")) return source;
+	if (!source || source.includes("\n") || isEncodedLiteralPromptInput(source)) return source;
 	const resolved = resolveRestartLaunchPath(source, launchCwd);
 	try {
 		await Bun.file(resolved).text();

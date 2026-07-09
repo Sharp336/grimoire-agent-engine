@@ -96,6 +96,9 @@ describe("restart launch flags", () => {
 		expect(literalRestartValue).not.toBe("literal prompt");
 		await Bun.write(path.join(sessionCwd, "literal prompt"), "session literal file");
 		expect(await resolvePromptInput(literalRestartValue, "system prompt")).toBe("literal prompt");
+		const secondRestartValue = await resolveRestartPromptLaunchValue(literalRestartValue, sessionCwd);
+		expect(secondRestartValue).toBe(literalRestartValue);
+		expect(await resolvePromptInput(secondRestartValue, "system prompt")).toBe("literal prompt");
 		expect(await resolveRestartPromptLaunchValue("literal\nprompt", sessionCwd)).toBe("literal\nprompt");
 	});
 });
