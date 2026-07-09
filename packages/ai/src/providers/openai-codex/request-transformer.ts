@@ -15,7 +15,7 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	reasoningEffort?: ReasoningConfig["effort"];
 	reasoningSummary?: ReasoningConfig["summary"] | null;
-	/** Explicit `reasoning.context` override; defaults to `all_turns` when unset. The `all_turns` value is gated to gpt-5.4+ Codex models — older ids reject it, so it is suppressed and `context` omitted. */
+	/** Explicit `reasoning.context` override. Omitted by default so Codex applies its native request policy. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
@@ -85,13 +85,12 @@ function getReasoningConfig(model: Model<Api>, options: CodexRequestOptions): Re
 		effort:
 			options.reasoningEffort === "none" ? "none" : requireSupportedEffort(model, options.reasoningEffort as Effort),
 	};
-	// `reasoning.summary` is accepted only from gpt-5.4 onward; earlier Codex ids
-	// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
-	// "Unsupported parameter: 'reasoning.summary' is not supported with this model".
-	// Mirrors the all_turns gate: an explicit summary is suppressed on unsupported
-	// ids, letting the server skip the human-readable summary stream.
-	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
-		config.summary = options.reasoningSummary ?? "detailed";
+	if (
+		options.reasoningSummary !== undefined &&
+		options.reasoningSummary !== null &&
+		supportsCodexReasoningSummary(model.id)
+	) {
+		config.summary = options.reasoningSummary;
 	}
 	return config;
 }
@@ -305,29 +304,24 @@ export async function transformRequestBody(
 			...body.reasoning,
 			...reasoningConfig,
 		};
-		// Default reasoning replay to `all_turns`, mirroring codex-rs; an
-		// explicit `reasoningContext` overrides the default. The `all_turns`
-		// value is only accepted from gpt-5.4 onward — earlier Codex ids
-		// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
-		// "Unsupported value: 'all_turns' is not supported with this model".
-		// For those, drop `context` so the server applies its `current_turn`
-		// default. The version gate is authoritative: even an explicit
-		// `all_turns` override is suppressed on unsupported models, while
-		// `current_turn`/`auto` (universally supported) always pass through.
-		const context = options.reasoningContext ?? "all_turns";
-		if (context === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
-			delete body.reasoning.context;
-		} else {
-			body.reasoning.context = context;
+		if (options.reasoningContext !== undefined) {
+			const context = options.reasoningContext;
+			if (context === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
+				delete body.reasoning.context;
+			} else {
+				body.reasoning.context = context;
+			}
 		}
 	} else {
 		delete body.reasoning;
 	}
 
-	body.text = {
-		...body.text,
-		verbosity: options.textVerbosity || "high",
-	};
+	if (options.textVerbosity !== undefined) {
+		body.text = {
+			...body.text,
+			verbosity: options.textVerbosity,
+		};
+	}
 
 	const include = Array.isArray(options.include) ? [...options.include] : [];
 	include.push("reasoning.encrypted_content");
