@@ -16,6 +16,7 @@ It reflects the current implementation, including partial semantics and metadata
 - [`packages/coding-agent/src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`packages/coding-agent/src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
 - [`packages/coding-agent/src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts)
+- [`packages/coding-agent/src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts)
 - [`packages/coding-agent/src/discovery/builtin-defaults.ts`](../packages/coding-agent/src/discovery/builtin-defaults.ts)
 - [`packages/coding-agent/src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
 - [`packages/coding-agent/src/discovery/cursor.ts`](../packages/coding-agent/src/discovery/cursor.ts)
@@ -56,6 +57,7 @@ Consequence: precedence and deduplication are **name-based only**. Two different
 
 - `native` (priority `100`)
 - `omp-plugins` (priority `90`) — `rules/*.{md,mdc}` inside configured extension package roots, normalized via the shared `buildRuleFromMarkdown` path
+- `claude-plugins` (priority `70`) — `rules/*.{md,mdc}` inside resolved marketplace plugin roots (Claude Code plugin cache plus OMP user/project plugin registries, via `listClaudePluginRoots`), normalized via the shared `buildRuleFromMarkdown` path; each rule's `_source` level is the plugin's `root.scope` (`user` or `project`)
 - `agents` (priority `70`)
 - `cursor` (priority `50`)
 - `windsurf` (priority `50`)
@@ -155,18 +157,20 @@ Ambiguity consequences:
 ### Precedence model
 
 - Providers are ordered by priority descending.
-- Equal priority keeps registration order (`cursor` before `windsurf` from `discovery/index.ts`).
+- Equal priority keeps registration order (`cursor` before `windsurf`, and `claude-plugins` before `agents`, per import order in `discovery/index.ts`).
+- `native` (priority `100`) is the highest-priority rules source, so project/user `.omp/rules` and `RULES.md` rules always take precedence over same-named marketplace (`claude-plugins`), extension-package (`omp-plugins`), and other rules.
 - Dedup is first-wins: first encountered rule name is kept; later same-name items are marked `_shadowed` in `all` and excluded from `items`.
 
 Effective rule provider order is currently:
 
 1. `native` (100)
 2. `omp-plugins` (90)
-3. `agents` (70)
-4. `cursor` (50)
-5. `windsurf` (50)
-6. `cline` (40)
-7. `builtin-defaults` (1)
+3. `claude-plugins` (70)
+4. `agents` (70)
+5. `cursor` (50)
+6. `windsurf` (50)
+7. `cline` (40)
+8. `builtin-defaults` (1)
 
 ### Intra-provider ordering caveat
 
@@ -176,6 +180,7 @@ Notable source-order differences:
 
 - `native` appends project `.omp/rules`, user `~/.omp/agent/rules`, user `RULES.md`, then nearest project `RULES.md`.
 - `omp-plugins` appends `rules/` results per configured extension package root.
+- `claude-plugins` appends `rules/` results per resolved marketplace plugin root, in `listClaudePluginRoots` order (injected `--plugin-dir` roots and project-scope roots before user-scope roots), so a project-scope marketplace plugin's rule wins a same-named user-scope plugin's rule within this provider.
 - `agents` appends project-walk `.agent`/`.agents` rule dirs before user home dirs.
 - `cursor` appends user then project results.
 - `windsurf` appends user `global_rules` first, then project rules.
@@ -261,7 +266,7 @@ Implications:
 
 ## 9. Known partial / non-enforced semantics
 
-1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, `cursor`, `windsurf`, `cline`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
+1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `claude-plugins`, `agents`, `cursor`, `windsurf`, `cline`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
 2. `globs` metadata is surfaced to prompt/UI and is used as a global path gate for TTSR matching, but it is not used to automatically select rulebook rules for `rule://`.
 3. Rule selection for `rule://` includes rulebook, always-apply, and registered TTSR rules (so a triggered TTSR rule can be re-read), but not rules that registered no condition and carry neither a description nor `alwaysApply`.
 4. Discovery warnings (`loadCapability("rules").warnings`) are produced but `createAgentSession` does not currently surface/log them in this path.

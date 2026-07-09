@@ -201,6 +201,7 @@ my-plugin/
   agents/*.md              ← subagent definitions
   hooks/pre/, hooks/post/  ← hooks
   tools/                   ← custom tools
+  rules/*.md, rules/*.mdc  ← rules (loaded via the marketplace/claude-plugins provider, priority 70)
   .mcp.json                ← MCP server definitions
   package.json             ← optional; its version is a fallback when the catalog entry has no version
   README.md                ← recommended: description + usage
