@@ -3277,6 +3277,73 @@ describe("TUI terminal-state regressions", () => {
 				tui.stop();
 			}
 		});
+
+		it("normal TUI startup emits no normal-screen mouse tracking sequences", async () => {
+			// The normal screen must never capture mouse events. Normal-screen
+			// mouse reporting makes focus clicks indistinguishable from deliberate
+			// copy intent and prevents terminal-native text selection. These three
+			// modes are enabled exclusively by the fullscreen overlay path.
+			const term = new VirtualTerminal(40, 8, 200);
+			const writes = captureWrites(term);
+			const tui = new TUI(term);
+			tui.addChild(new MutableLinesComponent(rows("base-", 8)));
+
+			try {
+				tui.start();
+				await settle(term);
+
+				const allWrites = writes.join("");
+				expect(allWrites).not.toContain("\x1b[?1000h");
+				expect(allWrites).not.toContain("\x1b[?1003h");
+				expect(allWrites).not.toContain("\x1b[?1006h");
+			} finally {
+				tui.stop();
+			}
+		});
+
+		it("an SGR left-click is routed to the focused fullscreen overlay component", async () => {
+			// Proves that once a fullscreen overlay enables mouse tracking, the
+			// terminal's SGR mouse reports reach the focused component's handleInput
+			// verbatim. No normal-screen mouse listener intercepts them; the TUI
+			// routes raw input strings to the focused component unchanged.
+			const term = new VirtualTerminal(40, 8, 200);
+			const tui = new TUI(term);
+			tui.addChild(new MutableLinesComponent(rows("base-", 8)));
+
+			class InputRecorder implements Component, Focusable {
+				focused = false;
+				inputs: string[] = [];
+				invalidate(): void {}
+				handleInput(data: string): void {
+					this.inputs.push(data);
+				}
+				render(_width: number): string[] {
+					return ["OVERLAY"];
+				}
+			}
+
+			const overlay = new InputRecorder();
+
+			try {
+				tui.start();
+				await settle(term);
+
+				tui.showOverlay(overlay, {
+					width: "100%",
+					maxHeight: "100%",
+					margin: 0,
+					fullscreen: true,
+				});
+				await settle(term);
+
+				// SGR left-click at column 5, row 3 (1-based terminal coordinates).
+				term.sendInput("\x1b[<0;5;3M");
+
+				expect(overlay.inputs).toEqual(["\x1b[<0;5;3M"]);
+			} finally {
+				tui.stop();
+			}
+		});
 	});
 
 	describe("stress scenarios", () => {

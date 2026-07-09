@@ -967,6 +967,7 @@ export class SelectorController {
 			width: "100%",
 			maxHeight: "100%",
 			margin: 0,
+			fullscreen: true,
 		});
 		this.ctx.ui.setFocus(selector);
 		this.ctx.ui.requestRender();

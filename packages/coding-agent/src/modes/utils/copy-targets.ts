@@ -15,8 +15,16 @@ export interface QuoteBlock {
 	text: string;
 }
 
+/** An ordinary prose block: a maximal run of nonblank markdown lines bounded by a blank line, a closed fence, or a quote run. */
+export interface TextBlock {
+	text: string;
+}
+
 /** A drillable block within an assistant message, in document order. */
-export type MessageBlock = ({ kind: "code" } & CodeBlock) | ({ kind: "quote" } & QuoteBlock);
+export type MessageBlock =
+	| ({ kind: "text" } & TextBlock)
+	| ({ kind: "code" } & CodeBlock)
+	| ({ kind: "quote" } & QuoteBlock);
 
 /** A runnable command found in the transcript. */
 export interface LastCommand {
@@ -63,15 +71,23 @@ const CLOSE_FENCE_RE = /^```/;
 const QUOTE_LINE_RE = /^>(.*)$/;
 
 /**
- * Split assistant markdown into drillable blocks — fenced code and `>`-quoted
- * runs — in document order. Fences mask their bodies, so a `>` line inside a
- * code block is never mistaken for a quote. An unclosed fence is treated as
- * ordinary text, matching the fenced-block grammar.
+ * Split assistant markdown into drillable blocks — fenced code, `>`-quoted
+ * runs, and ordinary prose — in document order. Fences mask their bodies, so
+ * a `>` line inside a code block is never mistaken for a quote. An unclosed
+ * fence is treated as ordinary text, matching the fenced-block grammar.
  */
 export function extractBlocks(text: string): MessageBlock[] {
 	const blocks: MessageBlock[] = [];
 	const lines = text.split("\n");
 	let quote: string[] | undefined;
+	let textLines: string[] = [];
+
+	const flushText = () => {
+		if (textLines.length > 0) {
+			blocks.push({ kind: "text", text: textLines.join("\n") });
+			textLines = [];
+		}
+	};
 	const flushQuote = () => {
 		if (quote) {
 			blocks.push({ kind: "quote", text: quote.join("\n") });
@@ -91,6 +107,7 @@ export function extractBlocks(text: string): MessageBlock[] {
 				}
 			}
 			if (close !== -1) {
+				flushText();
 				flushQuote();
 				blocks.push({ kind: "code", lang: open[1].trim(), code: lines.slice(i + 1, close).join("\n") });
 				i = close;
@@ -101,12 +118,19 @@ export function extractBlocks(text: string): MessageBlock[] {
 		const quoted = QUOTE_LINE_RE.exec(line);
 		if (quoted) {
 			// Strip the `>` marker plus one optional following space.
+			flushText();
 			quote ??= [];
 			quote.push(quoted[1].startsWith(" ") ? quoted[1].slice(1) : quoted[1]);
+		} else if (line.trim().length === 0) {
+			// Blank delimiter — ends both pending text and quote accumulations.
+			flushText();
+			flushQuote();
 		} else {
 			flushQuote();
+			textLines.push(line);
 		}
 	}
+	flushText();
 	flushQuote();
 	return blocks;
 }
@@ -227,24 +251,27 @@ function blockSummaryHint(text: string, codeCount: number, quoteCount: number): 
 	return parts.join(" · ");
 }
 
-/** Build the target node for one assistant message: a leaf when it has no
- * drillable blocks, otherwise a group exposing the full message plus each
- * fenced code block and `>`-quoted block (de-prefixed) as a child target. */
+/** Build the target node for one assistant message: a leaf when it is a plain
+ * prose-only message, otherwise a group exposing the full message plus every
+ * text, fenced-code, and `>`-quoted block as a child target in document order. */
 function messageTarget(text: string, rank: number): CopyTarget {
 	const id = `msg:${rank}`;
 	const label = firstLine(text);
 	const blocks = extractBlocks(text);
 	const messageCopy = rank === 1 ? "Copied last message to clipboard" : "Copied message to clipboard";
 
-	if (blocks.length === 0) {
+	// A message whose entire content is one prose span remains a plain leaf — no
+	// duplicate child that copies the same bytes the parent already copies.
+	if (blocks.length === 0 || (blocks.length === 1 && blocks[0].kind === "text")) {
 		return { id, label, hint: pluralLines(text), preview: text, content: text, copyMessage: messageCopy };
 	}
 
 	// The message node itself copies the full message; each block is a child
-	// copy target you can drill into, kept in document order.
+	// copy target in document order.
 	const children: CopyTarget[] = [];
 	const codeBlocks: CodeBlock[] = [];
 	const quoteBlocks: QuoteBlock[] = [];
+	let textIndex = 0;
 	for (const block of blocks) {
 		if (block.kind === "code") {
 			const j = codeBlocks.length;
@@ -258,7 +285,7 @@ function messageTarget(text: string, rank: number): CopyTarget {
 				content: block.code,
 				copyMessage: `Copied code block ${j + 1} to clipboard`,
 			});
-		} else {
+		} else if (block.kind === "quote") {
 			const j = quoteBlocks.length;
 			quoteBlocks.push(block);
 			children.push({
@@ -268,6 +295,16 @@ function messageTarget(text: string, rank: number): CopyTarget {
 				preview: block.text,
 				content: block.text,
 				copyMessage: `Copied quote block ${j + 1} to clipboard`,
+			});
+		} else {
+			const j = textIndex++;
+			children.push({
+				id: `${id}:text:${j}`,
+				label: firstLine(block.text),
+				hint: `Text ${j + 1} · ${pluralLines(block.text)}`,
+				preview: block.text,
+				content: block.text,
+				copyMessage: `Copied text block ${j + 1} to clipboard`,
 			});
 		}
 	}

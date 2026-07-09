@@ -4,6 +4,7 @@ import {
 	buildCopyTargets,
 	type CopySource,
 	type CopyTarget,
+	extractBlocks,
 	extractCodeBlocks,
 	extractLastCommand,
 	extractQuoteBlocks,
@@ -63,6 +64,61 @@ describe("extractQuoteBlocks", () => {
 	});
 });
 
+describe("extractBlocks", () => {
+	it("emits a text block for bare prose", () => {
+		expect(extractBlocks("Hello world")).toEqual([{ kind: "text", text: "Hello world" }]);
+	});
+
+	it("splits on blank lines into separate text blocks", () => {
+		expect(extractBlocks("First\n\nSecond")).toEqual([
+			{ kind: "text", text: "First" },
+			{ kind: "text", text: "Second" },
+		]);
+	});
+
+	it("treats a whitespace-only line as a text delimiter", () => {
+		expect(extractBlocks("Block A\n   \nBlock B")).toEqual([
+			{ kind: "text", text: "Block A" },
+			{ kind: "text", text: "Block B" },
+		]);
+	});
+
+	it("emits text, code, text in document order", () => {
+		expect(extractBlocks("intro\n```ts\ncode\n```\noutro")).toEqual([
+			{ kind: "text", text: "intro" },
+			{ kind: "code", lang: "ts", code: "code" },
+			{ kind: "text", text: "outro" },
+		]);
+	});
+
+	it("blank lines inside a fenced block stay inside the code and do not create text blocks", () => {
+		expect(extractBlocks("```py\nx = 1\n\ny = 2\n```")).toEqual([
+			{ kind: "code", lang: "py", code: "x = 1\n\ny = 2" },
+		]);
+	});
+
+	it("treats an unclosed fence as ordinary text", () => {
+		expect(extractBlocks("Before\n```ts\nnot closed\nAfter")).toEqual([
+			{ kind: "text", text: "Before\n```ts\nnot closed\nAfter" },
+		]);
+	});
+
+	it("preserves list markers and headings inside text blocks", () => {
+		expect(extractBlocks("# Heading\n\n- item one\n- item two")).toEqual([
+			{ kind: "text", text: "# Heading" },
+			{ kind: "text", text: "- item one\n- item two" },
+		]);
+	});
+
+	it("a quote run flushes pending text first and text resumes after the run closes", () => {
+		expect(extractBlocks("Intro\n> quoted\nRest")).toEqual([
+			{ kind: "text", text: "Intro" },
+			{ kind: "quote", text: "quoted" },
+			{ kind: "text", text: "Rest" },
+		]);
+	});
+});
+
 describe("extractLastCommand", () => {
 	it("returns the most recent bash command, walking backwards", () => {
 		const messages = [
@@ -113,12 +169,12 @@ describe("buildCopyTargets", () => {
 		expect(targets[1]?.id).toBe("msg:2");
 
 		// The newer message is itself a copy target (full text) AND a tree node
-		// exposing each code block as a child copy target.
+		// exposing text spans and code blocks as child copy targets in document order.
 		const group = targets[0]!;
 		expect(group.content).toBe(newer);
-		expect(group.children?.map(c => c.label)).toEqual(["Block 1", "Block 2", "All 2 blocks"]);
-		expect(group.children?.[0]?.content).toBe("const a = 1;");
-		expect(group.children?.[0]?.language).toBe("ts"); // drives preview syntax highlighting
+		expect(group.children?.map(c => c.label)).toEqual(["Newer message", "Block 1", "and", "Block 2", "All 2 blocks"]);
+		expect(group.children?.find(c => c.id === "msg:1:code:0")?.content).toBe("const a = 1;");
+		expect(group.children?.find(c => c.id === "msg:1:code:0")?.language).toBe("ts"); // drives preview syntax highlighting
 		expect(group.children?.at(-1)?.content).toBe("const a = 1;\n\nprint(2)");
 
 		// The older, code-free message is a leaf that copies its full text.
@@ -132,7 +188,7 @@ describe("buildCopyTargets", () => {
 		);
 		const msg = byId(targets, "msg:1");
 		expect(msg?.content).toBe("Just one\n```js\nfoo();\n```");
-		expect(msg?.children?.map(c => c.label)).toEqual(["Block 1"]);
+		expect(msg?.children?.map(c => c.label)).toEqual(["Just one", "Block 1"]);
 	});
 
 	it("drills a quoted message into a de-prefixed quote child", () => {
@@ -155,6 +211,7 @@ describe("buildCopyTargets", () => {
 		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
 		const msg = byId(targets, "msg:1");
 		expect(msg?.children?.map(c => c.id)).toEqual([
+			"msg:1:text:0",
 			"msg:1:code:0",
 			"msg:1:quote:0",
 			"msg:1:code:1",
@@ -210,5 +267,98 @@ describe("buildCopyTargets", () => {
 		expect(cmd?.content).toBe("bun check");
 		expect(cmd?.language).toBe("bash");
 		expect(byId(targets, "cmd:2")?.content).toBe("echo old");
+	});
+
+	it("a plain text-only message remains a leaf with no children", () => {
+		const targets = buildCopyTargets(
+			source({ messages: [assistantText("Hello world")] as unknown as AgentMessage[] }),
+		);
+		const msg = byId(targets, "msg:1");
+		expect(msg?.content).toBe("Hello world");
+		expect(msg?.children).toBeUndefined();
+		expect(msg?.hint).toBe("1 line");
+	});
+
+	it("blank-line-delimited paragraphs become indexed text children with exact ids, labels, hints, payloads, and copy messages", () => {
+		const text = "First paragraph\n\nSecond paragraph";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.content).toBe(text);
+		expect(msg?.children?.map(c => c.id)).toEqual(["msg:1:text:0", "msg:1:text:1"]);
+		const t0 = msg!.children![0]!;
+		expect(t0.label).toBe("First paragraph");
+		expect(t0.hint).toBe("Text 1 · 1 line");
+		expect(t0.content).toBe("First paragraph");
+		expect(t0.copyMessage).toBe("Copied text block 1 to clipboard");
+		const t1 = msg!.children![1]!;
+		expect(t1.label).toBe("Second paragraph");
+		expect(t1.hint).toBe("Text 2 · 1 line");
+		expect(t1.content).toBe("Second paragraph");
+		expect(t1.copyMessage).toBe("Copied text block 2 to clipboard");
+	});
+
+	it("text, code, quote, and trailing text children appear in source order", () => {
+		const text = "Intro\n```py\nprint(1)\n```\n\n> quoted\n\nTrailing";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children?.map(c => c.id)).toEqual(["msg:1:text:0", "msg:1:code:0", "msg:1:quote:0", "msg:1:text:1"]);
+		expect(msg?.children?.find(c => c.id === "msg:1:text:0")?.content).toBe("Intro");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:1")?.content).toBe("Trailing");
+	});
+
+	it("five-block message: text, fenced code, text, quote, trailing text appear in exact source order with correct ids and payloads", () => {
+		const text = "Intro text\n```ts\nconst x = 1;\n```\nMiddle text\n\n> quoted line\n\nTrailing text";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children?.map(c => c.id)).toEqual([
+			"msg:1:text:0",
+			"msg:1:code:0",
+			"msg:1:text:1",
+			"msg:1:quote:0",
+			"msg:1:text:2",
+		]);
+		expect(msg?.children?.find(c => c.id === "msg:1:text:0")?.content).toBe("Intro text");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:0")?.hint).toBe("Text 1 · 1 line");
+		expect(msg?.children?.find(c => c.id === "msg:1:code:0")?.content).toBe("const x = 1;");
+		expect(msg?.children?.find(c => c.id === "msg:1:code:0")?.language).toBe("ts");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:1")?.content).toBe("Middle text");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:1")?.hint).toBe("Text 2 · 1 line");
+		expect(msg?.children?.find(c => c.id === "msg:1:quote:0")?.content).toBe("quoted line");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:2")?.content).toBe("Trailing text");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:2")?.hint).toBe("Text 3 · 1 line");
+	});
+
+	it("text block payloads preserve list markers, headings, and blank-line boundaries exactly", () => {
+		const text = "# Heading\n\n- item one\n- item two\n\n**bold**";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:0")?.content).toBe("# Heading");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:1")?.content).toBe("- item one\n- item two");
+		expect(msg?.children?.find(c => c.id === "msg:1:text:2")?.content).toBe("**bold**");
+	});
+
+	it("a whitespace-only line delimits adjacent text blocks", () => {
+		const text = "Block A\n   \nBlock B";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children?.map(c => c.id)).toEqual(["msg:1:text:0", "msg:1:text:1"]);
+		expect(msg?.children?.[0]?.content).toBe("Block A");
+		expect(msg?.children?.[1]?.content).toBe("Block B");
+	});
+
+	it("blank lines inside a fenced code block stay inside the code and do not create text children", () => {
+		const text = "```py\nx = 1\n\ny = 2\n```";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children?.map(c => c.id)).toEqual(["msg:1:code:0"]);
+		expect(msg?.children?.[0]?.content).toBe("x = 1\n\ny = 2");
+	});
+
+	it("an unclosed fence is treated as ordinary text and the message remains a leaf", () => {
+		const text = "Before\n```ts\nno close\nAfter";
+		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
+		const msg = byId(targets, "msg:1");
+		expect(msg?.children).toBeUndefined();
+		expect(msg?.content).toBe(text);
 	});
 });
