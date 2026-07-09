@@ -263,16 +263,39 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (el !== null && lockRef.current) el.scrollTop = el.scrollHeight;
 	}, [entries, stream, activeTools, working]);
 
-	// Active tools not already represented as toolCall blocks in the stream ghost.
+	// Active tools not already represented as toolCall blocks in the stream ghost
+	// or in finalized entries (prevents duplicate tool cards when the entry frame
+	// arrives before tool_execution_start).
 	const streamIds = new Set<string>();
 	if (stream !== null) {
 		for (const block of stream.content) {
 			if (block.type === "toolCall") streamIds.add(block.id);
 		}
 	}
+	const entryIds = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			const blocks = entry.message.content;
+			if (Array.isArray(blocks)) {
+				for (const block of blocks) {
+					if (
+						block &&
+						typeof block === "object" &&
+						"type" in block &&
+						block.type === "toolCall" &&
+						"id" in block
+					) {
+						if (typeof block.id === "string") {
+							entryIds.add(block.id);
+						}
+					}
+				}
+			}
+		}
+	}
 	const tailTools: ActiveTool[] = [];
 	for (const tool of activeTools.values()) {
-		if (!streamIds.has(tool.toolCallId)) tailTools.push(tool);
+		if (!streamIds.has(tool.toolCallId) && !entryIds.has(tool.toolCallId)) tailTools.push(tool);
 	}
 
 	return (
@@ -317,7 +340,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 					))}
 				</Row>
 			)}
-			{working && stream === null && (
+			{working && stream === null && activeTools.size === 0 && (
 				<Row kind="assistant" gutter="agent">
 					<div className="tr-shimmer">thinking…</div>
 				</Row>

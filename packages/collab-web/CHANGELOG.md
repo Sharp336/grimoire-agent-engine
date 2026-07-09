@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed duplicate tool cards and stale "thinking…" shimmer during tool execution in the live collab view.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed
