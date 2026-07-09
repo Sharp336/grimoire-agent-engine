@@ -492,7 +492,7 @@ async function askSingleQuestion(
 		while (true) {
 			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
 
-			if (!navigation?.allowForward && selected.size > 0) {
+			if (selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);
@@ -712,7 +712,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	static createIf(session: ToolSession): AskTool | null {
-		return session.hasUI ? new AskTool(session) : null;
+		return (session.supportsUserPrompt ?? session.hasUI) ? new AskTool(session) : null;
 	}
 
 	/** Send terminal notification when ask tool is waiting for input */

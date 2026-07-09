@@ -966,6 +966,7 @@ interface RunRootCommandDependencies {
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: typeof selectSession;
 	runAcpMode?: RunAcpMode;
+	runRpcMode?: RunRpcMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
 }
@@ -1055,7 +1056,7 @@ export async function runRootCommand(
 	} else if (parsedArgs.mode === "acp") {
 		applyAcpDefaultSettingOverrides(settingsInstance);
 	}
-	if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
+	if (parsedArgs.noPty || parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 		Bun.env.PI_NO_PTY = "1";
 	}
 	if (parsedArgs.noTitle || parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "acp") {
@@ -1249,6 +1250,7 @@ export async function runRootCommand(
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+	sessionOptions.supportsUserPrompt = isInteractive || mode === "rpc" || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
 
 	// OTEL: register the global OTLP trace exporter when an OTLP endpoint is
@@ -1404,9 +1406,9 @@ export async function runRootCommand(
 
 		if (mode === "rpc" || mode === "rpc-ui") {
 			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
-			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
+			const runRpcMode: RunRpcMode = deps.runRpcMode ?? (await import("./modes/rpc/rpc-mode")).runRpcMode;
 			stopStartupWatchdog();
-			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus);
+			await runRpcMode(session, setToolUIContext, eventBus);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);

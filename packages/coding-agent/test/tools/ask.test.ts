@@ -1152,6 +1152,43 @@ describe("AskTool multi-question navigation", () => {
 		expect(result.details?.results?.[2]?.customInput).toBeUndefined();
 	});
 
+	it("offers Done for multi-select questions when keyboard navigation is unavailable", async () => {
+		const tool = new AskTool(createSession());
+		let firstVisits = 0;
+		let sawDoneAfterSelection = false;
+		const questions = [
+			{
+				id: "first",
+				question: "First?",
+				options: [{ label: "one" }, { label: "two" }],
+				multi: true,
+			},
+			{
+				id: "second",
+				question: "Second?",
+				options: [{ label: "alpha" }, { label: "beta" }],
+			},
+		];
+		const context = createContext({
+			select: async (prompt, options) => {
+				if (prompt.includes("First?")) {
+					firstVisits += 1;
+					if (firstVisits === 1) return "one";
+					const done = options.find(option => selectItemLabel(option)?.includes("Done selecting"));
+					sawDoneAfterSelection = done !== undefined;
+					return selectItemLabel(done);
+				}
+				return "alpha";
+			},
+		});
+
+		const result = await tool.execute("call-nav-multi-rpc-done", { questions }, undefined, undefined, context);
+
+		expect(sawDoneAfterSelection).toBe(true);
+		expect(result.details?.results?.[0]?.selectedOptions).toEqual(["one"]);
+		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["alpha"]);
+	});
+
 	it("persists state when changing an earlier answer and continuing", async () => {
 		const tool = new AskTool(createSession());
 		let firstVisits = 0;
@@ -1526,5 +1563,31 @@ describe("askToolRenderer malformed call args", () => {
 		expect(text).toContain("Real question");
 		expect(text).toContain("BareString");
 		expect(text).toContain("Proper");
+	});
+});
+
+describe("AskTool.createIf gating", () => {
+	const base: ToolSession = {
+		cwd: "/tmp/test",
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated(),
+	};
+
+	it("registers ask when supportsUserPrompt is true", () => {
+		expect(AskTool.createIf({ ...base, supportsUserPrompt: true })).toBeInstanceOf(AskTool);
+	});
+
+	it("does not register ask when supportsUserPrompt is explicitly false even if hasUI is true", () => {
+		expect(AskTool.createIf({ ...base, supportsUserPrompt: false, hasUI: true })).toBeNull();
+	});
+
+	it("falls back to hasUI when supportsUserPrompt is unset (true)", () => {
+		expect(AskTool.createIf({ ...base, hasUI: true })).toBeInstanceOf(AskTool);
+	});
+
+	it("falls back to hasUI when supportsUserPrompt is unset (false)", () => {
+		expect(AskTool.createIf({ ...base, hasUI: false })).toBeNull();
 	});
 });

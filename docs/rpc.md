@@ -409,7 +409,12 @@ From `packages/agent/src/agent.ts` defaults:
 
 ## Extension UI Sub-Protocol
 
-Extensions in RPC mode use request/response UI frames.
+Extensions **and the built-in `ask` tool** in RPC mode use request/response UI
+frames. Over plain `--mode rpc` (no `rpc-ui` alias needed), `ask` routes its
+single-select through `select` and its free-text ("Other") answer through
+`editor`; multi-select is driven as repeated `select` frames (each pick toggles;
+the title carries `(N selected)` and a "Done" option). A host that renders these
+frames can answer `ask` prompts directly.
 
 ### Outbound request
 

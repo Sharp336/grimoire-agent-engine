@@ -548,6 +548,11 @@ export interface CreateAgentSessionOptions {
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
 
+	/** Whether the session can surface an interactive user prompt (enables the `ask` tool).
+	 *  Separate from `hasUI` so RPC hosts get `ask` without also flipping UI-only startup
+	 *  paths (MCP discovery deferral, MCP status events, LSP warmup). Defaults to `hasUI`. */
+	supportsUserPrompt?: boolean;
+
 	/**
 	 * Opt-in OpenTelemetry instrumentation forwarded to the underlying Agent.
 	 * Passing `{}` enables the loop's GenAI-semantic-convention spans. See
@@ -1539,6 +1544,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			hasUI: options.hasUI ?? false,
+			supportsUserPrompt: options.supportsUserPrompt ?? options.hasUI ?? false,
 			enableLsp,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
