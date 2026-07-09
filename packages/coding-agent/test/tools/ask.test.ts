@@ -1528,3 +1528,29 @@ describe("askToolRenderer malformed call args", () => {
 		expect(text).toContain("Proper");
 	});
 });
+
+describe("AskTool.createIf gating", () => {
+	const base: ToolSession = {
+		cwd: "/tmp/test",
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated(),
+	};
+
+	it("registers ask when supportsUserPrompt is true", () => {
+		expect(AskTool.createIf({ ...base, supportsUserPrompt: true })).toBeInstanceOf(AskTool);
+	});
+
+	it("does not register ask when supportsUserPrompt is explicitly false even if hasUI is true", () => {
+		expect(AskTool.createIf({ ...base, supportsUserPrompt: false, hasUI: true })).toBeNull();
+	});
+
+	it("falls back to hasUI when supportsUserPrompt is unset (true)", () => {
+		expect(AskTool.createIf({ ...base, hasUI: true })).toBeInstanceOf(AskTool);
+	});
+
+	it("falls back to hasUI when supportsUserPrompt is unset (false)", () => {
+		expect(AskTool.createIf({ ...base, hasUI: false })).toBeNull();
+	});
+});

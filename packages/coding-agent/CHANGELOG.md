@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The interactive `ask` tool now works over plain `--mode rpc`, so UI-capable headless hosts can answer `ask` prompts (single-select via `select`, "Other" free-text via `editor`, multi-select as repeated `select` frames) without launching `--mode rpc-ui`. A new `supportsUserPrompt` session capability — decoupled from `hasUI` — gates `ask` for RPC hosts without flipping UI-only startup paths (MCP discovery deferral, MCP status events, LSP warmup). `--print`/`--json` remain non-interactive; `rpc-ui` is retained as a working alias.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

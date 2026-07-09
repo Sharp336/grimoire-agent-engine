@@ -158,6 +158,8 @@ export interface ToolSession {
 	cwd: string;
 	/** Whether UI is available */
 	hasUI: boolean;
+	/** Whether the session can surface an interactive user prompt (gates the `ask` tool). */
+	supportsUserPrompt?: boolean;
 	/**
 	 * Suppress the spawn specialization/coordination advisory appended to `task`
 	 * results. Set by internal/programmatic callers (e.g. the commit agent's
