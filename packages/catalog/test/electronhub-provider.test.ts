@@ -24,6 +24,7 @@ import {
 	ELECTRONHUB_DEVPASS_STATIC_MODELS,
 	electronHubModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import ELECTRONHUB_LIVE_DEVPASS from "./fixtures/electronhub-devpass-models.json" with { type: "json" };
 
 const EXPECTED_DEVPASS_IDS = [
 	"kimi-k2.6:dev",
@@ -64,7 +65,13 @@ function mockElectronHubModelsResponse(entries: Array<Record<string, unknown>>):
 
 function makeEntry(
 	id: string,
-	opts: { vision?: boolean; reasoning?: boolean; functionCall?: boolean; devpassOnly?: boolean } = {},
+	opts: {
+		vision?: boolean;
+		reasoning?: boolean;
+		functionCall?: boolean;
+		devpassOnly?: boolean;
+		devpassPlan?: boolean;
+	} = {},
 ) {
 	return {
 		id,
@@ -77,6 +84,7 @@ function makeEntry(
 			web_search: false,
 			...(opts.devpassOnly !== undefined && { devpass_only: opts.devpassOnly }),
 		},
+		...(opts.devpassPlan && { pricing: { type: "per_million_tokens", plan: "devpass" } }),
 	};
 }
 
@@ -91,13 +99,17 @@ describe("ElectronHub dynamic discovery", () => {
 			makeEntry("gemini-3-pro", { vision: true, reasoning: true }),
 			// Edge: a devpass_only model WITHOUT the :dev suffix should still pass.
 			makeEntry("special-devpass-model", { reasoning: true, devpassOnly: true }),
+			// Edge: a model with pricing.plan=devpass but no :dev suffix and no
+			// metadata.devpass_only should still pass (two live DevPass records
+			// omit devpass_only — pricing.plan is the reliable secondary signal).
+			makeEntry("plan-only-devpass-model", { reasoning: true, devpassPlan: true }),
 		]);
 
 		const manager = createModelManager(electronHubModelManagerOptions({ apiKey: "ek-dev_test", fetch: fetchMock }));
 		const { models } = await manager.refresh("online");
 		const ids = models.map(m => m.id).sort();
 
-		expect(ids).toEqual(["glm-5.2:dev", "kimi-k2.6:dev", "special-devpass-model"].sort());
+		expect(ids).toEqual(["glm-5.2:dev", "kimi-k2.6:dev", "plan-only-devpass-model", "special-devpass-model"].sort());
 	});
 
 	it("maps live metadata: vision → image input, reasoning always true for DevPass", async () => {
@@ -125,5 +137,33 @@ describe("ElectronHub dynamic discovery", () => {
 		expect(qwen).toBeDefined();
 		expect(qwen!.reasoning).toBe(true);
 		expect(qwen!.input).toEqual(["text", "image"]);
+	});
+});
+
+describe("ElectronHub DevPass static seed mirrors live /v1/models", () => {
+	// Source evidence for the three IDs the public Coding Plan docs omit
+	// (gpt-oss-120b:dev, gemma-4-31b-it:dev, qwen3.6-27b:dev). The fixture is
+	// a sanitized snapshot of the live `/v1/models` DevPass entries — no API
+	// key, only the fields the resolver relies on. Asserts the review
+	// contract: every static-seed id appears in the live data with a `:dev`
+	// suffix and `pricing.plan === "devpass"`.
+	const liveEntries = ELECTRONHUB_LIVE_DEVPASS.data as Array<Record<string, unknown>>;
+
+	it("every static-seed id is present in the live fixture", () => {
+		const liveIds = new Set(liveEntries.map(e => e.id));
+		for (const seed of ELECTRONHUB_DEVPASS_STATIC_MODELS) {
+			expect(liveIds.has(seed.id)).toBe(true);
+		}
+	});
+
+	it("every live DevPass entry has :dev suffix and pricing.plan devpass", () => {
+		for (const entry of liveEntries) {
+			const id = entry.id;
+			expect(typeof id === "string" && id.endsWith(":dev")).toBe(true);
+			const pricing = entry.pricing;
+			expect(
+				typeof pricing === "object" && pricing !== null && "plan" in pricing && pricing.plan === "devpass",
+			).toBe(true);
+		}
 	});
 });

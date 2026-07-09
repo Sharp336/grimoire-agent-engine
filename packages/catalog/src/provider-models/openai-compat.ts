@@ -1701,13 +1701,15 @@ const ELECTRONHUB_OPENAI_COMPAT = {
 /**
  * Static seed of the ElectronHub Coding Plan (DevPass) catalogue. DevPass
  * `ek-dev-…` keys authorize only the `:dev`-suffixed models surfaced by
- * `/v1/models` (carrying `metadata.devpass_only: true`); every other id on
- * that endpoint returns 404 "not included in the Electron Hub Coding Plan".
+ * `/v1/models`; every other id on that endpoint returns 404 "not included
+ * in the Electron Hub Coding Plan".
  *
- * The seed mirrors the six live DevPass records so `/login electronhub` has a
- * usable offline catalogue even when generation runs without a key. Dynamic
- * discovery (`fetchDynamicModels`) is authoritative and refreshes these from
- * `/v1/models` at runtime.
+ * The seed mirrors the six live DevPass records (verified against a
+ * sanitized `/v1/models` snapshot — see
+ * `test/fixtures/electronhub-devpass-models.json`) so `/login electronhub`
+ * has a usable offline catalogue even when generation runs without a key.
+ * Dynamic discovery (`fetchDynamicModels`) is authoritative and refreshes
+ * these from `/v1/models` at runtime.
  */
 export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
@@ -1789,9 +1791,13 @@ export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-compl
 		compat: ELECTRONHUB_OPENAI_COMPAT,
 	},
 ];
-
 function isElectronHubDevpassModel(entry: OpenAICompatibleModelRecord, id: string): boolean {
 	if (id.endsWith(":dev")) return true;
+	// Fallback for non-suffixed DevPass entries: check `pricing.plan === "devpass"`.
+	// Note: `metadata.devpass_only` is not set on all DevPass models (two of the
+	// six live records omit it), so `pricing.plan` is the reliable secondary signal.
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	if (pricing?.plan === "devpass") return true;
 	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
 	return metadata?.devpass_only === true;
 }

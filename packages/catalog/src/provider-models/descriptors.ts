@@ -137,7 +137,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "electronhub",
-		defaultModel: "glm-5.2:dev",
+		defaultModel: "kimi-k2.6:dev",
 		envVars: ["ELECTRONHUB_DEV_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => electronHubModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,

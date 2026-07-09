@@ -6,6 +6,12 @@
 
 - Added ElectronHub DevPass provider with 6 static-seed models (`glm-5.2:dev`, `kimi-k2.6:dev`, `minimax-m2.7:dev`, `gpt-oss-120b:dev`, `gemma-4-31b-it:dev`, `qwen3.6-27b:dev`) and dynamic `/v1/models` discovery filtered to `:dev`-suffixed IDs.
 
+
+### Fixed
+
+- Switched ElectronHub DevPass default model from `glm-5.2:dev` to `kimi-k2.6:dev` (documented available model) to avoid potential 404 on fresh installs before dynamic discovery refreshes.
+- Fixed DevPass discovery filter to use `pricing.plan === "devpass"` as secondary signal instead of relying solely on `metadata.devpass_only` (two of six live DevPass models omit that field).
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

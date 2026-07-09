@@ -1,0 +1,141 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-oss-120b:dev",
+      "name": "OpenAI: GPT OSS 120B (DevPass)",
+      "object": "model",
+      "owned_by": "openai",
+      "tokens": 128000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 0.15, "output": 0.6 }
+      },
+      "metadata": {
+        "vision": false,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": true,
+        "devpass_only": true
+      }
+    },
+    {
+      "id": "gemma-4-31b-it:dev",
+      "name": "Google: Gemma 4 31B (DevPass)",
+      "object": "model",
+      "owned_by": "google",
+      "tokens": 262000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 0.14, "output": 0.4 }
+      },
+      "metadata": {
+        "vision": true,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3.6-27b:dev",
+      "name": "Alibaba: Qwen3.6 27B (DevPass)",
+      "object": "model",
+      "owned_by": "alibaba",
+      "tokens": 1000000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 0.3, "output": 2.5 }
+      },
+      "metadata": {
+        "vision": true,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kimi-k2.6:dev",
+      "name": "MoonshotAI: Kimi K2.6 (DevPass)",
+      "object": "model",
+      "owned_by": "moonshotai",
+      "tokens": 240000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 0.75, "output": 3.5 }
+      },
+      "metadata": {
+        "vision": false,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": true,
+        "devpass_only": true
+      }
+    },
+    {
+      "id": "minimax-m2.7:dev",
+      "name": "MiniMax: MiniMax M2.7 (DevPass)",
+      "object": "model",
+      "owned_by": "minimax",
+      "tokens": 180000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 0.3, "output": 1.2 }
+      },
+      "metadata": {
+        "vision": false,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": true,
+        "devpass_only": true
+      }
+    },
+    {
+      "id": "glm-5.2:dev",
+      "name": "ZhipuAI: GLM 5.2 (DevPass)",
+      "object": "model",
+      "owned_by": "zhipuai",
+      "tokens": 400000,
+      "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
+      "premium_model": false,
+      "pricing": {
+        "type": "per_million_tokens",
+        "input": 0,
+        "output": 0,
+        "plan": "devpass",
+        "reference": { "input": 1, "output": 3.2 }
+      },
+      "metadata": {
+        "vision": false,
+        "function_call": true,
+        "web_search": false,
+        "reasoning": true,
+        "devpass_only": true
+      }
+    }
+  ]
+}
