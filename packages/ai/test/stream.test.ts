@@ -21,8 +21,17 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("google-gemini-cli"),
 	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [
+	anthropicOAuthToken,
+	githubCopilotToken,
+	geminiCliToken,
+	antigravityToken,
+	openaiCodexToken,
+	xaiOauthFromTestauth,
+] = oauthTokens;
+const xaiOauthToken = e2eApiKey("XAI_OAUTH_TOKEN") ?? xaiOauthFromTestauth;
 
 function hasBedrockCredentials(): boolean {
 	const region = e2eApiKey("AWS_REGION") ?? e2eApiKey("AWS_DEFAULT_REGION");
@@ -1075,6 +1084,123 @@ describe("Generate E2E Tests", () => {
 			{ retry: 3 },
 		);
 	});
+
+	describe.skipIf(!e2eApiKey("XAI_API_KEY") || !getBundledModel("xai", "grok-4.5"))(
+		"xAI Provider (grok-4.5 via OpenAI Completions)",
+		() => {
+			const llm = getBundledModel("xai", "grok-4.5")!;
+			const efforts = llm.thinking?.mode === "effort" ? llm.thinking.efforts : [];
+
+			it(
+				"should complete basic text generation",
+				async () => {
+					await basicTextGeneration(llm);
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle tool calling",
+				async () => {
+					await handleToolCall(llm);
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle streaming",
+				async () => {
+					await handleStreaming(llm);
+				},
+				{ retry: 3 },
+			);
+
+			for (const effort of efforts) {
+				it(
+					`should handle thinking mode (effort=${effort})`,
+					async () => {
+						await handleThinking(llm, { reasoning: effort });
+					},
+					{ retry: 2 },
+				);
+			}
+
+			it(
+				"should handle multi-turn with thinking and tools",
+				async () => {
+					await multiTurn(llm, { reasoning: Effort.Medium });
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle image input",
+				async () => {
+					await handleImage(llm);
+				},
+				{ retry: 3 },
+			);
+		},
+	);
+
+	describe.skipIf(!xaiOauthToken || !getBundledModel("xai-oauth", "grok-4.5"))(
+		"xAI OAuth Provider (grok-4.5 via OpenAI Responses)",
+		() => {
+			const llm = getBundledModel("xai-oauth", "grok-4.5") as Model<"openai-responses">;
+			const efforts = llm.thinking?.mode === "effort" ? llm.thinking.efforts : [];
+			const opts = { apiKey: xaiOauthToken! };
+
+			it(
+				"should complete basic text generation",
+				async () => {
+					await basicTextGeneration(llm, opts);
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle tool calling",
+				async () => {
+					await handleToolCall(llm, opts);
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle streaming",
+				async () => {
+					await handleStreaming(llm, opts);
+				},
+				{ retry: 3 },
+			);
+
+			for (const effort of efforts) {
+				it(
+					`should handle thinking mode (effort=${effort})`,
+					async () => {
+						await handleThinking(llm, { ...opts, reasoning: effort });
+					},
+					{ retry: 2 },
+				);
+			}
+
+			it(
+				"should handle multi-turn with thinking and tools",
+				async () => {
+					await multiTurn(llm, { ...opts, reasoning: Effort.High });
+				},
+				{ retry: 3 },
+			);
+
+			it(
+				"should handle image input",
+				async () => {
+					await handleImage(llm, opts);
+				},
+				{ retry: 3 },
+			);
+		},
+	);
 
 	describe.skipIf(!e2eApiKey("GROQ_API_KEY"))("Groq Provider (gpt-oss-20b via OpenAI Completions)", () => {
 		const llm = getBundledModel("groq", "openai/gpt-oss-20b");
