@@ -17,6 +17,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	electronHubModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -133,6 +134,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => devinModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Devin", envVars: ["DEVIN_API_KEY"], oauthProvider: "devin" },
+	},
+	{
+		id: "electronhub",
+		defaultModel: "glm-5.2:dev",
+		envVars: ["ELECTRONHUB_DEV_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => electronHubModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "ElectronHub", envVars: ["ELECTRONHUB_DEV_API_KEY"], oauthProvider: "electronhub" },
 	},
 	{
 		id: "firepass",

@@ -34,6 +34,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	ELECTRONHUB_DEVPASS_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -516,6 +517,13 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
+	// Seed ElectronHub DevPass models so the provider is usable when catalog
+	// generation has no live API key. DevPass `ek-dev-…` keys authorize only the
+	// `:dev`-suffixed models; discovery (`dynamicModelsAuthoritative: true`)
+	// replaces these at runtime when a key is present.
+	if (!authoritativeCatalogProviders.has("electronhub")) {
+		allModels.push(...ELECTRONHUB_DEVPASS_STATIC_MODELS);
+	}
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -594,6 +602,12 @@ async function generateModels() {
 	// Fill remaining null endpoint limits from each model's canonical-family
 	// reference. Runs last so canonical ids and explicit policy limits are final.
 	applyCanonicalLimitFallback(allModels);
+	// ElectronHub DevPass models don't expose an output-token cap in their
+	// /v1/models metadata; keep the intentional null so the runtime doesn't
+	// inherit a family-reference limit the gateway may not honour.
+	for (const model of allModels) {
+		if (model.provider === "electronhub") model.maxTokens = null;
+	}
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);

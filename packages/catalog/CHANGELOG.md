@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub DevPass provider with 6 static-seed models (`glm-5.2:dev`, `kimi-k2.6:dev`, `minimax-m2.7:dev`, `gpt-oss-120b:dev`, `gemma-4-31b-it:dev`, `qwen3.6-27b:dev`) and dynamic `/v1/models` discovery filtered to `:dev`-suffixed IDs.
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub provider registry with API-key login flow for Coding Plan (DevPass) models.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added
