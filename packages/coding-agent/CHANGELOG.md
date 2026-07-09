@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in local global memory bank. When `memory.backend=local` and `memory.globalBank` is enabled, the `learn` tool can write cross-project lessons with `scope: "global"`, prompt injection reads the global bank before project memory, and `memory://global` resolves the bank's `learned.md`.
+- Added Nomnoml diagram rendering with a `/settings` mode for SVG images, ASCII fallback, or highlighted fences; when active, Nomnoml replaces the Mermaid prompt/rendering hint.
+- Added opt-in lazy MCP discovery (`mcp.lazyDiscovery`) so configured MCP servers can be advertised from config and cached schemas without connecting at startup; matching or calling a lazy tool connects only the selected server on demand.
+- `/guided-goal` now injects project context files (AGENTS.md and the like) as an untrusted `<repository-context>` system block so interview questions and drafted objectives ground in the real repo. Failures and empty projects keep the previous context-free behavior.
+
+### Changed
+
+- Rewrote the `/guided-goal` interviewer rubric around loop-engineering: deterministic success criteria, verification commands, attempt caps, scope boundaries, and stop conditions. Ready objectives must use the five-section structured markdown form.
+
+### Fixed
+
+- Fixed extension `sendUserMessage` throwing `Agent is already processing…` while the agent is streaming: without `deliverAs`, busy messages now queue as a steer. ACP/RPC skill invocations pass `streamingBehavior: "steer"` so they can land mid-turn the same way TUI skill commands do.
+- Fixed autolearn auto-continue firing a capture turn after an aborted stop (Esc/cancel): the controller now skips any `agent_end` whose last assistant message has `stopReason: "aborted"`.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added
