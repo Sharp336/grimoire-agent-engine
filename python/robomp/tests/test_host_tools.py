@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -1302,7 +1303,9 @@ def test_impl_gate_allows_later_authorized_event_to_reach_repo_commands(
     assert calls
 
 
-def test_impl_gate_ignores_skipped_authorized_event(db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_impl_gate_ignores_skipped_authorized_event(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[list[str] | tuple[str, ...]] = []
 
     def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
@@ -1782,9 +1785,10 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
 
     opened_pr = False
 
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal opened_pr
-        opened_pr = True
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/pulls" in str(request.url):
+            nonlocal opened_pr
+            opened_pr = True
         return httpx.Response(
             201,
             json={
@@ -1992,9 +1996,10 @@ def test_gh_open_pr_refuses_failed_bun_check_before_push_or_pr(
 
     opened_pr = False
 
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal opened_pr
-        opened_pr = True
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/pulls" in str(request.url):
+            nonlocal opened_pr
+            opened_pr = True
         return httpx.Response(
             201,
             json={
@@ -2303,15 +2308,21 @@ def test_gh_push_branch_runs_fix_and_check_before_pushing(
     # Both gates ran, and fix preceded check (both have one call recorded).
     assert fix_calls.read_text() == "called"
     assert check_calls.read_text() == "called"
-    # The formatter's diff was committed by the bot as a `style: bun run fix` commit.
+    # The formatter's diff was amended into the bot-authored HEAD commit.
     log = subprocess.run(
-        ["git", "-C", str(ws.repo_dir), "log", "--format=%an <%ae> %s", "-n", "2"],
+        ["git", "-C", str(ws.repo_dir), "log", "--format=%an <%ae> %s", "-1"],
         capture_output=True,
         text=True,
         check=True,
     )
-    lines = log.stdout.strip().splitlines()
-    assert lines[0].startswith("robomp-bot <robomp-bot@example.invalid> style: bun run fix"), lines
+    assert log.stdout.strip() == "robomp-bot <robomp-bot@example.invalid> feat: follow-up"
+    formatted = subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "show", "HEAD:src.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert formatted.stdout == "formatted\n"
     # And the branch ended up on the remote at the new head.
     assert result.startswith(f"pushed {ws.branch} ")
     refs = subprocess.run(
@@ -3025,7 +3036,8 @@ def test_gh_open_pr_runs_fix_then_check_and_commits_fixup(
     opened_pr: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        opened_pr["url"] = str(request.url)
+        if request.method == "POST" and "/pulls" in str(request.url):
+            opened_pr["url"] = str(request.url)
         return httpx.Response(
             201,
             json={
@@ -3078,16 +3090,21 @@ def test_gh_open_pr_runs_fix_then_check_and_commits_fixup(
     # Both bun stages ran, and fix preceded check.
     assert fix_calls.read_text() == "called"
     assert check_calls.read_text() == "called"
-    # The formatter diff was committed by the bot as a "style:" commit.
+    # The formatter diff was amended into the bot-authored HEAD commit.
     log = subprocess.run(
-        ["git", "-C", str(ws.repo_dir), "log", "--format=%an|%ae|%s", "-2"],
+        ["git", "-C", str(ws.repo_dir), "log", "--format=%an|%ae|%s", "-1"],
         capture_output=True,
         text=True,
         check=True,
     )
-    lines = log.stdout.strip().splitlines()
-    assert lines[0] == "robomp-bot|robomp-bot@example.invalid|style: bun run fix"
-    assert lines[1].endswith("|feat: initial change")
+    assert log.stdout.strip() == "robomp-bot|robomp-bot@example.invalid|feat: initial change"
+    formatted = subprocess.run(
+        ["git", "-C", str(ws.repo_dir), "show", "HEAD:src.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert formatted.stdout == "formatted\n"
     # Worktree is clean again (gate before push would have rejected otherwise).
     status = subprocess.run(
         ["git", "-C", str(ws.repo_dir), "status", "--porcelain"],
@@ -3113,8 +3130,8 @@ def test_gh_open_pr_refuses_dirty_worktree_before_fix(
 ) -> None:
     """A pre-existing uncommitted edit MUST cause gh_open_pr (and gh_push_branch)
     to refuse BEFORE `bun run fix` runs — otherwise `git add -A` after fix
-    would silently fold the unrelated edit into the `style: bun run fix`
-    commit and ship it in the PR."""
+    would silently fold the unrelated edit into the bot-authored HEAD commit
+    and ship it in the PR."""
     import os
     import subprocess
 
@@ -3593,3 +3610,595 @@ def test_gh_post_comment_skips_suffix_when_feature_disabled(db: Database, tmp_pa
 
     assert captured["body"] == {"body": "Here's the answer"}
     assert db.get_pending_closure(bindings.issue_key) is None
+
+
+# ---------- gh_open_pr: duplicate closing-PR guard ----------
+
+
+def _timeline_handler(
+    closing_prs: tuple[int, ...] = (),
+    *,
+    timeline_status: int = 200,
+    recorded_pr_state: str | None = None,
+) -> httpx.MockTransport:
+    """MockTransport for the duplicate-PR guard.
+
+    - ``closing_prs``: timeline events linking these PR numbers to issue #42.
+    - ``recorded_pr_state``: when set, GET ``/pulls/{n}`` returns a PR with
+      this ``state`` (used by the recorded-PR branch of the guard).
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            if timeline_status != 200:
+                return httpx.Response(timeline_status, json={"message": "server error"})
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": pr,
+                            "state": "open",
+                            "pull_request": {},
+                            "html_url": f"https://github.com/octo/widget/pull/{pr}",
+                        }
+                    },
+                }
+                for pr in closing_prs
+            ]
+            return httpx.Response(200, json=events)
+        # the test explicitly expects this call path.
+        if recorded_pr_state is not None and request.method == "GET" and "/pulls/" in url:
+            pr_num = int(url.rsplit("/", 1)[-1])
+            return httpx.Response(
+                200,
+                json={
+                    "number": pr_num,
+                    "html_url": f"https://github.com/octo/widget/pull/{pr_num}",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                    "state": recorded_pr_state,
+                },
+            )
+        # PR creation endpoint — return a fake PR if we get this far.
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    return httpx.MockTransport(handler)
+
+
+def test_gh_open_pr_refuses_when_closing_pr_exists(db: Database, tmp_path: Path) -> None:
+    """gh_open_pr refuses if another open PR already closes this issue via timeline links."""
+    transport = _timeline_handler(closing_prs=(77,))
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "https://github.com/octo/widget/pull/77" in msg
+    assert "already linked to open PR" in msg
+    assert "gh_post_reference_comment" in msg
+    assert "`gh_post_comment`" not in msg
+    assert "git reset --hard" in msg
+
+
+def test_gh_open_pr_refuses_when_bot_own_pr_already_recorded(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gh_open_pr refuses when the bot has already recorded an open PR for this
+    issue — opening a second PR is itself a duplicate. The legitimate amend
+    path goes through gh_push_branch (push to the same branch), not gh_open_pr."""
+    transport = _timeline_handler(closing_prs=(), recorded_pr_state="open")
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "already has an open PR #77" in msg
+    assert "gh_push_branch" in msg
+    assert "gh_post_reference_comment" in msg
+
+
+def test_gh_open_pr_allows_when_recorded_pr_is_closed(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed recorded PR is stale — reopened replacement work must not be
+    blocked. The guard verifies the recorded PR's state on GitHub and falls
+    through to the timeline check when it is no longer open."""
+    transport = _timeline_handler(closing_prs=(), recorded_pr_state="closed")
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_open_pr_recorded_pr_guard_fails_open_on_fetch_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient get_pull_request failure for the recorded PR must fail open
+    (fall through to the timeline check), not block a legitimate PR."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.method == "GET" and "/pulls/77" in url:
+            raise httpx.ConnectError("connection refused", request=request)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    db.set_issue_pr(bindings.issue_key, 77)
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_open_pr_guard_fails_open_on_timeline_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient timeline fetch failure must not block a legitimate PR."""
+    transport = _timeline_handler(closing_prs=(), timeline_status=500)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+
+
+def test_gh_open_pr_guard_fails_open_on_transport_error(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A network/transport failure during the closing-PR lookup must fail open
+    (not block a legitimate PR) — the guard catches httpx.ConnectError /
+    httpx.TimeoutException, not just GitHubError."""
+
+    timeline_hits = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_hits
+        if "/issues/42/timeline" in str(request.url) and request.method == "GET":
+            timeline_hits += 1
+            raise httpx.ConnectError("connection refused", request=request)
+        if request.method == "POST" and "/pulls" in str(request.url):
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", lambda *_a, **_kw: "abc123def456")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        result = tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "opened #99" in result
+    assert timeline_hits >= 1, "guard must have attempted the timeline lookup before failing open"
+
+
+def test_gh_open_pr_rechecks_duplicate_after_pre_publish_checks(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OGZF6: the duplicate-PR guard must run a second time
+    after the pre-publish fix/check and immediately before the push. A
+    competing PR that appears while `bun run fix` / `bun check` are running
+    must be caught before the branch is pushed or a second PR is opened."""
+    timeline_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_calls
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            timeline_calls += 1
+            # First call (pre-check guard): no closing PRs → passes.
+            # Second call (post-check recheck): a competing PR #88 appeared.
+            if timeline_calls == 1:
+                return httpx.Response(200, json=[])
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": 88,
+                            "state": "open",
+                            "pull_request": {},
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    # Stub out the pre-publish fix/check so they don't touch the filesystem.
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *_a, **_kw: None)
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *_a, **_kw: None)
+    push_calls: list[tuple[str, str]] = []
+
+    def _fake_push(_b: ToolBindings, _a: Mapping[str, object], tool_name: str, _branch: str) -> str:
+        push_calls.append((tool_name, _branch))
+        return "abc123def456"
+
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", _fake_push)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#88" in msg
+    assert "already linked to open PR" in msg
+    assert "gh_post_reference_comment" in msg
+    # The guard must have queried the timeline twice: once before the
+    # pre-publish checks and once during the post-check recheck.
+    assert timeline_calls == 2, "guard must recheck after pre-publish checks"
+    # The push must never have happened — the recheck refused before it.
+    assert push_calls == [], "push must not run when the recheck refuses"
+
+
+def test_gh_post_reference_comment_posts_and_does_not_mutate_state(db: Database, tmp_path: Path) -> None:
+    """gh_post_reference_comment posts a comment and is terminal for triage
+    without mutating the issue state (unlike abort_task → 'abandoned')."""
+    from robomp.worker import _TERMINAL_TRIAGE_TOOLS
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={"id": 555, "user": {"login": "robomp-bot"}, "body": "x", "created_at": "t"},
+        )
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    db.set_issue_classification(bindings.issue_key, "bug")
+    row_before = db.get_issue(bindings.issue_key)
+    assert row_before is not None
+    state_before = row_before.state
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        result = tool.execute({"body": "See #77 — already in flight."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "reference comment posted: id=555" in result
+    assert captured["body"] == {"body": "See #77 — already in flight."}
+    # The tool is in the terminal triage set so reminders don't fire.
+    assert "gh_post_reference_comment" in _TERMINAL_TRIAGE_TOOLS
+    # Issue state must be unchanged — the issue stays resumable.
+    row_after = db.get_issue(bindings.issue_key)
+    assert row_after is not None
+    assert row_after.state == state_before
+
+
+def test_gh_post_reference_comment_validates_body(db: Database, tmp_path: Path) -> None:
+    """PRRT_kwDOQxs0bc6OKbT5: blank/missing body must surface RpcCommandError
+    with no comment or audit side effects (AGENTS.md requires a validation-
+    failure path for every new host tool)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"validation failure must not hit GitHub: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": ""}, _ctx())
+        assert "non-empty" in str(exc.value)
+    finally:
+        _stop_loop(loop, t)
+
+    # No audit row should have been written for this tool — the call failed
+    # before any side effect.
+    with db._lock:  # noqa: SLF001 - test-only inspection
+        row = db._conn.execute(  # noqa: SLF001
+            "SELECT tool FROM tool_calls WHERE issue_key=? AND tool=?",
+            (bindings.issue_key, "gh_post_reference_comment"),
+        ).fetchone()
+    assert row is None, "no audit row should exist for a rejected validation"
+
+
+def test_gh_post_reference_comment_refuses_with_unpushed_commits(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OKbT7: when the duplicate-PR guard refuses gh_open_pr
+    after the agent has already committed a fix, gh_post_reference_comment
+    must refuse so the worker's dirty-state reminder does not route the agent
+    to gh_push_branch (which has no duplicate guard)."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=0, unpushed=1, summary="Unpushed commits (1):\nabc fix"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "unpushed commit" in msg
+        assert "git reset --hard" in msg
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_gh_post_reference_comment_refuses_with_uncommitted_changes(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OL1l7: gh_post_reference_comment must reject uncommitted
+    duplicate work too, not only unpushed commits — a clean worktree is
+    required before the terminal reference comment posts. Otherwise the
+    worker's dirty-state reminder routes the agent to gh_push_branch (no
+    duplicate guard) and the redundant edit ships."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=3, unpushed=0, summary="Uncommitted changes (3):\nM a.py"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "uncommitted change" in msg
+        assert "git clean -fd" in msg
+        # No comment must have reached GitHub.
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_gh_post_reference_comment_refuses_with_both_uncommitted_and_unpushed(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both uncommitted changes AND unpushed commits are reported together so
+    the agent knows the full scope of redundant work to discard."""
+    from robomp.git_ops import DirtyState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"must not post comment while worktree is dirty: {request.url}")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    monkeypatch.setattr(
+        host_tools,
+        "inspect_dirty_state",
+        lambda *_a, **_kw: DirtyState(uncommitted=2, unpushed=1, summary="Uncommitted (2)\nUnpushed (1)"),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_reference_comment")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"body": "See #77 — already in flight."}, _ctx())
+        msg = str(exc.value)
+        assert "unpushed commit" in msg
+        assert "uncommitted change" in msg
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_gh_open_pr_rechecks_duplicate_after_push(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOQxs0bc6OKreC: a competing PR that links the issue while the
+    network push is in progress must be caught after the push and before
+    open_pull_request, so the just-pushed branch does not become a second
+    open PR."""
+    timeline_calls = 0
+    pr_created = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal timeline_calls, pr_created
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            timeline_calls += 1
+            # Calls 1 & 2 (pre-check + post-check recheck): no closing PRs.
+            # Call 3 (post-push recheck): a competing PR #88 appeared during push.
+            if timeline_calls <= 2:
+                return httpx.Response(200, json=[])
+            events = [
+                {
+                    "event": "connected",
+                    "source": {
+                        "issue": {
+                            "number": 88,
+                            "state": "open",
+                            "pull_request": {},
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "POST" and "/pulls" in url:
+            pr_created = True
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "html_url": "https://github.com/octo/widget/pull/99",
+                    "head": {"ref": "farm/abc12345/some-issue"},
+                    "base": {"ref": "main"},
+                },
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *_a, **_kw: None)
+    monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *_a, **_kw: None)
+    push_calls: list[str] = []
+
+    def _fake_push(_b: ToolBindings, _a: Mapping[str, object], _tool: str, _branch: str) -> str:
+        push_calls.append(_branch)
+        return "abc123def456"
+
+    monkeypatch.setattr(host_tools, "_guarded_push_branch", _fake_push)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#88" in msg
+    # The push happened (the branch was pushed before the post-push recheck),
+    # but the PR must never have been created.
+    assert push_calls == [bindings.workspace.branch], "push must happen before the post-push recheck"
+    assert pr_created is False, "PR must not be created when the post-push recheck refuses"
+    assert timeline_calls == 3, "guard must run three times: pre-check, post-check, post-push"
+
+
+def test_gh_open_pr_refuses_on_cross_referenced_closing_pr(db: Database, tmp_path: Path) -> None:
+    """PRRT_kwDOQxs0bc6OKbTz: a cross-referenced event whose source PR body
+    contains a closing keyword (Fixes #42) must be treated as a linked PR,
+    even when no connected event exists."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/timeline" in url and request.method == "GET":
+            events = [
+                {
+                    "event": "cross-referenced",
+                    "source": {
+                        "issue": {
+                            "number": 77,
+                            "state": "open",
+                            "pull_request": {},
+                            "body": "This PR fixes the crash. Fixes #42",
+                            "repository_url": "https://api.github.com/repos/octo/widget",
+                        }
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events)
+        if request.method == "GET" and "/pulls/77" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "number": 77,
+                    "html_url": "https://github.com/octo/widget/pull/77",
+                    "state": "open",
+                    "head": {"ref": "fix/crash", "repo": {"full_name": "octo/widget"}},
+                    "base": {"ref": "main"},
+                    "user": {"login": "alice"},
+                    "title": "fix: crash",
+                    "body": "This PR fixes the crash. Fixes #42",
+                },
+            )
+        if request.method == "POST" and "/pulls" in url:
+            return httpx.Response(
+                201, json={"number": 99, "html_url": "x", "head": {"ref": "b"}, "base": {"ref": "main"}}
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "refusing to open PR" in msg
+    assert "#77" in msg
+    assert "already linked to open PR" in msg

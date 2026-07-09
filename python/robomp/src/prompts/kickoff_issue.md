@@ -20,12 +20,18 @@ the classification calls for code. Drive the todo list to completion:
    `classify_issue(primary=..., priority=..., functional=[...], rationale=...)`.
    You NEVER post a comment, push, or open a PR before this step.
 
-2. **Follow the workflow branch** the classification dictates — see the system
+2. **Before any PR work, check for an existing fix.** Scan the issue thread for
+   a linked/open PR, concrete patch, or maintainer note that a fix is in flight.
+   If one applies, call `gh_post_reference_comment` with a body referencing the
+   existing fix; this ends the task cleanly without mutating the issue state.
+   Do NOT open a duplicate PR.
+
+3. **Follow the workflow branch** the classification dictates — see the system
    prompt for the full per-type behavior:
    - `bug` / `documentation` → ack comment → reproduce → fix → PR.
    - `question` → one comment, then stop.
    - `enhancement` / `proposal` → one thoughtful comment, then stop.
    - `invalid` / `duplicate` → one brief comment, then stop.
 
-3. If `bug` and you cannot reproduce after a real attempt, call
+4. If `bug` and you cannot reproduce after a real attempt, call
    `mark_unable_to_reproduce` with the exact reporter details needed. You NEVER guess at fixes.

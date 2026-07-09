@@ -1,9 +1,8 @@
 """Minimal typed GitHub REST client (PAT auth, httpx)."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -80,6 +79,20 @@ class PullRequestFileInfo:
 
 
 @dataclass(slots=True, frozen=True)
+class LinkedPullRequest:
+    """A PR linked to an issue via closing keywords or the Development panel.
+
+    Carries the PR's own source repo and html_url so cross-repo linked PRs
+    can be reported with their full identity (``owner/repo#N``) rather than
+    a bare ``#N`` that is ambiguous across repositories.
+    """
+
+    repo: str
+    number: int
+    html_url: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class ReviewCommentInfo:
     """In-line PR review comment (attached to a file/line)."""
 
@@ -146,6 +159,79 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
         except ValueError:
             pass
     return None
+
+
+_CLOSING_KEYWORD_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)"
+    r"(?:#(?P<num>\d+)"
+    r"|https?://(?:www\.)?github\.com/(?P<url_repo>[\w.+-]+/[\w.+-]+)/issues/(?P<url_num>\d+)"
+    r"|(?P<repo>[\w.+-]+/[\w.+-]+)#(?P<repo_num>\d+))",
+    re.IGNORECASE,
+)
+
+
+def _repo_from_url(url: object) -> str:
+    """Extract ``owner/repo`` from a GitHub API ``repository_url``, or ``""``."""
+    if not isinstance(url, str) or not url:
+        return ""
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return ""
+
+
+def _closing_keyword_for(body: str, issue_number: int, repo: str = "", *, source_repo: str = "") -> bool:
+    """True iff *body* contains a closing keyword referencing *issue_number*.
+
+    Recognizes the three GitHub closing-reference forms: bare ``#N``,
+    a full URL ending in ``/issues/N``, and the ``owner/repo#N`` shorthand
+    (e.g. ``Fixes octo/widget#42``) GitHub accepts for cross-repo links.
+    Also accepts the colon-form ``Closes: #N``.
+
+    For the ``owner/repo#N`` form the prefix must match *repo* (the issue's
+    own repository) so an unrelated cross-repo reference like
+    ``Fixes other/repo#42`` does not trip the duplicate guard on issue #42
+    of a different repository.
+
+    For the URL form the repo path in the URL must match *repo* when *repo*
+    is provided, so ``Fixes https://github.com/other/repo/issues/42`` does
+    not falsely match issue #42 of a different repository.
+
+    For the bare ``#N`` form, when *source_repo* is provided (the repo the
+    referencing PR lives in), it must match *repo* — a bare ``#42`` in a
+    cross-repo PR refers to that PR's own issue #42, not this repo's.
+    """
+    for match in _CLOSING_KEYWORD_RE.finditer(body):
+        num = match.group("num")
+        if num:
+            # Bare #N — only trust when the source PR is in the same repo
+            # as the issue. A cross-repo PR's bare #N refers to its own
+            # repo's issue, not ours.
+            if source_repo and repo and source_repo.lower() != repo.lower():
+                continue
+            if int(num) == issue_number:
+                return True
+            continue
+        url_num = match.group("url_num")
+        if url_num:
+            # URL form — the repo in the URL path must match our repo.
+            if repo and (match.group("url_repo") or "").lower() != repo.lower():
+                continue
+            if int(url_num) == issue_number:
+                return True
+            continue
+        repo_num = match.group("repo_num")
+        if repo_num:
+            # owner/repo#N — a fully-qualified cross-repo shorthand. Only
+            # count it when we know our own repo AND the prefix matches;
+            # without a repo context we cannot confirm it targets THIS
+            # issue, so skip it rather than risk a false positive on the
+            # duplicate-PR refuse gate.
+            if not repo or (match.group("repo") or "").lower() != repo.lower():
+                continue
+            if int(repo_num) == issue_number:
+                return True
+    return False
 
 
 class GitHubClient:
@@ -253,43 +339,148 @@ class GitHubClient:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}")
         return _issue_from_payload(repo, data)
 
-    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
-        """Return PR numbers currently linked to issue ``number`` via "Closes"/"Fixes"
+    async def list_closing_pull_requests(
+        self, repo: str, number: int, *, default_branch: str = ""
+    ) -> tuple[LinkedPullRequest, ...]:
+        """Return PRs currently linked to issue ``number`` via "Closes"/"Fixes"
         keywords or the Development panel.
 
         Walks ``GET /repos/{repo}/issues/{N}/timeline`` and computes net
         ``connected`` − ``disconnected`` events for sources that are pull
-        requests. Only PRs whose timeline source carries ``state == "open"``
-        are returned — a merged or closed PR no longer needs the bot's work.
+        requests. ``cross-referenced`` events are also considered when the
+        source PR body contains a closing keyword (``Fixes #N`` /
+        ``Closes #N``) for this issue, because GitHub does not always emit a
+        matching ``connected`` event for closing-keyword links. Only PRs
+        whose timeline source carries ``state == "open"`` are returned — a
+        merged or closed PR no longer needs the bot's work.
 
-        Pagination intentionally skipped: a just-opened issue has at most a
-        handful of timeline entries, and the bot only consults this on
-        ``issues.opened`` triage.
+        When *default_branch* is provided, cross-referenced PRs whose body
+        contains a closing keyword are additionally verified to target the
+        default branch of their **own** repository:
+
+        - A **same-repo** PR targeting a feature branch does not block the
+          guard.
+        - A **cross-repo** PR (``source_repo`` differs from *repo*) is
+          fetched from its own source repository and its base ref is
+          compared against that repo's default branch. This prevents a
+          cross-repo PR targeting a feature branch from blocking a valid
+          fix. PRs whose base ref or default branch cannot be fetched are
+          skipped (fail open) so a GitHub hiccup doesn't block a legitimate
+          PR.
+
+        The timeline is paginated (``per_page=100``) because by the time the
+        duplicate guard runs at ``gh_open_pr`` the issue may have accumulated
+        well over 100 events (comments, commits, cross-refs); a ``connected``
+        or ``cross-referenced`` link can land on any page. On a page-2+ fetch
+        failure (API error, connection reset, or timeout after retries) all
+        partial positives from earlier pages are **discarded** (``return ()``):
+        a later page could carry a ``disconnected`` event that cancels an
+        earlier ``connected`` link, so returning partials risks a false
+        "already covered" skip. Page-1 failures still propagate to the caller.
         """
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues/{number}/timeline",
-            params={"per_page": 100},
+        # Keyed by (repo, number) so two repos' PRs sharing a number
+        # don't collide.
+        linked: dict[tuple[str, int], LinkedPullRequest] = {}
+        states: dict[tuple[str, int], str] = {}
+        # Cache source_repo → default_branch to avoid re-fetching across
+        # multiple cross-repo cross-refs from the same source repo.
+        source_defaults: dict[str, str] = {}
+        page = 1
+        while True:
+            try:
+                data = await self.request(
+                    "GET",
+                    f"/repos/{repo}/issues/{number}/timeline",
+                    params={"per_page": 100, "page": page},
+                )
+            except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
+                if page == 1:
+                    raise
+                # Page 2+ failure: discard partial positives. A later page
+                # could carry a ``disconnected`` event that cancels a
+                # ``connected`` link seen on an earlier page, so returning
+                # partials risks a false "already covered" skip that blocks
+                # legitimate triage. Fail open to an empty tuple instead —
+                # worst case the bot does redundant work. Page 1 failures
+                # still propagate (a total timeline fetch failure is a
+                # real error).
+                log.warning(
+                    "timeline page %d fetch failed; discarding partial closing-PR results",
+                    page,
+                    extra={"repo": repo, "number": number, "page": page, "error": str(exc)},
+                )
+                return ()
+            batch = data or []
+            for event in batch:
+                if not isinstance(event, Mapping):
+                    continue
+                ev = event.get("event")
+                source = event.get("source") or {}
+                src_issue = source.get("issue") if isinstance(source, Mapping) else None
+                if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
+                    continue
+                pr_number = src_issue.get("number")
+                if not isinstance(pr_number, int):
+                    continue
+                source_repo = _repo_from_url(src_issue.get("repository_url")) or repo
+                key = (source_repo, pr_number)
+                states[key] = str(src_issue.get("state") or "open")
+                html_url = str(src_issue.get("html_url") or "")
+                if ev == "connected":
+                    linked[key] = LinkedPullRequest(repo=source_repo, number=pr_number, html_url=html_url)
+                elif ev == "cross-referenced":
+                    # GitHub exposes ``Fixes #N`` / ``Closes #N`` PR-body links
+                    # as ``cross-referenced`` events, not always as
+                    # ``connected``. Only treat the cross-ref as a closing
+                    # link when the PR body contains a closing keyword for
+                    # this issue number, so mere mentions don't trigger
+                    # false-positive duplicate guards.
+                    pr_body = src_issue.get("body") or ""
+                    if not _closing_keyword_for(pr_body, number, repo, source_repo=source_repo):
+                        continue
+                    if default_branch:
+                        if source_repo.lower() == repo.lower():
+                            # Same-repo PR: verify it targets the default
+                            # branch — a PR targeting a feature branch should
+                            # not block the guard. Fail open on fetch errors.
+                            try:
+                                pr_info = await self.get_pull_request(repo, pr_number)
+                            except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
+                                continue
+                            if pr_info.base_ref != default_branch:
+                                continue
+                        else:
+                            # Cross-repo PR: verify it targets the default
+                            # branch of its OWN source repo. Fetch the
+                            # source repo's default branch (cached) and the
+                            # PR from the source repo. Fail open on any
+                            # fetch error so a GitHub hiccup or an
+                            # inaccessible private repo doesn't block a
+                            # valid fix.
+                            try:
+                                src_default = source_defaults.get(source_repo)
+                                if src_default is None:
+                                    src_repo_info = await self.get_repo(source_repo)
+                                    src_default = src_repo_info.default_branch
+                                    source_defaults[source_repo] = src_default
+                                pr_info = await self.get_pull_request(source_repo, pr_number)
+                            except (GitHubError, httpx.ConnectError, httpx.TimeoutException):
+                                continue
+                            if pr_info.base_ref != src_default:
+                                continue
+                            html_url = pr_info.html_url or html_url
+                    linked[key] = LinkedPullRequest(repo=source_repo, number=pr_number, html_url=html_url)
+                elif ev == "disconnected":
+                    linked.pop(key, None)
+            if len(batch) < 100:
+                break
+            page += 1
+        return tuple(
+            sorted(
+                (v for k, v in linked.items() if states.get(k, "open") == "open"),
+                key=lambda lpr: (lpr.repo, lpr.number),
+            )
         )
-        linked: set[int] = set()
-        states: dict[int, str] = {}
-        for event in data or []:
-            if not isinstance(event, Mapping):
-                continue
-            ev = event.get("event")
-            source = event.get("source") or {}
-            src_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
-                continue
-            pr_number = src_issue.get("number")
-            if not isinstance(pr_number, int):
-                continue
-            states[pr_number] = str(src_issue.get("state") or "open")
-            if ev == "connected":
-                linked.add(pr_number)
-            elif ev == "disconnected":
-                linked.discard(pr_number)
-        return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self.request("GET", f"/repos/{repo}/pulls/{number}")
@@ -639,6 +830,7 @@ __all__ = [
     "GitHubError",
     "IssueInfo",
     "IssueSummary",
+    "LinkedPullRequest",
     "PullRequestFileInfo",
     "PullRequestInfo",
     "PullRequestReviewInfo",

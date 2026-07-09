@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from robomp.config import Settings, reset_settings_cache
 from robomp.dashboard import tail_jsonl
 from robomp.db import Database, close_database, get_database, issue_key
-from robomp.github_client import GitHubClient
+from robomp.github_client import GitHubClient, LinkedPullRequest
 from robomp.manual_triage import InvalidIssueRef, ManualTriageTimeout, await_terminal_state, parse_issue_ref
 from robomp.sandbox import LocalGitTransport
 from robomp.server import create_app
@@ -1531,7 +1531,10 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None
         row = get_database(cfg.sqlite_path).get_event("dir-1")
     close_database()
     assert row is not None
-    assert row.state == "queued"
+    # TestClient starts the worker pool; it may claim the row before the
+    # assertion reads it. The webhook contract is the 202/queued response above;
+    # this test defends the durable directive metadata on the stored event.
+    assert row.state in {"queued", "running"}
     directive = row.payload.get("_robomp_directive")
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
 
@@ -2465,11 +2468,13 @@ class _StubGithubForTriage:
         self._closing_prs = closing_prs
         self.calls: list[tuple[str, int]] = []
 
-    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+    async def list_closing_pull_requests(
+        self, repo: str, number: int, *, default_branch: str = ""
+    ) -> tuple[LinkedPullRequest, ...]:
         self.calls.append((repo, number))
         if isinstance(self._closing_prs, Exception):
             raise self._closing_prs
-        return self._closing_prs
+        return tuple(LinkedPullRequest(repo="octo/widget", number=n) for n in self._closing_prs)
 
 
 async def test_triage_issue_skips_when_a_closing_pr_already_exists(

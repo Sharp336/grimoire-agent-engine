@@ -15,6 +15,7 @@ from robomp.github_client import (
     CommentInfo,
     IssueInfo,
     IssueSummary,
+    LinkedPullRequest,
     PullRequestFileInfo,
     PullRequestInfo,
     PullRequestReviewInfo,
@@ -32,7 +33,9 @@ class GitHubBackend(Protocol):
 
     async def get_issue(self, repo: str, number: int) -> IssueInfo: ...
 
-    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]: ...
+    async def list_closing_pull_requests(
+        self, repo: str, number: int, *, default_branch: str = ""
+    ) -> tuple[LinkedPullRequest, ...]: ...
 
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo: ...
 

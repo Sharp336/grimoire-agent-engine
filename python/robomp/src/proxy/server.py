@@ -182,6 +182,7 @@ def _require_review_comments(value: Any) -> list[dict[str, Any]]:
         comments.append(comment)
     return comments
 
+
 def _pool_dir(cfg: Settings, repo: str) -> Path:
     _validate_repo_name(repo)
     return Path(cfg.workspace_root) / "_pool" / repo.replace("/", "__")
@@ -473,14 +474,14 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return JSONResponse(_serialize(info))
 
     @app.get("/gh/v1/closing_prs")
-    async def list_closing_prs(request: Request, repo: str, number: int) -> JSONResponse:
+    async def list_closing_prs(request: Request, repo: str, number: int, default_branch: str = "") -> JSONResponse:
         await _authenticate(request)
         github: GitHubClient = request.app.state.github
         try:
-            prs = await github.list_closing_pull_requests(repo, number)
+            prs = await github.list_closing_pull_requests(repo, number, default_branch=default_branch)
         except GitHubError as exc:
             return _gh_error_response(exc)
-        return JSONResponse({"pr_numbers": list(prs)})
+        return JSONResponse({"closing_prs": _serialize(list(prs))})
 
     @app.get("/gh/v1/pull_request")
     async def get_pull_request(request: Request, repo: str, number: int) -> JSONResponse:

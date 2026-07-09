@@ -19,12 +19,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
+import httpx
 from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 
 from robomp import persona
 from robomp.config import Settings
 from robomp.db import Database, IssueState, issue_key
-from robomp.git_ops import GitCommandError, HeadDriftError
+from robomp.git_ops import DirtyState, GitCommandError, HeadDriftError, inspect_dirty_state
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import GitHubError, IssueInfo, PullRequestFileInfo, RepoInfo
 from robomp.sandbox import (
@@ -639,6 +640,80 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# ---------- gh_post_reference_comment ----------
+def _build_post_reference_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip():
+            _raise_command("gh_post_reference_comment requires a non-empty 'body'.")
+        # Refuse unless the worktree is clean. The duplicate-PR guard
+        # refuses gh_open_pr, so the agent reaches this terminal tool
+        # with drafted duplicate work — either committed (unpushed) or
+        # still uncommitted in the working tree. If we let the comment
+        # through, the worker's dirty-state reminder fires on the next
+        # turn and routes the agent to gh_push_branch — which has no
+        # duplicate guard and would publish the redundant branch. Force
+        # the agent to reset/discard the work first.
+        try:
+            dirty = inspect_dirty_state(
+                bindings.workspace.repo_dir,
+                slot_uid=bindings.slot_uid,
+                safe_directory=bindings.workspace.repo_dir,
+            )
+        except Exception:
+            dirty = DirtyState(uncommitted=0, unpushed=0, summary="")
+        if dirty.unpushed > 0 or dirty.uncommitted > 0:
+            parts = []
+            if dirty.unpushed > 0:
+                parts.append(f"{dirty.unpushed} unpushed commit(s)")
+            if dirty.uncommitted > 0:
+                parts.append(f"{dirty.uncommitted} uncommitted change(s)")
+            dirty_desc = " and ".join(parts)
+            msg = (
+                "refusing to post reference comment: the worktree has "
+                f"{dirty_desc}. The duplicate-PR guard refused `gh_open_pr`, "
+                "so this work is redundant. Discard it first with "
+                f"`git reset --hard origin/{bindings.repo.default_branch}`"
+                " (and `git clean -fd` for uncommitted files), then call "
+                "`gh_post_reference_comment` again."
+            )
+            _audit(bindings, "gh_post_reference_comment", args, error=msg)
+            _raise_command(msg)
+        target_number = bindings.default_comment_number
+        try:
+            comment = _run_coro(
+                bindings.loop,
+                bindings.github.post_comment(bindings.repo.full_name, target_number, body),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "gh_post_reference_comment", args, error=str(exc))
+            _raise_command(f"GitHub rejected comment: {exc.status} {exc.message}")
+        _audit(
+            bindings,
+            "gh_post_reference_comment",
+            args,
+            result={"comment_id": comment.id},
+        )
+        return f"reference comment posted: id={comment.id}"
+
+    return host_tool(
+        name="gh_post_reference_comment",
+        description=persona.host_tool_description("gh_post_reference_comment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_post_reference_comment", "body"),
+                },
+            },
+            "required": ["body"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
 def _repair_message_escapes(message: str) -> str | None:
     """Convert shell-literal ``\\n`` escapes in a commit message to newlines.
 
@@ -906,6 +981,100 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+def _refuse_if_duplicate_fix_pr(bindings: ToolBindings, args: Mapping[str, Any]) -> None:
+    """Refuse ``gh_open_pr`` when an open PR already closes this issue.
+
+    Two checks, in order:
+
+    1. If the bot has already recorded a PR for this issue
+       (``row.pr_number``), verify that PR is still **open** on GitHub.
+       A closed/merged recorded PR is stale — reopened replacement work
+       must not be blocked by it. If the PR is open, refuse immediately;
+       opening a second PR for the same issue is itself a duplicate. The
+       legitimate "amend existing PR" path goes through ``gh_push_branch``
+       (push to the same branch), not ``gh_open_pr`` (create a new PR).
+       A transient fetch error fails open (fall through to the timeline
+       check) so a GitHub hiccup doesn't block a legitimate PR.
+    2. Otherwise consult ``list_closing_pull_requests`` (timeline /
+       Development-panel links) so the guard sees linked PRs from other
+       authors even when no issue comment mentions them.
+
+    A transient timeline fetch fails open so a GitHub hiccup doesn't block a
+    legitimate PR.
+    """
+    row = bindings.db.get_issue(bindings.issue_key)
+    own_pr = row.pr_number if row is not None else None
+    if own_pr is not None:
+        try:
+            own_pr_info = _run_coro(
+                bindings.loop,
+                bindings.github.get_pull_request(bindings.repo.full_name, own_pr),
+            )
+        except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
+            log.warning(
+                "recorded-PR guard: fetch failed; falling through to timeline check",
+                extra={"issue": bindings.issue_key, "pr": own_pr, "err": str(exc)},
+            )
+        else:
+            if own_pr_info.state == "open":
+                msg = (
+                    f"refusing to open PR: issue #{bindings.issue.number} already has "
+                    f"an open PR #{own_pr} recorded for this issue. Do NOT open a "
+                    "second PR. To amend the existing PR, push to its branch with "
+                    "`gh_push_branch`; to discard your unpushed commit run "
+                    f"`git reset --hard origin/{bindings.repo.default_branch}`. "
+                    "If the existing fix is sufficient, call `gh_post_reference_comment` "
+                    "with a body referencing it — this ends the task cleanly."
+                )
+                _audit(bindings, "gh_open_pr", args, error=msg)
+                _raise_command(msg)
+            # PR is closed/merged → stale record; fall through to the
+            # timeline check so a reopened replacement PR is not blocked.
+            log.info(
+                "recorded-PR guard: recorded PR is no longer open; proceeding",
+                extra={"issue": bindings.issue_key, "pr": own_pr, "state": own_pr_info.state},
+            )
+    try:
+        closing_prs = _run_coro(
+            bindings.loop,
+            bindings.github.list_closing_pull_requests(
+                bindings.repo.full_name, bindings.issue.number, default_branch=bindings.repo.default_branch
+            ),
+        )
+    except (GitHubError, httpx.ConnectError, httpx.TimeoutException) as exc:
+        log.warning(
+            "closing-PR guard failed; proceeding with open PR",
+            extra={"issue": bindings.issue_key, "err": str(exc)},
+        )
+        return
+    if not closing_prs:
+        return
+    duplicates = tuple(closing_prs)
+    if not duplicates:
+        return
+    # Format each duplicate with its source repo so cross-repo linked PRs
+    # are reported as ``owner/repo#N`` (or a clickable URL) rather than a
+    # bare ``#N`` that is ambiguous across repositories.
+    pr_labels: list[str] = []
+    for lpr in duplicates:
+        if lpr.html_url:
+            pr_labels.append(lpr.html_url)
+        elif lpr.repo and lpr.repo.lower() != bindings.repo.full_name.lower():
+            pr_labels.append(f"{lpr.repo}#{lpr.number}")
+        else:
+            pr_labels.append(f"#{lpr.number}")
+    msg = (
+        f"refusing to open PR: issue #{bindings.issue.number} is already linked to "
+        f"open PR(s) {', '.join(pr_labels)} via Closes/Fixes/Resolves "
+        "or the Development panel. Do NOT open a duplicate PR. First discard your "
+        f"unpushed commit (`git reset --hard origin/{bindings.repo.default_branch}`) so the "
+        "worktree is clean, then call `gh_post_reference_comment` with a body referencing "
+        "the existing fix — this ends the task cleanly without a dirty-state reminder loop."
+    )
+    _audit(bindings, "gh_open_pr", args, error=msg)
+    _raise_command(msg)
+
+
 # ---------- gh_open_pr ----------
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
@@ -936,11 +1105,22 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        _refuse_if_duplicate_fix_pr(bindings, args)
         skip = bool(args.get("skip_checks", False))
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
+        # Recheck for duplicate PRs immediately before pushing/opening. A
+        # competing PR may have been opened (or the bot's own PR recorded)
+        # while the pre-publish fix/check ran; refuse here so we do not push
+        # a duplicate branch or open a second PR.
+        _refuse_if_duplicate_fix_pr(bindings, args)
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
+        # Final duplicate recheck after the push but before opening the PR.
+        # A competing PR may have linked the issue while the network push
+        # was in progress; refuse here so the just-pushed branch does not
+        # become a second open PR for the same issue.
+        _refuse_if_duplicate_fix_pr(bindings, args)
         base = args.get("base") or bindings.repo.default_branch
         was_needs_info = _issue_needs_info(bindings)
         try:
@@ -1263,7 +1443,7 @@ _FUNCTIONAL = ("agent", "tool", "tui", "cli", "prompting", "sdk", "auth", "setup
 _PLATFORMS = ("platform:linux", "platform:macos", "platform:windows", "platform:wsl")
 _PR_RANKS = ("review:p0", "review:p1", "review:p2", "review:p3")
 _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "build")
-_CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE)
+_CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|:\s*)#(\d+)", re.IGNORECASE)
 
 
 def _enforce_impl_authorization(
@@ -1828,6 +2008,7 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         _build_pr_review_comment(bindings),
         _build_submit_pr_review(bindings),
         _build_post_comment(bindings),
+        _build_post_reference_comment(bindings),
         _build_push_branch(bindings),
         _build_open_pr(bindings),
         _build_request_review(bindings),

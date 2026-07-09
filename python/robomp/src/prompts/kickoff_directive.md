@@ -34,12 +34,14 @@ Maintainer **@{{directive.author}}** tagged you. Their directive is authoritativ
 
 1. **Classify first.** You MUST call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)` before any other side effect, even if the directive states the answer. Labels are how the rest of the org sees triage.
 
-2. **Execute the directive** in the same session on `{{workspace.branch}}`:
-   - **Code change** → commit on `{{workspace.branch}}`, then `gh_push_branch` + `gh_open_pr`. Both run `bun run fix` then `bun check` against the worktree; if `bun check` fails, fix the cause and call again. PR body uses the four-section template verbatim: `## Repro` / `## Cause` / `## Fix` / `## Verification`. Reply with a single `gh_post_comment` linking the PR.
+2. **Before any PR work, check for an existing fix.** Scan the issue thread for a linked/open PR, concrete patch, or maintainer note that a fix is in flight. If one applies, call `gh_post_reference_comment` with a body referencing the existing fix; this ends the task cleanly without mutating the issue state. Do NOT open a duplicate PR.
+
+3. **Execute the directive** in the same session on `{{workspace.branch}}`:
+   - **Code change** → commit on `{{workspace.branch}}`, then call `gh_open_pr` directly. It pushes the branch (same guarded preflight as `gh_push_branch`), runs the duplicate-PR guard, then opens the PR. Do NOT call `gh_push_branch` separately first; that would push before the duplicate guard can run. `gh_open_pr` runs `bun run fix` then `bun check` against the worktree; if `bun check` fails, fix the cause and call again. PR body uses the four-section template verbatim: `## Repro` / `## Cause` / `## Fix` / `## Verification`. Reply with a single `gh_post_comment` linking the PR.
    - **Question / clarification** → one `gh_post_comment`. No branch, no PR.
    - **Explicit stop / ignore** → one `gh_post_comment` acknowledging, then halt.
 
-3. **Ambiguous directive** → one clarifying `gh_post_comment` and stop. NEVER guess.
+4. **Ambiguous directive** → one clarifying `gh_post_comment` and stop. NEVER guess.
 
 ---
 
