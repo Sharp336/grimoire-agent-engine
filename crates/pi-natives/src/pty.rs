@@ -14,13 +14,13 @@ use std::{
 
 use napi::{
 	bindgen_prelude::*,
-	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
-use crate::{ps, task};
+use crate::{ps, shell::bridge_chunks, task};
 
 /// Options for running a command in a PTY session.
 #[napi(object)]
@@ -65,11 +65,6 @@ struct PtyRunConfig {
 	shell:   Option<String>,
 }
 
-enum ReaderEvent {
-	Chunk(String),
-	Done,
-}
-
 enum ControlMessage {
 	Input(String),
 	Resize { cols: u16, rows: u16 },
@@ -77,11 +72,15 @@ enum ControlMessage {
 }
 
 const CONTROL_MESSAGES_PER_TICK: usize = 64;
-const READER_EVENTS_PER_TICK: usize = 256;
 const POST_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 #[cfg(not(windows))]
 const FINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+/// Cap on how long `PtySession::start` waits for the drain pump when
+/// `run_pty_sync` reports the reader thread did *not* reach EOF (see
+/// `await_drain_handle`). Mirrors the other post-exit drain deadlines above,
+/// just applied to the JS-side pump instead of the reader thread itself.
+const WEDGED_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct PtySessionCore {
 	control_tx: flume::Sender<ControlMessage>,
@@ -113,7 +112,7 @@ impl PtySession {
 		env: &'env Env,
 		options: PtyStartOptions<'env>,
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
-		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
 			command: options.command,
@@ -136,9 +135,32 @@ impl PtySession {
 			*guard = Some(PtySessionCore { control_tx });
 		}
 		task::future(env, "pty.start", async move {
+			// Bounded reader→JS bridge (#4040): the PTY reader thread sends chunks
+			// directly into `chunk_tx` (see `run_pty_sync`), bypassing the control
+			// loop entirely so a full queue only ever parks the reader thread, never
+			// the loop that must keep servicing `ControlMessage::Kill`. `pump_chunks`
+			// coalesces and forwards batches via `call_async`, which backpressures on
+			// the JS event loop's actual consumption rate — shared with the non-PTY
+			// shell bridge in `crate::shell`.
+			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
 			let run_result =
-				tokio::task::spawn_blocking(move || run_pty_sync(run_config, on_chunk, control_rx, ct))
+				tokio::task::spawn_blocking(move || run_pty_sync(run_config, chunk_tx, control_rx, ct))
 					.await;
+			// Await the pump before resolving so the last output chunk is delivered
+			// to JS before the caller observes completion. Unlike `Shell::run`,
+			// whose unconditional await is safe because its tokio readers are
+			// deterministically torn down, the PTY reader is a plain OS thread that
+			// a detached descendant (or a hung Windows `ClosePseudoConsole`) can
+			// leave running forever — `run_pty_sync`'s second return value reports
+			// whether that happened, and `await_drain_handle` picks the matching
+			// policy. Absent a result at all (setup error or spawn_blocking panic),
+			// treat it as the wedged case: `chunk_tx` was dropped either way, so the
+			// pump exits on its own quickly, but the bounded ceiling stays in place
+			// as a backstop.
+			let reader_exited = matches!(&run_result, Ok(Ok((_, true))));
+			if let Some(handle) = drain_handle {
+				await_drain_handle(reader_exited, handle).await;
+			}
 
 			// Always clear core regardless of result
 			let mut guard = core.lock();
@@ -146,7 +168,7 @@ impl PtySession {
 			drop(guard);
 
 			match run_result {
-				Ok(inner) => inner,
+				Ok(inner) => inner.map(|(result, _reader_exited)| result),
 				Err(err) => Err(Error::from_reason(format!("PTY execution task failed: {err}"))),
 			}
 		})
@@ -204,12 +226,19 @@ fn terminate_pty_processes(
 	let _ = child.kill();
 	targets.signal(ps::KILL_SIGNAL);
 }
+/// Runs a PTY command to completion. Returns the run result alongside
+/// whether the reader thread reached EOF on its own (`true`) versus being
+/// left running because a detached descendant still holds the PTY slave
+/// open, or a hung Windows `ClosePseudoConsole` (`false`) — see the
+/// `reader_done` check before `reader_thread.join()` at the end of this
+/// function. Callers use that flag to decide how long to wait for the
+/// reader-fed drain pump (see `await_drain_handle`).
 fn run_pty_sync(
 	config: PtyRunConfig,
-	on_chunk: Option<ThreadsafeFunction<String>>,
+	chunk_tx: Option<flume::Sender<String>>,
 	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
-) -> Result<PtyRunResult> {
+) -> Result<(PtyRunResult, bool)> {
 	let pty_system = native_pty_system();
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before openpty: {err}")))?;
@@ -297,8 +326,28 @@ fn run_pty_sync(
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
-	let (reader_tx, reader_rx) = flume::unbounded::<ReaderEvent>();
+	// Single-shot "reader thread finished" signal, decoupled from chunk
+	// delivery (see `send_chunk` below). Capacity 1 is enough since it is
+	// sent exactly once; the control loop below only ever needs to know
+	// whether the reader has reached EOF, not consume chunk payloads.
+	let (reader_done_tx, reader_done_rx) = flume::bounded::<()>(1);
 	let reader_thread = std::thread::spawn(move || {
+		// Forwards a decoded chunk straight to the bounded JS-bridge channel,
+		// bypassing the control loop entirely (#4040). A full queue blocks
+		// this call, which stops `reader.read()` from being called again, so
+		// the kernel PTY buffer fills and the child parks on its tty write —
+		// ordinary OS backpressure instead of unbounded process memory. This
+		// blocking send is safe here specifically because it runs on this
+		// dedicated OS thread, not on the control loop below, which must stay
+		// free to service `ControlMessage::Kill` even while a chunk send is
+		// parked. A disconnected receiver (JS pump gone) drops the chunk and
+		// keeps reading, so the PTY output keeps draining and the child never
+		// wedges on a dead consumer.
+		let send_chunk = |text: String| {
+			if let Some(tx) = chunk_tx.as_ref() {
+				let _ = tx.send(text);
+			}
+		};
 		const REPLACEMENT: &str = "\u{FFFD}";
 		const BUF: usize = 65536;
 		let mut buf = vec![0u8; BUF + 4];
@@ -314,7 +363,7 @@ fn run_pty_sync(
 						let pending = &buf[..it];
 						match str::from_utf8(pending) {
 							Ok(text) => {
-								let _ = reader_tx.send(ReaderEvent::Chunk(text.to_string()));
+								send_chunk(text.to_string());
 								it = 0;
 								break;
 							},
@@ -323,13 +372,13 @@ fn run_pty_sync(
 								if valid_up_to > 0 {
 									// SAFETY: [..valid_up_to] is guaranteed valid UTF-8 by valid_up_to().
 									let text = unsafe { str::from_utf8_unchecked(&pending[..valid_up_to]) };
-									let _ = reader_tx.send(ReaderEvent::Chunk(text.to_string()));
+									send_chunk(text.to_string());
 									buf.copy_within(valid_up_to..it, 0);
 									it -= valid_up_to;
 								}
 								match err.error_len() {
 									Some(invalid_len) => {
-										let _ = reader_tx.send(ReaderEvent::Chunk(REPLACEMENT.to_string()));
+										send_chunk(REPLACEMENT.to_string());
 										buf.copy_within(invalid_len..it, 0);
 										it -= invalid_len;
 									},
@@ -349,13 +398,13 @@ fn run_pty_sync(
 		for chunk in buf[..it].utf8_chunks() {
 			let valid = chunk.valid();
 			if !valid.is_empty() {
-				let _ = reader_tx.send(ReaderEvent::Chunk(valid.to_string()));
+				send_chunk(valid.to_string());
 			}
 			if !chunk.invalid().is_empty() {
-				let _ = reader_tx.send(ReaderEvent::Chunk(REPLACEMENT.to_string()));
+				send_chunk(REPLACEMENT.to_string());
 			}
 		}
-		let _ = reader_tx.send(ReaderEvent::Done);
+		let _ = reader_done_tx.send(());
 	});
 
 	let child_pid = child
@@ -402,19 +451,13 @@ fn run_pty_sync(
 			}
 		}
 
-		for _ in 0..READER_EVENTS_PER_TICK {
-			match reader_rx.try_recv() {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
-				Ok(ReaderEvent::Done) => {
-					reader_done = true;
-					break;
-				},
-				Err(flume::TryRecvError::Empty) => break,
-				Err(flume::TryRecvError::Disconnected) => {
-					reader_done = true;
-					break;
-				},
-			}
+		// Chunk delivery no longer runs through this loop (see `send_chunk` in
+		// the reader thread above); this only tracks whether the reader has
+		// reached EOF so the loop below knows when to stop waiting on it.
+		match reader_done_rx.try_recv() {
+			Ok(()) => reader_done = true,
+			Err(flume::TryRecvError::Empty) => {},
+			Err(flume::TryRecvError::Disconnected) => reader_done = true,
 		}
 		if exit_code.is_none()
 			&& let Some(status) = child
@@ -438,9 +481,8 @@ fn run_pty_sync(
 					.saturating_duration_since(Instant::now())
 					.min(Duration::from_millis(16))
 			});
-			match reader_rx.recv_timeout(wait_duration) {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
-				Ok(ReaderEvent::Done) => reader_done = true,
+			match reader_done_rx.recv_timeout(wait_duration) {
+				Ok(()) => reader_done = true,
 				Err(flume::RecvTimeoutError::Timeout) => {},
 				Err(flume::RecvTimeoutError::Disconnected) => {
 					reader_done = true;
@@ -506,9 +548,8 @@ fn run_pty_sync(
 		while Instant::now() < finalize_deadline {
 			let remaining = finalize_deadline.saturating_duration_since(Instant::now());
 			let wait_duration = remaining.min(Duration::from_millis(5));
-			match reader_rx.recv_timeout(wait_duration) {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
-				Ok(ReaderEvent::Done) => {
+			match reader_done_rx.recv_timeout(wait_duration) {
+				Ok(()) => {
 					reader_done = true;
 					break;
 				},
@@ -548,11 +589,312 @@ fn run_pty_sync(
 	if reader_done {
 		let _ = reader_thread.join();
 	}
-	Ok(PtyRunResult { exit_code, cancelled, timed_out })
+	Ok((PtyRunResult { exit_code, cancelled, timed_out }, reader_done))
 }
 
-fn emit_chunk(text: &str, callback: Option<&ThreadsafeFunction<String>>) {
-	if let Some(callback) = callback {
-		callback.call(Ok(text.to_string()), ThreadsafeFunctionCallMode::NonBlocking);
+/// Await policy for the reader→JS drain pump (`drain_handle` from
+/// `bridge_chunks`) after `run_pty_sync` returns.
+///
+/// `Shell::run`'s equivalent await is unconditional, which is safe there
+/// only because its readers are tokio tasks that are deterministically torn
+/// down. The PTY reader is a plain OS thread, and `run_pty_sync` can return
+/// with it still running (`reader_exited == false`: a detached descendant
+/// kept the PTY slave open, or a hung Windows `ClosePseudoConsole`) — in
+/// that case `pump_chunks` would never see its channel disconnect on its
+/// own, since the wedged reader thread still holds a live sender.
+///
+/// - `reader_exited == true`: await `handle` unconditionally. Lossless and
+///   guaranteed to finish, since `pump_chunks` only returns once the channel
+///   drains and disconnects.
+/// - `reader_exited == false`: give the pump a bounded grace period, then abort
+///   it. Aborting drops the pump's receiver, so the wedged reader thread's next
+///   `chunk_tx.send()` fails fast and stops invoking JS. This loses only
+///   whatever tail chunks were still in flight — a case that was already lossy
+///   pre-fix (the old tsfn died at promise resolution, and
+///   `bash-interactive.ts`'s `finished` guard dropped anything arriving after).
+async fn await_drain_handle(reader_exited: bool, mut handle: tokio::task::JoinHandle<()>) {
+	if reader_exited {
+		let _ = handle.await;
+		return;
+	}
+	if tokio::time::timeout(WEDGED_READER_DRAIN_TIMEOUT, &mut handle)
+		.await
+		.is_err()
+	{
+		handle.abort();
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	//! `run_pty_sync` is a plain function (no napi `Env` needed), so these
+	//! tests call it directly against a real PTY. They need an actual
+	//! pseudo-terminal, so they are gated on `unix` (the sandboxes that run
+	//! this crate's tests do not carry `ConPTY`, and `portable-pty`'s Windows
+	//! path is comparatively untested here regardless).
+
+	use std::time::{Duration, Instant};
+
+	use super::{ControlMessage, PtyRunConfig, await_drain_handle, run_pty_sync};
+	use crate::task;
+
+	fn config(command: &str) -> PtyRunConfig {
+		PtyRunConfig {
+			command: command.to_string(),
+			cwd:     None,
+			env:     None,
+			cols:    120,
+			rows:    40,
+			shell:   Some("sh".to_string()),
+		}
+	}
+
+	/// Regression for #4040: with the pre-fix bridge (unbounded reader
+	/// channel + fire-and-forget `ThreadsafeFunctionCallMode::NonBlocking`),
+	/// a fast-writing child and a slow JS consumer let the reader thread
+	/// buffer the entire surplus in the unbounded channel, so the child
+	/// would finish writing a payload this size almost instantly regardless
+	/// of how slowly the consumer drains its end. This checks the
+	/// *observable effect* of backpressure rather than a channel-length
+	/// invariant that a bounded `flume` channel could never violate anyway:
+	/// pausing the consumer entirely, mid-stream, for longer than it would
+	/// take to write the whole (10+ MiB) payload into an unbounded buffer
+	/// must still leave the run unfinished, because the reader thread can
+	/// never get more than `BRIDGE_CAPACITY` chunks ahead of the consumer.
+	/// Losslessness and ordering are still checked at the end.
+	#[test]
+	fn slow_consumer_applies_real_backpressure_and_loses_no_bytes() {
+		const ITERATIONS: usize = 1_400_000;
+		const CHUNK: &str = "0123456789";
+		const BRIDGE_CAPACITY: usize = 4;
+		// Pause once at least this many bytes have arrived, so the pause lands
+		// solidly mid-stream rather than at the very start or end.
+		const PAUSE_AFTER_BYTES: usize = 2 * 1024 * 1024;
+		const PAUSE_DURATION: Duration = Duration::from_secs(2);
+		// `-lc` makes the child a login shell, which on some hosts sources a
+		// profile that writes an unrelated startup line to stderr — merged
+		// into the same PTY stream ahead of our output. Emit a marker right
+		// before the payload and search for it, so the assertions below
+		// check the actual payload rather than depend on a byte-identical
+		// pty stream from process start.
+		const MARKER: &str = "<<PAYLOAD>>";
+
+		let (chunk_tx, chunk_rx) = flume::bounded::<String>(BRIDGE_CAPACITY);
+		let (_control_tx, control_rx) = flume::unbounded::<ControlMessage>();
+		let run_config = config(&format!(
+			"printf '{MARKER}'; for i in $(seq 1 {ITERATIONS}); do printf '{CHUNK}'; done"
+		));
+
+		let handle = std::thread::spawn(move || {
+			run_pty_sync(run_config, Some(chunk_tx), control_rx, task::CancelToken::default())
+		});
+
+		// Deliberately slow consumer: drains one chunk at a time with a short
+		// delay, so the reader thread must park on `chunk_tx.send()` once the
+		// bridge fills — the same backpressure a slow JS event loop applies.
+		let mut received = String::with_capacity(ITERATIONS * CHUNK.len());
+		let mut paused = false;
+		while let Ok(chunk) = chunk_rx.recv_timeout(Duration::from_secs(10)) {
+			received.push_str(&chunk);
+			std::thread::sleep(Duration::from_micros(200));
+			if !paused && received.len() >= PAUSE_AFTER_BYTES {
+				paused = true;
+				assert!(
+					!handle.is_finished(),
+					"pty run already finished before the pause -- payload too small to exercise \
+					 backpressure",
+				);
+				std::thread::sleep(PAUSE_DURATION);
+				assert!(
+					!handle.is_finished(),
+					"pty run finished during the consumer pause -- output was buffered unboundedly \
+					 instead of applying real backpressure",
+				);
+			}
+		}
+
+		let (result, reader_exited) = handle
+			.join()
+			.expect("pty thread should not panic")
+			.expect("pty run should succeed");
+		assert_eq!(result.exit_code, Some(0));
+		assert!(reader_exited, "reader thread should reach EOF on a normal exit");
+		assert!(paused, "consumer never reached the pause threshold");
+		let payload_start = received
+			.find(MARKER)
+			.expect("payload marker must arrive somewhere in the stream")
+			+ MARKER.len();
+		let payload = &received[payload_start..];
+		let expected = CHUNK.repeat(ITERATIONS);
+		assert_eq!(payload.len(), expected.len(), "bytes were dropped or duplicated");
+		assert_eq!(payload, expected, "chunks must arrive losslessly and in order");
+	}
+
+	/// Regression for #4040's kill-path wrinkle: chunk forwarding must never
+	/// run on the control loop, because a full bridge channel would then
+	/// park the loop that has to service `ControlMessage::Kill`. This pins
+	/// down the actual design (the reader thread owns the blocking send; the
+	/// control loop never touches the bridge channel) by parking the reader
+	/// thread on a full one-slot bridge — and deliberately never draining it
+	/// — then asserting `Kill` still completes promptly instead of hanging
+	/// until the test harness kills the process.
+	#[test]
+	fn kill_completes_promptly_while_reader_thread_is_parked_on_a_full_bridge() {
+		let (chunk_tx, _chunk_rx_kept_alive_but_never_drained) = flume::bounded::<String>(1);
+		let (control_tx, control_rx) = flume::unbounded::<ControlMessage>();
+		let run_config = config("while :; do printf '0123456789'; done");
+
+		let (done_tx, done_rx) = flume::bounded(1);
+		std::thread::spawn(move || {
+			let result =
+				run_pty_sync(run_config, Some(chunk_tx), control_rx, task::CancelToken::default());
+			let _ = done_tx.send(result.map_err(|err| err.to_string()));
+		});
+
+		// Give the reader thread time to fill the one-slot bridge and park on
+		// the next send. `_chunk_rx_kept_alive_but_never_drained` is held for
+		// the whole test so the channel stays connected (a dropped receiver
+		// would itself unpark the sender, defeating the point of this test).
+		std::thread::sleep(Duration::from_millis(200));
+
+		control_tx
+			.send(ControlMessage::Kill)
+			.expect("control channel should still be open");
+
+		let (result, reader_exited) = done_rx
+			.recv_timeout(Duration::from_secs(3))
+			.expect(
+				"run_pty_sync must return promptly after Kill even while the reader thread is parked \
+				 on a full bridge channel — if this times out, chunk forwarding has been coupled back \
+				 into the control loop",
+			)
+			.expect("pty run should not error");
+		assert!(result.cancelled, "Kill should mark the run as cancelled");
+		assert!(
+			!reader_exited,
+			"reader thread is still parked on the never-drained bridge send, so it never reached EOF",
+		);
+	}
+
+	/// End-to-end regression for #4040 finding 1, using a real PTY and the
+	/// full `await_drain_handle` policy together. A detached descendant
+	/// holding the PTY slave open (e.g. `sh -lc 'sleep 300 &'`) is the
+	/// motivating case in production, but this sandbox reaps orphaned
+	/// background jobs the moment their parent shell exits, which would
+	/// silently defeat that exact reproduction here. Wedging the reader on a
+	/// full, never-drained bridge channel plus `Kill` (the same reliable
+	/// technique `kill_completes_promptly_while_reader_thread_is_parked_on_a_full_bridge`
+	/// uses) reaches the identical observable state that matters:
+	/// `run_pty_sync` returns with `reader_exited == false` and the reader
+	/// thread still parked forever on `chunk_tx.send()`. From there this
+	/// pins down that the caller-side await policy still resolves in bounded
+	/// time even though the drain pump it awaits never finishes on its own —
+	/// if the policy regressed to an unconditional await, this test would
+	/// hang until the test harness kills the process instead of resolving in
+	/// roughly `WEDGED_READER_DRAIN_TIMEOUT`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn wedged_reader_resolves_within_bounded_time_via_full_await_policy() {
+		let (chunk_tx, chunk_rx) = flume::bounded::<String>(1);
+		let (control_tx, control_rx) = flume::unbounded::<ControlMessage>();
+		let run_config = config("while :; do printf '0123456789'; done");
+
+		let run_task = tokio::task::spawn_blocking(move || {
+			run_pty_sync(run_config, Some(chunk_tx), control_rx, task::CancelToken::default())
+		});
+
+		// Give the reader thread time to fill the one-slot bridge and park on
+		// the next send before anyone kills the child or drains the channel.
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		control_tx
+			.send(ControlMessage::Kill)
+			.expect("control channel should still be open");
+
+		let (result, reader_exited) = run_task
+			.await
+			.expect("pty task should not panic")
+			.expect("pty run should succeed");
+		assert!(result.cancelled, "Kill should mark the run as cancelled");
+		assert!(
+			!reader_exited,
+			"reader thread should still be parked on the never-drained bridge send",
+		);
+
+		// Stand in for `bridge_chunks`' pump without needing a napi `Env`. A
+		// pump that actually drained `chunk_rx` here would unpark the leaked
+		// reader thread's send and let it observe the already-dead child's EOF
+		// almost immediately -- unlike a real detached descendant, which keeps
+		// producing (and the pump keeps recv'ing, so it never disconnects and
+		// never returns). `std::future::pending` models that "never returns on
+		// its own" property directly and deterministically; `chunk_rx` is kept
+		// alive (undrained) alongside it so the leaked reader thread stays
+		// parked for the rest of the test, matching the real leak.
+		let _chunk_rx_kept_alive_but_never_drained = chunk_rx;
+		let pump = tokio::spawn(std::future::pending::<()>());
+
+		let start = Instant::now();
+		tokio::time::timeout(Duration::from_secs(10), await_drain_handle(reader_exited, pump))
+			.await
+			.expect("await_drain_handle must resolve on its own, well within 10s");
+		assert!(
+			start.elapsed() < Duration::from_secs(4),
+			"await_drain_handle took {:?}, expected roughly WEDGED_READER_DRAIN_TIMEOUT (2s)",
+			start.elapsed(),
+		);
+	}
+
+	/// Plain policy-fn coverage for `await_drain_handle`, independent of any
+	/// real PTY or napi `Env`: when the reader already exited, the drain pump
+	/// must still be awaited unconditionally (lossless, like `Shell::run`).
+	#[tokio::test]
+	async fn drain_handle_reader_exited_awaits_pump_unconditionally() {
+		let handle = tokio::spawn(async {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		});
+		await_drain_handle(true, handle).await;
+	}
+
+	/// The crux of finding 1, isolated from the real PTY harness: when the
+	/// reader did *not* exit, `await_drain_handle` must resolve in bounded
+	/// time even given a pump future that never completes on its own —
+	/// otherwise `PtySession::start`'s promise would hang forever. The drop
+	/// guard additionally pins that the timed-out pump task is *aborted*
+	/// (dropped), not merely abandoned: a leaked pump would keep the bridge
+	/// receiver and the tsfn alive for the process lifetime.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn drain_handle_reader_not_exited_resolves_within_bounded_time() {
+		struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+		impl Drop for SetOnDrop {
+			fn drop(&mut self) {
+				self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+
+		let pump_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let guard = SetOnDrop(pump_dropped.clone());
+		let handle = tokio::spawn(async move {
+			let _guard = guard;
+			std::future::pending::<()>().await;
+		});
+		let start = Instant::now();
+		tokio::time::timeout(Duration::from_secs(10), await_drain_handle(false, handle))
+			.await
+			.expect("await_drain_handle must resolve on its own, well within 10s");
+		assert!(
+			start.elapsed() < Duration::from_secs(4),
+			"expected resolution around WEDGED_READER_DRAIN_TIMEOUT (2s), took {:?}",
+			start.elapsed(),
+		);
+		// The abort lands asynchronously to the JoinHandle; give the runtime a
+		// moment to drop the task body before asserting.
+		for _ in 0..50 {
+			if pump_dropped.load(std::sync::atomic::Ordering::SeqCst) {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert!(
+			pump_dropped.load(std::sync::atomic::Ordering::SeqCst),
+			"timed-out pump task must be aborted (dropped), not leaked",
+		);
 	}
 }

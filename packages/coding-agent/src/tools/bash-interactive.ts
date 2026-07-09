@@ -103,6 +103,14 @@ function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean):
 	}
 	return data;
 }
+// Cap on bytes queued for the live overlay's xterm render (`#writeQueue`),
+// not on captured output. `OutputSink` (see `runInteractiveBashPty`) receives
+// every chunk independently and is the lossless capture path; this queue only
+// feeds what the overlay currently renders, and xterm itself keeps 10k lines
+// of scrollback, so dropping the oldest not-yet-rendered chunks here under
+// backpressure is safe.
+const MAX_RENDER_QUEUE_BYTES = 1 << 20; // 1 MiB
+
 class BashInteractiveOverlayComponent implements Component {
 	#terminal: XtermTerminalType;
 	#state: "running" | "complete" | "timed_out" | "killed" = "running";
@@ -115,6 +123,7 @@ class BashInteractiveOverlayComponent implements Component {
 	#lastRows = 0;
 	#writeQueue: string[] = [];
 	#writeOffset = 0;
+	#pendingBytes = 0;
 	#flushResolvers: Array<() => void> = [];
 	#writing = false;
 
@@ -141,7 +150,18 @@ class BashInteractiveOverlayComponent implements Component {
 
 	appendOutput(chunk: string): void {
 		this.#writeQueue.push(chunk);
+		this.#pendingBytes += Buffer.byteLength(chunk, "utf-8");
+		this.#evictOverflow();
 		this.#drainQueue();
+	}
+
+	// Drops the oldest not-yet-started chunks (never the one currently mid-write
+	// at `#writeOffset`) until the queue is back under the byte cap.
+	#evictOverflow(): void {
+		while (this.#pendingBytes > MAX_RENDER_QUEUE_BYTES && this.#writeOffset + 1 < this.#writeQueue.length) {
+			const [dropped] = this.#writeQueue.splice(this.#writeOffset + 1, 1);
+			this.#pendingBytes -= Buffer.byteLength(dropped!, "utf-8");
+		}
 	}
 
 	#drainQueue(): void {
@@ -155,9 +175,11 @@ class BashInteractiveOverlayComponent implements Component {
 		this.#terminal.write(data, () => {
 			this.#writing = false;
 			this.#writeOffset += 1;
+			this.#pendingBytes -= Buffer.byteLength(data, "utf-8");
 			if (this.#writeOffset >= this.#writeQueue.length) {
 				this.#writeQueue = [];
 				this.#writeOffset = 0;
+				this.#pendingBytes = 0;
 				this.#resolveFlushWaiters();
 			}
 			this.#drainQueue();

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the interactive bash overlay's live render queue growing unboundedly under a fast producer and a slow terminal renderer: it is now byte-capped (1 MiB) with oldest-first eviction. The queue only ever fed the live overlay — `OutputSink` already captured everything losslessly — so dropping stale unrendered chunks under backpressure is safe. ([#4040](https://github.com/can1357/oh-my-pi/issues/4040), [#4026](https://github.com/can1357/oh-my-pi/issues/4026))
+
 ## [16.3.14] - 2026-07-09
 
 ### Fixed

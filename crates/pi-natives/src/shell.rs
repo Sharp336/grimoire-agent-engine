@@ -294,15 +294,20 @@ pub fn execute_shell<'env>(
 	})
 }
 
-/// Capacity (in chunks) of the queue between the pipe readers and the JS
-/// forwarding pump. One queued chunk is at most one pipe read (≤64 KiB), so
-/// the Rust side of the bridge holds ~4 MiB worst case before the readers'
-/// `send_async` parks — which in turn parks the child on its stdout/stderr
-/// pipe (ordinary pipe backpressure) instead of buffering the surplus in
-/// process memory (#4078).
-const BRIDGE_QUEUE_CHUNKS: usize = 64;
+/// Capacity (in chunks) of the queue between a reader (pipe or PTY) and the
+/// JS forwarding pump. One queued chunk is at most one read (≤64 KiB), so the
+/// Rust side of the bridge holds ~4 MiB worst case before the reader's send
+/// parks — which in turn parks the underlying producer (child stdout/stderr
+/// pipe, or the PTY reader thread and transitively the child's tty) on
+/// ordinary OS backpressure instead of buffering the surplus in process
+/// memory (#4078, #4040).
+pub(crate) const BRIDGE_QUEUE_CHUNKS: usize = 64;
 
-fn bridge_chunks(
+/// Shared by the non-PTY shell path ([`Shell::run`], [`execute_shell`]) and
+/// the PTY path ([`crate::pty::PtySession::start`]): both need a bounded
+/// reader→JS bridge whose drain pump is awaited before the caller's promise
+/// resolves, so the last output chunk is delivered before completion.
+pub(crate) fn bridge_chunks(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 ) -> (Option<flume::Sender<String>>, Option<napi::tokio::task::JoinHandle<()>>) {
 	let Some(on_chunk) = on_chunk else {
@@ -325,10 +330,16 @@ fn bridge_chunks(
 /// the consumer is gone; dropping `rx` then disconnects the channel so
 /// parked/future senders fail fast and the pipe readers keep draining the
 /// child instead of wedging it.
-async fn pump_chunks(rx: flume::Receiver<String>, mut forward: impl AsyncFnMut(String) -> bool) {
-	// Hard cap on one coalesced batch so the JS main thread never sees a
+pub(crate) async fn pump_chunks(
+	rx: flume::Receiver<String>,
+	mut forward: impl AsyncFnMut(String) -> bool,
+) {
+	// Soft cap on one coalesced batch so the JS main thread never sees a
 	// multi-MB napi callback (a giant single string would stall sanitize +
-	// tail-buffer maintenance for the whole copy).
+	// tail-buffer maintenance for the whole copy). The loop below checks this
+	// bound *before* admitting the next already-queued chunk but always
+	// admits at least the first chunk of a batch, so a real batch can reach
+	// MAX_BATCH_BYTES + one chunk (≤64 KiB) — up to ~128 KiB, not 64 KiB.
 	const MAX_BATCH_BYTES: usize = 64 * 1024;
 	// Initial capacity sized for typical bursty pipe output. Re-allocated
 	// each batch because `String` ownership is moved into the napi call.

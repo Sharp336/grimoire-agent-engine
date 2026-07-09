@@ -260,6 +260,15 @@ pub struct StreamSinks {
 /// Bytes are delivered on separate channels with no UTF-8 decoding and no
 /// merging. The minimizer is intentionally disabled — its
 /// `MinimizerResult.text` contract presumes a single merged transcript.
+///
+/// Callers MUST pass bounded [`Sender`]s in `streams`. This function drains
+/// the child's stdout/stderr pipes directly into whichever sender each sink
+/// supplies (see `read_output_bytes` in this module), with no coalescing
+/// pump in front of it; an unbounded sender lets a fast child buffer its
+/// entire output in process memory before a slow consumer catches up
+/// (#4078/#4040). A bounded sender instead parks the pipe-reading task —
+/// and transitively the child, via ordinary pipe backpressure — once the
+/// consumer falls behind.
 pub async fn execute_shell_streams(
 	options: ShellExecuteOptions,
 	streams: StreamSinks,
@@ -1362,7 +1371,7 @@ async fn read_output_bytes(
 		let _ = activity.try_send(());
 		buf.truncate(n);
 		if let Some(sink) = sink.as_ref()
-			&& sink.send(Bytes::from(buf)).is_err()
+			&& sink.send_async(Bytes::from(buf)).await.is_err()
 		{
 			// Receiver dropped — stop forwarding and let the pipe close.
 			break;

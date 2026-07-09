@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed unbounded memory growth in the PTY output bridge used by the interactive bash overlay: the PTY reader thread now sends decoded chunks through the same bounded, backpressured JS-bridge channel already used by the non-PTY shell path, instead of an unbounded reader channel feeding a fire-and-forget threadsafe-function queue. Chunk forwarding stays off the PTY control loop entirely, so a full queue only ever parks the reader thread and never delays `kill()`. ([#4040](https://github.com/can1357/oh-my-pi/issues/4040), [#4026](https://github.com/can1357/oh-my-pi/issues/4026))
+
 ## [16.3.13] - 2026-07-09
 
 ### Fixed
