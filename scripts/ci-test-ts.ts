@@ -29,7 +29,11 @@ type CodingAgentTestPartition = Record<CodingAgentBucket, string[]>;
 const repoRoot = path.join(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
-const requestedMode = args.find(arg => !arg.startsWith("--")) ?? "all";
+const modeArg = args.find(arg => !arg.startsWith("--"));
+const requestedMode = modeArg ?? "all";
+const requestedCodingAgentTestFiles = args
+	.filter(arg => !arg.startsWith("--") && arg !== modeArg)
+	.map(value => value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^packages\/coding-agent\//, ""));
 // `--only-failures` is Bun's output filter — it hides passing tests within each
 // chunk, keeping the log terse, and is the default here (CI and the root
 // `test:ts` aggregate append it). It does NOT skip tests or share any
@@ -201,6 +205,7 @@ const codingAgentRuntimeContentMarkers = ["AgentSession", "SessionManager", "Aut
 
 let codingAgentTestPartitionPromise: Promise<CodingAgentTestPartition> | null = null;
 
+
 function shellQuote(value: string): string {
 	if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) {
 		return value;
@@ -311,8 +316,16 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> 
 
 async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
 	const partition = await getCodingAgentTestPartition();
-	const testFiles = partition[bucket];
+	const allTestFiles = partition[bucket];
+	const testFiles =
+		requestedCodingAgentTestFiles.length === 0
+			? allTestFiles
+			: allTestFiles.filter(testFile => {
+					const normalized = testFile.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^packages\/coding-agent\//, "");
+					return requestedCodingAgentTestFiles.some(requested => requested === normalized);
+				});
 	if (testFiles.length === 0) {
+		if (requestedCodingAgentTestFiles.length > 0) return [];
 		throw new Error(`No coding-agent ${bucket} tests matched`);
 	}
 	const plan = codingAgentBucketPlans[bucket];
@@ -815,6 +828,9 @@ if (import.meta.main) {
 	}
 
 	const testCommands = await commandsForMode(requestedMode as Mode);
+	if (requestedCodingAgentTestFiles.length > 0 && testCommands.length === 0) {
+		throw new Error(`No coding-agent tests matched requested filter(s): ${requestedCodingAgentTestFiles.join(", ")}`);
+	}
 	// Outside CI, fan the independent chunk processes out across cores; CI keeps the
 	// sequential, fail-fast path so each memory-capped runner job stays bounded.
 	if (!isDryRun && !isCI() && testCommands.length > 1) {
