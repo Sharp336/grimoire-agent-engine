@@ -33,7 +33,8 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths
 {{#if hasEval}}- Need exact pipeline semantics (`cmd | head`, multi-stage filtering) or output truncation? Prefer `eval` and process the stream directly.{{else}}- Need exact pipeline semantics (`cmd | head`, multi-stage filtering) or output truncation? Use a checked-in script, purpose-built tool, or single command that owns the output shape.{{/if}}
 {{#if asyncEnabled}}
-- `async: true` for long-running commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up.
+- `async: true` for long-running commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up that wakes you automatically.
+- After starting an async/background job, do useful independent work or stop naturally. NEVER run `sleep` loops or repeated status checks just to wait; OMP will wake you when the job finishes. Use the `job` tool only to inspect progress, cancel, or block when truly no other work is possible.
 {{/if}}
 </instruction>
 
@@ -60,7 +61,8 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 
 ## Auto-background
 
-- A long-running foreground call may convert to a background job; the final result arrives as a follow-up tool call. NOT a failure — don't retry or wait synchronously.
+- A long-running foreground call may convert to a background job; the final result arrives as a follow-up tool call and wakes you automatically. NOT a failure — don't retry or wait synchronously.
+- If this happens, treat the current stop as a scheduling pause. Do not issue sleep/poll loops to wait for it; continue only when the follow-up result arrives or use `job` for deliberate lifecycle control.
 - Need the result inline (e.g. piping into another command)? Raise `timeout` above expected duration{{#if asyncEnabled}}, or set `async: true` up front{{/if}}.
 {{/if}}
 

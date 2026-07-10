@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified that background-job completion automatically wakes the agent, and discouraged sleep loops or repeated `job` polling while work is still running.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed

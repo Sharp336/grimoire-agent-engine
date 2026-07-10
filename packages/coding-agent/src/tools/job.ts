@@ -348,6 +348,13 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			for (const j of running) {
 				lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}`);
 			}
+			lines.push("");
+			lines.push(
+				"No new output is available yet. Background jobs deliver their final result automatically and wake the session when complete.",
+			);
+			lines.push(
+				"Do not call `job` again just to wait; continue useful work, end the turn if blocked, or cancel only if the job is no longer needed.",
+			);
 		}
 
 		const details: JobToolDetails = {

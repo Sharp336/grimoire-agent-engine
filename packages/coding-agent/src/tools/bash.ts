@@ -543,9 +543,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			lines.push(...options.notices, "");
 		}
 		lines.push(`Background job ${jobId} started: ${label}`);
-		lines.push("Result will be delivered automatically when complete.");
+		lines.push("Result will be delivered automatically when complete and will wake the session.");
 		lines.push(
-			`You can use \`job\` to poll until complete, but prefer to continue with another task in the meanwhile if it's not blocking.`,
+			`Do not call \`job\` just to wait for output. Continue useful work, end the turn if blocked, or use \`job\` only for lifecycle control such as cancel/list or one deliberate blocking wait.`,
 		);
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],

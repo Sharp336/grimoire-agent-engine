@@ -42,7 +42,7 @@ The tool returns a single `text` content block plus optional `details`.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
   - non-zero exits return a tool result marked `isError` with output plus `Command exited with code <n>`; they are not thrown.
 - Success, background start (`async: true` or auto-background):
-  - `content[0].text`: optional preview tail, timeout notice if any, then `Background job <id> started: <label>` with follow-up instructions.
+  - `content[0].text`: optional preview tail, timeout notice if any, then `Background job <id> started: <label>` with follow-up instructions. The final result is delivered automatically and wakes the agent; the agent does not need to sleep-loop or poll just to wait.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
@@ -90,7 +90,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
    - Supports interactive input; `Esc` kills the session from the overlay.
 4. Explicit background job
    - Requires `async: true` and `async.enabled`.
-   - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately.
+   - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. On completion, the async-result delivery wakes the agent automatically.
 5. Auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY, and an async job manager.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window.
@@ -115,7 +115,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
   - Invalidates `github-cache` rows before execution when the command contains a mutating `gh issue`/`gh pr` subcommand, so later `issue://`/`pr://` reads see post-mutation state (`invalidateGithubCacheForBashCommand`).
 - User-visible prompts / interactive UI
   - PTY mode opens a TUI overlay titled `Console` and forwards input to the PTY.
-  - Background start messages note that the result is delivered automatically when complete and that the `job` tool can poll until then.
+  - Background start messages note that the result is delivered automatically when complete and that the `job` tool is only for deliberate progress inspection, cancellation, or blocking when no other work is possible.
 - Background work / cancellation
   - Async and auto-background jobs continue after the initial tool return.
   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.

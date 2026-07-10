@@ -1443,6 +1443,8 @@ function b() {
 			expect(result.details?.async?.type).toBe("bash");
 			expect(getTextOutput(result)).toContain("Background job");
 			expect(getTextOutput(result)).toContain("start");
+			expect(getTextOutput(result)).toContain("will wake the session");
+			expect(getTextOutput(result)).toContain("Do not call `job` just to wait");
 
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
@@ -1637,10 +1639,18 @@ function b() {
 			const pollPromise = jobTool.execute("test-call-useless-poll", { poll: [jobId] }, controller.signal);
 			controller.abort();
 			const polled = await pollPromise;
+			expect(getTextOutput(polled)).toContain(
+				"Background jobs deliver their final result automatically and wake the session",
+			);
+			expect(getTextOutput(polled)).toContain("Do not call `job` again just to wait");
 			expect(polled.useless).toBe(true);
 
 			// A list snapshot showing only running jobs is equally uneventful.
 			const listed = await jobTool.execute("test-call-useless-list", { list: true });
+			expect(getTextOutput(listed)).toContain(
+				"Background jobs deliver their final result automatically and wake the session",
+			);
+			expect(getTextOutput(listed)).toContain("Do not call `job` again just to wait");
 			expect(listed.useless).toBe(true);
 
 			// Once the job settles, the result is informative — flag absent.
