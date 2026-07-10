@@ -1272,7 +1272,7 @@ async function handlePiNative(
  */
 async function handleUsage(
 	storage: AuthStorage,
-	signal: AbortSignal,
+	req: Request,
 	principal: AuthGatewayPrincipal,
 	accessStore?: AuthGatewayBootOptions["accessStore"],
 ): Promise<Response> {
@@ -1281,11 +1281,28 @@ async function handleUsage(
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "usage", true);
 		if (!access.allowed)
 			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
-		return json(200, { usage: accessStore.getUserUsage(principal.userId, 0) });
+		const since = readUsageSince(req);
+		if (since instanceof Response) return since;
+		return json(200, { usage: accessStore.getUserUsage(principal.userId, since) });
 	}
-	const reports = (await storage.fetchUsageReports?.({ signal })) ?? [];
+	const reports = (await storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
 	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
 	return json(200, { generatedAt: Date.now(), reports: trimmed });
+}
+
+function readUsageSince(req: Request): number | Response {
+	const raw = new URL(req.url).searchParams.get("since");
+	if (raw === null) return 0;
+	const since = Number(raw);
+	if (!Number.isFinite(since) || since < 0) {
+		return json(400, {
+			error: {
+				type: "invalid_request_error",
+				message: "since must be a non-negative millisecond timestamp",
+			},
+		});
+	}
+	return since;
 }
 
 async function handleCredentialsCheck(
@@ -1460,7 +1477,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				}
 
 				if (req.method === "GET" && pathname === "/v1/usage") {
-					const response = await handleUsage(opts.storage, req.signal, principal, opts.accessStore);
+					const response = await handleUsage(opts.storage, req, principal, opts.accessStore);
 					audit?.record(auditOutcomeForStatus(response.status), response.status);
 					return withCors(response, req);
 				}

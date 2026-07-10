@@ -153,6 +153,76 @@ describe("auth-gateway audit", () => {
 		expect(persisted).not.toContain("secret@example.com");
 	});
 
+	test("filters managed self-service usage by since and validates the query", async () => {
+		harness = await createGatewayHarness();
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected credential row");
+		const user = harness.accessStore.createUser({ name: "usagefilter" });
+		const pool = harness.accessStore.createPool({ name: "usagefilterpool", provider: "mock" });
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+		for (const [requestId, startedAt, totalTokens] of [
+			["usage-old", 1_000, 10],
+			["usage-new", 2_000, 20],
+		] as const) {
+			harness.accessStore.recordAudit({
+				requestId,
+				startedAt,
+				completedAt: startedAt + 10,
+				userId: user.user.id,
+				userName: user.user.name,
+				tokenId: user.token.id,
+				method: "POST",
+				path: "/v1/chat/completions",
+				routeFamily: "chat",
+				requestedModel: "model-a",
+				resolvedProvider: "mock",
+				resolvedModel: "model-a",
+				credentialId: row.id,
+				outcome: "success",
+				statusCode: 200,
+				inputTokens: totalTokens,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens,
+				costUsd: 0,
+				errorCode: null,
+			});
+		}
+
+		let response = await fetch(`${harness.handle.url}/v1/usage`, { headers: jsonHeaders(user.token.value) });
+		expect(response.status).toBe(200);
+		let body = expectObject(await readJson(response));
+		let usage = expectObject(body.usage);
+		expect(usage.since).toBe(0);
+
+		response = await fetch(`${harness.handle.url}/v1/usage?since=1500`, {
+			headers: jsonHeaders(user.token.value),
+		});
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		usage = expectObject(body.usage);
+		expect(usage.since).toBe(1500);
+		expect(usage.totals).toMatchObject({ requests: 1, totalTokens: 20 });
+		expect(usage.byProviderModel).toEqual([
+			{ provider: "mock", model: "model-a", requests: 1, totalTokens: 20, costUsd: 0 },
+		]);
+
+		for (const since of ["-1", "abc"]) {
+			response = await fetch(`${harness.handle.url}/v1/usage?since=${since}`, {
+				headers: jsonHeaders(user.token.value),
+			});
+			expect(response.status).toBe(400);
+			expect(await readJson(response)).toEqual({
+				error: {
+					type: "invalid_request_error",
+					message: "since must be a non-negative millisecond timestamp",
+				},
+			});
+		}
+	});
+
 	test("returns scoped usage summaries, redacted credential checks, and newest-first audit pagination", async () => {
 		harness = await createGatewayHarness({
 			credentials: [
