@@ -25,20 +25,44 @@ import {
 	type Model,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	DEFAULT_AUTH_GATEWAY_BIND,
+	type AuthGatewayAclEffect,
+	type AuthGatewayAclKind,
+	type AuthGatewayPool,
+	type AuthGatewayPoolStrategy,
+	type AuthGatewayRole,
+	type AuthGatewayUser,
+	SqliteAuthGatewayAccessStore,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
-export type AuthGatewayAction = "serve" | "token" | "status" | "check";
+export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit";
 
 export interface AuthGatewayCommandArgs {
 	action: AuthGatewayAction;
+	subaction?: string;
+	target?: string;
+	value?: string;
 	flags: {
 		json?: boolean;
 		bind?: string;
 		regenerate?: boolean;
+		description?: string;
+		owner?: string;
+		role?: string;
+		label?: string;
+		provider?: string;
+		model?: string;
+		route?: string;
+		strategy?: string;
+		since?: string;
+		limit?: string;
+		user?: string;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
 		 * is bound to loopback (the default `127.0.0.1:4000`) and you don't want
@@ -56,10 +80,19 @@ export interface AuthGatewayCommandArgs {
 	};
 }
 
-const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check"];
+export interface AuthGatewayCommandDependencies {
+	accessDbPath?: string;
+	loadBrokerCredentials?: () => Promise<Array<{ id: number; provider: string; type: "oauth" | "api_key" }>>;
+}
+
+const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit"];
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
+}
+
+function getAccessDbPath(deps?: AuthGatewayCommandDependencies): string {
+	return deps?.accessDbPath ?? path.join(getConfigRootDir(), "auth-gateway.db");
 }
 
 async function readToken(): Promise<string | null> {
@@ -135,7 +168,21 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 	return result.snapshot;
 }
 
-async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+async function loadBrokerCredentials(
+	deps?: AuthGatewayCommandDependencies,
+): Promise<Array<{ id: number; provider: string; type: "oauth" | "api_key" }>> {
+	if (deps?.loadBrokerCredentials) return deps.loadBrokerCredentials();
+	const brokerConfig = await resolveAuthBrokerConfig();
+	if (!brokerConfig) {
+		throw new Error(
+			"`omp auth-gateway pool add-account` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml).",
+		);
+	}
+	const snapshot = await fetchBrokerSnapshot(createBrokerClient(brokerConfig));
+	return snapshot.credentials.map(entry => ({ id: entry.id, provider: entry.provider, type: entry.credential.type }));
+}
+
+async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatewayCommandDependencies): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
@@ -144,89 +191,101 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : await ensureToken();
-
-	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
-	// in sdk.ts. The gateway never touches local SQLite.
-	const client = createBrokerClient(brokerConfig);
-	const initialSnapshot = await fetchBrokerSnapshot(client);
-	const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
-	// Refresh + usage both flow through the store's broker hooks automatically —
-	// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
-	// AuthStorage discovers them when no explicit option overrides them, so the
-	// gateway only needs to construct the store and pass it in.
-	const storage = new AuthStorage(store, {
-		sourceLabel: `broker ${brokerConfig.url}`,
-	});
-	await storage.reload();
-
-	// Build the model resolver + catalog from pi-ai's bundled metadata, scoped
-	// to providers we hold credentials for. Format handlers ask `resolveModel`
-	// to translate a client-requested `model` field into a pi-ai `Model<Api>`
-	// before dispatch; `listModels` powers `/v1/models`.
-	const snapshot = storage.exportSnapshot();
-	const providersWithCreds = new Set<string>();
-	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
-	const modelById = new Map<string, Model<Api>>();
-	for (const provider of getBundledProviders()) {
-		if (!providersWithCreds.has(provider)) continue;
-		for (const model of getBundledModels(provider as GeneratedProvider)) {
-			// Always set the qualified key (no collision possible)
-			modelById.set(`${model.provider}/${model.id}`, model);
-			// Bare id as fallback for legacy clients (first-write-wins)
-			if (!modelById.has(model.id)) modelById.set(model.id, model);
-		}
-	}
-
-	const handle = startAuthGateway({
-		storage,
-		bind,
-		bearerTokens: gatewayToken ? [gatewayToken] : [],
-		version: VERSION,
-		resolveModel: (id: string) => modelById.get(id),
-		listModels: () => modelById.values(),
-	});
-	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
-	if (gatewayToken) {
-		process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
-	} else {
-		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
-	}
-	process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
-
-	const stopped = Promise.withResolvers<void>();
-	let shutdownStarted = false;
-	const stop = async (signal: NodeJS.Signals): Promise<void> => {
-		if (shutdownStarted) return;
-		shutdownStarted = true;
-		process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
-		let closeError: unknown;
-		try {
-			await handle.close();
-		} catch (error) {
-			closeError = error;
-		} finally {
-			storage.close();
-		}
-		if (closeError) {
-			stopped.reject(closeError);
-		} else {
-			stopped.resolve();
-		}
-	};
-	const onSigint = (): void => {
-		void stop("SIGINT");
-	};
-	const onSigterm = (): void => {
-		void stop("SIGTERM");
-	};
-	process.once("SIGINT", onSigint);
-	process.once("SIGTERM", onSigterm);
+	let storage: AuthStorage | undefined;
+	let accessStore: SqliteAuthGatewayAccessStore | undefined;
 
 	try {
-		await stopped.promise;
-	} finally {
-		process.off("SIGINT", onSigint);
-		process.off("SIGTERM", onSigterm);
+		// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
+		// in sdk.ts. The gateway never touches local SQLite for provider secrets.
+		const client = createBrokerClient(brokerConfig);
+		const initialSnapshot = await fetchBrokerSnapshot(client);
+		const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
+		// Refresh + usage both flow through the store's broker hooks automatically —
+		// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
+		storage = new AuthStorage(store, {
+			sourceLabel: `broker ${brokerConfig.url}`,
+		});
+		await storage.reload();
+		accessStore = await SqliteAuthGatewayAccessStore.open(getAccessDbPath(deps));
+
+		// Build the model resolver + catalog from pi-ai's bundled metadata, scoped
+		// to providers we hold credentials for. Format handlers ask `resolveModel`
+		// to translate a client-requested `model` field into a pi-ai `Model<Api>`
+		// before dispatch; `listModels` powers `/v1/models`.
+		const snapshot = storage.exportSnapshot();
+		const providersWithCreds = new Set<string>();
+		for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
+		const modelById = new Map<string, Model<Api>>();
+		for (const provider of getBundledProviders()) {
+			if (!providersWithCreds.has(provider)) continue;
+			for (const model of getBundledModels(provider as GeneratedProvider)) {
+				// Always set the qualified key (no collision possible)
+				modelById.set(`${model.provider}/${model.id}`, model);
+				// Bare id as fallback for legacy clients (first-write-wins)
+				if (!modelById.has(model.id)) modelById.set(model.id, model);
+			}
+		}
+
+		const handle = startAuthGateway({
+			storage,
+			accessStore,
+			bind,
+			bearerTokens: gatewayToken ? [gatewayToken] : [],
+			version: VERSION,
+			resolveModel: (id: string) => modelById.get(id),
+			listModels: () => modelById.values(),
+		});
+		process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
+		if (gatewayToken) {
+			process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
+		} else {
+			process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
+		}
+		process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
+		process.stdout.write(`access database: ${getAccessDbPath(deps)}\n`);
+
+		const stopped = Promise.withResolvers<void>();
+		let shutdownStarted = false;
+		const stop = async (signal: NodeJS.Signals): Promise<void> => {
+			if (shutdownStarted) return;
+			shutdownStarted = true;
+			process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
+			let closeError: unknown;
+			try {
+				await handle.close();
+			} catch (error) {
+				closeError = error;
+			} finally {
+				storage?.close();
+				storage = undefined;
+				accessStore?.close();
+				accessStore = undefined;
+			}
+			if (closeError) {
+				stopped.reject(closeError);
+			} else {
+				stopped.resolve();
+			}
+		};
+		const onSigint = (): void => {
+			void stop("SIGINT");
+		};
+		const onSigterm = (): void => {
+			void stop("SIGTERM");
+		};
+		process.once("SIGINT", onSigint);
+		process.once("SIGTERM", onSigterm);
+
+		try {
+			await stopped.promise;
+		} finally {
+			process.off("SIGINT", onSigint);
+			process.off("SIGTERM", onSigterm);
+		}
+	} catch (error) {
+		storage?.close();
+		accessStore?.close();
+		throw error;
 	}
 }
 
@@ -249,27 +308,96 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}
 }
 
-async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+async function readAccessCounts(dbPath: string): Promise<{ users: number; activeTokens: number; pools: number }> {
+	const exists = await fs.stat(dbPath).then(stat => stat.isFile()).catch(() => false);
+	if (!exists) return { users: 0, activeTokens: 0, pools: 0 };
+	const store = await SqliteAuthGatewayAccessStore.open(dbPath);
+	try {
+		return store.counts();
+	} finally {
+		store.close();
+	}
+}
+
+async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatewayCommandDependencies): Promise<void> {
 	const token = await readToken();
-	const brokerConfig = await resolveAuthBrokerConfig();
 	const tokenFile = getTokenFilePath();
+	const accessDb = getAccessDbPath(deps);
+	const accessCounts = await readAccessCounts(accessDb);
+	const accessStatus = {
+		accessDb,
+		managedUserCount: accessCounts.users,
+		activeManagedTokenCount: accessCounts.activeTokens,
+		poolCount: accessCounts.pools,
+	};
+	const tokenPresent = token !== null;
+
+	if (deps?.loadBrokerCredentials) {
+		try {
+			const credentials = await deps.loadBrokerCredentials();
+			const status = {
+				ready: tokenPresent,
+				reason: tokenPresent ? null : "token_missing",
+				tokenFile,
+				tokenPresent,
+				broker: null,
+				brokerConfigured: true,
+				brokerAuthenticated: true,
+				credentialCount: credentials.length,
+				...accessStatus,
+			};
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(status)}\n`);
+			} else {
+				process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} upstream broker: injected (${credentials.length} credentials)\n`);
+				process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
+				process.stdout.write(`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+			}
+			if (!tokenPresent) process.exitCode = 1;
+			return;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const status = {
+				ready: false,
+				reason: "broker_unavailable",
+				tokenFile,
+				tokenPresent,
+				broker: null,
+				brokerConfigured: true,
+				brokerAuthenticated: false,
+				error: message,
+				...accessStatus,
+			};
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify(status)}\n`);
+			} else {
+				process.stdout.write(`${chalk.red("FAILED")} upstream broker: ${message}\n`);
+				process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
+				process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+			}
+			process.exitCode = 1;
+			return;
+		}
+	}
+
+	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		const status = {
 			ready: false,
 			reason: "not_configured",
 			tokenFile,
-			tokenPresent: token !== null,
+			tokenPresent,
 			broker: null,
 			brokerConfigured: false,
 			brokerAuthenticated: false,
+			...accessStatus,
 		};
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
 			process.stdout.write(`${chalk.yellow("No broker configured.")} Set OMP_AUTH_BROKER_URL.\n`);
-			process.stdout.write(
-				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
-			);
+			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
+			process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
 		}
 		process.exitCode = 1;
 		return;
@@ -277,7 +405,6 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 
 	try {
 		const snapshot = await fetchBrokerSnapshot(createBrokerClient(brokerConfig));
-		const tokenPresent = token !== null;
 		const status = {
 			ready: tokenPresent,
 			reason: tokenPresent ? null : "token_missing",
@@ -287,6 +414,7 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 			brokerConfigured: true,
 			brokerAuthenticated: true,
 			credentialCount: snapshot.credentials.length,
+			...accessStatus,
 		};
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify(status)}\n`);
@@ -295,9 +423,8 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 				snapshot.credentials.length === 1 ? "" : "s"
 			})`;
 			process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} ${brokerLine}\n`);
-			process.stdout.write(
-				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
-			);
+			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
+			process.stdout.write(`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
 			if (!tokenPresent) {
 				process.stdout.write(
 					"Run `omp auth-gateway token` or `omp auth-gateway serve` to create a bearer token.\n",
@@ -311,37 +438,307 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 			ready: false,
 			reason: "broker_unavailable",
 			tokenFile,
-			tokenPresent: token !== null,
+			tokenPresent,
 			broker: brokerConfig.url,
 			brokerConfigured: true,
 			brokerAuthenticated: false,
 			error: message,
+			...accessStatus,
 		};
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
 			process.stdout.write(`${chalk.red("FAILED")} upstream broker: ${brokerConfig.url}: ${message}\n`);
-			process.stdout.write(
-				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
-			);
+			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
+			process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
 		}
 		process.exitCode = 1;
 	}
 }
 
-export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs): Promise<void> {
+async function withAccessStore<T>(
+	deps: AuthGatewayCommandDependencies | undefined,
+	fn: (store: SqliteAuthGatewayAccessStore) => T | Promise<T>,
+): Promise<T> {
+	const store = await SqliteAuthGatewayAccessStore.open(getAccessDbPath(deps));
+	try {
+		return await fn(store);
+	} finally {
+		store.close();
+	}
+}
+
+function writeCommandOutput(flags: AuthGatewayCommandArgs["flags"], jsonValue: unknown, human: string): void {
+	process.stdout.write(flags.json ? `${JSON.stringify(jsonValue)}\n` : human);
+}
+
+function requireSubaction(cmd: AuthGatewayCommandArgs, group: string): string {
+	if (!cmd.subaction) throw new Error(`Missing ${group} sub-command`);
+	return cmd.subaction;
+}
+
+function requireTarget(cmd: AuthGatewayCommandArgs, label: string): string {
+	if (!cmd.target) throw new Error(`Missing ${label}`);
+	return cmd.target;
+}
+
+function requireValue(cmd: AuthGatewayCommandArgs, label: string): string {
+	if (!cmd.value) throw new Error(`Missing ${label}`);
+	return cmd.value;
+}
+
+function parsePositiveInteger(value: string, label: string): number {
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
+	return parsed;
+}
+
+function parseLimit(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) throw new Error("--limit must be between 1 and 1000");
+	return parsed;
+}
+
+function parseSince(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 0) throw new Error("--since must be a non-negative epoch millisecond value");
+	return parsed;
+}
+
+function parseRole(value: string | undefined): AuthGatewayRole | undefined {
+	if (value === undefined) return undefined;
+	if (value !== "user" && value !== "admin") throw new Error("--role must be user or admin");
+	return value;
+}
+
+function parseStrategy(value: string | undefined): AuthGatewayPoolStrategy | undefined {
+	if (value === undefined) return undefined;
+	if (value !== "sticky-session" && value !== "least-used" && value !== "round-robin" && value !== "failover") {
+		throw new Error("--strategy must be sticky-session, least-used, round-robin, or failover");
+	}
+	return value;
+}
+
+function resolveAclScope(flags: AuthGatewayCommandArgs["flags"]): { kind: AuthGatewayAclKind; pattern: string } {
+	const entries: Array<[AuthGatewayAclKind, string | undefined]> = [
+		["provider", flags.provider],
+		["model", flags.model],
+		["route", flags.route],
+	];
+	const selected = entries.filter((entry): entry is [AuthGatewayAclKind, string] => entry[1] !== undefined);
+	if (selected.length !== 1) throw new Error("Exactly one of --provider, --model, or --route is required");
+	const [kind, pattern] = selected[0]!;
+	return { kind, pattern };
+}
+
+function resolveUser(store: SqliteAuthGatewayAccessStore, ref: string): AuthGatewayUser {
+	const user = store.getUser(ref);
+	if (!user) throw new Error("user not found");
+	return user;
+}
+
+function resolvePool(store: SqliteAuthGatewayAccessStore, ref: string): AuthGatewayPool {
+	const pool = store.getPool(ref);
+	if (!pool) throw new Error("pool not found");
+	return pool;
+}
+
+async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCommandDependencies): Promise<void> {
+	const subaction = requireSubaction(cmd, "user");
+	const flags = cmd.flags;
+	await withAccessStore(deps, async store => {
+		if (subaction === "create") {
+			const name = requireTarget(cmd, "user name");
+			const created = store.createUser({
+				name,
+				description: flags.description,
+				owner: flags.owner,
+				role: parseRole(flags.role),
+				tokenLabel: flags.label,
+			});
+			writeCommandOutput(flags, created, `created user ${created.user.name} (#${created.user.id}) token ${created.token.publicId}\n`);
+			return;
+		}
+		if (subaction === "list") {
+			const users = store.listUsers();
+			writeCommandOutput(flags, { users }, users.map(user => `${user.id}\t${user.name}\t${user.role}\t${user.enabled ? "enabled" : "disabled"}`).join("\n") + (users.length ? "\n" : ""));
+			return;
+		}
+
+		const ref = requireTarget(cmd, "user name or id");
+		const user = resolveUser(store, ref);
+		if (subaction === "show") {
+			const value = { user, tokens: store.listUserTokens(user.id), acl: store.listAclRules(user.id), pools: store.listUserPools(user.id) };
+			writeCommandOutput(flags, value, `user ${user.name} (#${user.id}) ${user.enabled ? "enabled" : "disabled"} role=${user.role}\n`);
+			return;
+		}
+		if (subaction === "update") {
+			const patch: { description?: string | null; owner?: string | null; role?: AuthGatewayRole } = {};
+			if (Object.prototype.hasOwnProperty.call(flags, "description")) patch.description = flags.description === "" ? null : flags.description;
+			if (Object.prototype.hasOwnProperty.call(flags, "owner")) patch.owner = flags.owner === "" ? null : flags.owner;
+			const role = parseRole(flags.role);
+			if (role !== undefined) patch.role = role;
+			const updated = store.updateUser(user.id, patch);
+			writeCommandOutput(flags, { user: updated }, `updated user ${updated.name} (#${updated.id})\n`);
+			return;
+		}
+		if (subaction === "enable" || subaction === "disable") {
+			const updated = store.updateUser(user.id, { enabled: subaction === "enable" });
+			writeCommandOutput(flags, { user: updated }, `${updated.enabled ? "enabled" : "disabled"} user ${updated.name} (#${updated.id})\n`);
+			return;
+		}
+		if (subaction === "delete") {
+			if (!store.deleteUser(user.id)) throw new Error("user not found");
+			const value = { deleted: true as const, user: { id: user.id, name: user.name } };
+			writeCommandOutput(flags, value, `deleted user ${user.name} (#${user.id})\n`);
+			return;
+		}
+		if (subaction === "token") {
+			const token = flags.regenerate ? store.rotateUserTokens(user.id, flags.label) : store.addUserToken(user.id, flags.label);
+			writeCommandOutput(flags, { token }, `${flags.regenerate ? "rotated" : "created"} token ${token.publicId} for ${user.name}\n`);
+			return;
+		}
+		if (subaction === "token-revoke") {
+			const tokenId = parsePositiveInteger(requireValue(cmd, "token id"), "token id");
+			if (!store.revokeUserToken(user.id, tokenId)) throw new Error("token not found");
+			writeCommandOutput(flags, { revoked: true, tokenId }, `revoked token #${tokenId} for ${user.name}\n`);
+			return;
+		}
+		if (subaction === "allow" || subaction === "deny") {
+			const scope = resolveAclScope(flags);
+			const result = store.addAclRule(user.id, {
+				effect: subaction as AuthGatewayAclEffect,
+				kind: scope.kind,
+				pattern: scope.pattern,
+			});
+			writeCommandOutput(flags, result, `${result.created ? "created" : "kept"} ${subaction} ${scope.kind}:${scope.pattern} for ${user.name}\n`);
+			return;
+		}
+		if (subaction === "acl") {
+			const acl = store.listAclRules(user.id);
+			writeCommandOutput(flags, { acl }, acl.map(rule => `${rule.id}\t${rule.effect}\t${rule.kind}\t${rule.pattern}`).join("\n") + (acl.length ? "\n" : ""));
+			return;
+		}
+		if (subaction === "acl-delete") {
+			const ruleId = parsePositiveInteger(requireValue(cmd, "rule id"), "rule id");
+			if (!store.deleteAclRule(user.id, ruleId)) throw new Error("ACL rule not found");
+			writeCommandOutput(flags, { deleted: true, ruleId }, `deleted ACL rule #${ruleId} for ${user.name}\n`);
+			return;
+		}
+		if (subaction === "set-pool" || subaction === "unset-pool") {
+			const pool = resolvePool(store, requireValue(cmd, "pool name or id"));
+			if (subaction === "set-pool") {
+				const result = store.bindUserPool(user.id, pool.id);
+				writeCommandOutput(flags, { created: result.created, user: { id: user.id, name: user.name }, pool }, `${result.created ? "bound" : "kept"} pool ${pool.name} (#${pool.id}) for ${user.name}\n`);
+				return;
+			}
+			if (!store.unbindUserPool(user.id, pool.id)) throw new Error("pool binding not found");
+			writeCommandOutput(flags, { removed: true, user: { id: user.id, name: user.name }, pool }, `unbound pool ${pool.name} (#${pool.id}) from ${user.name}\n`);
+			return;
+		}
+		if (subaction === "usage") {
+			const usage = store.getUserUsage(user.id, parseSince(flags.since));
+			writeCommandOutput(flags, { usage }, `usage for ${user.name}: ${usage.totals.requests} requests, ${usage.totals.totalTokens} tokens, $${usage.totals.costUsd}\n`);
+			return;
+		}
+		throw new Error(`Unknown auth-gateway user sub-command: ${subaction}`);
+	});
+}
+
+async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCommandDependencies): Promise<void> {
+	const subaction = requireSubaction(cmd, "pool");
+	const flags = cmd.flags;
+	await withAccessStore(deps, async store => {
+		if (subaction === "create") {
+			const provider = flags.provider?.trim();
+			if (!provider) throw new Error("--provider is required");
+			const pool = store.createPool({
+				name: requireTarget(cmd, "pool name"),
+				provider,
+				model: flags.model,
+				strategy: parseStrategy(flags.strategy),
+			});
+			writeCommandOutput(flags, { pool }, `created pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy}\n`);
+			return;
+		}
+		if (subaction === "list") {
+			const pools = store.listPools();
+			writeCommandOutput(flags, { pools }, pools.map(pool => `${pool.id}\t${pool.name}\t${pool.provider}\t${pool.model ?? "*"}\t${pool.strategy}\t${pool.members.length} accounts`).join("\n") + (pools.length ? "\n" : ""));
+			return;
+		}
+		const pool = resolvePool(store, requireTarget(cmd, "pool name or id"));
+		if (subaction === "show") {
+			writeCommandOutput(flags, { pool }, `pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy} accounts=${pool.members.map(member => member.credentialId).join(",")}\n`);
+			return;
+		}
+		if (subaction === "delete") {
+			if (!store.deletePool(pool.id)) throw new Error("pool not found");
+			writeCommandOutput(flags, { deleted: true, pool: { id: pool.id, name: pool.name } }, `deleted pool ${pool.name} (#${pool.id})\n`);
+			return;
+		}
+		if (subaction === "set-strategy") {
+			const updated = store.updatePool(pool.id, { strategy: parseStrategy(requireValue(cmd, "strategy")) });
+			writeCommandOutput(flags, { pool: updated }, `updated pool ${updated.name} (#${updated.id}) strategy=${updated.strategy}\n`);
+			return;
+		}
+		if (subaction === "add-account") {
+			const credentialId = parsePositiveInteger(requireValue(cmd, "credential id"), "credential id");
+			const credentials = await loadBrokerCredentials(deps);
+			const credential = credentials.find(entry => entry.id === credentialId);
+			if (!credential) throw new Error(`credential id ${credentialId} was not found in broker snapshot`);
+			if (credential.provider !== pool.provider) {
+				throw new Error(`credential id ${credentialId} belongs to provider ${credential.provider}, not ${pool.provider}`);
+			}
+			const result = store.addPoolCredential(pool.id, credentialId);
+			writeCommandOutput(flags, result, `${result.created ? "added" : "kept"} credential #${credentialId} in pool ${pool.name} (#${pool.id})\n`);
+			return;
+		}
+		if (subaction === "remove-account") {
+			const credentialId = parsePositiveInteger(requireValue(cmd, "credential id"), "credential id");
+			if (!store.removePoolCredential(pool.id, credentialId)) throw new Error("pool member not found");
+			const updated = resolvePool(store, String(pool.id));
+			writeCommandOutput(flags, { removed: true, credentialId, pool: updated }, `removed credential #${credentialId} from pool ${pool.name} (#${pool.id})\n`);
+			return;
+		}
+		throw new Error(`Unknown auth-gateway pool sub-command: ${subaction}`);
+	});
+}
+
+async function runAuditCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCommandDependencies): Promise<void> {
+	const subaction = requireSubaction(cmd, "audit");
+	if (subaction !== "list") throw new Error(`Unknown auth-gateway audit sub-command: ${subaction}`);
+	const flags = cmd.flags;
+	await withAccessStore(deps, store => {
+		const user = flags.user ? resolveUser(store, flags.user) : undefined;
+		const result = store.listAudit({ userId: user?.id, limit: parseLimit(flags.limit) });
+		writeCommandOutput(flags, result, result.events.map(event => `${event.id}\t${event.userName ?? "-"}\t${event.outcome}\t${event.method} ${event.path}\t${event.totalTokens} tokens`).join("\n") + (result.events.length ? "\n" : ""));
+	});
+}
+
+export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCommandDependencies): Promise<void> {
 	switch (cmd.action) {
 		case "serve":
-			await runServe(cmd.flags);
+			await runServe(cmd.flags, deps);
 			return;
 		case "token":
 			await runToken(cmd.flags);
 			return;
 		case "status":
-			await runStatus(cmd.flags);
+			await runStatus(cmd.flags, deps);
 			return;
 		case "check":
 			await runCheck(cmd.flags);
+			return;
+		case "user":
+			await runUserCommand(cmd, deps);
+			return;
+		case "pool":
+			await runPoolCommand(cmd, deps);
+			return;
+		case "audit":
+			await runAuditCommand(cmd, deps);
 			return;
 		default: {
 			const _exhaustive: never = cmd.action;

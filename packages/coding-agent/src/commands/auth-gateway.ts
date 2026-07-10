@@ -19,12 +19,35 @@ export default class AuthGateway extends Command {
 			required: false,
 			options: [...AUTH_GATEWAY_ACTIONS],
 		}),
+		subaction: Args.string({
+			description: "Group sub-command",
+			required: false,
+		}),
+		target: Args.string({
+			description: "Name/id target",
+			required: false,
+		}),
+		value: Args.string({
+			description: "Additional value",
+			required: false,
+		}),
 	};
 
 	static flags = {
-		json: Flags.boolean({ description: "Output JSON (token/status/check)" }),
+		json: Flags.boolean({ description: "Output JSON (token/status/check/management)" }),
 		bind: Flags.string({ description: "Bind address for `serve` (host:port)", char: "b" }),
-		regenerate: Flags.boolean({ description: "Regenerate the gateway bearer token (token)" }),
+		regenerate: Flags.boolean({ description: "Regenerate the gateway bearer token or managed user token" }),
+		description: Flags.string({ description: "User description (empty clears on update)" }),
+		owner: Flags.string({ description: "User owner (empty clears on update)" }),
+		role: Flags.string({ description: "User role (user|admin)" }),
+		label: Flags.string({ description: "Managed token label" }),
+		provider: Flags.string({ description: "Provider id for ACL or pool" }),
+		model: Flags.string({ description: "Model id for ACL or pool" }),
+		route: Flags.string({ description: "Gateway route family for ACL" }),
+		strategy: Flags.string({ description: "Pool strategy" }),
+		since: Flags.string({ description: "Usage lower bound as epoch milliseconds" }),
+		limit: Flags.string({ description: "Audit limit (1..1000)" }),
+		user: Flags.string({ description: "Audit user name/id filter" }),
 		"no-auth": Flags.boolean({
 			description:
 				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
@@ -45,6 +68,10 @@ export default class AuthGateway extends Command {
 		"# Probe each broker credential to see which one is producing 401s\n  omp auth-gateway check",
 		"# Same, machine-readable for scripts\n  omp auth-gateway check --json",
 		"# Strict check — also exercises each credential with a real chat-completion ping\n  omp auth-gateway check --strict",
+		"# Create a managed gateway user and one-time token\n  omp auth-gateway user create alice --role=user --label=initial",
+		"# Add a provider ACL for a user\n  omp auth-gateway user allow alice --provider=anthropic",
+		"# Create a credential pool and add a broker credential id\n  omp auth-gateway pool create primary --provider=anthropic --strategy=round-robin\n  omp auth-gateway pool add-account primary 42",
+		"# Show audit events for one user\n  omp auth-gateway audit list --user=alice --limit=25",
 	];
 
 	async run(): Promise<void> {
@@ -55,10 +82,24 @@ export default class AuthGateway extends Command {
 		}
 		const cmd: AuthGatewayCommandArgs = {
 			action: args.action as AuthGatewayAction,
+			subaction: args.subaction,
+			target: args.target,
+			value: args.value,
 			flags: {
 				json: flags.json,
 				bind: flags.bind,
 				regenerate: flags.regenerate,
+				description: flags.description,
+				owner: flags.owner,
+				role: flags.role,
+				label: flags.label,
+				provider: flags.provider,
+				model: flags.model,
+				route: flags.route,
+				strategy: flags.strategy,
+				since: flags.since,
+				limit: flags.limit,
+				user: flags.user,
 				noAuth: flags["no-auth"],
 				strict: flags.strict,
 			},
