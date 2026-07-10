@@ -127,6 +127,18 @@ class LegacyKeyboardVirtualTerminal extends VirtualTerminal {
 	}
 }
 
+class PrivateModeProbeTerminal extends VirtualTerminal {
+	#callback: ((mode: number, supported: boolean, confirmed?: boolean) => void) | undefined;
+
+	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
+		this.#callback = callback;
+	}
+
+	reportPrivateMode(mode: number, supported: boolean, confirmed: boolean): void {
+		this.#callback?.(mode, supported, confirmed);
+	}
+}
+
 function rows(prefix: string, count: number): string[] {
 	return Array.from({ length: count }, (_v, i) => `${prefix}${i}`);
 }
@@ -1383,6 +1395,47 @@ describe("TUI terminal-state regressions", () => {
 				tui.stop();
 				setTerminalScreenToScrollback(saved);
 			}
+		});
+
+		it("keeps destructive paints synchronized when DECRQM is unavailable", async () => {
+			await withEnvPatch(
+				{
+					TERM_FEATURES: "Sy",
+					PI_NO_SYNC_OUTPUT: undefined,
+					PI_FORCE_SYNC_OUTPUT: undefined,
+					PI_TUI_SYNC_OUTPUT: undefined,
+				},
+				async () => {
+					const term = new PrivateModeProbeTerminal(20, 3);
+					const component = new MutableLinesComponent(rows("old-", 6));
+					const tui = new TUI(term);
+					tui.addChild(component);
+
+					try {
+						tui.start();
+						await settle(term);
+						const writes = captureWrites(term);
+
+						// A DA1 sentinel without DECRPM is inconclusive. Terminals such as
+						// xterm.js can implement synchronized output without implementing
+						// the query, so the static TERM_FEATURES capability must survive.
+						term.reportPrivateMode(2026, false, false);
+						expect(tui.synchronizedOutput).toBe(true);
+
+						component.setLines(rows("resumed-", 8));
+						tui.requestRender(true, { clearScrollback: true });
+						await settle(term);
+
+						const paint = writes.find(write => write.includes("\x1b[3J"));
+						expect(paint).toBeDefined();
+						expect(paint).toContain("\x1b[?2026h");
+						expect(paint).toContain("\x1b[?2026l");
+						expect(visible(term)).toEqual(["resumed-5", "resumed-6", "resumed-7"]);
+					} finally {
+						tui.stop();
+					}
+				},
+			);
 		});
 	});
 

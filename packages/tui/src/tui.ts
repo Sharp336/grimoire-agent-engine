@@ -1454,13 +1454,15 @@ export class TUI extends Container {
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
-		// A DECRQM report for mode 2026 is authoritative: enable synchronized
-		// output when the terminal reports support (upgrading conservatively
-		// defaulted-off hosts like zellij/tmux-master/foot) and disable it when
-		// the terminal reports it unsupported. An explicit user opt-out/force
-		// (resolved at construction) still wins, so skip the probe in that case.
-		this.terminal.onPrivateModeReport?.((mode, supported) => {
-			if (mode !== 2026) return;
+		// A confirmed DECRPM report for mode 2026 is authoritative: enable
+		// synchronized output when the terminal reports support and disable it for
+		// an explicit unsupported status. A DA1 sentinel without a DECRPM reply is
+		// inconclusive: many terminals implement synchronized output without
+		// implementing DECRQM, so retain the statically detected default instead of
+		// exposing destructive full paints. An explicit user opt-out/force still
+		// wins, so skip every probe result in that case.
+		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true) => {
+			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
 			this.#setSynchronizedOutput(supported);
 		});

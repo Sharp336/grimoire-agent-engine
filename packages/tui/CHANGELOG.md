@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed inconclusive DECRQM probes disabling DEC 2026 synchronized output on terminals that support atomic paints but cannot report the mode, preventing session resume, replacement, and resize replays from exposing torn intermediate frames ([#5028](https://github.com/can1357/oh-my-pi/issues/5028), [#4686](https://github.com/can1357/oh-my-pi/issues/4686)).
+
 ## [16.4.0] - 2026-07-10
 
 ### Fixed
