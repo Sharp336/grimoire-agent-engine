@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added auth-gateway pool rename and audit-list cursor pagination to the operator CLI.
+
+### Fixed
+
+- Fixed non-JSON managed-user token creation and rotation to print the one-time bearer value.
+
 ## [16.4.0] - 2026-07-10
 
 ### Breaking Changes
@@ -12,7 +20,6 @@
 ### Added
 
 - Added `omp auth-gateway user`, `pool`, and `audit` management commands with gateway-local SQLite persistence and independently rotatable client tokens ([#5098](https://github.com/can1357/oh-my-pi/issues/5098)).
-
 - Added a native, first-class max thinking tier for supported models, including a new thinkingBudgets.max configuration setting, support in CLI flags (--thinking, :max model suffixes), and terminal theme customization (thinkingMax border color and icons).
 
 ### Fixed

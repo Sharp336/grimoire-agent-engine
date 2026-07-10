@@ -110,13 +110,14 @@ omp auth-gateway pool create <name> --provider=<id> [--model=<provider-model-id>
 omp auth-gateway pool list|show|delete <name-or-id> [--json]
 omp auth-gateway pool set-strategy <name-or-id> <strategy> [--json]
 omp auth-gateway pool add-account|remove-account <name-or-id> <credential-id> [--json]
-omp auth-gateway audit list [--user=<name-or-id>] [--limit=<1..1000>] [--json]
+omp auth-gateway pool rename <name-or-id> <new-name> [--json]
+omp auth-gateway audit list [--user=<name-or-id>] [--limit=<1..1000>] [--before=<event-id>] [--json]
 ```
 
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, constructs an `AuthStorage` that resolves access tokens through the broker, and opens the gateway-local access database at `<config-dir>/auth-gateway.db` (`0600` in a `0700` parent dir). Default bind is `127.0.0.1:4000`. The legacy gateway token remains stored at `<config-dir>/auth-gateway.token` (`0600`); managed client tokens are accepted in addition to it. `--no-auth` disables bearer checks for inference/diagnostic routes but intentionally rejects remote HTTP management APIs.
 - `token` / `status` manage and inspect the legacy gateway bearer token and upstream broker readiness. `status --json` also reports `accessDb`, `managedUserCount`, `activeManagedTokenCount`, and `poolCount`; a missing access DB reports zero managed counts without creating it.
 - `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota. Managed regular users calling `/v1/credentials/check` receive only scoped, redacted pool-member health.
-- `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. JSON output includes a one-time `token.value` only for user create/add/rotate; list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
+- `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. `user create`, `user token`, and `user token --regenerate` print the raw managed token once in human output and include `token.value` in JSON output; list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
 
 ### Endpoints
 
@@ -148,9 +149,9 @@ Regular managed users are default-deny. They need a route allow for route-gated 
 Pools bind users to ordered broker credential ids for one provider scope. A pool can be provider-wide or exact-model-scoped; exact-model bindings win over provider-wide bindings. Strategies are:
 
 - `sticky-session` — keep the session's eligible unblocked credential; otherwise use the existing deterministic session hash and usage-aware ordering.
-- `least-used` — keep the eligible sticky for an existing session; otherwise prefer the credential with the lowest live usage signal and fall back to configured member order when usage is unavailable.
-- `round-robin` — assign new sessions from a counter scoped by pool/provider/type while keeping existing eligible stickies.
-- `failover` — use configured member order and advance only after block/auth/usage-limit failure.
+- `least-used` — keep the eligible unblocked credential for an existing session; for a new or replacement session, rank OAuth members that have live usage and then fall back to unified configured order when no live OAuth usage is available.
+- `round-robin` — assign new sessions from one counter scoped by pool/provider across all OAuth and API-key members while keeping existing eligible stickies.
+- `failover` — follow configured cross-type member order and advance only after block/auth/usage-limit failure.
 
 Managed regular requests pass an `AuthStorage` selection policy containing only the winning pool's credential ids. Initial resolution, force refresh, usage-limit handling, invalidation, and retries all receive the same policy, so no request can fall through to out-of-pool stored credentials, runtime overrides, config keys, env keys, or fallback resolvers. A bound pool with no live provider-matching member returns `503 no_eligible_credential`; an exhausted pool returns `429 rate_limit_error` with `Retry-After` when the upstream reset is known.
 
@@ -172,7 +173,7 @@ HTTP management routes require an authenticated legacy or managed admin token. T
 | `POST` / `DELETE` | `/v1/pools/:id/members[/:credentialId]` | Add or remove broker credential ids |
 | `GET` | `/v1/audit?userId=&limit=&before=` | Newest-first audit rows with an exclusive `before` id cursor |
 
-For managed regular users, `/v1/usage` returns `{ usage: AuthGatewayUsageSummary }` aggregated from successful provider/model audit rows, not broker account-quota reports. `/v1/credentials/check` returns response-local member ordinals, provider, type, `ok`, and coarse reason codes only; it omits broker credential ids, emails, account/project ids, provider payloads, upstream reason strings, headers, and raw metadata.
+For managed regular users, `/v1/usage[?since=<ms>]` returns `{ usage: AuthGatewayUsageSummary }` aggregated from successful provider/model audit rows, not broker account-quota reports. Omitted `since` means `0`; non-finite or negative values return `400 invalid_request_error`; legacy, managed-admin, and `--no-auth` callers continue to receive broker quota reports. `/v1/credentials/check` returns response-local member ordinals, provider, type, `ok`, and coarse reason codes only; it omits broker credential ids, emails, account/project ids, provider payloads, upstream reason strings, headers, and raw metadata.
 
 Audit rows snapshot request id, user id/name, token id, method, query-stripped pathname, route family, requested/resolved model, selected credential id, outcome, status, token counts, cost, and sanitized error code. They never persist URL query/search/hash, request bodies, headers, raw gateway tokens, provider API keys, OAuth access tokens, OAuth refresh tokens, raw upstream errors, account ids, project ids, or emails.
 
