@@ -62,6 +62,7 @@ export interface AuthGatewayCommandArgs {
 		strategy?: string;
 		since?: string;
 		limit?: string;
+		before?: string;
 		user?: string;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
@@ -525,6 +526,11 @@ function parseLimit(value: string | undefined): number | undefined {
 	return parsed;
 }
 
+function parseBefore(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
+	return parsePositiveInteger(value, "--before");
+}
+
 function parseSince(value: string | undefined): number | undefined {
 	if (value === undefined) return undefined;
 	const parsed = Number(value);
@@ -776,6 +782,12 @@ async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			);
 			return;
 		}
+		if (subaction === "rename") {
+			const newName = requireValue(cmd, "new pool name");
+			const updated = store.updatePool(pool.id, { name: newName });
+			writeCommandOutput(flags, { pool: updated }, `renamed pool ${pool.name} (#${pool.id}) to ${updated.name}\n`);
+			return;
+		}
 		if (subaction === "set-strategy") {
 			const updated = store.updatePool(pool.id, { strategy: parseStrategy(requireValue(cmd, "strategy")) });
 			writeCommandOutput(
@@ -824,7 +836,11 @@ async function runAuditCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCo
 	const flags = cmd.flags;
 	await withAccessStore(deps, store => {
 		const user = flags.user ? resolveUser(store, flags.user) : undefined;
-		const result = store.listAudit({ userId: user?.id, limit: parseLimit(flags.limit) });
+		const result = store.listAudit({
+			userId: user?.id,
+			limit: parseLimit(flags.limit),
+			before: parseBefore(flags.before),
+		});
 		writeCommandOutput(
 			flags,
 			result,

@@ -35,10 +35,7 @@ async function expectJsonCommand<T>(cmd: AuthGatewayCommandArgs, deps: AuthGatew
 	}
 }
 
-async function expectHumanCommand(
-	cmd: AuthGatewayCommandArgs,
-	deps: AuthGatewayCommandDependencies,
-): Promise<string> {
+async function expectHumanCommand(cmd: AuthGatewayCommandArgs, deps: AuthGatewayCommandDependencies): Promise<string> {
 	const restore = captureStdout();
 	try {
 		await runAuthGatewayCommand(cmd, deps);
@@ -147,6 +144,8 @@ describe("auth-gateway CLI access management", () => {
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway user create"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool add-account"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway audit list"))).toBe(true);
+		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool rename"))).toBe(true);
+		expect(AuthGatewayCommand.examples.some(example => example.includes("--before="))).toBe(true);
 	});
 
 	test("prints one-time managed token values in human output only on create, add, and rotate", async () => {
@@ -183,6 +182,157 @@ describe("auth-gateway CLI access management", () => {
 			expect(redactedOutput).not.toContain(token);
 		}
 		expect(redactedOutput).not.toContain("token_hash");
+	});
+
+	test("pages audit events with --before cursor", async () => {
+		const created = await expectJsonCommand<{ user: Record<string, unknown> }>(
+			userCommand("create", "auditor"),
+			deps,
+		);
+		const userId = created.user.id as number;
+		const [older, newer] = await withStore(dbPath, store => [
+			store.recordAudit({
+				requestId: "audit-older",
+				startedAt: 1_000,
+				completedAt: 1_010,
+				userId,
+				userName: "auditor",
+				tokenId: null,
+				method: "POST",
+				path: "/v1/chat/completions",
+				routeFamily: "chat",
+				requestedModel: "claude-3-5-sonnet",
+				resolvedProvider: "anthropic",
+				resolvedModel: "anthropic/claude-3-5-sonnet",
+				credentialId: 42,
+				outcome: "success",
+				statusCode: 200,
+				inputTokens: 1,
+				outputTokens: 2,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 3,
+				costUsd: 0.01,
+				errorCode: null,
+			}),
+			store.recordAudit({
+				requestId: "audit-newer",
+				startedAt: 2_000,
+				completedAt: 2_010,
+				userId,
+				userName: "auditor",
+				tokenId: null,
+				method: "POST",
+				path: "/v1/chat/completions",
+				routeFamily: "chat",
+				requestedModel: "claude-3-5-sonnet",
+				resolvedProvider: "anthropic",
+				resolvedModel: "anthropic/claude-3-5-sonnet",
+				credentialId: 43,
+				outcome: "success",
+				statusCode: 200,
+				inputTokens: 4,
+				outputTokens: 5,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 9,
+				costUsd: 0.02,
+				errorCode: null,
+			}),
+		]);
+
+		const firstPage = await expectJsonCommand<{ events: Array<Record<string, unknown>>; nextBefore: number | null }>(
+			{ action: "audit", subaction: "list", flags: { json: true, user: "auditor", limit: "1" } },
+			deps,
+		);
+		expect(firstPage.events.map(event => event.id)).toEqual([newer.id]);
+		expect(firstPage.nextBefore).toBe(newer.id);
+
+		const secondPage = await expectJsonCommand<{ events: Array<Record<string, unknown>>; nextBefore: number | null }>(
+			{
+				action: "audit",
+				subaction: "list",
+				flags: { json: true, user: "auditor", limit: "1", before: String(firstPage.nextBefore) },
+			},
+			deps,
+		);
+		expect(secondPage.events.map(event => event.id)).toEqual([older.id]);
+		expect(secondPage.nextBefore).toBe(older.id);
+
+		const emptyPage = await expectJsonCommand<{ events: Array<Record<string, unknown>>; nextBefore: number | null }>(
+			{ action: "audit", subaction: "list", flags: { json: true, user: "auditor", before: String(older.id) } },
+			deps,
+		);
+		expect(emptyPage).toEqual({ events: [], nextBefore: null });
+
+		await expectCommandError(
+			{ action: "audit", subaction: "list", flags: { json: true, before: "0" } },
+			deps,
+			"--before must be a positive integer",
+		);
+		await expectCommandError(
+			{ action: "audit", subaction: "list", flags: { json: true, before: "abc" } },
+			deps,
+			"--before must be a positive integer",
+		);
+	});
+
+	test("renames pools without dropping members and supports JSON and human output", async () => {
+		const user = await expectJsonCommand<{ user: Record<string, unknown> }>(userCommand("create", "pooluser"), deps);
+		const pool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
+			poolCommand("create", "primary", undefined, {
+				provider: "anthropic",
+				model: "claude-3-5-sonnet",
+				strategy: "round-robin",
+			}),
+			deps,
+		);
+		const poolId = pool.pool.id as number;
+		await expectJsonCommand(poolCommand("add-account", "primary", "42"), deps);
+		await expectJsonCommand(poolCommand("add-account", "primary", "43"), deps);
+		await expectJsonCommand(userCommand("set-pool", String(user.user.id), "primary"), deps);
+
+		const renamed = await expectJsonCommand<{ pool: Record<string, unknown> }>(
+			poolCommand("rename", "primary", "primary-renamed"),
+			deps,
+		);
+		expect(renamed.pool).toMatchObject({
+			id: poolId,
+			name: "primary-renamed",
+			provider: "anthropic",
+			model: "anthropic/claude-3-5-sonnet",
+			strategy: "round-robin",
+			members: [
+				{ credentialId: 42, position: 0 },
+				{ credentialId: 43, position: 1 },
+			],
+		});
+		const shownUser = await expectJsonCommand<{ pools: Array<Record<string, unknown>> }>(
+			userCommand("show", "pooluser"),
+			deps,
+		);
+		expect(shownUser.pools).toHaveLength(1);
+		expect(shownUser.pools[0]).toMatchObject({ id: poolId, name: "primary-renamed" });
+		await expectCommandError(poolCommand("show", "primary"), deps, "pool not found");
+		await expectCommandError(poolCommand("rename", "primary-renamed"), deps, "Missing new pool name");
+
+		const human = await expectHumanCommand(
+			poolCommand("rename", "primary-renamed", "primary-human", { json: false }),
+			deps,
+		);
+		expect(human).toBe(`renamed pool primary-renamed (#${poolId}) to primary-human\n`);
+		const finalPool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
+			poolCommand("show", "primary-human"),
+			deps,
+		);
+		expect(finalPool.pool).toMatchObject({
+			id: poolId,
+			name: "primary-human",
+			members: [
+				{ credentialId: 42, position: 0 },
+				{ credentialId: 43, position: 1 },
+			],
+		});
 	});
 
 	test("manages users, tokens, ACLs, pools, usage, audit, and status without exposing secrets", async () => {

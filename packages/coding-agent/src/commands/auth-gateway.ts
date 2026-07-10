@@ -48,6 +48,7 @@ export default class AuthGateway extends Command {
 		since: Flags.string({ description: "Usage lower bound as epoch milliseconds" }),
 		limit: Flags.string({ description: "Audit limit (1..1000)" }),
 		user: Flags.string({ description: "Audit user name/id filter" }),
+		before: Flags.string({ description: "Audit cursor/event id" }),
 		"no-auth": Flags.boolean({
 			description:
 				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
@@ -72,6 +73,8 @@ export default class AuthGateway extends Command {
 		"# Add a provider ACL for a user\n  omp auth-gateway user allow alice --provider=anthropic",
 		"# Create a credential pool and add a broker credential id\n  omp auth-gateway pool create primary --provider=anthropic --strategy=round-robin\n  omp auth-gateway pool add-account primary 42",
 		"# Show audit events for one user\n  omp auth-gateway audit list --user=alice --limit=25",
+		"# Rename a credential pool\n  omp auth-gateway pool rename primary primary-prod",
+		"# Show audit events before one event id\n  omp auth-gateway audit list --user=alice --limit=25 --before=12345",
 	];
 
 	async run(): Promise<void> {
@@ -100,6 +103,7 @@ export default class AuthGateway extends Command {
 				since: flags.since,
 				limit: flags.limit,
 				user: flags.user,
+				before: flags.before,
 				noAuth: flags["no-auth"],
 				strict: flags.strict,
 			},
