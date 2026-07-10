@@ -35,7 +35,16 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {
-					throw new Error("Mnemopi backend is not initialised for this session.");
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Mnemopi memory is configured but not initialised for this session; no memories were recalled.",
+							},
+						],
+						details: { backend: "mnemopi", initialized: false },
+						useless: true,
+					};
 				}
 				try {
 					const results = await state.recallResultsScoped(params.query);

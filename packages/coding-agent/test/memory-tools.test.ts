@@ -25,6 +25,7 @@ import {
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
@@ -418,12 +419,21 @@ describe("retain.execute (Mnemopi backend)", () => {
 		});
 		expect((alphaRecall.content[0] as { text: string }).text).toContain("alpha uses tabs");
 	});
-	it("throws when no per-session Mnemopi state is registered", async () => {
+	it("returns an explicit no-op when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
-		await expect(tool.execute("call-mnemopi-no-state", { items: [{ content: "x" }] })).rejects.toThrow(
-			/not initialised/i,
-		);
+		const result = await tool.execute("call-mnemopi-no-state", { items: [{ content: "x" }] });
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; no memories were stored.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false, requested: 1, count: 0, stored: 0 },
+			useless: true,
+		});
 	});
 });
 
@@ -1075,10 +1085,21 @@ describe("recall.execute (Mnemopi backend)", () => {
 		expect(text).not.toContain("project beta deploys to staging first");
 	});
 
-	it("throws when no per-session Mnemopi state is registered", async () => {
+	it("returns an explicit no-op when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const tool = MemoryRecallTool.createIf(makeSession(settings))!;
-		await expect(tool.execute("call-mnemopi-no-state", { query: "anything" })).rejects.toThrow(/not initialised/i);
+		const result = await tool.execute("call-mnemopi-no-state", { query: "anything" });
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; no memories were recalled.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false },
+			useless: true,
+		});
 	});
 });
 
@@ -1168,12 +1189,21 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 		expect((result.content[0] as { text: string }).text).toContain("not found");
 	});
 
-	it("throws when no per-session Mnemopi state is registered", async () => {
+	it("returns an explicit no-op when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const tool = MemoryEditTool.createIf(makeSession(settings))!;
-		await expect(tool.execute("call-memory-edit-no-state", { op: "forget", id: "anything" })).rejects.toThrow(
-			/not initialised/i,
-		);
+		const result = await tool.execute("call-memory-edit-no-state", { op: "forget", id: "anything" });
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; no memory edit was applied.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false, op: "forget", id: "anything", applied: false },
+			useless: true,
+		});
 	});
 
 	it("renders backend stats and diagnostics for scoped banks", async () => {
@@ -1343,11 +1373,75 @@ describe("reflect.execute (Mnemopi backend)", () => {
 		expect(text).toContain("project alpha uses turbo for task orchestration");
 	});
 
-	it("throws when no per-session Mnemopi state is registered", async () => {
+	it("returns an explicit no-op when no per-session Mnemopi state is registered", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const tool = MemoryReflectTool.createIf(makeSession(settings))!;
-		await expect(tool.execute("call-mnemopi-reflect-no-state", { query: "anything" })).rejects.toThrow(
-			/not initialised/i,
-		);
+		const result = await tool.execute("call-mnemopi-reflect-no-state", { query: "anything" });
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; no information was available to reflect on.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false },
+			useless: true,
+		});
+	});
+});
+
+describe("learn.execute (Mnemopi backend)", () => {
+	beforeEach(() => {
+		resetSettingsForTest();
+		registeredMnemopiState = undefined;
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await registeredMnemopiState?.dispose();
+		registeredMnemopiState = undefined;
+	});
+
+	it("returns an explicit no-op when no per-session Mnemopi state is registered", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi", "autolearn.enabled": true });
+		const tool = LearnTool.createIf(makeSession(settings))!;
+		const result = await tool.execute("call-learn-no-state", { memory: "store this lesson" });
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; lesson was not stored.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false, stored: 0, skill: null },
+			useless: true,
+		});
+	});
+
+	it("does not change managed skills when memory state is missing", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi", "autolearn.enabled": true });
+		const tool = LearnTool.createIf(makeSession(settings))!;
+		const result = await tool.execute("call-learn-skill-no-state", {
+			memory: "store this lesson",
+			skill: {
+				action: "create",
+				name: "missing-state-skill",
+				description: "unused",
+				body: "unused",
+			},
+		});
+
+		expect(result).toMatchObject({
+			content: [
+				{
+					type: "text",
+					text: "Mnemopi memory is configured but not initialised for this session; lesson was not stored and managed skill was not changed.",
+				},
+			],
+			details: { backend: "mnemopi", initialized: false, stored: 0, skill: null },
+			useless: true,
+		});
 	});
 });

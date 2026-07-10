@@ -3026,23 +3026,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		};
 
-		// Auto-learn can immediately trigger a synthetic capture turn after the
-		// first real stop. When a memory backend is selected, install that backend's
-		// per-session state first so the capture turn's `learn` tool observes the
-		// same initialized state as normal memory tools. Other sessions keep memory
-		// startup in the background to preserve the existing startup profile.
-		//
-		// Gated on `autolearn.enabled` to match the tools: `createTools` builds the
-		// `learn`/`manage_skill` registry ONCE at session start and no settings
-		// change rebuilds it, so installing the controller while disabled would let a
-		// mid-session enable fire a nudge pointing at tools the session never built.
-		// Activation is therefore a session-start decision for BOTH the controller
-		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
-		// mid-session DISABLE. The subscription lives for the session's lifetime; the
-		// reference is intentionally discarded (the listener retains it).
-		if (settings.get("autolearn.enabled") && taskDepth === 0) {
+		// Memory tools are exposed from `memory.backend` at tool-build time, so the
+		// selected backend's per-session state must exist before the first model turn
+		// can call `recall` / `retain` / `reflect`. Auto-learn also needs this for
+		// its synthetic capture turn. Subagents inherit parent memory state when one
+		// exists; keeping their startup non-blocking preserves the existing spawn path.
+		const shouldAwaitMemoryStartup =
+			taskDepth === 0 &&
+			(settings.get("autolearn.enabled") || ["hindsight", "mnemopi"].includes(settings.get("memory.backend") ?? ""));
+		if (shouldAwaitMemoryStartup) {
 			await logger.time("startMemoryStartupTask", startMemoryBackend);
-			new AutoLearnController({ session, settings });
+			if (settings.get("autolearn.enabled")) new AutoLearnController({ session, settings });
 		} else {
 			void logger.time("startMemoryStartupTask", startMemoryBackend);
 		}

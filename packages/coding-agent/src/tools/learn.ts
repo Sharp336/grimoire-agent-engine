@@ -55,7 +55,17 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
-				throw new Error("Mnemopi backend is not initialised for this session.");
+				const suffix = params.skill ? " and managed skill was not changed" : "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Mnemopi memory is configured but not initialised for this session; lesson was not stored${suffix}.`,
+						},
+					],
+					details: { backend: "mnemopi", initialized: false, stored: 0, skill: null },
+					useless: true,
+				};
 			}
 			const id = state.rememberScoped(params.memory, {
 				source: "coding-agent-learn",

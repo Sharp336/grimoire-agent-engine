@@ -36,7 +36,16 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {
-					throw new Error("Mnemopi backend is not initialised for this session.");
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Mnemopi memory is configured but not initialised for this session; no information was available to reflect on.",
+							},
+						],
+						details: { backend: "mnemopi", initialized: false },
+						useless: true,
+					};
 				}
 
 				try {

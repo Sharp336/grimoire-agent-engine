@@ -37,7 +37,16 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
-				throw new Error("Mnemopi backend is not initialised for this session.");
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Mnemopi memory is configured but not initialised for this session; no memories were stored.",
+						},
+					],
+					details: { backend: "mnemopi", initialized: false, requested: params.items.length, count: 0, stored: 0 },
+					useless: true,
+				};
 			}
 
 			for (const item of params.items) {
