@@ -633,13 +633,26 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		nextBefore: number | null;
 	} {
 		const limit = normalizeAuditLimit(query.limit);
-		const before = query.before ?? null;
-		const userId = query.userId ?? null;
-		const rows = this.#db
-			.prepare(
-				"SELECT * FROM gateway_audit_events WHERE (? IS NULL OR user_id = ?) AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?",
-			)
-			.all(userId, userId, before, before, limit) as AuditRow[];
+		const userId = query.userId;
+		const before = query.before;
+		let rows: AuditRow[];
+		if (userId !== undefined && before !== undefined) {
+			rows = this.#db
+				.prepare("SELECT * FROM gateway_audit_events WHERE user_id = ? AND id < ? ORDER BY id DESC LIMIT ?")
+				.all(userId, before, limit) as AuditRow[];
+		} else if (userId !== undefined) {
+			rows = this.#db
+				.prepare("SELECT * FROM gateway_audit_events WHERE user_id = ? ORDER BY id DESC LIMIT ?")
+				.all(userId, limit) as AuditRow[];
+		} else if (before !== undefined) {
+			rows = this.#db
+				.prepare("SELECT * FROM gateway_audit_events WHERE id < ? ORDER BY id DESC LIMIT ?")
+				.all(before, limit) as AuditRow[];
+		} else {
+			rows = this.#db
+				.prepare("SELECT * FROM gateway_audit_events ORDER BY id DESC LIMIT ?")
+				.all(limit) as AuditRow[];
+		}
 		const events = rows.map(mapAuditEvent);
 		const last = events[events.length - 1];
 		return { events, nextBefore: events.length === limit && last ? last.id : null };
@@ -799,6 +812,7 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				error_code TEXT
 			);
 			CREATE INDEX IF NOT EXISTS idx_gateway_audit_user_time ON gateway_audit_events(user_id, started_at DESC, id DESC);
+			CREATE INDEX IF NOT EXISTS idx_gateway_audit_user_id ON gateway_audit_events(user_id, id DESC);
 			CREATE INDEX IF NOT EXISTS idx_gateway_audit_provider_model_time ON gateway_audit_events(resolved_provider, resolved_model, started_at DESC);
 		`);
 	}

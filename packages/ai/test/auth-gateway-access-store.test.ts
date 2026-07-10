@@ -44,6 +44,18 @@ function countRows(dbPath: string, table: string): number {
 	}
 }
 
+function indexExists(dbPath: string, indexName: string): boolean {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db.prepare("SELECT 1 AS count FROM sqlite_master WHERE type = 'index' AND name = ?").get(indexName) as
+			| CountRow
+			| undefined;
+		return row != null;
+	} finally {
+		db.close();
+	}
+}
+
 function assertAccessError(error: unknown, code: "invalid_request" | "not_found" | "conflict"): void {
 	expect(error).toBeInstanceOf(AuthGatewayAccessError);
 	if (error instanceof AuthGatewayAccessError) {
@@ -129,6 +141,23 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		});
 		expect(store.getUser("999999")).toBeUndefined();
 		expect(store.getUser(String(alice.user.id))?.id).toBe(alice.user.id);
+	});
+
+	test("recreates the additive audit cursor index when reopening a v1 database", async () => {
+		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(true);
+		store.close();
+		expect(readSchemaVersion(dbPath)).toBe(1);
+		const db = new Database(dbPath);
+		try {
+			db.run("DROP INDEX IF EXISTS idx_gateway_audit_user_id");
+		} finally {
+			db.close();
+		}
+		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(false);
+		expect(readSchemaVersion(dbPath)).toBe(1);
+		store = await SqliteAuthGatewayAccessStore.open(dbPath);
+		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(true);
+		expect(readSchemaVersion(dbPath)).toBe(1);
 	});
 
 	test("isolates token add revoke rotate disable and delete per user", () => {
@@ -465,12 +494,22 @@ describe("SqliteAuthGatewayAccessStore", () => {
 
 		store.close();
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
+		const globalPage = store.listAudit({ limit: 3 });
+		expect(globalPage.events.map(event => event.requestId)).toEqual(["req-bob", "req-denied", "req-models-list"]);
+		expect(globalPage.nextBefore).toBeNumber();
+		const globalNextPage = store.listAudit({ limit: 3, before: globalPage.nextBefore ?? undefined });
+		expect(globalNextPage.events.map(event => event.requestId)).toEqual(["req-success-2", "req-success-1"]);
+		expect(globalNextPage.events.every(event => event.id < (globalPage.nextBefore ?? 0))).toBe(true);
+		expect(globalNextPage.nextBefore).toBeNull();
+
 		const page = store.listAudit({ userId: alice.user.id, limit: 3 });
 		expect(page.events).toHaveLength(3);
+		expect(page.events.map(event => event.requestId)).toEqual(["req-denied", "req-models-list", "req-success-2"]);
 		expect(page.nextBefore).toBeNumber();
 		expect(page.events[0]?.id).toBeGreaterThan(page.events[1]?.id ?? 0);
 		const nextPage = store.listAudit({ userId: alice.user.id, limit: 3, before: page.nextBefore ?? undefined });
-		expect(nextPage.events).toHaveLength(1);
+		expect(nextPage.events.map(event => event.requestId)).toEqual(["req-success-1"]);
+		expect(nextPage.events.every(event => event.id < (page.nextBefore ?? 0))).toBe(true);
 		expect(nextPage.nextBefore).toBeNull();
 
 		const serializedAudit = JSON.stringify(store.listAudit({ limit: 100 }));

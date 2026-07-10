@@ -1364,28 +1364,33 @@ async function handleCredentialsCheck(
 
 function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPrincipal): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
-	const filtered =
-		isManagedRegular(principal) && opts.accessStore
-			? list.filter(model => {
-					const rules = opts.accessStore?.listAclRules(principal.userId) ?? [];
-					const access = evaluateAuthGatewayAccess(principal, rules, {
-						route: "models",
-						provider: model.provider,
-						qualifiedModel: qualifiedModelId(model),
-					});
-					if (!access.allowed) return false;
-					const pool = opts.accessStore
-						? resolveAuthGatewayPoolSelection(
-								opts.accessStore.listUserPools(principal.userId),
-								model.provider,
-								qualifiedModelId(model),
-							)
-						: null;
-					if (!pool) return false;
-					const liveIds = credentialIdsForProvider(opts.storage, model.provider);
-					return pool.credentialIds.some(id => liveIds.has(id));
-				})
-			: list;
+	let filtered = list;
+	if (isManagedRegular(principal) && opts.accessStore) {
+		const rules = opts.accessStore.listAclRules(principal.userId);
+		const pools = opts.accessStore.listUserPools(principal.userId);
+		const liveIdsByProvider = new Map<string, Set<number>>();
+		const liveIdsForProvider = (provider: string): Set<number> => {
+			let liveIds = liveIdsByProvider.get(provider);
+			if (!liveIds) {
+				liveIds = credentialIdsForProvider(opts.storage, provider);
+				liveIdsByProvider.set(provider, liveIds);
+			}
+			return liveIds;
+		};
+		filtered = list.filter(model => {
+			const qualified = qualifiedModelId(model);
+			const access = evaluateAuthGatewayAccess(principal, rules, {
+				route: "models",
+				provider: model.provider,
+				qualifiedModel: qualified,
+			});
+			if (!access.allowed) return false;
+			const pool = resolveAuthGatewayPoolSelection(pools, model.provider, qualified);
+			if (!pool) return false;
+			const liveIds = liveIdsForProvider(model.provider);
+			return pool.credentialIds.some(id => liveIds.has(id));
+		});
+	}
 	const data = filtered.map(model => ({
 		id: model.id,
 		object: "model" as const,

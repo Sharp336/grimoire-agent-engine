@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
@@ -145,5 +145,38 @@ describe("auth-gateway managed users", () => {
 		const data = body.data;
 		expect(Array.isArray(data)).toBe(true);
 		expect((data as Array<{ id: string }>).map(model => model.id)).toEqual(["model-a"]);
+	});
+
+	test("lists managed models from one access snapshot per request", async () => {
+		const modelA = createMockModel({ provider: "mock", id: "model-a" });
+		const modelB = createMockModel({ provider: "mock", id: "model-b" });
+		const modelC = createMockModel({ provider: "mock", id: "model-c" });
+		harness = await createGatewayHarness({ models: [modelA, modelB, modelC], credentials: credentials(["key-a"]) });
+		const managed = harness.accessStore.createUser({ name: "modelcache" });
+		const pool = harness.accessStore.createPool({ name: "modelcachepool", provider: "mock" });
+		harness.accessStore.addPoolCredential(pool.id, harness.credentialStore.listAuthCredentials("mock")[0]!.id);
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "route", pattern: "models" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "provider", pattern: "mock" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "model", pattern: "mock/*" });
+		harness.accessStore.bindUserPool(managed.user.id, pool.id);
+
+		const listAclRules = spyOn(harness.accessStore, "listAclRules");
+		const listUserPools = spyOn(harness.accessStore, "listUserPools");
+		const listStoredCredentials = spyOn(harness.storage, "listStoredCredentials");
+		try {
+			const response = await fetch(`${harness.handle.url}/v1/models`, { headers: jsonHeaders(managed.token.value) });
+			expect(response.status).toBe(200);
+			const body = expectObject(await readJson(response));
+			const data = body.data as Array<{ id: string }>;
+			expect(data.map(model => model.id)).toEqual(["model-a", "model-b", "model-c"]);
+			expect(listAclRules).toHaveBeenCalledTimes(1);
+			expect(listUserPools).toHaveBeenCalledTimes(1);
+			expect(listStoredCredentials).toHaveBeenCalledTimes(1);
+			expect(listStoredCredentials).toHaveBeenCalledWith("mock");
+		} finally {
+			listAclRules.mockRestore();
+			listUserPools.mockRestore();
+			listStoredCredentials.mockRestore();
+		}
 	});
 });
