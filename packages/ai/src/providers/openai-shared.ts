@@ -1071,6 +1071,25 @@ function normalizeOpenAIStableId(value: string | undefined, maxLength: number, h
 	return `${hashPrefix}${Bun.hash(wellFormed).toString(36)}`;
 }
 
+/** Canonical shape of a UUID already carrying the v7 version nibble and RFC 4122 variant bits. */
+const CODEX_TRANSPORT_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Stable, version-7-shaped UUID for Codex transport headers. This is not a
+ * time-ordered UUIDv7: hashing preserves affinity for arbitrary client ids
+ * while avoiding Luna's stale-deployment routing for other UUID versions.
+ * Already-valid UUIDv7 values pass through unchanged.
+ */
+export function normalizeCodexTransportSessionId(sessionId: string | undefined): string | undefined {
+	if (!sessionId || sessionId.length === 0) return undefined;
+	const wellFormed = sessionId.toWellFormed();
+	if (CODEX_TRANSPORT_SESSION_ID_PATTERN.test(wellFormed)) return wellFormed;
+	const hex = new Bun.CryptoHasher("sha256").update(wellFormed).digest("hex").slice(0, 32);
+	const variantNibble = (Number.parseInt(hex[16], 16) & 0x3) | 0x8;
+	const stamped = `${hex.slice(0, 12)}7${hex.slice(13, 16)}${variantNibble.toString(16)}${hex.slice(17, 32)}`;
+	return `${stamped.slice(0, 8)}-${stamped.slice(8, 12)}-${stamped.slice(12, 16)}-${stamped.slice(16, 20)}-${stamped.slice(20, 32)}`;
+}
+
 export const OPENAI_RESPONSES_PROGRESS_EVENT_TYPES: ReadonlySet<string> = new Set([
 	"response.created",
 	"response.output_item.added",

@@ -100,6 +100,7 @@ import {
 	finalizeToolCallArgumentsDone,
 	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
+	normalizeCodexTransportSessionId,
 	normalizeOpenAIPromptCacheKey,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
@@ -901,7 +902,7 @@ async function buildCodexRequestContext(
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
-	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	const transportSessionId = normalizeCodexTransportSessionId(options?.sessionId);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
 
 	const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
@@ -2186,8 +2187,7 @@ export async function prewarmOpenAICodexResponses(
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
-	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
-	const promptCacheKey = transportSessionId;
+	const transportSessionId = normalizeCodexTransportSessionId(options?.sessionId);
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = resolveCodexResponsesLite(model, options?.responsesLite);
 	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
@@ -2204,7 +2204,7 @@ export async function prewarmOpenAICodexResponses(
 		{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 		accountId,
 		apiKey,
-		promptCacheKey,
+		transportSessionId,
 		"websocket",
 		state,
 		responsesLite,
@@ -2330,7 +2330,7 @@ function getCodexWebSocketStateForPublicSession(
 ): CodexWebSocketSessionState | undefined {
 	const baseUrl = options?.baseUrl || model.baseUrl || CODEX_BASE_URL;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
-	const normalizedSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	const normalizedSessionId = normalizeCodexTransportSessionId(options?.sessionId);
 	const publicSessionKey = normalizedSessionId ? `${baseUrl}:${model.id}:${normalizedSessionId}` : undefined;
 	const privateSessionKey = publicSessionKey
 		? providerSessionState?.webSocketPublicToPrivate.get(publicSessionKey)

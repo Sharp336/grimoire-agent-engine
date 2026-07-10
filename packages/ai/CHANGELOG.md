@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed concurrent reasoning summaries to ignore legacy streaming events under cutoff contract
+- Normalized arbitrary Codex session IDs to stable version-7-shaped transport UUIDs, preventing GPT-5.6 Luna requests from routing to stale deployments.
 
 ## [16.3.15] - 2026-07-09
 

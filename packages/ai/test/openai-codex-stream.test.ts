@@ -137,6 +137,13 @@ function encodeWebSocketMessage(value: Record<string, unknown>): Uint8Array {
 	return new TextEncoder().encode(JSON.stringify(value));
 }
 
+/**
+ * Version-7-shaped UUID with an RFC 4122 variant nibble — the shape Codex's
+ * conversation_id/session_id/x-client-request-id headers must carry. Tests
+ * assert only against this shape, never against the derivation algorithm.
+ */
+const CODEX_TRANSPORT_UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 type WsHeaders = Record<string, string>;
 type WsEventType = "open" | "message" | "error" | "close";
 
@@ -1662,52 +1669,13 @@ describe("openai-codex streaming", () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 
-		const payload = Buffer.from(
-			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
-			"utf8",
-		).toBase64();
-		const token = `aaa.${payload}.bbb`;
-
-		const sse = `${[
-			`data: ${JSON.stringify({
-				type: "response.output_item.added",
-				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
-			})}`,
-			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
-			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello" })}`,
-			`data: ${JSON.stringify({
-				type: "response.output_item.done",
-				item: {
-					type: "message",
-					id: "msg_1",
-					role: "assistant",
-					status: "completed",
-					content: [{ type: "output_text", text: "Hello" }],
-				},
-			})}`,
-			`data: ${JSON.stringify({
-				type: "response.completed",
-				response: {
-					status: "completed",
-					usage: {
-						input_tokens: 5,
-						output_tokens: 3,
-						total_tokens: 8,
-						input_tokens_details: { cached_tokens: 0 },
-					},
-				},
-			})}`,
-		].join("\n\n")}\n\n`;
-
-		const encoder = new TextEncoder();
-		const stream = new ReadableStream({
-			start(controller) {
-				controller.enqueue(encoder.encode(sse));
-				controller.close();
-			},
-		});
-
+		const token = createCodexTestToken();
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
 		const sessionId = "test-session-123";
+
+		const capturedTransportIds: (string | null)[] = [];
+		const capturedCacheKeys: unknown[] = [];
+
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
@@ -1717,17 +1685,22 @@ describe("openai-codex streaming", () => {
 				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
 			}
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const headers = init?.headers instanceof Headers ? init.headers : undefined;
-				// Verify sessionId is set in headers
-				expect(headers?.get("conversation_id")).toBe(sessionId);
-				expect(headers?.get("session_id")).toBe(sessionId);
-				expect(headers?.get("x-client-request-id")).toBe(sessionId);
+				const headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+				const conversationId = headers.get("conversation_id");
 
-				// Verify sessionId is set in request body as prompt_cache_key
+				// Codex requires all three transport identifiers to agree and to be
+				// version-7-shaped UUIDs — never the raw, arbitrary client sessionId,
+				// which the real backend routes to a nonexistent Luna deployment.
+				expect(headers.get("session_id")).toBe(conversationId);
+				expect(headers.get("x-client-request-id")).toBe(conversationId);
+				expect(conversationId).toMatch(CODEX_TRANSPORT_UUID_V7_RE);
+				expect(conversationId).not.toBe(sessionId);
+				capturedTransportIds.push(conversationId);
+
 				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
-				expect(body?.prompt_cache_key).toBe(sessionId);
+				capturedCacheKeys.push(body?.prompt_cache_key);
 
-				return new Response(stream, {
+				return new Response(createCompletedCodexSse("Hello"), {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
 				});
@@ -1735,30 +1708,62 @@ describe("openai-codex streaming", () => {
 			return new Response("not found", { status: 404 });
 		});
 
-		const model: Model<"openai-codex-responses"> = buildModel({
-			id: "gpt-5.1-codex",
-			name: "GPT-5.1 Codex",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 400000,
-			maxTokens: 128000,
-		});
-
-		const context: Context = {
-			systemPrompt: ["You are a helpful assistant."],
-			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
-		};
-
-		const streamResult = streamOpenAICodexResponses(model, context, {
+		await streamOpenAICodexResponses(model, createCodexTestContext(), {
 			apiKey: token,
 			sessionId,
 			fetch: fetchMock as FetchImpl,
+		}).result();
+		await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			sessionId,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+
+		// Same input sessionId must deterministically derive the identical
+		// transport id every call — not fresh random entropy per request.
+		expect(capturedTransportIds).toHaveLength(2);
+		expect(capturedTransportIds[0]).toBe(capturedTransportIds[1]);
+
+		// The body's prompt_cache_key stays the raw, unhashed sessionId.
+		expect(capturedCacheKeys).toEqual([sessionId, sessionId]);
+	});
+
+	it("passes an already-valid UUIDv7 sessionId through unchanged", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+
+		const token = createCodexTestToken();
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const sessionId = "0190f1e0-1234-7abc-89ab-1234567890ab";
+		let capturedHeaders: Headers | undefined;
+
+		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				capturedHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+				return new Response(createCompletedCodexSse("Hello"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response("not found", { status: 404 });
 		});
-		await streamResult.result();
+
+		await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			sessionId,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+
+		expect(capturedHeaders?.get("conversation_id")).toBe(sessionId);
+		expect(capturedHeaders?.get("session_id")).toBe(sessionId);
+		expect(capturedHeaders?.get("x-client-request-id")).toBe(sessionId);
 	});
 	it("keeps prompt_cache_key separate from Codex conversation headers", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
@@ -1798,9 +1803,11 @@ describe("openai-codex streaming", () => {
 			promptCacheKey,
 		}).result();
 
-		expect(capturedHeaders?.get("conversation_id")).toBe(sessionId);
-		expect(capturedHeaders?.get("session_id")).toBe(sessionId);
-		expect(capturedHeaders?.get("x-client-request-id")).toBe(sessionId);
+		const conversationId = capturedHeaders?.get("conversation_id");
+		expect(conversationId).toBe(capturedHeaders?.get("session_id"));
+		expect(conversationId).toBe(capturedHeaders?.get("x-client-request-id"));
+		expect(conversationId).toMatch(CODEX_TRANSPORT_UUID_V7_RE);
+		expect(conversationId).not.toBe(sessionId);
 		expect(capturedBody?.prompt_cache_key).toBe(promptCacheKey);
 	});
 
