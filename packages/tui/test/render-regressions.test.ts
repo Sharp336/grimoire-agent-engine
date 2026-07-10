@@ -1437,6 +1437,42 @@ describe("TUI terminal-state regressions", () => {
 				},
 			);
 		});
+
+		it("fuses fullscreen overlay exit into a pending session replacement paint", async () => {
+			const term = new VirtualTerminal(24, 4);
+			const component = new MutableLinesComponent(rows("old-session-", 8));
+			const tui = new TUI(term);
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+				const overlay = tui.showOverlay(new MutableLinesComponent(["session selector"]), {
+					width: "100%",
+					maxHeight: "100%",
+					fullscreen: true,
+				});
+				await settle(term);
+
+				// Session loading finishes behind the still-visible selector. The forced
+				// replacement remains pending while the fullscreen path owns the frame.
+				component.setLines(rows("resumed-", 9));
+				tui.requestRender(true, { clearScrollback: true });
+				await settle(term);
+
+				const writes = captureWrites(term);
+				overlay.hide();
+				await settle(term);
+
+				const exits = writes.filter(write => write.includes("\x1b[?1049l"));
+				expect(exits).toHaveLength(1);
+				expect(exits[0]).toContain("\x1b[3J");
+				expect(exits[0]).toContain("resumed-8");
+				expect(visible(term)).toEqual(["resumed-5", "resumed-6", "resumed-7", "resumed-8"]);
+			} finally {
+				tui.stop();
+			}
+		});
 	});
 
 	describe("scrollback integrity", () => {

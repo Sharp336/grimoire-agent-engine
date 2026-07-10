@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/resume` and plan approval exposing the previous session while their asynchronous session replacement was still loading by keeping fullscreen overlays mounted until the rebuilt transcript is ready ([#5028](https://github.com/can1357/oh-my-pi/issues/5028), [#4686](https://github.com/can1357/oh-my-pi/issues/4686)).
+
 ## [16.4.0] - 2026-07-10
 
 ### Breaking Changes

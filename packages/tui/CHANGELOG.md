@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed inconclusive DECRQM probes disabling DEC 2026 synchronized output on terminals that support atomic paints but cannot report the mode, preventing session resume, replacement, and resize replays from exposing torn intermediate frames ([#5028](https://github.com/can1357/oh-my-pi/issues/5028), [#4686](https://github.com/can1357/oh-my-pi/issues/4686)).
+- Fixed fullscreen session-replacement overlays and resize drags exposing stale normal-buffer frames on terminals without effective DEC 2026: asynchronous replacements now keep their overlay visible until the rebuilt transcript is ready, overlay exit is fused into the destructive paint, and resize viewport frames rewrite the normal buffer without alternate-screen switches. Inconclusive DECRQM probes also no longer disable statically detected synchronized output ([#5028](https://github.com/can1357/oh-my-pi/issues/5028), [#4686](https://github.com/can1357/oh-my-pi/issues/4686)).
 
 ## [16.4.0] - 2026-07-10
 

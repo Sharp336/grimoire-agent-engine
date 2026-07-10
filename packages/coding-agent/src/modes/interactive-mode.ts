@@ -2464,8 +2464,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const finish = (choice: string | undefined): void => {
 			if (settled) return;
 			settled = true;
-			this.#hidePlanReview();
-			this.ui.requestRender();
 			resolve(choice);
 		};
 		const overlay = new PlanReviewOverlay(
@@ -3289,6 +3287,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			{ slider },
 		);
+		const closePlanReview = (): void => {
+			this.#hidePlanReview();
+			this.ui.requestRender();
+		};
 
 		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
 			try {
@@ -3301,6 +3303,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				if (!latestPlanContent) {
 					this.showError(`Plan file not found at ${planFilePath}`);
+					closePlanReview();
 					return;
 				}
 				// Capture the operator's tier choice and hand it to #approvePlan, which
@@ -3343,6 +3346,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
+			closePlanReview();
 			return;
 		}
 
@@ -3361,8 +3365,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			} catch (error) {
 				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
 			}
+			closePlanReview();
 			return;
 		}
+		closePlanReview();
 	}
 
 	/**
