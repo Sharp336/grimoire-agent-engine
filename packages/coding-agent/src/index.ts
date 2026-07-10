@@ -7,6 +7,7 @@ export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 // Logging
 export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 export * as zod from "zod/v4";
+export { countTokens, POST_TRANSFORM_ABORT_GUARD_VERSION } from "@oh-my-pi/pi-agent-core";
 export { z } from "zod/v4";
 export * from "./config/keybindings";
 export * from "./config/model-registry";

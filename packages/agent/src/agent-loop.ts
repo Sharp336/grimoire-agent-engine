@@ -73,6 +73,11 @@ import { yieldIfDue } from "./utils/yield";
 
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
+/**
+ * Capability version for the guard that prevents provider dispatch after an
+ * asynchronous context transform aborts the current request.
+ */
+export const POST_TRANSFORM_ABORT_GUARD_VERSION = 1;
 
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
@@ -1221,6 +1226,12 @@ async function streamAssistantResponse(
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
+	}
+
+	// A context extension may abort while transforming messages. Honor that
+	// cancellation before conversion, credential resolution, or provider dispatch.
+	if (signal?.aborted) {
+		return emitAbortedAssistantMessage(null, false, new Set(), context, config, stream, signal);
 	}
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])

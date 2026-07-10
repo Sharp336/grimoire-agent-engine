@@ -86,6 +86,38 @@ describe("agentLoop with AgentMessage", () => {
 		expect(events.map(event => event.type)).toContain("agent_end");
 	});
 
+	it("does not dispatch the provider after a context transform aborts", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const controller = new AbortController();
+		const mock = createMockModel({ responses: [{ content: ["Provider must not run"] }] });
+		let providerCalls = 0;
+		const provider = (...args: Parameters<typeof mock.stream>) => {
+			providerCalls++;
+			return mock.stream(...args);
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			transformContext: async messages => {
+				controller.abort("Context transform aborted this request");
+				return messages;
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("Hello")], context, config, controller.signal, provider);
+		const messages = await stream.result();
+
+		expect(providerCalls).toBe(0);
+		const final = messages.at(-1);
+		expect(final?.role).toBe("assistant");
+		if (final?.role !== "assistant") throw new Error("expected aborted assistant message");
+		expect(final.stopReason).toBe("aborted");
+	});
+
 	it("returns detailed telemetry when awaiting detailed() directly", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
