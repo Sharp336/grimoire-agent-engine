@@ -36,6 +36,7 @@ import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
+import { setSessionTerminalTitle } from "../utils/title-generator";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -2251,6 +2252,37 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "title",
+		description: "Set or show the session title",
+		inlineHint: "[name]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const name = command.args.trim();
+			if (!name) {
+				const current = runtime.session.sessionName;
+				await runtime.output(current ? `Session title: ${current}` : "No session title set.");
+				return commandConsumed();
+			}
+			await runtime.session.setSessionName(name, "user");
+			await runtime.output(`Session title set to: ${name}`);
+			await runtime.notifyTitleChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const name = command.args.trim();
+			if (!name) {
+				const current = runtime.ctx.session.sessionName;
+				runtime.ctx.showStatus(current ? `Session title: ${current}` : "No session title set.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			await runtime.ctx.session.setSessionName(name, "user");
+			setSessionTerminalTitle(name);
+			runtime.ctx.showStatus(`Session title set to: ${name}`);
+			runtime.ctx.editor.setText("");
 		},
 	},
 	{
