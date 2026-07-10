@@ -1044,7 +1044,10 @@ describe("marketplace plugin rules", () => {
 				},
 			}),
 		);
-		await fs.writeFile(path.join(pluginPath, "rules", "alpha.md"), "---\ndescription: Alpha rule\n---\nAlpha body.\n");
+		await fs.writeFile(
+			path.join(pluginPath, "rules", "alpha.md"),
+			"---\ndescription: Alpha rule\n---\nAlpha body.\n",
+		);
 		await fs.writeFile(path.join(pluginPath, "rules", "beta.mdc"), "---\ndescription: Beta rule\n---\nBeta body.\n");
 
 		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir, providers: ["claude-plugins"] });

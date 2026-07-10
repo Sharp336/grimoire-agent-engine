@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `rules/*.md` and `rules/*.mdc` discovery for installed marketplace plugins, including OMP user/project scope and existing rule precedence.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed
