@@ -74,6 +74,9 @@ function parseApplyPatchWithOptions(patchText: string, options: ParseApplyPatchO
 	if (!hasEndMarker && !streaming) {
 		throw new ParseError("The last line of the patch must be '*** End Patch'");
 	}
+	if (!streaming) {
+		validateCompleteEnvelopeMarkers(lines);
+	}
 
 	const hunks: PatchInput[] = [];
 	let remaining = hasEndMarker ? lines.slice(1, lines.length - 1) : lines.slice(1);
@@ -171,4 +174,17 @@ function parseApplyPatchWithOptions(patchText: string, options: ParseApplyPatchO
 	}
 
 	return hunks;
+}
+
+function validateCompleteEnvelopeMarkers(lines: string[]): void {
+	for (let index = 0; index < lines.length; index++) {
+		const marker = lines[index].trim();
+		const lineNumber = index + 1;
+		if (marker === BEGIN_PATCH_MARKER && index !== 0) {
+			throw new ParseError("Nested '*** Begin Patch' markers are not allowed", lineNumber);
+		}
+		if (marker === END_PATCH_MARKER && index !== lines.length - 1) {
+			throw new ParseError("Nested '*** End Patch' markers are not allowed", lineNumber);
+		}
+	}
 }

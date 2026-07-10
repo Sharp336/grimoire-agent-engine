@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rejected nested `*** Begin Patch` and premature `*** End Patch` markers instead of treating them as update content and applying a malformed multi-envelope patch.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed

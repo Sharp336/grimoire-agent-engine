@@ -639,6 +639,33 @@ describe("parseApplyPatch (production)", () => {
 		const result = parseApplyPatch(wrap("*** Update File: a.py\n@@\n-x\n+y\n*** End of File"));
 		expect(result[0].diff).toContain("*** End of File");
 	});
+
+	test("rejects an end marker before another file operation", () => {
+		const patch = `*** Begin Patch
+*** Update File: scripts/example.py
+@@
++N_TRAIN = 512
+*** End Patch
+*** Update File: scripts/example.py
+@@
++BATCH = 512
+*** End Patch`;
+
+		expect(() => parseApplyPatch(patch)).toThrow(ParseError);
+		expect(() => parseApplyPatch(patch)).toThrow("Nested '*** End Patch' markers are not allowed");
+	});
+
+	test("rejects a nested begin marker", () => {
+		const patch = `*** Begin Patch
+*** Update File: scripts/example.py
+@@
++N_TRAIN = 512
+*** Begin Patch
+*** End Patch`;
+
+		expect(() => parseApplyPatch(patch)).toThrow(ParseError);
+		expect(() => parseApplyPatch(patch)).toThrow("Nested '*** Begin Patch' markers are not allowed");
+	});
 });
 
 describe("applyCodexPatch (production)", () => {
