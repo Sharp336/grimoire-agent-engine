@@ -10,7 +10,7 @@ import {
 	postChat,
 	postPiNative,
 	readJson,
-} from "./auth-gateway-step4-helpers";
+} from "./auth-gateway-integration-helpers";
 
 function seededCredentials(): AuthCredential[] {
 	return [

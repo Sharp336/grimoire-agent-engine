@@ -11,7 +11,7 @@ import {
 	postChat,
 	postPiNative,
 	readJson,
-} from "./auth-gateway-step4-helpers";
+} from "./auth-gateway-integration-helpers";
 
 function credentials(keys: string[]): AuthCredential[] {
 	return keys.map(key => ({ type: "api_key", key }));

@@ -6,7 +6,7 @@ import {
 	type GatewayHarness,
 	jsonHeaders,
 	readJson,
-} from "./auth-gateway-step4-helpers";
+} from "./auth-gateway-integration-helpers";
 
 async function requestJson(
 	baseUrl: string,

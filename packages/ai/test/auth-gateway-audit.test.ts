@@ -10,7 +10,7 @@ import {
 	jsonHeaders,
 	postChat,
 	readJson,
-} from "./auth-gateway-step4-helpers";
+} from "./auth-gateway-integration-helpers";
 
 function testCredentials(): AuthCredential[] {
 	return [
