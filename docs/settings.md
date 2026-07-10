@@ -633,6 +633,7 @@ searxng:
 | `providers.openaiWebsockets` | enum | `auto` | `auto`, `off`, `on`. |
 | `providers.openrouterVariant` | enum | `default` | `default`, `nitro`, `floor`, `online`, `exacto`. |
 | `providers.kimiApiFormat` | enum | `anthropic` | `openai`, `anthropic`. |
+| `providers.awsAuthRefresh` | string | _(unset)_ | Shell command run to refresh AWS credentials for Amazon Bedrock when the SSO token is missing/expired or a request returns 401/403 (e.g. `aws sso login --profile my-profile`). Refreshes creds on disk; stdout is shown, not parsed. See [Providers](./providers.md). |
 | `provider.appendOnlyContext` | enum | `auto` | `auto`, `on`, `off`. |
 | `exa.enabled` | boolean | `true` | Enable Exa integration. |
 | `exa.enableSearch` | boolean | `true` | Exa search. |

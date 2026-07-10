@@ -52,6 +52,12 @@ export interface BedrockOptions extends StreamOptions {
 	profile?: string;
 	/** Amazon Bedrock API key sent as `Authorization: Bearer`, ahead of SigV4 credential resolution. */
 	bearerToken?: string;
+	/**
+	 * Shell command run to refresh AWS credentials on disk when the SSO token is
+	 * missing/expired or a request returns 401/403 (e.g. `aws sso login`). Ignored
+	 * on the bearer-token and `AWS_BEDROCK_SKIP_AUTH` paths.
+	 */
+	awsAuthRefresh?: string;
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/* See https://docs.aws.amazon.com/bedrock/latest/userguide/inference-reasoning.html for supported models. */
 	reasoning?: Effort;
@@ -356,12 +362,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			};
 
 			const bearerToken = resolveBearerToken(options);
-			let requestHeaders: Record<string, string>;
-			if (bearerToken) {
-				requestHeaders = { ...baseHeaders, Authorization: `Bearer ${bearerToken}` };
-			} else {
+			const skipAuth = $flag("AWS_BEDROCK_SKIP_AUTH");
+
+			// Resolve credentials and sign for this attempt. `forceRefresh` runs the
+			// configured `awsAuthRefresh` command before re-resolving; it only
+			// applies to the SigV4 credential path (bearer/skip-auth carry no creds).
+			const buildRequestHeaders = async (forceRefresh: boolean): Promise<Record<string, string>> => {
+				if (bearerToken) return { ...baseHeaders, Authorization: `Bearer ${bearerToken}` };
 				let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
-				if ($flag("AWS_BEDROCK_SKIP_AUTH")) {
+				if (skipAuth) {
 					credentials = { accessKeyId: "dummy-access-key", secretAccessKey: "dummy-secret-key" };
 				} else {
 					credentials = await resolveAwsCredentials({
@@ -369,6 +378,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						region,
 						signal: options.signal,
 						fetch: options.fetch,
+						authRefresh: options.awsAuthRefresh,
+						forceRefresh,
 					});
 				}
 				const signed = await signRequest({
@@ -381,40 +392,48 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					credentials,
 					headers: baseHeaders,
 				});
-				requestHeaders = { ...baseHeaders, ...signed };
-			}
+				return { ...baseHeaders, ...signed };
+			};
 
-			// Bun's native fetch ceiling is disabled below (`timeout: false`) so
-			// configurable watchdogs govern slow-prefill streams (issue #2422).
-			// Direct callers that bypass `register-builtins` (which installs the
-			// iterator-level first-event watchdog) still need a pre-response
-			// timer, otherwise a Bedrock/proxy that accepts the POST and never
-			// sends headers would hang forever.
-			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs();
-			// Clear the pre-response timer the instant headers arrive (below): an
-			// absolute `AbortSignal.timeout` would keep aborting the actively
-			// streaming body, not just a stalled time-to-first-byte (issue #2422).
-			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
-			let response: Response;
-			try {
-				response = await fetchWithRetry(url, {
-					method: "POST",
-					headers: requestHeaders,
-					body,
-					signal: watchdog.signal,
-					fetch: options.fetch,
-					timeout: false,
-				});
-			} finally {
-				watchdog.clear();
+			const sendOnce = async (forceRefresh: boolean): Promise<Response> => {
+				const requestHeaders = await buildRequestHeaders(forceRefresh);
+				// Bun's native fetch ceiling is disabled below (`timeout: false`) so
+				// configurable watchdogs govern slow-prefill streams (issue #2422).
+				// Direct callers that bypass `register-builtins` (which installs the
+				// iterator-level first-event watchdog) still need a pre-response
+				// timer, otherwise a Bedrock/proxy that accepts the POST and never
+				// sends headers would hang forever.
+				const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs();
+				// Clear the pre-response timer the instant headers arrive (below): an
+				// absolute `AbortSignal.timeout` would keep aborting the actively
+				// streaming body, not just a stalled time-to-first-byte (issue #2422).
+				const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
+				try {
+					return await fetchWithRetry(url, {
+						method: "POST",
+						headers: requestHeaders,
+						body,
+						signal: watchdog.signal,
+						fetch: options.fetch,
+						timeout: false,
+					});
+				} finally {
+					watchdog.clear();
+				}
+			};
+
+			// A 401/403 on the credential path means the signed creds were rejected.
+			// Drop the cache so the retry re-resolves; when `awsAuthRefresh` is set,
+			// re-run it first (forceRefresh) to repair on-disk SSO state, then retry
+			// the request once.
+			const canReauth = !bearerToken && !skipAuth;
+			let response = await sendOnce(false);
+			if (!response.ok && canReauth && (response.status === 401 || response.status === 403)) {
+				invalidateAwsCredentialCache({ profile: options.profile, region });
+				if (options.awsAuthRefresh) response = await sendOnce(true);
 			}
 
 			if (!response.ok) {
-				if (!bearerToken && (response.status === 401 || response.status === 403)) {
-					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
-					// drop the cache entry so the next attempt re-resolves from scratch.
-					invalidateAwsCredentialCache({ profile: options.profile, region });
-				}
 				const errBody = await response.text().catch(() => "");
 				throw new AIError.BedrockApiError(
 					`Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`,

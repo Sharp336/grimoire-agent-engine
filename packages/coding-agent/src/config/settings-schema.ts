@@ -4350,6 +4350,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
+	"providers.awsAuthRefresh": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "AWS Auth Refresh Command",
+			description:
+				"Shell command run to refresh AWS credentials for Amazon Bedrock when the SSO token is missing/expired or a request returns 401/403 (for example `aws sso login --profile my-profile`). The command refreshes credentials on disk; its stdout is shown, not parsed, and credentials are re-read from the AWS chain afterward.",
+		},
+	},
 	"providers.antigravityEndpoint": {
 		type: "enum",
 		values: ["auto", "production", "sandbox"] as const,

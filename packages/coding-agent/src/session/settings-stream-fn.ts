@@ -33,6 +33,8 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		const awsAuthRefresh =
+			model.api === "bedrock-converse-stream" ? settings.get("providers.awsAuthRefresh") : undefined;
 		const textVerbosity =
 			model.api === "openai-codex-responses" || model.api === "openai-responses"
 				? settings.get("textVerbosity")
@@ -55,6 +57,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			...streamOptions,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
+			awsAuthRefresh: streamOptions?.awsAuthRefresh ?? awsAuthRefresh,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,

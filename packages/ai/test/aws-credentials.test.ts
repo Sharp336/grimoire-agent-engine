@@ -177,3 +177,101 @@ describe("resolveAwsCredentials credential_process", () => {
 		await expect(promise).rejects.toBeDefined();
 	});
 });
+
+// `awsAuthRefresh` coverage. The SSO cache lives under `os.homedir()` (which
+// can't be redirected mid-process), so these drive the reactive path through
+// the file seam instead: an SSO profile with no cached token first throws
+// `sso-token-missing`, and the refresh command writes static keys into the
+// shared credentials file that the retry's profile resolution then returns
+// (static keys are checked ahead of the SSO branch). No homedir or fetch mocks.
+describe("resolveAwsCredentials awsAuthRefresh", () => {
+	let tmp: string;
+	const saved = new Map<string, string | undefined>();
+
+	const START_URL = "https://example.awsapps.com/start";
+	const SSO_REGION = "us-east-1";
+	let credentialsPath: string;
+
+	beforeEach(async () => {
+		for (const k of ENV_KEYS) {
+			saved.set(k, Bun.env[k]);
+			delete Bun.env[k];
+		}
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-authrefresh-"));
+		credentialsPath = path.join(tmp, "credentials");
+		clearAwsCredentialCache();
+	});
+
+	afterEach(async () => {
+		for (const [k, v] of saved) {
+			if (v === undefined) delete Bun.env[k];
+			else Bun.env[k] = v;
+		}
+		saved.clear();
+		await removeWithRetries(tmp);
+		clearAwsCredentialCache();
+	});
+
+	async function writeFixtureFile(name: string, body: string): Promise<string> {
+		const p = path.join(tmp, name);
+		await Bun.write(p, body);
+		return p;
+	}
+
+	/** SSO profile with no cached token, so the first resolution throws sso-token-missing. */
+	async function writeSsoConfig(profile: string): Promise<void> {
+		const cfg = path.join(tmp, "config");
+		await Bun.write(
+			cfg,
+			`[profile ${profile}]\n` +
+				`sso_start_url = ${START_URL}\n` +
+				`sso_region = ${SSO_REGION}\n` +
+				`sso_account_id = 111122223333\n` +
+				`sso_role_name = TestRole\n`,
+		);
+		Bun.env.AWS_CONFIG_FILE = cfg;
+		await Bun.write(credentialsPath, "");
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+	}
+
+	test("missing SSO token surfaces an actionable error without a refresh command", async () => {
+		await writeSsoConfig("bare");
+		await expect(resolveAwsCredentials({ profile: "bare", region: SSO_REGION })).rejects.toThrow(/aws sso login/i);
+	});
+
+	test("runs awsAuthRefresh on a stale token, then re-resolves the repaired creds", async () => {
+		await writeSsoConfig("refreshable");
+
+		// The refresh command stands in for `aws sso login`: it repairs on-disk
+		// state so the retry resolves. Writing static keys for the profile is the
+		// simplest repair to observe (the retry returns them ahead of the SSO
+		// branch); a marker file proves the command actually ran.
+		const marker = path.join(tmp, "ran.txt");
+		const written = `[refreshable]\naws_access_key_id = AKIAFRESH\naws_secret_access_key = fresh-secret\n`;
+		const refreshScript = await writeFixtureFile(
+			"refresh.js",
+			`const fs=require("node:fs");
+			 fs.writeFileSync(${JSON.stringify(credentialsPath)}, ${JSON.stringify(written)});
+			 fs.writeFileSync(${JSON.stringify(marker)}, "1");`,
+		);
+		const authRefresh = `${quoteForConfig(process.execPath)} ${quoteForConfig(refreshScript)}`;
+
+		const creds = await resolveAwsCredentials({ profile: "refreshable", region: SSO_REGION, authRefresh });
+		expect(creds.accessKeyId).toBe("AKIAFRESH");
+		expect(creds.secretAccessKey).toBe("fresh-secret");
+		expect(await Bun.file(marker).exists()).toBe(true);
+	});
+
+	test("surfaces the refresh command's non-zero exit", async () => {
+		await writeSsoConfig("broken-refresh");
+		const failScript = await writeFixtureFile(
+			"fail-refresh.js",
+			`process.stderr.write("login failed");process.exit(3);`,
+		);
+		const authRefresh = `${quoteForConfig(process.execPath)} ${quoteForConfig(failScript)}`;
+		await expect(
+			resolveAwsCredentials({ profile: "broken-refresh", region: SSO_REGION, authRefresh }),
+		).rejects.toThrow(/awsAuthRefresh command exited 3.*login failed/);
+	});
+});

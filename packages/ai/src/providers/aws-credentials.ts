@@ -40,6 +40,18 @@ export interface CredentialResolveOptions {
 	region?: string;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	/**
+	 * Shell command run to refresh credentials on disk (e.g. `aws sso login`) when
+	 * the SSO cache token is missing/expired. Its stdout/stderr is logged, not
+	 * parsed; credentials are re-read from the AWS chain after it exits 0.
+	 */
+	authRefresh?: string;
+	/**
+	 * Run {@link authRefresh} before resolving even when the cached token still
+	 * looks valid. Set by the Bedrock provider after a 401/403, where the cached
+	 * credentials were accepted locally but rejected by the service.
+	 */
+	forceRefresh?: boolean;
 }
 
 const REFRESH_SKEW_MS = 60_000;
@@ -68,20 +80,25 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	const region = opts.region || $env.AWS_REGION || $env.AWS_DEFAULT_REGION || "us-east-1";
 	const cacheKey = `${profile}\x00${region}`;
 
-	const hit = cache.get(cacheKey);
-	if (hit && hit.expiresAt - REFRESH_SKEW_MS > Date.now()) return hit.creds;
+	// forceRefresh (a 401/403 backstop) must not be served the cached creds the
+	// service just rejected, and must not join an in-flight resolution started
+	// without the refresh command.
+	if (!opts.forceRefresh) {
+		const hit = cache.get(cacheKey);
+		if (hit && hit.expiresAt - REFRESH_SKEW_MS > Date.now()) return hit.creds;
 
-	// Single-flight: N concurrent cold calls must not each spawn credential_process/SSO/IMDS fetches.
-	// The shared resolution is deliberately detached from any caller's signal — aborting one
-	// request must not fail every waiter — and bounded by its own timeout instead; each caller
-	// races its own signal against the shared promise.
-	const existing = inflight.get(cacheKey);
-	if (existing) return raceWithSignal(existing, opts.signal);
+		// Single-flight: N concurrent cold calls must not each spawn credential_process/SSO/IMDS fetches.
+		// The shared resolution is deliberately detached from any caller's signal — aborting one
+		// request must not fail every waiter — and bounded by its own timeout instead; each caller
+		// races its own signal against the shared promise.
+		const existing = inflight.get(cacheKey);
+		if (existing) return raceWithSignal(existing, opts.signal);
+	}
 
 	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
 	const promise = (async () => {
 		try {
-			const creds = await resolveFresh(profile, region, AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS), fetchImpl);
+			const creds = await resolveFreshWithRefresh(profile, region, fetchImpl, opts.authRefresh, opts.forceRefresh);
 			cache.set(cacheKey, { creds, expiresAt: creds.expiresAt ?? Number.POSITIVE_INFINITY });
 			return creds;
 		} finally {
@@ -90,6 +107,42 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	})();
 	inflight.set(cacheKey, promise);
 	return raceWithSignal(promise, opts.signal);
+}
+
+/**
+ * Resolve credentials, running the optional `awsAuthRefresh` command to repair
+ * on-disk SSO state when needed. The command runs proactively when
+ * `forceRefresh` is set (post-401/403), and reactively when the first
+ * resolution reports a missing/expired SSO token; either way credentials are
+ * re-resolved from the AWS chain afterward. Without a command, this is a plain
+ * pass-through to {@link resolveFresh}.
+ */
+async function resolveFreshWithRefresh(
+	profile: string,
+	region: string,
+	fetchImpl: FetchImpl,
+	authRefresh: string | undefined,
+	forceRefresh: boolean | undefined,
+): Promise<ResolvedCredentials> {
+	const newSignal = () => AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS);
+
+	if (authRefresh && forceRefresh) {
+		await runAuthRefresh(authRefresh, newSignal());
+	}
+
+	try {
+		return await resolveFresh(profile, region, newSignal(), fetchImpl);
+	} catch (err) {
+		const isSsoTokenStale =
+			err instanceof AIError.AwsCredentialsError &&
+			(err.kind === "sso-token-expired" || err.kind === "sso-token-missing");
+		// Only the proactive (non-forced) path retries here; a forced refresh
+		// already ran above, so a still-stale token means the command didn't fix
+		// it and re-running would just loop.
+		if (!authRefresh || forceRefresh || !isSsoTokenStale) throw err;
+		await runAuthRefresh(authRefresh, newSignal());
+		return await resolveFresh(profile, region, newSignal(), fetchImpl);
+	}
 }
 
 async function resolveFresh(
@@ -513,6 +566,84 @@ export function tokenizeCredentialProcessCommand(cmd: string): string[] {
 	}
 	if (hasToken) tokens.push(current);
 	return tokens;
+}
+
+// ---------- awsAuthRefresh ----------
+
+/**
+ * Wall-clock bound for the refresh command. SSO device-code flows wait on a
+ * human completing the browser step, so this is generous relative to other
+ * credential timeouts.
+ */
+const AUTH_REFRESH_TIMEOUT_MS = 3 * 60_000;
+/**
+ * Minimum spacing between refresh runs for one command. A refresh that succeeds
+ * but leaves the token still-rejected (misconfigured command, wrong profile)
+ * would otherwise re-run on every retry; this debounces the storm while a
+ * genuinely-expired token an hour later still refreshes.
+ */
+const AUTH_REFRESH_DEBOUNCE_MS = 10_000;
+
+/** In-flight refresh per command, so concurrent resolutions share one login. */
+const authRefreshInflight: Map<string, Promise<void>> = new Map();
+/** Last completion timestamp per command, for {@link AUTH_REFRESH_DEBOUNCE_MS}. */
+const authRefreshLastRun: Map<string, number> = new Map();
+
+/**
+ * Run the user's `awsAuthRefresh` command to refresh credentials on disk (e.g.
+ * `aws sso login`). Modeled on Claude Code's setting of the same name: the
+ * command's job is to rewrite `~/.aws` state, not to emit credentials, so its
+ * stdout/stderr is logged rather than parsed and the caller re-reads the AWS
+ * chain afterward. Single-flighted and debounced per command; a non-zero exit
+ * throws so the caller can surface the failure instead of looping.
+ */
+async function runAuthRefresh(command: string, signal: AbortSignal | undefined): Promise<void> {
+	const trimmed = command.trim();
+	if (!trimmed) return;
+
+	const inflight = authRefreshInflight.get(trimmed);
+	if (inflight) return inflight;
+
+	const lastRun = authRefreshLastRun.get(trimmed);
+	if (lastRun !== undefined && Date.now() - lastRun < AUTH_REFRESH_DEBOUNCE_MS) return;
+
+	const promise = (async () => {
+		const argv = buildCredentialProcessArgv("awsAuthRefresh", trimmed);
+		logger.info("aws-credentials: running awsAuthRefresh", { command: trimmed });
+		const timeout = AbortSignal.timeout(AUTH_REFRESH_TIMEOUT_MS);
+		const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		const child = Bun.spawn(argv, {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+			signal: combined,
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		// Unlike credential_process, stdout is informational (e.g. the SSO device
+		// URL/code); surface it so the user can complete the browser flow.
+		const combinedOutput = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+		if (exitCode !== 0) {
+			throw new AIError.AwsCredentialsError(
+				`awsAuthRefresh command exited ${exitCode}: ${combinedOutput.slice(-512) || "(no output)"}`,
+				"auth-refresh",
+			);
+		}
+		if (combinedOutput)
+			logger.info("aws-credentials: awsAuthRefresh output", { output: combinedOutput.slice(-1024) });
+	})();
+
+	authRefreshInflight.set(trimmed, promise);
+	try {
+		await promise;
+	} finally {
+		authRefreshInflight.delete(trimmed);
+		authRefreshLastRun.set(trimmed, Date.now());
+	}
 }
 
 // ---------- IMDSv2 ----------

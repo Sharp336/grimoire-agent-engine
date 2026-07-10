@@ -162,6 +162,8 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 
 Region fallback in provider code: `options.region` → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`.
 
+To auto-refresh an expired AWS SSO session instead of erroring, set the `providers.awsAuthRefresh` setting (see [Settings](./settings.md)) to a command such as `aws sso login --profile my-profile`. It runs when the SSO token is missing/expired or a request returns 401/403, refreshes credentials on disk, and the request is retried; its stdout is shown (for the SSO device URL/code), not parsed. For programmatic credentials emitted to stdout, use a profile `credential_process` instead.
+
 ### Azure OpenAI Responses
 
 | Variable                           | Default / behavior                                                          |

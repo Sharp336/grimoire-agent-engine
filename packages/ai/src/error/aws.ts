@@ -9,7 +9,9 @@ export type AwsCredentialsErrorKind =
 	/** SSO `GetRoleCredentials` call failed or returned no role. */
 	| "sso-role"
 	/** External `credential_process` failed, timed out, or emitted bad output. */
-	| "credential-process";
+	| "credential-process"
+	/** The configured `awsAuthRefresh` command failed, timed out, or was empty. */
+	| "auth-refresh";
 
 /** A failure resolving AWS credentials for the Bedrock provider. */
 export class AwsCredentialsError extends Error {

@@ -574,6 +574,14 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	/**
+	 * Shell command run to refresh AWS credentials for Amazon Bedrock when the SSO
+	 * token is missing/expired or a request returns 401/403. The command refreshes
+	 * credentials on disk (e.g. `aws sso login`); its stdout is not parsed and
+	 * credentials are re-read from the AWS chain afterward. Ignored by non-Bedrock
+	 * providers.
+	 */
+	awsAuthRefresh?: string;
+	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
 	 * the default and preserves the pre-fallback behavior on every
