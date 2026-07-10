@@ -95,11 +95,28 @@ omp auth-gateway serve   [--bind=host:port] [--no-auth]
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
 omp auth-gateway check   [--strict] [--json]
+
+omp auth-gateway user create <name> [--description=] [--owner=] [--role=user|admin] [--label=] [--json]
+omp auth-gateway user list|show|enable|disable|delete <name-or-id> [--json]
+omp auth-gateway user update <name-or-id> [--description=] [--owner=] [--role=] [--json]
+omp auth-gateway user token <name-or-id> [--label=] [--regenerate] [--json]
+omp auth-gateway user token-revoke <name-or-id> <token-id> [--json]
+omp auth-gateway user allow|deny <name-or-id> (--provider= | --model= | --route=) [--json]
+omp auth-gateway user acl|acl-delete <name-or-id> [<rule-id>] [--json]
+omp auth-gateway user set-pool|unset-pool <name-or-id> <pool-name-or-id> [--json]
+omp auth-gateway user usage <name-or-id> [--since=<epoch-ms>] [--json]
+
+omp auth-gateway pool create <name> --provider=<id> [--model=<provider-model-id>] [--strategy=sticky-session|least-used|round-robin|failover] [--json]
+omp auth-gateway pool list|show|delete <name-or-id> [--json]
+omp auth-gateway pool set-strategy <name-or-id> <strategy> [--json]
+omp auth-gateway pool add-account|remove-account <name-or-id> <credential-id> [--json]
+omp auth-gateway audit list [--user=<name-or-id>] [--limit=<1..1000>] [--json]
 ```
 
-- `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and constructs an `AuthStorage` that resolves access tokens through the broker. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
-- `token` / `status` manage and inspect the gateway bearer token and upstream broker readiness.
-- `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota.
+- `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, constructs an `AuthStorage` that resolves access tokens through the broker, and opens the gateway-local access database at `<config-dir>/auth-gateway.db` (`0600` in a `0700` parent dir). Default bind is `127.0.0.1:4000`. The legacy gateway token remains stored at `<config-dir>/auth-gateway.token` (`0600`); managed client tokens are accepted in addition to it. `--no-auth` disables bearer checks for inference/diagnostic routes but intentionally rejects remote HTTP management APIs.
+- `token` / `status` manage and inspect the legacy gateway bearer token and upstream broker readiness. `status --json` also reports `accessDb`, `managedUserCount`, `activeManagedTokenCount`, and `poolCount`; a missing access DB reports zero managed counts without creating it.
+- `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota. Managed regular users calling `/v1/credentials/check` receive only scoped, redacted pool-member health.
+- `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. JSON output includes a one-time `token.value` only for user create/add/rotate; list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
 
 ### Endpoints
 
@@ -119,6 +136,45 @@ The model id is read from the top-level `model` field for foreign wire formats a
 There is no raw provider passthrough path. All supported routes go through `pi-ai` provider logic so credential-specific request shaping, OAuth refresh-on-auth-error, and provider quirks stay centralized.
 
 `idleTimeout` on the underlying `Bun.serve` is set to `255 s` so long thinking-budget calls do not get killed by Bun’s default idle timeout.
+
+### Managed users, ACLs, and pools
+
+The gateway stores client identities, SHA-256 hashes of managed client tokens, ACL rules, pool definitions, user-pool bindings, and audit rows in `<config-dir>/auth-gateway.db`. Managed tokens are generated as `omp_gw_<publicId>.<secret>` and are shown only once by `user create`, `user token`, or `user token --regenerate`; list/show commands display token public ids and revoked/last-used state only. The broker remains the only owner of provider OAuth refresh tokens and uploaded provider API-key credential payloads.
+
+Legacy `<config-dir>/auth-gateway.token` is a virtual full-admin identity for operational recovery. `--no-auth` is a virtual admin bypass for inference, `/v1/models`, `/v1/usage`, and `/v1/credentials/check`, but it cannot call HTTP management APIs; use the local CLI for management when `--no-auth` is active.
+
+Regular managed users are default-deny. They need a route allow for route-gated diagnostics (`usage`, `check`) and need a provider or exact model allow plus a matching provider-wide or exact-model pool binding before inference can dispatch. Deny rules win over allows. Provider ACL patterns are exact provider ids or `*`; model patterns are exact qualified ids (`provider/model`), `provider/*`, or `*`; route patterns are one gateway route (`chat`, `messages`, `responses`, `pi-native`, `models`, `usage`, `check`) or `*`. Route allows alone never grant provider/model access. Hidden known models, unknown model ids, ACL failures, and missing pool bindings all return the same managed-user `403 permission_error` response so model existence is not leaked.
+
+Pools bind users to ordered broker credential ids for one provider scope. A pool can be provider-wide or exact-model-scoped; exact-model bindings win over provider-wide bindings. Strategies are:
+
+- `sticky-session` — keep the session's eligible unblocked credential; otherwise use the existing deterministic session hash and usage-aware ordering.
+- `least-used` — keep the eligible sticky for an existing session; otherwise prefer the credential with the lowest live usage signal and fall back to configured member order when usage is unavailable.
+- `round-robin` — assign new sessions from a counter scoped by pool/provider/type while keeping existing eligible stickies.
+- `failover` — use configured member order and advance only after block/auth/usage-limit failure.
+
+Managed regular requests pass an `AuthStorage` selection policy containing only the winning pool's credential ids. Initial resolution, force refresh, usage-limit handling, invalidation, and retries all receive the same policy, so no request can fall through to out-of-pool stored credentials, runtime overrides, config keys, env keys, or fallback resolvers. A bound pool with no live provider-matching member returns `503 no_eligible_credential`; an exhausted pool returns `429 rate_limit_error` with `Retry-After` when the upstream reset is known.
+
+### Management and audit APIs
+
+HTTP management routes require an authenticated legacy or managed admin token. They use JSON errors shaped as `{ "error": { "code": "...", "message": "..." } }`; validation errors are `400 invalid_request`, non-admins are `403 forbidden`, no-auth is `403 management_auth_required`, missing rows are `404 not_found`, and duplicate/conflicting rows are `409 conflict`.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` / `POST` | `/v1/users` | List users; create user and one-time token |
+| `GET` / `PATCH` / `DELETE` | `/v1/users/:id` | Show, update, or delete a user |
+| `POST` / `DELETE` | `/v1/users/:id/tokens[/:tokenId]` | Add or revoke managed tokens |
+| `POST` | `/v1/users/:id/tokens/rotate` | Revoke active tokens for one user and issue one replacement |
+| `GET` / `POST` / `DELETE` | `/v1/users/:id/acl[/:ruleId]` | Manage provider/model/route ACL rules |
+| `POST` / `DELETE` | `/v1/users/:id/pools[/:poolId]` | Bind or unbind pools |
+| `GET` | `/v1/users/:id/usage?since=<ms>` | Return gateway audit usage for one user |
+| `GET` / `POST` | `/v1/pools` | List or create pools |
+| `GET` / `PATCH` / `DELETE` | `/v1/pools/:id` | Show, update name/strategy, or delete a pool |
+| `POST` / `DELETE` | `/v1/pools/:id/members[/:credentialId]` | Add or remove broker credential ids |
+| `GET` | `/v1/audit?userId=&limit=&before=` | Newest-first audit rows with an exclusive `before` id cursor |
+
+For managed regular users, `/v1/usage` returns `{ usage: AuthGatewayUsageSummary }` aggregated from successful provider/model audit rows, not broker account-quota reports. `/v1/credentials/check` returns response-local member ordinals, provider, type, `ok`, and coarse reason codes only; it omits broker credential ids, emails, account/project ids, provider payloads, upstream reason strings, headers, and raw metadata.
+
+Audit rows snapshot request id, user id/name, token id, method, query-stripped pathname, route family, requested/resolved model, selected credential id, outcome, status, token counts, cost, and sanitized error code. They never persist URL query/search/hash, request bodies, headers, raw gateway tokens, provider API keys, OAuth access tokens, OAuth refresh tokens, raw upstream errors, account ids, project ids, or emails.
 
 ## Usage cache: server-side 5-min jitter + client-side 15 s single-flight
 
