@@ -390,15 +390,15 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(content).not.toContain("Run focused checks");
 	});
 
-	it("drops a goal continuation tick while the agent is streaming", async () => {
+	it("defers a goal continuation tick while the agent is streaming", async () => {
 		// Repro for the race the streaming guard on /goal set X exposed: the
 		// 800ms continuation timer armed by getUserInput() can outlive the idle
 		// window when streaming starts between schedule and fire (e.g. /goal set
 		// taking the streaming branch, or any extension that triggers a turn).
 		// Without the streaming-aware guard the timer fires onInputCallback
 		// with a `goal-continuation` and submitInteractiveInput resurfaces
-		// AgentBusyError via promptCustomMessage. Driven with fake timers so the
-		// 800ms window is exercised deterministically without a real wall-clock wait.
+		// AgentBusyError via promptCustomMessage. The tick must be deferred, not
+		// dropped, or an active goal can wait forever once post-prompt work clears.
 		await harness.mode.handleGoalModeCommand("Ship the release");
 
 		vi.useFakeTimers();
@@ -414,7 +414,10 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(waiter.getResolvedText()).toBeUndefined();
 
 		streaming = false;
-		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(waiter.getResolvedText()).toContain("Ship the release");
 		await waiter.inputPromise;
 	});
 

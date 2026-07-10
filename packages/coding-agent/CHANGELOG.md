@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rearmed deferred autonomous goal continuations after streaming or post-prompt work instead of dropping the timer tick and potentially leaving an active goal idle indefinitely.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed

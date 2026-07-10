@@ -1240,9 +1240,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			// path that starts a turn while we wait) leaves the agent busy. Firing
 			// the continuation now would route through `submitInteractiveInput` →
 			// `promptCustomMessage` with no `streamingBehavior` and resurface
-			// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
-			// on the next `agent_end`.
-			if (this.#isAutoSubmitBlocked()) return;
+			// `AgentBusyError`. Rearm the timer because post-prompt work can clear
+			// without another `agent_end`, which would otherwise strand the goal.
+			if (this.#isAutoSubmitBlocked()) {
+				this.#scheduleGoalContinuation();
+				return;
+			}
 			if (this.#pendingSubmittedInput) return;
 			if (this.editor.getText().trim().length > 0) return;
 			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
