@@ -68,6 +68,12 @@ describe("restart launch flags", () => {
 		expect(cliFlags.apiKey).toBe("sk-cli");
 	});
 
+	test("preserves empty extension flag snapshots as restart markers", () => {
+		const flags = buildRestartLaunchFlags({}, "/repo/original", []);
+
+		expect(flags.extensionFlagValues).toEqual([]);
+	});
+
 	test("uses the live thinking selector instead of the stale launch selector", () => {
 		const restartArgs = applyLiveThinkingToRestartLaunchArgs({ thinking: ThinkingLevel.High }, ThinkingLevel.Low);
 		const flags = buildRestartLaunchFlags(

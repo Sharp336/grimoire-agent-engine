@@ -250,6 +250,21 @@ describe("restart command construction", () => {
 		});
 	});
 
+	test("hands off empty extension CLI flag snapshots as restart markers", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), extensionFlagValues: [] }, env);
+
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_FLAG_VALUES_ENV]: "[]",
+		});
+	});
+
 	test("hands off live advisor state via child env", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,
@@ -275,6 +290,13 @@ describe("restart command construction", () => {
 		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "not-json" };
 
 		expect(consumeRestartExtensionFlagValues(env)).toBeUndefined();
+		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("consumes empty restart extension flag snapshots as restart markers", () => {
+		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "[]" };
+
+		expect(consumeRestartExtensionFlagValues(env)).toEqual([]);
 		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
 	});
 

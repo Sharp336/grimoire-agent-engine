@@ -131,7 +131,7 @@ export function consumeRestartExtensionFlagValues(
 	env: Record<string, string | undefined> = process.env,
 ): RestartExtensionFlagValue[] | undefined {
 	const encoded = env[RESTART_EXTENSION_FLAG_VALUES_ENV];
-	if (!encoded) return undefined;
+	if (encoded === undefined) return undefined;
 	delete env[RESTART_EXTENSION_FLAG_VALUES_ENV];
 	let decoded: unknown;
 	try {
@@ -148,7 +148,7 @@ export function consumeRestartExtensionFlagValues(
 		if (typeof value !== "boolean" && typeof value !== "string") continue;
 		values.push([name, value]);
 	}
-	return values.length > 0 ? values : undefined;
+	return values;
 }
 
 /** Restore restart-carried extension flag values for names still registered after discovery. */
@@ -193,7 +193,7 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 		}
 		hasChildEnv = true;
 	}
-	if (options.extensionFlagValues && options.extensionFlagValues.length > 0) {
+	if (options.extensionFlagValues !== undefined) {
 		childEnv[RESTART_EXTENSION_FLAG_VALUES_ENV] = JSON.stringify(options.extensionFlagValues);
 		hasChildEnv = true;
 	}

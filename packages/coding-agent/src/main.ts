@@ -1707,10 +1707,9 @@ export async function runRootCommand(
 			? null
 			: applyExtensionFlags(extensionFlagSink, rawArgs);
 		const initialArgs = parsedWithExtensionFlags ?? parsedArgs;
-		const extensionFlagValues = parsedWithExtensionFlags?.unknownFlags;
 		const currentExtensionFlagValues =
 			restartExtensionFlagValues ??
-			(extensionFlagValues && extensionFlagValues.size > 0 ? [...extensionFlagValues.entries()] : undefined);
+			(parsedWithExtensionFlags ? [...parsedWithExtensionFlags.unknownFlags.entries()] : undefined);
 		restoreRestartExtensionFlagValues(extensionFlagSink, restartExtensionFlagValues);
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
