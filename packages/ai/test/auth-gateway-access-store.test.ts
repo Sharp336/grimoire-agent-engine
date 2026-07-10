@@ -4,8 +4,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	type AuthGatewayAuditEvent,
 	AuthGatewayAccessError,
+	type AuthGatewayAuditEvent,
 	evaluateAuthGatewayAccess,
 	evaluateAuthGatewayRouteAccess,
 	resolveAuthGatewayPoolSelection,
@@ -24,7 +24,9 @@ interface VersionRow {
 function readSchemaVersion(dbPath: string): number | null {
 	const db = new Database(dbPath, { readonly: true });
 	try {
-		const row = db.prepare("SELECT version FROM auth_gateway_schema_version WHERE id = 1").get() as VersionRow | undefined;
+		const row = db.prepare("SELECT version FROM auth_gateway_schema_version WHERE id = 1").get() as
+			| VersionRow
+			| undefined;
 		return row?.version ?? null;
 	} finally {
 		db.close();
@@ -121,7 +123,10 @@ describe("SqliteAuthGatewayAccessStore", () => {
 
 		store.close();
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
-		expect(store.authenticateToken(alice.token.value)).toMatchObject({ userId: alice.user.id, tokenId: alice.token.id });
+		expect(store.authenticateToken(alice.token.value)).toMatchObject({
+			userId: alice.user.id,
+			tokenId: alice.token.id,
+		});
 		expect(store.getUser("999999")).toBeUndefined();
 		expect(store.getUser(String(alice.user.id))?.id).toBe(alice.user.id);
 	});
@@ -209,7 +214,9 @@ describe("SqliteAuthGatewayAccessStore", () => {
 			).toThrow();
 			expect(() =>
 				db
-					.prepare("INSERT INTO gateway_pools(name, provider, strategy, created_at, updated_at) VALUES (?, 'anthropic', 'failover', 1, 1)")
+					.prepare(
+						"INSERT INTO gateway_pools(name, provider, strategy, created_at, updated_at) VALUES (?, 'anthropic', 'failover', 1, 1)",
+					)
 					.run("1bad"),
 			).toThrow();
 		} finally {
@@ -227,58 +234,90 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		expect(principal).not.toBeNull();
 		if (!principal) throw new Error("expected managed principal");
 
-		expect(evaluateAuthGatewayAccess(principal, [], { route: "chat", provider: "anthropic", qualifiedModel: "anthropic/claude" })).toEqual({
+		expect(
+			evaluateAuthGatewayAccess(principal, [], {
+				route: "chat",
+				provider: "anthropic",
+				qualifiedModel: "anthropic/claude",
+			}),
+		).toEqual({
 			allowed: false,
 			reason: "no_matching_allow",
 		});
 		expect(evaluateAuthGatewayRouteAccess(principal, [], "models", false)).toEqual({ allowed: true });
-		expect(evaluateAuthGatewayRouteAccess(principal, [], "usage", true)).toEqual({ allowed: false, reason: "route_denied" });
+		expect(evaluateAuthGatewayRouteAccess(principal, [], "usage", true)).toEqual({
+			allowed: false,
+			reason: "route_denied",
+		});
 
 		store.addAclRule(alice.user.id, { effect: "allow", kind: "route", pattern: "chat" });
 		store.addAclRule(alice.user.id, { effect: "allow", kind: "provider", pattern: "anthropic" });
-		expect(evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
-			route: "chat",
-			provider: "anthropic",
-			qualifiedModel: "anthropic/claude-sonnet",
-		})).toEqual({ allowed: true });
-		expect(evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
-			route: "messages",
-			provider: "anthropic",
-			qualifiedModel: "anthropic/claude-sonnet",
-		})).toEqual({ allowed: false, reason: "route_denied" });
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "chat",
+				provider: "anthropic",
+				qualifiedModel: "anthropic/claude-sonnet",
+			}),
+		).toEqual({ allowed: true });
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "messages",
+				provider: "anthropic",
+				qualifiedModel: "anthropic/claude-sonnet",
+			}),
+		).toEqual({ allowed: false, reason: "route_denied" });
 
 		store.addAclRule(alice.user.id, { effect: "deny", kind: "model", pattern: "anthropic/claude-sonnet" });
-		expect(evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
-			route: "chat",
-			provider: "anthropic",
-			qualifiedModel: "anthropic/claude-sonnet",
-		})).toEqual({ allowed: false, reason: "model_denied" });
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "chat",
+				provider: "anthropic",
+				qualifiedModel: "anthropic/claude-sonnet",
+			}),
+		).toEqual({ allowed: false, reason: "model_denied" });
 
 		store.addAclRule(alice.user.id, { effect: "allow", kind: "model", pattern: "openai/gpt-4o" });
-		expect(evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
-			route: "chat",
-			provider: "openai",
-			qualifiedModel: "openai/gpt-4o",
-		})).toEqual({ allowed: true });
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "chat",
+				provider: "openai",
+				qualifiedModel: "openai/gpt-4o",
+			}),
+		).toEqual({ allowed: true });
 
 		const admin = store.createUser({ name: "admin", role: "admin" });
 		const adminPrincipal = store.authenticateToken(admin.token.value);
 		expect(adminPrincipal).not.toBeNull();
 		if (!adminPrincipal) throw new Error("expected admin principal");
-		expect(evaluateAuthGatewayAccess(adminPrincipal, store.listAclRules(alice.user.id), {
-			route: "usage",
-			provider: "hidden",
-			qualifiedModel: "hidden/model",
-		})).toEqual({ allowed: true });
+		expect(
+			evaluateAuthGatewayAccess(adminPrincipal, store.listAclRules(alice.user.id), {
+				route: "usage",
+				provider: "hidden",
+				qualifiedModel: "hidden/model",
+			}),
+		).toEqual({ allowed: true });
 
-		expect(() => store.addAclRule(alice.user.id, { effect: "allow", kind: "model", pattern: "anthropic/claude*" })).toThrow(AuthGatewayAccessError);
-		expect(() => store.addAclRule(alice.user.id, { effect: "allow", kind: "route", pattern: "management" })).toThrow(AuthGatewayAccessError);
+		expect(() =>
+			store.addAclRule(alice.user.id, { effect: "allow", kind: "model", pattern: "anthropic/claude*" }),
+		).toThrow(AuthGatewayAccessError);
+		expect(() => store.addAclRule(alice.user.id, { effect: "allow", kind: "route", pattern: "management" })).toThrow(
+			AuthGatewayAccessError,
+		);
 	});
 
 	test("binds deterministic provider and model pools with ordered members across reopen", async () => {
 		const alice = store.createUser({ name: "alice" });
-		const providerPool = store.createPool({ name: "anthropic-default", provider: "anthropic", strategy: "round-robin" });
-		const modelPool = store.createPool({ name: "sonnet", provider: "anthropic", model: "claude-3-5-sonnet", strategy: "failover" });
+		const providerPool = store.createPool({
+			name: "anthropic-default",
+			provider: "anthropic",
+			strategy: "round-robin",
+		});
+		const modelPool = store.createPool({
+			name: "sonnet",
+			provider: "anthropic",
+			model: "claude-3-5-sonnet",
+			strategy: "failover",
+		});
 
 		store.addPoolCredential(providerPool.id, 20);
 		store.addPoolCredential(providerPool.id, 10);
@@ -288,11 +327,17 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		expect(store.bindUserPool(alice.user.id, providerPool.id)).toEqual({ created: true });
 		expect(store.bindUserPool(alice.user.id, providerPool.id)).toEqual({ created: false });
 		expect(store.bindUserPool(alice.user.id, modelPool.id)).toEqual({ created: true });
-		expect(() => store.bindUserPool(alice.user.id, store.createPool({ name: "anthropic-other", provider: "anthropic" }).id)).toThrow(AuthGatewayAccessError);
+		expect(() =>
+			store.bindUserPool(alice.user.id, store.createPool({ name: "anthropic-other", provider: "anthropic" }).id),
+		).toThrow(AuthGatewayAccessError);
 
 		const pools = store.listUserPools(alice.user.id);
-		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-haiku")?.credentialIds).toEqual([20, 10]);
-		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-5-sonnet")?.credentialIds).toEqual([30]);
+		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-haiku")?.credentialIds).toEqual([
+			20, 10,
+		]);
+		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-5-sonnet")?.credentialIds).toEqual(
+			[30],
+		);
 		expect(resolveAuthGatewayPoolSelection(pools, "openai", "openai/gpt-4o")).toBeNull();
 
 		expect(store.removePoolCredential(providerPool.id, 20)).toBe(true);
@@ -309,7 +354,10 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		store.close();
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
 		expect(store.getPool("anthropic-default")?.members.map(member => member.credentialId)).toEqual([10]);
-		expect(resolveAuthGatewayPoolSelection(store.listUserPools(alice.user.id), "anthropic", "anthropic/claude-3-5-sonnet")?.poolId).toBe(modelPool.id);
+		expect(
+			resolveAuthGatewayPoolSelection(store.listUserPools(alice.user.id), "anthropic", "anthropic/claude-3-5-sonnet")
+				?.poolId,
+		).toBe(modelPool.id);
 	});
 
 	test("concurrent duplicate scope binds create one row and one conflict", async () => {
@@ -342,68 +390,78 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		const alice = store.createUser({ name: "alice" });
 		const bob = store.createUser({ name: "bob" });
 
-		store.recordAudit(eventInput({
-			requestId: "req-success-1",
-			userId: alice.user.id,
-			userName: alice.user.name,
-			tokenId: alice.token.id,
-			path: `/v1/chat/completions?token=${rawGatewayToken}#${providerApiKey}`,
-			requestedModel: "anthropic/claude",
-			resolvedProvider: "anthropic",
-			resolvedModel: "claude",
-			credentialId: 123,
-			inputTokens: 10,
-			outputTokens: 5,
-			cacheReadTokens: 3,
-			cacheWriteTokens: 2,
-			totalTokens: 20,
-			costUsd: 0.25,
-			errorCode: `${oauthAccess}-${oauthRefresh}`,
-		}));
-		store.recordAudit(eventInput({
-			requestId: "req-success-2",
-			userId: alice.user.id,
-			userName: alice.user.name,
-			requestedModel: "anthropic/haiku",
-			resolvedProvider: "anthropic",
-			resolvedModel: "haiku",
-			credentialId: 124,
-			inputTokens: 1,
-			outputTokens: 2,
-			totalTokens: 3,
-			costUsd: 0.5,
-		}));
-		store.recordAudit(eventInput({
-			requestId: "req-models-list",
-			userId: alice.user.id,
-			userName: alice.user.name,
-			routeFamily: "models",
-			requestedModel: "anthropic/list",
-			resolvedProvider: "anthropic",
-			resolvedModel: "list",
-			totalTokens: 100,
-			costUsd: 10,
-		}));
-		store.recordAudit(eventInput({
-			requestId: "req-denied",
-			userId: alice.user.id,
-			userName: alice.user.name,
-			outcome: "denied_by_acl",
-			statusCode: 403,
-			resolvedProvider: "anthropic",
-			resolvedModel: "hidden",
-			totalTokens: 999,
-			costUsd: 99,
-		}));
-		store.recordAudit(eventInput({
-			requestId: "req-bob",
-			userId: bob.user.id,
-			userName: bob.user.name,
-			resolvedProvider: "openai",
-			resolvedModel: "gpt-4o",
-			totalTokens: 7,
-			costUsd: 0.07,
-		}));
+		store.recordAudit(
+			eventInput({
+				requestId: "req-success-1",
+				userId: alice.user.id,
+				userName: alice.user.name,
+				tokenId: alice.token.id,
+				path: `/v1/chat/completions?token=${rawGatewayToken}#${providerApiKey}`,
+				requestedModel: "anthropic/claude",
+				resolvedProvider: "anthropic",
+				resolvedModel: "claude",
+				credentialId: 123,
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: 3,
+				cacheWriteTokens: 2,
+				totalTokens: 20,
+				costUsd: 0.25,
+				errorCode: `${oauthAccess}-${oauthRefresh}`,
+			}),
+		);
+		store.recordAudit(
+			eventInput({
+				requestId: "req-success-2",
+				userId: alice.user.id,
+				userName: alice.user.name,
+				requestedModel: "anthropic/haiku",
+				resolvedProvider: "anthropic",
+				resolvedModel: "haiku",
+				credentialId: 124,
+				inputTokens: 1,
+				outputTokens: 2,
+				totalTokens: 3,
+				costUsd: 0.5,
+			}),
+		);
+		store.recordAudit(
+			eventInput({
+				requestId: "req-models-list",
+				userId: alice.user.id,
+				userName: alice.user.name,
+				routeFamily: "models",
+				requestedModel: "anthropic/list",
+				resolvedProvider: "anthropic",
+				resolvedModel: "list",
+				totalTokens: 100,
+				costUsd: 10,
+			}),
+		);
+		store.recordAudit(
+			eventInput({
+				requestId: "req-denied",
+				userId: alice.user.id,
+				userName: alice.user.name,
+				outcome: "denied_by_acl",
+				statusCode: 403,
+				resolvedProvider: "anthropic",
+				resolvedModel: "hidden",
+				totalTokens: 999,
+				costUsd: 99,
+			}),
+		);
+		store.recordAudit(
+			eventInput({
+				requestId: "req-bob",
+				userId: bob.user.id,
+				userName: bob.user.name,
+				resolvedProvider: "openai",
+				resolvedModel: "gpt-4o",
+				totalTokens: 7,
+				costUsd: 0.07,
+			}),
+		);
 
 		store.close();
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
@@ -420,8 +478,12 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		expect(serializedAudit).not.toContain(providerApiKey);
 		expect(serializedAudit).not.toContain(oauthAccess);
 		expect(serializedAudit).not.toContain(oauthRefresh);
-		expect(store.listAudit({ limit: 100 }).events.find(event => event.requestId === "req-success-1")?.path).toBe("/v1/chat/completions");
-		expect(store.listAudit({ limit: 100 }).events.find(event => event.requestId === "req-success-1")?.errorCode).toBeNull();
+		expect(store.listAudit({ limit: 100 }).events.find(event => event.requestId === "req-success-1")?.path).toBe(
+			"/v1/chat/completions",
+		);
+		expect(
+			store.listAudit({ limit: 100 }).events.find(event => event.requestId === "req-success-1")?.errorCode,
+		).toBeNull();
 
 		const usage = store.getUserUsage(alice.user.id);
 		expect(usage.userId).toBe(alice.user.id);

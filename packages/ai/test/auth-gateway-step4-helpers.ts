@@ -1,11 +1,15 @@
+import { expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { expect } from "bun:test";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { SqliteAuthGatewayAccessStore, startAuthGateway, type AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway";
-import { AuthStorage, SqliteAuthCredentialStore, type AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
-import { createMockModel, registerMockApi, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import {
+	type AuthGatewayServerHandle,
+	SqliteAuthGatewayAccessStore,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import { type AuthCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -24,7 +28,7 @@ export interface GatewayHarnessOptions {
 	credentials?: AuthCredential[];
 }
 
-export function jsonHeaders(token?: string): HeadersInit {
+export function jsonHeaders(token?: string): Record<string, string> {
 	return {
 		"content-type": "application/json",
 		...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -35,12 +39,21 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 	registerMockApi();
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-gateway-step4-"));
 	const credentialStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "credentials.db"));
-	credentialStore.replaceAuthCredentialsForProvider("mock", options.credentials ?? [{ type: "api_key", key: "key-a" }]);
+	credentialStore.replaceAuthCredentialsForProvider(
+		"mock",
+		options.credentials ?? [{ type: "api_key", key: "key-a" }],
+	);
 	const storage = new AuthStorage(credentialStore);
 	await storage.reload();
 	const accessStore = await SqliteAuthGatewayAccessStore.open(path.join(tempDir, "access.db"));
 	const models = new Map<string, MockModel>();
-	for (const model of options.models ?? [createMockModel({ provider: "mock", id: "model-a", handler: (_ctx, opts) => ({ content: [`key:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }) })]) {
+	for (const model of options.models ?? [
+		createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: (_ctx, opts) => ({ content: [`key:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		}),
+	]) {
 		models.set(model.id, model);
 	}
 	const handle = startAuthGateway({
@@ -75,7 +88,12 @@ export function expectObject(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
-export async function postChat(baseUrl: string, token: string | undefined, model = "model-a", stream = false): Promise<Response> {
+export async function postChat(
+	baseUrl: string,
+	token: string | undefined,
+	model = "model-a",
+	stream = false,
+): Promise<Response> {
 	return fetch(`${baseUrl}/v1/chat/completions`, {
 		method: "POST",
 		headers: jsonHeaders(token),

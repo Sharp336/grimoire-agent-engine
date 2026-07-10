@@ -1046,7 +1046,10 @@ export class AuthStorage {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<string, Map<string, { type: AuthCredential["type"]; index: number; credentialId: number }>> = new Map();
+	#sessionLastCredential: Map<
+		string,
+		Map<string, { type: AuthCredential["type"]; index: number; credentialId: number }>
+	> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
 	#credentialBackoff: Map<string, Map<number, number>> = new Map();
 	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
@@ -1561,11 +1564,7 @@ export class AuthStorage {
 		return selection ? `${provider}\0${selection.policyKey}` : provider;
 	}
 
-	#sessionCacheKey(
-		provider: string,
-		sessionId: string,
-		selection: AuthCredentialSelectionPolicy | undefined,
-	): string {
+	#sessionCacheKey(provider: string, sessionId: string, selection: AuthCredentialSelectionPolicy | undefined): string {
 		return selection
 			? `session:sticky:${provider}:policy:${selection.policyKey}:${sessionId}`
 			: `session:sticky:${provider}:${sessionId}`;
@@ -1605,7 +1604,9 @@ export class AuthStorage {
 				);
 		}
 		const byId = new Map<number, { entry: StoredCredential; index: number }>();
-		stored.forEach((entry, index) => byId.set(entry.id, { entry, index }));
+		stored.forEach((entry, index) => {
+			byId.set(entry.id, { entry, index });
+		});
 		const credentials: { id: number; credential: Extract<AuthCredential, { type: T }>; index: number }[] = [];
 		for (const id of selection.eligibleCredentialIds) {
 			const row = byId.get(id);
@@ -1671,7 +1672,9 @@ export class AuthStorage {
 			const sessionCredential = sessionMap.get(sessionId);
 			const stored = this.#getStoredCredentials(provider);
 			const actualIndex =
-				sessionCredential !== undefined ? stored.findIndex(entry => entry.id === sessionCredential.credentialId) : -1;
+				sessionCredential !== undefined
+					? stored.findIndex(entry => entry.id === sessionCredential.credentialId)
+					: -1;
 			const actual = actualIndex >= 0 ? stored[actualIndex] : undefined;
 			if (
 				sessionCredential !== undefined &&
@@ -1766,7 +1769,8 @@ export class AuthStorage {
 			sticky?.type === type
 				? credentials.findIndex(
 						candidate =>
-							candidate.index === sticky.index && !this.#isCredentialBlocked(provider, providerKey, sticky.index),
+							candidate.index === sticky.index &&
+							!this.#isCredentialBlocked(provider, providerKey, sticky.index),
 					)
 				: -1;
 		const shouldKeepSticky = selection?.strategy === "sticky-session" || selection?.strategy === "round-robin";
@@ -1774,12 +1778,19 @@ export class AuthStorage {
 
 		let order: number[];
 		if (selection?.strategy === "round-robin") {
-			const start = this.#getNextRoundRobinIndex(this.#selectionRoundRobinKey(provider, type, selection), credentials.length);
+			const start = this.#getNextRoundRobinIndex(
+				this.#selectionRoundRobinKey(provider, type, selection),
+				credentials.length,
+			);
 			order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
 		} else if (selection?.strategy === "least-used" || selection?.strategy === "failover") {
 			order = credentials.map((_credential, index) => index);
 		} else {
-			order = this.#getCredentialOrder(this.#selectionRoundRobinKey(provider, type, selection), sessionId, credentials.length);
+			order = this.#getCredentialOrder(
+				this.#selectionRoundRobinKey(provider, type, selection),
+				sessionId,
+				credentials.length,
+			);
 		}
 
 		const fallback = credentials[order[0]];
@@ -3744,7 +3755,9 @@ export class AuthStorage {
 				})
 			: order
 					.map(idx => credentials[idx])
-					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
+					.filter((selection): selection is { id: number; credential: OAuthCredential; index: number } =>
+						Boolean(selection),
+					)
 					.map(selection => ({ selection, usage: null, usageChecked: false }));
 
 		if (shouldKeepOAuthSticky && sessionPreferredIndex !== undefined && !hasPlanRequirement) {

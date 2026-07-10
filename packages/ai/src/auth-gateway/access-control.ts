@@ -219,7 +219,9 @@ export function normalizeAuthGatewayRole(role: AuthGatewayRole | undefined): Aut
 	return role;
 }
 
-export function normalizeAuthGatewayPoolStrategy(strategy: AuthGatewayPoolStrategy | undefined): AuthGatewayPoolStrategy {
+export function normalizeAuthGatewayPoolStrategy(
+	strategy: AuthGatewayPoolStrategy | undefined,
+): AuthGatewayPoolStrategy {
 	if (strategy === undefined) return "sticky-session";
 	if (!(strategy in STRATEGIES)) {
 		throw new AuthGatewayAccessError("invalid_request", "invalid pool strategy");
@@ -257,7 +259,8 @@ export function evaluateAuthGatewayRouteAccess(
 	route: AuthGatewayAclRoute,
 	requireExplicitAllow: boolean,
 ): AuthGatewayAccessDecision {
-	if (principal.role === "admin" || principal.kind === "legacy" || principal.kind === "no-auth") return { allowed: true };
+	if (principal.role === "admin" || principal.kind === "legacy" || principal.kind === "no-auth")
+		return { allowed: true };
 	const routeRules = rules.filter(rule => rule.kind === "route");
 	if (routeRules.some(rule => rule.effect === "deny" && (rule.pattern === "*" || rule.pattern === route))) {
 		return { allowed: false, reason: "route_denied" };
@@ -276,7 +279,8 @@ export function evaluateAuthGatewayAccess(
 	rules: readonly AuthGatewayAclRule[],
 	scope: AuthGatewayAccessScope,
 ): AuthGatewayAccessDecision {
-	if (principal.role === "admin" || principal.kind === "legacy" || principal.kind === "no-auth") return { allowed: true };
+	if (principal.role === "admin" || principal.kind === "legacy" || principal.kind === "no-auth")
+		return { allowed: true };
 	const routeDecision = evaluateAuthGatewayRouteAccess(principal, rules, scope.route, false);
 	if (!routeDecision.allowed) return routeDecision;
 
@@ -284,18 +288,41 @@ export function evaluateAuthGatewayAccess(
 	const qualifiedModel = scope.qualifiedModel;
 	if (provider === undefined && qualifiedModel === undefined) return { allowed: true };
 
-	if (provider !== undefined && rules.some(rule => rule.kind === "provider" && rule.effect === "deny" && providerPatternMatches(rule.pattern, provider))) {
+	if (
+		provider !== undefined &&
+		rules.some(
+			rule => rule.kind === "provider" && rule.effect === "deny" && providerPatternMatches(rule.pattern, provider),
+		)
+	) {
 		return { allowed: false, reason: "provider_denied" };
 	}
-	if (qualifiedModel !== undefined && rules.some(rule => rule.kind === "model" && rule.effect === "deny" && modelPatternMatches(rule.pattern, qualifiedModel))) {
+	if (
+		qualifiedModel !== undefined &&
+		rules.some(
+			rule => rule.kind === "model" && rule.effect === "deny" && modelPatternMatches(rule.pattern, qualifiedModel),
+		)
+	) {
 		return { allowed: false, reason: "model_denied" };
 	}
 
-	const hasModelAllow = qualifiedModel !== undefined
-		? rules.some(rule => rule.kind === "model" && rule.effect === "allow" && modelPatternMatches(rule.pattern, qualifiedModel))
-		: provider !== undefined && rules.some(rule => rule.kind === "model" && rule.effect === "allow" && modelPatternCoversProvider(rule.pattern, provider));
-	const hasProviderAllow = provider !== undefined
-		&& rules.some(rule => rule.kind === "provider" && rule.effect === "allow" && providerPatternMatches(rule.pattern, provider));
+	const hasModelAllow =
+		qualifiedModel !== undefined
+			? rules.some(
+					rule =>
+						rule.kind === "model" && rule.effect === "allow" && modelPatternMatches(rule.pattern, qualifiedModel),
+				)
+			: provider !== undefined &&
+				rules.some(
+					rule =>
+						rule.kind === "model" &&
+						rule.effect === "allow" &&
+						modelPatternCoversProvider(rule.pattern, provider),
+				);
+	const hasProviderAllow =
+		provider !== undefined &&
+		rules.some(
+			rule => rule.kind === "provider" && rule.effect === "allow" && providerPatternMatches(rule.pattern, provider),
+		);
 	if (hasModelAllow || hasProviderAllow) return { allowed: true };
 	return { allowed: false, reason: "no_matching_allow" };
 }

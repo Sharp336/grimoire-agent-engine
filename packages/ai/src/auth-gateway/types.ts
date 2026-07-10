@@ -1,4 +1,3 @@
-import type { AuthGatewayAccessStore } from "./access-store";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type {
 	AssistantMessage,
@@ -8,6 +7,7 @@ import type {
 	ServiceTier,
 	TokenTaskBudget,
 } from "../types";
+import type { AuthGatewayAccessStore } from "./access-store";
 
 /**
  * Wire types for the omp auth-gateway.

@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	closeGatewayHarness,
 	createGatewayHarness,
 	expectObject,
+	type GatewayHarness,
 	grantModelAccess,
 	jsonHeaders,
 	postChat,
 	readJson,
-	type GatewayHarness,
 } from "./auth-gateway-step4-helpers";
 
 function testCredentials(): AuthCredential[] {
@@ -56,15 +56,27 @@ describe("auth-gateway audit", () => {
 			id: "model-a",
 			handler: async (_ctx, opts) => {
 				callIndex += 1;
-				if (callIndex === 1) return { content: ["ok"], usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, totalTokens: 10, cost: { total: 0.12 } } };
-				if (callIndex === 2) return { throw: Object.assign(new Error("upstream raw secret oauth-access-secret exploded"), { status: 502 }) };
-				if (callIndex === 3) return { content: ["stream-ok"], usage: { input: 5, output: 6, totalTokens: 11, cost: { total: 0.34 } } };
+				if (callIndex === 1)
+					return {
+						content: ["ok"],
+						usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, totalTokens: 10, cost: { total: 0.12 } },
+					};
+				if (callIndex === 2)
+					return {
+						throw: Object.assign(new Error("upstream raw secret oauth-access-secret exploded"), { status: 502 }),
+					};
+				if (callIndex === 3)
+					return {
+						content: ["stream-ok"],
+						usage: { input: 5, output: 6, totalTokens: 11, cost: { total: 0.34 } },
+					};
 				abortStarted.resolve();
+				const signal = opts?.signal;
+				if (!signal) throw new Error("missing abort signal");
 				await new Promise<never>((_resolve, reject) => {
-					const signal = opts?.signal;
-					if (!signal) reject(new Error("missing abort signal"));
-					else signal.addEventListener("abort", () => reject(new Error("client aborted")), { once: true });
+					signal.addEventListener("abort", () => reject(new Error("client aborted")), { once: true });
 				});
+				throw new Error("unreachable abort wait completed");
 			},
 		});
 		harness = await createGatewayHarness({ models: [model], credentials: testCredentials() });
@@ -75,11 +87,17 @@ describe("auth-gateway audit", () => {
 		harness.accessStore.addPoolCredential(pool.id, apiKeyRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 
-		let response = await fetch(`${harness.handle.url}/v1/chat/completions?token=secret-query-token#oauth-access-secret`, {
-			method: "POST",
-			headers: jsonHeaders(user.token.value),
-			body: JSON.stringify({ model: "model-a", messages: [{ role: "user", content: "body has oauth-refresh-secret" }] }),
-		});
+		let response = await fetch(
+			`${harness.handle.url}/v1/chat/completions?token=secret-query-token#oauth-access-secret`,
+			{
+				method: "POST",
+				headers: jsonHeaders(user.token.value),
+				body: JSON.stringify({
+					model: "model-a",
+					messages: [{ role: "user", content: "body has oauth-refresh-secret" }],
+				}),
+			},
+		);
 		expect(response.status).toBe(200);
 
 		const denied = harness.accessStore.createUser({ name: "denied" });
@@ -116,7 +134,13 @@ describe("auth-gateway audit", () => {
 		expect(outcomes).toContain("upstream_error");
 		expect(outcomes).toContain("request_aborted");
 		const success = page.events.find(event => event.outcome === "success" && event.totalTokens === 10);
-		expect(success).toMatchObject({ inputTokens: 3, outputTokens: 4, cacheReadTokens: 1, cacheWriteTokens: 2, costUsd: 0.12 });
+		expect(success).toMatchObject({
+			inputTokens: 3,
+			outputTokens: 4,
+			cacheReadTokens: 1,
+			cacheWriteTokens: 2,
+			costUsd: 0.12,
+		});
 		const streamSuccess = page.events.find(event => event.outcome === "success" && event.totalTokens === 11);
 		expect(streamSuccess).toMatchObject({ inputTokens: 5, outputTokens: 6, costUsd: 0.34 });
 
@@ -130,7 +154,12 @@ describe("auth-gateway audit", () => {
 	});
 
 	test("returns scoped usage summaries, redacted credential checks, and newest-first audit pagination", async () => {
-		harness = await createGatewayHarness({ credentials: [{ type: "api_key", key: "out-of-pool-secret" }, { type: "api_key", key: "in-pool-secret" }] });
+		harness = await createGatewayHarness({
+			credentials: [
+				{ type: "api_key", key: "out-of-pool-secret" },
+				{ type: "api_key", key: "in-pool-secret" },
+			],
+		});
 		const [, oauthRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!oauthRow) throw new Error("expected second credential row");
 		const user = harness.accessStore.createUser({ name: "summaryuser" });
@@ -162,14 +191,19 @@ describe("auth-gateway audit", () => {
 		expect(serialized).not.toContain("project-secret");
 		expect(serialized).not.toContain("oauth-access-secret");
 
-		response = await fetch(`${harness.handle.url}/v1/audit?userId=${user.user.id}&limit=1`, { headers: jsonHeaders("legacy-token") });
+		response = await fetch(`${harness.handle.url}/v1/audit?userId=${user.user.id}&limit=1`, {
+			headers: jsonHeaders("legacy-token"),
+		});
 		expect(response.status).toBe(200);
 		body = expectObject(await readJson(response));
 		expect(body.events).toBeArrayOfSize(1);
 		const nextBefore = body.nextBefore;
 		expect(typeof nextBefore === "number" || nextBefore === null).toBe(true);
 		if (typeof nextBefore === "number") {
-			response = await fetch(`${harness.handle.url}/v1/audit?userId=${user.user.id}&limit=100&before=${nextBefore}`, { headers: jsonHeaders("legacy-token") });
+			response = await fetch(
+				`${harness.handle.url}/v1/audit?userId=${user.user.id}&limit=100&before=${nextBefore}`,
+				{ headers: jsonHeaders("legacy-token") },
+			);
 			expect(response.status).toBe(200);
 			const nextPage = expectObject(await readJson(response));
 			expect(nextPage.events).toBeArray();

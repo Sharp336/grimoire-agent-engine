@@ -26,13 +26,13 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
 import {
-	DEFAULT_AUTH_GATEWAY_BIND,
 	type AuthGatewayAclEffect,
 	type AuthGatewayAclKind,
 	type AuthGatewayPool,
 	type AuthGatewayPoolStrategy,
 	type AuthGatewayRole,
 	type AuthGatewayUser,
+	DEFAULT_AUTH_GATEWAY_BIND,
 	SqliteAuthGatewayAccessStore,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
@@ -309,7 +309,10 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 }
 
 async function readAccessCounts(dbPath: string): Promise<{ users: number; activeTokens: number; pools: number }> {
-	const exists = await fs.stat(dbPath).then(stat => stat.isFile()).catch(() => false);
+	const exists = await fs
+		.stat(dbPath)
+		.then(stat => stat.isFile())
+		.catch(() => false);
 	if (!exists) return { users: 0, activeTokens: 0, pools: 0 };
 	const store = await SqliteAuthGatewayAccessStore.open(dbPath);
 	try {
@@ -349,9 +352,15 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGate
 			if (flags.json) {
 				process.stdout.write(`${JSON.stringify(status)}\n`);
 			} else {
-				process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} upstream broker: injected (${credentials.length} credentials)\n`);
-				process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
-				process.stdout.write(`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+				process.stdout.write(
+					`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} upstream broker: injected (${credentials.length} credentials)\n`,
+				);
+				process.stdout.write(
+					`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`,
+				);
+				process.stdout.write(
+					`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+				);
 			}
 			if (!tokenPresent) process.exitCode = 1;
 			return;
@@ -372,8 +381,12 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGate
 				process.stdout.write(`${JSON.stringify(status)}\n`);
 			} else {
 				process.stdout.write(`${chalk.red("FAILED")} upstream broker: ${message}\n`);
-				process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
-				process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+				process.stdout.write(
+					`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`,
+				);
+				process.stdout.write(
+					`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+				);
 			}
 			process.exitCode = 1;
 			return;
@@ -396,8 +409,12 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGate
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
 			process.stdout.write(`${chalk.yellow("No broker configured.")} Set OMP_AUTH_BROKER_URL.\n`);
-			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
-			process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+			process.stdout.write(
+				`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`,
+			);
+			process.stdout.write(
+				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+			);
 		}
 		process.exitCode = 1;
 		return;
@@ -423,8 +440,12 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGate
 				snapshot.credentials.length === 1 ? "" : "s"
 			})`;
 			process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} ${brokerLine}\n`);
-			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
-			process.stdout.write(`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+			process.stdout.write(
+				`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`,
+			);
+			process.stdout.write(
+				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+			);
 			if (!tokenPresent) {
 				process.stdout.write(
 					"Run `omp auth-gateway token` or `omp auth-gateway serve` to create a bearer token.\n",
@@ -449,8 +470,12 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGate
 			process.stdout.write(`${JSON.stringify(status)}\n`);
 		} else {
 			process.stdout.write(`${chalk.red("FAILED")} upstream broker: ${brokerConfig.url}: ${message}\n`);
-			process.stdout.write(`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`);
-			process.stdout.write(`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`);
+			process.stdout.write(
+				`access db: ${status.accessDb} (${status.managedUserCount} users, ${status.activeManagedTokenCount} active tokens, ${status.poolCount} pools)\n`,
+			);
+			process.stdout.write(
+				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
+			);
 		}
 		process.exitCode = 1;
 	}
@@ -503,7 +528,8 @@ function parseLimit(value: string | undefined): number | undefined {
 function parseSince(value: string | undefined): number | undefined {
 	if (value === undefined) return undefined;
 	const parsed = Number(value);
-	if (!Number.isInteger(parsed) || parsed < 0) throw new Error("--since must be a non-negative epoch millisecond value");
+	if (!Number.isInteger(parsed) || parsed < 0)
+		throw new Error("--since must be a non-negative epoch millisecond value");
 	return parsed;
 }
 
@@ -558,26 +584,46 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				role: parseRole(flags.role),
 				tokenLabel: flags.label,
 			});
-			writeCommandOutput(flags, created, `created user ${created.user.name} (#${created.user.id}) token ${created.token.publicId}\n`);
+			writeCommandOutput(
+				flags,
+				created,
+				`created user ${created.user.name} (#${created.user.id}) token ${created.token.publicId}\n`,
+			);
 			return;
 		}
 		if (subaction === "list") {
 			const users = store.listUsers();
-			writeCommandOutput(flags, { users }, users.map(user => `${user.id}\t${user.name}\t${user.role}\t${user.enabled ? "enabled" : "disabled"}`).join("\n") + (users.length ? "\n" : ""));
+			writeCommandOutput(
+				flags,
+				{ users },
+				users
+					.map(user => `${user.id}\t${user.name}\t${user.role}\t${user.enabled ? "enabled" : "disabled"}`)
+					.join("\n") + (users.length ? "\n" : ""),
+			);
 			return;
 		}
 
 		const ref = requireTarget(cmd, "user name or id");
 		const user = resolveUser(store, ref);
 		if (subaction === "show") {
-			const value = { user, tokens: store.listUserTokens(user.id), acl: store.listAclRules(user.id), pools: store.listUserPools(user.id) };
-			writeCommandOutput(flags, value, `user ${user.name} (#${user.id}) ${user.enabled ? "enabled" : "disabled"} role=${user.role}\n`);
+			const value = {
+				user,
+				tokens: store.listUserTokens(user.id),
+				acl: store.listAclRules(user.id),
+				pools: store.listUserPools(user.id),
+			};
+			writeCommandOutput(
+				flags,
+				value,
+				`user ${user.name} (#${user.id}) ${user.enabled ? "enabled" : "disabled"} role=${user.role}\n`,
+			);
 			return;
 		}
 		if (subaction === "update") {
 			const patch: { description?: string | null; owner?: string | null; role?: AuthGatewayRole } = {};
-			if (Object.prototype.hasOwnProperty.call(flags, "description")) patch.description = flags.description === "" ? null : flags.description;
-			if (Object.prototype.hasOwnProperty.call(flags, "owner")) patch.owner = flags.owner === "" ? null : flags.owner;
+			if (Object.hasOwn(flags, "description"))
+				patch.description = flags.description === "" ? null : flags.description;
+			if (Object.hasOwn(flags, "owner")) patch.owner = flags.owner === "" ? null : flags.owner;
 			const role = parseRole(flags.role);
 			if (role !== undefined) patch.role = role;
 			const updated = store.updateUser(user.id, patch);
@@ -586,7 +632,11 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 		}
 		if (subaction === "enable" || subaction === "disable") {
 			const updated = store.updateUser(user.id, { enabled: subaction === "enable" });
-			writeCommandOutput(flags, { user: updated }, `${updated.enabled ? "enabled" : "disabled"} user ${updated.name} (#${updated.id})\n`);
+			writeCommandOutput(
+				flags,
+				{ user: updated },
+				`${updated.enabled ? "enabled" : "disabled"} user ${updated.name} (#${updated.id})\n`,
+			);
 			return;
 		}
 		if (subaction === "delete") {
@@ -596,8 +646,14 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			return;
 		}
 		if (subaction === "token") {
-			const token = flags.regenerate ? store.rotateUserTokens(user.id, flags.label) : store.addUserToken(user.id, flags.label);
-			writeCommandOutput(flags, { token }, `${flags.regenerate ? "rotated" : "created"} token ${token.publicId} for ${user.name}\n`);
+			const token = flags.regenerate
+				? store.rotateUserTokens(user.id, flags.label)
+				: store.addUserToken(user.id, flags.label);
+			writeCommandOutput(
+				flags,
+				{ token },
+				`${flags.regenerate ? "rotated" : "created"} token ${token.publicId} for ${user.name}\n`,
+			);
 			return;
 		}
 		if (subaction === "token-revoke") {
@@ -613,12 +669,21 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				kind: scope.kind,
 				pattern: scope.pattern,
 			});
-			writeCommandOutput(flags, result, `${result.created ? "created" : "kept"} ${subaction} ${scope.kind}:${scope.pattern} for ${user.name}\n`);
+			writeCommandOutput(
+				flags,
+				result,
+				`${result.created ? "created" : "kept"} ${subaction} ${scope.kind}:${scope.pattern} for ${user.name}\n`,
+			);
 			return;
 		}
 		if (subaction === "acl") {
 			const acl = store.listAclRules(user.id);
-			writeCommandOutput(flags, { acl }, acl.map(rule => `${rule.id}\t${rule.effect}\t${rule.kind}\t${rule.pattern}`).join("\n") + (acl.length ? "\n" : ""));
+			writeCommandOutput(
+				flags,
+				{ acl },
+				acl.map(rule => `${rule.id}\t${rule.effect}\t${rule.kind}\t${rule.pattern}`).join("\n") +
+					(acl.length ? "\n" : ""),
+			);
 			return;
 		}
 		if (subaction === "acl-delete") {
@@ -631,16 +696,28 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			const pool = resolvePool(store, requireValue(cmd, "pool name or id"));
 			if (subaction === "set-pool") {
 				const result = store.bindUserPool(user.id, pool.id);
-				writeCommandOutput(flags, { created: result.created, user: { id: user.id, name: user.name }, pool }, `${result.created ? "bound" : "kept"} pool ${pool.name} (#${pool.id}) for ${user.name}\n`);
+				writeCommandOutput(
+					flags,
+					{ created: result.created, user: { id: user.id, name: user.name }, pool },
+					`${result.created ? "bound" : "kept"} pool ${pool.name} (#${pool.id}) for ${user.name}\n`,
+				);
 				return;
 			}
 			if (!store.unbindUserPool(user.id, pool.id)) throw new Error("pool binding not found");
-			writeCommandOutput(flags, { removed: true, user: { id: user.id, name: user.name }, pool }, `unbound pool ${pool.name} (#${pool.id}) from ${user.name}\n`);
+			writeCommandOutput(
+				flags,
+				{ removed: true, user: { id: user.id, name: user.name }, pool },
+				`unbound pool ${pool.name} (#${pool.id}) from ${user.name}\n`,
+			);
 			return;
 		}
 		if (subaction === "usage") {
 			const usage = store.getUserUsage(user.id, parseSince(flags.since));
-			writeCommandOutput(flags, { usage }, `usage for ${user.name}: ${usage.totals.requests} requests, ${usage.totals.totalTokens} tokens, $${usage.totals.costUsd}\n`);
+			writeCommandOutput(
+				flags,
+				{ usage },
+				`usage for ${user.name}: ${usage.totals.requests} requests, ${usage.totals.totalTokens} tokens, $${usage.totals.costUsd}\n`,
+			);
 			return;
 		}
 		throw new Error(`Unknown auth-gateway user sub-command: ${subaction}`);
@@ -660,27 +737,52 @@ async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				model: flags.model,
 				strategy: parseStrategy(flags.strategy),
 			});
-			writeCommandOutput(flags, { pool }, `created pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy}\n`);
+			writeCommandOutput(
+				flags,
+				{ pool },
+				`created pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy}\n`,
+			);
 			return;
 		}
 		if (subaction === "list") {
 			const pools = store.listPools();
-			writeCommandOutput(flags, { pools }, pools.map(pool => `${pool.id}\t${pool.name}\t${pool.provider}\t${pool.model ?? "*"}\t${pool.strategy}\t${pool.members.length} accounts`).join("\n") + (pools.length ? "\n" : ""));
+			writeCommandOutput(
+				flags,
+				{ pools },
+				pools
+					.map(
+						pool =>
+							`${pool.id}\t${pool.name}\t${pool.provider}\t${pool.model ?? "*"}\t${pool.strategy}\t${pool.members.length} accounts`,
+					)
+					.join("\n") + (pools.length ? "\n" : ""),
+			);
 			return;
 		}
 		const pool = resolvePool(store, requireTarget(cmd, "pool name or id"));
 		if (subaction === "show") {
-			writeCommandOutput(flags, { pool }, `pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy} accounts=${pool.members.map(member => member.credentialId).join(",")}\n`);
+			writeCommandOutput(
+				flags,
+				{ pool },
+				`pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy} accounts=${pool.members.map(member => member.credentialId).join(",")}\n`,
+			);
 			return;
 		}
 		if (subaction === "delete") {
 			if (!store.deletePool(pool.id)) throw new Error("pool not found");
-			writeCommandOutput(flags, { deleted: true, pool: { id: pool.id, name: pool.name } }, `deleted pool ${pool.name} (#${pool.id})\n`);
+			writeCommandOutput(
+				flags,
+				{ deleted: true, pool: { id: pool.id, name: pool.name } },
+				`deleted pool ${pool.name} (#${pool.id})\n`,
+			);
 			return;
 		}
 		if (subaction === "set-strategy") {
 			const updated = store.updatePool(pool.id, { strategy: parseStrategy(requireValue(cmd, "strategy")) });
-			writeCommandOutput(flags, { pool: updated }, `updated pool ${updated.name} (#${updated.id}) strategy=${updated.strategy}\n`);
+			writeCommandOutput(
+				flags,
+				{ pool: updated },
+				`updated pool ${updated.name} (#${updated.id}) strategy=${updated.strategy}\n`,
+			);
 			return;
 		}
 		if (subaction === "add-account") {
@@ -689,17 +791,27 @@ async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			const credential = credentials.find(entry => entry.id === credentialId);
 			if (!credential) throw new Error(`credential id ${credentialId} was not found in broker snapshot`);
 			if (credential.provider !== pool.provider) {
-				throw new Error(`credential id ${credentialId} belongs to provider ${credential.provider}, not ${pool.provider}`);
+				throw new Error(
+					`credential id ${credentialId} belongs to provider ${credential.provider}, not ${pool.provider}`,
+				);
 			}
 			const result = store.addPoolCredential(pool.id, credentialId);
-			writeCommandOutput(flags, result, `${result.created ? "added" : "kept"} credential #${credentialId} in pool ${pool.name} (#${pool.id})\n`);
+			writeCommandOutput(
+				flags,
+				result,
+				`${result.created ? "added" : "kept"} credential #${credentialId} in pool ${pool.name} (#${pool.id})\n`,
+			);
 			return;
 		}
 		if (subaction === "remove-account") {
 			const credentialId = parsePositiveInteger(requireValue(cmd, "credential id"), "credential id");
 			if (!store.removePoolCredential(pool.id, credentialId)) throw new Error("pool member not found");
 			const updated = resolvePool(store, String(pool.id));
-			writeCommandOutput(flags, { removed: true, credentialId, pool: updated }, `removed credential #${credentialId} from pool ${pool.name} (#${pool.id})\n`);
+			writeCommandOutput(
+				flags,
+				{ removed: true, credentialId, pool: updated },
+				`removed credential #${credentialId} from pool ${pool.name} (#${pool.id})\n`,
+			);
 			return;
 		}
 		throw new Error(`Unknown auth-gateway pool sub-command: ${subaction}`);
@@ -713,11 +825,23 @@ async function runAuditCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCo
 	await withAccessStore(deps, store => {
 		const user = flags.user ? resolveUser(store, flags.user) : undefined;
 		const result = store.listAudit({ userId: user?.id, limit: parseLimit(flags.limit) });
-		writeCommandOutput(flags, result, result.events.map(event => `${event.id}\t${event.userName ?? "-"}\t${event.outcome}\t${event.method} ${event.path}\t${event.totalTokens} tokens`).join("\n") + (result.events.length ? "\n" : ""));
+		writeCommandOutput(
+			flags,
+			result,
+			result.events
+				.map(
+					event =>
+						`${event.id}\t${event.userName ?? "-"}\t${event.outcome}\t${event.method} ${event.path}\t${event.totalTokens} tokens`,
+				)
+				.join("\n") + (result.events.length ? "\n" : ""),
+		);
 	});
 }
 
-export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCommandDependencies): Promise<void> {
+export async function runAuthGatewayCommand(
+	cmd: AuthGatewayCommandArgs,
+	deps?: AuthGatewayCommandDependencies,
+): Promise<void> {
 	switch (cmd.action) {
 		case "serve":
 			await runServe(cmd.flags, deps);

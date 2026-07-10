@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	closeGatewayHarness,
 	createGatewayHarness,
+	type GatewayHarness,
 	grantModelAccess,
 	jsonHeaders,
 	postChat,
 	postPiNative,
 	readJson,
-	type GatewayHarness,
 } from "./auth-gateway-step4-helpers";
 
 function seededCredentials(): AuthCredential[] {
@@ -41,8 +41,16 @@ describe("auth-gateway credential pools", () => {
 	});
 
 	test("prefers exact model pools over provider-wide pools and passes the scoped policy to AuthStorage", async () => {
-		const modelA = createMockModel({ provider: "mock", id: "model-a", handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }) });
-		const modelB = createMockModel({ provider: "mock", id: "model-b", handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }) });
+		const modelA = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		});
+		const modelB = createMockModel({
+			provider: "mock",
+			id: "model-b",
+			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		});
 		harness = await createGatewayHarness({ models: [modelA, modelB], credentials: seededCredentials() });
 		const [keyA, keyB] = harness.credentialStore.listAuthCredentials("mock");
 		if (!keyA || !keyB) throw new Error("expected credential rows");
@@ -82,7 +90,11 @@ describe("auth-gateway credential pools", () => {
 
 		for (const strategy of ["sticky-session", "round-robin", "least-used", "failover"] as const) {
 			const user = harness.accessStore.createUser({ name: strategy.replace("-", "") });
-			const pool = harness.accessStore.createPool({ name: `${strategy.replace("-", "")}pool`, provider: "mock", strategy });
+			const pool = harness.accessStore.createPool({
+				name: `${strategy.replace("-", "")}pool`,
+				provider: "mock",
+				strategy,
+			});
 			harness.accessStore.addPoolCredential(pool.id, keyA.id);
 			harness.accessStore.addPoolCredential(pool.id, keyB.id);
 			await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -91,7 +103,11 @@ describe("auth-gateway credential pools", () => {
 			const second = await fetch(`${harness.handle.url}/v1/chat/completions`, {
 				method: "POST",
 				headers: jsonHeaders(user.token.value),
-				body: JSON.stringify({ model: "model-a", messages: [{ role: "user", content: "hello" }], prompt_cache_key: `session-${strategy}` }),
+				body: JSON.stringify({
+					model: "model-a",
+					messages: [{ role: "user", content: "hello" }],
+					prompt_cache_key: `session-${strategy}`,
+				}),
 			});
 			expect(second.status).toBe(200);
 		}
@@ -107,7 +123,9 @@ describe("auth-gateway credential pools", () => {
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
 				if (key === "key-a") {
-					const error = Object.assign(new Error("You have hit your ChatGPT usage limit. Try again later."), { status: 429 });
+					const error = Object.assign(new Error("You have hit your ChatGPT usage limit. Try again later."), {
+						status: 429,
+					});
 					return { throw: error };
 				}
 				return { content: [`used:${key}`] };
@@ -127,7 +145,11 @@ describe("auth-gateway credential pools", () => {
 		expect(await responseText(response)).toBe("used:key-b");
 
 		const exhaustedUser = harness.accessStore.createUser({ name: "exhausted" });
-		const exhaustedPool = harness.accessStore.createPool({ name: "exhaustedpool", provider: "mock", strategy: "failover" });
+		const exhaustedPool = harness.accessStore.createPool({
+			name: "exhaustedpool",
+			provider: "mock",
+			strategy: "failover",
+		});
 		harness.accessStore.addPoolCredential(exhaustedPool.id, keyA.id);
 		await grantModelAccess(harness.accessStore, exhaustedUser.user.id, exhaustedPool.id);
 		response = await postChat(harness.handle.url, exhaustedUser.token.value);
@@ -137,7 +159,11 @@ describe("auth-gateway credential pools", () => {
 		expect(text).not.toContain("outside-key");
 
 		const piUser = harness.accessStore.createUser({ name: "piexhausted" });
-		const piPool = harness.accessStore.createPool({ name: "piexhaustedpool", provider: "mock", strategy: "failover" });
+		const piPool = harness.accessStore.createPool({
+			name: "piexhaustedpool",
+			provider: "mock",
+			strategy: "failover",
+		});
 		harness.accessStore.addPoolCredential(piPool.id, keyA.id);
 		await grantModelAccess(harness.accessStore, piUser.user.id, piPool.id);
 		response = await postPiNative(harness.handle.url, piUser.token.value);

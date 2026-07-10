@@ -2,7 +2,6 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
-	type AuthGatewayAccessErrorCode,
 	AuthGatewayAccessError,
 	type AuthGatewayAclEffect,
 	type AuthGatewayAclKind,
@@ -49,23 +48,29 @@ export interface AuthGatewayAccessStore {
 	};
 	listUsers(): AuthGatewayUser[];
 	getUser(ref: number | string): AuthGatewayUser | undefined;
-	updateUser(ref: number | string, patch: {
-		description?: string | null;
-		owner?: string | null;
-		role?: AuthGatewayRole;
-		enabled?: boolean;
-	}): AuthGatewayUser;
+	updateUser(
+		ref: number | string,
+		patch: {
+			description?: string | null;
+			owner?: string | null;
+			role?: AuthGatewayRole;
+			enabled?: boolean;
+		},
+	): AuthGatewayUser;
 	deleteUser(ref: number | string): boolean;
 	listUserTokens(userId: number): AuthGatewayToken[];
 	addUserToken(userId: number, label?: string): AuthGatewayIssuedToken;
 	rotateUserTokens(userId: number, label?: string): AuthGatewayIssuedToken;
 	revokeUserToken(userId: number, tokenId: number): boolean;
 	listAclRules(userId: number): AuthGatewayAclRule[];
-	addAclRule(userId: number, input: {
-		effect: AuthGatewayAclEffect;
-		kind: AuthGatewayAclKind;
-		pattern: string;
-	}): { rule: AuthGatewayAclRule; created: boolean };
+	addAclRule(
+		userId: number,
+		input: {
+			effect: AuthGatewayAclEffect;
+			kind: AuthGatewayAclKind;
+			pattern: string;
+		},
+	): { rule: AuthGatewayAclRule; created: boolean };
 	deleteAclRule(userId: number, ruleId: number): boolean;
 	createPool(input: {
 		name: string;
@@ -90,11 +95,6 @@ export interface AuthGatewayAccessStore {
 	};
 	getUserUsage(userId: number, since?: number): AuthGatewayUsageSummary;
 	counts(): { users: number; activeTokens: number; pools: number };
-}
-
-interface SqliteErrorShape {
-	code?: string;
-	message?: string;
 }
 
 interface LastInsertRow {
@@ -269,7 +269,8 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		const parsed = parseManagedToken(rawToken);
 		const presentedDigest = hashToken(rawToken);
 		const row = parsed ? this.#findTokenPrincipal(parsed.publicId) : undefined;
-		const storedDigest = row?.token_hash instanceof Uint8Array && row.token_hash.length === 32 ? row.token_hash : DUMMY_TOKEN_DIGEST;
+		const storedDigest =
+			row?.token_hash instanceof Uint8Array && row.token_hash.length === 32 ? row.token_hash : DUMMY_TOKEN_DIGEST;
 		if (!timingSafeEqual(presentedDigest, storedDigest)) return null;
 		if (!parsed || !row || row.revoked_at !== null || row.user_enabled !== 1) return null;
 
@@ -310,17 +311,19 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		const name = normalizeAuthGatewayName(input.name, "user name");
 		const role = normalizeAuthGatewayRole(input.role);
 		const now = Date.now();
-		return this.#mapConflict(() => this.#withImmediateTransaction(() => {
-			this.#db
-				.prepare(
-					"INSERT INTO gateway_users(name, description, owner, role, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
-				)
-				.run(name, input.description ?? null, input.owner ?? null, role, now, now);
-			const user = this.#getUserById(this.#lastInsertId());
-			if (!user) throw new AuthGatewayAccessError("not_found", "created user was not found");
-			const token = this.#insertToken(user.id, input.tokenLabel, now);
-			return { user, token };
-		}));
+		return this.#mapConflict(() =>
+			this.#withImmediateTransaction(() => {
+				this.#db
+					.prepare(
+						"INSERT INTO gateway_users(name, description, owner, role, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+					)
+					.run(name, input.description ?? null, input.owner ?? null, role, now, now);
+				const user = this.#getUserById(this.#lastInsertId());
+				if (!user) throw new AuthGatewayAccessError("not_found", "created user was not found");
+				const token = this.#insertToken(user.id, input.tokenLabel, now);
+				return { user, token };
+			}),
+		);
 	}
 
 	listUsers(): AuthGatewayUser[] {
@@ -334,19 +337,31 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return this.#getUserByName(resolved.name);
 	}
 
-	updateUser(ref: number | string, patch: {
-		description?: string | null;
-		owner?: string | null;
-		role?: AuthGatewayRole;
-		enabled?: boolean;
-	}): AuthGatewayUser {
+	updateUser(
+		ref: number | string,
+		patch: {
+			description?: string | null;
+			owner?: string | null;
+			role?: AuthGatewayRole;
+			enabled?: boolean;
+		},
+	): AuthGatewayUser {
 		const user = this.#requireUser(ref);
 		const role = patch.role === undefined ? user.role : normalizeAuthGatewayRole(patch.role);
 		const enabled = patch.enabled === undefined ? user.enabled : patch.enabled;
 		const now = Date.now();
 		this.#db
-			.prepare("UPDATE gateway_users SET description = ?, owner = ?, role = ?, enabled = ?, updated_at = ? WHERE id = ?")
-			.run(patch.description === undefined ? user.description : patch.description, patch.owner === undefined ? user.owner : patch.owner, role, enabled ? 1 : 0, now, user.id);
+			.prepare(
+				"UPDATE gateway_users SET description = ?, owner = ?, role = ?, enabled = ?, updated_at = ? WHERE id = ?",
+			)
+			.run(
+				patch.description === undefined ? user.description : patch.description,
+				patch.owner === undefined ? user.owner : patch.owner,
+				role,
+				enabled ? 1 : 0,
+				now,
+				user.id,
+			);
 		return this.#requireUser(user.id);
 	}
 
@@ -397,11 +412,14 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return rows.map(mapAclRule);
 	}
 
-	addAclRule(userId: number, input: {
-		effect: AuthGatewayAclEffect;
-		kind: AuthGatewayAclKind;
-		pattern: string;
-	}): { rule: AuthGatewayAclRule; created: boolean } {
+	addAclRule(
+		userId: number,
+		input: {
+			effect: AuthGatewayAclEffect;
+			kind: AuthGatewayAclKind;
+			pattern: string;
+		},
+	): { rule: AuthGatewayAclRule; created: boolean } {
 		this.#requireUser(userId);
 		const rule = normalizeAuthGatewayAclRule(input);
 		const existing = this.#findAclRule(userId, rule.effect, rule.kind, rule.pattern);
@@ -428,13 +446,16 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	}): AuthGatewayPool {
 		const name = normalizeAuthGatewayName(input.name, "pool name");
 		const provider = input.provider.trim();
-		if (!provider || provider.includes("*")) throw new AuthGatewayAccessError("invalid_request", "provider is required");
+		if (!provider || provider.includes("*"))
+			throw new AuthGatewayAccessError("invalid_request", "provider is required");
 		const model = normalizeAuthGatewayPoolModel(provider, input.model);
 		const strategy = normalizeAuthGatewayPoolStrategy(input.strategy);
 		const now = Date.now();
 		return this.#mapConflict(() => {
 			this.#db
-				.prepare("INSERT INTO gateway_pools(name, provider, model, strategy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+				.prepare(
+					"INSERT INTO gateway_pools(name, provider, model, strategy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+				)
 				.run(name, provider, model, strategy, now, now);
 			return this.#requirePool(this.#lastInsertId());
 		});
@@ -457,7 +478,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		const strategy = patch.strategy === undefined ? pool.strategy : normalizeAuthGatewayPoolStrategy(patch.strategy);
 		const now = Date.now();
 		this.#mapConflict(() => {
-			this.#db.prepare("UPDATE gateway_pools SET name = ?, strategy = ?, updated_at = ? WHERE id = ?").run(name, strategy, now, pool.id);
+			this.#db
+				.prepare("UPDATE gateway_pools SET name = ?, strategy = ?, updated_at = ? WHERE id = ?")
+				.run(name, strategy, now, pool.id);
 		});
 		return this.#requirePool(pool.id);
 	}
@@ -484,7 +507,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				.prepare("SELECT COUNT(*) AS count FROM gateway_pool_credentials WHERE pool_id = ?")
 				.get(poolId) as CountRow | undefined;
 			this.#db
-				.prepare("INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at) VALUES (?, ?, ?, ?)")
+				.prepare(
+					"INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at) VALUES (?, ?, ?, ?)",
+				)
 				.run(poolId, credentialId, maxRow?.count ?? 0, Date.now());
 		});
 		return { pool: this.#requirePool(poolId), created: true };
@@ -498,7 +523,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				.run(poolId, credentialId);
 			if (result.changes === 0) return false;
 			const rows = this.#db
-				.prepare("SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC, credential_id ASC")
+				.prepare(
+					"SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC, credential_id ASC",
+				)
 				.all(poolId) as PoolMemberRow[];
 			for (let position = 0; position < rows.length; position++) {
 				this.#db
@@ -510,29 +537,33 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	}
 
 	bindUserPool(userId: number, poolId: number): { created: boolean } {
-		return this.#mapConflict(() => this.#withImmediateTransaction(() => {
-			const user = this.#getUserById(userId);
-			if (!user) throw new AuthGatewayAccessError("not_found", "user not found");
-			if (user.role === "admin") {
-				throw new AuthGatewayAccessError("invalid_request", "admin users cannot be bound to gateway pools");
-			}
-			const pool = this.#getPoolRowById(poolId);
-			if (!pool) throw new AuthGatewayAccessError("not_found", "pool not found");
-			const existing = this.#db
-				.prepare("SELECT provider, model_key FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
-				.get(userId, poolId) as BindingScopeRow | undefined;
-			if (existing) return { created: false };
-			this.#db
-				.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, provider, model_key) VALUES (?, ?, ?, ?)")
-				.run(userId, poolId, pool.provider, pool.model ?? "");
-			return { created: true };
-		}));
+		return this.#mapConflict(() =>
+			this.#withImmediateTransaction(() => {
+				const user = this.#getUserById(userId);
+				if (!user) throw new AuthGatewayAccessError("not_found", "user not found");
+				if (user.role === "admin") {
+					throw new AuthGatewayAccessError("invalid_request", "admin users cannot be bound to gateway pools");
+				}
+				const pool = this.#getPoolRowById(poolId);
+				if (!pool) throw new AuthGatewayAccessError("not_found", "pool not found");
+				const existing = this.#db
+					.prepare("SELECT provider, model_key FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
+					.get(userId, poolId) as BindingScopeRow | undefined;
+				if (existing) return { created: false };
+				this.#db
+					.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, provider, model_key) VALUES (?, ?, ?, ?)")
+					.run(userId, poolId, pool.provider, pool.model ?? "");
+				return { created: true };
+			}),
+		);
 	}
 
 	unbindUserPool(userId: number, poolId: number): boolean {
 		this.#requireUser(userId);
 		this.#requirePool(poolId);
-		const result = this.#db.prepare("DELETE FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?").run(userId, poolId);
+		const result = this.#db
+			.prepare("DELETE FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
+			.run(userId, poolId);
 		return result.changes > 0;
 	}
 
@@ -597,7 +628,10 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return this.#requireAudit(this.#lastInsertId());
 	}
 
-	listAudit(query: { userId?: number; limit?: number; before?: number } = {}): { events: AuthGatewayAuditEvent[]; nextBefore: number | null } {
+	listAudit(query: { userId?: number; limit?: number; before?: number } = {}): {
+		events: AuthGatewayAuditEvent[];
+		nextBefore: number | null;
+	} {
 		const limit = normalizeAuditLimit(query.limit);
 		const before = query.before ?? null;
 		const userId = query.userId ?? null;
@@ -812,7 +846,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	}
 
 	#getUserByName(name: string): AuthGatewayUser | undefined {
-		const row = this.#db.prepare("SELECT * FROM gateway_users WHERE name = ? COLLATE NOCASE").get(name) as UserRow | undefined;
+		const row = this.#db.prepare("SELECT * FROM gateway_users WHERE name = ? COLLATE NOCASE").get(name) as
+			| UserRow
+			| undefined;
 		return row ? mapUser(row) : undefined;
 	}
 
@@ -826,7 +862,12 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return this.#db.prepare("SELECT * FROM gateway_user_tokens WHERE id = ?").get(id) as TokenRow | undefined;
 	}
 
-	#findAclRule(userId: number, effect: AuthGatewayAclEffect, kind: AuthGatewayAclKind, pattern: string): AuthGatewayAclRule | undefined {
+	#findAclRule(
+		userId: number,
+		effect: AuthGatewayAclEffect,
+		kind: AuthGatewayAclKind,
+		pattern: string,
+	): AuthGatewayAclRule | undefined {
 		const row = this.#db
 			.prepare("SELECT * FROM gateway_acl_rules WHERE user_id = ? AND effect = ? AND kind = ? AND pattern = ?")
 			.get(userId, effect, kind, pattern) as AclRuleRow | undefined;
@@ -838,7 +879,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	}
 
 	#getPoolRowByName(name: string): PoolRow | undefined {
-		return this.#db.prepare("SELECT * FROM gateway_pools WHERE name = ? COLLATE NOCASE").get(name) as PoolRow | undefined;
+		return this.#db.prepare("SELECT * FROM gateway_pools WHERE name = ? COLLATE NOCASE").get(name) as
+			| PoolRow
+			| undefined;
 	}
 
 	#requirePool(ref: number | string): AuthGatewayPool {
@@ -849,7 +892,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 
 	#mapPool(row: PoolRow): AuthGatewayPool {
 		const members = this.#db
-			.prepare("SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC")
+			.prepare(
+				"SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC",
+			)
 			.all(row.id) as PoolMemberRow[];
 		return {
 			id: row.id,
@@ -874,7 +919,9 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		if (where !== undefined && !/^[a-z_ ]+IS NULL$/.test(where)) {
 			throw new AuthGatewayAccessError("invalid_request", "invalid count filter");
 		}
-		const sql = where ? `SELECT COUNT(*) AS count FROM ${table} WHERE ${where}` : `SELECT COUNT(*) AS count FROM ${table}`;
+		const sql = where
+			? `SELECT COUNT(*) AS count FROM ${table} WHERE ${where}`
+			: `SELECT COUNT(*) AS count FROM ${table}`;
 		const row = this.#db.prepare(sql).get() as CountRow | undefined;
 		return row?.count ?? 0;
 	}
@@ -1029,7 +1076,8 @@ function sanitizeAuditErrorCode(value: string | null): string | null {
 
 function normalizeAuditLimit(limit: number | undefined): number {
 	if (limit === undefined) return 100;
-	if (!Number.isInteger(limit) || limit <= 0) throw new AuthGatewayAccessError("invalid_request", "audit limit must be positive");
+	if (!Number.isInteger(limit) || limit <= 0)
+		throw new AuthGatewayAccessError("invalid_request", "audit limit must be positive");
 	return Math.min(limit, 1000);
 }
 

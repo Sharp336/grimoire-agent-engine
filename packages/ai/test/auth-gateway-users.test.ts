@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	closeGatewayHarness,
 	createGatewayHarness,
 	expectObject,
+	type GatewayHarness,
 	grantModelAccess,
 	jsonHeaders,
 	postChat,
 	postPiNative,
 	readJson,
-	type GatewayHarness,
 } from "./auth-gateway-step4-helpers";
 
 function credentials(keys: string[]): AuthCredential[] {
@@ -49,7 +49,9 @@ describe("auth-gateway managed users", () => {
 
 		response = await fetch(`${harness.handle.url}/v1/users`, { headers: jsonHeaders() });
 		expect(response.status).toBe(403);
-		expect(await readJson(response)).toEqual({ error: { code: "management_auth_required", message: "Management routes require an authenticated admin token" } });
+		expect(await readJson(response)).toEqual({
+			error: { code: "management_auth_required", message: "Management routes require an authenticated admin token" },
+		});
 	});
 
 	test("isolates managed users when a token is revoked or a user is disabled", async () => {
@@ -86,7 +88,9 @@ describe("auth-gateway managed users", () => {
 
 		let response = await postChat(harness.handle.url, managed.token.value);
 		expect(response.status).toBe(403);
-		expect(await readJson(response)).toEqual({ error: { message: "Access denied by gateway policy", type: "permission_error" } });
+		expect(await readJson(response)).toEqual({
+			error: { message: "Access denied by gateway policy", type: "permission_error" },
+		});
 		expect(modelA.calls).toHaveLength(0);
 
 		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "route", pattern: "chat" });
@@ -99,7 +103,6 @@ describe("auth-gateway managed users", () => {
 		response = await postChat(harness.handle.url, managed.token.value);
 		expect(response.status).toBe(403);
 		expect(modelA.calls).toHaveLength(0);
-
 
 		const knownHidden = await postChat(harness.handle.url, managed.token.value, "model-b");
 		const randomHidden = await postChat(harness.handle.url, managed.token.value, "definitely-random-model");

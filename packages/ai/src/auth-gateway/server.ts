@@ -29,19 +29,35 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context, Model, SimpleStreamOptions, Usage } from "../types";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	SimpleStreamOptions,
+	Usage,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
-import { captureRequestHeaders, corsHeaders, json, readBearerToken, resolvePeer, timingSafeEqual, withCors } from "./http";
 import {
-	evaluateAuthGatewayAccess,
-	evaluateAuthGatewayRouteAccess,
-	resolveAuthGatewayPoolSelection,
-	type AuthGatewayAclRule,
 	type AuthGatewayAuditOutcome,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRouteFamily,
+	evaluateAuthGatewayAccess,
+	evaluateAuthGatewayRouteAccess,
+	resolveAuthGatewayPoolSelection,
 } from "./access-control";
+import {
+	captureRequestHeaders,
+	corsHeaders,
+	json,
+	readBearerToken,
+	resolvePeer,
+	timingSafeEqual,
+	withCors,
+} from "./http";
 import { handleAuthGatewayManagementRequest } from "./management";
 import type {
 	AuthGatewayServerHandle,
@@ -230,7 +246,6 @@ interface GatewayCredentialResolution {
 	credential: ResolvedAuthCredential;
 }
 
-
 interface PoolExhaustionState {
 	reason?: "no_eligible_credential" | "all_eligible_blocked";
 	retryAtMs?: number;
@@ -322,7 +337,8 @@ function buildGatewayApiKeyResolver(
 				selection,
 			});
 			if (!refreshed.ok) {
-				exhaustion.reason = refreshed.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
+				exhaustion.reason =
+					refreshed.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
 				exhaustion.retryAtMs = refreshed.retryAtMs;
 				return undefined;
 			}
@@ -353,7 +369,9 @@ function qualifiedModelId(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-function isManagedRegular(principal: AuthGatewayPrincipal): boolean {
+function isManagedRegular(
+	principal: AuthGatewayPrincipal,
+): principal is AuthGatewayPrincipal & { kind: "managed"; id: number; userId: number } {
 	return principal.kind === "managed" && principal.role !== "admin" && principal.userId !== null;
 }
 
@@ -361,18 +379,22 @@ function gatewayPermissionDenied(route: { module: FormatModule }): Response {
 	return route.module.formatError(403, "permission_error", "Access denied by gateway policy");
 }
 
-
-function poolFailureResponse(route: { module: FormatModule }, status: number, type: string, message: string, retryAtMs?: number): Response {
+function poolFailureResponse(
+	route: { module: FormatModule },
+	status: number,
+	type: string,
+	message: string,
+	retryAtMs?: number,
+): Response {
 	const response = route.module.formatError(status, type, message);
-	if (retryAtMs !== undefined) response.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000))));
+	if (retryAtMs !== undefined)
+		response.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000))));
 	return response;
 }
-
 
 function credentialIdsForProvider(storage: AuthStorage, provider: string): Set<number> {
 	return new Set(storage.listStoredCredentials(provider).map(row => row.id));
 }
-
 
 async function resolveGatewayCredential(
 	storage: AuthStorage,
@@ -382,7 +404,11 @@ async function resolveGatewayCredential(
 	selection: AuthCredentialSelectionPolicy | undefined,
 	exhaustion: PoolExhaustionState,
 ): Promise<GatewayCredentialResolution | undefined> {
-	const result = await storage.resolveApiKeySelection(model.provider, sessionId, { modelId: model.id, signal, selection });
+	const result = await storage.resolveApiKeySelection(model.provider, sessionId, {
+		modelId: model.id,
+		signal,
+		selection,
+	});
 	if (!result.ok) {
 		exhaustion.reason = result.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
 		exhaustion.retryAtMs = result.retryAtMs;
@@ -398,14 +424,28 @@ function mapInitialCredentialFailure(
 	exhaustion: PoolExhaustionState,
 ): Response {
 	if (selection && exhaustion.reason === "all_eligible_blocked") {
-		return poolFailureResponse(route, 429, "rate_limit_error", "No eligible credential is available for this request", exhaustion.retryAtMs);
+		return poolFailureResponse(
+			route,
+			429,
+			"rate_limit_error",
+			"No eligible credential is available for this request",
+			exhaustion.retryAtMs,
+		);
 	}
 	if (selection) {
-		return poolFailureResponse(route, 503, "no_eligible_credential", "No eligible credential is available for this request");
+		return poolFailureResponse(
+			route,
+			503,
+			"no_eligible_credential",
+			"No eligible credential is available for this request",
+		);
 	}
-	return route.module.formatError(401, "authentication_error", `No credential available for provider ${model.provider}`);
+	return route.module.formatError(
+		401,
+		"authentication_error",
+		`No credential available for provider ${model.provider}`,
+	);
 }
-
 
 function usageOf(message: AssistantMessage): Usage {
 	return message.usage;
@@ -510,24 +550,39 @@ function wrapEventsForAudit(
 	signal?: AbortSignal,
 ): AssistantMessageEventStream {
 	if (!audit) return events;
+	const recorder: AuditRecorder = audit;
 	async function* iter() {
 		try {
 			for await (const event of events) {
-				if (event.type === "done") audit.record("success", statusCode, usageOf(event.message));
+				if (event.type === "done") recorder.record("success", statusCode, usageOf(event.message));
 				if (event.type === "error") {
 					if (exhaustion.reason) {
-						const error = { ...event.error, errorMessage: "No eligible credential is available for this request", stopReason: "error" as const };
-						audit.record("usage_limit", 429, usageOf(event.error), "rate_limit_error");
+						const error = {
+							...event.error,
+							errorMessage: "No eligible credential is available for this request",
+							stopReason: "error" as const,
+						};
+						recorder.record("usage_limit", 429, usageOf(event.error), "rate_limit_error");
 						yield { ...event, error } satisfies AssistantMessageEvent;
 						continue;
 					}
-					audit.record(event.reason === "aborted" ? "request_aborted" : "upstream_error", event.reason === "aborted" ? 499 : 502, usageOf(event.error), event.reason);
+					recorder.record(
+						event.reason === "aborted" ? "request_aborted" : "upstream_error",
+						event.reason === "aborted" ? 499 : 502,
+						usageOf(event.error),
+						event.reason,
+					);
 				}
 				yield event;
 			}
 		} catch (error) {
 			const aborted = signal?.aborted ?? false;
-			audit.record(aborted ? "request_aborted" : "upstream_error", aborted ? 499 : 502, zeroUsage(), aborted ? (error instanceof Error ? error.name : "stream_error") : "stream_error");
+			recorder.record(
+				aborted ? "request_aborted" : "upstream_error",
+				aborted ? 499 : 502,
+				zeroUsage(),
+				aborted ? (error instanceof Error ? error.name : "stream_error") : "stream_error",
+			);
 			throw error;
 		}
 	}
@@ -535,9 +590,14 @@ function wrapEventsForAudit(
 	wrapped.result = async () => {
 		const message = await events.result();
 		if (message.stopReason === "stop" || message.stopReason === "length" || message.stopReason === "toolUse") {
-			audit.record("success", statusCode, usageOf(message));
+			recorder.record("success", statusCode, usageOf(message));
 		} else {
-			audit.record(message.stopReason === "aborted" ? "request_aborted" : "upstream_error", message.stopReason === "aborted" ? 499 : 502, usageOf(message), message.stopReason);
+			recorder.record(
+				message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
+				message.stopReason === "aborted" ? 499 : 502,
+				usageOf(message),
+				message.stopReason,
+			);
 		}
 		return message;
 	};
@@ -625,7 +685,11 @@ async function handleFormatEndpoint(
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = resolveAuthGatewayPoolSelection(bootOpts.accessStore.listUserPools(principal.userId), model.provider, qualifiedModelId(model));
+		const poolSelection = resolveAuthGatewayPoolSelection(
+			bootOpts.accessStore.listUserPools(principal.userId),
+			model.provider,
+			qualifiedModelId(model),
+		);
 		if (!poolSelection) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
@@ -634,9 +698,18 @@ async function handleFormatEndpoint(
 		const eligibleCredentialIds = poolSelection.credentialIds.filter(id => liveIds.has(id));
 		if (eligibleCredentialIds.length === 0) {
 			audit?.record("no_eligible_credential", 503, zeroUsage(), "no_eligible_credential");
-			return poolFailureResponse(route, 503, "no_eligible_credential", "No eligible credential is available for this request");
+			return poolFailureResponse(
+				route,
+				503,
+				"no_eligible_credential",
+				"No eligible credential is available for this request",
+			);
 		}
-		selection = { policyKey: `gateway-pool:${poolSelection.poolId}`, eligibleCredentialIds, strategy: poolSelection.strategy };
+		selection = {
+			policyKey: `gateway-pool:${poolSelection.poolId}`,
+			eligibleCredentialIds,
+			strategy: poolSelection.strategy,
+		};
 	}
 
 	const requestSessionId = parsed.options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
@@ -648,18 +721,35 @@ async function handleFormatEndpoint(
 	const exhaustion: PoolExhaustionState = {};
 	let credential: GatewayCredentialResolution | undefined;
 	try {
-		credential = await resolveGatewayCredential(bootOpts.storage, model, storageSessionId, controller.signal, selection, exhaustion);
+		credential = await resolveGatewayCredential(
+			bootOpts.storage,
+			model,
+			storageSessionId,
+			controller.signal,
+			selection,
+			exhaustion,
+		);
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		audit?.record(classified.status >= 500 ? "internal_error" : "invalid_request", classified.status, zeroUsage(), classified.type);
+		audit?.record(
+			classified.status >= 500 ? "internal_error" : "invalid_request",
+			classified.status,
+			zeroUsage(),
+			classified.type,
+		);
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!credential) {
 		const response = mapInitialCredentialFailure(route, model, selection, exhaustion);
-		audit?.record(response.status === 429 ? "usage_limit" : response.status === 503 ? "no_eligible_credential" : "unauthorized", response.status, zeroUsage(), exhaustion.reason ?? "no_credential");
+		audit?.record(
+			response.status === 429 ? "usage_limit" : response.status === 503 ? "no_eligible_credential" : "unauthorized",
+			response.status,
+			zeroUsage(),
+			exhaustion.reason ?? "no_credential",
+		);
 		return response;
 	}
 
@@ -694,7 +784,8 @@ async function handleFormatEndpoint(
 				const errorMessage =
 					exhaustion.reason !== undefined
 						? "No eligible credential is available for this request"
-						: message.errorMessage ?? (message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
+						: (message.errorMessage ??
+							(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed"));
 				logger.warn("auth-gateway non-streaming failed", {
 					format: route.label,
 					reason: message.stopReason,
@@ -775,7 +866,13 @@ async function handleFormatEndpoint(
  * `parseRequest`/`encodeResponse`/`encodeStream` differ from the format-endpoint
  * path.
  */
-async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, peer: string, principal: AuthGatewayPrincipal, audit: AuditRecorder | undefined): Promise<Response> {
+async function handlePiNative(
+	bootOpts: AuthGatewayBootOptions,
+	req: Request,
+	peer: string,
+	principal: AuthGatewayPrincipal,
+	audit: AuditRecorder | undefined,
+): Promise<Response> {
 	const controller = mirrorRequestAbort(req);
 	const aborted = (): Response => {
 		audit?.record("request_aborted", 499, zeroUsage(), "request_aborted");
@@ -817,7 +914,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	let selection: AuthCredentialSelectionPolicy | undefined;
 	let poolId: number | null = null;
-	const exhaustion: PoolExhaustionState = { reason: null };
+	const exhaustion: PoolExhaustionState = {};
 	if (isManagedRegular(principal) && bootOpts.accessStore) {
 		const rules = bootOpts.accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayAccess(principal, rules, {
@@ -829,7 +926,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = resolveAuthGatewayPoolSelection(bootOpts.accessStore.listUserPools(principal.userId), model.provider, qualifiedModelId(model));
+		const poolSelection = resolveAuthGatewayPoolSelection(
+			bootOpts.accessStore.listUserPools(principal.userId),
+			model.provider,
+			qualifiedModelId(model),
+		);
 		if (!poolSelection) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
@@ -838,17 +939,34 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		const eligibleCredentialIds = poolSelection.credentialIds.filter(id => liveIds.has(id));
 		if (eligibleCredentialIds.length === 0) {
 			audit?.record("no_eligible_credential", 503, zeroUsage(), "no_eligible_credential");
-			return poolFailureResponse(route, 503, "no_eligible_credential", "No eligible credential is available for this request");
+			return poolFailureResponse(
+				route,
+				503,
+				"no_eligible_credential",
+				"No eligible credential is available for this request",
+			);
 		}
 		poolId = poolSelection.poolId;
-		selection = { policyKey: `gateway-pool:${poolSelection.poolId}`, eligibleCredentialIds, strategy: poolSelection.strategy };
+		selection = {
+			policyKey: `gateway-pool:${poolSelection.poolId}`,
+			eligibleCredentialIds,
+			strategy: poolSelection.strategy,
+		};
 	}
 
-	const credentialSessionId =
-		isManagedRegular(principal) ? `gateway:${principal.id}:${poolId ?? "default"}:${requestSessionId}` : requestSessionId;
+	const credentialSessionId = isManagedRegular(principal)
+		? `gateway:${principal.id}:${poolId ?? "default"}:${requestSessionId}`
+		: requestSessionId;
 	let credential: GatewayCredentialResolution | undefined;
 	try {
-		credential = await resolveGatewayCredential(bootOpts.storage, model, credentialSessionId, controller.signal, selection, exhaustion);
+		credential = await resolveGatewayCredential(
+			bootOpts.storage,
+			model,
+			credentialSessionId,
+			controller.signal,
+			selection,
+			exhaustion,
+		);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
@@ -858,7 +976,12 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (controller.signal.aborted) return aborted();
 	if (!credential) {
 		const response = mapInitialCredentialFailure(route, model, selection, exhaustion);
-		audit?.record(auditOutcomeForStatus(response.status), response.status, zeroUsage(), response.status >= 400 ? "credential_unavailable" : null);
+		audit?.record(
+			auditOutcomeForStatus(response.status),
+			response.status,
+			zeroUsage(),
+			response.status >= 400 ? "credential_unavailable" : null,
+		);
 		return response;
 	}
 	audit?.setCredential(credential.credential.credentialId ?? null);
@@ -917,9 +1040,16 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				});
 				if (exhaustion.reason) {
 					const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
-					const type = exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
+					const type =
+						exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
 					audit?.record("usage_limit", status, usageOf(message), type);
-					return poolFailureResponse(route, status, type, "No eligible credential is available for this request", exhaustion.retryAtMs);
+					return poolFailureResponse(
+						route,
+						status,
+						type,
+						"No eligible credential is available for this request",
+						exhaustion.retryAtMs,
+					);
 				}
 				if (message.stopReason === "aborted") {
 					audit?.record("request_aborted", 499, usageOf(message), "request_aborted");
@@ -937,7 +1067,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
 				const type = exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
 				audit?.record("usage_limit", status, zeroUsage(), type);
-				return poolFailureResponse(route, status, type, "No eligible credential is available for this request", exhaustion.retryAtMs);
+				return poolFailureResponse(
+					route,
+					status,
+					type,
+					"No eligible credential is available for this request",
+					exhaustion.retryAtMs,
+				);
 			}
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
@@ -957,7 +1093,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
 			const type = exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
 			audit?.record("usage_limit", status, zeroUsage(), type);
-			return poolFailureResponse(route, status, type, "No eligible credential is available for this request", exhaustion.retryAtMs);
+			return poolFailureResponse(
+				route,
+				status,
+				type,
+				"No eligible credential is available for this request",
+				exhaustion.retryAtMs,
+			);
 		}
 		audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 		return piNative.formatError(classified.status, classified.type, classified.message);
@@ -991,11 +1133,17 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
  * failure) inside `AuthStorage`, so this handler is a thin wrapper that
  * surfaces the same data to HTTP callers (notably the macOS usage widget).
  */
-async function handleUsage(storage: AuthStorage, signal: AbortSignal, principal: AuthGatewayPrincipal, accessStore?: AuthGatewayBootOptions["accessStore"]): Promise<Response> {
+async function handleUsage(
+	storage: AuthStorage,
+	signal: AbortSignal,
+	principal: AuthGatewayPrincipal,
+	accessStore?: AuthGatewayBootOptions["accessStore"],
+): Promise<Response> {
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "usage", true);
-		if (!access.allowed) return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
+		if (!access.allowed)
+			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
 		return json(200, { usage: accessStore.getUserUsage(principal.userId, 0) });
 	}
 	const reports = (await storage.fetchUsageReports?.({ signal })) ?? [];
@@ -1003,11 +1151,17 @@ async function handleUsage(storage: AuthStorage, signal: AbortSignal, principal:
 	return json(200, { generatedAt: Date.now(), reports: trimmed });
 }
 
-async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal, principal: AuthGatewayPrincipal, accessStore?: AuthGatewayBootOptions["accessStore"]): Promise<Response> {
+async function handleCredentialsCheck(
+	storage: AuthStorage,
+	signal: AbortSignal,
+	principal: AuthGatewayPrincipal,
+	accessStore?: AuthGatewayBootOptions["accessStore"],
+): Promise<Response> {
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "check", true);
-		if (!access.allowed) return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
+		if (!access.allowed)
+			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
 		const liveRows = storage.listStoredCredentials();
 		const liveById = new Map(liveRows.map(row => [row.id, row]));
 		const eligible = new Set<number>();
@@ -1056,21 +1210,28 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal,
 
 function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPrincipal): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
-	const filtered = isManagedRegular(principal) && opts.accessStore
-		? list.filter(model => {
-				const rules = opts.accessStore?.listAclRules(principal.userId) ?? [];
-				const access = evaluateAuthGatewayAccess(principal, rules, {
-					route: "models",
-					provider: model.provider,
-					qualifiedModel: qualifiedModelId(model),
-				});
-				if (!access.allowed) return false;
-				const pool = opts.accessStore ? resolveAuthGatewayPoolSelection(opts.accessStore.listUserPools(principal.userId), model.provider, qualifiedModelId(model)) : null;
-				if (!pool) return false;
-				const liveIds = credentialIdsForProvider(opts.storage, model.provider);
-				return pool.credentialIds.some(id => liveIds.has(id));
-			})
-		: list;
+	const filtered =
+		isManagedRegular(principal) && opts.accessStore
+			? list.filter(model => {
+					const rules = opts.accessStore?.listAclRules(principal.userId) ?? [];
+					const access = evaluateAuthGatewayAccess(principal, rules, {
+						route: "models",
+						provider: model.provider,
+						qualifiedModel: qualifiedModelId(model),
+					});
+					if (!access.allowed) return false;
+					const pool = opts.accessStore
+						? resolveAuthGatewayPoolSelection(
+								opts.accessStore.listUserPools(principal.userId),
+								model.provider,
+								qualifiedModelId(model),
+							)
+						: null;
+					if (!pool) return false;
+					const liveIds = credentialIdsForProvider(opts.storage, model.provider);
+					return pool.credentialIds.some(id => liveIds.has(id));
+				})
+			: list;
 	const data = filtered.map(model => ({
 		id: model.id,
 		object: "model" as const,
@@ -1080,7 +1241,11 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 	return json(200, { object: "list", data });
 }
 
-function authenticateGatewayRequest(req: Request, tokens: ReadonlySet<string>, accessStore?: AuthGatewayBootOptions["accessStore"]): AuthGatewayPrincipal | null {
+function authenticateGatewayRequest(
+	req: Request,
+	tokens: ReadonlySet<string>,
+	accessStore?: AuthGatewayBootOptions["accessStore"],
+): AuthGatewayPrincipal | null {
 	if (tokens.size === 0) {
 		return { kind: "no-auth", id: "no-auth-admin", userId: null, name: "no-auth", role: "admin", tokenId: null };
 	}
@@ -1091,7 +1256,8 @@ function authenticateGatewayRequest(req: Request, tokens: ReadonlySet<string>, a
 	for (const token of tokens) {
 		if (timingSafeEqual(presented, new TextEncoder().encode(token))) legacyOk = true;
 	}
-	if (legacyOk) return { kind: "legacy", id: "legacy-admin", userId: null, name: "legacy", role: "admin", tokenId: null };
+	if (legacyOk)
+		return { kind: "legacy", id: "legacy-admin", userId: null, name: "legacy", role: "admin", tokenId: null };
 	return accessStore?.authenticateToken(bearer) ?? null;
 }
 
@@ -1103,7 +1269,8 @@ function classifyRoute(pathname: string): AuthGatewayRouteFamily {
 	if (pathname === "/v1/models") return "models";
 	if (pathname === "/v1/usage") return "usage";
 	if (pathname === "/v1/credentials/check") return "check";
-	if (pathname.startsWith("/v1/users") || pathname.startsWith("/v1/pools") || pathname.startsWith("/v1/audit")) return "management";
+	if (pathname.startsWith("/v1/users") || pathname.startsWith("/v1/pools") || pathname.startsWith("/v1/audit"))
+		return "management";
 	return "unknown";
 }
 
@@ -1137,9 +1304,20 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				audit?.setPrincipal(principal);
 
 				if (opts.accessStore) {
-					const management = await handleAuthGatewayManagementRequest(req, pathname, principal, opts.accessStore, opts.storage);
+					const management = await handleAuthGatewayManagementRequest(
+						req,
+						pathname,
+						principal,
+						opts.accessStore,
+						opts.storage,
+					);
 					if (management) {
-						audit?.record(auditOutcomeForStatus(management.status), management.status, zeroUsage(), management.status >= 400 ? "management_error" : null);
+						audit?.record(
+							auditOutcomeForStatus(management.status),
+							management.status,
+							zeroUsage(),
+							management.status >= 400 ? "management_error" : null,
+						);
 						return withCors(management, req);
 					}
 				}
@@ -1159,7 +1337,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
 					if (routeFamily === "chat" || routeFamily === "messages" || routeFamily === "responses") {
-						return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer, principal, audit, routeFamily), req);
+						return withCors(
+							await handleFormatEndpoint(formatRoute, opts, req, peer, principal, audit, routeFamily),
+							req,
+						);
 					}
 				}
 

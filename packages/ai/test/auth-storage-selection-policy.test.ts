@@ -188,7 +188,9 @@ describe("AuthStorage credential selection policy", () => {
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 		const mixed = policy("failover", [oauthRow.id, apiRow.id], "mixed-pool");
 
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed", { selection: mixed })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed", { selection: mixed }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
 		});
@@ -303,7 +305,10 @@ describe("AuthStorage credential selection policy", () => {
 				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
 			).resolves.toMatchObject({ ok: true, credential: { credentialId: firstRow.id, apiKey: "api-a" } });
 			await expect(
-				storage.markUsageLimitReached(CUSTOM_PROVIDER, "api-failover", { retryAfterMs: 1_000, selection: failover }),
+				storage.markUsageLimitReached(CUSTOM_PROVIDER, "api-failover", {
+					retryAfterMs: 1_000,
+					selection: failover,
+				}),
 			).resolves.toMatchObject({ switched: true });
 			await expect(
 				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
@@ -330,12 +335,16 @@ describe("AuthStorage credential selection policy", () => {
 		if (!firstRow || !secondRow || !thirdRow) throw new Error("expected seeded API-key rows");
 		const rr = policy("round-robin", [firstRow.id, secondRow.id, thirdRow.id], "rr-reindex-pool");
 
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: firstRow.id, apiKey: "api-a" },
 		});
 		await storage.markUsageLimitReached(CUSTOM_PROVIDER, "rr-reindex", { retryAfterMs: 30_000, selection: rr });
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: secondRow.id, apiKey: "api-b" },
 		});
@@ -343,7 +352,9 @@ describe("AuthStorage credential selection policy", () => {
 		store.deleteAuthCredential(firstRow.id, "simulated external deletion");
 		await storage.reload();
 
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: secondRow.id, apiKey: "api-b" },
 		});
@@ -359,12 +370,16 @@ describe("AuthStorage credential selection policy", () => {
 		if (!firstRow || !secondRow || !outsideRow) throw new Error("expected seeded rows");
 		const failover = policy("failover", [firstRow.id, secondRow.id], "blocked-pool");
 
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: firstRow.id },
 		});
 		await storage.markUsageLimitReached(CUSTOM_PROVIDER, "blocked", { retryAfterMs: 30_000, selection: failover });
-		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover })).resolves.toMatchObject({
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover }),
+		).resolves.toMatchObject({
 			ok: true,
 			credential: { credentialId: secondRow.id },
 		});
@@ -380,9 +395,9 @@ describe("AuthStorage credential selection policy", () => {
 		expect(allBlocked.reason).toBe("all_eligible_blocked");
 		expect(allBlocked.retryAtMs).toBeGreaterThanOrEqual(blockedBefore + 30_000 - 5);
 		expect(allBlocked.retryAtMs).toBeLessThan(Date.now() + 46_000);
-		expect(await storage.getApiKey(CUSTOM_PROVIDER, "outside-ok", { selection: policy("failover", [outsideRow.id]) })).toBe(
-			"access-outside",
-		);
+		expect(
+			await storage.getApiKey(CUSTOM_PROVIDER, "outside-ok", { selection: policy("failover", [outsideRow.id]) }),
+		).toBe("access-outside");
 
 		await storage.set(CUSTOM_PROVIDER, [
 			oauthCredential("invalid", { refresh: "refresh-invalid", expires: Date.now() - HOUR_MS }),
@@ -399,7 +414,11 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("checkCredentials only probes credential ids requested by the caller", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("check-a"), apiKeyCredential("check-b"), oauthCredential("check-c")]);
+		await storage.set(CUSTOM_PROVIDER, [
+			oauthCredential("check-a"),
+			apiKeyCredential("check-b"),
+			oauthCredential("check-c"),
+		]);
 		const rows = store.listAuthCredentials(CUSTOM_PROVIDER);
 		const target = rows[1]!;
 		const probed: number[] = [];
