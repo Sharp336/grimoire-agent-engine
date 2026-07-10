@@ -154,6 +154,22 @@ describe("restart command construction", () => {
 		expect(command.cmd.indexOf("--no-extensions")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
 
+	test("preserves env-only CLI toggles across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const command = buildRestartCommand({ ...baseOptions(), noPty: true, noTitle: true }, env);
+
+		expect(command.cmd).toContain("--no-pty");
+		expect(command.cmd).toContain("--no-title");
+		expect(command.cmd.indexOf("--no-pty")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+		expect(command.cmd.indexOf("--no-title")).toBeLessThan(command.cmd.indexOf("--session-dir"));
+	});
+
 	test("preserves custom config files across restart", () => {
 		const env: RestartCommandEnvironment = {
 			isCompiledBinary: () => true,

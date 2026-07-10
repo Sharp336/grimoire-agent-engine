@@ -477,8 +477,10 @@ export function buildRestartLaunchFlags(
 		| "models"
 		| "noExtensions"
 		| "noLsp"
+		| "noPty"
 		| "noRules"
 		| "noSkills"
+		| "noTitle"
 		| "pluginDirs"
 		| "plan"
 		| "provider"
@@ -503,8 +505,10 @@ export function buildRestartLaunchFlags(
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
 		disableLsp: Boolean(parsed.noLsp),
+		noPty: Boolean(parsed.noPty),
 		disableRules: Boolean(parsed.noRules),
 		disableSkills: Boolean(parsed.noSkills),
+		noTitle: Boolean(parsed.noTitle),
 		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
 		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
 		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),

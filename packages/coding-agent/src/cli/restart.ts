@@ -30,6 +30,8 @@ export interface RestartLaunchFlags {
 	disableLsp?: boolean;
 	disableRules?: boolean;
 	disableSkills?: boolean;
+	noPty?: boolean;
+	noTitle?: boolean;
 	configFiles?: string[];
 	extensionPaths?: string[];
 	hookPaths?: string[];
@@ -296,6 +298,12 @@ export function buildRestartCommand(
 	}
 	if (options.disableRules) {
 		cmd.push("--no-rules");
+	}
+	if (options.noPty) {
+		cmd.push("--no-pty");
+	}
+	if (options.noTitle) {
+		cmd.push("--no-title");
 	}
 	if (options.skillPatterns && options.skillPatterns.length > 0) {
 		cmd.push("--skills", options.skillPatterns.join(","));

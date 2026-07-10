@@ -20,6 +20,8 @@ describe("restart launch flags", () => {
 				providerSessionId: "provider-session-1",
 				provider: "openai",
 				model: "gpt-5",
+				noPty: true,
+				noTitle: true,
 			},
 			"/repo/original",
 			undefined,
@@ -35,6 +37,8 @@ describe("restart launch flags", () => {
 		expect(flags.providerSessionId).toBe("provider-session-1");
 		expect(flags.provider).toBe("openai");
 		expect(flags.model).toBe("gpt-5");
+		expect(flags.noPty).toBe(true);
+		expect(flags.noTitle).toBe(true);
 	});
 
 	test("carries env-injected API keys through extension-aware restart snapshots", () => {
