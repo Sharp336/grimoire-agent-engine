@@ -11,9 +11,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 
@@ -992,6 +993,332 @@ describe("listClaudePluginRoots", () => {
 		expect(result.warnings).toEqual([]);
 		expect(result.all.find(c => c.name === "manifest-commands-replace:admin")).toBeDefined();
 		expect(result.all.find(c => c.name === "manifest-commands-replace:default")).toBeUndefined();
+	});
+});
+
+describe("marketplace plugin rules", () => {
+	let tempDir: string;
+	let originalHome: string | undefined;
+
+	beforeEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		originalHome = process.env.HOME;
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-rules-test-"));
+		process.env.HOME = tempDir;
+		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+	});
+
+	afterEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		vi.restoreAllMocks();
+		if (originalHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHome;
+		}
+		await removeWithRetries(tempDir);
+	});
+
+	test("loads rules/*.md and rules/*.mdc from a user-scoped OMP plugin registry", async () => {
+		const ompPluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "rule-pack");
+		await fs.mkdir(ompPluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(ompPluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"rule-pack@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(path.join(pluginPath, "rules", "alpha.md"), "---\ndescription: Alpha rule\n---\nAlpha body.\n");
+		await fs.writeFile(path.join(pluginPath, "rules", "beta.mdc"), "---\ndescription: Beta rule\n---\nBeta body.\n");
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir, providers: ["claude-plugins"] });
+		expect(result.warnings).toEqual([]);
+
+		const alpha = result.items.find(rule => rule.name === "alpha");
+		const beta = result.items.find(rule => rule.name === "beta");
+
+		expect(alpha).toBeDefined();
+		expect(beta).toBeDefined();
+		expect(alpha?._source.provider).toBe("claude-plugins");
+		expect(alpha?._source.level).toBe("user");
+		expect(beta?._source.level).toBe("user");
+	});
+
+	test("preserves canonical frontmatter metadata and strips body/name from marketplace rule files", async () => {
+		const ompPluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "style-pack");
+		await fs.mkdir(ompPluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(ompPluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"style-pack@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		const ruleFile = path.join(pluginPath, "rules", "commit-style.md");
+		await fs.writeFile(
+			ruleFile,
+			[
+				"---",
+				"description: Enforce conventional commit subjects",
+				"alwaysApply: true",
+				"globs:",
+				'  - "**/*.md"',
+				"---",
+				"",
+				"Use conventional commit subjects.",
+				"Keep the body under 72 columns.",
+				"",
+			].join("\n"),
+		);
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir, providers: ["claude-plugins"] });
+		const rule = result.items.find(item => item.name === "commit-style");
+
+		expect(rule).toBeDefined();
+		expect(rule?.description).toBe("Enforce conventional commit subjects");
+		expect(rule?.alwaysApply).toBe(true);
+		expect(rule?.globs).toEqual(["**/*.md"]);
+		expect(rule?.content).toBe("Use conventional commit subjects.\nKeep the body under 72 columns.");
+		expect(rule?.path).toBe(ruleFile);
+	});
+
+	test("project-scoped OMP plugin shadows a same-ID user-scoped plugin and reports project-level rules", async () => {
+		const userPluginsDir = path.join(tempDir, ".omp", "plugins");
+		const userPluginPath = path.join(tempDir, "plugins", "user-shared");
+		const projectDir = path.join(tempDir, "project");
+		const projectPluginsDir = path.join(projectDir, ".omp", "plugins");
+		const projectPluginPath = path.join(tempDir, "plugins", "project-shared");
+
+		await fs.mkdir(userPluginsDir, { recursive: true });
+		await fs.mkdir(path.join(userPluginPath, "rules"), { recursive: true });
+		await fs.mkdir(projectPluginsDir, { recursive: true });
+		await fs.mkdir(path.join(projectPluginPath, "rules"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(userPluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"shared-plugin@market": [
+						{
+							scope: "user",
+							installPath: userPluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(projectPluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"shared-plugin@market": [
+						{
+							scope: "project",
+							installPath: projectPluginPath,
+							version: "2.0.0",
+							installedAt: "2025-01-02T00:00:00Z",
+							lastUpdated: "2025-01-02T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(path.join(userPluginPath, "rules", "shared.md"), "User scope rule body.\n");
+		await fs.writeFile(path.join(projectPluginPath, "rules", "shared.md"), "Project scope rule body.\n");
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: projectDir, providers: ["claude-plugins"] });
+		const shared = result.items.filter(item => item.name === "shared");
+
+		expect(shared).toHaveLength(1);
+		expect(shared[0].content).toBe("Project scope rule body.\n");
+		expect(shared[0]._source.level).toBe("project");
+		expect(shared[0]._source.path).toContain(projectPluginPath);
+		expect(result.all.filter(item => item.name === "shared")).toHaveLength(1);
+	});
+
+	test("disabled marketplace plugin entries contribute no rules while enabled siblings still load", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const disabledPluginPath = path.join(tempDir, "plugins", "disabled-pack");
+		const enabledPluginPath = path.join(tempDir, "plugins", "enabled-pack");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(disabledPluginPath, "rules"), { recursive: true });
+		await fs.mkdir(path.join(enabledPluginPath, "rules"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"disabled-pack@market": [
+						{
+							scope: "user",
+							installPath: disabledPluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+							enabled: false,
+						},
+					],
+					"enabled-pack@market": [
+						{
+							scope: "user",
+							installPath: enabledPluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+							enabled: true,
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(path.join(disabledPluginPath, "rules", "note.md"), "Should never load.\n");
+		await fs.writeFile(path.join(enabledPluginPath, "rules", "sentinel.md"), "Should load.\n");
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir, providers: ["claude-plugins"] });
+
+		expect(result.warnings).toEqual([]);
+		expect(result.items.find(item => item.name === "sentinel")).toBeDefined();
+		expect(result.items.find(item => item.name === "note")).toBeUndefined();
+		expect(result.all.filter(item => item.name === "note")).toHaveLength(0);
+	});
+
+	test("native same-name rule wins capability dedup over the priority-70 marketplace rule", async () => {
+		const originalAgentDir = getAgentDir();
+		const nativeAgentDir = path.join(tempDir, "agent");
+		try {
+			setAgentDir(nativeAgentDir);
+			await fs.mkdir(path.join(nativeAgentDir, "rules"), { recursive: true });
+			await fs.writeFile(path.join(nativeAgentDir, "rules", "shared-rule.md"), "Native version.\n");
+
+			const ompPluginsDir = path.join(tempDir, ".omp", "plugins");
+			const pluginPath = path.join(tempDir, "plugins", "conflicting-pack");
+			await fs.mkdir(ompPluginsDir, { recursive: true });
+			await fs.mkdir(path.join(pluginPath, "rules"), { recursive: true });
+			await fs.writeFile(
+				path.join(ompPluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"conflicting-pack@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2025-01-01T00:00:00Z",
+								lastUpdated: "2025-01-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(path.join(pluginPath, "rules", "shared-rule.md"), "Marketplace version.\n");
+
+			const result = await loadCapability<Rule>(ruleCapability.id, {
+				cwd: tempDir,
+				providers: ["native", "claude-plugins"],
+			});
+			const winners = result.items.filter(item => item.name === "shared-rule");
+			const all = result.all.filter(item => item.name === "shared-rule");
+
+			expect(winners).toHaveLength(1);
+			expect(winners[0].content).toBe("Native version.\n");
+			expect(winners[0]._source.provider).toBe("native");
+			expect(all).toHaveLength(2);
+			expect(all.find(item => item._source.provider === "claude-plugins")?._shadowed).toBe(true);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	test("plugin visible in both the Claude and OMP registries under the same ID does not duplicate its rules", async () => {
+		const claudePluginsDir = path.join(tempDir, ".claude", "plugins");
+		const ompPluginsDir = path.join(tempDir, ".omp", "plugins");
+		const claudePluginPath = path.join(tempDir, "plugins", "claude-copy");
+		const ompPluginPath = path.join(tempDir, "plugins", "omp-copy");
+
+		await fs.mkdir(claudePluginsDir, { recursive: true });
+		await fs.mkdir(ompPluginsDir, { recursive: true });
+		await fs.mkdir(path.join(claudePluginPath, "rules"), { recursive: true });
+		await fs.mkdir(path.join(ompPluginPath, "rules"), { recursive: true });
+
+		await fs.writeFile(
+			path.join(claudePluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"dup-plugin@market": [
+						{
+							scope: "user",
+							installPath: claudePluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(ompPluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"dup-plugin@market": [
+						{
+							scope: "user",
+							installPath: ompPluginPath,
+							version: "1.1.0",
+							installedAt: "2025-01-02T00:00:00Z",
+							lastUpdated: "2025-01-02T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(path.join(claudePluginPath, "rules", "dup.md"), "Claude registry copy.\n");
+		await fs.writeFile(path.join(ompPluginPath, "rules", "dup.md"), "OMP registry copy.\n");
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir, providers: ["claude-plugins"] });
+		const dup = result.all.filter(item => item.name === "dup");
+
+		expect(dup).toHaveLength(1);
+		expect(dup[0].content).toBe("OMP registry copy.\n");
+		expect(dup[0]._source.path).toContain(ompPluginPath);
 	});
 });
 
