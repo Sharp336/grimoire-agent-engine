@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
@@ -6,6 +7,7 @@ import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	findInitialModel,
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
@@ -132,6 +134,37 @@ const mockMaxSuffixModels: Model<Api>[] = [
 	buildModel({
 		id: "coding-router:max",
 		name: "NanoGPT Coding Router Max",
+		api: "openai-completions",
+		provider: "nanogpt",
+		baseUrl: "https://nano-gpt.com/api/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	}),
+];
+
+const mockUltraSuffixModels: Model<Api>[] = [
+	buildModel({
+		id: "coding-router",
+		name: "NanoGPT Coding Router",
+		api: "openai-completions",
+		provider: "nanogpt",
+		baseUrl: "https://nano-gpt.com/api/v1",
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+		},
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	}),
+	buildModel({
+		id: "coding-router:ultra",
+		name: "NanoGPT Coding Router Ultra",
 		api: "openai-completions",
 		provider: "nanogpt",
 		baseUrl: "https://nano-gpt.com/api/v1",
@@ -469,6 +502,22 @@ describe("parseModelPattern", () => {
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toBeUndefined();
 		});
+
+		test("ultra parses as a guarded thinking suffix after the literal pattern misses", () => {
+			const result = parseModelPattern("nanogpt/coding-router:ultra", [mockUltraSuffixModels[0]]);
+			expect(result.model?.id).toBe("coding-router");
+			expect(result.thinkingLevel).toBe(ThinkingLevel.Ultra);
+			expect(result.explicitThinkingLevel).toBe(true);
+			expect(result.warning).toBeUndefined();
+		});
+
+		test("literal model ids ending in ultra win over the thinking suffix", () => {
+			const result = parseModelPattern("nanogpt/coding-router:ultra", mockUltraSuffixModels);
+			expect(result.model?.id).toBe("coding-router:ultra");
+			expect(result.thinkingLevel).toBeUndefined();
+			expect(result.explicitThinkingLevel).toBe(false);
+			expect(result.warning).toBeUndefined();
+		});
 	});
 
 	describe("patterns with invalid thinking levels", () => {
@@ -714,6 +763,24 @@ describe("resolveModelRoleValue", () => {
 		expect(result.model?.provider).toBe("anthropic");
 		expect(result.model?.id).toBe("claude-opus-4-7");
 		expect(result.thinkingLevel).toBe(Effort.Max);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("preserves ultra when the resolved model advertises max", () => {
+		const result = resolveModelRoleValue("anthropic/claude-opus-4-7:ultra", mockMaxCapableModels);
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-opus-4-7");
+		expect(result.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("degrades ultra to the model ceiling when max is not advertised", () => {
+		const result = resolveModelRoleValue("nanogpt/coding-router:ultra", [mockMaxSuffixModels[0]]);
+
+		expect(result.model?.provider).toBe("nanogpt");
+		expect(result.model?.id).toBe("coding-router");
+		expect(result.thinkingLevel).toBe(Effort.XHigh);
 		expect(result.explicitThinkingLevel).toBe(true);
 	});
 
@@ -1163,6 +1230,60 @@ describe("resolveCliModel", () => {
 	});
 });
 
+describe("findInitialModel", () => {
+	test("keeps existing default-selector clamping for models without controllable efforts", async () => {
+		const noEffortModel = {
+			id: "glm-5-2",
+			name: "GLM-5.2",
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		} as Model<Api>;
+		const registry = {
+			find: (provider: string, id: string) =>
+				provider === noEffortModel.provider && id === noEffortModel.id ? noEffortModel : undefined,
+			getAvailable: () => [noEffortModel],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: noEffortModel.provider,
+			defaultModelId: noEffortModel.id,
+			defaultThinkingSelector: Effort.High,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.id).toBe(noEffortModel.id);
+		expect(result.thinkingLevel).toBeUndefined();
+	});
+
+	test("degrades initial ultra defaults through the existing max clamp", async () => {
+		const [model] = mockMaxSuffixModels;
+		const registry = {
+			find: (provider: string, id: string) => (provider === model.provider && id === model.id ? model : undefined),
+			getAvailable: () => [model],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: model.provider,
+			defaultModelId: model.id,
+			defaultThinkingSelector: ThinkingLevel.Ultra,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.id).toBe("coding-router");
+		expect(result.thinkingLevel).toBe(Effort.XHigh);
+	});
+});
+
 describe("resolveModelScope", () => {
 	test("does not coalesce explicit provider/id patterns to Codex (regression for enabledModels)", async () => {
 		const scoped = await resolveModelScope(["openai/gpt-5.5"], {
@@ -1317,6 +1438,24 @@ describe("parseModelString", () => {
 			expect(result).toEqual({ provider: "example", id: "runtime:auto" });
 		});
 
+		test("extracts ultra when explicitly enabled for provider id selectors", () => {
+			const result = parseModelString("deepseek/deepseek-v4-pro:ultra", { allowUltraSuffix: true });
+			expect(result).toEqual({ provider: "deepseek", id: "deepseek-v4-pro", thinkingLevel: ThinkingLevel.Ultra });
+		});
+
+		test("preserves literal ultra model ids when the caller can prove they exist", () => {
+			const result = parseModelString("nanogpt/coding-router:ultra", {
+				allowUltraSuffix: true,
+				isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:ultra",
+			});
+			expect(result).toEqual({ provider: "nanogpt", id: "coding-router:ultra" });
+		});
+
+		test("leaves :ultra attached to the model id unless the caller opts in via allowUltraSuffix", () => {
+			const result = parseModelString("anthropic/claude-sonnet-4-5:ultra");
+			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:ultra" });
+		});
+
 		test("does not strip inherited object keys as thinking suffixes", () => {
 			const result = parseModelString("anthropic/claude-sonnet-4-5:constructor");
 			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:constructor" });
@@ -1352,6 +1491,18 @@ describe("resolveModelFromString", () => {
 		const result = resolveModelFromString("example/runtime:auto", mockAutoSuffixModels);
 		expect(result?.provider).toBe("example");
 		expect(result?.id).toBe("runtime:auto");
+	});
+
+	test("applies ultra as a provider model selector alias after literal lookup misses", () => {
+		const result = resolveModelFromString("nanogpt/coding-router:ultra", [mockUltraSuffixModels[0]]);
+		expect(result?.provider).toBe("nanogpt");
+		expect(result?.id).toBe("coding-router");
+	});
+
+	test("preserves literal ultra provider model ids before alias parsing", () => {
+		const result = resolveModelFromString("nanogpt/coding-router:ultra", mockUltraSuffixModels);
+		expect(result?.provider).toBe("nanogpt");
+		expect(result?.id).toBe("coding-router:ultra");
 	});
 });
 
@@ -1407,6 +1558,20 @@ describe("extractExplicitThinkingSelector", () => {
 			isLiteralModelId: () => false,
 		});
 		expect(result).toBe("auto");
+	});
+
+	test("does not carry ultra from literal role model ids", () => {
+		const result = extractExplicitThinkingSelector("nanogpt/coding-router:ultra", undefined, {
+			isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:ultra",
+		});
+		expect(result).toBeUndefined();
+	});
+
+	test("treats ultra as an explicit selector when the model id is not literal", () => {
+		const result = extractExplicitThinkingSelector("nanogpt/coding-router:ultra", undefined, {
+			isLiteralModelId: () => false,
+		});
+		expect(result).toBe(ThinkingLevel.Ultra);
 	});
 });
 

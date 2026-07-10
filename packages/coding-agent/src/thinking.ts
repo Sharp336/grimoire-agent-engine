@@ -40,6 +40,11 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 		label: "max",
 		description: "Maximum reasoning the model supports",
 	},
+	[ThinkingLevel.Ultra]: {
+		value: ThinkingLevel.Ultra,
+		label: "ultra",
+		description: "Ultra reasoning (uses max provider effort)",
+	},
 };
 
 const EFFORT_BY_SELECTOR: Readonly<Record<string, Effort>> = {
@@ -59,6 +64,7 @@ const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
 	[ThinkingLevel.High]: ThinkingLevel.High,
 	[ThinkingLevel.XHigh]: ThinkingLevel.XHigh,
 	[ThinkingLevel.Max]: ThinkingLevel.Max,
+	[ThinkingLevel.Ultra]: ThinkingLevel.Ultra,
 };
 
 function getOwnSelector<T>(selectors: Readonly<Record<string, T>>, value: string | null | undefined): T | undefined {
@@ -100,6 +106,9 @@ export function toReasoningEffort(level: ThinkingLevel | undefined): Effort | un
 	if (level === undefined || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) {
 		return undefined;
 	}
+	if (level === ThinkingLevel.Ultra) {
+		return Effort.Max;
+	}
 	return level;
 }
 
@@ -123,7 +132,26 @@ export function resolveThinkingLevelForModel(
 	if (level === ThinkingLevel.Off) {
 		return ThinkingLevel.Off;
 	}
-	return clampThinkingLevelForModel(model, level);
+	if (level === ThinkingLevel.Ultra) {
+		const resolved = clampThinkingLevelForModel(model, Effort.Max);
+		return model && resolved === Effort.Max && getSupportedEfforts(model).includes(Effort.Max)
+			? ThinkingLevel.Ultra
+			: resolved;
+	}
+	return clampThinkingLevelForModel(model, toReasoningEffort(level));
+}
+
+/**
+ * Returns model-aware concrete thinking selectors. Ultra is agent-local and is
+ * available only when the model advertises the provider Max effort.
+ */
+export function getAvailableThinkingLevelsForModel(model: Model): readonly ThinkingLevel[] {
+	const supported = getSupportedEfforts(model);
+	const levels: ThinkingLevel[] = [...supported];
+	if (supported.includes(Effort.Max)) {
+		levels.push(ThinkingLevel.Ultra);
+	}
+	return levels;
 }
 
 /**
@@ -176,7 +204,12 @@ export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLeve
  * for the flag's `options` list, shell completions, and the "invalid level"
  * warning so all three stay in sync.
  */
-export const CLI_THINKING_LEVELS: readonly string[] = [ThinkingLevel.Off, ...THINKING_EFFORTS, AUTO_THINKING];
+export const CLI_THINKING_LEVELS: readonly string[] = [
+	ThinkingLevel.Off,
+	...THINKING_EFFORTS,
+	ThinkingLevel.Ultra,
+	AUTO_THINKING,
+];
 
 /**
  * Parses a `--thinking` CLI value. Accepts every {@link parseConfiguredThinkingLevel}

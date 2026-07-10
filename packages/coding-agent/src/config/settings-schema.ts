@@ -1,3 +1,4 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
@@ -989,7 +990,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: [...THINKING_EFFORTS, AUTO_THINKING],
+		values: [...THINKING_EFFORTS, ThinkingLevel.Ultra, AUTO_THINKING],
 		default: "high",
 		ui: {
 			tab: "model",
@@ -999,6 +1000,7 @@ export const SETTINGS_SCHEMA = {
 			options: [
 				getConfiguredThinkingLevelMetadata(AUTO_THINKING),
 				...THINKING_EFFORTS.map(getThinkingLevelMetadata),
+				getThinkingLevelMetadata(ThinkingLevel.Ultra),
 			],
 		},
 	},

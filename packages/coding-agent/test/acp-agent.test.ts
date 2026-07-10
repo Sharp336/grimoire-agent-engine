@@ -8,6 +8,7 @@ import type {
 	CreateElicitationRequest,
 	CreateElicitationResponse,
 	PromptRequest,
+	SessionConfigOption,
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
 import {
@@ -17,7 +18,8 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -60,6 +62,7 @@ const TEST_MODELS: Model[] = [
 		provider: "anthropic",
 		baseUrl: "https://example.invalid",
 		reasoning: true,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
@@ -72,12 +75,18 @@ const TEST_MODELS: Model[] = [
 		provider: "openai",
 		baseUrl: "https://example.invalid",
 		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+		},
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 8_192,
 	}),
 ];
+
+const ULTRA_THINKING_LEVEL = ThinkingLevel.Ultra;
 
 function makeAssistantMessage(text: string, thinking?: string) {
 	const content: Array<{ type: "text"; text: string } | { type: "thinking"; thinking: string }> = [
@@ -108,9 +117,10 @@ function makeAssistantMessage(text: string, thinking?: string) {
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
-	agent: { sessionId: string; waitForIdle: () => Promise<void> };
+	agent: { sessionId: string; waitForIdle: () => Promise<void>; state: { thinkingLevel: string | undefined } };
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
+	configuredThinkingSelector: string | undefined;
 	customCommands: [] = [];
 	extensionRunner = undefined;
 	isStreaming = false;
@@ -141,6 +151,7 @@ class FakeAgentSession {
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent = {
 			sessionId: this.sessionId,
+			state: { thinkingLevel: undefined },
 			waitForIdle: async () => {
 				await this.waitForIdle();
 			},
@@ -163,17 +174,26 @@ class FakeAgentSession {
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
-		return ["low", "medium", "high"];
+		const efforts = this.model?.thinking?.efforts.map(effort => String(effort)) ?? [];
+		return efforts.includes(Effort.Max) ? [...efforts, ULTRA_THINKING_LEVEL] : efforts;
+	}
+
+	configuredThinkingLevel(): string | undefined {
+		return this.configuredThinkingSelector;
 	}
 
 	setThinkingLevel(level: string | undefined): void {
-		const isChanging = this.thinkingLevel !== level;
+		const providerLevel = level === ULTRA_THINKING_LEVEL ? Effort.Max : level;
+		const isChanging = this.thinkingLevel !== level || this.agent.state.thinkingLevel !== providerLevel;
+		this.configuredThinkingSelector = level;
 		this.thinkingLevel = level;
+		this.agent.state.thinkingLevel = providerLevel;
 		if (isChanging) {
 			for (const listener of this.#listeners) {
 				listener({
 					type: "thinking_level_changed",
 					thinkingLevel: level,
+					configured: undefined,
 				} as AgentSessionEvent);
 			}
 		}
@@ -422,6 +442,29 @@ function expectAcpNotifications(updates: SessionNotification[]): void {
 	}
 }
 
+type AcpSelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
+
+function getSelectConfigOption(
+	configOptions: readonly SessionConfigOption[] | null | undefined,
+	id: string,
+): AcpSelectConfigOption {
+	const option = configOptions?.find(candidate => candidate.id === id);
+	if (option?.type !== "select") {
+		throw new Error(`Missing ACP select config option: ${id}`);
+	}
+	return option;
+}
+
+function getSelectOptionValues(option: AcpSelectConfigOption): string[] {
+	const values: string[] = [];
+	for (const entry of option.options) {
+		if ("value" in entry && typeof entry.value === "string") {
+			values.push(entry.value);
+		}
+	}
+	return values;
+}
+
 const cleanupRoots: string[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -568,6 +611,46 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("advertises and accepts Ultra only for max-capable ACP models", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		const initialThinking = getSelectConfigOption(created.configOptions, "thinking");
+		expect(getSelectOptionValues(initialThinking)).not.toContain(ULTRA_THINKING_LEVEL);
+		await expect(
+			harness.agent.setSessionConfigOption({
+				sessionId: created.sessionId,
+				configId: "thinking",
+				value: ULTRA_THINKING_LEVEL,
+			}),
+		).rejects.toThrow(/thinking level/i);
+		expect(session.thinkingLevel).toBeUndefined();
+
+		const modelResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "model",
+			value: `${TEST_MODELS[1]!.provider}/${TEST_MODELS[1]!.id}`,
+		});
+		const maxModelThinking = getSelectConfigOption(modelResponse.configOptions, "thinking");
+		expect(TEST_MODELS[1]!.thinking?.efforts).toContain(Effort.Max);
+		expect(TEST_MODELS[1]!.thinking?.efforts.map(effort => String(effort))).not.toContain(ULTRA_THINKING_LEVEL);
+		expect(getSelectOptionValues(maxModelThinking)).toContain(ULTRA_THINKING_LEVEL);
+
+		const ultraResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "thinking",
+			value: ULTRA_THINKING_LEVEL,
+		});
+		const ultraThinking = getSelectConfigOption(ultraResponse.configOptions, "thinking");
+		expect(ultraThinking.currentValue).toBe(ULTRA_THINKING_LEVEL);
+		expect(session.configuredThinkingLevel()).toBe(ULTRA_THINKING_LEVEL);
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Max);
+
+		harness.abortController.abort();
 	});
 
 	it("advertises plan mode and emits schema-valid mode updates", async () => {

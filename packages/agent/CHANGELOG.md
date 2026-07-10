@@ -39,6 +39,9 @@
 ### Fixed
 
 - Fixed serialization of BigInt tool arguments to prevent data loss during remote compaction.
+### Added
+
+- Added the agent-local `Ultra` thinking selector, mapping it to Max while preserving provider effort levels and applying Max lowering for compaction paths.
 
 ## [16.4.1] - 2026-07-10
 

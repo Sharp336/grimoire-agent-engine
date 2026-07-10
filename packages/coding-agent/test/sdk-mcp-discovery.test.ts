@@ -45,6 +45,26 @@ function createReasoningModel(): Model<"openai-responses"> {
 	});
 }
 
+function createMaxReasoningModel(): Model<"openai-responses"> {
+	return buildModel({
+		id: "mock-max-reasoning",
+		name: "mock-max-reasoning",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://example.invalid",
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			defaultLevel: Effort.High,
+		},
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 8192,
+		maxTokens: 2048,
+	});
+}
+
 const oldSessionMtime = new Date("2000-01-01T00:00:00.000Z");
 
 describe("createAgentSession MCP discovery prompt gating", () => {
@@ -197,6 +217,103 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			enableLsp: false,
 		});
 
+		expect(session.getActiveToolNames()).not.toContain("task");
+		await session.dispose();
+	});
+
+	it("force-activates task for implicit root Ultra under tools.discoveryMode all", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Ultra,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		const prompt = session.systemPrompt.join("\n");
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.getActiveToolNames()).toContain("task");
+		expect(prompt).not.toContain("Delegation is preferred here");
+		expect(prompt).not.toContain("Delegation is the default here");
+		await session.dispose();
+	});
+
+	it("keeps ordinary Max discoverable under tools.discoveryMode all when task.eager is defaulted", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Max,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Max);
+		expect(session.getActiveToolNames()).not.toContain("task");
+		await session.dispose();
+	});
+
+	it("keeps task discoverable when explicit task.eager default suppresses implicit Ultra activation", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all", "task.eager": "default" }),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Ultra,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.getActiveToolNames()).not.toContain("task");
+		await session.dispose();
+	});
+
+	it("keeps subagent Ultra task discoverable under tools.discoveryMode all", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Ultra,
+			taskDepth: 1,
+			parentTaskPrefix: "SubAgent",
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
 		expect(session.getActiveToolNames()).not.toContain("task");
 		await session.dispose();
 	});

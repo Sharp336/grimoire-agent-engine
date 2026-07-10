@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -60,6 +61,26 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			],
 		});
 	};
+
+	function createMaxReasoningModel() {
+		return buildModel({
+			id: "runtime-max-reasoning-model",
+			name: "Runtime Max Reasoning Model",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://runtime.example.com/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				defaultLevel: Effort.High,
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+	}
 
 	const dynamicOnlyProviderConfig: ProviderConfigInput = {
 		baseUrl: "https://runtime.example.com/v1",
@@ -290,6 +311,40 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		// The extension model has no explicit ladder; the inferred fallback tops
 		// out at xhigh, so the real max level clamps down.
 		expect(session.thinkingLevel).toBe(Effort.XHigh);
+	});
+
+	test("preserves initial Ultra selector on session while Agent starts with max effort", async () => {
+		const authStorage = await AuthStorage.create(path.join(tempDir, "ultra-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "ultra-models.yml"));
+		const sessionManager = SessionManager.inMemory();
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Ultra,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+			expect(session.agent.state.thinkingLevel).toBe(Effort.Max);
+			expect(session.agent.state.thinkingLevel).not.toBe(ThinkingLevel.Ultra);
+			expect(sessionManager.buildSessionContext().thinkingLevel).toBe(ThinkingLevel.Ultra);
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("selects the settings default model without synchronously validating auth", async () => {

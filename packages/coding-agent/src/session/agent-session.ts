@@ -286,6 +286,8 @@ import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redire
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
+import ultraModeContextPrompt from "../prompts/system/ultra-mode-context.md" with { type: "text" };
+import ultraModeResetPrompt from "../prompts/system/ultra-mode-reset.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -303,6 +305,7 @@ import {
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	concreteThinkingLevel,
+	getAvailableThinkingLevelsForModel,
 	parseConfiguredThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
@@ -511,6 +514,23 @@ const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
  *  thinking/response loop. Steers the model off the repeated content; never displayed. */
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
+
+const ULTRA_MODE_CONTEXT_TYPE = "ultra-mode-context";
+const ULTRA_MODE_RESET_TYPE = "ultra-mode-reset";
+
+type UltraModeInactiveReason = "selector-inactive" | "subagent" | "task-eager-configured" | "task-unavailable";
+
+type UltraModeDecision = { active: true; taskToolName: string } | { active: false; reason: UltraModeInactiveReason };
+
+type UltraModeContextStatus = "active" | "reset";
+
+interface UltraModeContextDetails {
+	selector: "ultra";
+	status: UltraModeContextStatus;
+	reason: string;
+	taskTool?: string;
+	providerThinkingLevel?: Effort;
+}
 
 function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") return content;
@@ -1662,7 +1682,8 @@ type AgentContinueSkipReason =
 	| PostPromptSkipReason
 	| "session-unavailable"
 	| "should-continue-false"
-	| "post-restore-unavailable";
+	| "post-restore-unavailable"
+	| "post-ultra-reconcile-unavailable";
 
 type ScheduledAgentContinueOptions = {
 	delayMs?: number;
@@ -1739,7 +1760,7 @@ export class AgentSession {
 	readonly configWarnings: string[] = [];
 
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	/** Effective, metadata-clamped thinking level applied to the agent (never `auto`). */
+	/** Model-clamped local selector (never `auto`); Ultra lowers to Max when applied to the agent. */
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** True when the user configured `auto`; the effective level is resolved per turn. */
 	#autoThinking: boolean = false;
@@ -2507,7 +2528,7 @@ export class AgentSession {
 			this.#autoThinking = true;
 			this.#thinkingLevel = resolveProvisionalAutoLevel(this.model);
 		} else {
-			this.#thinkingLevel = config.thinkingLevel;
+			this.#thinkingLevel = resolveThinkingLevelForModel(this.model, config.thinkingLevel);
 		}
 		if (config.prewalk) {
 			this.#prewalk = config.prewalk;
@@ -2603,6 +2624,7 @@ export class AgentSession {
 				}
 			}
 			await this.#maintainContextMidRun(messages, signal, context);
+			await this.#reconcileQueuedUltraModeContext();
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -4772,6 +4794,13 @@ export class AgentSession {
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
+					if (this.agent.hasQueuedMessages()) {
+						await this.#reconcileQueuedUltraModeContext();
+						if (signal.aborted || this.#isDisposed) {
+							this.#skipAgentContinue("post-ultra-reconcile-unavailable", options);
+							return;
+						}
+					}
 					await this.agent.continue();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
@@ -4793,11 +4822,12 @@ export class AgentSession {
 
 	#scheduleAutoContinuePrompt(generation: number): void {
 		const continuePrompt = async () => {
-			// Compaction summarizes away the first-message eager preludes, so re-assert the
-			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
-			// at invocation (past the abort check below), so an aborted continuation queues
-			// nothing; scoped to this request via prependMessages, never the shared queue.
-			const eagerNudges = this.#buildPostCompactionEagerNudges();
+			// Compaction can summarize away hidden mode/task preludes, so re-assert any
+			// currently-applicable root-session context on this auto-resumed turn. This
+			// runs at invocation (past the abort check below), so an aborted continuation
+			// queues nothing; scoped to this request via prependMessages, never the shared
+			// queue.
+			const eagerNudges = await this.#buildPostCompactionEagerNudges();
 			await this.#promptWithMessage(
 				{
 					role: "developer",
@@ -8179,8 +8209,9 @@ export class AgentSession {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
-			// Steer/follow-up the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
+			// Steer/follow-up hidden keyword context BEFORE the queued user message so the
+			// model reads turn-local guidance ahead of the prompt it modifies. Standing
+			// Ultra mode context is re-derived when the queued turn actually executes.
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
@@ -8383,6 +8414,12 @@ export class AgentSession {
 			const vibeModeMessage = this.#buildVibeModeMessage();
 			if (vibeModeMessage) {
 				messages.push(vibeModeMessage);
+			}
+			const hasExplicitUltraModeMessage = options?.prependMessages?.some(message =>
+				this.#isUltraModeCustomMessage(message),
+			);
+			if (!hasExplicitUltraModeMessage) {
+				messages.push(...(await this.#buildRootTurnUltraModeMessages(message, { activateTask: true })));
 			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
@@ -9882,7 +9919,15 @@ export class AgentSession {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		if (this.#autoThinking) {
+			this.setThinkingLevel(AUTO_THINKING);
+			return;
+		}
+		const requestedLevel =
+			this.configuredThinkingLevel() === ThinkingLevel.Ultra
+				? ThinkingLevel.Ultra
+				: (preferredDefault ?? this.#thinkingLevel);
+		this.setThinkingLevel(requestedLevel);
 	}
 
 	/**
@@ -10067,9 +10112,9 @@ export class AgentSession {
 	/**
 	 * Get available thinking levels for current model.
 	 */
-	getAvailableThinkingLevels(): ReadonlyArray<Effort> {
+	getAvailableThinkingLevels(): readonly ThinkingLevel[] {
 		if (!this.model) return [];
-		return getSupportedEfforts(this.model);
+		return getAvailableThinkingLevelsForModel(this.model);
 	}
 
 	// =========================================================================
@@ -11984,6 +12029,169 @@ export class AgentSession {
 		};
 	}
 
+	#stripQueuedUltraModeMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+		return messages.filter(message => !this.#isUltraModeCustomMessage(message));
+	}
+
+	async #reconcileQueuedUltraModeContext(): Promise<void> {
+		if (!this.agent.hasQueuedMessages()) return;
+
+		const originalSteering = [...this.agent.peekSteeringQueue()];
+		const originalFollowUp = [...this.agent.peekFollowUpQueue()];
+		const steering = this.#stripQueuedUltraModeMessages(originalSteering);
+		const followUp = this.#stripQueuedUltraModeMessages(originalFollowUp);
+		const firstQueuedRootMessage = steering[0] ?? followUp[0];
+		if (!firstQueuedRootMessage) {
+			if (steering.length !== originalSteering.length || followUp.length !== originalFollowUp.length) {
+				this.agent.replaceQueues(steering, followUp);
+			}
+			return;
+		}
+
+		const ultraModeMessages = await this.#buildUltraModeContextMessages({
+			activateTask: true,
+			suppressActiveReassertion: true,
+		});
+		if (steering.length > 0) {
+			this.agent.replaceQueues([...ultraModeMessages, ...steering], followUp);
+			return;
+		}
+		this.agent.replaceQueues(steering, [...ultraModeMessages, ...followUp]);
+	}
+
+	#implicitUltraTaskAllowed(): boolean {
+		return this.#requestedToolNames === undefined || this.#requestedToolNames.has("task");
+	}
+
+	#resolveImplicitUltraModeDecision(): UltraModeDecision {
+		if (this.configuredThinkingLevel() !== ThinkingLevel.Ultra) {
+			return { active: false, reason: "selector-inactive" };
+		}
+		if (this.#agentKind === "sub") {
+			return { active: false, reason: "subagent" };
+		}
+		if (this.settings.isConfigured("task.eager")) {
+			return { active: false, reason: "task-eager-configured" };
+		}
+		if (!this.#implicitUltraTaskAllowed()) {
+			return { active: false, reason: "task-unavailable" };
+		}
+		const activeToolNames = this.getActiveToolNames();
+		const taskIsAvailable = activeToolNames.includes("task") || this.#toolRegistry.has("task");
+		if (!taskIsAvailable) {
+			return { active: false, reason: "task-unavailable" };
+		}
+		return { active: true, taskToolName: this.#buildEagerPreludeContext().toolRefs.task };
+	}
+
+	async #ensureImplicitUltraTaskActive(): Promise<void> {
+		if (!this.#implicitUltraTaskAllowed()) return;
+		const activeToolNames = this.getActiveToolNames();
+		if (activeToolNames.includes("task")) return;
+		if (!this.#toolRegistry.has("task")) return;
+		await this.#applyActiveToolsByName([...activeToolNames, "task"], { persistMCPSelection: false });
+	}
+
+	#isUltraModeCustomMessage(message: AgentMessage): message is CustomMessage<UltraModeContextDetails> {
+		return (
+			message.role === "custom" &&
+			(message.customType === ULTRA_MODE_CONTEXT_TYPE || message.customType === ULTRA_MODE_RESET_TYPE)
+		);
+	}
+
+	#isAgentOnlyRootTurnMessage(message: AgentMessage): boolean {
+		if (message.role === "user") return false;
+		if ("attribution" in message && message.attribution === "user") return false;
+		return true;
+	}
+
+	#lastUltraModeContextStatusFromBranch(): UltraModeContextStatus | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry?.type !== "custom_message") continue;
+			if (entry.customType === ULTRA_MODE_CONTEXT_TYPE) return "active";
+			if (entry.customType === ULTRA_MODE_RESET_TYPE) return "reset";
+			const details = entry.details;
+			if (!details || typeof details !== "object" || Array.isArray(details)) continue;
+			if ((details as Partial<UltraModeContextDetails>).selector !== "ultra") continue;
+			const status = (details as Partial<UltraModeContextDetails>).status;
+			if (status === "active" || status === "reset") return status;
+		}
+		return undefined;
+	}
+
+	#createUltraModeContextMessage(taskToolName: string): CustomMessage<UltraModeContextDetails> {
+		const context = this.#buildEagerPreludeContext();
+		const details: UltraModeContextDetails = {
+			selector: "ultra",
+			status: "active",
+			reason: "implicit-root",
+			taskTool: taskToolName,
+			providerThinkingLevel: Effort.Max,
+		};
+		return {
+			role: "custom",
+			customType: ULTRA_MODE_CONTEXT_TYPE,
+			content: prompt.render(ultraModeContextPrompt, context),
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	#createUltraModeResetMessage(reason: UltraModeInactiveReason): CustomMessage<UltraModeContextDetails> {
+		const details: UltraModeContextDetails = {
+			selector: "ultra",
+			status: "reset",
+			reason,
+		};
+		return {
+			role: "custom",
+			customType: ULTRA_MODE_RESET_TYPE,
+			content: prompt.render(ultraModeResetPrompt, {}),
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	async #buildUltraModeContextMessages(options: {
+		activateTask: boolean;
+		suppressActiveReassertion?: boolean;
+	}): Promise<CustomMessage[]> {
+		const lastStatus = this.#lastUltraModeContextStatusFromBranch();
+		const decision = this.#resolveImplicitUltraModeDecision();
+		if (decision.active) {
+			if (options.activateTask) {
+				await this.#ensureImplicitUltraTaskActive();
+			}
+			if (!this.getActiveToolNames().includes("task")) {
+				return [];
+			}
+			if (options.suppressActiveReassertion && lastStatus === "active") {
+				return [];
+			}
+			return [this.#createUltraModeContextMessage(decision.taskToolName)];
+		}
+		if (lastStatus !== "active") {
+			return [];
+		}
+		return [this.#createUltraModeResetMessage(decision.reason)];
+	}
+
+	async #buildRootTurnUltraModeMessages(
+		message: AgentMessage,
+		options: { activateTask: boolean },
+	): Promise<CustomMessage[]> {
+		if (this.#isUltraModeCustomMessage(message)) return [];
+		return this.#buildUltraModeContextMessages({
+			activateTask: options.activateTask,
+			suppressActiveReassertion: this.#isAgentOnlyRootTurnMessage(message),
+		});
+	}
 	#createEagerTodoPrelude(
 		promptText: string | undefined,
 	): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
@@ -12085,16 +12293,15 @@ export class AgentSession {
 	}
 
 	/**
-	 * Build the eager task/todo reminders to re-inject on the auto-continuation turn that
-	 * follows a compaction. The first-message preludes are the oldest messages, so
-	 * compaction summarizes them away and the agent silently loses the delegate-via-tasks
-	 * and phased-todo guidance mid-work; this re-asserts them, reminder-only (the todo
-	 * builder drops its forced tool_choice when `promptText` is undefined). Each builder
-	 * still applies its own mode / agent-kind / plan-mode / tool-active / surviving-todo
-	 * gates, so an empty array means nothing currently warrants a nudge.
+	 * Build the hidden mode/task reminders to re-inject on the auto-continuation turn
+	 * that follows a compaction. Compaction can summarize away the earliest hidden
+	 * custom messages, so this re-asserts only currently applicable guidance. Each
+	 * builder still applies its own mode / agent-kind / plan-mode / tool-active gates,
+	 * so an empty array means nothing currently warrants a nudge.
 	 */
-	#buildPostCompactionEagerNudges(): AgentMessage[] {
+	async #buildPostCompactionEagerNudges(): Promise<AgentMessage[]> {
 		const nudges: AgentMessage[] = [];
+		nudges.push(...(await this.#buildUltraModeContextMessages({ activateTask: true })));
 		const todo = this.#createEagerTodoPrelude(undefined);
 		if (todo) nudges.push(todo.message);
 		const task = this.#createEagerTaskPrelude(undefined);

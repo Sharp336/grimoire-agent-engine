@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -137,6 +137,16 @@ describe("Settings", () => {
 			const settings = Settings.isolated();
 			expect(settings.get("providers.maxInFlightRequests")).toEqual({});
 			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
+		});
+
+		it("accepts ultra in config without adding it to provider effort metadata", () => {
+			const values = getEnumValues("defaultThinkingLevel");
+			expect(values).toContain("ultra");
+			expect(values).toContain(Effort.Max);
+			expect(THINKING_EFFORTS).not.toContain("ultra");
+
+			const settings = Settings.isolated({ defaultThinkingLevel: "ultra" });
+			expect(settings.get("defaultThinkingLevel")).toBe("ultra");
 		});
 
 		it("exposes all tool calling mode options", () => {

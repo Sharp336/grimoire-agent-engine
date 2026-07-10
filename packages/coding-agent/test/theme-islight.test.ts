@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { generateThemeVars } from "@oh-my-pi/pi-coding-agent/export/html";
 import { defaultThemes } from "@oh-my-pi/pi-coding-agent/modes/theme/defaults";
 import { getResolvedThemeColors, getThemeByName, isLightTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -15,6 +16,14 @@ describe("Theme.isLight", () => {
 		expect((await getThemeByName("porcelain"))?.isLight).toBe(true);
 		expect((await getThemeByName("light-catppuccin"))?.isLight).toBe(true);
 		expect((await getThemeByName("dark-catppuccin"))?.isLight).toBe(false);
+	});
+
+	it("renders ultra with max's thinking border treatment", async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected built-in dark theme");
+		expect(theme.getThinkingBorderColor(ThinkingLevel.Ultra)("sample")).toBe(
+			theme.getThinkingBorderColor(ThinkingLevel.Max)("sample"),
+		);
 	});
 
 	it("exposes the status-line surface luminance for accent sizing", async () => {

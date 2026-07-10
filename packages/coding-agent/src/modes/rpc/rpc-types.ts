@@ -6,7 +6,7 @@
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -240,7 +240,7 @@ export type RpcResponse =
 			type: "response";
 			command: "cycle_thinking_level";
 			success: true;
-			data: { level: Effort } | null;
+			data: { level: ThinkingLevel } | null;
 	  }
 
 	// Queue modes

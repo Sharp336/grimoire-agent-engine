@@ -1685,6 +1685,7 @@ export class Theme {
 				return (str: string) => this.fg("thinkingHigh", str);
 			case "xhigh":
 				return (str: string) => this.fg("thinkingXhigh", str);
+			case "ultra":
 			case "max":
 				// thinkingMax is optional; themes without it resolve to the xhigh color.
 				return (str: string) => this.fg(this.#fgColors.thinkingMax ? "thinkingMax" : "thinkingXhigh", str);

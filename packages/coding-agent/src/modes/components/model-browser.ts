@@ -26,7 +26,12 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/mo
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	parseConfiguredThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -70,15 +75,19 @@ export function resolveRoleAssignments(
 ): RoleAssignments {
 	const resolvedThinkingLevel = (
 		role: string,
+		model: Model,
 		resolved: { explicitThinkingLevel: boolean; thinkingLevel?: ConfiguredThinkingLevel },
 	): ConfiguredThinkingLevel => {
-		if (resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined) {
-			return resolved.thinkingLevel;
+		const configured =
+			resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined
+				? resolved.thinkingLevel
+				: role === "default"
+					? (parseConfiguredThinkingLevel(settings.get("defaultThinkingLevel")) ?? ThinkingLevel.Inherit)
+					: ThinkingLevel.Inherit;
+		if (configured === ThinkingLevel.Ultra) {
+			return resolveThinkingLevelForModel(model, configured) ?? ThinkingLevel.Inherit;
 		}
-		if (role === "default") {
-			return parseConfiguredThinkingLevel(settings.get("defaultThinkingLevel")) ?? ThinkingLevel.Inherit;
-		}
-		return ThinkingLevel.Inherit;
+		return configured;
 	};
 
 	const roles: RoleAssignments = {};
@@ -95,7 +104,7 @@ export function resolveRoleAssignments(
 		if (resolved.model) {
 			roles[role] = {
 				model: resolved.model,
-				thinkingLevel: resolvedThinkingLevel(role, resolved),
+				thinkingLevel: resolvedThinkingLevel(role, resolved.model, resolved),
 				autoSelected: false,
 			};
 		}
@@ -109,7 +118,7 @@ export function resolveRoleAssignments(
 			if (!resolved.model) continue;
 			roles[role] = {
 				model: resolved.model,
-				thinkingLevel: resolvedThinkingLevel(role, resolved),
+				thinkingLevel: resolvedThinkingLevel(role, resolved.model, resolved),
 				autoSelected: true,
 			};
 		}
@@ -247,6 +256,8 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 		case ThinkingLevel.XHigh:
 			return glyphOf(theme.thinking.xhigh);
 		case ThinkingLevel.Max:
+			return glyphOf(theme.thinking.max);
+		case ThinkingLevel.Ultra:
 			return glyphOf(theme.thinking.max);
 		case ThinkingLevel.Inherit:
 			return "";

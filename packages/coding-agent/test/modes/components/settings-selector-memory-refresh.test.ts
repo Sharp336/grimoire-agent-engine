@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -39,7 +40,10 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 	};
 }
 
-function createSelector(onCancel: () => void = () => {}): SettingsSelectorComponent {
+function createSelector(
+	onCancel: () => void = () => {},
+	contextOverrides: Partial<ConstructorParameters<typeof SettingsSelectorComponent>[0]> = {},
+): SettingsSelectorComponent {
 	return new SettingsSelectorComponent(
 		{
 			availableThinkingLevels: [],
@@ -47,6 +51,7 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			availableThemes: ["dark"],
 			providers: [],
 			cwd: process.cwd(),
+			...contextOverrides,
 		},
 		{
 			onChange: () => {},
@@ -62,6 +67,22 @@ function focusMemoryTab(comp: SettingsSelectorComponent): void {
 	}
 }
 
+describe("SettingsSelectorComponent model tab", () => {
+	it("includes agent-local ultra in the runtime thinking submenu", () => {
+		const comp = createSelector(() => {}, {
+			availableThinkingLevels: [ThinkingLevel.Max, ThinkingLevel.Ultra],
+		});
+
+		comp.handleInput("\x1b[C");
+		const modelTab = comp.render(120).join("\n");
+		expect(modelTab).toContain("Thinking Level");
+
+		comp.handleInput("\n");
+		const submenu = comp.render(120).join("\n");
+		expect(submenu).toContain("max");
+		expect(submenu).toContain("ultra");
+	});
+});
 describe("SettingsSelectorComponent memory tab", () => {
 	it("reveals condition-gated Hindsight rows the moment memory.backend changes via the submenu", () => {
 		settings.set("memory.backend", "off");

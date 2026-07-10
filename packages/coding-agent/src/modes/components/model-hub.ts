@@ -12,7 +12,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	type Component,
@@ -30,7 +29,12 @@ import {
 import type { ModelRegistry } from "../../config/model-registry";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getAvailableThinkingLevelsForModel,
+	getConfiguredThinkingLevelMetadata,
+} from "../../thinking";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -766,7 +770,7 @@ export class ModelHubComponent implements Component {
 	}
 
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
-		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getAvailableThinkingLevelsForModel(model)];
 	}
 
 	#openRoleStrip(item: ModelBrowserItem): void {

@@ -16,12 +16,11 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
-import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { resolveBareVariantAlias, resolveVariantAlias } from "@oh-my-pi/pi-catalog/variant-collapse";
@@ -87,22 +86,28 @@ export interface ScopedModel {
 
 interface ThinkingSuffixOptions {
 	allowMaxSuffix?: boolean;
+	allowUltraSuffix?: boolean;
 	allowAutoAlias?: boolean;
 }
 
 interface ModelStringParseOptions extends ThinkingSuffixOptions {
 	isLiteralModelId?: (provider: string, id: string) => boolean;
 }
-// Suffix recognition for the model-pattern parser: `:max` is a real thinking
-// level and `:auto` maps to the auto sentinel. Both are gated behind flags
-// (and the literal-id / exact-match guards on the callers) because real model
-// ids end in `:max` (e.g. `glm-4.7:max`) — an ungated split would silently
-// reinterpret them as a thinking suffix.
-const MAX_THINKING_SUFFIX_OPTIONS: ThinkingSuffixOptions = { allowMaxSuffix: true, allowAutoAlias: true };
+// Suffix recognition for the model-pattern parser: `:max` and `:ultra` are real
+// thinking levels and `:auto` maps to the auto sentinel. They are gated behind
+// flags (and the literal-id / exact-match guards on the callers) because real
+// model ids can end in these tokens (e.g. `glm-4.7:max`) — an ungated split
+// would silently reinterpret them as thinking suffixes.
+const GUARDED_THINKING_SUFFIX_OPTIONS: ThinkingSuffixOptions = {
+	allowMaxSuffix: true,
+	allowUltraSuffix: true,
+	allowAutoAlias: true,
+};
 
 function parseThinkingSuffix(value: string, options?: ThinkingSuffixOptions): ConfiguredThinkingLevel | undefined {
 	const level = parseThinkingLevel(value);
 	if (level === ThinkingLevel.Max) return options?.allowMaxSuffix === true ? level : undefined;
+	if (level === ThinkingLevel.Ultra) return options?.allowUltraSuffix === true ? level : undefined;
 	if (level !== undefined) return level;
 	if (options?.allowAutoAlias === true && value === AUTO_THINKING) return AUTO_THINKING;
 	return undefined;
@@ -112,9 +117,9 @@ function parseThinkingSuffix(value: string, options?: ThinkingSuffixOptions): Co
  * Split a trailing `:<level>` thinking selector off a model pattern.
  *
  * `level` is set when the suffix parses as a concrete thinking level (or, when
- * the caller opts in via `allowMaxSuffix`/`allowAutoAlias`, the guarded `:max`
- * level / `:auto` sentinel); `base` then has the suffix stripped. Otherwise
- * `base` is the input.
+ * the caller opts in via `allowMaxSuffix`/`allowUltraSuffix`/`allowAutoAlias`,
+ * the guarded `:max` / `:ultra` level or `:auto` sentinel); `base` then has the
+ * suffix stripped. Otherwise `base` is the input.
  * `minColonIndex` requires the colon to appear strictly after that index —
  * role-alias callers pass the matched alias prefix length.
  */
@@ -155,15 +160,15 @@ function resolveGlobScopePattern(
 		};
 	}
 
-	const maxSuffix = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
-	if (maxSuffix.level !== undefined) {
+	const guardedSuffix = splitThinkingSuffix(pattern, -1, GUARDED_THINKING_SUFFIX_OPTIONS);
+	if (guardedSuffix.level !== undefined) {
 		const literalMatches = matchingGlobModels(pattern, availableModels);
 		if (literalMatches.length > 0) {
 			return { models: literalMatches, thinkingLevel: undefined, explicitThinkingLevel: false };
 		}
-		const thinkingLevel = concreteThinkingLevel(maxSuffix.level);
+		const thinkingLevel = concreteThinkingLevel(guardedSuffix.level);
 		return {
-			models: matchingGlobModels(maxSuffix.base, availableModels),
+			models: matchingGlobModels(guardedSuffix.base, availableModels),
 			thinkingLevel,
 			explicitThinkingLevel: thinkingLevel !== undefined,
 		};
@@ -191,13 +196,14 @@ export function parseModelString(
 	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
 	const strict = splitThinkingSuffix(id);
 	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
-	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
-	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
+	// `max` and `ultra` are real thinking selectors, but real model IDs can also
+	// end in those tokens. Context-aware callers pass a literal lookup so those
+	// models win.
+	const guardedAlias = splitThinkingSuffix(id, -1, options);
+	if (guardedAlias.level) {
 		return options?.isLiteralModelId?.(provider, id) === true
 			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
+			: { provider, id: guardedAlias.base, thinkingLevel: guardedAlias.level };
 	}
 	return { provider, id };
 }
@@ -240,6 +246,22 @@ export function formatModelSelectorValue(selector: string, thinkingLevel: Config
 	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
 }
 
+function resolveExplicitThinkingLevelForModel(
+	model: Model<Api>,
+	thinkingLevel: ThinkingLevel | undefined,
+): ThinkingLevel | undefined {
+	const resolved = resolveThinkingLevelForModel(model, thinkingLevel);
+	return thinkingLevel === ThinkingLevel.Ultra ? resolved : (resolved ?? thinkingLevel);
+}
+
+function resolveConfiguredThinkingLevelForModel(
+	model: Model<Api>,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (thinkingLevel === AUTO_THINKING) return AUTO_THINKING;
+	return resolveExplicitThinkingLevelForModel(model, thinkingLevel);
+}
+
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
 	const colonIdx = modelId.lastIndexOf(":");
 	if (colonIdx === -1) {
@@ -247,10 +269,10 @@ function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: st
 	}
 
 	const suffix = modelId.slice(colonIdx + 1).trim();
-	// `max` is a thinking-level suffix, never an OpenRouter route suffix, so
-	// `openrouter/<id>:max` falls through to the max-aware selector split instead of
-	// being cloned into a literal `<id>:max` model id with the reasoning level lost.
-	if (!suffix || parseThinkingSuffix(suffix, MAX_THINKING_SUFFIX_OPTIONS)) {
+	// Guarded thinking-level suffixes are never OpenRouter route suffixes, so
+	// `openrouter/<id>:ultra` falls through to selector splitting instead of being
+	// cloned into a literal `<id>:ultra` model id with the reasoning level lost.
+	if (!suffix || parseThinkingSuffix(suffix, GUARDED_THINKING_SUFFIX_OPTIONS)) {
 		return undefined;
 	}
 
@@ -772,10 +794,10 @@ function parseModelPatternWithContext(
 		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
-	// No match - try stripping a valid thinking suffix and recursing.
-	// `max` is accepted only after the full pattern failed, so literal model IDs
-	// ending in `:max` keep winning over the thinking suffix.
-	const { base, level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	// No match - try stripping a valid thinking suffix and recursing. Guarded
+	// suffixes are accepted only after the full pattern failed, so literal model
+	// IDs ending in `:max` / `:ultra` keep winning over the thinking suffix.
+	const { base, level } = splitThinkingSuffix(pattern, -1, GUARDED_THINKING_SUFFIX_OPTIONS);
 	if (level) {
 		const result = parseModelPatternWithContext(base, availableModels, context, options);
 		if (result.model) {
@@ -941,7 +963,7 @@ function resolveDefaultInheritedPatterns(
 		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
 			pattern,
 			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-			MAX_THINKING_SUFFIX_OPTIONS,
+			GUARDED_THINKING_SUFFIX_OPTIONS,
 		);
 		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
 		if (aliasRole === role) {
@@ -978,7 +1000,7 @@ function resolveConfiguredRolePattern(
 	const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
 		normalized,
 		modelRoleAliasPrefixLength(normalized) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-		MAX_THINKING_SUFFIX_OPTIONS,
+		GUARDED_THINKING_SUFFIX_OPTIONS,
 	);
 	const role = getModelRoleAlias(aliasCandidate, settings);
 	if (!role) return [normalized];
@@ -1097,9 +1119,7 @@ export function resolveModelRoleValue(
 			return {
 				model: resolved.model,
 				thinkingLevel: resolved.explicitThinkingLevel
-					? resolved.thinkingLevel === AUTO_THINKING
-						? AUTO_THINKING
-						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
+					? resolveConfiguredThinkingLevelForModel(resolved.model, resolved.thinkingLevel)
 					: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
 				warning: resolved.warning,
@@ -1140,12 +1160,12 @@ export function extractExplicitThinkingSelector(
 		if (strictSelector) {
 			return strictSelector;
 		}
-		const maxSelector = splitThinkingSuffix(current, rolePrefixLength, MAX_THINKING_SUFFIX_OPTIONS).level;
+		const guardedSelector = splitThinkingSuffix(current, rolePrefixLength, GUARDED_THINKING_SUFFIX_OPTIONS).level;
 		if (
-			maxSelector &&
+			guardedSelector &&
 			(modelRoleAliasPrefixLength(current) !== undefined || !isLiteralModelSelector(current, options))
 		) {
-			return maxSelector;
+			return guardedSelector;
 		}
 		const expanded = expandRoleAlias(current, settings).trim();
 		if (!expanded || expanded === current) break;
@@ -1167,7 +1187,7 @@ export function resolveModelFromString(
 	const exact = available.find(model => `${model.provider}/${model.id}` === value);
 	if (exact) return exact;
 	const parsed = parseModelString(value, {
-		...MAX_THINKING_SUFFIX_OPTIONS,
+		...GUARDED_THINKING_SUFFIX_OPTIONS,
 		isLiteralModelId: (provider, id) => available.some(model => model.provider === provider && model.id === id),
 	});
 	if (parsed) {
@@ -1360,9 +1380,7 @@ export async function resolveModelScope(
 		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
-			thinkingLevel: explicit
-				? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
-				: thinkingLevel,
+			thinkingLevel: explicit ? resolveExplicitThinkingLevelForModel(model, thinkingLevel) : thinkingLevel,
 			explicitThinkingLevel: explicit,
 		});
 	};
@@ -1661,10 +1679,11 @@ export function resolveCliModel(options: {
 		selector = `${selector}@${upstream}`;
 	}
 
+	const resolvedThinkingLevel = resolveConfiguredThinkingLevelForModel(model, thinkingLevel);
 	return {
 		model,
 		selector,
-		thinkingLevel,
+		thinkingLevel: resolvedThinkingLevel,
 		warning,
 		error: undefined,
 	};
@@ -1691,7 +1710,7 @@ export async function findInitialModel(options: {
 	isContinuing: boolean;
 	defaultProvider?: string;
 	defaultModelId?: string;
-	defaultThinkingSelector?: Effort;
+	defaultThinkingSelector?: ThinkingLevel;
 	modelRegistry: InitialModelRegistry;
 }): Promise<InitialModelResult> {
 	const {
@@ -1706,7 +1725,7 @@ export async function findInitialModel(options: {
 	} = options;
 
 	let model: Model<Api> | undefined;
-	let thinkingLevel: Effort | undefined;
+	let thinkingLevel: ThinkingLevel | undefined;
 
 	// 1. CLI args take priority
 	if (cliProvider && cliModel) {
@@ -1727,10 +1746,7 @@ export async function findInitialModel(options: {
 				: (scoped.thinkingLevel ?? defaultThinkingSelector);
 		return {
 			model: scoped.model,
-			thinkingLevel:
-				scopedThinkingSelector === ThinkingLevel.Off
-					? ThinkingLevel.Off
-					: clampThinkingLevelForModel(scoped.model, scopedThinkingSelector),
+			thinkingLevel: resolveThinkingLevelForModel(scoped.model, scopedThinkingSelector),
 			fallbackMessage: undefined,
 		};
 	}
@@ -1740,7 +1756,7 @@ export async function findInitialModel(options: {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
 		if (found) {
 			model = found;
-			thinkingLevel = clampThinkingLevelForModel(found, defaultThinkingSelector);
+			thinkingLevel = resolveThinkingLevelForModel(found, defaultThinkingSelector);
 			return { model, thinkingLevel, fallbackMessage: undefined };
 		}
 	}

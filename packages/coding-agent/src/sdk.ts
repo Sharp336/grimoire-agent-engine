@@ -6,7 +6,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { Context, CredentialDisabledEvent, Message, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -2606,15 +2606,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (effectiveDiscoveryMode === "all") {
 			// Tools a forced tool_choice will target must stay active, or the named
 			// choice references a tool absent from the request (provider 400). Eager
-			// todos force a named `todo` choice on the first turn. `task` is also kept
-			// active under discovery-all when `task.eager` is not `default`, so eager delegation is
-			// possible and the Eager Tasks prompt section renders, even though nothing
-			// forces a `task` tool_choice.
+			// todos force a named `todo` choice on the first turn. `task` is kept
+			// active when explicitly configured eager delegation needs it, and for
+			// implicit root Ultra so discovery-all does not hide the only delegation
+			// tool the Ultra session policy can use. Explicit `task.eager=default`
+			// remains authoritative and suppresses this Ultra activation.
 			const forceActive = new Set<string>();
 			if (settings.get("todo.eager") !== "default" && settings.get("todo.enabled") && toolRegistry.has("todo")) {
 				forceActive.add("todo");
 			}
-			if (settings.get("task.eager") !== "default" && toolRegistry.has("task")) {
+			const explicitTaskEager = settings.isConfigured("task.eager");
+			const implicitRootUltraTask =
+				agentKind === "main" && !explicitTaskEager && effectiveThinkingLevel === ThinkingLevel.Ultra;
+			if (
+				((explicitTaskEager && settings.get("task.eager") !== "default") || implicitRootUltraTask) &&
+				toolRegistry.has("task")
+			) {
 				forceActive.add("task");
 			}
 			initialToolNames = filterInitialToolsForDiscoveryAll(initialToolNames, {
