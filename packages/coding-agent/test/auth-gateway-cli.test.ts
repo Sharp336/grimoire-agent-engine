@@ -35,6 +35,19 @@ async function expectJsonCommand<T>(cmd: AuthGatewayCommandArgs, deps: AuthGatew
 	}
 }
 
+async function expectHumanCommand(
+	cmd: AuthGatewayCommandArgs,
+	deps: AuthGatewayCommandDependencies,
+): Promise<string> {
+	const restore = captureStdout();
+	try {
+		await runAuthGatewayCommand(cmd, deps);
+		return restore();
+	} finally {
+		process.stdout.write = ORIGINAL_STDOUT_WRITE;
+	}
+}
+
 async function expectCommandError(
 	cmd: AuthGatewayCommandArgs,
 	deps: AuthGatewayCommandDependencies,
@@ -134,6 +147,42 @@ describe("auth-gateway CLI access management", () => {
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway user create"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool add-account"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway audit list"))).toBe(true);
+	});
+
+	test("prints one-time managed token values in human output only on create, add, and rotate", async () => {
+		const created = await expectHumanCommand(
+			userCommand("create", "human", undefined, { json: false, label: "initial" }),
+			deps,
+		);
+		const createdMatch = created.match(/^created user human \(#\d+\) token (omp_gw_[^\s]+)\n$/);
+		expect(createdMatch).not.toBeNull();
+		const initialToken = createdMatch![1]!;
+
+		const added = await expectHumanCommand(
+			userCommand("token", "human", undefined, { json: false, label: "second" }),
+			deps,
+		);
+		const addedMatch = added.match(/^created token (omp_gw_[^\s]+) for human\n$/);
+		expect(addedMatch).not.toBeNull();
+		const addedToken = addedMatch![1]!;
+
+		const rotated = await expectHumanCommand(
+			userCommand("token", "human", undefined, { json: false, regenerate: true, label: "rotated" }),
+			deps,
+		);
+		const rotatedMatch = rotated.match(/^rotated token (omp_gw_[^\s]+) for human\n$/);
+		expect(rotatedMatch).not.toBeNull();
+		const rotatedToken = rotatedMatch![1]!;
+
+		expect(new Set([initialToken, addedToken, rotatedToken]).size).toBe(3);
+
+		const list = await expectHumanCommand(userCommand("list", undefined, undefined, { json: false }), deps);
+		const shown = await expectHumanCommand(userCommand("show", "human", undefined, { json: false }), deps);
+		const redactedOutput = `${list}${shown}`;
+		for (const token of [initialToken, addedToken, rotatedToken]) {
+			expect(redactedOutput).not.toContain(token);
+		}
+		expect(redactedOutput).not.toContain("token_hash");
 	});
 
 	test("manages users, tokens, ACLs, pools, usage, audit, and status without exposing secrets", async () => {

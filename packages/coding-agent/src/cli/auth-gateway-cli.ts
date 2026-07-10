@@ -587,7 +587,7 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			writeCommandOutput(
 				flags,
 				created,
-				`created user ${created.user.name} (#${created.user.id}) token ${created.token.publicId}\n`,
+				`created user ${created.user.name} (#${created.user.id}) token ${created.token.value}\n`,
 			);
 			return;
 		}
@@ -652,7 +652,7 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			writeCommandOutput(
 				flags,
 				{ token },
-				`${flags.regenerate ? "rotated" : "created"} token ${token.publicId} for ${user.name}\n`,
+				`${flags.regenerate ? "rotated" : "created"} token ${token.value} for ${user.name}\n`,
 			);
 			return;
 		}
