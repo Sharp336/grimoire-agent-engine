@@ -22,6 +22,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthCredentialSelectionPolicy, AuthStorage, ResolvedAuthCredential } from "../auth-storage";
+import { isAuthRetryableError } from "../error/auth-classify";
 import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
@@ -251,6 +252,34 @@ interface PoolExhaustionState {
 	retryAtMs?: number;
 }
 
+interface PoolExhaustionFailure {
+	status: 429 | 503;
+	type: "rate_limit_error" | "no_eligible_credential";
+	outcome: "usage_limit" | "no_eligible_credential";
+	retryAtMs?: number;
+}
+
+function describePoolExhaustion(exhaustion: PoolExhaustionState): PoolExhaustionFailure | undefined {
+	if (exhaustion.reason === "all_eligible_blocked") {
+		return {
+			status: 429,
+			type: "rate_limit_error",
+			outcome: "usage_limit",
+			retryAtMs: exhaustion.retryAtMs,
+		};
+	}
+	if (exhaustion.reason === "no_eligible_credential") {
+		return { status: 503, type: "no_eligible_credential", outcome: "no_eligible_credential" };
+	}
+	return undefined;
+}
+
+function isTerminalCredentialError(error: unknown): boolean {
+	if (isAuthRetryableError(error) || classifyGatewayError(error).type === "authentication_error") return true;
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	return message !== undefined && /(?:^|\b)(?:401|403)\b|\binvalid[-_ ]?api[-_ ]?key\b/i.test(message);
+}
+
 async function refreshGatewayApiKeyAfterAuthError(
 	storage: AuthStorage,
 	model: Model<Api>,
@@ -285,13 +314,18 @@ async function refreshGatewayApiKeyAfterAuthError(
 			retryAtMs,
 			error: message,
 		});
-		if (!switched) {
-			exhaustion.reason = "all_eligible_blocked";
-			exhaustion.retryAtMs = retryAtMs;
+		if (!selection && !switched) return undefined;
+		const retryExhaustion = selection ? exhaustion : {};
+		const next = await resolveGatewayCredential(storage, model, sessionId, signal, selection, retryExhaustion);
+		if (!next) {
+			if (selection && exhaustion.reason === undefined) {
+				exhaustion.reason = "all_eligible_blocked";
+				exhaustion.retryAtMs = retryAtMs;
+			} else if (selection && exhaustion.retryAtMs === undefined) {
+				exhaustion.retryAtMs = retryAtMs;
+			}
 			return undefined;
 		}
-		const next = await resolveGatewayCredential(storage, model, sessionId, signal, selection, exhaustion);
-		if (!next) return undefined;
 		onCredential(next.credential);
 		return next.apiKey;
 	}
@@ -302,8 +336,21 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	const next = await resolveGatewayCredential(storage, model, sessionId, signal, selection, exhaustion);
-	if (!next) return undefined;
+	const next = await resolveGatewayCredential(
+		storage,
+		model,
+		sessionId,
+		signal,
+		selection,
+		selection ? exhaustion : {},
+	);
+	if (!next) {
+		if (selection && exhaustion.reason === "all_eligible_blocked") {
+			exhaustion.reason = "no_eligible_credential";
+			exhaustion.retryAtMs = undefined;
+		}
+		return undefined;
+	}
 	onCredential(next.credential);
 	return next.apiKey;
 }
@@ -337,9 +384,11 @@ function buildGatewayApiKeyResolver(
 				selection,
 			});
 			if (!refreshed.ok) {
-				exhaustion.reason =
-					refreshed.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
-				exhaustion.retryAtMs = refreshed.retryAtMs;
+				if (selection) {
+					exhaustion.reason =
+						refreshed.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
+					exhaustion.retryAtMs = refreshed.retryAtMs;
+				}
 				return undefined;
 			}
 			lastKey = refreshed.credential.apiKey;
@@ -410,8 +459,11 @@ async function resolveGatewayCredential(
 		selection,
 	});
 	if (!result.ok) {
-		exhaustion.reason = result.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
-		exhaustion.retryAtMs = result.retryAtMs;
+		if (selection) {
+			exhaustion.reason =
+				result.reason === "all_eligible_blocked" ? "all_eligible_blocked" : "no_eligible_credential";
+			exhaustion.retryAtMs = result.retryAtMs;
+		}
 		return undefined;
 	}
 	return { apiKey: result.credential.apiKey, credential: result.credential };
@@ -423,13 +475,14 @@ function mapInitialCredentialFailure(
 	selection: AuthCredentialSelectionPolicy | undefined,
 	exhaustion: PoolExhaustionState,
 ): Response {
-	if (selection && exhaustion.reason === "all_eligible_blocked") {
+	const poolFailure = selection ? describePoolExhaustion(exhaustion) : undefined;
+	if (poolFailure) {
 		return poolFailureResponse(
 			route,
-			429,
-			"rate_limit_error",
+			poolFailure.status,
+			poolFailure.type,
 			"No eligible credential is available for this request",
-			exhaustion.retryAtMs,
+			poolFailure.retryAtMs,
 		);
 	}
 	if (selection) {
@@ -548,6 +601,7 @@ function wrapEventsForAudit(
 	statusCode: number,
 	exhaustion: PoolExhaustionState,
 	signal?: AbortSignal,
+	onTerminalCredentialError?: (error: unknown) => Promise<PoolExhaustionFailure | undefined>,
 ): AssistantMessageEventStream {
 	if (!audit) return events;
 	const recorder: AuditRecorder = audit;
@@ -556,13 +610,18 @@ function wrapEventsForAudit(
 			for await (const event of events) {
 				if (event.type === "done") recorder.record("success", statusCode, usageOf(event.message));
 				if (event.type === "error") {
-					if (exhaustion.reason) {
+					let poolFailure = describePoolExhaustion(exhaustion);
+					const terminalError = event.error.errorMessage ?? "Upstream request failed";
+					if (!poolFailure && isTerminalCredentialError(terminalError)) {
+						poolFailure = await onTerminalCredentialError?.(terminalError);
+					}
+					if (poolFailure) {
 						const error = {
 							...event.error,
 							errorMessage: "No eligible credential is available for this request",
 							stopReason: "error" as const,
 						};
-						recorder.record("usage_limit", 429, usageOf(event.error), "rate_limit_error");
+						recorder.record(poolFailure.outcome, poolFailure.status, usageOf(event.error), poolFailure.type);
 						yield { ...event, error } satisfies AssistantMessageEvent;
 						continue;
 					}
@@ -744,11 +803,17 @@ async function handleFormatEndpoint(
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!credential) {
 		const response = mapInitialCredentialFailure(route, model, selection, exhaustion);
+		const poolFailure = describePoolExhaustion(exhaustion);
 		audit?.record(
-			response.status === 429 ? "usage_limit" : response.status === 503 ? "no_eligible_credential" : "unauthorized",
+			poolFailure?.outcome ??
+				(response.status === 429
+					? "usage_limit"
+					: response.status === 503
+						? "no_eligible_credential"
+						: "unauthorized"),
 			response.status,
 			zeroUsage(),
-			exhaustion.reason ?? "no_credential",
+			poolFailure?.type ?? "no_credential",
 		);
 		return response;
 	}
@@ -781,11 +846,11 @@ async function handleFormatEndpoint(
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
-				const errorMessage =
-					exhaustion.reason !== undefined
-						? "No eligible credential is available for this request"
-						: (message.errorMessage ??
-							(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed"));
+				const poolFailure = describePoolExhaustion(exhaustion);
+				const errorMessage = poolFailure
+					? "No eligible credential is available for this request"
+					: (message.errorMessage ??
+						(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed"));
 				logger.warn("auth-gateway non-streaming failed", {
 					format: route.label,
 					reason: message.stopReason,
@@ -796,9 +861,46 @@ async function handleFormatEndpoint(
 					audit?.record("request_aborted", 499, usageOf(message), "request_aborted");
 					return route.module.formatError(499, "request_aborted", errorMessage);
 				}
-				if (exhaustion.reason !== undefined) {
-					audit?.record("usage_limit", 429, usageOf(message), "rate_limit_error");
-					return poolFailureResponse(route, 429, "rate_limit_error", errorMessage, exhaustion.retryAtMs);
+				const terminalPoolFailure = isTerminalCredentialError(errorMessage)
+					? await refreshGatewayApiKeyAfterAuthError(
+							bootOpts.storage,
+							model,
+							storageSessionId,
+							model.provider,
+							credential.apiKey,
+							errorMessage,
+							controller.signal,
+							route.label,
+							peer,
+							selection,
+							exhaustion,
+							nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
+						).then(() => describePoolExhaustion(exhaustion))
+					: undefined;
+				if (terminalPoolFailure) {
+					audit?.record(
+						terminalPoolFailure.outcome,
+						terminalPoolFailure.status,
+						usageOf(message),
+						terminalPoolFailure.type,
+					);
+					return poolFailureResponse(
+						route,
+						terminalPoolFailure.status,
+						terminalPoolFailure.type,
+						"No eligible credential is available for this request",
+						terminalPoolFailure.retryAtMs,
+					);
+				}
+				if (poolFailure) {
+					audit?.record(poolFailure.outcome, poolFailure.status, usageOf(message), poolFailure.type);
+					return poolFailureResponse(
+						route,
+						poolFailure.status,
+						poolFailure.type,
+						errorMessage,
+						poolFailure.retryAtMs,
+					);
 				}
 				const classified = classifyGatewayError(errorMessage);
 				audit?.record("upstream_error", classified.status, usageOf(message), classified.type);
@@ -814,6 +916,17 @@ async function handleFormatEndpoint(
 				error: classified.message,
 				peer,
 			});
+			const poolFailure = describePoolExhaustion(exhaustion);
+			if (poolFailure) {
+				audit?.record(poolFailure.outcome, poolFailure.status, zeroUsage(), poolFailure.type);
+				return poolFailureResponse(
+					route,
+					poolFailure.status,
+					poolFailure.type,
+					"No eligible credential is available for this request",
+					poolFailure.retryAtMs,
+				);
+			}
 			audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		}
@@ -826,12 +939,38 @@ async function handleFormatEndpoint(
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+		const poolFailure = describePoolExhaustion(exhaustion);
+		if (poolFailure) {
+			audit?.record(poolFailure.outcome, poolFailure.status, zeroUsage(), poolFailure.type);
+			return poolFailureResponse(
+				route,
+				poolFailure.status,
+				poolFailure.type,
+				"No eligible credential is available for this request",
+				poolFailure.retryAtMs,
+			);
+		}
 		audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-
-	const auditedEvents = wrapEventsForAudit(events, audit, 200, exhaustion, controller.signal);
+	const auditedEvents = wrapEventsForAudit(events, audit, 200, exhaustion, controller.signal, async error => {
+		await refreshGatewayApiKeyAfterAuthError(
+			bootOpts.storage,
+			model,
+			storageSessionId,
+			model.provider,
+			credential.apiKey,
+			error,
+			controller.signal,
+			route.label,
+			peer,
+			selection,
+			exhaustion,
+			nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
+		);
+		return describePoolExhaustion(exhaustion);
+	});
 	const sseStream = route.module.encodeStream(auditedEvents, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
@@ -976,11 +1115,12 @@ async function handlePiNative(
 	if (controller.signal.aborted) return aborted();
 	if (!credential) {
 		const response = mapInitialCredentialFailure(route, model, selection, exhaustion);
+		const poolFailure = describePoolExhaustion(exhaustion);
 		audit?.record(
-			auditOutcomeForStatus(response.status),
+			poolFailure?.outcome ?? auditOutcomeForStatus(response.status),
 			response.status,
 			zeroUsage(),
-			response.status >= 400 ? "credential_unavailable" : null,
+			poolFailure?.type ?? (response.status >= 400 ? "credential_unavailable" : null),
 		);
 		return response;
 	}
@@ -1029,26 +1169,25 @@ async function handlePiNative(
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
-				const errorMessage =
-					message.errorMessage ??
-					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
+				const poolFailure = describePoolExhaustion(exhaustion);
+				const errorMessage = poolFailure
+					? "No eligible credential is available for this request"
+					: (message.errorMessage ??
+						(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed"));
 				logger.warn("auth-gateway non-streaming failed", {
 					format: "pi-native",
 					reason: message.stopReason,
 					error: errorMessage,
 					peer,
 				});
-				if (exhaustion.reason) {
-					const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
-					const type =
-						exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
-					audit?.record("usage_limit", status, usageOf(message), type);
+				if (poolFailure) {
+					audit?.record(poolFailure.outcome, poolFailure.status, usageOf(message), poolFailure.type);
 					return poolFailureResponse(
 						route,
-						status,
-						type,
+						poolFailure.status,
+						poolFailure.type,
 						"No eligible credential is available for this request",
-						exhaustion.retryAtMs,
+						poolFailure.retryAtMs,
 					);
 				}
 				if (message.stopReason === "aborted") {
@@ -1063,16 +1202,15 @@ async function handlePiNative(
 			return json(200, { message });
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
-			if (exhaustion.reason) {
-				const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
-				const type = exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
-				audit?.record("usage_limit", status, zeroUsage(), type);
+			const poolFailure = describePoolExhaustion(exhaustion);
+			if (poolFailure) {
+				audit?.record(poolFailure.outcome, poolFailure.status, zeroUsage(), poolFailure.type);
 				return poolFailureResponse(
 					route,
-					status,
-					type,
+					poolFailure.status,
+					poolFailure.type,
 					"No eligible credential is available for this request",
-					exhaustion.retryAtMs,
+					poolFailure.retryAtMs,
 				);
 			}
 			const classified = classifyGatewayError(error);
@@ -1089,16 +1227,15 @@ async function handlePiNative(
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
-		if (exhaustion.reason) {
-			const status = exhaustion.reason === "all_eligible_blocked" ? 429 : 503;
-			const type = exhaustion.reason === "all_eligible_blocked" ? "rate_limit_error" : "no_eligible_credential";
-			audit?.record("usage_limit", status, zeroUsage(), type);
+		const poolFailure = describePoolExhaustion(exhaustion);
+		if (poolFailure) {
+			audit?.record(poolFailure.outcome, poolFailure.status, zeroUsage(), poolFailure.type);
 			return poolFailureResponse(
 				route,
-				status,
-				type,
+				poolFailure.status,
+				poolFailure.type,
 				"No eligible credential is available for this request",
-				exhaustion.retryAtMs,
+				poolFailure.retryAtMs,
 			);
 		}
 		audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);

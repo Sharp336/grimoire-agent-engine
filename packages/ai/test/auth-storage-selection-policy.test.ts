@@ -76,9 +76,11 @@ describe("AuthStorage credential selection policy", () => {
 	let store: SqliteAuthCredentialStore;
 	let storage: AuthStorage;
 	const usageByAccount = new Map<string, UsageReport>();
+	let fetchUsageOverride: UsageProvider["fetchUsage"] | undefined;
 	const usageProvider: UsageProvider = {
 		id: CUSTOM_PROVIDER,
-		async fetchUsage(params) {
+		async fetchUsage(params, options) {
+			if (fetchUsageOverride) return fetchUsageOverride(params, options);
 			const accountId = params.credential.accountId;
 			return accountId ? (usageByAccount.get(accountId) ?? null) : null;
 		},
@@ -97,6 +99,7 @@ describe("AuthStorage credential selection policy", () => {
 			rankingStrategyResolver: provider => (provider === CUSTOM_PROVIDER ? rankingStrategy : undefined),
 		});
 		usageByAccount.clear();
+		fetchUsageOverride = undefined;
 		registerOAuthProvider({
 			id: CUSTOM_PROVIDER,
 			name: "Selection Policy Unit Provider",
@@ -121,6 +124,8 @@ describe("AuthStorage credential selection policy", () => {
 		storage.close();
 		store.close();
 		usageByAccount.clear();
+		fetchUsageOverride = undefined;
+		vi.restoreAllMocks();
 	});
 
 	test("ordered allow-list limits OAuth and stored API-key selection and empty pools do not fall through", async () => {
@@ -199,6 +204,184 @@ describe("AuthStorage credential selection policy", () => {
 			ok: true,
 			credential: { apiKey: "api-second", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
 		});
+	});
+
+	test("explicit mixed failover honors API-key-before-OAuth pool order", async () => {
+		await storage.set(CUSTOM_PROVIDER, [oauthCredential("fallback"), apiKeyCredential("api-primary", "login")]);
+		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
+		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
+
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-first", {
+				selection: policy("failover", [apiRow.id, oauthRow.id], "api-before-oauth"),
+			}),
+		).resolves.toEqual({
+			ok: true,
+			credential: { apiKey: "api-primary", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
+		});
+	});
+
+	test("explicit mixed round-robin advances across credential types and keeps session stickiness", async () => {
+		await storage.set(CUSTOM_PROVIDER, [oauthCredential("oauth-rr"), apiKeyCredential("api-rr", "login")]);
+		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
+		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
+		const mixed = policy("round-robin", [apiRow.id, oauthRow.id], "mixed-rr");
+
+		const rrA = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: mixed });
+		const rrB = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-b", { selection: mixed });
+		const rrAAgain = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: mixed });
+
+		expect(rrA.ok && rrA.credential.credentialId).toBe(apiRow.id);
+		expect(rrB.ok && rrB.credential.credentialId).toBe(oauthRow.id);
+		expect(rrAAgain.ok && rrAAgain.credential.credentialId).toBe(apiRow.id);
+	});
+
+	test("explicit mixed usage-limit marks cross-type availability", async () => {
+		await storage.set(CUSTOM_PROVIDER, [
+			oauthCredential("oauth-limited"),
+			apiKeyCredential("api-after-oauth", "login"),
+		]);
+		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
+		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
+		const mixed = policy("failover", [oauthRow.id, apiRow.id], "mixed-usage-limit");
+
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed-limit", { selection: mixed }),
+		).resolves.toMatchObject({
+			ok: true,
+			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
+		});
+		await expect(
+			storage.markUsageLimitReached(CUSTOM_PROVIDER, "mixed-limit", {
+				apiKey: "access-oauth-limited",
+				selection: mixed,
+			}),
+		).resolves.toMatchObject({ switched: true });
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed-limit", { selection: mixed }),
+		).resolves.toEqual({
+			ok: true,
+			credential: {
+				apiKey: "api-after-oauth",
+				credentialId: apiRow.id,
+				credentialType: "api_key",
+				source: "api_key",
+			},
+		});
+	});
+
+	test("least-used keeps an eligible session and reranks only a new or replacement session", async () => {
+		const now = Date.now();
+		vi.useFakeTimers();
+		setSystemTime(new Date(now));
+		try {
+			await storage.set(CUSTOM_PROVIDER, [
+				oauthCredential("high", { accountId: "high" }),
+				oauthCredential("low", { accountId: "low" }),
+			]);
+			const [highRow, lowRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
+			if (!highRow || !lowRow) throw new Error("expected oauth rows");
+			usageByAccount.set("high", usageReport("high", 0.9));
+			usageByAccount.set("low", usageReport("low", 0.1));
+			const leastUsed = policy("least-used", [highRow.id, lowRow.id], "least-sticky");
+
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: lowRow.id } });
+
+			usageByAccount.set("high", usageReport("high", 0.05));
+			usageByAccount.set("low", usageReport("low", 0.95));
+			setSystemTime(new Date(now + 7 * 60_000));
+
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: lowRow.id } });
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-b", { selection: leastUsed }),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: highRow.id } });
+
+			await storage.markUsageLimitReached(CUSTOM_PROVIDER, "least-a", {
+				retryAfterMs: 30_000,
+				selection: leastUsed,
+			});
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: highRow.id } });
+		} finally {
+			setSystemTime();
+			vi.useRealTimers();
+		}
+	});
+
+	test("least-used falls back to unified pool order when OAuth has no usage signal", async () => {
+		fetchUsageOverride = async () => null;
+		await storage.set(CUSTOM_PROVIDER, [oauthCredential("no-usage"), apiKeyCredential("api-no-usage", "login")]);
+		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
+		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
+
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-api-first", {
+				selection: policy("least-used", [apiRow.id, oauthRow.id], "least-no-usage-api"),
+			}),
+		).resolves.toEqual({
+			ok: true,
+			credential: { apiKey: "api-no-usage", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
+		});
+		await expect(
+			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-oauth-first", {
+				selection: policy("least-used", [oauthRow.id, apiRow.id], "least-no-usage-oauth"),
+			}),
+		).resolves.toMatchObject({ ok: true, credential: { credentialId: oauthRow.id, credentialType: "oauth" } });
+	});
+
+	test("usage-limit blocking follows credential ids across an awaited reload", async () => {
+		const now = Date.now();
+		vi.useFakeTimers();
+		setSystemTime(new Date(now));
+		try {
+			await storage.set(CUSTOM_PROVIDER, [
+				oauthCredential("stale-a", { accountId: "stale-a" }),
+				oauthCredential("stale-b", { accountId: "stale-b" }),
+			]);
+			const [rowA, rowB] = store.listAuthCredentials(CUSTOM_PROVIDER);
+			if (!rowA || !rowB) throw new Error("expected oauth rows");
+			const selected = policy("failover", [rowA.id, rowB.id], "stable-id-usage-block");
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "stable-id", { selection: selected }),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: rowA.id } });
+			setSystemTime(new Date(now + 7 * 60_000));
+
+			const usageStarted = Promise.withResolvers<void>();
+			const releaseUsage = Promise.withResolvers<void>();
+			fetchUsageOverride = async params => {
+				if (params.credential.accountId === "stale-a") {
+					usageStarted.resolve();
+					await releaseUsage.promise;
+					return usageReport("stale-a", 1);
+				}
+				return usageReport(params.credential.accountId ?? "unknown", 0);
+			};
+
+			const markPromise = storage.markUsageLimitReached(CUSTOM_PROVIDER, "stable-id", {
+				apiKey: "access-stale-a",
+				selection: selected,
+			});
+			await usageStarted.promise;
+			store.deleteAuthCredential(rowA.id, "simulated external deletion");
+			await storage.reload();
+			releaseUsage.resolve();
+			await markPromise;
+
+			expect(storage.listCredentialBlocks([rowB.id])).toEqual([]);
+			await expect(
+				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "stable-id-replacement", {
+					selection: policy("failover", [rowB.id], "stable-id-replacement"),
+				}),
+			).resolves.toMatchObject({ ok: true, credential: { credentialId: rowB.id } });
+		} finally {
+			setSystemTime();
+			vi.useRealTimers();
+		}
 	});
 
 	test("OAuth access helpers honor selection policy credential ids", async () => {
