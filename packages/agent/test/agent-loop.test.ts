@@ -7,6 +7,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolContext,
+	StreamFn,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -1000,6 +1001,56 @@ describe("agentLoop with AgentMessage", () => {
 		// The exclusive call waited for every shared call to finish.
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.slow);
 		expect(startTimes.exclusive).toBeGreaterThan(finishTimes.fast);
+	});
+
+	it("finalizes partial output when provider event iteration fails", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const errorMessage = "provider stream disconnected before toolcall_end";
+		const streamFn: StreamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			const partial: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Useful partial analysis." },
+					{ type: "toolCall", id: "tool-1", name: "bash", arguments: {} },
+				],
+				api: "openai-completions",
+				provider: "test-provider",
+				model: "test-model",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial });
+				stream.push({ type: "text_start", contentIndex: 0, partial });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Useful partial analysis.", partial });
+				stream.push({ type: "text_end", contentIndex: 0, content: "Useful partial analysis.", partial });
+				stream.push({ type: "toolcall_start", contentIndex: 1, partial });
+				stream.push({ type: "toolcall_delta", contentIndex: 1, delta: '{"command":"', partial });
+				stream.fail(new Error(errorMessage));
+			});
+			return stream;
+		};
+		const config: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+
+		const messages = await agentLoop([createUserMessage("continue")], context, config, undefined, streamFn).result();
+
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant"]);
+		const failedTurn = messages[1] as AssistantMessage;
+		expect(failedTurn.stopReason).toBe("error");
+		expect(failedTurn.errorMessage).toBe(errorMessage);
+		expect(failedTurn.content).toEqual([{ type: "text", text: "Useful partial analysis." }]);
 	});
 
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {

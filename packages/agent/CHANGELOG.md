@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Finalized partial assistant output as an error turn when provider event iteration fails, preserving completed content while dropping unfinished tool calls.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

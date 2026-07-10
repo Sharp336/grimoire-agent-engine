@@ -1375,6 +1375,39 @@ async function streamAssistantResponse(
 			const completedToolCallIds = new Set<string>();
 
 			const responseIterator = response[Symbol.asyncIterator]();
+			const finishFailedStream = async (error: unknown): Promise<AssistantMessage> => {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				const failed: AssistantMessage = partialMessage
+					? { ...partialMessage, stopReason: "error", errorMessage }
+					: {
+							role: "assistant",
+							content: [],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "error",
+							errorMessage,
+							timestamp: Date.now(),
+						};
+				const finalMessage = snapshotAssistantMessage(retainCompletedToolCalls(failed, completedToolCallIds));
+				if (addedPartial) {
+					context.messages[context.messages.length - 1] = finalMessage;
+				} else {
+					context.messages.push(finalMessage);
+					stream.push({ type: "message_start", message: snapshotAssistantMessage(finalMessage) });
+				}
+				stream.push({ type: "message_end", message: snapshotAssistantMessage(finalMessage) });
+				await finishChat(finalMessage);
+				return finalMessage;
+			};
 			const finishAbortedStream = async (): Promise<AssistantMessage> => {
 				try {
 					const cleanup = responseIterator.return?.();
@@ -1415,13 +1448,23 @@ async function streamAssistantResponse(
 				while (true) {
 					let next: IteratorResult<AssistantMessageEvent>;
 					if (abortRacePromise) {
-						const result = await Promise.race([responseIterator.next(), abortRacePromise]);
+						const result = await Promise.race([
+							responseIterator.next().catch(error => ({ error })),
+							abortRacePromise,
+						]);
 						if (result === ABORTED) {
 							return await finishAbortedStream();
 						}
+						if ("error" in result) {
+							return await finishFailedStream(result.error);
+						}
 						next = result;
 					} else {
-						next = await responseIterator.next();
+						try {
+							next = await responseIterator.next();
+						} catch (error) {
+							return await finishFailedStream(error);
+						}
 					}
 					if (next.done) break;
 
@@ -1532,7 +1575,12 @@ async function streamAssistantResponse(
 				detachAbortListener?.();
 			}
 
-			let trailing = await response.result();
+			let trailing: AssistantMessage;
+			try {
+				trailing = await response.result();
+			} catch (error) {
+				return await finishFailedStream(error);
+			}
 			if (harmonyMitigationEnabled) {
 				const detection = detectHarmonyLeakInAssistantMessage(trailing);
 				if (detection) {
