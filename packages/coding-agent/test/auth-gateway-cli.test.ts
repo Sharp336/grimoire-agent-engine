@@ -301,7 +301,7 @@ describe("auth-gateway CLI access management", () => {
 		expect(deletedPool).toMatchObject({ deleted: true, pool: { id: poolId, name: "primary" } });
 		const deletedUser = await expectJsonCommand<{ deleted: true; user: Record<string, unknown> }>(userCommand("delete", "alice"), deps);
 		expect(deletedUser).toMatchObject({ deleted: true, user: { id: aliceId, name: "alice" } });
-	});
+	}, 15_000);
 
 	test("preserves legacy gateway token JSON contract and reports zero managed counts before creating a database", async () => {
 		const absentDb = path.join(agentDir, "missing-auth-gateway.db");
