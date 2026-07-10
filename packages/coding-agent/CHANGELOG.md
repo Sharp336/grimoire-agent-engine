@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added RPC protocol v2 native plan and goal mode controls, including capability negotiation, typed mode state, and safe session-switch restoration for non-interactive clients.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed

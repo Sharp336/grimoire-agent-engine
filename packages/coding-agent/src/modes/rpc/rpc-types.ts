@@ -21,6 +21,52 @@ import type {
 import type { TodoPhase } from "../../tools/todo";
 
 // ============================================================================
+// RPC Protocol Capabilities
+// ============================================================================
+
+export interface RpcProtocolInfo {
+	version: 2;
+	capabilities: { nativeModeControl: 1 };
+}
+
+/** Advertised in the ready frame once native plan/goal control is available. */
+export const RPC_NATIVE_MODE_PROTOCOL: RpcProtocolInfo = {
+	version: 2,
+	capabilities: { nativeModeControl: 1 },
+};
+
+export interface RpcReadyFrame {
+	type: "ready";
+	protocol: RpcProtocolInfo;
+}
+
+export type RpcNativeModeAction = "on" | "off" | "toggle";
+
+export type RpcPlanModeStatus = { status: "off" } | { status: "active" | "paused"; planFilePath?: string };
+
+export type RpcGoalModeStatus =
+	| { status: "off"; continuationEnabled: false }
+	| {
+			status: "active" | "paused";
+			objective?: string;
+			goalId?: string;
+			tokenBudget?: number;
+			tokensUsed?: number;
+			continuationEnabled: boolean;
+	  };
+
+/** Native mode snapshot shared by get_state and mode-mutation responses. */
+export interface RpcNativeModeState {
+	plan: RpcPlanModeStatus;
+	goal: RpcGoalModeStatus;
+}
+
+export interface RpcNativeModeResult {
+	mode: RpcNativeModeState;
+	agentInvoked: boolean;
+}
+
+// ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
 
@@ -35,6 +81,8 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "set_plan_mode"; action: RpcNativeModeAction; description?: string }
+	| { id?: string; type: "set_goal_mode"; action: RpcNativeModeAction; description?: string }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
@@ -110,6 +158,8 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Native plan and goal status. `status` is the only state discriminator. */
+	mode: RpcNativeModeState;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -178,6 +228,8 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "set_plan_mode"; success: true; data: RpcNativeModeResult }
+	| { id?: string; type: "response"; command: "set_goal_mode"; success: true; data: RpcNativeModeResult }
 	| {
 			id?: string;
 			type: "response";

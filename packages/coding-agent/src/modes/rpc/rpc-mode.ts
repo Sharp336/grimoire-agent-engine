@@ -10,9 +10,12 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, isRecord, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -24,31 +27,35 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { resolveLocalUrlToPath } from "../../internal-urls";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { normalizeLocalScheme } from "../../tools/path-utils";
 import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcNativeModeController } from "./rpc-native-mode-controller";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
-import type {
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcHostToolCallRequest,
-	RpcHostToolCancelRequest,
-	RpcHostToolDefinition,
-	RpcHostToolResult,
-	RpcHostToolUpdate,
-	RpcHostUriCancelRequest,
-	RpcHostUriRequest,
-	RpcHostUriResult,
-	RpcResponse,
-	RpcSessionState,
-	RpcSubagentSubscriptionLevel,
+import {
+	RPC_NATIVE_MODE_PROTOCOL,
+	type RpcCommand,
+	type RpcExtensionUIRequest,
+	type RpcExtensionUIResponse,
+	type RpcHostToolCallRequest,
+	type RpcHostToolCancelRequest,
+	type RpcHostToolDefinition,
+	type RpcHostToolResult,
+	type RpcHostToolUpdate,
+	type RpcHostUriCancelRequest,
+	type RpcHostUriRequest,
+	type RpcHostUriResult,
+	type RpcResponse,
+	type RpcSessionState,
+	type RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -69,6 +76,8 @@ type RpcOutput = (
 		| RpcHostUriCancelRequest
 		| object,
 ) => void;
+
+const RPC_PLAN_APPROVAL_TIMEOUT_MS = 600_000;
 
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
@@ -426,6 +435,44 @@ function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostTo
 	});
 }
 
+function resolveRpcNativePlanFilePath(session: AgentSession, planFilePath: string): string {
+	if (planFilePath.startsWith("local:")) {
+		const normalized = normalizeLocalScheme(planFilePath);
+		return resolveLocalUrlToPath(normalized, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+	}
+	return path.resolve(session.sessionManager.getCwd(), planFilePath);
+}
+
+async function readRpcNativePlanFile(session: AgentSession, planFilePath: string): Promise<string | null> {
+	try {
+		return await Bun.file(resolveRpcNativePlanFilePath(session, planFilePath)).text();
+	} catch (error) {
+		if (isEnoent(error)) return null;
+		throw error;
+	}
+}
+
+async function listRpcNativePlanFiles(session: AgentSession): Promise<string[]> {
+	const localRoot = resolveRpcNativePlanFilePath(session, "local://");
+	try {
+		const entries = await fs.readdir(localRoot, { withFileTypes: true });
+		const plans = await Promise.all(
+			entries
+				.filter(entry => entry.isFile() && /plan\.md$/i.test(entry.name))
+				.map(async entry => {
+					const stat = await fs.stat(path.join(localRoot, entry.name)).catch(() => null);
+					return { url: `local://${entry.name}`, mtime: stat?.mtimeMs ?? 0 };
+				}),
+		);
+		return plans.sort((a, b) => b.mtime - a.mtime).map(plan => plan.url);
+	} catch {
+		return [];
+	}
+}
+
 function parseValueDialogResponse(
 	response: RpcExtensionUIResponse,
 	dialogOptions: ExtensionUIDialogOptions | undefined,
@@ -521,14 +568,12 @@ export async function runRpcMode(
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 ): Promise<never> {
-	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
 	// process.stdout with no newline, which the reader merges with the next JSON line and
 	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
 
-	process.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		process.stdout.write(`${JSON.stringify(obj)}\n`);
 	};
@@ -588,6 +633,12 @@ export async function runRpcMode(
 			};
 
 			const onAbort = () => {
+				this.output({
+					type: "extension_ui_request",
+					id: Snowflake.next() as string,
+					method: "cancel",
+					targetId: id,
+				} as RpcExtensionUIRequest);
 				cleanup();
 				resolve(defaultValue);
 			};
@@ -800,7 +851,71 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
-	// Set up extensions with RPC-based UI context
+	const nativeModeController = new RpcNativeModeController({
+		isStreaming: () => session.isStreaming,
+		isCompacting: () => session.isCompacting,
+		hasPostPromptWork: () => session.hasPostPromptWork,
+		isPlanModeEnabled: () => session.settings.get("plan.enabled"),
+		isGoalModeEnabled: () => session.settings.get("goal.enabled"),
+		getGoalContinuationModes: () => session.settings.get("goal.continuationModes"),
+		getActiveToolNames: () => session.getActiveToolNames(),
+		hasBuiltInTool: name => session.hasBuiltInTool(name),
+		setActiveToolsByName: names => session.setActiveToolsByName(names),
+		captureModelState: () => {
+			const model = session.model;
+			return model ? { model, thinkingLevel: session.configuredThinkingLevel() } : undefined;
+		},
+		resolvePlanRoleModel: () => session.resolveRoleModelWithThinking("plan"),
+		applyTemporaryModel: (model, thinkingLevel) => session.setModelTemporary(model, thinkingLevel),
+		setThinkingLevel: thinkingLevel => session.setThinkingLevel(thinkingLevel),
+		getPlanModeState: () => session.getPlanModeState(),
+		setPlanModeState: state => session.setPlanModeState(state),
+		getPlanReferencePath: () => session.getPlanReferencePath(),
+		setPlanReferencePath: planFilePath => session.setPlanReferencePath(planFilePath),
+		setStandingResolveHandler: handler => session.setStandingResolveHandler(handler),
+		getGoalModeState: () => session.getGoalModeState(),
+		setGoalModeState: state => session.setGoalModeState(state),
+		goalRuntime: session.goalRuntime,
+		getPersistedMode: () => {
+			const context = session.sessionManager.buildSessionContext();
+			return { mode: context.mode, modeData: context.modeData };
+		},
+		appendModeChange: (mode, data) => {
+			session.sessionManager.appendModeChange(mode, data);
+		},
+		readPlan: planFilePath => readRpcNativePlanFile(session, planFilePath),
+		listPlanFiles: () => listRpcNativePlanFiles(session),
+		confirmPlan: (title, message, options) =>
+			rpcUiContext.confirm(title, message, { timeout: RPC_PLAN_APPROVAL_TIMEOUT_MS, signal: options?.signal }),
+		submitPrompt: (description, options) => session.prompt(description, options),
+		submitGoalContinuation: prompt =>
+			session.promptCustomMessage({
+				customType: "goal-continuation",
+				content: prompt,
+				display: false,
+				attribution: "agent",
+			}),
+		reportBackgroundError: backgroundError => {
+			output(
+				error(
+					undefined,
+					"native_mode",
+					backgroundError instanceof Error ? backgroundError.message : String(backgroundError),
+				),
+			);
+		},
+	});
+	let sessionSwitchReconciled = false;
+	session.setSessionSwitchReconciler(async () => {
+		await nativeModeController.reconcileAfterSessionChange();
+		sessionSwitchReconciled = true;
+	});
+
+	// Reconcile persisted native state before clients can issue mode commands.
+	await nativeModeController.reconcile();
+	process.stdout.write(`${JSON.stringify({ type: "ready", protocol: RPC_NATIVE_MODE_PROTOCOL })}\n`);
+
+	// Set up extensions with RPC-based UI context.
 	await initializeExtensions(session, {
 		reportSendError: (action, err) => {
 			output(error(undefined, action, err.message));
@@ -817,8 +932,16 @@ export async function runRpcMode(
 		uiContext: rpcUiContext,
 	});
 
-	// Output all agent events as JSON
 	session.subscribe(event => {
+		void nativeModeController.handleSessionEvent(event).catch(backgroundError => {
+			output(
+				error(
+					undefined,
+					"native_mode",
+					backgroundError instanceof Error ? backgroundError.message : String(backgroundError),
+				),
+			);
+		});
 		output(event);
 	});
 
@@ -926,9 +1049,17 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
-				return success(id, result.type, result.data);
+				sessionSwitchReconciled = false;
+				await nativeModeController.prepareForSessionChange();
+				try {
+					const result = await handleRpcSessionChange(session, command, subagentRegistry);
+					if (!sessionSwitchReconciled) await nativeModeController.reconcile();
+					if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+					return success(id, result.type, result.data);
+				} catch (commandError) {
+					await nativeModeController.reconcile();
+					throw commandError;
+				}
 			}
 
 			// =================================================================
@@ -959,8 +1090,41 @@ export async function runRpcMode(
 						examples: tool.examples,
 					})),
 					contextUsage: session.getContextUsage(),
+					mode: nativeModeController.getMode(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "set_plan_mode": {
+				try {
+					return success(
+						id,
+						"set_plan_mode",
+						await nativeModeController.setPlanMode({ action: command.action, description: command.description }),
+					);
+				} catch (commandError) {
+					return error(
+						id,
+						"set_plan_mode",
+						commandError instanceof Error ? commandError.message : String(commandError),
+					);
+				}
+			}
+
+			case "set_goal_mode": {
+				try {
+					return success(
+						id,
+						"set_goal_mode",
+						await nativeModeController.setGoalMode({ action: command.action, description: command.description }),
+					);
+				} catch (commandError) {
+					return error(
+						id,
+						"set_goal_mode",
+						commandError instanceof Error ? commandError.message : String(commandError),
+					);
+				}
 			}
 
 			case "get_available_commands": {
