@@ -46,6 +46,13 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 const TOKEN_ENCODER = new TextEncoder();
 
+export function readBearerToken(req: Request): string | null {
+	const header = req.headers.get("authorization");
+	if (!header) return null;
+	const match = header.match(/^Bearer\s+(.+)$/i);
+	return match?.[1]?.trim() ?? null;
+}
+
 export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	if (tokens.size === 0) return true;
 	const header = req.headers.get("authorization");
@@ -162,7 +169,7 @@ export function resolvePromptCacheKey(body: unknown, headers?: Headers): string 
 
 const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
 	"Access-Control-Allow-Headers":
 		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key",
 	"Access-Control-Max-Age": "86400",

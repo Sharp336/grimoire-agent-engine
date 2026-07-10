@@ -1,3 +1,4 @@
+import type { AuthGatewayAccessStore } from "./access-store";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type {
 	AssistantMessage,
@@ -139,6 +140,8 @@ export interface AuthGatewayServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
 	bearerTokens: string[];
+	/** Optional access-control, management, and audit store for managed gateway users. */
+	accessStore?: AuthGatewayAccessStore;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }
