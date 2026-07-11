@@ -786,6 +786,16 @@ function getUsageTokens(usage: unknown): number {
 	return firstNumberField(record, ["totalTokens", "total_tokens"]) ?? 0;
 }
 
+function attachFollowUpTreeBudgetAccounting(session: AgentSession, budget: TaskTreeBudget): void {
+	budget.registerAbortTarget(session);
+	session.subscribe(event => {
+		if (event.type !== "message_end" || !isRecord(event.message) || event.message.role !== "assistant") return;
+		const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
+		const messageUsage = "usage" in event.message ? event.message.usage : eventUsage;
+		budget.recordRequest(getUsageTokens(messageUsage));
+	});
+}
+
 /**
  * Create proxy tools that reuse the parent's MCP connections.
  *
@@ -3161,6 +3171,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					);
 					installRegistryStatusSync(revived);
 					installIrcWakeTurnMonitor(revived);
+					if (options.taskTreeBudget) {
+						attachFollowUpTreeBudgetAccounting(revived, options.taskTreeBudget);
+					}
 					return revived;
 				};
 			}
@@ -3374,6 +3387,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				monitor.captureSalvage(session);
 				if (options.keepAlive !== false && worktree === undefined) {
 					installIrcWakeTurnMonitor(session);
+					if (!aborted && options.taskTreeBudget) {
+						attachFollowUpTreeBudgetAccounting(session, options.taskTreeBudget);
+					}
 				}
 				await finalizeSubagentLifecycle({
 					id,

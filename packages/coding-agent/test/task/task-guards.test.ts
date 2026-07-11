@@ -43,6 +43,7 @@ interface FakeSessionHandle {
 	session: AgentSession;
 	steerCalls: SteerCall[];
 	abortCalls: () => number;
+	emit: (event: AgentSessionEvent) => void;
 }
 
 function assistantMessageEnd(text: string, usage?: Record<string, number>): AgentSessionEvent {
@@ -81,6 +82,8 @@ function yieldToolEnd(type?: string | string[]): AgentSessionEvent {
 
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
+	let eventsScheduled = false;
+	const listeners = new Set<(event: AgentSessionEvent) => void>();
 	const steerCalls: SteerCall[] = [];
 	const { promise: hang, resolve: releaseHang } = Promise.withResolvers<void>();
 	if (!config.hang) releaseHang();
@@ -94,13 +97,17 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_names: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
-			if (config.events?.length) {
+			listeners.add(listener);
+			if (!eventsScheduled && config.events?.length) {
+				eventsScheduled = true;
 				const events = config.events;
 				queueMicrotask(() => {
-					for (const event of events) listener(event);
+					for (const event of events) {
+						for (const subscriber of listeners) subscriber(event);
+					}
 				});
 			}
-			return () => {};
+			return () => listeners.delete(listener);
 		},
 		prompt: async () => {
 			await hang;
@@ -124,6 +131,9 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		session: session as AgentSession,
 		steerCalls,
 		abortCalls: () => abortCount,
+		emit: event => {
+			for (const listener of listeners) listener(event);
+		},
 	};
 }
 
@@ -327,6 +337,66 @@ describe("runSubprocess request guards", () => {
 		expect(budget.snapshot()).toMatchObject({ requests: 4, maxRequests: 3, exhausted: true });
 	});
 
+	it("charges keep-alive follow-up turns to the shared tree budget", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		const handle = createFakeSession({
+			events: [assistantMessageEnd("initial"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-follow-up",
+			settings,
+			taskTreeBudget: budget,
+			keepAlive: true,
+		});
+		expect(result.aborted).toBe(false);
+		expect(budget.snapshot()).toMatchObject({ requests: 1, exhausted: false });
+
+		const abortsBeforeFollowUp = handle.abortCalls();
+		handle.emit(assistantMessageEnd("follow-up"));
+
+		expect(budget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+		expect(handle.abortCalls()).toBeGreaterThan(abortsBeforeFollowUp);
+	});
+
+	it("aborts an idle keep-alive child when a sibling exhausts the shared budget", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 2 });
+		const handle = createFakeSession({
+			events: [assistantMessageEnd("initial"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-sibling-abort",
+			settings,
+			taskTreeBudget: budget,
+			keepAlive: true,
+		});
+		const abortsBeforeExhaustion = handle.abortCalls();
+
+		budget.recordRequest(15);
+		budget.recordRequest(15);
+
+		expect(budget.snapshot().exhausted).toBe(true);
+		expect(handle.abortCalls()).toBeGreaterThan(abortsBeforeExhaustion);
+	});
+
+	it("aborts a revived descendant registered after tree exhaustion", () => {
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		budget.recordRequest(15);
+		budget.recordRequest(15);
+		const revived = createFakeSession();
+
+		budget.registerAbortTarget(revived.session);
+
+		expect(revived.abortCalls()).toBe(1);
+	});
+
 	it("preserves a pending terminal yield when the tree request budget is crossed", async () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
 		const budget = new TaskTreeBudget({ maxRequests: 1 });
@@ -346,7 +416,7 @@ describe("runSubprocess request guards", () => {
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain('"ok": true');
-		expect(handle.abortCalls()).toBe(1);
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(budget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
 	});
 

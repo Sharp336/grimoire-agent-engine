@@ -1,9 +1,18 @@
+import { logger } from "@oh-my-pi/pi-utils";
+
+interface TaskTreeAbortTarget {
+	readonly isDisposed: boolean;
+	abort(): Promise<void>;
+}
+
+/** Optional aggregate limits applied across one root session's task descendants. */
 export interface TaskTreeBudgetLimits {
 	maxSpawns?: number;
 	maxRequests?: number;
 	maxTokens?: number;
 }
 
+/** Current task-tree consumption and the first aggregate limit that was exceeded. */
 export interface TaskTreeBudgetSnapshot {
 	spawns: number;
 	requests: number;
@@ -15,12 +24,13 @@ export interface TaskTreeBudgetSnapshot {
 	reason?: string;
 }
 
-/** Session-wide safety budget shared by every descendant spawned through `task`. */
+/** Session-wide safety budget shared by task and eval-agent descendants. */
 export class TaskTreeBudget {
 	readonly #maxSpawns: number;
 	readonly #maxRequests: number;
 	readonly #maxTokens: number;
 	readonly #controller = new AbortController();
+	readonly #abortTargets = new Set<WeakRef<TaskTreeAbortTarget>>();
 	#spawns = 0;
 	#requests = 0;
 	#tokens = 0;
@@ -34,6 +44,23 @@ export class TaskTreeBudget {
 
 	get signal(): AbortSignal {
 		return this.#controller.signal;
+	}
+
+	/** Register a keep-alive descendant for aggregate budget abort propagation. */
+	registerAbortTarget(target: TaskTreeAbortTarget): void {
+		for (const ref of this.#abortTargets) {
+			const existing = ref.deref();
+			if (!existing || existing.isDisposed) {
+				this.#abortTargets.delete(ref);
+			} else if (existing === target) {
+				return;
+			}
+		}
+		if (this.#reason) {
+			this.#abortTarget(target);
+		} else {
+			this.#abortTargets.add(new WeakRef(target));
+		}
 	}
 
 	reserveSpawns(count: number): string | undefined {
@@ -81,7 +108,20 @@ export class TaskTreeBudget {
 	#exhaust(reason: string): string {
 		this.#reason = reason;
 		this.#controller.abort(new Error(reason));
+		for (const ref of this.#abortTargets) {
+			const target = ref.deref();
+			if (target && !target.isDisposed) this.#abortTarget(target);
+		}
+		this.#abortTargets.clear();
 		return reason;
+	}
+
+	#abortTarget(target: TaskTreeAbortTarget): void {
+		void target.abort().catch(error => {
+			logger.debug("Task-tree keep-alive abort failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 	}
 }
 
