@@ -1326,7 +1326,7 @@ export class ModelRegistry {
 			}
 
 			const authMode = (providerConfig.auth ?? "apiKey") as ProviderAuthMode;
-			if (authMode === "none") {
+			if (authMode === "none" && !isOAuthOnlyProvider(providerName)) {
 				keylessProviders.add(providerName);
 			}
 

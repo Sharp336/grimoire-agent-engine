@@ -8,7 +8,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as deepseekModule from "@oh-my-pi/pi-ai/registry/deepseek";
 import * as kagiModule from "@oh-my-pi/pi-ai/registry/kagi";
 import * as ollamaCloudModule from "@oh-my-pi/pi-ai/registry/ollama-cloud";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKeyModule from "@oh-my-pi/pi-ai/env-api-key";
 import { removeWithRetries } from "../../utils/src/temp";
 
 function countCredentialRows(dbPath: string, provider: string): number {
@@ -49,10 +49,10 @@ describe("AuthStorage api-key login upsert", () => {
 	let loginDeepSeekSpy: Mock<typeof deepseekModule.loginDeepSeek>;
 	let loginKagiSpy: Mock<typeof kagiModule.loginKagi>;
 	let loginOllamaCloudSpy: Mock<typeof ollamaCloudModule.loginOllamaCloud>;
-	let getEnvApiKeySpy: Mock<typeof aiStream.getEnvApiKey>;
+	let getEnvApiKeySpy: Mock<typeof envApiKeyModule.getEnvApiKey>;
 
 	beforeEach(async () => {
-		getEnvApiKeySpy = vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		getEnvApiKeySpy = vi.spyOn(envApiKeyModule, "getEnvApiKey").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-api-key-login-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);
@@ -188,6 +188,15 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(stored.credential.key).toBe("same-deepseek-key");
 		expect(store.getApiKey("deepseek")).toBe("same-deepseek-key");
 		expect(await authStorage.getApiKey("deepseek", "session-deepseek-relogin")).toBe("same-deepseek-key");
+	});
+
+	it("reads the canonical env-key module when no higher-precedence credential exists", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		getEnvApiKeySpy.mockImplementation(provider => (provider === "kagi" ? "env-sentinel-key" : undefined));
+
+		expect(await authStorage.getApiKey("kagi", "session-kagi-env")).toBe("env-sentinel-key");
+		expect(getEnvApiKeySpy).toHaveBeenCalledWith("kagi");
 	});
 
 	it("uses a fresh OpenCode Go login over an existing env fallback", async () => {

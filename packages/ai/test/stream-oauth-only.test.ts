@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
 	AuthStorage,
 	SqliteAuthCredentialStore,
@@ -35,19 +35,44 @@ function usage(): Usage {
 	};
 }
 
+function assertMissingOAuthError(error: unknown): void {
+	expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
+	expect((error as Error).message).toBe("No OAuth credential for provider: xai-grok-build. Run /login.");
+	expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
+}
+
 function assertMissingOAuth(run: () => AssistantMessageEventStream): void {
 	try {
 		run();
 		throw new Error("expected OAuth admission failure");
 	} catch (error) {
-		expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
-		expect((error as Error).message).toBe("No OAuth credential for provider: xai-grok-build. Run /login.");
-		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
+		assertMissingOAuthError(error);
+	}
+}
+
+async function assertMissingOAuthStreamResult(run: () => AssistantMessageEventStream): Promise<void> {
+	const events = run();
+	try {
+		for await (const _event of events) {
+			// drain
+		}
+		throw new Error("expected OAuth admission failure");
+	} catch (error) {
+		assertMissingOAuthError(error);
+	}
+	try {
+		await events.result();
+		throw new Error("expected OAuth admission failure");
+	} catch (error) {
+		assertMissingOAuthError(error);
 	}
 }
 
 describe("OAuth-only stream admission", () => {
-	afterEach(() => unregisterCustomApis(SOURCE));
+	afterEach(() => {
+		unregisterCustomApis(SOURCE);
+		vi.restoreAllMocks();
+	});
 
 	test("rejects static, arbitrary, cross-provider, and generic-seeded credentials before dispatch", async () => {
 		let dispatches = 0;
@@ -66,6 +91,23 @@ describe("OAuth-only stream admission", () => {
 		const otherModel = { ...model, provider: "xai-oauth" };
 		assertMissingOAuth(() => streamSimple(model, context, { apiKey: storage.resolver(otherModel.provider) }));
 		expect(dispatches).toBe(0);
+		store.close();
+	});
+
+	test("fails a trusted empty resolver before dispatch", async () => {
+		let dispatches = 0;
+		registerCustomApi(API, () => {
+			dispatches += 1;
+			throw new Error("unexpected custom API dispatch");
+		}, SOURCE);
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store);
+		const buildResolver = storage.createOAuthApiKeyResolver(PROVIDER);
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+		await assertMissingOAuthStreamResult(() => streamSimple(model, context, { apiKey: buildResolver }));
+		expect(dispatches).toBe(0);
+		expect(fetchSpy).not.toHaveBeenCalled();
 		store.close();
 	});
 

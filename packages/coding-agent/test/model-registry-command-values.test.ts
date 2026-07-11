@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isOAuthCredentialResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai";
-import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -168,5 +168,57 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
 		expect(await resolveApiKeyOnce(resolver)).toBe("oauth-access");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("0");
+	});
+
+	test("auth:none does not make OAuth-only Build keyless", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						baseUrl: "https://cli-chat-proxy.grok.com/v1",
+						api: "openai-responses",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+					"normal-keyless": {
+						baseUrl: "https://normal-keyless.example.com/v1",
+						api: "openai-completions",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+						models: [{ id: "normal-keyless-model", name: "Normal keyless" }],
+					},
+				},
+			}),
+		);
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url === "https://normal-keyless.example.com/v1/models") {
+				return new Response(JSON.stringify({ data: [{ id: "normal-keyless-model" }] }));
+			}
+			throw new Error(`Unexpected discovery request: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+		const buildModel = registry.getAll().find(model => model.provider === "xai-grok-build");
+		const normalKeylessModel = registry.find("normal-keyless", "normal-keyless-model");
+		if (!buildModel || !normalKeylessModel) throw new Error("Expected configured models");
+
+		expect(registry.getAvailable()).not.toContainEqual(buildModel);
+		expect(registry.hasConfiguredAuth(buildModel)).toBe(false);
+		expect(await registry.getApiKey(buildModel)).toBeUndefined();
+		await registry.refreshProvider("xai-grok-build");
+		expect(registry.getProviderDiscoveryState("xai-grok-build")?.status).toBe("unauthenticated");
+
+		await registry.refreshProvider("normal-keyless");
+		expect(requestedUrls).toEqual(["https://normal-keyless.example.com/v1/models"]);
+		expect(
+			registry.getAvailable().some(
+				model => model.provider === "normal-keyless" && model.id === "normal-keyless-model",
+			),
+		).toBe(true);
+		expect(registry.hasConfiguredAuth(normalKeylessModel)).toBe(true);
+		expect(await registry.getApiKey(normalKeylessModel)).toBe(kNoAuth);
 	});
 });

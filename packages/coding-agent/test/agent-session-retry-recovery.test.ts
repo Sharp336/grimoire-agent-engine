@@ -4,7 +4,7 @@ import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ApiKeyResolveContext, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKeyModule from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -127,7 +127,7 @@ describe("AgentSession retry recovery", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKeyModule, "getEnvApiKey").mockReturnValue(undefined);
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		sessions = [];
 		managers = [];
