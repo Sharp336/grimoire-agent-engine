@@ -1,4 +1,10 @@
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	XAI_GROK_BUILD_CLIENT_IDENTIFIER,
+	XAI_GROK_BUILD_CLIENT_VERSION,
+	XAI_GROK_BUILD_TOKEN_AUTH,
+	XAI_GROK_BUILD_USER_AGENT,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -162,6 +168,14 @@ interface OpenAIResponsesProviderSessionState
 	nativeHistoryReplayWarmed: boolean;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
+	/** Stable identity and attempt counter for Grok Build requests in this provider session. */
+	grokBuild?: GrokBuildRequestState;
+}
+
+interface GrokBuildRequestState {
+	agentId: string;
+	sessionId: string;
+	nextTurnIndex: number;
 }
 
 interface OpenAIResponsesChainState {
@@ -191,6 +205,7 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
 			state.chains.clear();
+			state.grokBuild = undefined;
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
 		},
@@ -209,6 +224,25 @@ function getOpenAIResponsesProviderSessionState(
 	const created = createOpenAIResponsesProviderSessionState();
 	providerSessionState.set(key, created);
 	return created;
+}
+
+function getGrokBuildRequestState(state: OpenAIResponsesProviderSessionState): GrokBuildRequestState {
+	state.grokBuild ??= {
+		agentId: crypto.randomUUID(),
+		sessionId: crypto.randomUUID(),
+		nextTurnIndex: 0,
+	};
+	return state.grokBuild;
+}
+
+function createTraceparent(): string {
+	const traceId = crypto.randomUUID().replaceAll("-", "");
+	const spanId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+	return `00-${traceId}-${spanId}-01`;
+}
+
+function isGrokBuildProvider(model: Model<"openai-responses">): boolean {
+	return model.provider === "xai-grok-build";
 }
 
 function isOpenAIResponsesStatefulEnabled(
@@ -401,7 +435,15 @@ const streamOpenAIResponsesOnce = (
 				promptCacheSessionId,
 			});
 			const premiumRequestsTotal = copilotPremiumRequests;
-			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+			const storedProviderSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+			const providerSessionState =
+				storedProviderSessionState ?? (isGrokBuildProvider(model) ? createOpenAIResponsesProviderSessionState() : undefined);
+			const grokBuildState = providerSessionState && isGrokBuildProvider(model)
+				? getGrokBuildRequestState(providerSessionState)
+				: undefined;
+			const grokBuildConversationId = grokBuildState
+				? (promptCacheSessionId ?? grokBuildState.sessionId)
+				: undefined;
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			const builtParams = buildParams(model, context, options, providerSessionState, strictToolsScope);
 			const params = builtParams.params;
@@ -478,12 +520,43 @@ const streamOpenAIResponsesOnce = (
 						}
 						try {
 							const headersWithTimeout = { ...headers };
+							if (grokBuildState) {
+								for (const name of Object.keys(headersWithTimeout)) {
+									const normalized = name.toLowerCase();
+									if (normalized === "x-grok-turn-idx" || normalized === "traceparent") {
+										delete headersWithTimeout[name];
+									}
+								}
+							}
 							if (requestTimeoutMs !== undefined) {
 								headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 							}
 							const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
 								url: requestUrl,
 								headers: headersWithTimeout,
+								prepareHeaders: grokBuildState
+									? () => {
+											const turnIndex = grokBuildState.nextTurnIndex++;
+											return {
+												Authorization: `Bearer ${apiKey}`,
+												"User-Agent": XAI_GROK_BUILD_USER_AGENT,
+												"x-grok-client-identifier": XAI_GROK_BUILD_CLIENT_IDENTIFIER,
+												"x-grok-client-version": XAI_GROK_BUILD_CLIENT_VERSION,
+												"X-XAI-Token-Auth": XAI_GROK_BUILD_TOKEN_AUTH,
+												"x-grok-model-override": model.id,
+												"x-grok-agent-id": grokBuildState.agentId,
+												"x-grok-session-id": grokBuildState.sessionId,
+												"x-grok-conv-id": grokBuildConversationId ?? grokBuildState.sessionId,
+												"x-grok-req-id": crypto.randomUUID(),
+												...(turnIndex === 0
+													? {}
+													: {
+															"x-grok-turn-idx": String(turnIndex),
+															traceparent: createTraceparent(),
+														}),
+											};
+										}
+									: undefined,
 								body: requestParams,
 								signal: requestSignal,
 								fetch: options?.fetch,
@@ -753,8 +826,18 @@ const streamOpenAIResponsesOnce = (
  * would otherwise stall the agent loop. Shared with the OpenAI-completions and
  * Anthropic providers via `withEmptyCompletionRetry`.
  */
-export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
+export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) => {
+	if (isGrokBuildProvider(model) && !options?.providerSessionState) {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		return withEmptyCompletionRetry(
+			model,
+			context,
+			{ ...options, providerSessionState },
+			streamOpenAIResponsesOnce,
+		);
+	}
+	return withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
+};
 
 function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): boolean {
 	if (model.provider !== "openai") return false;
@@ -898,7 +981,7 @@ export function buildParams(
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
 	const reasoningSummary =
-		model.provider === "xai-oauth"
+		model.provider === "xai-oauth" || model.provider === "xai-grok-build"
 			? options?.reasoning === undefined
 				? undefined
 				: null

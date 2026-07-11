@@ -38,6 +38,8 @@ const MAX_DETAIL_CHARS = 4096;
 export interface OpenAIStreamRequestInit {
 	url: string;
 	headers: Record<string, string>;
+	/** Per-attempt headers overlaid after static headers immediately before each fetch. */
+	prepareHeaders?: (attempt: number) => Record<string, string>;
 	/** JSON request body; serialized once per call (retries resend the same bytes). */
 	body: unknown;
 	signal: AbortSignal;
@@ -62,9 +64,11 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const prepareHeaders = init.prepareHeaders;
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
+		prepareInit: prepareHeaders ? attempt => ({ headers: prepareHeaders(attempt) }) : undefined,
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
