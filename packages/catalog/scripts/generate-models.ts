@@ -30,6 +30,7 @@ import {
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	AZURE_CURATED_FALLBACK_MODELS,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
@@ -497,6 +498,10 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	// Seed Azure OpenAI gpt-5.6 deployments that models.dev has not catalogued
+	// for the azure provider yet. Deduped behind upstream models.dev entries
+	// once those appear (models.dev rows are pushed first, earlier sources win).
+	allModels.push(...AZURE_CURATED_FALLBACK_MODELS);
 	// Seed Sakana's documented Fugu models so the provider is usable when
 	// catalog generation has no live API key. If live `/v1/models` succeeds,
 	// Sakana is authoritative and stale seed IDs must stay out.

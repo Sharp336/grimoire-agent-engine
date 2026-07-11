@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import {
+	AZURE_CURATED_FALLBACK_MODELS,
 	DEFAULT_MODEL_PER_PROVIDER,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
@@ -78,4 +80,43 @@ describe("azure catalog provider", () => {
 		expect(model.thinking?.mode).toBe("effort");
 		expect(model.thinking?.efforts).toContain(Effort.XHigh);
 	});
+});
+
+// Pins the invariant: bundled `models.json` carries every entry the curated
+// azure gpt-5.6 seed (AZURE_CURATED_FALLBACK_MODELS) emits. models.dev has not
+// catalogued the gpt-5.6 generation for azure yet, so the bundle is the only
+// source for these ids. Failure here means: run `bun run gen:models` and
+// commit the diff.
+describe("azure curated gpt-5.6 seed (regression)", () => {
+	const bundled =
+		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"azure-openai-responses">>>).azure ?? {};
+
+	test("seed covers the gpt-5.6 deployment generation", () => {
+		expect(AZURE_CURATED_FALLBACK_MODELS.map(model => model.id).sort()).toEqual([
+			"gpt-5.6",
+			"gpt-5.6-luna",
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+		]);
+	});
+
+	for (const seeded of AZURE_CURATED_FALLBACK_MODELS) {
+		test(`bundles ${seeded.id} with the azure Responses shape`, () => {
+			const entry = bundled[seeded.id];
+			expect(entry, `azure/${seeded.id} missing from models.json`).toBeDefined();
+			expect(entry.api).toBe("azure-openai-responses");
+			expect(entry.provider).toBe("azure");
+			// Empty baseUrl: the deployment host is per-resource, resolved at runtime.
+			expect(entry.baseUrl).toBe("");
+			expect(entry.reasoning).toBe(true);
+			expect(entry.input).toEqual(["text", "image"]);
+			expect(entry.contextWindow).toBe(seeded.contextWindow);
+			expect(entry.maxTokens).toBe(seeded.maxTokens);
+			// Azure does not bill cache writes; mirrors every other bundled azure row.
+			expect(entry.cost).toEqual(seeded.cost);
+			// Policy pass must bake the gpt-5.6 effort vocabulary (incl. max).
+			expect(entry.thinking?.mode).toBe("effort");
+			expect(entry.thinking?.efforts).toContain(Effort.XHigh);
+		});
+	}
 });

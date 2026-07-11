@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Azure OpenAI GPT-5.6 models (gpt-5.6, gpt-5.6-sol, gpt-5.6-luna, gpt-5.6-terra) via a curated seed so the bundled catalog is not gated on models.dev cataloguing the new deployments
+
 ## [16.4.3] - 2026-07-11
 
 ### Fixed

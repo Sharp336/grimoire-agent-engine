@@ -4564,6 +4564,50 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 	}),
 ];
 
+/**
+ * Curated Azure OpenAI models that are deployable on Azure (the deployment
+ * name matches the first-party SKU id) but that models.dev has not catalogued
+ * for the `azure` provider yet — currently the gpt-5.6 generation. Seeded into
+ * model generation so the bundled catalog is never gated on models.dev's
+ * update cadence; deduped behind upstream models.dev entries once those
+ * appear. Pricing mirrors the first-party OpenAI rows except `cacheWrite: 0`
+ * (Azure does not bill cache writes), matching every other bundled azure row.
+ * `thinking` is re-baked by the generator's policy pass
+ * (scripts/generated-policies.ts).
+ */
+function createAzureGpt56StaticModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"azure-openai-responses">["cost"],
+): ModelSpec<"azure-openai-responses"> {
+	return {
+		id,
+		name,
+		api: "azure-openai-responses",
+		provider: "azure",
+		// Empty baseUrl: the deployment host is per-resource, resolved at runtime
+		// from AZURE_OPENAI_BASE_URL / AZURE_OPENAI_RESOURCE_NAME.
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost,
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	};
+}
+
+export const AZURE_CURATED_FALLBACK_MODELS: readonly ModelSpec<"azure-openai-responses">[] = [
+	createAzureGpt56StaticModel("gpt-5.6", "GPT-5.6", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }),
+	createAzureGpt56StaticModel("gpt-5.6-sol", "GPT-5.6 Sol", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }),
+	createAzureGpt56StaticModel("gpt-5.6-luna", "GPT-5.6 Luna", { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 }),
+	createAzureGpt56StaticModel("gpt-5.6-terra", "GPT-5.6 Terra", {
+		input: 2.5,
+		output: 15,
+		cacheRead: 0.25,
+		cacheWrite: 0,
+	}),
+];
+
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
 	// --- Azure OpenAI ---
 	// OpenAI-family models hosted on Azure, served via the Responses API. baseUrl
