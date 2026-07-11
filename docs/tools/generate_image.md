@@ -32,7 +32,9 @@
 
 ## Flow
 1. The SDK injects `generate_image` as a custom tool via `getImageGenTools()`.
-2. `execute(...)` resolves credentials and provider from the active model registry / session credentials.
+2. `execute(...)` resolves credentials and provider from settings + session credentials:
+   - `providers.image: auto` uses the built-in auto chain (OpenAI hosted → Antigravity → xAI → OpenRouter → Gemini).
+   - A concrete `providers.image` value is **strict**: only that provider is tried; local credential/model-gate failures throw a provider-specific diagnostic and do **not** soft-fall through into auto.
 3. Input images are resolved from `path` relative to the session cwd or from inline `data` + `mime_type`.
 4. The tool validates provider-specific `aspect_ratio` support.
 5. Provider dispatch:
@@ -62,8 +64,9 @@
 - `image_size` schema accepts `1024x1024`, `1536x1024`, and `1024x1536`.
 
 ## Errors
-- Missing credentials: `No image API credentials found...`
-- OpenAI path without an active GPT model: `Missing active GPT model for OpenAI image generation`.
+- Missing credentials under `auto`: `No image API credentials found...`
+- Concrete `providers.image` unavailable: provider-specific diagnostic (for example OpenAI requires an eligible active GPT/o3 Responses/Codex host; no silent fallthrough to Antigravity/xAI/etc.).
+- OpenAI path without an active GPT model after credentials resolved: `Missing active GPT model for OpenAI image generation`.
 - Antigravity credentials without `projectId`: `Missing projectId in antigravity credentials`.
 - Provider HTTP failures surface as provider-specific error messages with status metadata where available.
 - Unsupported provider/aspect-ratio combinations fail before the provider request.

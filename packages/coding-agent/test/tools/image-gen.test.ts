@@ -333,4 +333,187 @@ describe("imageGenTool", () => {
 		if (!savedPath) throw new Error("Expected generated image path");
 		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-xai-image"));
 	});
+
+	it("keeps providers.image=openai strict when active model is Grok", async () => {
+		setPreferredImageProvider("openai");
+		let fetchCalls = 0;
+		let antigravityLookups = 0;
+
+		const fetchMock: typeof fetch = (async () => {
+			fetchCalls += 1;
+			return new Response(null, { status: 500 });
+		}) as unknown as typeof fetch;
+
+		const activeModel = {
+			api: "openai-responses",
+			provider: "xai-oauth",
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			baseUrl: "https://api.x.ai/v1",
+		} as Model;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => "unused-openai-key",
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "google-antigravity") {
+						antigravityLookups += 1;
+						return JSON.stringify({ token: "ag-token", projectId: "proj-1" });
+					}
+					if (provider === "xai-oauth") return "xai-token";
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: (provider: string) => provider === "xai-oauth" || provider === "google-antigravity",
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "unused",
+			} as unknown as ModelRegistry,
+			model: activeModel,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await expect(imageGenTool.execute("call-strict-openai", { subject: "a cat" }, undefined, ctx)).rejects.toThrow(
+			/providers\.image is set to openai[\s\S]*eligible OpenAI\/Codex GPT\/o3 Responses host[\s\S]*xai-oauth\/grok-4\.5/,
+		);
+		expect(fetchCalls).toBe(0);
+		expect(antigravityLookups).toBe(0);
+	});
+
+	it("leaves providers.image=auto legacy order unchanged when OpenAI host is ineligible", async () => {
+		setPreferredImageProvider("auto");
+		let requestUrl: string | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			requestUrl = input.toString();
+			if (String(input).includes("streamGenerateContent")) {
+				return new Response(
+					[
+						"data: " +
+							JSON.stringify({
+								response: {
+									candidates: [
+										{
+											content: {
+												parts: [
+													{
+														inlineData: {
+															data: Buffer.from("fake-ag-image").toString("base64"),
+															mimeType: "image/png",
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							}),
+						"",
+					].join("\n"),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response(null, { status: 500 });
+		}) as unknown as typeof fetch;
+
+		const activeModel = {
+			api: "openai-responses",
+			provider: "xai-oauth",
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			baseUrl: "https://api.x.ai/v1",
+		} as Model;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "google-antigravity") {
+						return JSON.stringify({ token: "ag-token", projectId: "proj-1" });
+					}
+					if (provider === "xai-oauth") return "xai-token";
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: (provider: string) => provider === "xai-oauth" || provider === "google-antigravity",
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "ag-token",
+			} as unknown as ModelRegistry,
+			model: activeModel,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-auto-antigravity", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toContain("streamGenerateContent");
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3-pro-image");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	it("keeps providers.image=xai strict when xAI credentials are missing", async () => {
+		setPreferredImageProvider("xai");
+		let fetchCalls = 0;
+		let antigravityLookups = 0;
+
+		const fetchMock: typeof fetch = (async () => {
+			fetchCalls += 1;
+			return new Response(null, { status: 500 });
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => {
+					if (provider === "google-antigravity") {
+						antigravityLookups += 1;
+						return JSON.stringify({ token: "ag-token", projectId: "proj-1" });
+					}
+					return undefined;
+				},
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: (provider: string) => provider === "google-antigravity",
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "unused",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await expect(imageGenTool.execute("call-strict-xai", { subject: "a cat" }, undefined, ctx)).rejects.toThrow(
+			/providers\.image is set to xai[\s\S]*no usable xAI credentials/,
+		);
+		expect(fetchCalls).toBe(0);
+		expect(antigravityLookups).toBe(0);
+	});
 });

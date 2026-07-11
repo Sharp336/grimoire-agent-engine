@@ -4397,14 +4397,18 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Image Provider",
-			description: "Preferred provider for image generation",
+			description: "Image generation provider. Concrete values are strict (no silent auto fallthrough).",
 			options: [
 				{
 					value: "auto",
 					label: "Auto",
 					description: "Priority: GPT model image tool > Antigravity > xAI > OpenRouter > Gemini",
 				},
-				{ value: "openai", label: "OpenAI", description: "Uses the active GPT Responses/Codex model" },
+				{
+					value: "openai",
+					label: "OpenAI",
+					description: "Requires active GPT/o3 Responses/Codex host; fails closed if unavailable",
+				},
 				{
 					value: "antigravity",
 					label: "Antigravity",
