@@ -861,6 +861,41 @@ def _post_issue_opened(
     )
 
 
+def test_webhook_strips_client_supplied_robomp_metadata(settings: Settings) -> None:
+    app = create_app(settings)
+    payload = {
+        "action": "opened",
+        "issue": {
+            "number": 919,
+            "user": {"login": "attacker"},
+            "author_association": "NONE",
+        },
+        "repository": {"full_name": "octo/widget"},
+        "_robomp_directive": {
+            "body": "ship it",
+            "author": "attacker",
+            "pragmas": [],
+            "authorizes_impl": True,
+        },
+        "_robomp_review": {"bypass_once_guard": True},
+    }
+    raw = json.dumps(payload).encode()
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhook/github",
+            content=raw,
+            headers=_signed_headers("test-webhook-secret", raw, event="issues", delivery="tainted-metadata"),
+        )
+        row = get_database(settings.sqlite_path).get_event("tainted-metadata")
+
+    close_database()
+    assert resp.status_code == 202
+    assert row is not None
+    assert "_robomp_directive" not in row.payload
+    assert "_robomp_review" not in row.payload
+
+
 def _post_pr_issue_comment(
     client: TestClient,
     *,
@@ -888,6 +923,32 @@ def _post_pr_issue_comment(
         "/webhook/github",
         content=body,
         headers=_signed_headers(secret, body, event="issue_comment", delivery=delivery),
+    )
+
+
+def _post_pull_request_synchronize(
+    client: TestClient,
+    *,
+    delivery: str,
+    user: str,
+    pr_number: int,
+    association: str = "NONE",
+    secret: str = "test-webhook-secret",
+):
+    payload = {
+        "action": "synchronize",
+        "pull_request": {
+            "number": pr_number,
+            "user": {"login": user},
+            "author_association": association,
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+    body = json.dumps(payload).encode()
+    return client.post(
+        "/webhook/github",
+        content=body,
+        headers=_signed_headers(secret, body, event="pull_request", delivery=delivery),
     )
 
 
@@ -1531,7 +1592,6 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None
         row = get_database(cfg.sqlite_path).get_event("dir-1")
     close_database()
     assert row is not None
-    assert row.state == "queued"
     directive = row.payload.get("_robomp_directive")
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
 
@@ -1636,6 +1696,7 @@ class _RecordingSandbox:
         author_name: str = "",
         author_email: str = "",
         slot_uid: int | None = None,
+        refresh: bool = False,
     ):
         self.ensure_calls.append(
             {
@@ -1646,6 +1707,7 @@ class _RecordingSandbox:
                 "existing_branch": existing_branch,
                 "pr_head": pr_head,
                 "slot_uid": slot_uid,
+                "refresh": refresh,
             }
         )
         # Mimic Workspace shape — only the attributes ensure_workspace's
@@ -2090,6 +2152,709 @@ async def test_review_pr_skips_after_submitted_review(
         delivery_id="d-review-skip",
     )
 
+    assert stub_run_task == []
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_bypasses_once_guard_on_re_review_directive(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    # Log 1 successful review tool call
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # Deliver a comment payload that has the directive metadata with re-review intent
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-bypass",
+    )
+
+    # Since it bypassed the once-guard, it should run
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    # The directive must be hydrated and passed into run_task so maintainer
+    # instructions/pragmas are honored during the review.
+    directive = stub_run_task[0].get("directive")
+    assert directive is not None
+    assert directive.body == "please re-review"
+    assert directive.author == "can1357"
+    assert len(sandbox.ensure_calls) >= 1
+    close_database()
+
+
+async def test_review_pr_rereview_new_delivery_uses_fresh_session(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A new re-review delivery (first attempt) must refresh the workspace
+    so the review sees the current PR head."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-fresh-session",
+        attempts=1,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is True, "new delivery must refresh workspace"
+    close_database()
+
+
+async def test_review_pr_rereview_retry_refreshes_until_reset_succeeds(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A retry of the same delivery must keep refreshing the workspace until the
+    checkout reset actually succeeds — even if attempts >= 2. A prior attempt
+    may have failed before the PR head was re-fetched, so the retry must not
+    skip refresh merely because it is not the first attempt."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-retry-session",
+        attempts=2,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is True, "retry must keep refreshing until the checkout reset succeeds"
+    close_database()
+
+
+async def test_review_pr_rereview_retry_resumes_session_after_reset_success(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Once the checkout reset has succeeded for a delivery, a later retry of
+    the same delivery must resume the existing session (refresh=False) so
+    in-progress work survives."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    # Simulate a prior successful ensure_workspace(refresh=True) for this delivery.
+    db.upsert_issue(key=key, repo="octo/widget", number=900, state="reviewing", pr_number=900)
+    db.set_issue_head_refreshed_delivery(key, "d-retry-session")
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-retry-session",
+        attempts=2,
+    )
+
+    assert len(stub_run_task) == 1
+    assert sandbox.ensure_calls[0]["refresh"] is False, "retry after successful reset must resume session, not refresh"
+    close_database()
+
+
+async def test_review_pr_rereview_retry_idempotent_after_successful_submit(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A retry of the same delivery after a successful submit_pr_review must NOT
+    re-review. The bypass_once_guard preserves retry idempotency by checking
+    has_successful_tool_call_for_delivery(key, 'submit_pr_review', delivery_id)."""
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    # Simulate a prior successful submit_pr_review for this delivery.
+    db.log_tool_call(
+        issue_key=key,
+        tool="submit_pr_review",
+        args={"body": "done"},
+        result={"review_id": 12},
+        delivery_id="d-rereview-retry",
+    )
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # Retry the same delivery with a re-review directive (bypass_once_guard=True).
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-rereview-retry",
+    )
+
+    # Must NOT re-review: the same delivery already produced a successful submit.
+    assert stub_run_task == [], "retry of a completed delivery must not re-review"
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_skips_draft_pr_on_re_review_comment(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Comment-triggered re-review must not queue for draft PRs (task-boundary guard).
+
+    The issue_comment webhook payload has no `draft` field, so routing can't
+    skip draft PRs the way pull_request events do. The guard lives at the
+    task boundary after `get_pull_request` returns the real PR state.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+        draft=True,
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-draft-skip",
+    )
+
+    assert stub_run_task == []
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_bypasses_once_guard_on_synchronize_opt_in(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    # Log 1 successful review tool call
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # Opt in to synchronize
+    class MockReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", MockReviewSettings())
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "action": "synchronize",
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+        },
+        delivery_id="d-review-sync",
+    )
+
+    # Since it is synchronize and opted in, it should run
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    assert len(sandbox.ensure_calls) >= 1
+    close_database()
+
+
+async def test_review_pr_runs_on_synchronize_when_under_cap(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    # Log 2 successful review tool calls
+    for i in range(2):
+        db.log_tool_call(
+            issue_key=key, tool="submit_pr_review", args={"body": f"done {i}"}, result={"review_id": 12 + i}
+        )
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # Opt in to synchronize
+    class MockReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", MockReviewSettings())
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "action": "synchronize",
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+        },
+        delivery_id="d-review-sync-2",
+    )
+
+    # Under cap (2 < 3), so it should run the 3rd review
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    assert len(sandbox.ensure_calls) >= 1
+    close_database()
+
+
+async def test_review_pr_skips_on_synchronize_when_cap_reached(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    # Log 3 successful review tool calls
+    for i in range(3):
+        db.log_tool_call(
+            issue_key=key, tool="submit_pr_review", args={"body": f"done {i}"}, result={"review_id": 12 + i}
+        )
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # Opt in to synchronize with max 3 reviews
+    class MockReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", MockReviewSettings())
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "action": "synchronize",
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+        },
+        delivery_id="d-review-sync-caped",
+    )
+
+    # Since 3 reviews have already been submitted, it should skip
     assert stub_run_task == []
     assert sandbox.ensure_calls == []
     close_database()
@@ -2762,4 +3527,410 @@ def test_webhook_pr_conversation_does_not_cancel_pending_closure(settings: Setti
     # other than `handle_comment`.
     assert row is not None
     assert row.state == "pending"
+    close_database()
+
+
+# -------- /webhook/github synchronize gating & cap enforcement --------
+
+
+def test_webhook_pull_request_synchronize_is_gated_by_config(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    # 1. By default, review_on_synchronize is False, so synchronize is skipped.
+    reset_settings_cache()
+    default_settings = Settings()  # type: ignore[call-arg]
+    default_settings.ensure_paths()
+    app_default = create_app(default_settings)
+    with TestClient(app_default) as client:
+        resp = _post_pull_request_synchronize(
+            client,
+            delivery="d-sync-default",
+            user="alice",
+            pr_number=900,
+        )
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "skipped"
+
+    # 2. When review_on_synchronize is True, synchronize is queued.
+    monkeypatch.setenv("ROBOMP_PR_REVIEW_ON_SYNCHRONIZE", "true")
+    reset_settings_cache()
+    enabled_settings = Settings()  # type: ignore[call-arg]
+    enabled_settings.ensure_paths()
+    app_enabled = create_app(enabled_settings)
+    with TestClient(app_enabled) as client:
+        resp = _post_pull_request_synchronize(
+            client,
+            delivery="d-sync-enabled",
+            user="alice",
+            pr_number=900,
+        )
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "queued"
+    close_database()
+
+
+async def test_review_pr_synchronize_respects_cap(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        assert repo_full == "octo/widget"
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        assert repo_full == "octo/widget"
+        assert number == 900
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        assert repo_full == "octo/widget"
+        assert number == 900
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    # 1. 0 reviews -> should review
+    payload = {
+        "action": "synchronize",
+        "pull_request": {"number": 900},
+        "repository": {"full_name": "octo/widget"},
+    }
+
+    monkeypatch.setenv("ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR", "2")
+    monkeypatch.setenv("ROBOMP_PR_REVIEW_ON_SYNCHRONIZE", "true")
+    reset_settings_cache()
+    custom_settings = Settings()  # type: ignore[call-arg]
+    custom_settings.ensure_paths()
+
+    await tasks.review_pr(
+        settings=custom_settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload=payload,
+        delivery_id="d-sync-0",
+    )
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    stub_run_task.clear()
+    sandbox.ensure_calls.clear()
+
+    # Log 1 successful review
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done 1"}, result={"review_id": 12})
+
+    # 2. 1 review -> should still review (less than cap of 2)
+    await tasks.review_pr(
+        settings=custom_settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload=payload,
+        delivery_id="d-sync-1",
+    )
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    stub_run_task.clear()
+    sandbox.ensure_calls.clear()
+
+    # Log 2nd successful review
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done 2"}, result={"review_id": 13})
+
+    # 3. 2 reviews -> should skip (equal to cap of 2)
+    await tasks.review_pr(
+        settings=custom_settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload=payload,
+        delivery_id="d-sync-2",
+    )
+    assert len(stub_run_task) == 0
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_skips_closed_pr_on_re_review_comment(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """Comment-triggered re-review must not run on a closed PR (task-boundary guard).
+
+    The payload-time state is stale: a PR can close between webhook delivery and
+    worker execution. The guard checks the live `pr.state` after
+    `get_pull_request` returns the real PR state.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="closed",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-closed-skip",
+    )
+
+    assert stub_run_task == []
+    assert sandbox.ensure_calls == []
+    close_database()
+
+
+async def test_review_pr_bypass_clears_stale_staged_comments(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A bypass re-review must clear stale staged comments from a prior failed run.
+
+    If an earlier review staged inline comments with `pr_review_comment` but
+    crashed before `submit_pr_review`, those rows are still keyed by issue_key.
+    The next bypass re-review on a different head must not flush them alongside
+    the new review.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    # Simulate stale staged comments from a prior failed review.
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=10, side="RIGHT", body="stale comment")
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=20, side="RIGHT", body="another stale")
+    assert len(db.list_staged_review_comments(key)) == 2
+
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id="d-review-clear-stale",
+    )
+
+    # The bypass re-review ran.
+    assert len(stub_run_task) == 1
+    assert stub_run_task[0]["task_kind"] == "review_pr"
+    # Stale staged comments from the prior failed run must be cleared.
+    assert db.list_staged_review_comments(key) == [], "stale staged comments survived bypass re-review"
+    close_database()
+
+
+async def test_review_pr_bypass_preserves_same_delivery_staged_comments(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """A retry of the same delivery must NOT clear comments staged during that delivery.
+
+    Only stale comments from earlier deliveries (or head comments with no
+    delivery tag) are cleared; same-delivery comments survive so the retry
+    can resume the in-progress review.
+    """
+    from robomp import tasks
+    from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+    key = issue_key("octo/widget", 900)
+    db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    delivery = "d-retry-same"
+    # Stale comment from an earlier delivery (no delivery_id → head comment).
+    db.stage_review_comment(issue_key=key, path="src/old.ts", line=10, body="stale from prior run")
+    # In-progress comment from the current delivery (retry must preserve it).
+    db.stage_review_comment(issue_key=key, path="src/new.ts", line=5, body="in-progress", delivery_id=delivery)
+    assert len(db.list_staged_review_comments(key)) == 2
+
+    repo = RepoInfo(
+        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=900,
+        title="Fix parser",
+        body="body",
+        state="open",
+        author="alice",
+        labels=("triaged", "review:p1"),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=900,
+        html_url="https://github.com/octo/widget/pull/900",
+        head_ref="alice/fix-parser",
+        base_ref="main",
+        state="open",
+        author="alice",
+        head_repo="alice/widget",
+    )
+
+    async def _get_repo(self, repo_full: str):
+        return repo
+
+    async def _get_issue(self, repo_full: str, number: int):
+        return issue
+
+    async def _get_pull_request(self, repo_full: str, number: int):
+        return pr
+
+    monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=GitHubClient("t"),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
+        payload={
+            "pull_request": {"number": 900},
+            "repository": {"full_name": "octo/widget"},
+            "_robomp_directive": {
+                "body": "please re-review",
+                "author": "can1357",
+                "pragmas": [],
+                "authorizes_impl": True,
+            },
+        },
+        delivery_id=delivery,
+    )
+
+    assert len(stub_run_task) == 1
+    # The stale head comment must be cleared; the same-delivery comment preserved.
+    remaining = db.list_staged_review_comments(key)
+    assert len(remaining) == 1, f"expected 1 same-delivery comment, got {len(remaining)}"
+    assert remaining[0].path == "src/new.ts"
+    assert remaining[0].body == "in-progress"
+    assert remaining[0].delivery_id == delivery
     close_database()

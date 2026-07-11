@@ -119,6 +119,11 @@ class ToolBindings:
     # authorizes implementation. Gates first-PR creation on non-bug/doc issues.
     impl_authorized: bool = False
     slot_uid: int | None = None
+    # Delivery id of the inbound webhook event that created this task. Used by
+    # _audit to stamp tool_calls with their originating delivery so the
+    # re-review bypass_once_guard can detect a retry of a delivery that already
+    # produced a successful submit_pr_review.
+    delivery_id: str | None = None
     # Set by the worker before launching omp. Carries the abort-task signal
     # back out to the worker; `None` for unit tests that exercise tools
     # without a live RpcClient.
@@ -185,6 +190,7 @@ def _audit(
         args=args,
         result=result if isinstance(result, Mapping) else ({"value": result} if result is not None else None),
         error=error,
+        delivery_id=bindings.delivery_id,
     )
 
 
@@ -1376,10 +1382,43 @@ def _build_classify_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         if isinstance(provider, str) and provider.strip() and provider.startswith("provider:"):
             labels.append("providers")
             labels.append(provider)
+
+        # Re-review replaces any stale review:p* rank label AND any stale
+        # _PR_TYPES type label before applying the new ones. PRs are issues in
+        # the GitHub API, so get_issue carries the current label set
+        # (PullRequestInfo does not). Removal is best-effort: tolerate 404
+        # (label already gone) and degrade to additive-only if the fetch
+        # itself fails.
+        pr_number = bindings.default_comment_number
+        stale: list[str] = []
+        try:
+            current = _run_coro(bindings.loop, bindings.github.get_issue(bindings.repo.full_name, pr_number))
+            stale = [
+                lbl
+                for lbl in current.labels
+                if (lbl in _PR_RANKS and lbl != str(rank)) or (lbl in _PR_TYPES and lbl != str(pr_type))
+            ]
+        except GitHubError as exc:
+            _audit(bindings, "classify_pr", args, error=f"fetch current labels failed: {exc.status} {exc.message}")
+        for old in stale:
+            try:
+                _run_coro(
+                    bindings.loop,
+                    bindings.github.remove_issue_label(bindings.repo.full_name, pr_number, old),
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    _audit(
+                        bindings,
+                        "classify_pr",
+                        args,
+                        error=f"remove stale label {old!r} failed: {exc.status} {exc.message}",
+                    )
+
         try:
             applied = _run_coro(
                 bindings.loop,
-                bindings.github.add_issue_labels(bindings.repo.full_name, bindings.default_comment_number, labels),
+                bindings.github.add_issue_labels(bindings.repo.full_name, pr_number, labels),
             )
         except GitHubError as exc:
             _audit(bindings, "classify_pr", args, error=str(exc))
@@ -1486,6 +1525,7 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             start_line=start_line,
             start_side=start_side,
             body=body.strip(),
+            delivery_id=bindings.delivery_id,
         )
         count = len(bindings.db.list_staged_review_comments(bindings.issue_key))
         _audit(bindings, "pr_review_comment", args, result={"id": staged.id, "staged": count})

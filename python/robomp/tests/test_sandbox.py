@@ -474,6 +474,371 @@ def test_ensure_workspace_pr_head_uses_detached_pr_ref(tmp_path: Path, upstream_
     assert pushurl.returncode != 0
 
 
+def test_ensure_workspace_refresh_refetches_pr_head_on_existing_workspace(tmp_path: Path, upstream_repo: Path) -> None:
+    """A synchronize/re-review on an existing PR workspace must re-fetch the
+    PR head and reset the detached checkout so the review sees new commits."""
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head_v1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws1.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Push a new commit to the PR head.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    # Without refresh, the existing workspace stays at the old HEAD.
+    ws_stale = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head_stale = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws_stale.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_stale == head_v1
+
+    # With refresh=True, the workspace resets to the new PR head.
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+    head_refreshed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(ws_refreshed.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_refreshed != head_v1
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+
+def test_ensure_workspace_refresh_cleans_untracked_files(tmp_path: Path, upstream_repo: Path) -> None:
+    """The refresh path must clean untracked files left by a prior review run.
+
+    `git reset --hard` does not touch untracked files, so without an explicit
+    `git clean -fd` a stale artifact from the previous review would survive
+    the refresh and shadow the fresh checkout.
+    """
+    import os
+    import subprocess
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    # Simulate a prior review run leaving an untracked artifact behind.
+    stray_file = ws1.repo_dir / "stale_build_output.txt"
+    stray_file.write_text("leftover from previous review\n", encoding="utf-8")
+    stray_dir = ws1.repo_dir / "build_cache"
+    stray_dir.mkdir(parents=True, exist_ok=True)
+    (stray_dir / "artifact.txt").write_text("cached\n", encoding="utf-8")
+    assert stray_file.exists()
+    assert (stray_dir / "artifact.txt").exists()
+
+    # Push a new commit to the PR head so refresh actually runs.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+
+    # The untracked artifact from the prior run must be gone.
+    assert not stray_file.exists(), "untracked file survived refresh"
+    assert not stray_dir.exists(), "untracked directory survived refresh"
+    # The refreshed content is the new PR head.
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+
+def test_ensure_workspace_refresh_cleans_ignored_artifacts(tmp_path: Path, upstream_repo: Path) -> None:
+    """The refresh path must clean ignored files too, not just untracked ones.
+
+    `git clean -fd` preserves ignored files (dist/, coverage/, build caches).
+    A prior review may have produced ignored artifacts that are not in the
+    current PR head; `git clean -fdx` removes them so the refreshed review
+    sees only the new PR head's tree.
+    """
+    import os
+    import subprocess
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    # Add a .gitignore so dist/ and coverage/ are ignored.
+    (contributor / ".gitignore").write_text("dist/\ncoverage/\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md", ".gitignore"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    # Simulate a prior review run leaving ignored artifacts behind.
+    ignored_dir = ws1.repo_dir / "dist"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    (ignored_dir / "bundle.js").write_text("stale build output\n", encoding="utf-8")
+    ignored_file = ws1.repo_dir / "coverage.dat"
+    ignored_file.write_text("stale coverage\n", encoding="utf-8")
+    assert ignored_dir.exists()
+    assert ignored_file.exists()
+
+    # Push a new commit to the PR head so refresh actually runs.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+
+    # The ignored artifacts from the prior run must be gone.
+    assert not ignored_dir.exists(), "ignored directory survived refresh"
+    assert not ignored_file.exists(), "ignored file survived refresh"
+    # The refreshed content is the new PR head.
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+
+def test_ensure_workspace_refresh_clears_stale_session_transcripts(tmp_path: Path, upstream_repo: Path) -> None:
+    """A new re-review delivery must not resume the previous review's transcript.
+
+    `ensure_workspace` with ``refresh=True`` re-fetches the PR head and resets
+    the checkout, but without clearing ``.omp-session/*.jsonl`` the worker's
+    ``_has_prior_session`` would still pass ``--continue`` and the agent would
+    review the new PR head inside the stale transcript.  The refresh path must
+    remove old JSONL transcripts so the next run starts fresh; a same-delivery
+    retry (``refresh=False``) preserves them.
+    """
+    import os
+    import subprocess
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("v1\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    env = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+    subprocess.run(
+        ["git", "commit", "-m", "pr v1"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    # Simulate a prior review run leaving a session transcript behind.
+    transcript = ws1.session_dir / "turn-abc.jsonl"
+    transcript.write_text('{"role":"user"}\n', encoding="utf-8")
+    assert transcript.is_file()
+
+    # Push a new commit to the PR head so refresh actually runs.
+    (contributor / "README.md").write_text("v2\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr v2"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    # A new delivery (refresh=True) must clear the stale transcript.
+    ws_refreshed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=True,
+    )
+    assert not transcript.exists(), "stale session transcript survived refresh"
+    # The session dir itself still exists (ensure_workspace re-creates it).
+    assert ws_refreshed.session_dir.is_dir()
+    # The refreshed content is the new PR head.
+    assert (ws_refreshed.repo_dir / "README.md").read_text(encoding="utf-8") == "v2\n"
+
+    # A same-delivery retry (refresh=False) must preserve the session.
+    retry_transcript = ws_refreshed.session_dir / "turn-retry.jsonl"
+    retry_transcript.write_text('{"role":"assistant"}\n', encoding="utf-8")
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+        refresh=False,
+    )
+    assert retry_transcript.is_file(), "session transcript was cleared on non-refresh retry"
+
+
 def test_chown_workspace_noops_when_not_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], bool]] = []
 
@@ -1110,7 +1475,9 @@ def test_remove_workspace(tmp_path: Path, upstream_repo: Path) -> None:
     assert not ws.root.exists()
 
 
-def test_remove_workspace_prunes_pool_after_failed_worktree_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remove_workspace_prunes_pool_after_failed_worktree_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     # Create a real repo_dir on disk so `repo_dir.exists()` is True on entry.
     ws_root = mgr.workspace_root("o/r", 7)
@@ -1184,6 +1551,7 @@ def test_remove_workspace_prunes_when_failed_remove_already_deleted_checkout(
     )
     prune_idx = next(i for i, (c, _) in enumerate(calls) if c == ["git", "worktree", "prune"])
     assert calls[prune_idx][1] == pool, "prune did not run in the repo's pool dir"
+
 
 def test_redact_credentials_strips_userinfo() -> None:
     from robomp.sandbox import redact_credentials
@@ -1911,7 +2279,9 @@ def test_run_timeout_raises_git_command_error_124(monkeypatch: pytest.MonkeyPatc
     assert seen["timeout"] == s._DEFAULT_SANDBOX_SUBPROCESS_TIMEOUT
 
 
-def test_ensure_workspace_raises_when_local_branch_probe_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_workspace_raises_when_local_branch_probe_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
     mgr.transport = SimpleNamespace(
@@ -1946,7 +2316,9 @@ def test_ensure_workspace_raises_when_local_branch_probe_times_out(tmp_path: Pat
         )
 
 
-def test_ensure_workspace_raises_when_remote_branch_probe_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_workspace_raises_when_remote_branch_probe_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
     mgr.transport = SimpleNamespace(

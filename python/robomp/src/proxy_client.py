@@ -11,10 +11,10 @@ to short-circuit the network.
 
 from __future__ import annotations
 
-import json
 import asyncio
-import time
+import json
 import logging
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -573,6 +573,7 @@ def _pr_from(data: Any) -> PullRequestInfo:
         head_repo=str(data.get("head_repo") or ""),
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
+        draft=bool(data.get("draft")),
     )
 
 

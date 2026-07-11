@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+
 import pytest
 
 from robomp.github_events import (
@@ -248,37 +249,119 @@ def test_route_incoming_pr_opened_skips_draft_bot_and_disabled() -> None:
     assert "disabled" in disabled.reason
 
 
-def test_route_pull_request_synchronize_stays_skipped() -> None:
+def test_route_pull_request_synchronize_skips_unless_opted_in() -> None:
+    payload = {
+        "action": "synchronize",
+        "pull_request": {"number": 9, "user": {"login": "alice"}},
+        "repository": {"full_name": "octo/widget"},
+    }
+
+    default_decision = route("pull_request", payload, allowlist=ALLOWLIST, bot_login=BOT)
+    assert not default_decision.should_queue
+    assert default_decision.reason == "pull_request.synchronize ignored"
+
+    enabled_decision = route("pull_request", payload, allowlist=ALLOWLIST, bot_login=BOT, on_synchronize=True)
+    assert enabled_decision.should_queue
+    assert enabled_decision.task == "review_pr"
+    assert enabled_decision.issue_key == "octo/widget#9"
+    assert enabled_decision.bypass_once_guard is True
+    assert enabled_decision.synchronize_review is True
+
+
+def test_route_pull_request_synchronize_vouched_label_always_defers() -> None:
+    """In vouched_label mode, synchronize must always defer to the vouch gate.
+
+    The synchronize payload carries no trusted signal that the configured
+    `vouch_review_labeler` applied the current vouch label — the PR `labels`
+    array only carries label names, not who applied them.  A stale or
+    maintainer-added label must not bypass the gate, so synchronize always
+    defers regardless of `on_synchronize` or label presence.
+    """
+    labeled_payload = {
+        "action": "synchronize",
+        "pull_request": {
+            "number": 9,
+            "user": {"login": "alice"},
+            "labels": [{"name": "vouched"}],
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+    unlabeled_payload = {
+        "action": "synchronize",
+        "pull_request": {
+            "number": 9,
+            "user": {"login": "alice"},
+            "labels": [],
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+
+    # Opted-in + vouch label present → still skip (label name is not trusted).
+    opted_in_labeled = route(
+        "pull_request",
+        labeled_payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_trigger="vouched_label",
+        on_synchronize=True,
+    )
+    assert not opted_in_labeled.should_queue
+    assert opted_in_labeled.reason == "deferred to vouch label"
+
+    # Opted-in but vouch label absent → skip (gate preserved).
+    opted_in_unlabeled = route(
+        "pull_request",
+        unlabeled_payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_trigger="vouched_label",
+        on_synchronize=True,
+    )
+    assert not opted_in_unlabeled.should_queue
+    assert opted_in_unlabeled.reason == "deferred to vouch label"
+
+    # Default (no opt-in) also skips.
+    default_decision = route(
+        "pull_request",
+        labeled_payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_trigger="vouched_label",
+    )
+    assert not default_decision.should_queue
+    assert default_decision.reason == "deferred to vouch label"
+
+
+def test_route_pull_request_synchronize_vouched_label_skips_even_with_stale_label() -> None:
+    """A maintainer-added or stale vouch label must not trigger sync review.
+
+    Unlike the `labeled` handler which validates `sender` against
+    `vouch_review_labeler`, the synchronize branch has no trusted labeler
+    signal, so it must never queue — even when the label is present.
+    """
+    payload = {
+        "action": "synchronize",
+        "pull_request": {
+            "number": 9,
+            "user": {"login": "alice"},
+            "labels": [{"name": "Vouched"}],
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
     decision = route(
         "pull_request",
-        {
-            "action": "synchronize",
-            "pull_request": {"number": 9, "user": {"login": "alice"}},
-            "repository": {"full_name": "octo/widget"},
-        },
+        payload,
         allowlist=ALLOWLIST,
         bot_login=BOT,
+        pr_review_trigger="vouched_label",
+        vouch_review_label="VOUCHED",
+        on_synchronize=True,
     )
     assert not decision.should_queue
+    assert decision.reason == "deferred to vouch label"
 
 
-def test_route_incoming_pr_comment_skips() -> None:
-    decision = route(
-        "issue_comment",
-        {
-            "action": "created",
-            "comment": {"user": {"login": "alice"}, "body": "ping"},
-            "issue": {"number": 9, "user": {"login": "contributor"}, "pull_request": {"url": "x"}},
-            "repository": {"full_name": "octo/widget"},
-        },
-        allowlist=ALLOWLIST,
-        bot_login=BOT,
-    )
-    assert not decision.should_queue
-    assert "incoming PR comments ignored" == decision.reason
-
-
-def test_route_incoming_pr_comment_with_maintainer_mention_still_skips() -> None:
+def test_route_incoming_pr_comment_directive_routes_on_re_review() -> None:
     decision = route(
         "issue_comment",
         {
@@ -294,9 +377,93 @@ def test_route_incoming_pr_comment_with_maintainer_mention_still_skips() -> None
         allowlist=ALLOWLIST,
         bot_login=BOT,
     )
-    assert not decision.should_queue
+    assert decision.should_queue
+    assert decision.task == "review_pr"
     assert decision.issue_key == "octo/widget#9"
-    assert decision.reason == "incoming PR comments ignored"
+    assert decision.directive is True
+    assert decision.bypass_once_guard is True
+
+    decision_no_intent = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "can1357"},
+                "author_association": "OWNER",
+                "body": "@robomp-bot change the indentation in foo.py",
+            },
+            "issue": {"number": 9, "user": {"login": "contributor"}, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision_no_intent.should_queue
+    assert decision_no_intent.reason == "incoming PR comments ignored"
+
+    decision_unauth = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "alice"},
+                "author_association": "CONTRIBUTOR",
+                "body": "@robomp-bot please re-review",
+            },
+            "issue": {"number": 9, "user": {"login": "contributor"}, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision_unauth.should_queue
+    assert decision_unauth.reason == "incoming PR comments ignored"
+
+
+def test_route_comment_re_review_skips_when_pr_review_disabled() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "can1357"},
+                "author_association": "OWNER",
+                "body": "@robomp-bot please re-review",
+            },
+            "issue": {"number": 9, "user": {"login": "contributor"}, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_enabled=False,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "PR review disabled"
+
+
+def test_route_comment_re_review_skips_closed_pr() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "can1357"},
+                "author_association": "OWNER",
+                "body": "@robomp-bot please re-review",
+            },
+            "issue": {
+                "number": 9,
+                "state": "closed",
+                "user": {"login": "contributor"},
+                "pull_request": {"url": "x"},
+            },
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "PR not open"
 
 
 def test_route_review_only_for_bot_authored_pr() -> None:
@@ -737,7 +904,7 @@ def test_route_directive_unset_for_maintainer_without_mention() -> None:
     assert decision.directive is False
 
 
-def test_route_directive_on_incoming_pr_conversation_is_ignored() -> None:
+def test_route_directive_on_incoming_pr_conversation_forces_review() -> None:
     decision = route(
         "issue_comment",
         {
@@ -745,7 +912,7 @@ def test_route_directive_on_incoming_pr_conversation_is_ignored() -> None:
             "comment": {
                 "user": {"login": "can1357"},
                 "author_association": "OWNER",
-                "body": "@robomp-bot change the indentation in foo.py",
+                "body": "@robomp-bot please re-review",
             },
             "issue": {"number": 50, "pull_request": {"url": "x"}},
             "repository": {"full_name": "octo/widget"},
@@ -754,8 +921,11 @@ def test_route_directive_on_incoming_pr_conversation_is_ignored() -> None:
         bot_login=BOT,
         resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
     )
-    assert not decision.should_queue
-    assert decision.reason == "incoming PR comments ignored"
+    assert decision.should_queue
+    assert decision.task == "review_pr"
+    assert decision.issue_key == "octo/widget#50"
+    assert decision.directive is True
+    assert decision.bypass_once_guard is True
 
 
 def test_route_directive_set_on_review_comment() -> None:
@@ -807,14 +977,14 @@ def test_route_review_comment_normalizes_bot_author_suffix() -> None:
 # ---------- reviewer bots ----------
 
 
-def test_route_reviewer_bot_comment_on_incoming_pr_is_ignored() -> None:
+def test_route_reviewer_bot_comment_on_incoming_pr_forces_review() -> None:
     decision = route(
         "issue_comment",
         {
             "action": "created",
             "comment": {
                 "user": {"login": "chatgpt-codex-connector[bot]", "type": "Bot"},
-                "body": "Found two issues in the diff: ...",
+                "body": "Please re-review the diff; found two issues.",
             },
             "issue": {"number": 9, "pull_request": {"url": "x"}},
             "repository": {"full_name": "octo/widget"},
@@ -824,8 +994,11 @@ def test_route_reviewer_bot_comment_on_incoming_pr_is_ignored() -> None:
         reviewer_bots=frozenset({"chatgpt-codex-connector"}),
         resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
     )
-    assert not decision.should_queue
-    assert decision.reason == "incoming PR comments ignored"
+    assert decision.should_queue
+    assert decision.task == "review_pr"
+    assert decision.issue_key == "octo/widget#9"
+    assert decision.directive is True
+    assert decision.bypass_once_guard is True
 
 
 def test_route_reviewer_bot_review_comment_is_directive() -> None:

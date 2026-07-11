@@ -768,6 +768,7 @@ class SandboxManager:
         author_name: str,
         author_email: str,
         slot_uid: int | None = None,
+        refresh: bool = False,
     ) -> Workspace:
         """Create or resume a per-issue worktree."""
         with self._repo_lock(repo):
@@ -806,6 +807,54 @@ class SandboxManager:
                 _provision_runtime_dirs(ws_root)
                 _chown_workspace(ws_root, slot_uid)
                 workspace_prepared = True
+                if refresh and pr_head is not None:
+                    # A synchronize event or explicit re-review landed new
+                    # commits on the PR head. Re-fetch into the pool and reset
+                    # the detached checkout so the review sees the latest state
+                    # instead of resuming a stale worktree. FETCH_HEAD lives in
+                    # the pool, not the linked worktree, so resolve the SHA there
+                    # before resetting the worktree checkout.
+                    self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+                    rev = _safe_run(
+                        ["git", "rev-parse", "FETCH_HEAD"],
+                        cwd=pool,
+                    )
+                    if rev.returncode != 0:
+                        raise GitCommandError(rev.args, rev.returncode, rev.stdout, rev.stderr)
+                    new_head = rev.stdout.strip()
+                    reset = _safe_run(
+                        ["git", "reset", "--hard", new_head],
+                        cwd=repo_dir,
+                        env=_git_env_for_repo(repo_dir),
+                        **slot_git_kwargs,
+                    )
+                    if reset.returncode != 0:
+                        raise GitCommandError(reset.args, reset.returncode, reset.stdout, reset.stderr)
+                    # `git reset --hard` does not touch untracked or ignored
+                    # files. A prior review run may have left stray artifacts
+                    # (build output, temp files, ignored dirs like dist/ or
+                    # coverage/) that would shadow the fresh checkout. Clean
+                    # untracked AND ignored files/dirs (-fdx) so the refreshed
+                    # review sees only the new PR head's tree.
+                    clean = _safe_run(
+                        ["git", "clean", "-fdx"],
+                        cwd=repo_dir,
+                        env=_git_env_for_repo(repo_dir),
+                        **slot_git_kwargs,
+                    )
+                    if clean.returncode != 0:
+                        raise GitCommandError(clean.args, clean.returncode, clean.stdout, clean.stderr)
+                    # A new delivery (synchronize or re-review) must not
+                    # resume the previous review's transcript.  Clear stale
+                    # JSONL session files so worker._has_prior_session()
+                    # returns False and the agent starts fresh; same-delivery
+                    # retries skip this block (refresh=False) and keep
+                    # --continue for in-progress work.
+                    for _stale in session_dir.glob("*.jsonl"):
+                        try:
+                            _stale.unlink()
+                        except OSError as exc:
+                            log.warning("failed to remove stale session transcript %s: %s", _stale, exc)
             if not repo_exists:
                 if pr_head is not None:
                     self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)

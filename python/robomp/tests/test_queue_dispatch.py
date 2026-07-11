@@ -1,10 +1,10 @@
 """Dispatch action -> task mapping in WorkerPool._dispatch.
 
-Regression guard for the route<->dispatch contract: `github_events.route`
-queues a `pull_request.labeled` event as a `review_pr` task in `vouched_label`
-mode, so `_dispatch` MUST invoke `tasks.review_pr` for that action. It
-previously only handled `opened/reopened/ready_for_review`, so every vouched
-PR fell through to the no-op branch and was silently marked `done`.
+Regression guard for the route<->dispatch contract: every always-admitted PR
+action that `github_events.route` can queue as `review_pr` must reach
+`tasks.review_pr`. `pull_request.synchronize` is admitted only behind the
+settings gate in `_dispatch`; missed actions fall through to the no-op branch
+and get silently marked `done`.
 """
 
 from __future__ import annotations
@@ -41,13 +41,13 @@ def _make_pool(settings: Settings, db: Database) -> WorkerPool:
     )
 
 
-def _pr_row(action: str, *, delivery: str = "pr1") -> EventRow:
+def _pr_row(action: str, *, delivery: str = "pr1", payload: dict | None = None) -> EventRow:
     return EventRow(
         delivery_id=delivery,
         event_type="pull_request",
         repo="octo/widget",
         issue_key="octo/widget#7",
-        payload={"action": action, "pull_request": {"number": 7}},
+        payload=payload or {"action": action, "pull_request": {"number": 7}},
         received_at="2026-01-01T00:00:00Z",
         state="running",
         attempts=1,
@@ -55,14 +55,16 @@ def _pr_row(action: str, *, delivery: str = "pr1") -> EventRow:
     )
 
 
-@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review", "labeled"])
+@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review"])
 @pytest.mark.asyncio
 async def test_dispatch_routes_pr_review_actions_to_review_pr(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
     """Every PR action `route` can queue for review MUST reach `tasks.review_pr`.
 
-    `labeled` is the vouched-label trigger; the others are the `open` trigger.
+    Under the default `open` trigger these are opened/reopened/ready_for_review.
+    `labeled` is tested separately under `vouched_label` mode, and `synchronize`
+    is config-gated in `route`.
     """
     seen: list[str] = []
 
@@ -77,18 +79,310 @@ async def test_dispatch_routes_pr_review_actions_to_review_pr(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_pr_synchronize_is_noop(
+async def test_dispatch_pr_labeled_reaches_review_pr_under_vouched_label(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Actions `route` never queues for review must NOT spawn a review task."""
-    called = False
+    """Under `vouched_label` mode, a `labeled` event from the trusted labeler
+    applying the vouch label must reach `tasks.review_pr`."""
+    seen: list[str] = []
 
-    async def fake_review_pr(**_kwargs) -> None:
-        nonlocal called
-        called = True
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+
+    payload = {
+        "action": "labeled",
+        "pull_request": {"number": 7},
+        "label": {"name": "vouched"},
+        "sender": {"login": "github-actions[bot]"},
+    }
+    await _make_pool(settings, db)._dispatch(_pr_row("labeled", payload=payload))  # noqa: SLF001
+
+    assert seen == ["labeled"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_labeled_skipped_under_open_trigger(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the `open` trigger, `labeled` is not a review trigger — route
+    never queues it, so dispatch must not reach `review_pr`."""
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
 
     monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
 
-    await _make_pool(settings, db)._dispatch(_pr_row("synchronize"))  # noqa: SLF001
+    await _make_pool(settings, db)._dispatch(_pr_row("labeled"))  # noqa: SLF001
 
-    assert called is False
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_labeled_skipped_under_vouched_label_wrong_label(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `vouched_label` mode, a `labeled` event for a non-vouch label
+    must not reach `review_pr`."""
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+
+    payload = {
+        "action": "labeled",
+        "pull_request": {"number": 7},
+        "label": {"name": "bug"},
+        "sender": {"login": "github-actions[bot]"},
+    }
+    await _make_pool(settings, db)._dispatch(_pr_row("labeled", payload=payload))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_labeled_skipped_under_vouched_label_wrong_labeler(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `vouched_label` mode, a `labeled` event from an untrusted labeler
+    must not reach `review_pr` even if the label name matches."""
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+
+    payload = {
+        "action": "labeled",
+        "pull_request": {"number": 7},
+        "label": {"name": "vouched"},
+        "sender": {"login": "some-user"},
+    }
+    await _make_pool(settings, db)._dispatch(_pr_row("labeled", payload=payload))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_opened_skipped_under_vouched_label(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `vouched_label` mode, `opened`/`reopened`/`ready_for_review` defer
+    to the vouch `labeled` event and must not reach `review_pr` on dispatch."""
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+
+    for action in ("opened", "reopened", "ready_for_review"):
+        await _make_pool(settings, db)._dispatch(_pr_row(action, delivery=f"vouched-{action}"))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_synchronize_respects_settings_gate(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+
+    class DisabledReviewSettings:
+        on_synchronize = False
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", DisabledReviewSettings())
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-disabled"))  # noqa: SLF001
+    assert seen == []
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-enabled"))  # noqa: SLF001
+    assert seen == ["synchronize"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_synchronize_skipped_under_vouched_label_trigger(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored/retried synchronize row must not bypass the vouch gate.
+
+    `github_events.route` defers synchronize to the `labeled` event under
+    `vouched_label`; `_dispatch` must enforce the same gate so a retried
+    row never reaches `review_pr` even when `on_synchronize` is True.
+    """
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-vouched"))  # noqa: SLF001
+    assert seen == []
+
+    # Under the default `open` trigger the same row is admitted.
+    monkeypatch.setattr(settings, "pr_review_trigger", "open")
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-open"))  # noqa: SLF001
+    assert seen == ["synchronize"]
+
+
+@pytest.mark.parametrize("action", ["opened", "reopened", "ready_for_review"])
+@pytest.mark.asyncio
+async def test_dispatch_pr_review_actions_respect_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    await _make_pool(settings, db)._dispatch(_pr_row(action, delivery=f"disabled-{action}"))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_labeled_respects_kill_switch_under_vouched_label(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `vouched_label` mode, the kill switch must block `labeled` events
+    from the trusted labeler before they reach `review_pr`."""
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_trigger", "vouched_label")
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    payload = {
+        "action": "labeled",
+        "pull_request": {"number": 7},
+        "label": {"name": "vouched"},
+        "sender": {"login": "github-actions[bot]"},
+    }
+    await _make_pool(settings, db)._dispatch(_pr_row("labeled", delivery="labeled-kill", payload=payload))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_synchronize_respects_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    class EnabledReviewSettings:
+        on_synchronize = True
+        max_reviews_per_pr = 3
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setitem(settings.__dict__, "review", EnabledReviewSettings())
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    await _make_pool(settings, db)._dispatch(_pr_row("synchronize", delivery="sync-kill-switch"))  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pr_comment_rereview_respects_kill_switch(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_review_pr(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+    monkeypatch.setattr(settings, "pr_review_enabled", False)
+
+    row = EventRow(
+        delivery_id="comment-kill-switch",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": "created",
+            "repository": {"full_name": "octo/widget"},
+            "issue": {"number": 7, "pull_request": {"url": "https://api.github.test/pulls/7"}},
+            "comment": {"user": {"login": "can1357"}, "body": "@robomp-bot please re-review"},
+            "_robomp_review": {"bypass_once_guard": True},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_pr_comment_rereview_delegates_to_review_pr(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_review_pr(**kwargs) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(tasks, "review_pr", fake_review_pr)
+
+    payload = {
+        "action": "created",
+        "repository": {"full_name": "octo/widget"},
+        "issue": {"number": 7, "pull_request": {"url": "https://api.github.test/pulls/7"}},
+        "comment": {"user": {"login": "can1357"}, "body": "@robomp-bot please re-review"},
+        "_robomp_review": {"bypass_once_guard": True},
+    }
+
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=_StubGitHub(),  # type: ignore[arg-type]
+        sandbox=_StubSandbox(),  # type: ignore[arg-type]
+        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        payload=payload,
+        delivery_id="d-rereview",
+    )
+
+    delegated_payload = seen["payload"]
+    assert isinstance(delegated_payload, dict)
+    assert delegated_payload["pull_request"] == {"number": 7}
+    assert delegated_payload["_robomp_review"] == {"bypass_once_guard": True}

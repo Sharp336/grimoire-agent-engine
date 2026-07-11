@@ -1005,6 +1005,9 @@ def test_classify_pr_applies_review_labels_and_persists_rank(db: Database, tmp_p
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/repos/octo/widget/issues/99":
+            # No stale rank labels on first review.
+            return httpx.Response(200, json={"number": 99, "labels": [], "user": {"login": "alice"}})
         captured["path"] = request.url.path
         captured["body"] = json.loads(request.content)
         return httpx.Response(200, json=[{"name": label} for label in captured["body"]["labels"]])
@@ -1028,6 +1031,102 @@ def test_classify_pr_applies_review_labels_and_persists_rank(db: Database, tmp_p
     assert "review:p1" in result
     assert captured["path"].endswith("/issues/99/labels")
     assert captured["body"]["labels"] == ["triaged", "review:p1", "fix", "tool", "providers", "provider:openai"]
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "review:p1"
+
+
+def test_classify_pr_replaces_stale_rank_label_on_re_review(db: Database, tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/repos/octo/widget/issues/99":
+            # PR already carries a stale review:p2 from a prior review.
+            return httpx.Response(
+                200,
+                json={
+                    "number": 99,
+                    "labels": [{"name": "triaged"}, {"name": "review:p2"}, {"name": "fix"}],
+                    "user": {"login": "alice"},
+                },
+            )
+        if request.method == "DELETE" and path == "/repos/octo/widget/issues/99/labels/review:p2":
+            calls.append(("DELETE", "review:p2"))
+            return httpx.Response(200, json=[{"name": "triaged"}, {"name": "fix"}])
+        if request.method == "POST" and path.endswith("/issues/99/labels"):
+            body = json.loads(request.content)
+            calls.append(("POST", ",".join(body["labels"])))
+            return httpx.Response(200, json=[{"name": lbl} for lbl in body["labels"]])
+        return httpx.Response(404, json={"message": "unrouted"})
+
+    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_pr")
+        result = tool.execute(
+            {"rank": "review:p1", "type": "fix", "rationale": "re-review upgrades rank after fixes"},
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "review:p1" in result
+    # Stale review:p2 removed before the new review:p1 is added.
+    assert calls[0] == ("DELETE", "review:p2")
+    assert calls[1][0] == "POST"
+    assert "review:p1" in calls[1][1]
+    assert "review:p2" not in calls[1][1]
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "review:p1"
+
+
+def test_classify_pr_replaces_stale_type_label_on_re_review(db: Database, tmp_path: Path) -> None:
+    """Re-review must remove stale _PR_TYPES labels (e.g. 'feat') when the new
+    classification picks a different type (e.g. 'fix'), not just stale rank labels."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/repos/octo/widget/issues/99":
+            # PR carries a stale 'feat' type from a prior review plus a stale rank.
+            return httpx.Response(
+                200,
+                json={
+                    "number": 99,
+                    "labels": [{"name": "triaged"}, {"name": "review:p2"}, {"name": "feat"}],
+                    "user": {"login": "alice"},
+                },
+            )
+        if request.method == "DELETE":
+            label = path.rsplit("/", 1)[-1]
+            calls.append(("DELETE", label))
+            return httpx.Response(200, json=[{"name": "triaged"}])
+        if request.method == "POST" and path.endswith("/issues/99/labels"):
+            body = json.loads(request.content)
+            calls.append(("POST", ",".join(body["labels"])))
+            return httpx.Response(200, json=[{"name": lbl} for lbl in body["labels"]])
+        return httpx.Response(404, json={"message": "unrouted"})
+
+    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_pr")
+        result = tool.execute(
+            {"rank": "review:p1", "type": "fix", "rationale": "re-review reclassifies from feat to fix"},
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "review:p1" in result
+    # Both stale 'review:p2' and stale 'feat' must be removed before the POST.
+    deleted = [c[1] for c in calls if c[0] == "DELETE"]
+    assert "review:p2" in deleted
+    assert "feat" in deleted
+    post_calls = [c for c in calls if c[0] == "POST"]
+    assert len(post_calls) == 1
+    assert "review:p1" in post_calls[0][1]
+    assert "fix" in post_calls[0][1]
+    assert "feat" not in post_calls[0][1]
+    assert "review:p2" not in post_calls[0][1]
     row = db.get_issue(bindings.issue_key)
     assert row is not None and row.classification == "review:p1"
 
@@ -1302,7 +1401,9 @@ def test_impl_gate_allows_later_authorized_event_to_reach_repo_commands(
     assert calls
 
 
-def test_impl_gate_ignores_skipped_authorized_event(db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_impl_gate_ignores_skipped_authorized_event(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[list[str] | tuple[str, ...]] = []
 
     def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):

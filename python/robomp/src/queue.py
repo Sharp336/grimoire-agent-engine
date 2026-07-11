@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 
 from robomp import tasks
@@ -353,6 +353,16 @@ class WorkerPool:
                 "recovered": row.attempts >= 2,
             },
         )
+
+        def pr_review_allowed() -> bool:
+            if self.settings.pr_review_enabled:
+                return True
+            log.info(
+                "skip: PR review disabled (kill switch)",
+                extra={"event": event, "action": action, "delivery": row.delivery_id, "key": row.issue_key},
+            )
+            return False
+
         if event == "issues" and action == "opened":
             await tasks.triage_issue(
                 settings=self.settings,
@@ -368,17 +378,33 @@ class WorkerPool:
         elif event == "issue_comment" and action == "created":
             issue = row.payload.get("issue") or {}
             if "pull_request" in issue:
-                await tasks.handle_pr_conversation(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
+                review = row.payload.get("_robomp_review")
+                if isinstance(review, dict) and review.get("bypass_once_guard"):
+                    if not pr_review_allowed():
+                        return
+                    await tasks.review_pr(
+                        settings=self.settings,
+                        db=self.db,
+                        github=self.github,
+                        sandbox=self.sandbox,
+                        git_transport=self.git_transport,
+                        payload=row.payload,
+                        delivery_id=row.delivery_id,
+                        attempts=row.attempts,
+                        slot_uid=slot_uid,
+                    )
+                else:
+                    await tasks.handle_pr_conversation(
+                        settings=self.settings,
+                        db=self.db,
+                        github=self.github,
+                        sandbox=self.sandbox,
+                        git_transport=self.git_transport,
+                        payload=row.payload,
+                        delivery_id=row.delivery_id,
+                        attempts=row.attempts,
+                        slot_uid=slot_uid,
+                    )
             else:
                 await tasks.handle_comment(
                     settings=self.settings,
@@ -391,7 +417,69 @@ class WorkerPool:
                     attempts=row.attempts,
                     slot_uid=slot_uid,
                 )
-        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
+        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review"):
+            if not pr_review_allowed():
+                return
+            # Mirror `github_events.route`: under `vouched_label` these
+            # actions defer to the `labeled` event the vouch workflow emits
+            # after a fresh gate check. A stored/retried row must not bypass
+            # that gate and reach `review_pr` on dispatch.
+            if self.settings.pr_review_trigger == "vouched_label":
+                return
+            await tasks.review_pr(
+                settings=self.settings,
+                db=self.db,
+                github=self.github,
+                sandbox=self.sandbox,
+                git_transport=self.git_transport,
+                payload=row.payload,
+                delivery_id=row.delivery_id,
+                attempts=row.attempts,
+                slot_uid=slot_uid,
+            )
+        elif event == "pull_request" and action == "labeled":
+            if not pr_review_allowed():
+                return
+            # Mirror `github_events.route`: the `labeled` event is the
+            # vouched-label trigger. Under `vouched_label` mode only the
+            # configured trusted labeler applying the vouch label may
+            # trigger a review — a stored/retried row from a manual or
+            # stale label must not bypass that gate. Under the `open`
+            # trigger `labeled` is not a review trigger at all.
+            if self.settings.pr_review_trigger == "vouched_label":
+                label = row.payload.get("label")
+                label_name = str(label.get("name") or "") if isinstance(label, Mapping) else ""
+                if label_name.lower() != self.settings.vouch_review_label.lower():
+                    return
+                sender = row.payload.get("sender")
+                labeler = str(sender.get("login") or "") if isinstance(sender, Mapping) else ""
+                if labeler.lower() != self.settings.vouch_review_labeler.lower():
+                    return
+            else:
+                return
+            await tasks.review_pr(
+                settings=self.settings,
+                db=self.db,
+                github=self.github,
+                sandbox=self.sandbox,
+                git_transport=self.git_transport,
+                payload=row.payload,
+                delivery_id=row.delivery_id,
+                attempts=row.attempts,
+                slot_uid=slot_uid,
+            )
+        elif event == "pull_request" and action == "synchronize":
+            if not pr_review_allowed():
+                return
+            # Mirror `github_events.route`: under `vouched_label` the only
+            # trusted synchronize review trigger is the `labeled` event the
+            # vouch workflow emits after a fresh gate check, never the
+            # synchronize itself. A stored/retried synchronize row must not
+            # bypass that gate and reach `review_pr` on dispatch.
+            if self.settings.pr_review_trigger == "vouched_label":
+                return
+            if not getattr(self.settings.review, "on_synchronize", False):
+                return
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,

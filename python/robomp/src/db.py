@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS issues (
   pr_number      INTEGER,
   state          TEXT NOT NULL,
   classification TEXT,         -- bug|enhancement|question|proposal|documentation|invalid|duplicate
+  head_refreshed_delivery TEXT, -- delivery_id of the last delivery whose checkout reset succeeded
   updated_at     TEXT NOT NULL
 );
 
@@ -73,20 +74,22 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   args_json     TEXT NOT NULL,
   result_json   TEXT,
   error         TEXT,
-  ts            TEXT NOT NULL
+  ts            TEXT NOT NULL,
+  delivery_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_issue ON tool_calls(issue_key, ts);
 
 CREATE TABLE IF NOT EXISTS pr_review_comments (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  issue_key   TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  line        INTEGER NOT NULL,
-  side        TEXT NOT NULL DEFAULT 'RIGHT',
-  start_line  INTEGER,
-  start_side  TEXT,
-  body        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_key    TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  line         INTEGER NOT NULL,
+  side         TEXT NOT NULL DEFAULT 'RIGHT',
+  start_line   INTEGER,
+  start_side   TEXT,
+  body         TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  delivery_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pr_review_comments_key
   ON pr_review_comments(issue_key);
@@ -154,6 +157,7 @@ class IssueRow:
     state: IssueState
     updated_at: str
     classification: str | None = None
+    head_refreshed_delivery: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -167,6 +171,7 @@ class StagedReviewComment:
     created_at: str
     start_line: int | None = None
     start_side: str | None = None
+    delivery_id: str | None = None
 
 
 def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
@@ -244,11 +249,20 @@ class Database:
         issue_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
         if "classification" not in issue_cols:
             self._conn.execute("ALTER TABLE issues ADD COLUMN classification TEXT")
+        if "head_refreshed_delivery" not in issue_cols:
+            self._conn.execute("ALTER TABLE issues ADD COLUMN head_refreshed_delivery TEXT")
         event_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
         if "model" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
         if "available_at" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN available_at TEXT")
+        tool_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
+        if "delivery_id" not in tool_cols:
+            self._conn.execute("ALTER TABLE tool_calls ADD COLUMN delivery_id TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS tool_calls_delivery ON tool_calls(delivery_id, tool)")
+        pr_review_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(pr_review_comments)").fetchall()}
+        if "delivery_id" not in pr_review_cols:
+            self._conn.execute("ALTER TABLE pr_review_comments ADD COLUMN delivery_id TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -733,10 +747,24 @@ class Database:
                 (branch, _utcnow(), key),
             )
 
+    def set_issue_head_refreshed_delivery(self, key: str, delivery_id: str) -> None:
+        """Record that the checkout for `delivery_id` was refreshed/reset successfully.
+
+        A retry of the same delivery reads this flag to decide whether to
+        refresh again (reset never succeeded) or resume the session (reset
+        already done). A new delivery overwrites it so a genuine re-review
+        still refreshes.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE issues SET head_refreshed_delivery=?, updated_at=? WHERE key=?",
+                (delivery_id, _utcnow(), key),
+            )
+
     def get_issue(self, key: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE key=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues WHERE key=?",
                 (key,),
             ).fetchone()
         if row is None:
@@ -751,12 +779,13 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def find_issue_by_pr(self, repo: str, pr_number: int) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE repo=? AND pr_number=?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues WHERE repo=? AND pr_number=?",
                 (repo, pr_number),
             ).fetchone()
         if row is None:
@@ -771,13 +800,14 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def find_issue_by_branch(self, repo: str, branch: str) -> IssueRow | None:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at
+                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at
                 FROM issues
                 WHERE repo=? AND branch=?
                 ORDER BY updated_at DESC
@@ -797,12 +827,13 @@ class Database:
             state=row["state"],
             updated_at=row["updated_at"],
             classification=row["classification"],
+            head_refreshed_delivery=row["head_refreshed_delivery"],
         )
 
     def list_issues(self, limit: int = 100) -> list[IssueRow]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, head_refreshed_delivery, updated_at FROM issues ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
@@ -816,6 +847,7 @@ class Database:
                 state=r["state"],
                 updated_at=r["updated_at"],
                 classification=r["classification"],
+                head_refreshed_delivery=r["head_refreshed_delivery"],
             )
             for r in rows
         ]
@@ -852,10 +884,12 @@ class Database:
         args: Mapping[str, Any],
         result: Mapping[str, Any] | None = None,
         error: str | None = None,
+        delivery_id: str | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO tool_calls (issue_key, tool, args_json, result_json, error, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tool_calls (issue_key, tool, args_json, result_json, error, ts, delivery_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     issue_key,
                     tool,
@@ -863,6 +897,7 @@ class Database:
                     json.dumps(result, separators=(",", ":"), default=str) if result is not None else None,
                     error,
                     _utcnow(),
+                    delivery_id,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -881,6 +916,38 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def has_successful_tool_call_for_delivery(self, issue_key: str, tool: str, delivery_id: str) -> bool:
+        """Return True iff a successful (error IS NULL) tool call exists for
+        the given (issue_key, tool, delivery_id) triple.
+
+        Used by the re-review bypass_once_guard to preserve retry idempotency:
+        once a submit_pr_review has succeeded for a delivery, a retry of that
+        same delivery must NOT re-review.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM tool_calls
+                WHERE issue_key=? AND tool=? AND delivery_id=? AND error IS NULL
+                LIMIT 1
+                """,
+                (issue_key, tool, delivery_id),
+            ).fetchone()
+        return row is not None
+
+    def count_successful_tool_calls(self, issue_key: str, tool: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM tool_calls
+                WHERE issue_key=? AND tool=? AND error IS NULL
+                """,
+                (issue_key, tool),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     # ---- PR review comment staging ----
     def stage_review_comment(
         self,
@@ -892,19 +959,20 @@ class Database:
         side: str = "RIGHT",
         start_line: int | None = None,
         start_side: str | None = None,
+        delivery_id: str | None = None,
     ) -> StagedReviewComment:
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO pr_review_comments
-                  (issue_key, path, line, side, start_line, start_side, body, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (issue_key, path, line, side, start_line, start_side, body, _utcnow()),
+                (issue_key, path, line, side, start_line, start_side, body, _utcnow(), delivery_id),
             )
             row = self._conn.execute(
                 """
-                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id
                 FROM pr_review_comments
                 WHERE id=?
                 """,
@@ -921,13 +989,14 @@ class Database:
             created_at=row["created_at"],
             start_line=int(row["start_line"]) if row["start_line"] is not None else None,
             start_side=row["start_side"],
+            delivery_id=row["delivery_id"] if row["delivery_id"] is not None else None,
         )
 
     def list_staged_review_comments(self, issue_key: str) -> list[StagedReviewComment]:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at, delivery_id
                 FROM pr_review_comments
                 WHERE issue_key=?
                 ORDER BY id
@@ -945,13 +1014,28 @@ class Database:
                 created_at=row["created_at"],
                 start_line=int(row["start_line"]) if row["start_line"] is not None else None,
                 start_side=row["start_side"],
+                delivery_id=row["delivery_id"] if row["delivery_id"] is not None else None,
             )
             for row in rows
         ]
 
-    def clear_staged_review_comments(self, issue_key: str) -> int:
+    def clear_staged_review_comments(self, issue_key: str, *, exclude_delivery_id: str | None = None) -> int:
+        """Delete staged review comments for ``issue_key``.
+
+        When ``exclude_delivery_id`` is set, comments staged during that
+        delivery are preserved — a retry of the same delivery must not lose
+        its own in-progress comments. Only stale comments from earlier
+        deliveries (or head comments with no delivery association) are
+        cleared.
+        """
         with self._lock:
-            cur = self._conn.execute("DELETE FROM pr_review_comments WHERE issue_key=?", (issue_key,))
+            if exclude_delivery_id is not None:
+                cur = self._conn.execute(
+                    "DELETE FROM pr_review_comments WHERE issue_key=? AND (delivery_id IS NULL OR delivery_id != ?)",
+                    (issue_key, exclude_delivery_id),
+                )
+            else:
+                cur = self._conn.execute("DELETE FROM pr_review_comments WHERE issue_key=?", (issue_key,))
             return int(cur.rowcount or 0)
 
     # ---- submissions (per-user rate limiting) ----

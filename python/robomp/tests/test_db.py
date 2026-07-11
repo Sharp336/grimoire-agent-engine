@@ -264,6 +264,55 @@ def test_log_tool_call(db: Database) -> None:
     assert row_id > 0
 
 
+def test_count_successful_tool_calls(db: Database) -> None:
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="new")
+    # No rows yet → 0
+    assert db.count_successful_tool_calls("octo/widget#1", "submit_pr_review") == 0
+    # Two successful calls
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 1})
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 2})
+    # One errored call — must not be counted
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, error="boom")
+    assert db.count_successful_tool_calls("octo/widget#1", "submit_pr_review") == 2
+    # Different tool is isolated
+    db.log_tool_call(issue_key="octo/widget#1", tool="gh_post_comment", args={}, result={"ok": True})
+    assert db.count_successful_tool_calls("octo/widget#1", "gh_post_comment") == 1
+    # Different issue_key is isolated
+    assert db.count_successful_tool_calls("octo/widget#2", "submit_pr_review") == 0
+
+
+def test_has_successful_tool_call_for_delivery(db: Database) -> None:
+    """Delivery-scoped idempotency check for the re-review bypass_once_guard."""
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="new")
+    # No rows yet → False
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-1") is False
+    # Successful call for delivery d-1
+    db.log_tool_call(
+        issue_key="octo/widget#1",
+        tool="submit_pr_review",
+        args={},
+        result={"review_id": 1},
+        delivery_id="d-1",
+    )
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-1") is True
+    # Different delivery_id → False (retry of a different delivery)
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-2") is False
+    # Errored call for delivery d-2 → still False
+    db.log_tool_call(
+        issue_key="octo/widget#1",
+        tool="submit_pr_review",
+        args={},
+        error="boom",
+        delivery_id="d-2",
+    )
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-2") is False
+    # Different tool for same delivery → False
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "gh_post_comment", "d-1") is False
+    # No delivery_id stamped (legacy row) → False for any delivery_id
+    db.log_tool_call(issue_key="octo/widget#1", tool="submit_pr_review", args={}, result={"review_id": 2})
+    assert db.has_successful_tool_call_for_delivery("octo/widget#1", "submit_pr_review", "d-3") is False
+
+
 def test_pr_review_comment_staging_round_trip(db: Database) -> None:
     first = db.stage_review_comment(
         issue_key="octo/widget#9",
@@ -292,6 +341,34 @@ def test_pr_review_comment_staging_round_trip(db: Database) -> None:
     assert db.clear_staged_review_comments("octo/widget#9") == 2
     assert db.list_staged_review_comments("octo/widget#9") == []
     assert len(db.list_staged_review_comments("octo/widget#10")) == 1
+
+
+def test_clear_staged_review_comments_preserves_same_delivery(db: Database) -> None:
+    """clear_staged_review_comments(exclude_delivery_id=...) preserves comments
+    from the named delivery while clearing stale earlier/head comments."""
+    # Stale comment with no delivery_id (head comment from a prior run).
+    db.stage_review_comment(issue_key="octo/widget#9", path="src/old.py", line=1, body="stale head")
+    # Stale comment from an earlier delivery.
+    db.stage_review_comment(
+        issue_key="octo/widget#9", path="src/old2.py", line=2, body="stale prior", delivery_id="d-old"
+    )
+    # In-progress comment from the current delivery.
+    current = db.stage_review_comment(
+        issue_key="octo/widget#9", path="src/new.py", line=3, body="in-progress", delivery_id="d-current"
+    )
+    assert len(db.list_staged_review_comments("octo/widget#9")) == 3
+
+    cleared = db.clear_staged_review_comments("octo/widget#9", exclude_delivery_id="d-current")
+    assert cleared == 2, "should clear stale head + prior delivery comments"
+
+    remaining = db.list_staged_review_comments("octo/widget#9")
+    assert len(remaining) == 1
+    assert remaining[0].id == current.id
+    assert remaining[0].delivery_id == "d-current"
+
+    # Without exclude_delivery_id, all are cleared (backward-compatible).
+    assert db.clear_staged_review_comments("octo/widget#9") == 1
+    assert db.list_staged_review_comments("octo/widget#9") == []
 
 
 def test_processed_issue_keys_returns_only_known(db: Database) -> None:
@@ -337,6 +414,25 @@ def test_classification_roundtrip(db: Database) -> None:
     # Round-trip via list_issues too.
     items = db.list_issues()
     assert any(r.key == key and r.classification == "question" for r in items)
+
+
+def test_head_refreshed_delivery_roundtrip(db: Database) -> None:
+    key = issue_key("octo/widget", 7)
+    db.upsert_issue(key=key, repo="octo/widget", number=7, state="new", pr_number=7)
+    row = db.get_issue(key)
+    assert row is not None and row.head_refreshed_delivery is None
+    db.set_issue_head_refreshed_delivery(key, "d-abc")
+    row = db.get_issue(key)
+    assert row is not None and row.head_refreshed_delivery == "d-abc"
+    # Round-trip via list_issues too.
+    items = db.list_issues()
+    assert any(r.key == key and r.head_refreshed_delivery == "d-abc" for r in items)
+    # find_issue_by_pr and find_issue_by_branch carry the field as well.
+    by_pr = db.find_issue_by_pr("octo/widget", 7)
+    assert by_pr is not None and by_pr.head_refreshed_delivery == "d-abc"
+    db.set_issue_branch(key, "farm/abc/fix")
+    by_branch = db.find_issue_by_branch("octo/widget", "farm/abc/fix")
+    assert by_branch is not None and by_branch.head_refreshed_delivery == "d-abc"
 
 
 def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:

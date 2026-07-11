@@ -14,6 +14,9 @@ Confirmed decisions:
 - **Reuse the issue isolation verbatim.** The PR head is checked out into a per-PR worktree
   (clone pool + slot uid + natives cache + scrubbed env) **before** the agent starts, and
   that worktree is the agent's cwd. Review is read-only on that checkout.
+- **Re-review is explicit.** Maintainer `@bot` re-review directives bypass the one-review
+  guard; `pull_request.synchronize` is skipped unless `ROBOMP_PR_REVIEW_ON_SYNCHRONIZE=true`,
+  then capped by `ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR` (default 3).
 
 The agent prompt already exists: `src/prompts/pr_review_rubric.md` (rename to
 `kickoff_pr_review.md` — see §5). Everything below is the wiring around it.
@@ -68,24 +71,24 @@ Two facts that shape the wiring:
 ### 2a. New entry: incoming PR opened
 
 Add a `pull_request` branch **before** the existing `pull_request`/`closed` block. Trigger a
-one-shot review on `opened`, `reopened`, and `ready_for_review`; **skip everything else**
-(notably `synchronize` already falls through to the final skip — keep it that way: do **not**
-re-review on new commits).
+one-shot review on `opened`, `reopened`, and `ready_for_review`; in `vouched_label` mode those
+open-family events defer to the trusted label gate. `synchronize` is ignored by default, but
+`ROBOMP_PR_REVIEW_ON_SYNCHRONIZE=true` opts into a capped re-review on pushed commits.
 
 ```python
 if event_type == "pull_request" and action in ("opened", "reopened", "ready_for_review"):
-    pr = payload.get("pull_request") or {}
-    if bool(pr.get("draft")):
-        return RouteDecision("skip", None, repo, None, "draft PR")
-    pr_user = pr.get("user") or {}
-    if _is_bot_account(pr_user, bot_login):
-        return RouteDecision("skip", None, repo, None, "bot-authored PR")   # our own farm PRs
-    number = pr.get("number")
-    if not isinstance(number, int):
-        return RouteDecision("skip", None, repo, None, "PR missing number")
-    login, assoc = _submitter_info(pr)           # PR author = rate-limit subject
-    return RouteDecision("queue", "review_pr", repo, issue_key(repo, number),
-                         f"pull_request.{action}", submitter=login, association=assoc)
+    if not pr_review_enabled:
+        return RouteDecision("skip", None, repo, None, "PR review disabled")
+    if pr_review_trigger == "vouched_label":
+        return RouteDecision("skip", None, repo, None, "deferred to vouch label")
+    return _pr_review_pr(payload.get("pull_request") or {}, repo, action, bot_login)
+
+if event_type == "pull_request" and action == "synchronize":
+    if not pr_review_enabled:
+        return RouteDecision("skip", None, repo, None, "PR review disabled")
+    if not on_synchronize:
+        return RouteDecision("skip", None, repo, None, "pull_request.synchronize ignored")
+    return _pr_review_pr(payload.get("pull_request") or {}, repo, action, bot_login)
 ```
 
 Use the PR's **own** key (`issue_key(repo, number)`), not `_resolve_pr_key` — an incoming PR
@@ -99,11 +102,14 @@ Today `issue_comment.created` on **any** PR queues `handle_pr_conversation`. For
 
 - PR author **is** the bot → `handle_pr_conversation` (unchanged).
 - PR author is **not** the bot → **skip**, *unless* `_directive_kwargs(...)` is non-empty
-  (a maintainer `@bot` mention or a configured reviewer bot). A directive routes to the
-  existing directive path; only an explicit "re-review" directive re-runs the review.
+  (a maintainer `@bot` mention or a configured reviewer bot) and the directive explicitly asks
+  for review/re-review. That routes to `review_pr`, stamps the payload with
+  `_robomp_review.bypass_once_guard`, and synthesizes the top-level `pull_request.number`
+  that `review_pr` expects. Unauthorized or non-review comments keep the existing skip reason.
 
-The PR author is on `payload.issue.user.login` for `issue_comment` events. `synchronize`,
-`edited`, etc. need no change (they already skip).
+The PR author is on `payload.issue.user.login` for `issue_comment` events. Non-directive
+incoming-PR comments and `edited` comments remain skipped; non-review actions continue to skip
+unless explicitly routed above.
 
 ### 2c. Cleanup for incoming PRs
 
@@ -116,22 +122,27 @@ PR's worktree is GC'd on close. Minimal: when the PR has a workspace row, route
 
 ## 3. Dispatch (`src/queue.py` `_dispatch`)
 
-Add a branch mirroring `triage_issue`:
+Dispatch mirrors every route that can queue `review_pr`: open-family PR events, trusted
+`labeled` events in `vouched_label` mode, opt-in `synchronize`, and directive-bearing
+incoming-PR comments stamped by `server.py`.
 
 ```python
+if event == "issue_comment" and action == "created" and payload.issue.pull_request and payload has _robomp_review:
+    await tasks.review_pr(...)
 elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review"):
-    await tasks.review_pr(
-        settings=self.settings, db=self.db, github=self.github,
-        sandbox=self.sandbox, git_transport=self.git_transport,
-        payload=row.payload, delivery_id=row.delivery_id,
-        attempts=row.attempts, slot_uid=slot_uid,
-    )
+    await tasks.review_pr(...)
+elif event == "pull_request" and action == "labeled":
+    # Only arrives here after `route()` admits the trusted vouch label event.
+    await tasks.review_pr(...)
+elif event == "pull_request" and action == "synchronize" and self.settings.review.on_synchronize:
+    await tasks.review_pr(...)
 ```
 
 Idempotency: `record_event` dedups on delivery id and `_inflight` serializes per
-`(owner,repo,number)`. Add one guard in `tasks.review_pr`: if the PR already carries a
-`triaged`/`review:*` label, skip the re-review (a `reopened` shouldn't redo work) unless a
-directive forces it.
+`(owner,repo,number)`. `tasks.review_pr` skips when a successful `submit_pr_review` already
+exists, unless a maintainer/reviewer-bot directive or an opted-in `synchronize` forces
+another pass. Automated `synchronize` passes additionally stop at
+`ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR`.
 
 ---
 
@@ -318,9 +329,11 @@ PR's `issue_key`.
 
 ## 11. Config (`src/config.py`) — optional
 
-Add `pr_review_enabled: bool = True` (`ROBOMP_PR_REVIEW_ENABLED`) so the whole flow can be
-killed without a redeploy; check it in `route()`'s new branch. Reuse the existing
-`repo_allowlist`, `maintainers`, `reviewer_bots`. No new auth.
+`pr_review_enabled: bool = True` (`ROBOMP_PR_REVIEW_ENABLED`) kills the whole flow without a
+redeploy. `pr_review_on_synchronize: bool = False` (`ROBOMP_PR_REVIEW_ON_SYNCHRONIZE`) opts
+into reviews for pushed commits, and `pr_review_max_reviews_per_pr: int = 3`
+(`ROBOMP_PR_REVIEW_MAX_REVIEWS_PER_PR`) caps automated synchronize reviews. Reuse the existing
+`repo_allowlist`, `maintainers`, `reviewer_bots`, and rate-limit knobs; no new auth.
 
 ---
 
@@ -330,10 +343,11 @@ killed without a redeploy; check it in `route()`'s new branch. Reuse the existin
 |---|---|---|
 | `pull_request.opened` / `reopened` / `ready_for_review` | non-draft, author ≠ bot, allowlisted, enabled | **`review_pr`** |
 | `pull_request.opened` | draft / bot-authored | skip |
-| `pull_request.synchronize` (new commits) | — | **skip** (no re-review) |
+| `pull_request.synchronize` (new commits) | `ROBOMP_PR_REVIEW_ON_SYNCHRONIZE=false` | skip |
+| `pull_request.synchronize` (new commits) | enabled and below per-PR cap | **`review_pr`** |
 | `pull_request.edited` / others | — | skip |
 | `issue_comment.created` on incoming PR | not a directive | **skip** |
-| `issue_comment.created` on incoming PR | maintainer `@bot` / reviewer bot | directive path (may re-review) |
+| `issue_comment.created` on incoming PR | maintainer `@bot` / reviewer bot | **`review_pr`** (bypasses once-guard) |
 | `issue_comment.created` on bot PR | — | `handle_pr_conversation` (unchanged) |
 | `pull_request.closed` | has review workspace | `cleanup_workspace` |
 
@@ -344,7 +358,7 @@ killed without a redeploy; check it in `route()`'s new branch. Reuse the existin
 Mirror existing test style; assert observable contracts, never internals.
 
 - **Routing** (`test_github_events.py`): `pull_request.opened` → `review_pr`; draft/bot/non-allowlist
-  → skip; `synchronize` → skip; incoming-PR comment → skip unless directive.
+  → skip; `synchronize` → skip by default and queue when enabled; incoming-PR comment → skip unless directive.
 - **classify_pr** (`test_host_tools.py`): happy path applies `triaged`+`review:pN`+type+area
   (assert the labels in the mocked `add_issue_labels` call); bad rank → validation error; unknown
   area dropped silently.

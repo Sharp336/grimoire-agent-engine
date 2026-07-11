@@ -132,6 +132,43 @@ def test_get_pull_request_parses_title_and_body() -> None:
     assert pr.body == "Fixes #1"
 
 
+def test_get_pull_request_parses_draft_flag() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 9,
+                "html_url": "https://github.com/octo/widget/pull/9",
+                "head": {"ref": "feat", "repo": {"full_name": "octo/widget"}},
+                "base": {"ref": "main"},
+                "state": "open",
+                "user": {"login": "alice"},
+                "draft": True,
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    pr = _run_async(client.get_pull_request("octo/widget", 9))
+    assert pr.draft is True
+
+    def handler_no_draft(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 9,
+                "html_url": "https://github.com/octo/widget/pull/9",
+                "head": {"ref": "feat", "repo": {"full_name": "octo/widget"}},
+                "base": {"ref": "main"},
+                "state": "open",
+                "user": {"login": "alice"},
+            },
+        )
+
+    client2 = GitHubClient("tok", transport=httpx.MockTransport(handler_no_draft))
+    pr2 = _run_async(client2.get_pull_request("octo/widget", 9))
+    assert pr2.draft is False
+
+
 def test_list_pr_files_parses_changed_file_summary() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/repos/octo/widget/pulls/9/files"
