@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `xai-grok-build` provider with authoritative authenticated model discovery and bundled fallbacks for `grok-4.5` and `grok-composer-2.5-fast`.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed

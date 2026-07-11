@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `xai-grok-build` to `/login` and model selection with provider-scoped OAuth credentials.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed

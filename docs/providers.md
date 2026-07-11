@@ -50,6 +50,14 @@ For headless or remote setups backed by a shared auth broker, the CLI exposes `o
 
 When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
 
+### xAI Grok Build
+
+`xai-grok-build` is separate from the existing `xai` and `xai-oauth` providers. Authenticate it with `/login xai-grok-build`; the login opens a browser OAuth flow and stores the resulting credential under the `xai-grok-build` provider ID in OMP's auth store.
+
+Only that stored OAuth credential can authenticate the provider. `xai-grok-build` refuses API keys from every source, including `XAI_API_KEY`, runtime overrides, `models.yml`, and stored API-key credentials. Those sources continue to work as documented for `xai` and `xai-oauth`.
+
+Requests go directly to the official Grok Build inference host at `https://cli-chat-proxy.grok.com/v1`. Authenticated model discovery is authoritative after a successful refresh. Until discovery succeeds, the bundled fallback catalog contains `grok-4.5` and `grok-composer-2.5-fast`.
+
 ### Pinning a key in `models.yml`
 
 A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an existing environment variable, that variable's value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
@@ -88,6 +96,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `mistral` | `MISTRAL_API_KEY` |
 | `xai` | `XAI_API_KEY` |
 | `xai-oauth` | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY` |
+| `xai-grok-build` | None (`/login xai-grok-build` only; `XAI_API_KEY` is refused) |
 | `github-copilot` | `COPILOT_GITHUB_TOKEN` |
 | `cursor` | `CURSOR_ACCESS_TOKEN` |
 | `azure` | `AZURE_OPENAI_API_KEY` |

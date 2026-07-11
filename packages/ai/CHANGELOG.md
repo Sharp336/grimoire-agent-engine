@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added browser OAuth, OAuth-only credential isolation, and stable Responses request identity for the `xai-grok-build` provider.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed
