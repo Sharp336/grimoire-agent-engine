@@ -6,7 +6,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { formatResultOutputFallback } from "@oh-my-pi/pi-coding-agent/task";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runSubprocess, TaskTreeBudget } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -55,15 +55,25 @@ function assistantMessageEnd(text: string, usage?: Record<string, number>): Agen
 		},
 	} as unknown as AgentSessionEvent;
 }
+function assistantYieldMessageEnd(type?: string | string[]): AgentSessionEvent {
+	return {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tool-yield", name: "yield", arguments: { data: { ok: true }, type } }],
+			usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+		},
+	} as unknown as AgentSessionEvent;
+}
 
-function yieldToolEnd(): AgentSessionEvent {
+function yieldToolEnd(type?: string | string[]): AgentSessionEvent {
 	return {
 		type: "tool_execution_end",
 		toolCallId: "tool-yield",
 		toolName: "yield",
 		result: {
 			content: [{ type: "text", text: "Result submitted." }],
-			details: { status: "success", data: { ok: true } },
+			details: { status: "success", data: { ok: true }, type },
 		},
 		isError: false,
 	} as AgentSessionEvent;
@@ -277,6 +287,113 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("shares an aggregate request budget across sibling subagents", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 3 });
+		const first = createFakeSession({
+			events: [assistantMessageEnd("one"), assistantMessageEnd("two"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(first.session);
+
+		const firstResult = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-first",
+			settings,
+			taskTreeBudget: budget,
+		});
+
+		expect(firstResult.aborted).toBe(false);
+		expect(budget.snapshot()).toMatchObject({ requests: 2, maxRequests: 3, exhausted: false });
+
+		vi.restoreAllMocks();
+		const second = createFakeSession({
+			hang: true,
+			events: [assistantMessageEnd("three"), assistantMessageEnd("four")],
+		});
+		mockCreateAgentSession(second.session);
+
+		const secondResult = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-second",
+			settings,
+			taskTreeBudget: budget,
+		});
+
+		expect(secondResult.aborted).toBe(true);
+		expect(secondResult.abortReason).toContain("tree request budget exceeded");
+		expect(second.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(budget.snapshot()).toMatchObject({ requests: 4, maxRequests: 3, exhausted: true });
+	});
+
+	it("preserves a pending terminal yield when the tree request budget is crossed", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		budget.recordRequest(15);
+		const handle = createFakeSession({
+			events: [assistantYieldMessageEnd(), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-yield",
+			settings,
+			taskTreeBudget: budget,
+		});
+
+		expect(result.aborted).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain('"ok": true');
+		expect(handle.abortCalls()).toBe(1);
+		expect(budget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+	});
+
+	it("aborts after an incremental yield when the tree request budget is crossed", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 50, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		const handle = createFakeSession({
+			hang: true,
+			events: [
+				assistantYieldMessageEnd(["findings"]),
+				yieldToolEnd(["findings"]),
+				assistantMessageEnd("continuing after the incremental section"),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-incremental-yield",
+			settings,
+			taskTreeBudget: budget,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("tree request budget exceeded");
+		expect(budget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+	});
+
+	it("aborts when aggregate task-tree token usage crosses its budget", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 50, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxTokens: 20 });
+		const handle = createFakeSession({
+			hang: true,
+			events: [assistantMessageEnd("one"), assistantMessageEnd("two")],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-token-budget",
+			settings,
+			taskTreeBudget: budget,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.abortReason).toContain("tree token budget exceeded");
+		expect(budget.snapshot()).toMatchObject({ tokens: 30, maxTokens: 20, exhausted: true });
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

@@ -166,6 +166,7 @@ import {
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import { TaskTreeBudget } from "./task/tree-budget";
 import type { StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -507,6 +508,8 @@ export interface CreateAgentSessionOptions {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/** Session-wide budget shared by every descendant spawned through task. */
+	taskTreeBudget?: TaskTreeBudget;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -1266,6 +1269,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	const taskTreeBudget =
+		options.taskTreeBudget ??
+		new TaskTreeBudget({
+			maxSpawns: settings.get("task.treeMaxSpawns"),
+			maxRequests: settings.get("task.treeMaxRequests"),
+			maxTokens: settings.get("task.treeMaxTokens"),
+		});
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
@@ -1688,6 +1698,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			taskTreeBudget,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,

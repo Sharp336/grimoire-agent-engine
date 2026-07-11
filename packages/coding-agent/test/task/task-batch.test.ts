@@ -39,6 +39,8 @@ function createSession(
 		settings?: Record<string, unknown>;
 		agentId?: string;
 		planMode?: boolean;
+		taskTreeBudget?: executorModule.TaskTreeBudget;
+		getSpawns?: () => string;
 	} = {},
 ): ToolSession {
 	return {
@@ -46,10 +48,11 @@ function createSession(
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? {}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionSpawns: options.getSpawns ?? (() => "*"),
 		getAgentId: () => options.agentId ?? null,
 		getPlanModeState: options.planMode ? () => ({ enabled: true }) : undefined,
 		asyncJobManager: options.manager,
+		taskTreeBudget: options.taskTreeBudget,
 	} as unknown as ToolSession;
 }
 
@@ -277,6 +280,71 @@ describe("task.batch validation", () => {
 		expect(text).toContain("task.batch is disabled");
 		expect(text).not.toContain("was missing");
 	});
+
+	it("rejects a batch atomically when it would cross the tree spawn budget", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2, maxRequests: 1 });
+		const runSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false },
+				taskTreeBudget,
+			}),
+		);
+
+		const result = await tool.execute("tool-call", {
+			agent: "task",
+			context: "Shared.",
+			tasks: [
+				{ id: "A", assignment: "Work A." },
+				{ id: "B", assignment: "Work B." },
+				{ id: "C", assignment: "Work C." },
+			],
+		});
+
+		expect(getFirstText(result)).toContain("Task tree spawn budget exceeded");
+		expect(runSpy).not.toHaveBeenCalled();
+		expect(result.details?.treeBudget).toMatchObject({
+			spawns: 0,
+			maxSpawns: 2,
+			exhausted: false,
+		});
+		expect(taskTreeBudget.signal.aborted).toBe(false);
+		taskTreeBudget.recordRequest(10);
+		taskTreeBudget.recordRequest(10);
+		expect(taskTreeBudget.snapshot()).toMatchObject({ requests: 2, exhausted: true });
+		expect(taskTreeBudget.signal.aborted).toBe(true);
+	});
+
+	it("does not reserve spawn capacity for a policy-rejected call", async () => {
+		mockDiscovery();
+		let spawnPolicy = "reviewer";
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Allowed"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false },
+				taskTreeBudget,
+				getSpawns: () => spawnPolicy,
+			}),
+		);
+
+		const denied = await tool.execute("tool-call-denied", {
+			agent: "task",
+			assignment: "Denied.",
+		});
+		expect(getFirstText(denied)).toContain("Cannot spawn 'task'");
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+
+		spawnPolicy = "*";
+		const allowed = await tool.execute("tool-call-allowed", {
+			agent: "task",
+			assignment: "Allowed.",
+		});
+		expect(getFirstText(allowed)).toContain("All done.");
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
+	});
 });
 
 describe("task.batch spawning", () => {
@@ -465,6 +533,28 @@ describe("task.batch spawning", () => {
 		expect(reviewerSpawn?.outputSchema).toBe(callerSchema);
 		expect(reviewerSpawn?.outputSchemaSource).toBe("caller");
 		expect(reviewerSpawn?.outputSchemaOverridesAgent).toBe(true);
+	});
+
+	it("releases spawn capacity when no background job can be registered", async () => {
+		mockDiscovery();
+		const manager = createManager();
+		await manager.dispose({ timeoutMs: 1000 });
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: { "async.enabled": true, "task.batch": false },
+				taskTreeBudget,
+			}),
+		);
+
+		const result = await tool.execute("tc-disposed", {
+			agent: "task",
+			assignment: "Do work.",
+		});
+
+		expect(getFirstText(result)).toContain("Failed to start background task job");
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
 	});
 
 	it("treats a one-item batch as a single spawn and forwards context", async () => {

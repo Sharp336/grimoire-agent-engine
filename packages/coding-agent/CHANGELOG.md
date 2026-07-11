@@ -340,6 +340,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Added
+
+- Added optional session-wide spawn, request, and counted-token budgets for task trees, with atomic batch rejection, graceful descendant aborts, and budget usage telemetry.
 
 ## [17.2.1] - 2026-07-30
 
@@ -1536,6 +1539,7 @@
 - Fixed native Windows binary compatibility on older Windows 10 CPUs by building the `omp-windows-x64.exe` release asset with a baseline x64 runtime instead of AVX2. (#5172)
 - Fixed `GenerateImage` rejecting OpenAI Codex-compatible proxy bearer keys when the token does not expose a `chatgpt-account-id`. (#5174)
 - Fixed context promotion documentation to accurately reflect the `contextPromotionTarget` runtime behavior and `contextPromotion.enabled` default. (#5163)
+### Added
 
 ## [16.4.3] - 2026-07-11
 

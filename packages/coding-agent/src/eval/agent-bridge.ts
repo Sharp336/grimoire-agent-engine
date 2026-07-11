@@ -139,6 +139,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			: undefined;
 
 	try {
+		if (options.session.taskTreeBudget) {
+			const treeBudgetError = options.session.taskTreeBudget.reserveSpawns(1);
+			if (treeBudgetError) throw new ToolError(treeBudgetError);
+		}
 		const execution = await withBridgeTimeoutPause(
 			options.emitStatus,
 			() =>

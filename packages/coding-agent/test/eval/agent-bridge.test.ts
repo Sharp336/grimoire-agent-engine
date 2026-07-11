@@ -46,6 +46,7 @@ describe("runEvalAgent", () => {
 			getArtifactsDir: () => "/tmp/parent-artifacts",
 			getSessionId: () => "parent-session",
 		};
+		const taskTreeBudget = new taskExecutor.TaskTreeBudget({ maxSpawns: 1 });
 		const session = {
 			cwd: "/tmp",
 			settings: Settings.isolated(),
@@ -54,6 +55,7 @@ describe("runEvalAgent", () => {
 			mcpManager,
 			localProtocolOptions,
 			getAgentId: () => "BridgeParent",
+			taskTreeBudget,
 		} as unknown as ToolSession;
 
 		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
@@ -63,6 +65,8 @@ describe("runEvalAgent", () => {
 		expect(options?.mcpManager).toBe(mcpManager);
 		expect(options?.localProtocolOptions).toBe(localProtocolOptions);
 		expect(options?.parentAgentId).toBe("BridgeParent");
+		expect(options?.taskTreeBudget).toBe(taskTreeBudget);
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
 	});
 
 	it("returns executor-parsed structured data through the public eval bridge", async () => {

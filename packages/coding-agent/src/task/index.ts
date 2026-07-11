@@ -104,6 +104,7 @@ export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
+export * from "./tree-budget";
 export type {
 	AgentDefinition,
 	AgentProgress,
@@ -681,7 +682,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+		const defaultAgent = spawnPolicy.defaultAgent;
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
@@ -720,6 +722,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const treeBudgetError = this.session.taskTreeBudget?.reserveSpawns(spawnItems.length);
+		if (treeBudgetError) {
+			return {
+				content: [{ type: "text", text: treeBudgetError }],
+				details: {
+					projectAgentsDir: null,
+					results: [],
+					totalDurationMs: 0,
+					treeBudget: this.session.taskTreeBudget?.snapshot(),
+				},
+			};
+		}
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -795,9 +809,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
+			const budgetedResult =
+				result.details && this.session.taskTreeBudget
+					? {
+							...result,
+							details: { ...result.details, treeBudget: this.session.taskTreeBudget.snapshot() },
+						}
+					: result;
+			if (!advisory) return budgetedResult;
 			let appended = false;
-			const content = result.content.map(part => {
+			const content = budgetedResult.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
 					return { ...part, text: `${part.text}\n\n${advisory}` };
@@ -805,7 +826,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				return part;
 			});
 			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			return { ...budgetedResult, content };
 		};
 		if (asyncItems.length === 0) {
 			return withAdvisory(
@@ -888,6 +909,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			usage: syncUsage,
 			outputPaths: syncOutputPaths,
 			progress: spawns.map(spawn => ({ ...spawn.progress })),
+			treeBudget: this.session.taskTreeBudget?.snapshot(),
 			async: {
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
 				jobId: primaryJobId,
@@ -923,6 +945,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				failedCount += 1;
 			}
 		}
+		this.session.taskTreeBudget?.releaseSpawns(failedSchedules.length);
 
 		if (started.length === 0 && syncSpawns.length === 0) {
 			return {
