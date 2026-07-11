@@ -65,7 +65,7 @@ describe("nested task policy", () => {
 		expect(rendered).toContain("Do not spawn sub-agents unless");
 		expect(rendered).not.toContain("Proactive multi-agent delegation is active");
 		expect(rendered).not.toContain("Maximize parallelism");
-		expect(rendered).not.toContain("At most 4 subagents");
+		expect(rendered).toContain("At most 4 subagents");
 	});
 
 	it("inherits the parent task concurrency when no nested limit is configured", () => {
