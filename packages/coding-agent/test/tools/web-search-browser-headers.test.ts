@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildBrowserNavigationHeaders } from "@oh-my-pi/pi-coding-agent/web/search/providers/browser-headers";
 import { browserFetch } from "@oh-my-pi/pi-coding-agent/web/search/providers/browser-page";
+import { compileCodingAgent } from "../../scripts/compile-binary";
 
-afterEach(() => {
+afterEach(async () => {
 	vi.restoreAllMocks();
+	for (const tempDir of tempDirs.splice(0)) {
+		await fs.rm(tempDir, { recursive: true, force: true });
+	}
 });
 
 const CHROME_FALLBACK_HEADERS: Record<string, string> = {
@@ -29,7 +34,9 @@ const CHROME_FALLBACK_HEADERS: Record<string, string> = {
 };
 
 const packageRoot = path.join(import.meta.dir, "../..");
+const repoRoot = path.join(packageRoot, "../..");
 const headerGeneratorRoot = path.dirname(fileURLToPath(import.meta.resolve("header-generator")));
+const tempDirs: string[] = [];
 
 describe("browser navigation headers", () => {
 	it("builds a randomized, internally consistent browser profile", () => {
@@ -105,6 +112,62 @@ describe("browser navigation headers", () => {
 			}
 
 			expect(JSON.parse(stdout)).toEqual(CHROME_FALLBACK_HEADERS);
+		} finally {
+			await fs.rename(unavailableDataFilesDir, dataFilesDir);
+		}
+	});
+
+	it("keeps generated headers embedded in compiled probes after header-generator data files disappear", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-headers-compile-"));
+		tempDirs.push(tempDir);
+		const entrypoint = path.join(tempDir, "headers-probe.ts");
+		const outfile = path.join(tempDir, process.platform === "win32" ? "headers-probe.exe" : "headers-probe");
+		await Bun.write(
+			entrypoint,
+			[
+				`import { buildBrowserNavigationHeaders } from ${JSON.stringify(path.join(packageRoot, "src/web/search/providers/browser-headers.ts"))};`,
+				"Math.random = () => 0;",
+				"const stable = buildBrowserNavigationHeaders({ randomized: false });",
+				"const randomized = buildBrowserNavigationHeaders();",
+				"process.stdout.write(JSON.stringify({ randomized, stable }));",
+			].join("\n"),
+		);
+
+		await compileCodingAgent({
+			repoRoot,
+			entrypoint,
+			outfile,
+			transformersVersion: "0.0.0-test",
+		});
+
+		const dataFilesDir = path.join(headerGeneratorRoot, "data_files");
+		const unavailableDataFilesDir = path.join(
+			headerGeneratorRoot,
+			`.data_files-compiled-unavailable-${process.pid}-${Date.now()}`,
+		);
+
+		await fs.rename(dataFilesDir, unavailableDataFilesDir);
+		try {
+			const proc = Bun.spawn([outfile], {
+				cwd: packageRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+
+			const [exitCode, stdout, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+
+			if (exitCode !== 0) {
+				throw new Error(`compiled browser header probe failed with exit ${exitCode}:\n${stderr}`);
+			}
+
+			const payload: { randomized: Record<string, string>; stable: Record<string, string> } = JSON.parse(stdout);
+			expect(payload.stable).toEqual(CHROME_FALLBACK_HEADERS);
+			expect(payload.randomized).not.toEqual(payload.stable);
+			expect(payload.randomized["User-Agent"]).toContain("Mozilla/5.0");
 		} finally {
 			await fs.rename(unavailableDataFilesDir, dataFilesDir);
 		}
