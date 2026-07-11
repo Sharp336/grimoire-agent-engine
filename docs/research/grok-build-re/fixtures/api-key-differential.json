@@ -10,6 +10,10 @@
     "GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:39489/v1"
   },
   "fake_api_key_case": {
+    "environment_overrides": {
+      "XAI_API_KEY": "<redacted length=7>",
+      "XAI_OAUTH_TOKEN": "unset"
+    },
     "captured_at_models": "2026-07-11T01:34:13.581082Z",
     "models_command": "grok --leader-socket <temporary> --cwd <temporary> models",
     "models_exit_code": 0,

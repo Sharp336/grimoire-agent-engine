@@ -1,11 +1,11 @@
 {
   "captured_at": "2026-07-11T01:26:31Z",
-  "source": "~/.grok/auth.json inspected in-process; no values copied",
+  "source": "~/.grok/auth.json inspected in-process; credential and user-profile values were not copied",
   "parseable_json": true,
   "entry_count": 1,
   "entry_key_schema": {
     "issuer_host": "auth.x.ai",
-    "client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+    "client_id": {"redacted": true, "length": 36, "note": "public OAuth client identifier shape only; value not published"}
   },
   "entry_field_schema": {
     "key": {"type": "string", "redacted": true, "length": 818},
@@ -32,5 +32,5 @@
     "observed_login_state": "logged in",
     "transport_trace": "local-only redacted summary in strace-models-summary.json"
   },
-  "security": "No key, refresh token, identifiers, email, or other values are present in this fixture."
+  "security": "No access key, refresh token, email, user id, or other credential/profile values are present. Issuer host is intentionally retained as non-secret endpoint metadata; OAuth client_id is retained only as redacted length metadata."
 }

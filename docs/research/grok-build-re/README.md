@@ -4,7 +4,7 @@ Related product request: [can1357/oh-my-pi#4945](https://github.com/can1357/oh-m
 
 **Status: DOSSIER_ONLY.** This document is behavior-evidence for a future separate Build-quota provider. It is **not** a ship of Build chat, Build auth, Build models, or Build usage code. Existing SuperGrok `xai-oauth` (including `xai-oauth/grok-build*`) is unchanged.
 
-Redacted capture fixtures live under [`fixtures/`](fixtures/). Every header and body **value** was redacted before write; only names, lengths, schemas, hosts, methods, and paths are retained.
+Redacted capture fixtures live under [`fixtures/`](fixtures/). Every header and body **value** was redacted before write; retained fields are names, lengths, schemas, hosts, methods, and paths. Public OAuth client identifiers are published only as redacted length metadata, not literal values.
 
 
 ## Executive summary — **DOSSIER_ONLY**
@@ -31,7 +31,7 @@ The official binary is an RE oracle only: `grok 0.2.93 (f00f96316d) [stable]`. W
 - Wave B exercised the official `grok 0.2.93 (f00f96316d) [stable]` binary. Loopback capture used a base-URL override bound only to `127.0.0.1`; every persisted request header/body value was converted to redaction metadata before the fixture was written. The loopback response bodies and statuses are explicitly synthetic and prove request emission only. [Evidence: [`fixtures/override-models-401.json`](fixtures/override-models-401.json), [`fixtures/override-chat-staged.json`](fixtures/override-chat-staged.json), [`fixtures/strace-local-prompt-summary.json`](fixtures/strace-local-prompt-summary.json)]
 - Production transport proof came from redacted `strace` summaries. Authenticated `models` resolved `cli-chat-proxy.grok.com` and connected to its corroborated TLS addresses. The traced `-m grok-build` prompt resolved the same name and connected to one corroborated TLS address, but ended with a redacted non-JSON CLI error. `strace` did not reveal decrypted HTTP, SNI, a status, a response body, or SSE frames. Therefore this is **host DNS/TCP proof only**, not production host/path proof. [Evidence: [`fixtures/strace-models-summary.json`](fixtures/strace-models-summary.json), [`fixtures/authenticated-prompt-strace-summary.json`](fixtures/authenticated-prompt-strace-summary.json)]
 - The TLS key-log experiment produced an empty temporary file, so it provides no decrypted-wire evidence. [Evidence: [`fixtures/sslkeylog-experiment.json`](fixtures/sslkeylog-experiment.json)]
-- Sensitive fixture data is intentionally limited to field names, types, and redacted lengths. No token, authorization, API-key, email, user identifier, cookie, raw trace line, or raw CLI error is reproduced here. [Evidence: [`fixtures/auth-store-shape.json`](fixtures/auth-store-shape.json), [`fixtures/override-chat-staged.json`](fixtures/override-chat-staged.json), [`fixtures/api-key-differential.json`](fixtures/api-key-differential.json)]
+- Sensitive fixture data is intentionally limited to field names, types, redacted lengths, and non-secret host metadata. No token, authorization, API-key, email, user identifier, cookie, raw trace line, or raw CLI error is reproduced here. [Evidence: [`fixtures/auth-store-shape.json`](fixtures/auth-store-shape.json), [`fixtures/override-chat-staged.json`](fixtures/override-chat-staged.json), [`fixtures/api-key-differential.json`](fixtures/api-key-differential.json)]
 - Offline static strings from the same oracle binary remain leads, not contracts. In particular, static auth, billing, streaming, host, and model-like tokens cannot establish a Build request path, authentication rule, model inventory, SSE contract, or usage API.
 
 ## Confirmed request-side facts only
@@ -97,7 +97,7 @@ Static 401/403/429, quota, credit, and access-gate text remains **unverified —
 
 ### 6. Build usage/billing — **partial and the ship blocker**
 
-Normal-turn initialization emitted `GET /v1/user?include=subscription` once and `GET /v1/user` three times under loopback capture. Both requests carried the distinct header subsets shown above. No response was from the production service; the recorder supplied only synthetic errors for non-model paths. [Evidence: [`fixtures/override-chat-staged.json`](fixtures/override-chat-staged.json)]
+Normal-turn initialization emitted `GET /v1/user?include=subscription` once and `GET /v1/user` three times under loopback capture. Both requests carried the same header-name subset shown above (`accept`, `accept-encoding`, `authorization`, `host`, `user-agent`, `x-grok-client-version`, `x-xai-token-auth`). No response was from the production service; the recorder supplied only synthetic errors for non-model paths. [Evidence: [`fixtures/override-chat-staged.json`](fixtures/override-chat-staged.json)]
 
 There is no captured durable Build residual, used amount, limit, reset, unit, account scope, or update cadence. Static billing paths and field-like tokens are **unverified — confirm first** and MUST NOT be substituted for Build usage reporting. [Evidence: [`fixtures/live-remote-capture-template.json`](fixtures/live-remote-capture-template.json)]
 
