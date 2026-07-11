@@ -47,7 +47,12 @@ import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-o
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import { getChangelogPath, parseChangelog } from "../../utils/changelog";
+import {
+	getChangelogPath,
+	parseChangelog,
+	RECENT_CHANGELOG_ENTRY_LIMIT,
+	renderChangelogEntries,
+} from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -487,16 +492,9 @@ export class CommandController {
 	async handleChangelogCommand(showFull = false): Promise<void> {
 		const changelogPath = getChangelogPath();
 		const allEntries = await parseChangelog(changelogPath);
-		// Default to showing only the latest 3 versions unless --full is specified
-		// allEntries comes from parseChangelog with newest first, reverse to show oldest->newest
-		const entriesToShow = showFull ? allEntries : allEntries.slice(0, 3);
+		const entriesToShow = showFull ? allEntries : allEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
 		const changelogMarkdown =
-			entriesToShow.length > 0
-				? [...entriesToShow]
-						.reverse()
-						.map(e => e.content)
-						.join("\n\n")
-				: "No changelog entries found.";
+			entriesToShow.length > 0 ? renderChangelogEntries(entriesToShow).markdown : "No changelog entries found.";
 		const title = showFull ? "Full Changelog" : "Recent Changes";
 		const hint = showFull
 			? ""
@@ -849,11 +847,7 @@ export class CommandController {
 	}
 
 	async #runNewSessionFlow(options?: NewSessionOptions, label: string = "New session started"): Promise<void> {
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
-		}
-		this.ctx.statusContainer.clear();
+		this.ctx.clearTransientSessionUi();
 
 		if (this.ctx.session.isCompacting) {
 			this.ctx.session.abortCompaction();
@@ -867,14 +861,9 @@ export class CommandController {
 
 		this.ctx.statusLine.invalidate();
 		this.ctx.statusLine.resetActiveTime();
-		this.ctx.ui.requestRender();
 		this.ctx.updateEditorBorderColor();
-		this.ctx.chatContainer.clear();
-		this.ctx.pendingMessagesContainer.clear();
-		this.ctx.compactionQueuedMessages = [];
-		this.ctx.streamingComponent = undefined;
-		this.ctx.streamingMessage = undefined;
-		this.ctx.pendingTools.clear();
+		this.ctx.clearTransientSessionUi();
+		this.ctx.resetTranscript();
 
 		this.ctx.present([new Spacer(1), new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1)]);
 		await this.ctx.reloadTodos();
@@ -914,7 +903,7 @@ export class CommandController {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 		}
-		this.ctx.statusContainer.clear();
+		this.ctx.statusContainer.disposeChildren();
 
 		const success = await this.ctx.session.fork();
 		if (!success) {
@@ -1177,7 +1166,7 @@ export class CommandController {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 		}
-		this.ctx.statusContainer.clear();
+		this.ctx.statusContainer.disposeChildren();
 
 		const label = isAuto ? "Auto-compacting context... (esc to cancel)" : "Compacting context... (esc to cancel)";
 		const compactingLoader = new Loader(
@@ -1207,7 +1196,7 @@ export class CommandController {
 			await this.ctx.session.compact(instructions, options);
 
 			compactingLoader.stop();
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 			this.ctx.rebuildChatFromMessages();
 
 			this.ctx.statusLine.invalidate();
@@ -1223,7 +1212,7 @@ export class CommandController {
 			}
 		} finally {
 			compactingLoader.stop();
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
 		// Run the caller's pre-flush hook (e.g. the plan-approval model transition)
 		// before queued user input is dispatched, so any turn queued during
@@ -1252,7 +1241,7 @@ export class CommandController {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 		}
-		this.ctx.statusContainer.clear();
+		this.ctx.statusContainer.disposeChildren();
 
 		const handoffLoader = new Loader(
 			this.ctx.ui,
@@ -1273,11 +1262,10 @@ export class CommandController {
 				return;
 			}
 
-			// Rebuild chat from the new session (which now contains the handoff document)
-			this.ctx.rebuildChatFromMessages();
-
+			// Rebuild chat from the new session (which now contains the handoff document).
+			this.ctx.clearTransientSessionUi();
+			this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
-			this.ctx.ui.requestRender();
 			this.ctx.updateEditorBorderColor();
 			await this.ctx.reloadTodos();
 
@@ -1297,9 +1285,9 @@ export class CommandController {
 			}
 		} finally {
 			handoffLoader.stop();
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
-		this.ctx.ui.requestRender();
+		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 }
 

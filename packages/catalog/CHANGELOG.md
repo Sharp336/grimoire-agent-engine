@@ -5,6 +5,130 @@
 ### Added
 
 - Added ClinePass (`clinepass`) as a native, bundled model provider — Cline's flat-rate subscription gateway at `https://api.cline.bot/api/v1` (`CLINE_API_KEY`). ClinePass has no `/v1/models` endpoint, so the descriptor omits `catalogDiscovery` and `generate-models.ts` seeds the ten curated models (`glm-5.2`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `minimax-m3`, `qwen3.7-max`, `qwen3.7-plus`) from `CLINEPASS_STATIC_MODELS` as the source of truth, like Fire Pass. Added a `clinepass` `wireModelIdMode` that keeps friendly bare catalog ids (`glm-5.2`) while translating to the `cline-pass/glm-5.2` wire form at request time, so selection is `clinepass/glm-5.2` rather than a doubled prefix. Provider-id-gated compat (verified live against `api.cline.bot`) pins `reasoningContentField: "reasoning"` (ClinePass streams `delta.reasoning`), a `reasoningEffortMap` that passes `minimal`..`xhigh` through as-is for most models so `xhigh` is advertised without the family `xhigh → max` rewrite the gateway 400s on while keeping the MiMo `minimal→low`/`xhigh→high` clamp, and `thinkingFormat: "openai"` so the Qwen SKUs keep the full effort ladder. Per-model context windows, output budgets, and vision support were probed live and cross-checked against upstream vendor specs: `kimi-k2.6`, `kimi-k2.7-code`, `mimo-v2.5`, and `qwen3.7-plus` are image-capable; the Kimi SKUs cap context at 262144 while the rest are 1M-class (`mimo-v2.5` 1048576, `minimax-m3` 1000000), and the DeepSeek V4 SKUs carry their documented 384000 output budget.
+## [16.4.3] - 2026-07-11
+
+### Fixed
+
+- Fixed parsing of SAP AI Core Claude model IDs in version-first format (e.g., anthropic--claude-4.8-opus), restoring adaptive thinking metadata and capability gates.
+- Fixed GitHub Copilot Business and Enterprise model discovery to correctly preserve vision capabilities instead of downgrading models to text-only.
+
+## [16.4.2] - 2026-07-10
+
+### Fixed
+
+- Fixed OpenAI Codex model discovery to include the Codex version header alongside the client_version query parameter.
+
+## [16.4.1] - 2026-07-10
+
+### Added
+
+- Added GPT-5.6 Luna, Sol, and Terra models
+- Added perplexity-academic-researcher model
+
+### Changed
+
+- Updated context windows for multiple GPT-5.6 models
+- Increased max tokens for several models
+- Updated cache write costs for GPT-5.6 variants
+- Reduced pricing for select models
+
+### Removed
+
+- Removed the generated GPT-5.6 pro-reasoning aliases (`gpt-5.6-{luna,sol,terra}-pro`) from the `openai-codex` subscription provider — pro reasoning is not offered on subscriptions; the `openai` API-key aliases remain
+
+## [16.4.0] - 2026-07-10
+
+### Breaking Changes
+
+- Redesigned reasoning effort ladders to be wire-exact, removing the shifted five-tier effort mapping. Models now expose exactly the effort tiers their upstream APIs accept, mapped 1:1. Removed SHIFTED_FIVE_TIER_EFFORT_MAP, ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER, and per-host xhigh-to-max alias maps. Selecting an unsupported tier now automatically clamps down via clampThinkingLevelForModel. Devin effort routing is now mapped 1:1 onto per-tier siblings.
+
+### Added
+
+- Added support for new models: Grok 4.5 family, Dolphin Mistral 24b Venice Edition, GLM5.2-Fast, and Zenmux variants for GPT-5.6 (Luna, Sol, and Terra).
+- Added Novita as a model provider, including public catalog discovery, pricing, limits, modality, reasoning, and tool metadata.
+- Added useResponsesLite to Model and ModelSpec to support the Responses Lite transport, enabled by default for the GPT-5.6 family.
+- Added Effort.Max ("max") as a first-class user-facing thinking level above xhigh.
+
+### Changed
+
+- Enabled reasoning effort controls for Grok 4.5 and updated support flags for additional Grok variants
+- Standardized reasoning effort levels to use a wire-exact max tier across all model providers, including Devin routing and Ollama configurations.
+- Updated costs and context windows for various models in the catalog.
+
+## [16.3.15] - 2026-07-09
+
+### Added
+
+- Added support for Grok 4.5 model
+- Added `gpt-5.6` base models and `gpt-5.6-{luna,sol,terra}-pro` variants
+- Added `meta/muse-spark-1.1` model support
+- Added support for thinking modes on `poolside/laguna` models
+- Added generated GPT-5.6 Pro aliases (`gpt-5.6-{luna,sol,terra}-pro`) on the `openai` and `openai-codex` providers: each alias sends the base model id on the wire (`requestModelId`) with the new `reasoningMode: "pro"` marker, and re-derives from the current base rows on every catalog regeneration.
+
+### Changed
+
+- Updated cache read costs for Grok models
+- Reduced max token limit for Grok 4.3 model
+- Enabled prompt cache affinity for Grok models via the x-grok-conv-id header in OpenAI compatible endpoints
+- Enabled prompt cache affinity for Grok models via the x-grok-conv-id header
+- Marked direct xAI Grok Chat Completions models for `x-grok-conv-id` prompt-cache affinity.
+
+## [16.3.14] - 2026-07-09
+
+### Added
+
+- Added support for GPT-5.6 (Luna, Sol, Terra) model variants
+- Enabled expanded five-tier reasoning effort scale (minimal to xhigh) for GPT-5.6 models
+- Added GPT-5.6 (Terra/Luna/Sol) support for the new `max` reasoning tier: on wire-effort APIs (OpenAI Responses, Codex, Azure, openai-compat/OpenRouter models that advertise reasoning) user efforts shift up one notch — `xhigh` sends `max`, `high` sends `xhigh` — mirroring the Claude Fable/Opus 4.7+ five-tier mapping, and the exposed ladder becomes `minimal..xhigh` with `minimal` reaching the native `low` tier. Devin's per-tier GPT-5.6 sibling rows now collapse into `gpt-5-6-{luna,sol,terra}` logical models with the same shifted routing (`xhigh` → `-max`), plus `-fast` families that keep the direct `low..xhigh` `-priority` scale since Devin serves no `-max-priority` tier.
+
+## [16.3.13] - 2026-07-09
+
+### Added
+
+- Added support for Grok 4.5 across multiple providers
+- Added support for GPT-5.6 series models (Luna, Sol, Terra)
+- Added Aion 3.0 and 3.0 Mini models
+- Added Kuaishou KAT-Coder v2.5 models
+- Added Nex-N2-Mini and SWE-1.7 series models
+- Added Hy3 models and free variants
+
+### Changed
+
+- Updated cost and token configurations for various models across providers
+- Renamed several models for consistency (e.g., MiniMax M3, Gemma 4 31B, Qwen variants)
+
+## [16.3.12] - 2026-07-08
+
+### Fixed
+
+- Fixed LiteLLM discovery stopping at `/model_group/info` when that endpoint omitted `supports_vision`; it now continues to `/model/info` and preserves `model_info.supports_vision=true` for vision-capable proxy models. ([#4747](https://github.com/can1357/oh-my-pi/issues/4747))
+- Fixed LiteLLM discovery to fall back to bundled catalog metadata when `models.dev` lacks a model reference, preserving reasoning and thinking support for models such as `glm-5.2`. ([#4695](https://github.com/can1357/oh-my-pi/issues/4695))
+- Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
+
+## [16.3.11] - 2026-07-06
+
+### Added
+
+- Added Claude Haiku 4.5 (JP) model support
+- Added tencent/hy3 model support via ZenMux
+
+### Changed
+
+- Updated naming format for various synthetic models to include provider prefix
+- Adjusted context window limit for MiniMax-M3 model
+- Updated pricing for select models
+
+## [16.3.10] - 2026-07-06
+
+### Fixed
+
+- Fixed LiteLLM rich discovery to ignore unusable sentinel placeholders and continue to `/v2/model/info` for real models. ([#4655](https://github.com/can1357/oh-my-pi/issues/4655))
+
+## [16.3.9] - 2026-07-06
+
+### Fixed
+
+- Fixed compatibility with OpenCode Go DeepSeek V4 models by sending max_tokens instead of max_completion_tokens to match the provider's API requirements.
 
 ## [16.3.7] - 2026-07-05
 

@@ -330,6 +330,34 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation).toBeUndefined();
 		});
 
+		it("treats empty optional selector as omitted for read", async () => {
+			const testFile = path.join(testDir, "read-empty-selector.txt");
+			const content = "alpha\nselector target\nomega";
+			fs.writeFileSync(testFile, content);
+
+			const omitted = getTextOutput(await readTool.execute("test-read-empty-selector-omitted", { path: testFile }));
+			expect(omitted).toContain("alpha");
+			expect(omitted).toContain("selector target");
+			expect(omitted).toContain("omega");
+
+			for (const { name, selector } of [
+				{ name: "empty", selector: "" },
+				{ name: "whitespace", selector: " \t\n " },
+			]) {
+				const withOptionalSelector = getTextOutput(
+					await readTool.execute(`test-read-empty-selector-${name}`, {
+						path: testFile,
+						selector,
+					}),
+				);
+				expect(withOptionalSelector).toBe(omitted);
+			}
+
+			await expect(
+				readTool.execute("test-read-empty-selector-malformed", { path: testFile, selector: "-100" }),
+			).rejects.toThrow(/Invalid selector/);
+		});
+
 		it("truncates lines wider than the read column cap, leaving narrow lines untouched", async () => {
 			const wideLine = "x".repeat(1500);
 			const testFile = path.join(testDir, "wide.txt");
@@ -1492,6 +1520,21 @@ function b() {
 			expect(result.details?.requestedTimeoutSeconds).toBe(7200);
 		});
 
+		it("should disable the command deadline when timeout is zero", async () => {
+			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
+
+			const result = await bashTool.execute("test-call-timeout-disabled", {
+				command: "printf 'start\\n'; sleep 0.1; printf 'done\\n'",
+				timeout: 0,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("start");
+			expect(output).toContain("done");
+			expect(result.details?.timeoutDisabled).toBe(true);
+			expect(result.details?.timeoutSeconds).toBeUndefined();
+		});
+
 		it("should respect timeout", async () => {
 			// Reduce the effective timeout through the production clamp seam; the
 			// real subprocess kill-on-timeout path is still exercised, just faster.
@@ -1632,6 +1675,42 @@ function b() {
 			expect(output).not.toContain("# example.txt");
 			// PI_EDIT_VARIANT=replace in beforeEach disables hashlines; expect line-number mode
 			expect(output).toMatch(/\*2\|match line/);
+		});
+
+		it("treats empty optional selector as omitted for search", async () => {
+			const testFile = path.join(testDir, "grep-empty-selector.txt");
+			fs.writeFileSync(testFile, "before\nneedle empty selector\nbetween\nneedle whitespace selector\nafter");
+
+			const omitted = getTextOutput(
+				await searchTool.execute("test-search-empty-selector-omitted", {
+					pattern: "needle",
+					path: testFile,
+				}),
+			);
+			expect(omitted).toMatch(/\*2\|needle empty selector/);
+			expect(omitted).toMatch(/\*4\|needle whitespace selector/);
+
+			for (const { name, selector } of [
+				{ name: "empty", selector: "" },
+				{ name: "whitespace", selector: " \t\n " },
+			]) {
+				const withOptionalSelector = getTextOutput(
+					await searchTool.execute(`test-search-empty-selector-${name}`, {
+						pattern: "needle",
+						path: testFile,
+						selector,
+					}),
+				);
+				expect(withOptionalSelector).toBe(omitted);
+			}
+
+			await expect(
+				searchTool.execute("test-search-empty-selector-malformed", {
+					pattern: "needle",
+					path: testFile,
+					selector: "not-a-range",
+				}),
+			).rejects.toThrow(/selector "not-a-range" is invalid/);
 		});
 
 		it("flags a zero-match search as contextually useless", async () => {

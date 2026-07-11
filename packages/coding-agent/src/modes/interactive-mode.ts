@@ -16,6 +16,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type {
+	AutocompleteProvider,
 	Component,
 	EditorTheme,
 	LoaderMessageColorFn,
@@ -59,6 +60,7 @@ import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { isSettingsInitialized, onStatusLineSessionAccentChanged, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
+	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -90,7 +92,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
 };
-import type { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -123,6 +125,7 @@ import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import { VibeSessionRegistry } from "../vibe/runtime";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -161,8 +164,11 @@ import {
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
-import type { ObservableSession } from "./session-observer-registry";
-import { SessionObserverRegistry } from "./session-observer-registry";
+import {
+	type ObservableSession,
+	type SessionObserverChangeKind,
+	SessionObserverRegistry,
+} from "./session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
@@ -343,9 +349,12 @@ class AnchoredLiveContainer extends Container implements NativeScrollbackLiveReg
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
+const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
+const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
+
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
- * one tree row per running agent in the same `Id: description` shape the
+ * a bounded set of running-agent rows in the same `Id: description` shape the
  * inline task rows use (muted task preview when no description was given).
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
@@ -361,9 +370,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (running.length === 0) return [];
 
 	const dot = theme.styledSymbol("status.done", "accent");
+	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
+	const hiddenCount = running.length - visible.length;
 	const rows = renderTreeList(
 		{
-			items: running,
+			items: visible,
 			expanded: true,
 			renderItem: session => {
 				const displayId = formatTaskId(session.id);
@@ -385,6 +396,9 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		},
 		theme,
 	);
+	if (hiddenCount > 0) {
+		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+	}
 	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
 }
 
@@ -421,6 +435,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	planModePaused = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
+	vibeModeEnabled = false;
 	planModePlanFilePath: string | undefined = undefined;
 	loopModeEnabled = false;
 	loopPrompt: string | undefined = undefined;
@@ -505,12 +520,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	collabGuest?: CollabGuestLink;
 
 	#pendingSlashCommands: SlashCommand[] = [];
+	/** Built-in editor autocomplete provider, before extension wrapping. */
+	#baseAutocompleteProvider: AutocompleteProvider | undefined;
+	/** Extension-registered provider factories, applied in registration order (#4919). */
+	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	#vibeModePreviousTools: string[] | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
@@ -568,10 +588,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader.stop();
 			this.retryLoader = undefined;
 		}
-		this.statusContainer.clear();
-		this.pendingMessagesContainer.clear();
+		this.statusContainer.disposeChildren();
+		this.pendingMessagesContainer.disposeChildren();
 		this.#cancelModelCycleClearTimer();
-		this.modelCycleContainer.clear();
+		this.modelCycleContainer.disposeChildren();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -588,6 +608,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
+	#observerUiSyncTimer?: NodeJS.Timeout;
+	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -917,17 +939,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
-		this.#observerRegistry.onChange(() => {
-			this.syncRunningSubagentBadge();
-			// Auto-checkmark todos whose matching subagent just succeeded, then
-			// re-render so the running override (the static "live" glyph when a
-			// subagent is doing the work for a still-pending todo) updates as
-			// subagents start, finish, or fail.
-			this.#reconcileTodosWithSubagents();
-			this.#syncTodoAutoClearTimer();
-			this.#renderTodoList();
-			this.#renderSubagentList();
-			this.ui.requestRender();
+		this.#observerRegistry.onChange(kind => {
+			this.#scheduleObserverUiSync(kind);
 		});
 
 		// Load initial todos
@@ -1090,12 +1103,47 @@ export class InteractiveMode implements InteractiveModeContext {
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
 			}));
-		const autocompleteProvider = this.#inputController.createAutocompleteProvider(
+		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
 			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
 			basePath,
 		);
-		this.editor.setAutocompleteProvider(autocompleteProvider);
+		this.#applyAutocompleteProvider();
 		this.session.setSlashCommands(fileCommands);
+	}
+
+	/**
+	 * Rebuild the editor's autocomplete provider: the built-in provider wrapped
+	 * by every extension-registered factory, in registration order. A factory
+	 * that throws or returns a malformed provider is skipped so one broken
+	 * extension cannot take down core autocomplete.
+	 */
+	#applyAutocompleteProvider(): void {
+		const base = this.#baseAutocompleteProvider;
+		if (!base) return;
+		let provider = base;
+		for (const factory of this.#autocompleteProviderFactories) {
+			try {
+				const wrapped = factory(provider);
+				if (
+					wrapped &&
+					typeof wrapped.getSuggestions === "function" &&
+					typeof wrapped.applyCompletion === "function"
+				) {
+					provider = wrapped;
+				} else {
+					logger.warn("Extension autocomplete provider factory returned an invalid provider; skipping it");
+				}
+			} catch (error) {
+				logger.warn("Extension autocomplete provider factory threw; skipping it", { error: String(error) });
+			}
+		}
+		this.editor.setAutocompleteProvider(provider);
+	}
+
+	/** Stack extension autocomplete behavior on top of the built-in editor provider (#4919). */
+	addAutocompleteProvider(factory: AutocompleteProviderFactory): void {
+		this.#autocompleteProviderFactories.push(factory);
+		this.#applyAutocompleteProvider();
 	}
 
 	/**
@@ -1521,19 +1569,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
-	syncRunningSubagentBadge(): void {
+	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
 				this.syncRunningSubagentBadge();
-				this.ui.requestRender();
 			});
 		}
 		const count = countRunningSubagentBadgeAgents(registry);
 		this.statusLine.setSubagentCount(count);
-		this.ui.requestRender();
+		if (options.requestRender !== false) this.ui.requestRender();
 	}
 
 	rebuildChatFromMessages(): void {
@@ -1754,6 +1801,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		return active ?? nonEmpty[nonEmpty.length - 1];
 	}
 
+	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind !== "progress") {
+			this.#observerUiSyncNeedsTodoReconcile = true;
+		}
+		if (this.#observerUiSyncTimer) return;
+		this.#observerUiSyncTimer = setTimeout(() => {
+			this.#observerUiSyncTimer = undefined;
+			this.#flushObserverUiSync();
+		}, SUBAGENT_OBSERVER_UI_COALESCE_MS);
+		this.#observerUiSyncTimer.unref?.();
+	}
+
+	#flushObserverUiSync(): void {
+		this.syncRunningSubagentBadge({ requestRender: false });
+		if (this.#observerUiSyncNeedsTodoReconcile) {
+			this.#observerUiSyncNeedsTodoReconcile = false;
+			this.#reconcileTodosWithSubagents();
+		}
+		this.#syncTodoAutoClearTimer();
+		this.#renderTodoList();
+		this.#renderSubagentList();
+		this.ui.requestRender();
+	}
+
+	#cancelObserverUiSyncTimer(): void {
+		if (this.#observerUiSyncTimer) {
+			clearTimeout(this.#observerUiSyncTimer);
+			this.#observerUiSyncTimer = undefined;
+		}
+		this.#observerUiSyncNeedsTodoReconcile = false;
+	}
+
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
@@ -1864,6 +1943,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					}
 				: undefined;
 		this.statusLine.setPlanModeStatus(status);
+		this.ui.requestRender();
+	}
+
+	#updateVibeModeStatus(): void {
+		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
 		this.ui.requestRender();
 	}
 
@@ -2035,6 +2119,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#cancelGoalContinuation();
 			this.#updateGoalModeStatus();
 		}
+
+		if (this.vibeModeEnabled) {
+			await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
+			this.session.setVibeModeState(undefined);
+			this.vibeModeEnabled = false;
+			this.#vibeModePreviousTools = undefined;
+			await VibeSessionRegistry.global().killAll(
+				this.session.getAgentId() ?? MAIN_AGENT_ID,
+				this.session.asyncJobManager,
+			);
+			this.#updateVibeModeStatus();
+		}
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */
@@ -2074,6 +2170,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.session.goalRuntime.clearAccounting();
+		if (sessionContext.mode === "vibe") {
+			await this.#enterVibeMode();
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -2098,6 +2198,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
 			return;
 		}
 
@@ -2265,6 +2369,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
 			return;
 		}
 		const previousTools = this.session.getActiveToolNames().filter(name => name !== "goal");
@@ -2567,6 +2675,49 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#resolveLocalRoot(): string {
+		return resolveLocalUrlToPath("local://", {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		});
+	}
+
+	async #copyLocalArtifactsForFreshSession(sourceRoot: string, destinationRoot: string): Promise<void> {
+		if (sourceRoot === destinationRoot) return;
+
+		let sourceRootStat: { isDirectory(): boolean };
+		try {
+			sourceRootStat = await fs.lstat(sourceRoot);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+
+		if (!sourceRootStat.isDirectory()) return;
+
+		await fs.mkdir(destinationRoot, { recursive: true });
+		await this.#copyLocalArtifactEntries(sourceRoot, destinationRoot);
+	}
+
+	async #copyLocalArtifactEntries(sourceDir: string, destinationDir: string): Promise<void> {
+		const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const sourcePath = path.join(sourceDir, entry.name);
+			const destinationPath = path.join(destinationDir, entry.name);
+
+			if (entry.isDirectory()) {
+				await fs.mkdir(destinationPath, { recursive: true });
+				await this.#copyLocalArtifactEntries(sourcePath, destinationPath);
+				continue;
+			}
+
+			if (entry.isFile()) {
+				await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+				await fs.copyFile(sourcePath, destinationPath);
+			}
+		}
+	}
+
 	async #approvePlan(
 		planContent: string,
 		options: {
@@ -2597,14 +2748,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 
 			if (!options.preserveContext) {
+				const oldLocalRoot = this.#resolveLocalRoot();
 				await this.handleClearCommand();
-				// The new session has a fresh local:// root — persist the approved plan there
-				// so `local://<slug>-plan.md` resolves correctly in the execution session.
+				const newLocalRoot = this.#resolveLocalRoot();
+				await this.#copyLocalArtifactsForFreshSession(oldLocalRoot, newLocalRoot);
 				const newLocalPath = resolveLocalUrlToPath(options.planFilePath, {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				});
-				await Bun.write(newLocalPath, planContent);
+				await fs.mkdir(path.dirname(newLocalPath), { recursive: true });
+				await fs.writeFile(newLocalPath, planContent);
 			} else if (options.compactBeforeExecute) {
 				// Distill the plan-mode transcript before the execution turn is queued so
 				// the plan-approved synthetic prompt lands as a fresh cache anchor.
@@ -2726,6 +2879,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit goal mode first.");
 			return;
 		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
 		if (this.planModeEnabled) {
 			const planFilePath = this.planModePlanFilePath ?? (await this.#getPlanFilePath());
 			if (await this.#hasPlanModeDraftContent(planFilePath)) {
@@ -2761,6 +2918,82 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
+	 * active toolset down to `read` plus those tools, and injects the director
+	 * context. Exiting unregisters them, restores the previous toolset, and kills
+	 * every worker session so workers cannot outlive the mode that directs them.
+	 */
+	async handleVibeModeCommand(initialPrompt?: string): Promise<void> {
+		if (this.vibeModeEnabled) {
+			await this.#exitVibeMode();
+			return;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		await this.#enterVibeMode();
+		if (initialPrompt && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		}
+	}
+
+	async #enterVibeMode(): Promise<void> {
+		if (this.vibeModeEnabled) {
+			return;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+
+		const previousTools = this.session.getActiveToolNames();
+		await this.session.activateVibeTools(["read"]);
+		this.#vibeModePreviousTools = previousTools;
+		this.vibeModeEnabled = true;
+		// Suppress cache-miss marker on the next turn: vibe mode changes the
+		// injected context, which predictably invalidates the cache.
+		this.lastAssistantUsage = undefined;
+		this.session.setVibeModeState({ enabled: true });
+		if (this.session.isStreaming) {
+			await this.session.sendVibeModeContext({ deliverAs: "steer" });
+		}
+		this.#updateVibeModeStatus();
+		this.sessionManager.appendModeChange("vibe");
+		this.showStatus("Vibe mode enabled. You direct fast/good worker sessions; toolset is read + vibe tools.");
+	}
+
+	async #exitVibeMode(): Promise<void> {
+		if (!this.vibeModeEnabled) {
+			return;
+		}
+		await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
+		this.session.setVibeModeState(undefined);
+		this.vibeModeEnabled = false;
+		this.#vibeModePreviousTools = undefined;
+		this.lastAssistantUsage = undefined;
+		const killed = await VibeSessionRegistry.global().killAll(
+			this.session.getAgentId() ?? MAIN_AGENT_ID,
+			this.session.asyncJobManager,
+		);
+		this.#updateVibeModeStatus();
+		this.sessionManager.appendModeChange("none");
+		this.showStatus(
+			killed > 0
+				? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`
+				: "Vibe mode disabled.",
+		);
+	}
+
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
 		const state = this.session.getGoalModeState();
 		if (!this.goalModeEnabled || !state?.enabled) {
@@ -2791,6 +3024,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
 				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (this.vibeModeEnabled) {
+				this.showWarning("Exit vibe mode first.");
 				return;
 			}
 			if (!this.session.settings.get("goal.enabled")) {
@@ -3306,6 +3543,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#cleanupMicAnimation();
 		this.#cancelTodoAutoClearTimer();
+		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
 			this.#sttController.dispose();
@@ -3590,7 +3828,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	ensureLoadingAnimation(): void {
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			const messageColorFn = ((message: string) =>
 				renderWorkingMessage(message, this.#getWorkingMessageAccent())) as LoaderMessageColorFn & {
 				animated?: true;
@@ -3611,7 +3849,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			this.statusContainer.addChild(this.loadingAnimation);
 			this.ui.requestRender();
 		}
@@ -3624,7 +3862,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loadingAnimation = undefined;
 		this.#clearWorkingMessageAccentCache();
 		if (clearStatusContainer) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 		}
 	}
 
@@ -4087,7 +4325,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.#btwController.dispose();
 			this.#omfgController.dispose();
-			this.chatContainer.clear();
 			this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(

@@ -8,7 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -214,6 +214,59 @@ describe("AgentSession retry fallback", () => {
 			{
 				type: "retry_fallback_succeeded",
 				model: `${secondFallback.provider}/${secondFallback.id}`,
+				role: "default",
+			},
+		]);
+	});
+
+	it("uses the active initial model as the default fallback primary when other role fallback chains are configured", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		const otherRoleFallbackModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !fallbackModel || !otherRoleFallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+				smol: [`${otherRoleFallbackModel.provider}/${otherRoleFallbackModel.id}`],
+			},
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+		});
+
+		await session.prompt("Recover using implicit default primary");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				to: `${fallbackModel.provider}/${fallbackModel.id}`,
 				role: "default",
 			},
 		]);
@@ -1549,6 +1602,12 @@ describe("AgentSession retry fallback", () => {
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o")).toBe(true);
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:low")).toBe(true);
 
+		// `:max` is a real thinking level now, not an xhigh alias — the two parse
+		// to distinct selectors...
+		expect(parseModelString("openai/gpt-4o:max", { allowMaxSuffix: true })?.thinkingLevel).toBe(Effort.Max);
+		expect(parseModelString("openai/gpt-4o:xhigh")?.thinkingLevel).toBe(Effort.XHigh);
+		// ...but suppression normalizes every thinking suffix to the base selector,
+		// so suppressing either still covers both.
 		modelRegistry.suppressSelector("openai/gpt-4o:max", future);
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:xhigh")).toBe(true);
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:max")).toBe(true);

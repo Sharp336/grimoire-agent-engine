@@ -14,6 +14,35 @@ function normalizeRenderedText(text: string): string {
 	return stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
 }
 
+const DEFAULT_RETRY_FALLBACK_ACTION_LABEL = "Set as DEFAULT retry fallback";
+const DEFAULT_RETRY_FALLBACK_ACTION = "retryFallback";
+
+type ModelSelectorAction = "modelRole" | typeof DEFAULT_RETRY_FALLBACK_ACTION;
+type TestRoleSelectArgs = [
+	model: Model,
+	role: string | null,
+	thinkingLevel?: ConfiguredThinkingLevel,
+	selector?: string,
+	action?: ModelSelectorAction,
+];
+type TestRoleSelectCallback = (...args: TestRoleSelectArgs) => void;
+
+function isSelectedMenuLine(line: string): boolean {
+	const trimmed = line.trimStart();
+	return trimmed.startsWith("❯") || trimmed.startsWith("▸") || trimmed.startsWith(">") || trimmed.startsWith("\uf054");
+}
+
+function selectMenuAction(selector: ModelSelectorComponent, label: string): void {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		const selectedTarget = stripVTControlCharacters(selector.render(220).join("\n"))
+			.split("\n")
+			.find(line => line.includes(label) && isSelectedMenuLine(line));
+		if (selectedTarget) return;
+		selector.handleInput("\x1b[B");
+	}
+	throw new Error(`Menu action not selectable: ${label}`);
+}
+
 function createSelector(model: Model, settings: Settings): ModelSelectorComponent {
 	const modelRegistry = {
 		getAll: () => [model],
@@ -66,7 +95,7 @@ function createContextTestModel(id: string, contextWindow: number): Model {
 function createScopedSelector(
 	models: Model[],
 	settings: Settings,
-	onSelect: (model: Model, role: string | null, thinkingLevel?: ConfiguredThinkingLevel, selector?: string) => void,
+	onSelect: TestRoleSelectCallback,
 	options?: { temporaryOnly?: boolean; currentContextTokens?: number },
 ): ModelSelectorComponent {
 	const modelRegistry = {
@@ -82,7 +111,13 @@ function createScopedSelector(
 		settings,
 		modelRegistry,
 		models.map(model => ({ model })),
-		(model, role, thinkingLevel, selector) => onSelect(model, role, thinkingLevel, selector),
+		(
+			model: Model,
+			role: string | null,
+			thinkingLevel?: ConfiguredThinkingLevel,
+			selector?: string,
+			action?: ModelSelectorAction,
+		) => onSelect(model, role, thinkingLevel, selector, action),
 		() => {},
 		options,
 	);
@@ -136,7 +171,7 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(menuRendered).toContain("Set as SMOL (Quick)");
 	});
 
-	test("renders xhigh effort for OpenAI GPT-5.5 thinking options", async () => {
+	test("renders the xhigh-ceiling ladder without a speculative max tier (GPT-5.5)", async () => {
 		installTestTheme();
 		const model = getBundledModel("openai", "gpt-5.5");
 		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
@@ -151,7 +186,25 @@ describe("ModelSelector role badge thinking display", () => {
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(rendered).toContain("Thinking for: Default (gpt-5.5)");
 		expect(rendered).toContain("low medium high xhigh");
-		expect(rendered).not.toContain("low medium high max");
+		// gpt-5.5's wire has no max tier; the selector must not invent one.
+		expect(rendered).not.toContain("max");
+	});
+
+	test("renders max as a real final tier on max-capable models (GPT-5.6)", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.6");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.6");
+
+		const selector = createSelector(model, Settings.isolated({}));
+		await Bun.sleep(0);
+		installTestTheme();
+
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Thinking for: Default (gpt-5.6)");
+		expect(rendered).toContain("low medium high xhigh max");
 	});
 
 	test("reloads DEFAULT(auto) from defaultThinkingLevel", async () => {
@@ -297,6 +350,32 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(onSelect.mock.calls[0]?.[0]).toBe(small);
 		expect(onSelect.mock.calls[0]?.[1]).toBe("default");
 		expect(onSelect.mock.calls[0]?.[3]).toBe("test/only-small");
+	});
+
+	test("assigns selected model as default retry fallback without opening thinking options", () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const fallback = createContextTestModel("retry-fallback-model", 128_000);
+		const onSelect = vi.fn();
+		const selector = createScopedSelector([fallback], settings, onSelect);
+		installTestTheme();
+
+		selector.handleInput("\n");
+		const menuRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(menuRendered).toContain("Action for: retry-fallback-model");
+		expect(menuRendered).toContain(DEFAULT_RETRY_FALLBACK_ACTION_LABEL);
+
+		selectMenuAction(selector, DEFAULT_RETRY_FALLBACK_ACTION_LABEL);
+		selector.handleInput("\n");
+
+		const afterEnter = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(afterEnter).not.toContain("Thinking for:");
+		expect(onSelect).toHaveBeenCalledTimes(1);
+		const call = onSelect.mock.calls[0];
+		expect(call?.[0]).toBe(fallback);
+		expect(call?.[1]).toBe("default");
+		expect(call?.[3]).toBe("test/retry-fallback-model");
+		expect(call?.[4]).toBe(DEFAULT_RETRY_FALLBACK_ACTION);
 	});
 
 	test("uses cached models for Enter while offline refresh is still pending", () => {

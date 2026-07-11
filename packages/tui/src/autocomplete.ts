@@ -276,7 +276,7 @@ function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): bool
 	return getCommandAliases(cmd).includes(commandName);
 }
 
-function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
+export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix.length === 0) return 1;
 	if (lowerPrefix === lowerTarget) return 1000;
 	// Flat score for every prefix match so same-prefix commands keep registry
@@ -425,9 +425,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						prefix: isMidPromptSkillLookup ? commandText : textBeforeCursor,
 					};
 				}
-				if (!isMidPromptSkillLookup) return null;
-				// A mid-prompt slash token with no matching skill may still be an
-				// absolute path (`see /tmp`); fall through to file-path completion.
+				// A slash token with no matching command may still be an absolute
+				// path (`/tmp/fo` at prompt start, `see /tmp` mid-prompt); fall
+				// through to file-path completion.
 			} else if (!isMidPromptSkillLookup) {
 				// Submitted slash commands own their argument text only when the
 				// matched command accepts args. No-arg slash-looking prompts such
@@ -437,6 +437,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
 
 				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
+					return null;
+				}
 				if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
 					if (!("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
 						return null; // No argument completion for this command
@@ -557,7 +560,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// Slash command suggestions can be accepted before the debounced refresh
 		// catches up to newly typed characters. Replace the live command token,
 		// not only the prefix captured when the suggestion list was rendered.
-		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null) {
+		// Absolute-path completions share the leading-slash prefix shape but
+		// insert values starting with `/` (or `"` when quoted); those must take
+		// the path tail below instead of command-style `/<name> ` insertion.
+		const isPathCompletionItem = item.value.startsWith("/") || item.value.startsWith('"');
+		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null && !isPathCompletionItem) {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
 			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);

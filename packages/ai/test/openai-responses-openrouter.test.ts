@@ -21,8 +21,18 @@ const context: Context = {
 
 function createSseResponse(): Response {
 	return new Response(
-		`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}\n\n` +
+		`data: ${JSON.stringify({
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: "msg_1", role: "assistant", content: [] },
+		})}\n\n` +
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}\n\n` +
 			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n` +
+			`data: ${JSON.stringify({
+				type: "response.output_item.done",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+			})}\n\n` +
 			`data: ${JSON.stringify({
 				type: "response.completed",
 				response: {
@@ -201,7 +211,7 @@ describe("OpenRouter pseudo API dual-surface request parity", () => {
 			stream: true,
 			stream_options: { include_usage: true },
 			store: false,
-			reasoning: { effort: "xhigh" },
+			reasoning: { effort: "high" },
 			provider: routing,
 		});
 		expect(responsesBody).toEqual({
@@ -210,7 +220,7 @@ describe("OpenRouter pseudo API dual-surface request parity", () => {
 			stream: true,
 			input: [{ role: "user", content: [{ type: "input_text", text: "ping" }] }],
 			store: false,
-			reasoning: { effort: "xhigh", summary: "auto" },
+			reasoning: { effort: "high", summary: "auto" },
 			prompt_cache_key: "workflow-123",
 			session_id: "workflow-123",
 			provider: routing,
@@ -363,8 +373,8 @@ describe("OpenRouter Responses request shape", () => {
 						status: "completed",
 						usage: {
 							input_tokens: 1,
-							output_tokens: 1,
-							total_tokens: 2,
+							output_tokens: 2,
+							total_tokens: 3,
 							input_tokens_details: { cached_tokens: 0 },
 						},
 					},
