@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AssistantMessage.stopSequence` and surfaced the matched stop sequence through the Anthropic Messages server (`stop_reason: "stop_sequence"` + `stop_sequence`) for both non-streaming and streaming responses.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed

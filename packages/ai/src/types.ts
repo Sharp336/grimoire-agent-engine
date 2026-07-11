@@ -740,6 +740,13 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
+	/**
+	 * The stop sequence string the model matched to end the turn, when the
+	 * provider reports one (e.g. Anthropic `stop_reason: "stop_sequence"` with
+	 * a `message_delta.delta.stop_sequence`). `undefined`/`null` when the turn
+	 * ended for any other reason (natural stop, length, tool use, error).
+	 */
+	stopSequence?: string | null;
 	errorMessage?: string;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 	toolCallAbortMessages?: Record<string, string>;

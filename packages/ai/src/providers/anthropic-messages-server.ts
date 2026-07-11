@@ -8,7 +8,6 @@ import type {
 	AssistantMessageEventStream,
 	Message,
 	RedactedThinkingContent,
-	StopReason,
 	TextContent,
 	ThinkingContent,
 	Tool,
@@ -430,8 +429,9 @@ function randomFallback(): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function mapStopReasonOut(reason: StopReason): "end_turn" | "max_tokens" | "tool_use" {
-	switch (reason) {
+function mapStopReasonOut(message: AssistantMessage): "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" {
+	if (message.stopSequence != null) return "stop_sequence";
+	switch (message.stopReason) {
 		case "length":
 			return "max_tokens";
 		case "toolUse":
@@ -490,11 +490,8 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		role: "assistant",
 		model: requestedModelId,
 		content: encodeContentBlocks(message),
-		stop_reason: mapStopReasonOut(message.stopReason),
-		// TODO: surface the matched stop sequence once pi-ai's
-		// `AssistantMessage.stopReason` carries the matched string. Intentionally
-		// `null` for now (Anthropic schema allows it).
-		stop_sequence: null,
+		stop_reason: mapStopReasonOut(message),
+		stop_sequence: message.stopSequence ?? null,
 		usage: encodeUsage(message),
 	};
 }
@@ -566,8 +563,6 @@ export function encodeStream(
 							model: requestedModelId,
 							content: [],
 							stop_reason: null,
-							// TODO: same as encodeResponse — surface matched stop sequence
-							// once pi-ai propagates it.
 							stop_sequence: null,
 							usage: partial ? encodeUsage(partial) : ZERO_WIRE_USAGE,
 						},
@@ -696,15 +691,16 @@ export function encodeStream(
 							break;
 						case "done": {
 							for (const idx of [...open.keys()]) closeBlock(idx);
-							controller.enqueue(
-								sseFrame("message_delta", {
-									type: "message_delta",
-									// TODO: surface matched stop sequence once pi-ai
-									// propagates it on the `done` event.
-									delta: { stop_reason: mapStopReasonOut(ev.reason), stop_sequence: null },
-									usage: encodeUsage(ev.message),
-								}),
-							);
+								controller.enqueue(
+									sseFrame("message_delta", {
+										type: "message_delta",
+										delta: {
+											stop_reason: mapStopReasonOut(ev.message),
+											stop_sequence: ev.message.stopSequence ?? null,
+										},
+										usage: encodeUsage(ev.message),
+									}),
+								);
 							controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));
 							controller.close();
 							return;
@@ -727,7 +723,10 @@ export function encodeStream(
 				controller.enqueue(
 					sseFrame("message_delta", {
 						type: "message_delta",
-						delta: { stop_reason: "end_turn", stop_sequence: null },
+						delta: {
+							stop_reason: lastPartial ? mapStopReasonOut(lastPartial) : "end_turn",
+							stop_sequence: lastPartial?.stopSequence ?? null,
+						},
 						usage: lastPartial ? encodeUsage(lastPartial) : ZERO_WIRE_USAGE,
 					}),
 				);

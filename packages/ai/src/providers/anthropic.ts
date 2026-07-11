@@ -2330,6 +2330,9 @@ const streamAnthropicOnce = (
 								output.stopReason = mapStopReason(rawStopReason);
 								sawTerminalEnvelope = true;
 							}
+							if (delta?.stop_sequence != null) {
+								output.stopSequence = delta.stop_sequence;
+							}
 							if (output.stopReason === "error") {
 								const stopDetails = delta?.stop_details;
 								output.stopDetails = stopDetails ?? (rawStopReason ? { type: rawStopReason } : null);
