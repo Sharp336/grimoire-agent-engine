@@ -118,6 +118,9 @@
 ### Removed
 
 - Removed the bundled plan subagent from available task agents.
+### Added
+
+- Added separate delegation guidance and per-session concurrency controls for descendant task agents ([#5133](https://github.com/can1357/oh-my-pi/pull/5133) by [@lyc-aon](https://github.com/lyc-aon)).
 
 ## [16.4.2] - 2026-07-10
 
