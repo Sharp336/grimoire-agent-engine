@@ -17,9 +17,10 @@ import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catal
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getConfigRootDir, isEnoent, logger, withExtraCaFetch } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { AUTH_RETRY_STEPS, isApiKeyResolver, resolveRetryKey } from "./auth-retry";
+import { AUTH_RETRY_STEPS, isApiKeyResolver, resolveRetryKey, rotateUsageLimitedSiblings } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
+import { isUsageLimit } from "./error/flags";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -1098,13 +1099,38 @@ export function streamSimple<TApi extends Api>(
 			}
 			let failure = await runAttempt(lastKey, true);
 			if (!failure) return;
-			// a/b/c policy: refresh the same account (lastChance=false), then
-			// switch to a sibling (lastChance=true). A step is skipped when the
-			// resolver yields the same key it just tried or `undefined`; the
-			// final step's attempt clears the capture flag so it emits directly.
+			// Usage limits cannot be fixed by refreshing the same bearer. Walk
+			// distinct siblings through the shared retry primitive; a fixed a/b/c
+			// ladder can strand a fourth or later account after earlier quota hits.
+			if (isUsageLimit(failure.error)) {
+				const rotation = await rotateUsageLimitedSiblings(
+					{ credential: lastKey, failure },
+					{
+						credentialIdentity: credential => credential,
+						failureError: failed => failed.error,
+						resolveSibling: state =>
+							resolveRetryKey(apiKeyResolver, true, state.failure.error, signal, state.credential),
+						attempt: async credential => {
+							const next = await runAttempt(credential, true);
+							return next === undefined
+								? { type: "success", value: undefined }
+								: { type: "failure", failure: next };
+						},
+						signal,
+					},
+				);
+				if (rotation.type === "success") return;
+				lastKey = rotation.state.credential;
+				failure = rotation.state.failure;
+				if (rotation.type === "exhausted") {
+					emitFailure(failure);
+					return;
+				}
+			}
+
+			// Non-quota authentication failures retain the a/b/c policy:
+			// refresh the same account, then switch once.
 			for (let step = 0; step < AUTH_RETRY_STEPS.length; step++) {
-				// Caller aborted between attempts: don't mint a fresh token or fire
-				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				const nextKey = await resolveRetryKey(
 					apiKeyResolver,

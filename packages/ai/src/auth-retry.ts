@@ -6,27 +6,23 @@ import { isUsageLimit } from "./error/flags";
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
  *
- * The `error`/`lastChance` pair drives the central a/b/c retry policy shared by
- * the streaming ({@link streamSimple}) and non-streaming ({@link withAuth})
- * drivers:
- * - `error === undefined` → **initial resolve** (no force-refresh; cheap, may
- *   return a locally-cached not-yet-expired token).
- * - `error !== undefined && !lastChance` → **step (b): refresh the SAME
- *   account** (force a token re-mint / await an in-flight broker refresh).
- * - `error !== undefined && lastChance` → **step (c): switch account**
- *   (invalidate/usage-limit the current credential and rotate to a sibling).
+ * The `error`/`lastChance` pair drives shared authentication recovery:
+ * - `error === undefined` → initial resolve (no force-refresh).
+ * - `error !== undefined && !lastChance` → refresh the same credential.
+ * - `error !== undefined && lastChance` → rotate to a sibling credential.
  *
- * The resolver returns the bearer to send, or `undefined` to stop retrying and
- * surface the last error to the caller.
+ * Normal authentication errors follow the bounded a/b/c sequence. Usage-limit
+ * errors call the sibling step repeatedly until the resolver exhausts or
+ * repeats its credential pool.
  */
 export interface ApiKeyResolveContext {
-	/** True on the final retry step — the resolver should rotate to a sibling credential. */
+	/** True when resolving a sibling credential after an authentication failure. */
 	lastChance: boolean;
-	/** The auth error that triggered this re-resolution, or `undefined` on the initial resolve. */
+	/** The error that triggered re-resolution, or `undefined` on initial resolve. */
 	error: unknown;
 	/** Bearer used by the failed attempt, when the caller can expose it. */
 	previousKey?: string;
-	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
+	/** Caller cancel signal, threaded into credential refresh and rotation. */
 	signal?: AbortSignal;
 }
 
@@ -77,10 +73,10 @@ export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyRes
 export { isAuthRetryableError };
 
 /**
- * The ordered `lastChance` values for the retry steps after the initial
- * attempt fails: `false` → step (b) refresh-same, `true` → step (c) switch.
- * Shared by {@link withAuth} and the streaming retry driver so both run the
- * same policy.
+ * The ordered normal-auth retry steps after the initial attempt fails:
+ * `false` → refresh same credential, `true` → switch once to a sibling.
+ * Usage-limit recovery is intentionally separate because it walks every
+ * distinct available sibling.
  */
 export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 
@@ -100,19 +96,64 @@ export async function resolveRetryKey(
 	}
 }
 
+type UsageLimitRotationState<TCredential, TFailure> = {
+	credential: TCredential;
+	failure: TFailure;
+};
+
+type UsageLimitRotationAttempt<TFailure, TResult> =
+	| { type: "failure"; failure: TFailure }
+	| { type: "success"; value: TResult };
+
+type UsageLimitRotationResult<TCredential, TFailure, TResult> =
+	| { type: "exhausted"; state: UsageLimitRotationState<TCredential, TFailure> }
+	| { type: "non_usage"; state: UsageLimitRotationState<TCredential, TFailure> }
+	| { type: "success"; value: TResult };
+
 /**
- * Runs an auth-protected operation through the central a/b/c retry policy.
+ * Replays a quota-limited request with distinct sibling credentials.
  *
- * - A static string key (or any non-resolver) → a single `attempt` with no
- *   retry (identical to the legacy static-key path).
- * - A resolver → initial `attempt`, then on a retryable auth error up to two
- *   more attempts (refresh-same, then switch). A step is skipped when the
- *   resolver returns the same key it just tried or `undefined`; non-auth errors
- *   propagate immediately.
+ * Credential pools can be larger than the normal a/b/c retry ladder. Stop
+ * when selection is exhausted, cycles, or caller aborts.
+ */
+export async function rotateUsageLimitedSiblings<TCredential, TIdentity, TFailure, TResult>(
+	initial: UsageLimitRotationState<TCredential, TFailure>,
+	options: {
+		credentialIdentity: (credential: TCredential) => TIdentity;
+		failureError: (failure: TFailure) => unknown;
+		resolveSibling: (state: UsageLimitRotationState<TCredential, TFailure>) => Promise<TCredential | undefined>;
+		attempt: (credential: TCredential) => Promise<UsageLimitRotationAttempt<TFailure, TResult>>;
+		signal?: AbortSignal;
+	},
+): Promise<UsageLimitRotationResult<TCredential, TFailure, TResult>> {
+	let state = initial;
+	const attemptedCredentials = new Set<TIdentity>([options.credentialIdentity(state.credential)]);
+	while (true) {
+		options.signal?.throwIfAborted();
+		const sibling = await options.resolveSibling(state);
+		if (sibling === undefined) return { type: "exhausted", state };
+		const identity = options.credentialIdentity(sibling);
+		if (attemptedCredentials.has(identity)) return { type: "exhausted", state };
+		attemptedCredentials.add(identity);
+
+		options.signal?.throwIfAborted();
+		const outcome = await options.attempt(sibling);
+		if (outcome.type === "success") return outcome;
+		state = { credential: sibling, failure: outcome.failure };
+		if (!isUsageLimit(options.failureError(state.failure))) return { type: "non_usage", state };
+	}
+}
+
+/**
+ * Runs an auth-protected operation through shared credential recovery.
  *
- * Used by non-streaming consumers (image generation, web search, completion
- * helpers). The streaming driver in `stream.ts` implements the same policy with
- * its replay-safe buffering machinery.
+ * - A static string key (or any non-resolver) → one `attempt`, no retry.
+ * - A resolver → initial `attempt`; normal authentication errors use a bounded
+ *   refresh-same then switch-sibling ladder. Usage-limit errors skip refreshing
+ *   the exhausted credential and walk distinct siblings until selection ends.
+ *
+ * Used by non-streaming consumers. The streaming driver in `stream.ts` uses
+ * the same sibling-rotation primitive with replay-safe buffering.
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
@@ -140,8 +181,32 @@ export async function withAuth<T>(
 		lastError = error;
 	}
 
-	for (let i = 0; i < AUTH_RETRY_STEPS.length; i++) {
-		const nextKey = await resolveRetryKey(resolver, AUTH_RETRY_STEPS[i]!, lastError, signal, lastKey);
+	if (isUsageLimit(lastError)) {
+		const rotation = await rotateUsageLimitedSiblings(
+			{ credential: lastKey, failure: lastError },
+			{
+				credentialIdentity: credential => credential,
+				failureError: failure => failure,
+				resolveSibling: state => resolveRetryKey(resolver, true, state.failure, signal, state.credential),
+				attempt: async credential => {
+					try {
+						return { type: "success", value: await attempt(credential) };
+					} catch (error) {
+						if (!isAuthError(error)) throw error;
+						return { type: "failure", failure: error };
+					}
+				},
+				signal,
+			},
+		);
+		if (rotation.type === "success") return rotation.value;
+		lastKey = rotation.state.credential;
+		lastError = rotation.state.failure;
+		if (rotation.type === "exhausted") throw lastError;
+	}
+
+	for (const lastChance of AUTH_RETRY_STEPS) {
+		const nextKey = await resolveRetryKey(resolver, lastChance, lastError, signal, lastKey);
 		if (nextKey === undefined || nextKey === lastKey) continue;
 		lastKey = nextKey;
 		try {
@@ -189,20 +254,12 @@ export interface WithOAuthAccessOptions {
 }
 
 /**
- * {@link withAuth} for OAuth-access consumers: runs an auth-protected
- * operation through the central a/b/c retry policy, handing the attempt the
- * full {@link OAuthAccess} (bearer + identity metadata: `accountId`,
- * `projectId`, `enterpriseUrl`) instead of bare API-key bytes.
+ * {@link withAuth} for consumers that require OAuth identity metadata.
  *
- * - initial → `getOAuthAccess` (or `opts.seed`).
- * - step (b) → `getOAuthAccess` with `forceRefresh: true` (re-mint the SAME
- *   account; picks up peer/broker rotations).
- * - step (c) → `rotateSessionCredential` then re-resolve (switch to a sibling).
- *
- * A step is skipped when it yields no access or the same `accessToken` that
- * just failed; non-auth errors propagate immediately. Use this instead of
- * hand-rolled `getOAuthAccess` + fetch flows so 401s and usage-limits rotate
- * credentials instead of failing the call.
+ * Normal authentication failures refresh the same credential once, then select
+ * a sibling. Usage-limit failures select each distinct available sibling until
+ * exhausted; `credentialId` provides stable sibling identity across token
+ * refreshes, with the bearer as a compatibility fallback.
  */
 export async function withOAuthAccess<T>(
 	storage: OAuthAccessSource,
@@ -223,8 +280,10 @@ export async function withOAuthAccess<T>(
 
 	const resolveStep = async (lastChance: boolean, error: unknown): Promise<OAuthAccess | undefined> => {
 		try {
-			if (!lastChance) return await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
-			await storage.rotateSessionCredential(provider, sessionId, { error, signal });
+			const rotateSibling = lastChance || isUsageLimit(error);
+			if (!rotateSibling) return await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+			const rotated = await storage.rotateSessionCredential(provider, sessionId, { error, signal });
+			if (!rotated) return undefined;
 			return await storage.getOAuthAccess(provider, sessionId, { signal });
 		} catch {
 			return undefined;
@@ -237,6 +296,30 @@ export async function withOAuthAccess<T>(
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
+	}
+
+	if (isUsageLimit(lastError)) {
+		const rotation = await rotateUsageLimitedSiblings(
+			{ credential: lastAccess, failure: lastError },
+			{
+				credentialIdentity: credential => credential.credentialId ?? credential.accessToken,
+				failureError: failure => failure,
+				resolveSibling: state => resolveStep(true, state.failure),
+				attempt: async credential => {
+					try {
+						return { type: "success", value: await attempt(credential) };
+					} catch (error) {
+						if (!isAuthError(error)) throw error;
+						return { type: "failure", failure: error };
+					}
+				},
+				signal,
+			},
+		);
+		if (rotation.type === "success") return rotation.value;
+		lastAccess = rotation.state.credential;
+		lastError = rotation.state.failure;
+		if (rotation.type === "exhausted") throw lastError;
 	}
 
 	for (const lastChance of AUTH_RETRY_STEPS) {

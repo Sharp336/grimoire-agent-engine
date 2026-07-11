@@ -410,6 +410,82 @@ describe("streamSimple resolver auth retry", () => {
 		}
 	});
 
+	it("walks later distinct credentials after consecutive usage-limit events", async () => {
+		const keys: unknown[] = [];
+		const accounts = ["credential-0", "credential-1", "credential-2", "credential-3"];
+		let siblingIndex = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "credential-3") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError("You have hit your ChatGPT usage limit (pro plan). Try again later.", 429),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const retryContexts: ApiKeyResolveContext[] = [];
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				if (ctx.error === undefined) return accounts[0]!;
+				retryContexts.push(ctx);
+				siblingIndex += 1;
+				return accounts[siblingIndex];
+			},
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(accounts);
+		expect(retryContexts.map(ctx => ctx.lastChance)).toEqual([true, true, true]);
+	});
+
+	it("surfaces the usage-limit event when rotation repeats a credential", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError("You have hit your ChatGPT usage limit (pro plan). Try again later.", 429),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => "credential-0",
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/usage limit/i);
+		expect(keys).toEqual(["credential-0"]);
+	});
+
 	it("does not rotate or refresh on informative transient 429 bodies", async () => {
 		const transient429Bodies = [
 			"Cloud Code Assist API error (429): Too many requests",

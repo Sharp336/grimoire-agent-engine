@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { UsageProvider } from "@oh-my-pi/pi-ai";
+import { type UsageProvider, withAuth } from "@oh-my-pi/pi-ai";
 import * as oauth from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createApiKeyResolver } from "../src/config/api-key-resolver";
+
+const TEST_CREDENTIAL_TTL_MS = 60 * 60 * 1_000;
 
 describe("AuthStorage account rotation", () => {
 	let tempDir: string;
@@ -144,5 +147,40 @@ describe("AuthStorage account rotation", () => {
 		const result = await authStorage.markUsageLimitReached("openai-codex", sessionId, { apiKey: failedKey });
 		expect(result.switched).toBe(true);
 		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe(stickyKey);
+	});
+
+	test("resolver reaches a fourth Codex account after three quota blocks", async () => {
+		await authStorage.set(
+			"openai-codex",
+			["acct-1", "acct-2", "acct-3", "acct-4"].map(accountId => ({
+				type: "oauth" as const,
+				access: `access-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				expires: Date.now() + TEST_CREDENTIAL_TTL_MS,
+				accountId,
+			})),
+		);
+
+		const sessionId = "four-account-quota-session";
+		const resolver = createApiKeyResolver(
+			{
+				getApiKeyForProvider: (provider, requestedSessionId, options) =>
+					authStorage.getApiKey(provider, requestedSessionId, options),
+				authStorage,
+			},
+			"openai-codex",
+			{ sessionId },
+		);
+		const quotaError = Object.assign(new Error("usage_limit_reached"), { status: 429 });
+		const attempted: string[] = [];
+		const result = await withAuth(resolver, async key => {
+			attempted.push(key);
+			if (attempted.length === 4) return "recovered";
+			throw quotaError;
+		});
+
+		expect(result).toBe("recovered");
+		expect(new Set(attempted).size).toBe(4);
+		expect(attempted).toHaveLength(4);
 	});
 });

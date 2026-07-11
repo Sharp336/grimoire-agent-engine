@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import type { ApiKeyResolveContext, OAuthAccess, OAuthAccessSource } from "@oh-my-pi/pi-ai";
-import { isApiKeyResolver, isAuthRetryableError, resolveApiKeyOnce, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	isApiKeyResolver,
+	isAuthRetryableError,
+	resolveApiKeyOnce,
+	rotateUsageLimitedSiblings,
+	withAuth,
+	withOAuthAccess,
+} from "@oh-my-pi/pi-ai";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -71,6 +78,30 @@ describe("isAuthRetryableError", () => {
 	});
 });
 
+describe("rotateUsageLimitedSiblings", () => {
+	it("propagates an abort without resolving another credential", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let resolveCalls = 0;
+		await expect(
+			rotateUsageLimitedSiblings(
+				{ credential: "initial", failure: usageLimitError() },
+				{
+					credentialIdentity: credential => credential,
+					failureError: failure => failure,
+					resolveSibling: async () => {
+						resolveCalls += 1;
+						return "sibling";
+					},
+					attempt: async () => ({ type: "success", value: "unexpected" }),
+					signal: controller.signal,
+				},
+			),
+		).rejects.toHaveProperty("name", "AbortError");
+		expect(resolveCalls).toBe(0);
+	});
+});
+
 describe("withAuth", () => {
 	it("runs a single attempt for a static string key (no retry)", async () => {
 		const keys: Array<string | undefined> = [];
@@ -131,6 +162,40 @@ describe("withAuth", () => {
 			{ lastChance: false, hasError: false },
 			{ lastChance: true, hasError: true },
 		]);
+	});
+
+	it("surfaces the final usage limit when no unseen sibling remains", async () => {
+		const keys: string[] = [];
+		const exhausted = usageLimitError();
+		await expect(
+			withAuth(
+				ctx => (ctx.error === undefined ? "k0" : "k0"),
+				async key => {
+					keys.push(key);
+					throw exhausted;
+				},
+			),
+		).rejects.toBe(exhausted);
+		expect(keys).toEqual(["k0"]);
+	});
+
+	it("falls back to the normal authentication policy after a sibling returns 401", async () => {
+		const keys: string[] = [];
+		const result = await withAuth(
+			ctx => {
+				if (ctx.error === undefined) return "quota-limited";
+				if (ctx.lastChance) return "sibling";
+				return "refreshed-sibling";
+			},
+			async key => {
+				keys.push(key);
+				if (key === "refreshed-sibling") return "success";
+				throw key === "quota-limited" ? usageLimitError() : authError();
+			},
+		);
+
+		expect(result).toBe("success");
+		expect(keys).toEqual(["quota-limited", "sibling", "refreshed-sibling"]);
 	});
 
 	it("stops retrying when the resolver returns undefined", async () => {
@@ -276,6 +341,66 @@ describe("withOAuthAccess", () => {
 			"rotate",
 			{ forceRefresh: undefined },
 		]);
+	});
+
+	it("walks later OAuth siblings after consecutive usage limits", async () => {
+		const accounts = [access("t0"), access("t1"), access("t2"), access("t3")];
+		let index = 0;
+		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
+		const storage: OAuthAccessSource = {
+			async getOAuthAccess(_provider, _sessionId, options) {
+				calls.push({ forceRefresh: options?.forceRefresh });
+				return accounts[index];
+			},
+			async rotateSessionCredential() {
+				calls.push("rotate");
+				index += 1;
+				return accounts[index] !== undefined;
+			},
+		};
+		const attempts: string[] = [];
+		const result = await withOAuthAccess(storage, "prov", async current => {
+			attempts.push(current.accessToken);
+			if (current.accessToken === "t3") return "success";
+			throw usageLimitError();
+		});
+
+		expect(result).toBe("success");
+		expect(attempts).toEqual(["t0", "t1", "t2", "t3"]);
+		expect(calls).toEqual([
+			{ forceRefresh: undefined },
+			"rotate",
+			{ forceRefresh: undefined },
+			"rotate",
+			{ forceRefresh: undefined },
+			"rotate",
+			{ forceRefresh: undefined },
+		]);
+	});
+
+	it("does not retry a refreshed token when no OAuth sibling was selected", async () => {
+		const exhausted = usageLimitError();
+		const calls: string[] = [];
+		const storage: OAuthAccessSource = {
+			async getOAuthAccess() {
+				calls.push("resolve");
+				return access("fresh-token", { credentialId: 1 });
+			},
+			async rotateSessionCredential() {
+				calls.push("rotate");
+				return false;
+			},
+		};
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async current => {
+				attempts.push(current.accessToken);
+				throw exhausted;
+			}),
+		).rejects.toBe(exhausted);
+
+		expect(attempts).toEqual(["fresh-token"]);
+		expect(calls).toEqual(["resolve", "rotate"]);
 	});
 
 	it("propagates non-auth errors immediately and surfaces the last auth error when exhausted", async () => {
