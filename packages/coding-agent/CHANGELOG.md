@@ -12,6 +12,7 @@
 - Added model-keyed fallback management to the /models Roles view: model and `provider/*` chains render as a separate section below the roles (divider + "+ New fallback…" row for creating one by picking the protected model, then keying it by model or provider), with the same replace/remove/reorder editing as role chains; the model strip gains `fallbacks:<model>` and `fallbacks:<provider>/*` chips as shortcuts.
 - Added `/queue <message>` plus `->` / `=>` composer shorthand for follow-up messages that wait until the agent yields. The shorthand opens a dim `Queueing` header and splits sequential numeric, Roman-numeral, or alphabetic lists into separately highlighted queue entries.
 - Added per-model TPS/TTFT tracking: every completed assistant turn folds its timing into recency-weighted aggregates in `~/.omp/agent.db`, and the /models browser shows measured speed — a right-aligned `118t/s` column on wide terminals (plus TTFT, e.g. `0.9s 118t/s`, when wider) and `~118t/s · 0.9s ttft` facts in the selection detail line — with no dependency on the `omp stats` session scan.
+- Added separate delegation guidance and per-session concurrency controls for descendant task agents ([#5133](https://github.com/can1357/oh-my-pi/pull/5133) by [@lyc-aon](https://github.com/lyc-aon)).
 
 ### Changed
 
@@ -118,9 +119,6 @@
 ### Removed
 
 - Removed the bundled plan subagent from available task agents.
-### Added
-
-- Added separate delegation guidance and per-session concurrency controls for descendant task agents ([#5133](https://github.com/can1357/oh-my-pi/pull/5133) by [@lyc-aon](https://github.com/lyc-aon)).
 
 ## [16.4.2] - 2026-07-10
 
