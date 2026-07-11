@@ -598,6 +598,7 @@ export function encodeStream(
 					if (cancelled) return;
 					switch (ev.type) {
 						case "start":
+							lastPartial = ev.partial;
 							ensureStart(ev.partial);
 							break;
 						case "text_start": {
@@ -691,16 +692,16 @@ export function encodeStream(
 							break;
 						case "done": {
 							for (const idx of [...open.keys()]) closeBlock(idx);
-								controller.enqueue(
-									sseFrame("message_delta", {
-										type: "message_delta",
-										delta: {
-											stop_reason: mapStopReasonOut(ev.message),
-											stop_sequence: ev.message.stopSequence ?? null,
-										},
-										usage: encodeUsage(ev.message),
-									}),
-								);
+							controller.enqueue(
+								sseFrame("message_delta", {
+									type: "message_delta",
+									delta: {
+										stop_reason: mapStopReasonOut(ev.message),
+										stop_sequence: ev.message.stopSequence ?? null,
+									},
+									usage: encodeUsage(ev.message),
+								}),
+							);
 							controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));
 							controller.close();
 							return;
