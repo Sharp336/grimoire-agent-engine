@@ -2445,6 +2445,7 @@ const streamAnthropicOnce = (
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
+						output.stopSequence = undefined;
 						firstTokenTime = undefined;
 						continue;
 					}
@@ -2478,6 +2479,7 @@ const streamAnthropicOnce = (
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
+						output.stopSequence = undefined;
 						firstTokenTime = undefined;
 						continue;
 					}
@@ -2505,6 +2507,7 @@ const streamAnthropicOnce = (
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
+						output.stopSequence = undefined;
 						firstTokenTime = undefined;
 						continue;
 					}
@@ -2549,6 +2552,7 @@ const streamAnthropicOnce = (
 					output.providerPayload = undefined;
 					output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 					output.stopReason = "stop";
+					output.stopSequence = undefined;
 					firstTokenTime = undefined;
 				}
 			}
