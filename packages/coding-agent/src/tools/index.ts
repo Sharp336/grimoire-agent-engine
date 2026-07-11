@@ -37,6 +37,7 @@ import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
+import { CodeSearchTool } from "./code-search";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type BuiltinToolName, normalizeToolNames } from "./builtin-names";
@@ -75,6 +76,7 @@ export * from "../task";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
+export * from "./code-search";
 export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
@@ -453,6 +455,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	ast_edit: s => new AstEditTool(s),
 	ask: AskTool.createIf,
 	debug: DebugTool.createIf,
+	code_search: CodeSearchTool.createIf,
 	eval: s => new EvalTool(s),
 	ssh: loadSshTool,
 	github: GithubTool.createIf,

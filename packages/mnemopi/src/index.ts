@@ -31,3 +31,5 @@ export {
 	storeMemory,
 	update,
 } from "./core/memory";
+export * from "./core/zvec-config";
+export * from "./core/zvec-store";
