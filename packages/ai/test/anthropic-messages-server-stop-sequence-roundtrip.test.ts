@@ -35,17 +35,17 @@ function messageDelta(
 	stopSequence: string | null,
 	usage = { input_tokens: 5, output_tokens: 3 },
 ): Record<string, unknown> {
-	return { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: stopSequence, usage } };
+	return { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: stopSequence }, usage };
 }
 
-function makeFetchMock(responses: Array<() => Response>): { fetch: FetchImpl } {
+function makeFetchMock(responses: Array<() => Response>): { fetch: FetchImpl; calls: () => number } {
 	let i = 0;
 	const fetchImpl = (async (_input: unknown, _init?: unknown) => {
 		const handler = responses[Math.min(i, responses.length - 1)];
 		i++;
 		return handler();
 	}) as unknown as FetchImpl;
-	return { fetch: fetchImpl };
+	return { fetch: fetchImpl, calls: () => i };
 }
 
 describe("anthropic provider stop sequence (parser round-trip)", () => {
@@ -82,10 +82,12 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 	});
 
 	it("clears a stale stop_sequence from a prior attempt on retry", async () => {
-		// First attempt streams a stop_sequence but then fails with a malformed
-		// trailing frame (transient stream-parse error) → the provider retries.
-		// The second attempt succeeds cleanly; the final message must NOT retain
-		// the stale stop_sequence.
+		// First attempt sets a stop_sequence but then fails with a malformed
+		// trailing frame (transient stream-parse error). No content blocks are
+		// streamed, so streamedReplayUnsafeContent stays false and the parse
+		// error enters the generic retry path (the provider will NOT retry once
+		// it has replayed text to the consumer). The second attempt succeeds
+		// cleanly; the final message must NOT retain the stale stop_sequence.
 		const broken =
 			frame("message_start", {
 				message: {
@@ -99,12 +101,9 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 					usage: { input_tokens: 5, output_tokens: 0 },
 				},
 			}) +
-			frame("content_block_start", { index: 0, content_block: { type: "text", text: "" } }) +
-			frame("content_block_delta", { index: 0, delta: { type: "text_delta", text: "hi" } }) +
-			frame("content_block_stop", { index: 0 }) +
 			frame("message_delta", messageDelta("stop_sequence", "STALE")) +
-			// Malformed trailing frame (missing closing braces) → transient parse error → retry.
-			'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"stop_sequence","stop_sequence":"STALE","usage":{"input_tokens":5,"output_tokens":3}}\n\n';
+			// Truncated JSON → transient stream-parse error → retry.
+			'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"stop_sequence"';
 
 		const clean = sseResponse([
 			{
@@ -127,15 +126,18 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 			{ type: "message_stop" },
 		]);
 
-		const { fetch } = makeFetchMock([
+		const { fetch, calls } = makeFetchMock([
 			() => new Response(broken, { status: 200, headers: { "content-type": "text/event-stream" } }),
 			() => clean,
 		]);
 
-		const stream = streamAnthropic(makeModel(), makeContext(), { fetch });
+		const stream = streamAnthropic(makeModel(), makeContext(), { fetch, providerRetryWait: async () => {} });
 		const message = await stream.result();
 
 		expect(message.stopSequence).toBeUndefined();
 		expect(message.stopReason).toBe("stop");
+		// Proves a retry actually happened (broken → clean), so the stale
+		// stop_sequence was reset by the retry path rather than never set.
+		expect(calls()).toBe(2);
 	});
 });
