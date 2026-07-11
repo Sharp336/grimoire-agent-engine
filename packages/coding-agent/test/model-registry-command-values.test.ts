@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isOAuthCredentialResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -131,5 +132,41 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		// The command should have only run once.
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("OAuth-only providers ignore command keys and mint provider-bound resolvers", async () => {
+		const counterFile = path.join(tempDir, "oauth-command-counter.txt");
+		fs.writeFileSync(counterFile, "0");
+		const trackingCommand = `node -e "const fs=require('fs'); fs.writeFileSync('${counterFile.replace(/\\/g, "/")}', '1'); process.stdout.write('forbidden')"`;
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						baseUrl: "https://cli-chat-proxy.grok.com/v1",
+						apiKey: `!${trackingCommand}`,
+					},
+				},
+			}),
+		);
+		await authStorage.set("xai-grok-build", [
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.getAll().find(candidate => candidate.provider === "xai-grok-build");
+		expect(model).toBeDefined();
+		if (!model) throw new Error("Build model missing");
+		expect(registry.hasConfiguredAuth(model)).toBe(true);
+		expect(await registry.getApiKey(model)).toBe("oauth-access");
+		const resolver = registry.resolver(model, "session");
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
+		expect(await resolveApiKeyOnce(resolver)).toBe("oauth-access");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("0");
 	});
 });

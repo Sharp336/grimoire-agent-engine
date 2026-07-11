@@ -8,8 +8,10 @@ import {
 	type Context,
 	EventStream,
 	isApiKeyResolver,
+	isOAuthCredentialResolver,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
+	seedOAuthCredentialResolver,
 	streamSimple,
 	stripSchemaDescriptions,
 	type ToolChoice,
@@ -1298,8 +1300,12 @@ async function streamAssistantResponse(
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
 	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
-	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal);
-	const apiKey = isApiKeyResolver(requestApiKey) ? seedApiKeyResolver(resolvedApiKey, requestApiKey) : requestApiKey;
+	const apiKey =
+		isApiKeyResolver(requestApiKey) && isOAuthCredentialResolver(requestApiKey, model.provider)
+			? await seedOAuthCredentialResolver(requestApiKey, model.provider, finalRequestSignal)
+			: isApiKeyResolver(requestApiKey)
+				? seedApiKeyResolver(await resolveApiKeyOnce(requestApiKey, finalRequestSignal), requestApiKey)
+				: requestApiKey;
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.

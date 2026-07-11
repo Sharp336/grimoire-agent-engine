@@ -63,6 +63,7 @@ const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { isOAuthOnlyProvider } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { getBundledModelReferenceIndex, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
@@ -769,6 +770,7 @@ export class ModelRegistry {
 	#fetch: FetchImpl;
 
 	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
+		if (isOAuthOnlyProvider(provider)) return { configured: false };
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		if (!isCommandConfigValue(keyConfig)) return { configured: false };
 		const value = resolveConfigValue(keyConfig);
@@ -782,6 +784,10 @@ export class ModelRegistry {
 
 	#installProviderApiKey(provider: string, keyConfig: string): void {
 		this.#customProviderApiKeys.set(provider, keyConfig);
+		if (isOAuthOnlyProvider(provider)) {
+			this.authStorage.removeConfigApiKey(provider);
+			return;
+		}
 		const resolved = resolveConfigValue(keyConfig);
 		if (resolved) {
 			this.authStorage.setConfigApiKey(provider, resolved);
@@ -1963,7 +1969,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			(!isOAuthOnlyProvider(model.provider) && isCommandConfigValue(keyConfig)) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasAuth(model.provider)
 		);
@@ -1998,8 +2004,10 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	async getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined> {
-		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
-		if (commandKey.configured) return commandKey.value;
+		if (!isOAuthOnlyProvider(model.provider)) {
+			const commandKey = this.#resolveCommandBackedApiKey(model.provider);
+			if (commandKey.configured) return commandKey.value;
+		}
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
 			return kNoAuth;
 		}
@@ -2018,8 +2026,10 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
-		const commandKey = this.#resolveCommandBackedApiKey(provider);
-		if (commandKey.configured) return commandKey.value;
+		if (!isOAuthOnlyProvider(provider)) {
+			const commandKey = this.#resolveCommandBackedApiKey(provider);
+			if (commandKey.configured) return commandKey.value;
+		}
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}
@@ -2043,7 +2053,19 @@ export class ModelRegistry {
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {
+			if (isOAuthOnlyProvider(target)) {
+				return this.authStorage.createOAuthApiKeyResolver(target, options?.sessionId, {
+					baseUrl: options?.baseUrl,
+					modelId: options?.modelId,
+				});
+			}
 			return createApiKeyResolver(this, target, options);
+		}
+		if (isOAuthOnlyProvider(target.provider)) {
+			return this.authStorage.createOAuthApiKeyResolver(target.provider, options?.sessionId, {
+				baseUrl: target.baseUrl,
+				modelId: target.id,
+			});
 		}
 		return createApiKeyResolver(this, target.provider, {
 			...options,
@@ -2053,8 +2075,10 @@ export class ModelRegistry {
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
-		const commandKey = this.#resolveCommandBackedApiKey(provider);
-		if (commandKey.configured) return commandKey.value;
+		if (!isOAuthOnlyProvider(provider)) {
+			const commandKey = this.#resolveCommandBackedApiKey(provider);
+			if (commandKey.configured) return commandKey.value;
+		}
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
 		}

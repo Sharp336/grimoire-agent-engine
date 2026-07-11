@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import {
 	agentLoop,
 	agentLoopContinue,
@@ -15,6 +15,7 @@ import type {
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { AuthStorage, isOAuthCredentialResolver, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -59,6 +60,34 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("message_end");
 		expect(eventTypes).toContain("turn_end");
 		expect(eventTypes).toContain("agent_end");
+	});
+
+	it("preserves provider-bound OAuth resolver provenance through request preflight", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({ provider: "xai-grok-build", responses: [{ content: ["authenticated"] }] });
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const authStorage = new AuthStorage(store);
+		await authStorage.set("xai-grok-build", [
+			{ type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60 * 60_000 },
+		]);
+		const getApiKeySpy = vi.spyOn(authStorage, "getApiKey");
+		const resolver = authStorage.createOAuthApiKeyResolver("xai-grok-build", "session");
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getApiKey: async () => resolver,
+		};
+		const streamFn: typeof mock.stream = (model, llmContext, options) => {
+			expect(typeof options?.apiKey).toBe("function");
+			if (typeof options?.apiKey !== "function") throw new Error("resolver missing");
+			expect(isOAuthCredentialResolver(options.apiKey, model.provider)).toBe(true);
+			return mock.stream(model, llmContext, options);
+		};
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, streamFn).result();
+		expect(messages.at(-1)?.role).toBe("assistant");
+		expect(getApiKeySpy).toHaveBeenCalledTimes(1);
+		store.close();
 	});
 
 	it("ends gracefully without a provider call after the deadline", async () => {

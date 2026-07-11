@@ -13,8 +13,9 @@ import * as path from "node:path";
 import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
+import { getEnvApiKey, getEnvApiKeyName } from "./env-api-key";
 import { isUsageLimitOutcome } from "./error/rate-limit";
-import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
+import { getProviderDefinition, isOAuthOnlyProvider, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
 import type {
 	OAuthAuthInfo,
@@ -23,7 +24,6 @@ import type {
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
-import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
 	CredentialRankingContext,
@@ -94,6 +94,33 @@ export interface CredentialOrigin {
 	kind: CredentialOriginKind;
 	/** Env var name when `kind === "env"` and a single named variable backs it. */
 	envVar?: string;
+}
+
+const oauthCredentialResolvers = new WeakMap<ApiKeyResolver, string>();
+
+export function isOAuthCredentialResolver(resolver: ApiKeyResolver, provider: string): boolean {
+	return oauthCredentialResolvers.get(resolver) === provider;
+}
+
+export async function seedOAuthCredentialResolver(
+	resolver: ApiKeyResolver,
+	provider: string,
+	signal?: AbortSignal,
+): Promise<ApiKeyResolver> {
+	if (!isOAuthCredentialResolver(resolver, provider)) {
+		throw new AIError.ConfigurationError(`Untrusted OAuth credential resolver for provider: ${provider}`);
+	}
+	const seed = (await resolver({ lastChance: false, error: undefined, signal })) || undefined;
+	let seedPending = true;
+	const seeded: ApiKeyResolver = ctx => {
+		if (seedPending && ctx.error === undefined) {
+			seedPending = false;
+			return seed;
+		}
+		return resolver(ctx);
+	};
+	oauthCredentialResolvers.set(seeded, provider);
+	return seeded;
 }
 
 /**
@@ -2155,6 +2182,7 @@ export class AuthStorage {
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
 	hasAuth(provider: string): boolean {
+		if (isOAuthOnlyProvider(provider)) return this.hasOAuth(provider);
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
@@ -2175,6 +2203,7 @@ export class AuthStorage {
 	 * silently satisfies xai-oauth and routes around `providers.xai.baseUrl`.
 	 */
 	hasNonEnvCredential(provider: string): boolean {
+		if (isOAuthOnlyProvider(provider)) return this.hasOAuth(provider);
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
@@ -2191,6 +2220,7 @@ export class AuthStorage {
 	 * Compact, structured counterpart to {@link describeCredentialSource}.
 	 */
 	getCredentialOrigin(provider: string): CredentialOrigin | undefined {
+		if (isOAuthOnlyProvider(provider)) return this.hasOAuth(provider) ? { kind: "oauth" } : undefined;
 		if (this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
 		if (this.#configOverrides.has(provider)) return { kind: "config" };
 		const stored = this.#getCredentialsForProvider(provider);
@@ -2224,10 +2254,11 @@ export class AuthStorage {
 		const allCredentials = this.#getCredentialsForProvider(provider);
 		const oauthCredentials = allCredentials.filter((c): c is OAuthCredential => c.type === "oauth");
 		if (oauthCredentials.length === 0) return undefined;
+		const oauthOnly = isOAuthOnlyProvider(provider);
 
 		// Runtime / config overrides bypass OAuth account_uuid attribution — the
 		// caller is authenticating with an explicit key, not the broker's OAuth.
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return undefined;
+		if (!oauthOnly && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) return undefined;
 
 		// Prefer the session-sticky credential when available.
 		const sessionPref = this.#getSessionCredential(provider, sessionId);
@@ -2240,7 +2271,7 @@ export class AuthStorage {
 		// account_uuid injection would misattribute traffic. Only apply this guard when
 		// sessionPref is absent; a recorded OAuth sticky (sessionPref.type === "oauth") must
 		// NOT be blocked even if an env key also happens to exist.
-		if (!sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
+		if (!oauthOnly && !sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
 		// Resolve the sticky index against the full credential list — the index is
 		// recorded against the unfiltered provider array (by #recordSessionCredential /
 		// #tryOAuthCredential), not the OAuth-only subset, so dereferencing it into the
@@ -4286,12 +4317,13 @@ export class AuthStorage {
 	 * routing metadata so discovery can hit the correct host.
 	 */
 	async peekApiKey(provider: string): Promise<string | undefined> {
-		const runtimeKey = this.#runtimeOverrides.get(provider);
+		const oauthOnly = isOAuthOnlyProvider(provider);
+		const runtimeKey = oauthOnly ? undefined : this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
 			return runtimeKey;
 		}
 
-		const configKey = this.#configOverrides.get(provider);
+		const configKey = oauthOnly ? undefined : this.#configOverrides.get(provider);
 		if (configKey) {
 			return configKey;
 		}
@@ -4312,6 +4344,8 @@ export class AuthStorage {
 				return oauthSelection.credential.access;
 			}
 		}
+
+		if (oauthOnly) return undefined;
 
 		const loginApiKeySelection = this.#selectCredentialByType(
 			provider,
@@ -4346,6 +4380,9 @@ export class AuthStorage {
 	 * 7. Fallback resolver (models.yml custom providers, last-resort)
 	 */
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		if (isOAuthOnlyProvider(provider)) {
+			return (await this.#resolveOAuthSelection(provider, sessionId, options))?.apiKey;
+		}
 		// Runtime override takes highest priority
 		const runtimeKey = this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
@@ -4423,10 +4460,8 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccess | undefined> {
-		// Runtime / config overrides intentionally short-circuit OAuth: when the
-		// user has pinned an API key, they expect the OAuth identity to be
-		// suppressed (same contract as `getOAuthAccountId`).
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		// Runtime / config overrides intentionally short-circuit OAuth for providers that permit keys.
+		if (!isOAuthOnlyProvider(provider) && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) {
 			return undefined;
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
@@ -4975,6 +5010,19 @@ export class AuthStorage {
 		};
 	}
 
+	createOAuthApiKeyResolver(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string },
+	): ApiKeyResolver {
+		if (!isOAuthOnlyProvider(provider)) {
+			throw new AIError.ConfigurationError(`Provider is not OAuth-only: ${provider}`);
+		}
+		const resolver = this.resolver(provider, { sessionId, ...options });
+		oauthCredentialResolvers.set(resolver, provider);
+		return resolver;
+	}
+
 	// ─── Auth Broker integration ────────────────────────────────────────────
 
 	/**
@@ -5200,10 +5248,11 @@ export class AuthStorage {
 	 * The string is purely informational; consumers must not parse it.
 	 */
 	describeCredentialSource(provider: string, sessionId?: string): string | undefined {
-		if (this.#runtimeOverrides.has(provider)) {
+		const oauthOnly = isOAuthOnlyProvider(provider);
+		if (!oauthOnly && this.#runtimeOverrides.has(provider)) {
 			return "runtime override (--api-key)";
 		}
-		if (this.#configOverrides.has(provider)) {
+		if (!oauthOnly && this.#configOverrides.has(provider)) {
 			return "config override (models.yml)";
 		}
 
@@ -5230,7 +5279,7 @@ export class AuthStorage {
 
 		// Deliberate login credentials win; then an explicit env var; then a stored static api_key.
 		const oauthSource = describeStored("oauth");
-		if (oauthSource) return oauthSource;
+		if (oauthSource || oauthOnly) return oauthSource;
 		const loginApiKeySource = describeStored(
 			"api_key",
 			credential => credential.type === "api_key" && credential.source === "login",
