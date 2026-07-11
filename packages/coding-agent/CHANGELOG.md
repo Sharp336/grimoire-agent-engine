@@ -5,6 +5,90 @@
 ### Added
 
 - Added `xai-grok-build` to `/login` and model selection with provider-scoped OAuth credentials.
+### Breaking Changes
+
+- Reworked the task tool wire schema: the top-level `agent` field moved into each task item as `agent` (so one call can mix agent types), `assignment` was renamed `task`, `id` was renamed `name`, and the `role` and `description` fields were removed. The one-line UI label previously supplied via `description` is now generated automatically from the `task` text by the tiny/title model.
+
+### Added
+
+- Added `auto` as a valid `thinking-level` in agent frontmatter; the bundled `task` subagent now defaults to it. An explicit `:level` suffix on a resolved model pattern takes precedence over an agent-definition default.
+- Added rich interactive ask dialogs: a fixed-height bottom panel (sized at spawn from the tallest tab, clamped to 70% of the terminal) with question tabs, option previews, notes, per-option markers, and ask.enabled gating. Multi-select questions toggle with Space/Enter and confirm from the Submit tab; submitting an empty Other value unselects the custom answer. ([#4186](https://github.com/can1357/oh-my-pi/issues/4186))
+- Added role un-assignment to the model hub: `x`/Backspace on a role row (or Enter on a chip already holding the model) clears the role back to auto-selection — previously only possible by editing config.
+- Added a manual F5 provider refresh in the model hub; providers now auto-refresh at most once per application lifetime instead of on every visit.
+- Added custom role creation to the Model Hub roles view (`+ New role…` / `n`): name the role and jump straight into assigning its model.
+- Added quick-switch (ctrl+p) cycle editing to the Model Hub roles view: `c` toggles a role's membership, `[`/`]` (or Shift+↑/↓) reorder it, with a live segment-track preview of the resulting cycle.
+
+### Changed
+
+- Updated Model Hub sidebar to float providers with search matches to the top while searching
+- Added spatial navigation between the Model Hub sidebar and model list using left/right arrow keys
+- Model Hub sidebar now leads with Roles above Recent, and hopping scopes with ↑/↓ no longer captures arrow focus when passing the Roles entry (diving into role rows is explicit via Enter, →, or click); while searching, the hop also skips Roles and an empty Recent, and the Recent/All annotations show live match counts.
+- Removed "Chat about this" option from question dialogs
+- Redesigned ask dialogs with fixed height, removed explicit Next button, and simplified headers
+- Rewrote the task tool prompt for the new wire schema and to push callers toward the most specific agent type: read-only research is directed to `agent: "scout"`, and omitting `agent` is framed as an explicit decision that no listed specialist fits.
+- Task rendering now keeps the `⟨agent⟩` type badge on live progress and finished result rows (previously it vanished after the streaming call preview), and the Task header shows only the spawn count instead of repeating the per-item agent types.
+- Redesigned `/model` into a fullscreen alternate-screen Model Hub (the `/settings` idiom) with full mouse support: a sidebar of scopes (recently used, role management, all models, per-provider), a metadata-aligned model table (role chips with thinking glyphs, context window, per-M cost), and inline role/thinking assignment strips instead of the old nested menus. Providers without credentials are listed dimmed and forward to `/login` when activated, replacing the "Only showing models with configured API keys" warning; you can now use arrow keys to navigate between the sidebar and model list, and searching grays out and skips providers without matches.
+- OAuth logins now run inside a cancellable login dialog (Esc aborts the flow and restores the editor) instead of an inescapable pairing prompt, and the model hub only reopens after a successful login.
+
+### Fixed
+
+- Fixed visible per-keystroke lag while searching in the `/resume` session picker. Literal matches now rank synchronously from a cached per-session haystack, fuzzy scoring runs in bounded background chunks that converge to the same ranking (large listings previously rebuilt a fuzzy index per token per session on every keystroke), and the prompt-history SQLite lookup — an FTS query plus a LIKE scan over every stored prompt — is debounced off the keystroke path.
+- Fixed compiled Linux binary extension loading when bundled web-search header generation cannot read `header-generator` data files from the build-time path. ([#5178](https://github.com/can1357/oh-my-pi/issues/5178))
+
+## [16.4.4] - 2026-07-11
+
+### Changed
+
+- Optimized session title generation and auto-thinking classification for sub-billion-parameter tiny models (such as LFM2) by rewriting system prompts, improving input truncation to preserve message context, and unifying preprocessing to filter out noise like ANSI codes, XML tags, and long commit hashes.
+
+### Fixed
+
+- Fixed an issue where the Windows binary exited silently without running the CLI, which also caused `omp update` to roll back.
+- Fixed native Windows binary compatibility on older Windows 10 CPUs by building the `omp-windows-x64.exe` release asset with a baseline x64 runtime instead of AVX2. (#5172)
+- Fixed `GenerateImage` rejecting OpenAI Codex-compatible proxy bearer keys when the token does not expose a `chatgpt-account-id`. (#5174)
+- Fixed context promotion documentation to accurately reflect the `contextPromotionTarget` runtime behavior and `contextPromotion.enabled` default. (#5163)
+
+## [16.4.3] - 2026-07-11
+
+### Added
+
+- Added /vibe mode, allowing the model to act as a director driving persistent background worker sessions (fast and good tiers) with dedicated session tools (vibe_spawn, vibe_send, vibe_wait, vibe_kill, vibe_list) and a live TUI "TV wall" showing active worker activity, tool traces, and streamed output.
+- Added multiple credential-free web search providers (Google, Bing, Yahoo, Startpage, Ecosia, Mojeek) with stealth-browser escalation, bot challenge detection, and recency filters, alongside a parallel public ("Public Web") provider that aggregates and deduplicates results across all engines.
+- Added PCRE2 fallback support for grep lookaround and backreferences when the default Rust regex engine rejects a pattern.
+- Added a helpful stderr hint when launching omp acp from an interactive terminal to clarify that the command communicates via JSON-RPC over stdout.
+
+### Changed
+
+- Reduced browser action timeout from 15s to 8s to improve agent iteration speed.
+- Refined agent delegation logic to prioritize top-level planning by the primary agent, discourage single-agent delegation, and handle prerequisite work inline.
+- Optimized credential-free web search engine ordering and routing, prioritizing Startpage and Ecosia, and using randomized desktop Chrome profiles with stealth-browser escalation for blocked requests.
+
+### Fixed
+
+- Fixed advisor config preserving an explicit empty tool list so `/advisor config` can disable all advisor tools. ([#5155](https://github.com/can1357/oh-my-pi/issues/5155))
+- Fixed npm bundle generation failing on Linux with E2BIG by building dist/cli.js in-process via Bun.build instead of passing the embedded docs payload as a CLI --define argument.
+- Fixed compiled-binary extensions failing to load native .node FFI dependencies by resolving platform-specific packages against the extension's own node_modules.
+- Fixed a hang in omp search and omp q CLI commands by ensuring the AuthStorage connection is properly closed upon completion.
+- Fixed write blocking for the full LSP diagnostics poll by deferring slow diagnostics to a late-diagnostics channel.
+- Fixed multiple browser and puppeteer tool issues, including locator action timeouts, missing console/print output buffering, missing fill() method on element handles, and incorrect viewport screenshots on multi-tab setups.
+- Improved browser selector error diagnostics to report match counts and abort early on empty matches instead of waiting for the full timeout.
+- Fixed silent failures, duplicate error messages, and unhandled provider errors in ACP mode when errors occurred before streaming assistant text.
+- Fixed glob reporting contradictory "no files found" messages on timeout by explicitly stating the scan was incomplete.
+- Fixed read adding unwanted context padding to raw range selectors (e.g., raw:31-31).
+- Fixed first-run interactive startup rendering the entire changelog when the last-seen marker is missing or unreadable (#5135).
+- Fixed empty local-model stop responses exhausting retries without displaying a user-visible error (#5128).
+- Fixed serialization of BigInt values in tool arguments during session compaction.
+- Fixed GPT-5.6 over-delegating work by centralizing task fan-out and concurrency policy in the system prompt.
+- Fixed session title generation including leaked thinking markup from OpenAI-compatible endpoints (#5122).
+- Fixed bare skill://<name> path-only resolution for bash, grep, and glob to resolve to the skill directory instead of SKILL.md (#5087).
+- Fixed macOS stdio MCP servers missing Apple Events TCC prompts by spawning MCP children via the correct Bun.spawn overload (#5085).
+- Fixed the /move directory picker drawing a narrow 68-column frame inside wider overlays (#5067).
+- Fixed snapcompact inline imaging for GitHub Copilot Business and Enterprise models (#4779).
+- Fixed omp commit agent sessions to ensure valid proposals are committed before teardown, handle missing host outputs with non-zero exits, and prevent forcing GPG_TTY on signing-enabled repositories (#4794).
+
+### Removed
+
+- Removed the bundled plan subagent from available task agents.
 
 ## [16.4.2] - 2026-07-10
 
@@ -290,7 +374,6 @@
 ### Fixed
 
 - Fixed `omp usage` hiding sibling-only limits such as Claude 7 Day (Fable) on accounts whose current report omitted that scoped bucket; the account now renders an explicit `not reported` row instead of looking like the usage refresh skipped the column.
-
 ## [16.3.3] - 2026-07-02
 
 ### Breaking Changes
