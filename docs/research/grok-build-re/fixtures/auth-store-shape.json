@@ -1,0 +1,36 @@
+{
+  "captured_at": "2026-07-11T01:26:31Z",
+  "source": "~/.grok/auth.json inspected in-process; no values copied",
+  "parseable_json": true,
+  "entry_count": 1,
+  "entry_key_schema": {
+    "issuer_host": "auth.x.ai",
+    "client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+  },
+  "entry_field_schema": {
+    "key": {"type": "string", "redacted": true, "length": 818},
+    "auth_mode": {"type": "string", "redacted": true, "length": 4},
+    "create_time": {"type": "string", "redacted": true, "length": 30},
+    "user_id": {"type": "string", "redacted": true, "length": 36},
+    "email": {"type": "string", "redacted": true, "length": 20},
+    "first_name": {"type": "string", "redacted": true, "length": 2},
+    "last_name": {"type": "string", "redacted": true, "length": 0},
+    "profile_image_asset_id": {"type": "string", "redacted": true, "length": 80},
+    "principal_type": {"type": "string", "redacted": true, "length": 4},
+    "principal_id": {"type": "string", "redacted": true, "length": 36},
+    "team_id": {"type": "string", "redacted": true, "length": 36},
+    "coding_data_retention_opt_out": {"type": "boolean"},
+    "refresh_token": {"type": "string", "redacted": true, "length": 86},
+    "expires_at": {"type": "string", "redacted": true, "length": 30},
+    "oidc_issuer": {"type": "string", "redacted": true, "length": 17},
+    "oidc_client_id": {"type": "string", "redacted": true, "length": 36}
+  },
+  "credential_usability_evidence": {
+    "command": "grok models",
+    "captured_at": "2026-07-11T01:31:17.032482Z",
+    "exit_code": 0,
+    "observed_login_state": "logged in",
+    "transport_trace": "local-only redacted summary in strace-models-summary.json"
+  },
+  "security": "No key, refresh token, identifiers, email, or other values are present in this fixture."
+}

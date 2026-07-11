@@ -1,0 +1,12 @@
+{
+  "capture_kind": "SSLKEYLOGFILE capability probe",
+  "captured_at": "2026-07-11T01:33:27.832284Z",
+  "command": "SSLKEYLOGFILE=<temporary mode-0600 file> grok --leader-socket <temporary> --cwd <temporary> models",
+  "exit_code": 0,
+  "grok_models_stdout_lines": 7,
+  "grok_stderr_bytes": 0,
+  "SSLKEYLOGFILE_bytes_before_deletion": 0,
+  "SSLKEYLOGFILE_nonempty": false,
+  "keylog_file_deleted_without_reading": true,
+  "conclusion": "This invocation did not emit NSS-style TLS key-log material."
+}

@@ -1,0 +1,35 @@
+{
+  "capture_kind": "authenticated production minimal-prompt strace",
+  "captured_at": "2026-07-11T01:53:24.678245Z",
+  "binary": "grok 0.2.93 (f00f96316d)",
+  "command": [
+    "strace", "-ff", "-s", "200", "-e", "trace=network,connect,sendto,recvfrom",
+    "grok", "-p", "<prompt length=4>", "-m", "grok-build",
+    "--output-format", "json", "--max-turns", "1", "--cwd", "<temporary>",
+    "--leader-socket", "<temporary>", "--no-subagents", "--disable-web-search"
+  ],
+  "credential_source": "existing official-binary auth store; not imported or copied",
+  "process_result": {
+    "exit_code": 1,
+    "timed_out": false,
+    "stdout": {
+      "line_count": 1,
+      "byte_count": 143,
+      "schema": {"type": "string", "redacted": true, "classification": "non-JSON CLI error text"},
+      "error_marker_present": true,
+      "error_value_persisted": false
+    }
+  },
+  "host_proof": {
+    "dns_qname_extracted_from_trace": "cli-chat-proxy.grok.com",
+    "corroborated_tls_connection": {"address": "104.18.28.234", "port": 443},
+    "network_syscall_counts": {"connect": 25, "sendto": 16, "recvfrom": 87}
+  },
+  "protocol_boundary": {
+    "http_status_observed": false,
+    "response_body_schema_observed": false,
+    "sse_events_observed": false,
+    "conclusion": "The requested authenticated minimal prompt reached the production Build host transport but returned a redacted non-JSON CLI error. It supplies no status/body/error-classification or streaming contract."
+  },
+  "trace_handling": "Both strace data and CLI output were processed only to metadata. Raw trace lines and raw CLI error text were neither printed nor persisted."
+}

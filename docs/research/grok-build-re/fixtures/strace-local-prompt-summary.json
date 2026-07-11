@@ -1,0 +1,40 @@
+{
+  "capture_kind": "single-prompt strace with loopback override",
+  "captured_at": "2026-07-11T01:32:54.120686Z",
+  "command": [
+    "strace", "-ff", "-s", "200", "-e", "trace=network,connect,sendto,recvfrom",
+    "grok", "-p", "<prompt length=4>", "-m", "grok-build",
+    "--output-format", "json", "--cwd", "<temporary>",
+    "--leader-socket", "<temporary>", "--no-subagents", "--disable-web-search"
+  ],
+  "environment": {
+    "GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:36193/v1",
+    "credential_source": "existing official-binary auth store; not imported or copied"
+  },
+  "process_result": {
+    "timed_out_then_terminated": true,
+    "termination_signal": "SIGKILL",
+    "network_syscall_counts": {"connect": 254, "sendto": 46, "recvfrom": 164},
+    "relevant_connect_destination": "127.0.0.1",
+    "other_connect_destinations": "Observed but not endpoint-attributed because this command initialized unrelated binary services while the loopback recorder was active."
+  },
+  "loopback_request": {
+    "method": "GET",
+    "url": "http://127.0.0.1:36193/v1/models",
+    "path": "/v1/models",
+    "header_names_and_redacted_values": {
+      "accept": "<redacted length=3>",
+      "accept-encoding": "<redacted length=17>",
+      "authorization": "<redacted length=825>",
+      "host": "<redacted length=15>",
+      "user-agent": "<redacted length=33>",
+      "x-email": "<redacted length=20>",
+      "x-grok-client-version": "<redacted length=6>",
+      "x-userid": "<redacted length=36>",
+      "x-xai-token-auth": "<redacted length=12>"
+    },
+    "body_schema": {"type": "null"},
+    "synthetic_response": {"status": 401, "body_schema": {"type": "object", "properties": {"error": {"type": "object"}}}}
+  },
+  "trace_handling": "strace stderr was consumed line-by-line; only syscall counts and connect destinations above were retained. Raw trace content was neither printed nor persisted."
+}

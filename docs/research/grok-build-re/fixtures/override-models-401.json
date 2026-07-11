@@ -1,0 +1,57 @@
+{
+  "capture_kind": "authenticated local override proof",
+  "captured_at": "2026-07-11T01:27:18.873266Z",
+  "binary": "grok 0.2.93 (f00f96316d)",
+  "command": [
+    "grok", "-p", "<prompt length=4>", "-m", "grok-build",
+    "--output-format", "json", "--cwd", "<temporary>",
+    "--no-subagents", "--disable-web-search"
+  ],
+  "environment": {
+    "GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:45939/v1",
+    "credential_source": "existing official-binary auth store; not imported or copied"
+  },
+  "request": {
+    "method": "GET",
+    "url": "http://127.0.0.1:45939/v1/models",
+    "path": "/v1/models",
+    "header_names_and_redacted_values": {
+      "accept": {"redacted": true, "length": 3},
+      "accept-encoding": {"redacted": true, "length": 17},
+      "authorization": {"redacted": true, "length": 825},
+      "host": {"redacted": true, "length": 15},
+      "user-agent": {"redacted": true, "length": 33},
+      "x-email": {"redacted": true, "length": 20},
+      "x-grok-client-version": {"redacted": true, "length": 6},
+      "x-userid": {"redacted": true, "length": 36},
+      "x-xai-token-auth": {"redacted": true, "length": 12}
+    },
+    "body_schema": {"type": "null"}
+  },
+  "response": {
+    "origin": "synthetic loopback recorder, not a production response",
+    "status": 401,
+    "header_names_and_redacted_values": {
+      "content-type": {"redacted": true, "length": 16},
+      "content-length": {"redacted": true}
+    },
+    "body_schema": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "object",
+          "properties": {
+            "message": {"type": "string"},
+            "type": {"type": "string"}
+          }
+        }
+      }
+    }
+  },
+  "probe_result": {
+    "exit_code": null,
+    "timed_out_after_seconds": 45,
+    "conclusion": "The override was honored before a model/chat request could reach a remote endpoint; the official stored session supplied the observed redacted auth-related headers."
+  },
+  "security": "The recorder replaced every request-header value and every body value with metadata before writing this file."
+}

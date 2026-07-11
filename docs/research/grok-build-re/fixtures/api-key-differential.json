@@ -1,0 +1,55 @@
+{
+  "capture_kind": "isolated fake-API-key differential",
+  "binary": "grok 0.2.93 (f00f96316d)",
+  "isolation": {
+    "HOME": "<fresh temporary directory>",
+    "GROK_HOME": "<fresh temporary directory>",
+    "XDG_CONFIG_HOME": "<fresh temporary directory>",
+    "XDG_DATA_HOME": "<fresh temporary directory>",
+    "XAI_OAUTH_TOKEN": "unset",
+    "GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:39489/v1"
+  },
+  "fake_api_key_case": {
+    "captured_at_models": "2026-07-11T01:34:13.581082Z",
+    "models_command": "grok --leader-socket <temporary> --cwd <temporary> models",
+    "models_exit_code": 0,
+    "models_stdout_stderr_bytes": 73,
+    "models_recorder_requests": 0,
+    "captured_at_chat": "2026-07-11T01:34:30.408424Z",
+    "chat_command": "grok -p <prompt length=4> -m grok-build --output-format json --cwd <temporary> --leader-socket <temporary> --no-subagents --disable-web-search",
+    "chat_exit_code": 1,
+    "chat_stdout_stderr_bytes": 523,
+    "chat_error_keyword_presence": {"api key": true, "oauth": false, "auth": false, "login": false, "credential": false},
+    "fake_api_key_value_echoed": false,
+    "loopback_recorder_requests": 0,
+    "conclusion": "The fake API-key-only chat attempt failed before any Build-endpoint request, and no fake key was transmitted to the loopback host."
+  },
+  "no_credential_comparison": {
+    "captured_at": "2026-07-11T01:34:55.664645Z",
+    "XAI_API_KEY": "unset",
+    "chat_exit_code": null,
+    "timed_out_after_seconds": 15,
+    "chat_stdout_stderr_bytes": 532,
+    "chat_error_keyword_presence": {"api key": false, "oauth": true, "auth": true, "login": false, "credential": false},
+    "loopback_requests": [
+      {
+        "method": "GET",
+        "path": "/v1/login-config",
+        "count": 2,
+        "header_names_and_redacted_values": {
+          "accept": "<redacted length=3>",
+          "accept-encoding": "<redacted length=17>",
+          "host": "<redacted length=15>",
+          "user-agent": "<redacted length=33>",
+          "x-grok-agent-id": "<redacted length=36>",
+          "x-grok-client-identifier": "<redacted length=10>",
+          "x-grok-client-version": "<redacted length=6>"
+        },
+        "body_schema": {"type": "null"},
+        "synthetic_response": {"status": 401, "body_schema": {"type": "object", "properties": {"error": {"type": "object"}}}}
+      }
+    ],
+    "conclusion": "Without either OAuth or API key, the binary attempted unauthenticated login configuration at the override host. The fake-key case instead failed locally and made no request."
+  },
+  "security": "Only the fake-key length (7) was retained; no API-key value, OAuth value, or authorization-header value was written."
+}

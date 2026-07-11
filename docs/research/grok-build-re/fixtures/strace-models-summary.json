@@ -1,0 +1,37 @@
+{
+  "capture_kind": "authenticated production model-discovery transport trace",
+  "captured_at": "2026-07-11T01:31:17.032482Z",
+  "binary": "grok 0.2.93 (f00f96316d)",
+  "command": [
+    "strace", "-ff", "-s", "200", "-e", "trace=network,connect,sendto,recvfrom",
+    "grok", "--leader-socket", "<temporary>", "--cwd", "<temporary>", "models"
+  ],
+  "exit_code": 0,
+  "grok_models_output": {
+    "login_state": "logged in with grok.com",
+    "default_model": "grok-4.5",
+    "available_model_ids_observed": ["grok-4.5", "grok-composer-2.5-fast"]
+  },
+  "host_proof": {
+    "dns_qname_extracted_from_trace": "cli-chat-proxy.grok.com",
+    "ipv4_connect_destinations": ["104.18.28.234", "104.18.29.234", "35.186.241.51"],
+    "ipv6_connect_destinations": ["2606:4700::6812:1cea", "2606:4700::6812:1dea"],
+    "independent_getent_ahostsv4": {
+      "cli-chat-proxy.grok.com": ["104.18.29.234", "104.18.28.234"]
+    },
+    "redacted_tcp_port_recapture": {
+      "captured_at": "2026-07-11T01:51:19.872695Z",
+      "exit_code": 0,
+      "dns_qname_extracted_from_trace": "cli-chat-proxy.grok.com",
+      "corroborated_ipv4_tls_connections": ["104.18.28.234:443", "104.18.29.234:443"],
+      "raw_trace_persisted": false
+    },
+    "attribution": "The two 104.18.28.234/104.18.29.234 addresses are directly corroborated as cli-chat-proxy.grok.com. The 35.186.241.51 connection was not attributed and is intentionally not treated as a Build endpoint."
+  },
+  "trace_handling": {
+    "raw_trace_bytes_observed": 31246,
+    "raw_trace_persisted": false,
+    "extraction": "Only connect destinations and an allowlisted DNS qname were retained. Raw sendto/recvfrom data was discarded."
+  },
+  "scope_note": "The observed model list is account/session output, not a proof of a globally complete model inventory or an api.x.ai comparison."
+}

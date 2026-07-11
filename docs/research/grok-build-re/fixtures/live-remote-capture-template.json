@@ -1,0 +1,33 @@
+{
+  "purpose": "Redacted fixture template for an explicitly approved, low-cost authenticated remote capture. Do not run automatically: a successful response can consume Build quota.",
+  "redaction_rule": "At ingestion retain only method, URL host/path, status, header names plus value lengths, and JSON/SSE field schemas. Replace every header/body value, including authorization and cookies, before writing.",
+  "captures_needed": [
+    {
+      "re_items": [1, 7],
+      "scenario": "Authorized normal request immediately before and after token refresh, if a naturally expiring session is available.",
+      "required_fields": ["auth/refresh host/path/method/status", "request header names and redacted lengths", "refresh response field schema", "post-refresh request header shape"]
+    },
+    {
+      "re_items": [2, 3, 5],
+      "scenario": "One approved minimal coding prompt and immediate cancellation in a capture environment.",
+      "required_fields": ["POST /v1/responses request schema", "response status", "content-type", "SSE event names and per-event data schema", "done/error/cancellation termination", "quota/auth/rate-limit status and body/header schema when naturally observed"]
+    },
+    {
+      "re_items": [4],
+      "scenario": "Capture successful remote GET /v1/models and compare its returned ids with the same credential against api.x.ai only if separately authorized and non-billing.",
+      "required_fields": ["model-list response schema", "complete returned model-id list", "status", "pagination/cursor fields if present"]
+    },
+    {
+      "re_items": [6],
+      "scenario": "Capture successful /v1/user?include=subscription, /v1/user, and any other normal-turn billing calls.",
+      "required_fields": ["status", "all response-field schemas", "used/residual/reset fields", "units and update cadence"]
+    },
+    {
+      "re_items": [8],
+      "scenario": "Successful normal coding turn from a clean session.",
+      "required_fields": ["settings/bundle/feedback response schemas", "default preset/toolset identifiers", "whether each sidecar is required or best-effort"]
+    }
+  ],
+  "known_request_sidecars_to_observe": ["/v1/models", "/v1/settings", "/v1/bundle/archive", "/v1/user?include=subscription", "/v1/user", "/v1/feedback/config", "/v1/responses", "/v1/login-config"],
+  "current_evidence_boundary": "This template intentionally contains no remote response values because the completed capture used synthetic loopback responses after request emission."
+}

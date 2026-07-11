@@ -1,0 +1,77 @@
+{
+  "capture_kind": "authenticated local staged chat-wire proof",
+  "captured_at": "2026-07-11T01:29:06.716416Z",
+  "binary": "grok 0.2.93 (f00f96316d)",
+  "command": [
+    "grok", "-p", "<prompt length=4>", "-m", "grok-build",
+    "--output-format", "json", "--cwd", "<temporary>",
+    "--leader-socket", "<temporary>", "--no-subagents", "--disable-web-search"
+  ],
+  "environment": {
+    "GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:38769/v1",
+    "credential_source": "existing official-binary auth store; not imported or copied"
+  },
+  "synthetic_responses": {
+    "GET /v1/models": {
+      "status": 200,
+      "header_names_and_redacted_values": {"content-type": "<redacted length=16>", "content-length": "<redacted>"},
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "object": {"type": "string"},
+          "data": {"type": "array", "length": 1, "item_schema": {"type": "object", "properties": {"id": {"type": "string"}, "object": {"type": "string"}, "created": {"type": "number"}, "owned_by": {"type": "string"}}}}
+        }
+      },
+      "note": "This is a deliberately synthetic loopback model list containing one synthetic grok-build entry. It is not a production model response."
+    },
+    "all_other_captured_paths": {
+      "status": 401,
+      "header_names_and_redacted_values": {"content-type": "<redacted length=16>", "content-length": "<redacted>"},
+      "body_schema": {"type": "object", "properties": {"error": {"type": "object", "properties": {"message": {"type": "string"}, "type": {"type": "string"}}}}},
+      "note": "Synthetic local error only; it proves request emission, not remote error semantics."
+    }
+  },
+  "observed_preflight_requests": [
+    {
+      "method": "GET", "path": "/v1/models", "count": 1,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "user-agent": "<redacted>", "x-email": "<redacted length=20>", "x-grok-client-version": "<redacted length=6>", "x-userid": "<redacted length=36>", "x-xai-token-auth": "<redacted length=12>"},
+      "body_schema": {"type": "null"}
+    },
+    {
+      "method": "GET", "path": "/v1/settings", "count": 4,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "user-agent": "<redacted>", "x-email": "<redacted length=20>", "x-grok-client-identifier": "<redacted length=10>", "x-grok-client-version": "<redacted length=6>", "x-userid": "<redacted length=36>", "x-xai-token-auth": "<redacted length=12>"},
+      "body_schema": {"type": "null"}
+    },
+    {
+      "method": "GET", "path": "/v1/bundle/archive", "count": 2,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "user-agent": "<redacted>", "x-email": "<redacted length=20>", "x-grok-client-version": "<redacted length=6>", "x-userid": "<redacted length=36>"},
+      "body_schema": {"type": "null"}
+    },
+    {
+      "method": "GET", "path": "/v1/user?include=subscription", "count": 1,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "user-agent": "<redacted>", "x-grok-client-version": "<redacted length=6>", "x-xai-token-auth": "<redacted length=12>"},
+      "body_schema": {"type": "null"}
+    },
+    {
+      "method": "GET", "path": "/v1/user", "count": 3,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "user-agent": "<redacted>", "x-grok-client-version": "<redacted length=6>", "x-xai-token-auth": "<redacted length=12>"},
+      "body_schema": {"type": "null"}
+    },
+    {
+      "method": "GET", "path": "/v1/feedback/config", "count": 1,
+      "header_names_and_redacted_values": {"accept": "<redacted>", "accept-encoding": "<redacted>", "authorization": "<redacted length=825>", "host": "<redacted>", "traceparent": "<redacted length=55>", "tracestate": "<redacted length=0>", "user-agent": "<redacted>", "x-grok-client-version": "<redacted length=6>", "x-xai-token-auth": "<redacted length=12>"},
+      "body_schema": {"type": "null"}
+    }
+  ],
+  "observed_chat_requests": [
+    {
+      "method": "POST", "path": "/v1/responses", "count": 3,
+      "headers_common": {"accept": "<redacted length=17>", "accept-encoding": "<redacted length=17>", "authorization": "<redacted length=825>", "content-length": "<redacted>", "content-type": "<redacted length=16>", "host": "<redacted>", "user-agent": "<redacted length=33>", "x-grok-agent-id": "<redacted>", "x-grok-client-identifier": "<redacted length=10>", "x-grok-client-version": "<redacted length=6>", "x-grok-conv-id": "<redacted>", "x-grok-model-override": "<redacted length=10>", "x-grok-req-id": "<redacted>", "x-grok-session-id": "<redacted>"},
+      "headers_on_requests_2_and_3_only": {"traceparent": "<redacted>", "x-grok-turn-idx": "<redacted>"},
+      "body_schema_request_1": {"type": "object", "properties": {"include": {"type": "array"}, "input": {"type": "array", "length": 2, "item_schema": {"type": "object", "properties": {"content": {"type": "string", "redacted": true}, "role": {"type": "string", "redacted": true}, "type": {"type": "string", "redacted": true}}}}, "max_output_tokens": {"type": "number"}, "model": {"type": "string", "redacted": true}, "reasoning": {"type": "object"}, "store": {"type": "boolean"}, "stream": {"type": "boolean"}, "temperature": {"type": "number"}, "tool_choice": {"type": "object"}, "tools": {"type": "array"}}},
+      "body_schema_requests_2_and_3": {"type": "object", "properties": {"include": {"type": "array"}, "input": {"type": "array", "length": 6, "item_schema": {"type": "object", "properties": {"content": {"type": "string", "redacted": true}, "role": {"type": "string", "redacted": true}, "type": {"type": "string", "redacted": true}}}}, "model": {"type": "string", "redacted": true}, "reasoning": {"type": "object"}, "store": {"type": "boolean"}, "stream": {"type": "boolean"}, "tools": {"type": "array"}}}
+    }
+  ],
+  "probe_result": {"exit_code": null, "timed_out_after_seconds": 35, "request_count": 15, "remote_quota_spent": false},
+  "security": "The loopback server bound only to 127.0.0.1 and converted every header/body value to redaction metadata before any fixture write."
+}
