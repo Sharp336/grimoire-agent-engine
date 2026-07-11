@@ -372,6 +372,26 @@ describe("task.batch validation", () => {
 		);
 	});
 
+	it("applies runtime task-tree limits before reserving a spawn", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget();
+		const session = createSession({
+			settings: { "task.batch": false, "async.enabled": false },
+			taskTreeBudget,
+		});
+		session.settings.set("task.treeMaxSpawns", 1);
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("runtime-limit"));
+		const tool = await TaskTool.create(session);
+
+		const first = await tool.execute("tool-call-runtime-limit-1", { agent: "task", task: "Allowed." });
+		const second = await tool.execute("tool-call-runtime-limit-2", { agent: "task", task: "Rejected." });
+
+		expect(getFirstText(first)).toContain("All done.");
+		expect(getFirstText(second)).toContain("Task tree spawn budget exceeded");
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(taskTreeBudget.snapshot()).toMatchObject({ spawns: 1, maxSpawns: 1 });
+	});
+
 	it("releases a queued sync spawn reservation when cancellation prevents execution", async () => {
 		mockDiscovery();
 		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });

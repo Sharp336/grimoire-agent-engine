@@ -26,9 +26,9 @@ export interface TaskTreeBudgetSnapshot {
 
 /** Session-wide safety budget shared by task and eval-agent descendants. */
 export class TaskTreeBudget {
-	readonly #maxSpawns: number;
-	readonly #maxRequests: number;
-	readonly #maxTokens: number;
+	#maxSpawns: number;
+	#maxRequests: number;
+	#maxTokens: number;
 	readonly #controller = new AbortController();
 	readonly #abortTargets = new Set<WeakRef<TaskTreeAbortTarget>>();
 	#spawns = 0;
@@ -40,6 +40,16 @@ export class TaskTreeBudget {
 		this.#maxSpawns = normalizeLimit(limits.maxSpawns);
 		this.#maxRequests = normalizeLimit(limits.maxRequests);
 		this.#maxTokens = normalizeLimit(limits.maxTokens);
+	}
+
+	/** Apply configured task settings to the shared budget before a new descendant starts. */
+	updateLimits(limits: TaskTreeBudgetLimits): void {
+		if (limits.maxSpawns !== undefined) this.#maxSpawns = normalizeLimit(limits.maxSpawns);
+		if (limits.maxRequests !== undefined) this.#maxRequests = normalizeLimit(limits.maxRequests);
+		if (limits.maxTokens !== undefined) this.#maxTokens = normalizeLimit(limits.maxTokens);
+		if (this.#reason) return;
+		const reason = this.#usageExhaustReason();
+		if (reason) this.#exhaust(reason);
 	}
 
 	get signal(): AbortSignal {
@@ -81,15 +91,8 @@ export class TaskTreeBudget {
 		if (this.#reason) return this.#reason;
 		this.#requests += 1;
 		this.#tokens += Math.max(0, Math.trunc(tokens));
-		if (this.#maxRequests > 0 && this.#requests > this.#maxRequests) {
-			return this.#exhaust(
-				`Task tree request budget exceeded (${this.#requests} requests; budget ${this.#maxRequests})`,
-			);
-		}
-		if (this.#maxTokens > 0 && this.#tokens > this.#maxTokens) {
-			return this.#exhaust(`Task tree token budget exceeded (${this.#tokens} tokens; budget ${this.#maxTokens})`);
-		}
-		return undefined;
+		const reason = this.#usageExhaustReason();
+		return reason ? this.#exhaust(reason) : undefined;
 	}
 
 	snapshot(): TaskTreeBudgetSnapshot {
@@ -103,6 +106,17 @@ export class TaskTreeBudget {
 			exhausted: this.#reason !== undefined,
 			reason: this.#reason,
 		};
+	}
+
+	/** First request/token limit currently exceeded, or undefined while within budget. */
+	#usageExhaustReason(): string | undefined {
+		if (this.#maxRequests > 0 && this.#requests > this.#maxRequests) {
+			return `Task tree request budget exceeded (${this.#requests} requests; budget ${this.#maxRequests})`;
+		}
+		if (this.#maxTokens > 0 && this.#tokens > this.#maxTokens) {
+			return `Task tree token budget exceeded (${this.#tokens} tokens; budget ${this.#maxTokens})`;
+		}
+		return undefined;
 	}
 
 	#exhaust(reason: string): string {

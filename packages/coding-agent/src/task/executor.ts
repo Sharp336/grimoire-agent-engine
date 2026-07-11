@@ -789,10 +789,25 @@ function getUsageTokens(usage: unknown): number {
 function attachFollowUpTreeBudgetAccounting(session: AgentSession, budget: TaskTreeBudget): void {
 	budget.registerAbortTarget(session);
 	session.subscribe(event => {
+		if (event.type === "agent_start" && budget.signal.aborted) {
+			void session.abort().catch(error => {
+				logger.debug("Task-tree follow-up abort failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return;
+		}
 		if (event.type !== "message_end" || !isRecord(event.message) || event.message.role !== "assistant") return;
 		const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
 		const messageUsage = "usage" in event.message ? event.message.usage : eventUsage;
-		budget.recordRequest(getUsageTokens(messageUsage));
+		const budgetError = budget.recordRequest(getUsageTokens(messageUsage));
+		if (budgetError) {
+			void session.abort().catch(error => {
+				logger.debug("Task-tree follow-up budget abort failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
 	});
 }
 

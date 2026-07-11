@@ -397,6 +397,30 @@ describe("runSubprocess request guards", () => {
 		expect(revived.abortCalls()).toBe(1);
 	});
 
+	it("aborts a keep-alive follow-up that starts after tree exhaustion", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
+		const budget = new TaskTreeBudget({ maxRequests: 1 });
+		const handle = createFakeSession({
+			events: [assistantMessageEnd("initial"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-tree-follow-up-after-exhaustion",
+			settings,
+			taskTreeBudget: budget,
+			keepAlive: true,
+		});
+		budget.recordRequest(15);
+		const abortsBeforeFollowUp = handle.abortCalls();
+
+		handle.emit({ type: "agent_start" } as AgentSessionEvent);
+
+		expect(budget.snapshot().exhausted).toBe(true);
+		expect(handle.abortCalls()).toBeGreaterThan(abortsBeforeFollowUp);
+	});
+
 	it("preserves a pending terminal yield when the tree request budget is crossed", async () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0, "task.softRequestBudget": 0 });
 		const budget = new TaskTreeBudget({ maxRequests: 1 });

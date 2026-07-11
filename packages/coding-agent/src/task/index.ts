@@ -678,6 +678,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		const settings = this.session.settings;
+		this.session.taskTreeBudget?.updateLimits({
+			...(settings.isConfigured("task.treeMaxSpawns") && { maxSpawns: settings.get("task.treeMaxSpawns") }),
+			...(settings.isConfigured("task.treeMaxRequests") && {
+				maxRequests: settings.get("task.treeMaxRequests"),
+			}),
+			...(settings.isConfigured("task.treeMaxTokens") && { maxTokens: settings.get("task.treeMaxTokens") }),
+		});
 		const repaired = repairTaskParams(rawParams as TaskParams);
 		// Schema defaults run for model calls, but internal callers and stale
 		// transcripts can bypass arktype. Normalize once so every downstream path
