@@ -21,6 +21,10 @@
 
 - Added an automated image-dropping rescue tier to compaction dead-end recovery.
 - Added visual warnings and detailed recovery instructions to the session timeline when compaction fails to free sufficient space.
+### Added
+
+- Added the agent-local `Ultra` thinking selector, mapping it to Max while preserving provider effort levels and applying Max lowering for compaction paths.
+- Added atomic steering/follow-up queue transforms and companion batching so hidden context is delivered with its queued root without overwriting concurrent enqueues.
 
 ## [16.4.5] - 2026-07-11
 
@@ -39,9 +43,6 @@
 ### Fixed
 
 - Fixed serialization of BigInt tool arguments to prevent data loss during remote compaction.
-### Added
-
-- Added the agent-local `Ultra` thinking selector, mapping it to Max while preserving provider effort levels and applying Max lowering for compaction paths.
 
 ## [16.4.1] - 2026-07-10
 

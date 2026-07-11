@@ -1877,6 +1877,7 @@ export class Theme {
 			high: this.#symbols["thinking.high"],
 			xhigh: this.#symbols["thinking.xhigh"],
 			max: this.#symbols["thinking.max"],
+			ultra: this.#symbols["thinking.max"],
 			autoPending: this.#symbols["thinking.autoPending"],
 		};
 	}

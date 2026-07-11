@@ -1327,6 +1327,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const sessionModelStr = sessionModelStrings[i];
 				const parsedModel = parseModelString(sessionModelStr, {
 					allowMaxSuffix: true,
+					allowUltraSuffix: true,
 					allowAutoAlias: true,
 					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 				});
@@ -1782,10 +1783,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									// through discovery-aware activation so selection persists.
 									await liveSession.activateDiscoveredMCPTools(activation.explicitlyRequestedMCPToolNames);
 								} else if (!discoveryEnabled && !activateAll) {
-									await liveSession.setActiveToolsByName([
-										...liveSession.getActiveToolNames(),
-										...activation.explicitlyRequestedMCPToolNames,
-									]);
+									await liveSession.setActiveToolsByName(
+										[...liveSession.getActiveToolNames(), ...activation.explicitlyRequestedMCPToolNames],
+										{ explicit: false },
+									);
 								}
 							}
 						} catch (error) {
@@ -1968,16 +1969,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Retry session-model candidates now that extension providers are
 		// registered. The initial restore runs before extensions load, so a role
 		// model supplied by an extension would have either fallen back to the
-		// saved default (`restoredSessionModelIndex > 0`) or failed entirely
+		// saved default (`restoredSessionModelIndex > 0`), failed entirely
 		// (`restoredSessionModelIndex === -1`, with the settings default or
-		// downstream fallback filling `model`). Reclaim it here so resume
-		// honors the last active role in either case.
-		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
+		// downstream fallback filling `model`), or matched an ambiguous guarded
+		// suffix as a base model before a literal extension id was registered.
+		// Reclaim through the selected index inclusively so resume honors the
+		// last active role in all cases.
+		const priorRestoredSessionModelIndex = restoredSessionModelIndex;
+		const sessionRetryLimit =
+			restoredSessionModelIndex >= 0 ? restoredSessionModelIndex + 1 : sessionModelStrings.length;
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			for (let i = 0; i < sessionRetryLimit; i++) {
 				const sessionModelStr = sessionModelStrings[i];
 				const parsedModel = parseModelString(sessionModelStr, {
 					allowMaxSuffix: true,
+					allowUltraSuffix: true,
 					allowAutoAlias: true,
 					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 				});
@@ -1985,7 +1991,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
 				if (restoredModel && hasModelAuth(restoredModel)) {
 					model = restoredModel;
-					modelFallbackMessage = undefined;
+					if (priorRestoredSessionModelIndex < 0 || i < priorRestoredSessionModelIndex) {
+						modelFallbackMessage = undefined;
+					}
 					restoredSessionModelIndex = i;
 					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
 					// Recompute thinking-level from scratch against the reclaimed
@@ -2364,7 +2372,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				);
 			}
 			if (!liveSession.getActiveToolNames().includes("search_tool_bm25")) {
-				await liveSession.setActiveToolsByName([...liveSession.getActiveToolNames(), "search_tool_bm25"]);
+				await liveSession.setActiveToolsByName([...liveSession.getActiveToolNames(), "search_tool_bm25"], {
+					explicit: false,
+				});
 			}
 			return true;
 		}
@@ -2620,7 +2630,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				agentKind === "main" && !explicitTaskEager && effectiveThinkingLevel === ThinkingLevel.Ultra;
 			if (
 				((explicitTaskEager && settings.get("task.eager") !== "default") || implicitRootUltraTask) &&
-				toolRegistry.has("task")
+				toolRegistry.has("task") &&
+				builtInRegistryToolNames.has("task")
 			) {
 				forceActive.add("task");
 			}

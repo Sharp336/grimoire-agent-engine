@@ -33,6 +33,8 @@ type Harness = {
 	authStorage: AuthStorage;
 	waitForCall: (predicate: (call: ObservedPromptCall) => boolean) => Promise<ObservedPromptCall>;
 	releaseFirstResponse?: () => void;
+	waitForTaskActivation?: () => Promise<void>;
+	releaseTaskActivation?: () => void;
 };
 
 function isTextContentBlock(value: unknown): value is TextContent {
@@ -170,10 +172,14 @@ describe("AgentSession Ultra mode orchestration", () => {
 			sessionManager?: SessionManager;
 			taskWireName?: string;
 			holdFirstResponse?: boolean;
+			holdTaskActivation?: boolean;
 			requestedToolNames?: ReadonlySet<string>;
+			taskBuiltIn?: boolean;
 		} = {},
 	): Promise<Harness> {
 		let releaseFirstResponse: (() => void) | undefined;
+		const taskActivationStarted = Promise.withResolvers<void>();
+		const taskActivationRelease = Promise.withResolvers<void>();
 		const observedCalls: ObservedPromptCall[] = [];
 		const waiters: Array<{
 			predicate: (call: ObservedPromptCall) => boolean;
@@ -252,9 +258,19 @@ describe("AgentSession Ultra mode orchestration", () => {
 			settings,
 			modelRegistry,
 			toolRegistry,
+			builtInToolNames: [
+				"read",
+				...(options.taskBuiltIn === false || options.registerTask === false ? [] : ["task"]),
+			],
 			thinkingLevel: options.thinkingLevel,
 			agentKind: options.agentKind,
-			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [`tools:${toolNames.join(",")}`] }),
+			rebuildSystemPrompt: async toolNames => {
+				if (options.holdTaskActivation && toolNames.includes("task")) {
+					taskActivationStarted.resolve();
+					await taskActivationRelease.promise;
+				}
+				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+			},
 			requestedToolNames: options.requestedToolNames,
 		});
 
@@ -273,6 +289,8 @@ describe("AgentSession Ultra mode orchestration", () => {
 			authStorage,
 			waitForCall,
 			releaseFirstResponse: () => releaseFirstResponse?.(),
+			waitForTaskActivation: () => taskActivationStarted.promise,
+			releaseTaskActivation: () => taskActivationRelease.resolve(),
 		};
 		harnesses.push(harness);
 		return harness;
@@ -387,6 +405,47 @@ describe("AgentSession Ultra mode orchestration", () => {
 		}
 	});
 
+	it("does not activate a task-named extension when built-in task provenance is shadowed", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			taskBuiltIn: false,
+		});
+
+		expect(session.hasBuiltInTool("task")).toBe(false);
+		await session.prompt("do not activate a shadow task");
+
+		expect(session.getActiveToolNames()).not.toContain("task");
+		expect(observedCalls[0]?.toolNames).not.toContain("task");
+		expect(observedCalls[0]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			false,
+		);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
+	});
+
+	it("yields proactive task orchestration to vibe mode and resumes after exit", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			activeTask: true,
+		});
+
+		await session.prompt("start with proactive delegation");
+		session.setVibeModeState({ enabled: true });
+		await session.setActiveToolsByName(["read"], { explicit: false });
+		await session.prompt("direct vibe workers instead");
+
+		expect(observedCalls[1]?.toolNames).not.toContain("task");
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("Vibe mode is ON"))).toBe(true);
+		expect(customEntries(session, ULTRA_RESET_TYPE).at(-1)).toMatchObject({
+			details: expect.objectContaining({ status: "reset", reason: "vibe-mode" }),
+		});
+
+		session.setVibeModeState(undefined);
+		await session.prompt("resume proactive delegation");
+
+		expect(observedCalls[2]?.toolNames).toContain("task");
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(2);
+	});
+
 	it("re-injects the conditional mode context after compaction without forcing task", async () => {
 		const { session, waitForCall } = await createHarness({
 			thinkingLevel: ThinkingLevel.Ultra,
@@ -467,6 +526,7 @@ describe("AgentSession Ultra mode orchestration", () => {
 		const activatedFollowUp = await activated.waitForCall(call =>
 			call.messageTexts.includes("queued after ultra activation"),
 		);
+		expect(activated.observedCalls).toHaveLength(2);
 		expect(activatedFollowUp.toolNames).toContain("task");
 		expect(activatedFollowUp.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
 			true,
@@ -485,8 +545,11 @@ describe("AgentSession Ultra mode orchestration", () => {
 		downgraded.releaseFirstResponse?.();
 		await firstDowngradedTurn;
 
-		await downgraded.waitForCall(call => call.messageTexts.some(text => text.includes("no longer applies")));
-		await downgraded.waitForCall(call => call.messageTexts.includes("queued after downgrade"));
+		const downgradedFollowUp = await downgraded.waitForCall(call =>
+			call.messageTexts.includes("queued after downgrade"),
+		);
+		expect(downgraded.observedCalls).toHaveLength(2);
+		expect(downgradedFollowUp.messageTexts.some(text => text.includes("no longer applies"))).toBe(true);
 		expect(customEntries(downgraded.session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
 		expect(customEntries(downgraded.session, ULTRA_RESET_TYPE)).toHaveLength(1);
 
@@ -502,10 +565,176 @@ describe("AgentSession Ultra mode orchestration", () => {
 		explicitEager.releaseFirstResponse?.();
 		await firstExplicitEagerTurn;
 
-		await explicitEager.waitForCall(call => call.messageTexts.some(text => text.includes("no longer applies")));
-		await explicitEager.waitForCall(call => call.messageTexts.includes("queued after explicit eager"));
+		const explicitEagerFollowUp = await explicitEager.waitForCall(call =>
+			call.messageTexts.includes("queued after explicit eager"),
+		);
+		expect(explicitEager.observedCalls).toHaveLength(2);
+		expect(explicitEagerFollowUp.messageTexts.some(text => text.includes("no longer applies"))).toBe(true);
 		expect(customEntries(explicitEager.session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
 		expect(customEntries(explicitEager.session, ULTRA_RESET_TYPE)).toHaveLength(1);
+	});
+
+	it("preserves follow-ups enqueued while queued Ultra context is building", async () => {
+		const {
+			session,
+			observedCalls,
+			waitForCall,
+			releaseFirstResponse,
+			waitForTaskActivation,
+			releaseTaskActivation,
+		} = await createHarness({
+			thinkingLevel: Effort.Max,
+			holdFirstResponse: true,
+			holdTaskActivation: true,
+		});
+		const first = session.prompt("start before Ultra");
+		await waitForCall(call => call.messageTexts.includes("start before Ultra"));
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("queued before context build", { streamingBehavior: "followUp" });
+		releaseFirstResponse?.();
+		await waitForTaskActivation?.();
+
+		await session.prompt("queued during context build", { streamingBehavior: "followUp" });
+		releaseTaskActivation?.();
+		await first;
+
+		expect(observedCalls).toHaveLength(3);
+		expect(observedCalls[1]?.messageTexts).toContain("queued before context build");
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			true,
+		);
+		expect(observedCalls[2]?.messageTexts).toContain("queued during context build");
+	});
+
+	it("injects queued Ultra context only into the higher-priority steering queue", async () => {
+		const { session, observedCalls, waitForCall, releaseFirstResponse } = await createHarness({
+			thinkingLevel: Effort.Max,
+			holdFirstResponse: true,
+		});
+		const first = session.prompt("start before queued transition");
+		await waitForCall(call => call.messageTexts.includes("start before queued transition"));
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("queued steering root", { streamingBehavior: "steer" });
+		await session.prompt("queued follow-up root", { streamingBehavior: "followUp" });
+		releaseFirstResponse?.();
+		await first;
+
+		expect(observedCalls).toHaveLength(3);
+		expect(observedCalls[1]?.messageTexts).toContain("queued steering root");
+		expect(observedCalls[2]?.messageTexts).toContain("queued follow-up root");
+		const contextCount = observedCalls[2]?.messageTexts.filter(text =>
+			text.includes("meaningfully improves speed or quality"),
+		).length;
+		expect(contextCount).toBe(1);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
+	});
+
+	it("keeps hidden keyword context with its queued user root and Ultra companion", async () => {
+		const { session, observedCalls, waitForCall, releaseFirstResponse } = await createHarness({
+			thinkingLevel: Effort.Max,
+			holdFirstResponse: true,
+		});
+		const first = session.prompt("start before hidden companion");
+		await waitForCall(call => call.messageTexts.includes("start before hidden companion"));
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		session.agent.followUp({
+			role: "custom",
+			customType: "ultrathink-notice",
+			content: "hidden keyword context",
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		session.agent.followUp({
+			role: "user",
+			content: [{ type: "text", text: "queued user root" }],
+			timestamp: Date.now() + 1,
+		});
+		releaseFirstResponse?.();
+		await first;
+
+		expect(observedCalls).toHaveLength(2);
+		expect(observedCalls[1]?.messageTexts).toContain("hidden keyword context");
+		expect(observedCalls[1]?.messageTexts).toContain("queued user root");
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			true,
+		);
+	});
+
+	it("delivers an Ultra reset with queued vibe context instead of a standalone model turn", async () => {
+		const { session, observedCalls, waitForCall, releaseFirstResponse } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			activeTask: true,
+			holdFirstResponse: true,
+		});
+		const first = session.prompt("start before vibe");
+		await waitForCall(call => call.messageTexts.includes("start before vibe"));
+		session.setVibeModeState({ enabled: true });
+		await session.setActiveToolsByName(["read"], { explicit: false });
+		await session.sendVibeModeContext({ deliverAs: "followUp" });
+		await session.prompt("queued vibe work", { streamingBehavior: "followUp" });
+		releaseFirstResponse?.();
+		await first;
+
+		expect(observedCalls).toHaveLength(3);
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("You are the DIRECTOR"))).toBe(true);
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("no longer applies"))).toBe(true);
+		expect(observedCalls[1]?.toolNames).not.toContain("task");
+		expect(observedCalls[2]?.messageTexts).toContain("queued vibe work");
+	});
+
+	it("removes a queued Ultra companion with a restored user prompt while preserving advisor context", async () => {
+		const { session } = await createHarness();
+		const advisor: AgentMessage = {
+			role: "custom",
+			customType: "advisor-card",
+			content: "independent advisor context",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const ultraContext: AgentMessage = {
+			role: "custom",
+			customType: ULTRA_CONTEXT_TYPE,
+			content: "queued Ultra context",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now() + 1,
+		};
+		const hiddenNotice: AgentMessage = {
+			role: "custom",
+			customType: "ultrathink-notice",
+			content: "hidden keyword context",
+			display: false,
+			attribution: "user",
+			timestamp: Date.now() + 2,
+		};
+		const userPrompt: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "restore me" }],
+			timestamp: Date.now() + 3,
+		};
+		const vibeContext: AgentMessage = {
+			role: "custom",
+			customType: "vibe-mode-context",
+			content: "queued vibe context",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now() + 4,
+		};
+		const queuedGroup = [advisor, ultraContext, hiddenNotice, userPrompt];
+		session.agent.replaceQueues(queuedGroup, []);
+
+		expect(session.popLastQueuedMessage()?.text).toBe("restore me");
+		expect(session.agent.peekSteeringQueue()).toEqual([advisor]);
+
+		session.agent.replaceQueues(queuedGroup, []);
+		expect(session.clearQueue().steering.map(message => message.text)).toEqual(["restore me"]);
+		expect(session.agent.peekSteeringQueue()).toEqual([advisor]);
+
+		session.agent.replaceQueues([ultraContext, vibeContext, userPrompt], []);
+		expect(session.clearQueue().steering.map(message => message.text)).toEqual(["restore me"]);
+		expect(session.agent.peekSteeringQueue()).toEqual([ultraContext, vibeContext]);
 	});
 
 	it("does not force Ultra task activation when requested tools exclude task", async () => {
@@ -522,6 +751,113 @@ describe("AgentSession Ultra mode orchestration", () => {
 		);
 		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
 		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(0);
+	});
+
+	it("honors an explicit runtime task exclusion before the first Ultra turn", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+
+		await session.setActiveToolsByName(["read"]);
+		await session.prompt("continue without delegation");
+
+		expect(observedCalls[0]?.toolNames).not.toContain("task");
+		expect(observedCalls[0]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			false,
+		);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
+		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(0);
+	});
+
+	it("does not treat internal active-tool reconciliation as an explicit task exclusion", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+
+		await session.setActiveToolsByName(["read"], { explicit: false });
+		await session.prompt("allow proactive delegation");
+
+		expect(observedCalls[0]?.toolNames).toContain("task");
+		expect(observedCalls[0]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			true,
+		);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
+		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(0);
+	});
+
+	it("does not let internal active-tool reconciliation clear an explicit task exclusion", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+
+		await session.setActiveToolsByName(["read"]);
+		await session.setActiveToolsByName(["read", "task"], { explicit: false });
+		expect(session.getActiveToolNames()).toContain("task");
+
+		await session.prompt("continue without delegation");
+
+		expect(observedCalls[0]?.toolNames).not.toContain("task");
+		expect(observedCalls[0]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			false,
+		);
+	});
+
+	it("preserves explicit runtime task exclusions across logical session round trips", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: Effort.High,
+			persisted: true,
+		});
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+
+		await session.setActiveToolsByName(["read"]);
+		await session.prompt("work in session A without delegation");
+		const sessionAFile = session.sessionFile;
+		expect(sessionAFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		await session.newSession();
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.setActiveToolsByName(["read", "task"]);
+		await session.prompt("allow delegation in session B");
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+
+		expect(await session.switchSession(sessionAFile!)).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Ultra);
+		await session.prompt("return to session A without delegation");
+
+		const returnedCall = observedCalls.at(-1);
+		expect(returnedCall?.toolNames).not.toContain("task");
+		expect(returnedCall?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			false,
+		);
+	});
+
+	it("preserves an explicit runtime task exclusion until task is re-enabled", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			activeTask: true,
+		});
+
+		await session.prompt("start with proactive delegation");
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
+
+		await session.setActiveToolsByName(["read"]);
+		await session.prompt("continue without delegation");
+
+		expect(observedCalls[1]?.toolNames).not.toContain("task");
+		expect(observedCalls[1]?.messageTexts.some(text => text.includes("no longer applies"))).toBe(true);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
+		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(1);
+
+		await session.setActiveToolsByName(["read", "task"]);
+		await session.prompt("resume proactive delegation");
+
+		expect(observedCalls[2]?.toolNames).toContain("task");
+		expect(observedCalls[2]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			true,
+		);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(2);
+		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(1);
 	});
 
 	it("ignores unrelated custom status details when deriving Ultra reset state", async () => {

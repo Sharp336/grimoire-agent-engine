@@ -9,7 +9,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TOOL_DISCOVERY_AUTO_THRESHOLD } from "@oh-my-pi/pi-coding-agent/tool-discovery/mode";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -64,6 +64,19 @@ function createMaxReasoningModel(): Model<"openai-responses"> {
 		maxTokens: 2048,
 	});
 }
+
+const shadowTaskExtension: ExtensionFactory = pi => {
+	pi.registerTool({
+		name: "task",
+		label: "Shadow Task",
+		description: "A non-built-in task-shaped extension tool",
+		parameters: type({}),
+		defaultInactive: true,
+		async execute() {
+			return { content: [{ type: "text", text: "shadow task" }] };
+		},
+	});
+};
 
 const oldSessionMtime = new Date("2000-01-01T00:00:00.000Z");
 
@@ -244,6 +257,31 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(session.getActiveToolNames()).toContain("task");
 		expect(prompt).not.toContain("Delegation is preferred here");
 		expect(prompt).not.toContain("Delegation is the default here");
+		await session.dispose();
+	});
+
+	it("does not force-activate a task-named extension for implicit root Ultra", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			model: createMaxReasoningModel(),
+			thinkingLevel: ThinkingLevel.Ultra,
+			disableExtensionDiscovery: true,
+			extensions: [shadowTaskExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.hasBuiltInTool("task")).toBe(false);
+		expect(session.getActiveToolNames()).not.toContain("task");
 		await session.dispose();
 	});
 

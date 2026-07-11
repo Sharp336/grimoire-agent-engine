@@ -537,6 +537,75 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("preserves restore warning when post-extension retry reselects the default fallback", async () => {
+		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!defaultModel) {
+			throw new Error("Expected bundled anthropic default model");
+		}
+
+		const authStorage = await AuthStorage.create(path.join(tempDir, "resume-warning-auth.db"));
+		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "resume-warning-models.yml"));
+
+		const missingRoleModel = "runtime-provider/missing-model";
+		const targetSessionFile = path.join(tempDir, "resume-warning.jsonl");
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "resume-warning", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: `${defaultModel.provider}/${defaultModel.id}`,
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "smol-model",
+					parentId: "default-model",
+					timestamp,
+					model: missingRoleModel,
+					role: "smol",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(
+			targetSessionFile,
+			path.join(tempDir, "resume-warning-sessions"),
+		);
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+
+		try {
+			expect(session.model?.provider).toBe(defaultModel.provider);
+			expect(session.model?.id).toBe(defaultModel.id);
+			expect(modelFallbackMessage).toContain(`Could not restore model ${missingRoleModel}`);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
 	test("prefers the provider default over catalog order in the startup fallback", async () => {
 		// Regression: with an Anthropic key but no configured `default` role and no
 		// session/CLI model, the step-4 startup fallback used to pick the first
@@ -681,6 +750,78 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-reasoning-model");
 			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	test("rechecks a restored Ultra-suffixed literal model after extension registration", async () => {
+		const authStorage = await AuthStorage.create(path.join(tempDir, "resume-literal-ultra-auth.db"));
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "literal-ultra-models.yml"));
+
+		const targetSessionFile = path.join(tempDir, "resume-literal-ultra.jsonl");
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "resume-literal-ultra", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: "openai/gpt-4o:ultra",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir, "literal-ultra-sessions"));
+		const literalUltraProvider: ExtensionFactory = pi => {
+			pi.registerProvider("openai", {
+				baseUrl: "https://runtime-openai.example.com/v1",
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "gpt-4o:ultra",
+						name: "Literal Ultra Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128_000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			extensions: [literalUltraProvider],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+
+		try {
+			expect(session.model?.provider).toBe("openai");
+			expect(session.model?.id).toBe("gpt-4o:ultra");
+			expect(session.thinkingLevel).not.toBe(ThinkingLevel.Ultra);
+			expect(session.agent.state.thinkingLevel).toBeUndefined();
 		} finally {
 			await session.dispose();
 			authStorage.close();

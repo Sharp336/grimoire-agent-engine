@@ -69,13 +69,16 @@ describe("status line model segment advisor badge", () => {
 });
 
 describe("status line model segment compact thinking level", () => {
-	function createThinkingContext(compactThinkingLevel: boolean): SegmentContext {
+	function createThinkingContext(
+		compactThinkingLevel: boolean,
+		level: ThinkingLevel = ThinkingLevel.High,
+	): SegmentContext {
 		return {
 			...createModelContext(false),
 			session: {
 				state: {
 					model: { id: "test-model", name: "Test Model", thinking: true },
-					thinkingLevel: ThinkingLevel.High,
+					thinkingLevel: level,
 				},
 				isFastModeActive: () => false,
 				isAutoThinking: false,
@@ -90,6 +93,13 @@ describe("status line model segment compact thinking level", () => {
 		const display = theme.thinking.high;
 		const modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
 		const rendered = renderSegment("model", createThinkingContext(false));
+		expect(Bun.stripANSI(rendered.content)).toBe(`${modelPrefix}Test Model${theme.sep.dot}${display}`);
+	});
+
+	it("renders Ultra with Max's thinking suffix when compact mode is off", () => {
+		const display = theme.thinking.max;
+		const modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
+		const rendered = renderSegment("model", createThinkingContext(false, ThinkingLevel.Ultra));
 		expect(Bun.stripANSI(rendered.content)).toBe(`${modelPrefix}Test Model${theme.sep.dot}${display}`);
 	});
 

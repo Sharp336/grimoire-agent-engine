@@ -180,6 +180,9 @@
 
 - Fixed PageUp/PageDown in the model browser wrapping past the list edges instead of clamping
 - Fixed the hover highlight sticking to the last hovered model row when the pointer moved into the provider sidebar
+### Added
+
+- Added model-gated Ultra thinking across CLI, TUI, config, suffix, ACP, and RPC surfaces, with root-only proactive delegation through the existing task runtime, atomic queued-context delivery, explicit tool exclusions, and vibe-mode precedence.
 
 ## [16.4.6] - 2026-07-12
 
@@ -305,7 +308,6 @@
 - Fixed an issue where BigInt values in tool arguments failed to serialize during session compaction.
 - Resolved an issue where GPT-5.6 over-delegated tasks by refining task fan-out and concurrency policies in the system prompt.
 - Fixed a race condition in concurrent MCP OAuth token refreshes across processes, ensuring rotating refresh tokens are only refreshed once and preventing stale token errors from clearing valid credentials.
-- Added model-gated Ultra thinking across CLI, TUI, config, suffix, ACP, and RPC surfaces, with root-only proactive delegation through the existing task runtime when enabled and not explicitly excluded.
 
 ## [16.4.1] - 2026-07-10
 

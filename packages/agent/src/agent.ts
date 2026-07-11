@@ -346,6 +346,7 @@ export class Agent {
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
+	#queueCompanions = new WeakSet<object>();
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
@@ -844,6 +845,37 @@ export class Agent {
 		this.#followUpQueue = followUp.slice();
 	}
 
+	/**
+	 * Atomically transform the live steering and follow-up queues.
+	 *
+	 * The callback must be synchronous and side-effect free. Messages listed as
+	 * companions are delivered with the next ordinary message when the queue is
+	 * configured for one-at-a-time delivery.
+	 */
+	transformQueues(
+		transform: (queues: {
+			readonly steering: readonly AgentMessage[];
+			readonly followUp: readonly AgentMessage[];
+		}) => {
+			readonly steering: readonly AgentMessage[];
+			readonly followUp: readonly AgentMessage[];
+			readonly companions?: Iterable<AgentMessage>;
+		},
+	): void {
+		const next = transform({
+			steering: this.#steeringQueue.slice(),
+			followUp: this.#followUpQueue.slice(),
+		});
+		if (isPromise(next)) {
+			throw new TypeError("Agent queue transforms must be synchronous");
+		}
+		this.#steeringQueue = Array.from(next.steering);
+		this.#followUpQueue = Array.from(next.followUp);
+		for (const message of next.companions ?? []) {
+			this.#queueCompanions.add(message as object);
+		}
+	}
+
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 	}
@@ -907,14 +939,20 @@ export class Agent {
 		return this.#abortController?.signal.aborted === true && this.#state.isStreaming;
 	}
 
+	#dequeueOneWithCompanions(queue: AgentMessage[]): [messages: AgentMessage[], remaining: AgentMessage[]] {
+		let end = 0;
+		while (end < queue.length && this.#queueCompanions.has(queue[end] as object)) {
+			end++;
+		}
+		if (end < queue.length) end++;
+		return [queue.slice(0, end), queue.slice(end)];
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
 		if (this.#steeringMode === "one-at-a-time") {
-			if (this.#steeringQueue.length > 0) {
-				const first = this.#steeringQueue[0];
-				this.#steeringQueue = this.#steeringQueue.slice(1);
-				return [first];
-			}
-			return [];
+			const [messages, remaining] = this.#dequeueOneWithCompanions(this.#steeringQueue);
+			this.#steeringQueue = remaining;
+			return messages;
 		}
 		const steering = this.#steeringQueue.slice();
 		this.#steeringQueue = [];
@@ -923,12 +961,9 @@ export class Agent {
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
 		if (this.#followUpMode === "one-at-a-time") {
-			if (this.#followUpQueue.length > 0) {
-				const first = this.#followUpQueue[0];
-				this.#followUpQueue = this.#followUpQueue.slice(1);
-				return [first];
-			}
-			return [];
+			const [messages, remaining] = this.#dequeueOneWithCompanions(this.#followUpQueue);
+			this.#followUpQueue = remaining;
+			return messages;
 		}
 		const followUp = this.#followUpQueue.slice();
 		this.#followUpQueue = [];
