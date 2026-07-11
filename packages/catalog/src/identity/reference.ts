@@ -17,11 +17,12 @@ export interface ModelReferenceIndex {
 	suffixAlias: Map<string, Model<Api>>;
 }
 
-// xai-oauth subscription entries carry zero public pricing and inflated maxTokens;
-// keep them provider-local so they cannot outrank paid/public Grok references.
+// Zero-cost xAI subscription entries carry no public pricing and may carry
+// provider-specific limits; keep them provider-local so they cannot outrank
+// paid/public Grok references.
 export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	return (
-		candidate.provider === "xai-oauth" &&
+		(candidate.provider === "xai-oauth" || candidate.provider === "xai-grok-build") &&
 		candidate.cost.input === 0 &&
 		candidate.cost.output === 0 &&
 		candidate.cost.cacheRead === 0 &&

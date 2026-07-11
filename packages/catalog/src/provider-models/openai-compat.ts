@@ -1089,6 +1089,18 @@ export interface XaiOAuthModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+export interface XaiGrokBuildModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export const XAI_GROK_BUILD_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+export const XAI_GROK_BUILD_USER_AGENT = "grok-shell/0.2.93 (linux; x86_64)";
+export const XAI_GROK_BUILD_CLIENT_IDENTIFIER = "grok-shell";
+export const XAI_GROK_BUILD_CLIENT_VERSION = "0.2.93";
+export const XAI_GROK_BUILD_TOKEN_AUTH = "xai-grok-cli";
+
 interface XAICuratedModel {
 	id: string;
 	contextWindow: number;
@@ -1157,6 +1169,17 @@ export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
 	// Cursor's "Composer 2.5 Fast" exposed via SuperGrok: non-reasoning,
 	// text-only, 200K context (mirrors Cursor's composer-* catalog entries).
 	// Off the Grok effort-capable allowlist; reasoning:false also hides the effort dial.
+	{
+		id: "grok-composer-2.5-fast",
+		contextWindow: 200_000,
+		name: "Grok Composer 2.5 Fast",
+		reasoning: false,
+		input: ["text"],
+	},
+] as const;
+
+export const XAI_GROK_BUILD_CURATED_MODELS: readonly XAICuratedModel[] = [
+	{ id: "grok-4.5", contextWindow: 500_000, name: "Grok 4.5", input: ["text", "image"] },
 	{
 		id: "grok-composer-2.5-fast",
 		contextWindow: 200_000,
@@ -1256,20 +1279,24 @@ function mergeCuratedIntoModel(
  * Order: curated models first in declaration order; then dynamic remainder
  * in original order.
  */
-function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]): ModelSpec<"openai-responses">[] {
+function applyXAICuration(
+	dynamic: readonly ModelSpec<"openai-responses">[],
+	curatedModels: readonly XAICuratedModel[],
+	injectMissing: boolean,
+): ModelSpec<"openai-responses">[] {
 	const filtered = dynamic.filter(e => !XAI_NON_CHAT_PREFIXES.some(p => e.id.startsWith(p)));
 
 	const byId = new Map<string, ModelSpec<"openai-responses">>(filtered.map(e => [e.id, e]));
-	for (const curated of XAI_OAUTH_CURATED_MODELS) {
+	for (const curated of curatedModels) {
 		const existing = byId.get(curated.id);
 		if (existing) {
 			byId.set(curated.id, mergeCuratedIntoModel(existing, curated));
 		}
 	}
 
-	const template = filtered[0];
+	const template = injectMissing ? filtered[0] : undefined;
 	if (template) {
-		for (const curated of XAI_OAUTH_CURATED_MODELS) {
+		for (const curated of curatedModels) {
 			if (!byId.has(curated.id)) {
 				// Reset id/name on the template before merging so the helper's
 				// `curated.name ?? base.name` clause falls back to curated.id
@@ -1280,12 +1307,39 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 		}
 	}
 
-	const curatedIds = new Set(XAI_OAUTH_CURATED_MODELS.map(c => c.id));
-	const curatedFirst = XAI_OAUTH_CURATED_MODELS.map(c => byId.get(c.id)).filter(
+	const curatedIds = new Set(curatedModels.map(c => c.id));
+	const curatedFirst = curatedModels.map(c => byId.get(c.id)).filter(
 		(e): e is ModelSpec<"openai-responses"> => e !== undefined,
 	);
 	const rest = filtered.filter(e => !curatedIds.has(e.id)).map(withXaiOAuthCompatDefaults);
 	return [...curatedFirst, ...rest];
+}
+
+function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]): ModelSpec<"openai-responses">[] {
+	return applyXAICuration(dynamic, XAI_OAUTH_CURATED_MODELS, true);
+}
+
+function buildXaiStaticSeed(
+	provider: "xai-oauth" | "xai-grok-build",
+	baseUrl: string,
+	curatedModels: readonly XAICuratedModel[],
+): ModelSpec<"openai-responses">[] {
+	return curatedModels.map(curated => {
+		const base: ModelSpec<"openai-responses"> = {
+			id: curated.id,
+			name: curated.id,
+			api: "openai-responses",
+			provider,
+			baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: curated.contextWindow,
+			maxTokens: curated.contextWindow,
+			compat: { reasoningEffortMap: XAI_REASONING_EFFORT_MAP },
+		};
+		return mergeCuratedIntoModel(base, curated);
+	});
 }
 
 /**
@@ -1307,27 +1361,11 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
  * `hermes-agent/hermes_cli/models.py:_XAI_STATIC_FALLBACK`.
  */
 export function buildXaiOAuthStaticSeed(baseUrl?: string): ModelSpec<"openai-responses">[] {
-	const resolvedBaseUrl = baseUrl ?? "https://api.x.ai/v1";
-	return XAI_OAUTH_CURATED_MODELS.map(curated => {
-		// Synthesise a bare base then layer curated metadata via the same helper
-		// the dynamic overlay/inject paths use. `name: curated.id` is a sentinel
-		// the helper rewrites to `curated.name ?? base.name`, so curated.name
-		// wins when set.
-		const base: ModelSpec<"openai-responses"> = {
-			id: curated.id,
-			name: curated.id,
-			api: "openai-responses",
-			provider: "xai-oauth",
-			baseUrl: resolvedBaseUrl,
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: curated.contextWindow,
-			maxTokens: curated.contextWindow,
-			compat: { reasoningEffortMap: XAI_REASONING_EFFORT_MAP },
-		};
-		return mergeCuratedIntoModel(base, curated);
-	});
+	return buildXaiStaticSeed("xai-oauth", baseUrl ?? "https://api.x.ai/v1", XAI_OAUTH_CURATED_MODELS);
+}
+
+export function buildXaiGrokBuildStaticSeed(baseUrl = XAI_GROK_BUILD_BASE_URL): ModelSpec<"openai-responses">[] {
+	return buildXaiStaticSeed("xai-grok-build", baseUrl, XAI_GROK_BUILD_CURATED_MODELS);
 }
 
 export function xaiOAuthModelManagerOptions(
@@ -1361,6 +1399,36 @@ export function xaiOAuthModelManagerOptions(
 		fetchDynamicModels: async () => {
 			const dynamic = await inner();
 			return dynamic == null ? dynamic : applyXAIOAuthCuration(dynamic);
+		},
+	};
+}
+
+export function xaiGrokBuildModelManagerOptions(
+	config?: XaiGrokBuildModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const baseUrl = config?.baseUrl ?? XAI_GROK_BUILD_BASE_URL;
+	const staticModels = buildXaiGrokBuildStaticSeed(baseUrl);
+	const base = createSimpleOpenAIResponsesOptions("xai-grok-build", XAI_GROK_BUILD_BASE_URL, {
+		...config,
+		headers: {
+			"User-Agent": XAI_GROK_BUILD_USER_AGENT,
+			"x-grok-client-identifier": XAI_GROK_BUILD_CLIENT_IDENTIFIER,
+			"x-grok-client-version": XAI_GROK_BUILD_CLIENT_VERSION,
+			"X-XAI-Token-Auth": XAI_GROK_BUILD_TOKEN_AUTH,
+		},
+	});
+	if (!base.fetchDynamicModels) {
+		return { ...base, staticModels, dynamicModelsAuthoritative: true };
+	}
+	const inner = base.fetchDynamicModels;
+	return {
+		...base,
+		staticModels,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: async () => {
+			const dynamic = await inner();
+			if (dynamic == null || dynamic.length === 0) return null;
+			return applyXAICuration(dynamic, XAI_GROK_BUILD_CURATED_MODELS, false);
 		},
 	};
 }

@@ -563,6 +563,10 @@ interface OpenAIResponsesSpecLike {
 	compat?: OpenAICompat;
 }
 
+function isXaiSubscriptionProvider(provider: string): boolean {
+	return provider === "xai-oauth" || provider === "xai-grok-build";
+}
+
 /**
  * Build the resolved Responses-API compat record. Most shared OpenAI-compatible
  * capability defaults intentionally mirror chat-completions, while Responses-
@@ -587,10 +591,12 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		!PROXY_OPENAI_COMPAT_PROVIDERS.has(spec.provider) &&
 		(LOCAL_OPENAI_COMPAT_PROVIDERS.has(spec.provider) || hasLocalLoopbackBaseUrl(baseUrl));
 
+	const isXaiSubscription = isXaiSubscriptionProvider(spec.provider);
+
 	const compat: ResolvedOpenAIResponsesCompat = {
 		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
 		supportsStrictMode: isAzure || detectStrictModeSupport(spec.provider, baseUrl),
-		supportsReasoningEffort: spec.provider !== "xai-oauth" || isGrokReasoningEffortCapable(id),
+		supportsReasoningEffort: !isXaiSubscription || isGrokReasoningEffortCapable(id),
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		// Azure OpenAI and GitHub Copilot Responses paths require tool results
 		// to strictly match prior tool calls when building Responses inputs.
@@ -601,14 +607,14 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// model pointed at the Copilot host under a different provider id still
 		// clamps; xai-oauth is provider-id only (same host family as paid `xai`).
 		supportsImageDetailOriginal:
-			spec.provider !== "xai-oauth" && !modelMatchesHost({ provider: spec.provider, baseUrl }, "githubCopilot"),
+			!isXaiSubscription && !modelMatchesHost({ provider: spec.provider, baseUrl }, "githubCopilot"),
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		thinkingFormat,
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
-		includeEncryptedReasoning: spec.provider !== "xai-oauth",
-		filterReasoningHistory: spec.provider === "xai-oauth" || (isOpenRouter && isAnthropicModel),
+		includeEncryptedReasoning: !isXaiSubscription,
+		filterReasoningHistory: isXaiSubscription || (isOpenRouter && isAnthropicModel),
 		disableReasoningOnForcedToolChoice: isKimiModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,
@@ -645,7 +651,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 			MINIMAX_PROVIDER_OR_ID_PATTERN.test(spec.provider) || (id ? MINIMAX_PROVIDER_OR_ID_PATTERN.test(id) : false),
 		emptyLengthFinishIsContextError: spec.provider === "ollama",
 		usesOpenAIToolCallIdLimit: spec.provider === "openai",
-		promptCacheSessionHeader: spec.provider === "xai-oauth" ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: isXaiSubscription ? "x-grok-conv-id" : undefined,
 		streamIdleTimeoutMs: isLocalOpenAICompatBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
 			: spec.compat?.streamIdleTimeoutMs,

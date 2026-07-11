@@ -87273,6 +87273,80 @@
 			"maxTokens": 4096
 		}
 	},
+	"xai-grok-build": {
+		"grok-4.5": {
+			"id": "grok-4.5",
+			"name": "Grok 4.5",
+			"api": "openai-responses",
+			"provider": "xai-grok-build",
+			"baseUrl": "https://cli-chat-proxy.grok.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 500000,
+			"maxTokens": 500000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			}
+		},
+		"grok-composer-2.5-fast": {
+			"id": "grok-composer-2.5-fast",
+			"name": "Grok Composer 2.5 Fast",
+			"api": "openai-responses",
+			"provider": "xai-grok-build",
+			"baseUrl": "https://cli-chat-proxy.grok.com/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 200000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": true,
+				"supportsReasoningEffort": false
+			}
+		}
+	},
 	"xai-oauth": {
 		"grok-4.20-0309-non-reasoning": {
 			"id": "grok-4.20-0309-non-reasoning",

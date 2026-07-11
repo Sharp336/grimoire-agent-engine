@@ -47,6 +47,7 @@ import {
 	vllmModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
+	xaiGrokBuildModelManagerOptions,
 	xaiOAuthModelManagerOptions,
 	xiaomiModelManagerOptions,
 	zenmuxModelManagerOptions,
@@ -420,6 +421,17 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "grok-4-fast-non-reasoning",
 		envVars: ["XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiModelManagerOptions(config),
+	},
+	{
+		id: "xai-grok-build",
+		defaultModel: "grok-4.5",
+		envVars: [],
+		createModelManagerOptions: (config: ModelManagerConfig) => xaiGrokBuildModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: {
+			label: "xAI Grok Build",
+			oauthProvider: "xai-grok-build",
+		},
 	},
 	{
 		id: "xai-oauth",
