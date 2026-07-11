@@ -355,7 +355,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
 		};
 		return {
-			content: [{ type: "text", text: lines.join("\n").trimEnd() }],
+			content: [{ type: "text", text: lines.length > 0 ? lines.join("\n").trimEnd() : "No background jobs found." }],
 			details,
 			// A poll where everything is still running carries no new information
 			// once a later poll exists — same predicate the TUI uses to displace

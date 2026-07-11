@@ -1595,6 +1595,21 @@ function b() {
 	});
 
 	describe("JobTool", () => {
+		it("returns an explicit empty state when listing before any jobs exist", async () => {
+			const manager = new AsyncJobManager({
+				onJobComplete: async () => {},
+			});
+			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
+				asyncJobManager: manager,
+			});
+			const jobTool = new JobTool(session);
+
+			const result = await jobTool.execute("test-call-empty-list", { list: true });
+
+			expect(getTextOutput(result)).toContain("No background jobs");
+			expect(result.details).toEqual({ jobs: [] });
+		});
+
 		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
 			const manager = new AsyncJobManager({
 				onJobComplete: async () => {},
