@@ -507,6 +507,16 @@ export class Settings {
 		return this.#cwd;
 	}
 
+	/** Raw global settings layer (config.yml). Legacy pi-compat accessor. */
+	getGlobalSettings(): RawSettings {
+		return structuredClone(this.#global);
+	}
+
+	/** Raw project settings layer (.claude/settings.yml, etc). Legacy pi-compat accessor. */
+	getProjectSettings(): RawSettings {
+		return structuredClone(this.#project);
+	}
+
 	getAgentDir(): string {
 		return this.#agentDir;
 	}

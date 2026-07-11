@@ -363,7 +363,8 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 | `pkg.pi` manifest field                                          | `pkg.omp` preferred; fallback to `pkg.pi` remains                                                  |
 | `StringEnum` from `pi-ai`                                        | `Type.Enum` from the `pi.typebox` shim (or author the schema with `pi.zod`); `pi-ai` no longer exports `StringEnum` |
 | `formatSize` from `pi-coding-agent`                              | `formatBytes` from `@oh-my-pi/pi-utils`                                                            |
-| `DefaultResourceLoader` / `DefaultPackageManager` / `SettingsManager` / `createEventBus` | Capability-based discovery (`loadCapability(...)`) plus the `Settings` singleton and `EventBus` |
+| `DefaultResourceLoader` / `DefaultPackageManager` / `createEventBus` | Capability-based discovery (`loadCapability(...)`) plus the `Settings` singleton and `EventBus` |
+| `SettingsManager` | The `Settings` singleton, exposed through a legacy shim: `SettingsManager.create(cwd)` returns it synchronously and `Settings` now provides `getGlobalSettings()`/`getProjectSettings()` raw-layer accessors for pi extensions (e.g. `pi-vim`) that read arbitrary namespaced keys |
 
 ### Skip These Upstream Features
 

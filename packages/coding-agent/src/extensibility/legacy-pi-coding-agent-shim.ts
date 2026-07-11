@@ -19,7 +19,7 @@ import type { TSchema } from "@oh-my-pi/pi-ai";
 import { Text } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getProjectDir, parseFrontmatter as parseOmpFrontmatter } from "@oh-my-pi/pi-utils";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { type SettingPath, Settings } from "../config/settings";
+import { isSettingsInitialized, type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -646,8 +646,15 @@ export function createReadOnlyTools(cwd: string): ToolDefinition[] {
 }
 
 export const SettingsManager = {
-	create(cwd: string, agentDir?: string): Promise<Settings> {
-		return Settings.init({ cwd, agentDir });
+	/**
+	 * Legacy pi extensions call this synchronously and immediately read
+	 * getGlobalSettings()/getProjectSettings(). Upstream Pi's API is sync, so
+	 * return the initialized global singleton (already scoped to the session
+	 * cwd, which legacy callers pass as ctx.cwd) rather than a Promise. Falls
+	 * back to an isolated instance outside a live session.
+	 */
+	create(_cwd: string, _agentDir?: string): Settings {
+		return isSettingsInitialized() ? Settings.instance : Settings.isolated();
 	},
 
 	inMemory(): Settings {
