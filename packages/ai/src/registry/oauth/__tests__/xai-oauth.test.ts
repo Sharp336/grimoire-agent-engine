@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { OAuthError } from "../../../error";
+import { LoginCancelledError, OAuthError } from "../../../error";
 import type { FetchImpl } from "../../../types";
 import { getProviderDefinition, isOAuthOnlyProvider, PROVIDER_REGISTRY } from "../../registry";
 import { XAI_GROK_BUILD_CALLBACK_PORT } from "../../xai-grok-build";
@@ -58,10 +58,14 @@ function jsonResponse(body: unknown, status: number = 200): Response {
 	});
 }
 
+function createFetchMock(handler: FetchImpl) {
+	return vi.fn(handler);
+}
+
 function createDeviceFlowFetch(tokenResponses: readonly TokenResponse[]) {
 	const requests: RecordedRequest[] = [];
 	let tokenResponseIndex = 0;
-	const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+	const fetchMock = createFetchMock(async (input, init) => {
 		const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 		requests.push({ url, init });
 
@@ -83,7 +87,7 @@ function createDeviceFlowFetch(tokenResponses: readonly TokenResponse[]) {
 	});
 
 	return {
-		fetchMock: fetchMock as unknown as typeof fetch,
+		fetchMock,
 		requests,
 	};
 }
@@ -104,22 +108,22 @@ function buildDiscoveryResponse(): Response {
 	});
 }
 
-function createBuildFlowFetch(options?: { userinfo?: unknown; tokenStatus?: number }) {
+function createBuildFlowFetch(options?: { userinfo?: unknown; token?: unknown; tokenStatus?: number }) {
 	const requests: RecordedRequest[] = [];
-	const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+	const fetchMock = createFetchMock(async (input, init) => {
 		const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 		requests.push({ url, init });
 		if (url === DISCOVERY_URL) return buildDiscoveryResponse();
 		if (url === TOKEN_ENDPOINT) {
 			return jsonResponse(
-				{ access_token: "build-access", refresh_token: "build-refresh", expires_in: 3600 },
+				options?.token ?? { access_token: "build-access", refresh_token: "build-refresh", expires_in: 3600 },
 				options?.tokenStatus,
 			);
 		}
 		if (url === USERINFO_ENDPOINT) return jsonResponse(options?.userinfo ?? { sub: "account-42", email: "a@b.test" });
 		throw new Error(`Unexpected Build OAuth request: ${url}`);
 	});
-	return { fetchMock: fetchMock as unknown as typeof fetch, requests };
+	return { fetchMock, requests };
 }
 
 describe("isXAIAccessTokenExpiring", () => {
@@ -163,13 +167,11 @@ describe("validateXAIEndpoint", () => {
 
 describe("refreshXAIOAuthToken", () => {
 	it("rejects an empty refresh_token without making a network call", async () => {
-		const fetchMock = vi.fn(async () => {
+		const fetchMock = createFetchMock(async () => {
 			throw new Error("fetch should not be called when refresh_token is empty");
 		});
 
-		await expect(refreshXAIOAuthToken("", fetchMock as unknown as typeof fetch)).rejects.toThrow(
-			/missing refresh_token/,
-		);
+		await expect(refreshXAIOAuthToken("", fetchMock)).rejects.toThrow(/missing refresh_token/);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
@@ -219,6 +221,7 @@ describe("xAI Grok Build browser OAuth", () => {
 		}
 		const { fetchMock } = createBuildFlowFetch();
 		let callbackRequest: Promise<Response> | undefined;
+		const onPrompt = vi.fn(async () => "");
 
 		const credentials = await provider.login({
 			fetch: fetchMock,
@@ -232,33 +235,178 @@ describe("xAI Grok Build browser OAuth", () => {
 				expect(callbackUrl.port).toBe(String(provider.callbackPort));
 				callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
 			},
-			onPrompt: async () => {
-				throw new Error("Grok Build uses a loopback callback, not a prompt");
-			},
+			onPrompt,
 		});
 
 		await callbackRequest;
+		expect(onPrompt).toHaveBeenCalledWith(expect.objectContaining({ allowEmpty: true, secret: true }));
 		expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
 	});
 
-	it("refreshes through the provider with its stored refresh credential", async () => {
-		const provider = getProviderDefinition("xai-grok-build");
-		if (!provider?.refreshToken) throw new Error("xAI Grok Build provider must expose token refresh");
-		const { fetchMock, requests } = createBuildFlowFetch();
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	it("exchanges a trimmed pasted refresh token without starting browser callback OAuth", async () => {
+		const { fetchMock, requests } = createBuildFlowFetch({ userinfo: { sub: "pasted-account" } });
+		const onPrompt = vi.fn(async () => " \tpasted-refresh\n");
+		const onAuth = vi.fn();
+		const serveSpy = vi.spyOn(Bun, "serve");
 
-		const credentials = await provider.refreshToken({
-			access: "old-access",
-			refresh: "stored-build-refresh",
-			expires: 0,
-		});
+		const credentials = await loginXAIGrokBuild({ fetch: fetchMock, onPrompt, onAuth }, 0);
 
-		expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
-		expect(Object.fromEntries(requestForm(requests.find(request => request.url === TOKEN_ENDPOINT)))).toEqual({
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onPrompt).toHaveBeenCalledWith(
+			expect.objectContaining({ message: expect.stringContaining("refresh token"), allowEmpty: true, secret: true }),
+		);
+		expect(onAuth).not.toHaveBeenCalled();
+		expect(serveSpy).not.toHaveBeenCalled();
+		expect(requests.map(request => request.url)).toEqual([DISCOVERY_URL, TOKEN_ENDPOINT, USERINFO_ENDPOINT]);
+		expect(Object.fromEntries(requestForm(requests[1]))).toEqual({
 			grant_type: "refresh_token",
 			client_id: CLIENT_ID,
-			refresh_token: "stored-build-refresh",
+			refresh_token: "pasted-refresh",
 		});
+		expect(credentials).toMatchObject({
+			access: "build-access",
+			refresh: "build-refresh",
+			accountId: "pasted-account",
+		});
+		expect(credentials.email).toBeUndefined();
+	});
+
+	it("keeps the pasted refresh token when the pasted grant omits a replacement", async () => {
+		const { fetchMock, requests } = createBuildFlowFetch({
+			token: { access_token: "pasted-access", expires_in: 3600 },
+		});
+
+		const credentials = await loginXAIGrokBuild({ fetch: fetchMock, onPrompt: async () => "pasted-refresh" }, 0);
+
+		expect(credentials).toMatchObject({
+			access: "pasted-access",
+			refresh: "pasted-refresh",
+			accountId: "account-42",
+			email: "a@b.test",
+		});
+		expect(Object.fromEntries(requestForm(requests[1]))).toEqual({
+			grant_type: "refresh_token",
+			client_id: CLIENT_ID,
+			refresh_token: "pasted-refresh",
+		});
+	});
+
+	it("redacts invalid pasted-token diagnostics", async () => {
+		const refreshToken = "pasted-refresh-token\r\ninjected";
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+			if (url === TOKEN_ENDPOINT) {
+				return jsonResponse(
+					{
+						error: `${refreshToken}\u0000`,
+						error_description: `refresh failed for ${refreshToken}`,
+						debug: refreshToken,
+					},
+					400,
+				);
+			}
+			throw new Error(`Unexpected Build OAuth request: ${url}`);
+		};
+
+		try {
+			await loginXAIGrokBuild({ fetch: fetchMock, onPrompt: async () => refreshToken }, 0);
+			throw new Error("Expected pasted refresh token exchange to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OAuthError);
+			expect(error).toMatchObject({ kind: "token-refresh", provider: "xai-grok-build", status: 400 });
+			expect((error as Error).message).toBe("xAI token refresh failed: 400");
+			expect((error as Error).message).not.toContain(refreshToken);
+		}
+	});
+
+	it("reports cancellation before and during a pasted token fetch", async () => {
+		const beforePrompt = new AbortController();
+		const noFetch = createFetchMock(async () => {
+			throw new Error("cancelled login must not fetch");
+		});
+		const noPrompt = vi.fn(async () => "pasted-refresh");
+		beforePrompt.abort();
+		await expect(
+			loginXAIGrokBuild({ fetch: noFetch, onPrompt: noPrompt, signal: beforePrompt.signal }, 0),
+		).rejects.toBeInstanceOf(LoginCancelledError);
+		expect(noPrompt).not.toHaveBeenCalled();
+		expect(noFetch).not.toHaveBeenCalled();
+
+		const duringTokenFetch = new AbortController();
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+			if (url === TOKEN_ENDPOINT) {
+				expect(init?.signal).toBeDefined();
+				duringTokenFetch.abort();
+				throw new DOMException("The operation was aborted", "AbortError");
+			}
+			throw new Error(`Unexpected Build OAuth request: ${url}`);
+		};
+		await expect(
+			loginXAIGrokBuild(
+				{ fetch: fetchMock, onPrompt: async () => "pasted-refresh", signal: duringTokenFetch.signal },
+				0,
+			),
+		).rejects.toBeInstanceOf(LoginCancelledError);
+	});
+
+	it("uses token and userinfo endpoints for pasted credentials while browser login requires authorization", async () => {
+		for (const authorizationEndpoint of [undefined, "http://auth.x.ai/oauth2/authorize"]) {
+			const discovery = {
+				token_endpoint: TOKEN_ENDPOINT,
+				userinfo_endpoint: USERINFO_ENDPOINT,
+				...(authorizationEndpoint === undefined ? {} : { authorization_endpoint: authorizationEndpoint }),
+			};
+			const pasteRequests: string[] = [];
+			const pastedFetch: FetchImpl = async input => {
+				const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+				pasteRequests.push(url);
+				if (url === DISCOVERY_URL) return jsonResponse(discovery);
+				if (url === TOKEN_ENDPOINT) {
+					return jsonResponse({
+						access_token: "pasted-access",
+						refresh_token: "pasted-refresh",
+						expires_in: 3600,
+					});
+				}
+				if (url === USERINFO_ENDPOINT) return jsonResponse({ sub: "pasted-account" });
+				throw new Error(`Unexpected pasted Build OAuth request: ${url}`);
+			};
+
+			const credentials = await loginXAIGrokBuild({ fetch: pastedFetch, onPrompt: async () => "pasted-refresh" }, 0);
+			expect(credentials).toMatchObject({
+				access: "pasted-access",
+				refresh: "pasted-refresh",
+				accountId: "pasted-account",
+			});
+			expect(pasteRequests).toEqual([DISCOVERY_URL, TOKEN_ENDPOINT, USERINFO_ENDPOINT]);
+
+			const onAuth = vi.fn();
+			const browserFetch: FetchImpl = async input => {
+				const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+				if (url === DISCOVERY_URL) return jsonResponse(discovery);
+				throw new Error(`Browser OAuth must not request ${url} after invalid discovery`);
+			};
+			await expect(loginXAIGrokBuild({ fetch: browserFetch, onPrompt: async () => "", onAuth }, 0)).rejects.toThrow(
+				/authorization_endpoint/,
+			);
+			expect(onAuth).not.toHaveBeenCalled();
+		}
+	});
+
+	it("requires a userinfo endpoint before exchanging pasted credentials", async () => {
+		const fetchMock = createFetchMock(async input => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url === DISCOVERY_URL) return jsonResponse({ token_endpoint: TOKEN_ENDPOINT });
+			throw new Error(`Pasted OAuth must not request ${url} without userinfo discovery`);
+		});
+
+		await expect(loginXAIGrokBuild({ fetch: fetchMock, onPrompt: async () => "pasted-refresh" }, 0)).rejects.toThrow(
+			/missing userinfo_endpoint/,
+		);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("completes the discovery-driven PKCE loopback flow and records verified identity", async () => {
@@ -395,14 +543,14 @@ describe("xAI Grok Build browser OAuth", () => {
 
 	it("retains the existing refresh token when Build refresh omits a replacement", async () => {
 		const requests: RecordedRequest[] = [];
-		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const fetchMock = createFetchMock(async (input, init) => {
 			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 			requests.push({ url, init });
 			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
 			if (url === TOKEN_ENDPOINT) return jsonResponse({ access_token: "next-access", expires_in: 3600 });
 			throw new Error(`Unexpected refresh request: ${url}`);
 		});
-		const credentials = await refreshXAIGrokBuildToken("existing-refresh", fetchMock as unknown as typeof fetch);
+		const credentials = await refreshXAIGrokBuildToken("existing-refresh", fetchMock);
 		expect(credentials.refresh).toBe("existing-refresh");
 		expect(Object.fromEntries(requestForm(requests[1]))).toEqual({
 			grant_type: "refresh_token",
@@ -413,7 +561,7 @@ describe("xAI Grok Build browser OAuth", () => {
 
 	it("labels Build refresh transport failures", async () => {
 		const transportFailure = new Error("connection reset");
-		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+		const fetchMock = createFetchMock(async input => {
 			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
 			if (url === TOKEN_ENDPOINT) throw transportFailure;
@@ -421,7 +569,7 @@ describe("xAI Grok Build browser OAuth", () => {
 		});
 
 		try {
-			await refreshXAIGrokBuildToken("build-refresh", fetchMock as unknown as typeof fetch);
+			await refreshXAIGrokBuildToken("build-refresh", fetchMock);
 			throw new Error("Expected Build refresh to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(OAuthError);

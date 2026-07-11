@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added browser OAuth, OAuth-only credential isolation, and stable Responses request identity for the `xai-grok-build` provider.
+- Added browser OAuth, masked refresh-token paste login, OAuth-only credential isolation, and stable Responses request identity for the `xai-grok-build` provider.
 ### Fixed
 
 - Healed GLM in-band tool calls whose `<arg_value>` closer is missing or mistyped as `</arg_key>`; the scanner now ends the value at the next-pair signature instead of swallowing the remaining arguments into one field.

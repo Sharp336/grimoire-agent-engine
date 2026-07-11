@@ -52,7 +52,7 @@ When a model has no credentials, `omp` tells you to run `/login` or set the prov
 
 ### xAI Grok Build
 
-`xai-grok-build` is separate from the existing `xai` and `xai-oauth` providers. Authenticate it with `/login xai-grok-build`; the login opens a browser OAuth flow and stores the resulting credential under the `xai-grok-build` provider ID in OMP's auth store.
+`xai-grok-build` is separate from the existing `xai` and `xai-oauth` providers. Authenticate it with `/login xai-grok-build`; the login first offers a masked prompt for an existing Grok Build OAuth refresh token, while blank input opens the browser OAuth flow. Either path stores the resulting credential under the `xai-grok-build` provider ID in OMP's auth store.
 
 Only that stored OAuth credential can authenticate the provider. `xai-grok-build` refuses API keys from every source, including `XAI_API_KEY`, runtime overrides, `models.yml`, and stored API-key credentials. Those sources continue to work as documented for `xai` and `xai-oauth`.
 
