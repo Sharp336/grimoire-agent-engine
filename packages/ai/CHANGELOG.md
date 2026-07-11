@@ -2,10 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Neuralwatt provider descriptor, OpenAI-compatible model manager options with metadata-driven discovery, and generated `models.json` entries.
+
+### Changed
+
+- Changed `isGlm52ReasoningEffortDialect` to gate on `model.reasoning`, preventing non-reasoning GLM fast aliases from receiving the inflated reasoning output clamp.
+- Changed Neuralwatt OpenAI-format caller-disable path to emit `reasoning_effort: "minimal"` (thinking-off) regardless of the exposed effort ladder, preserving the documented disable behavior after narrowing to `[High, Max]`.
+
 ## [16.4.5] - 2026-07-11
 
 ### Fixed
 
+- Neuralwatt GLM/Kimi reasoning requests no longer emit the Z.ai top-level `thinking` body; reasoning-content replay and GLM request limits are preserved.
+- Healed GLM in-band tool calls whose `<arg_value>` closer is missing or mistyped as `</arg_key>`; the scanner now ends the value at the next-pair signature instead of swallowing the remaining arguments into one field.
+- Healed the same `arg_key`/`arg_value` spill when it arrives through native tool calling (provider parses the in-band syntax server-side): as a last resort after validation and coercion fail, contaminated string arguments are split at the spill boundary and the swallowed pairs restored.
 - Fixed an issue in GLM tool calling where missing or malformed argument closers (such as `<arg_value>` mistyped as `</arg_key>`) caused subsequent arguments to be swallowed or merged into a single field, affecting both in-band and native tool calling.
 
 ## [16.4.3] - 2026-07-11
@@ -131,6 +143,9 @@
 
 - Fixed Ollama/Ollama Cloud EOS-only completions to retry empty stops with a single output token before the agent loop can halt silently. ([#4659](https://github.com/can1357/oh-my-pi/issues/4659))
 - Fixed Claude Sonnet 5 failing every request on feature-gated gateways (Azure Foundry, OpenAI-compatible relays) that reject strict tools with "structured_outputs not supported" — the rejection is now classified as a strict-tool rejection, so the request retries without strict tools and the session remembers the downgrade.
+### Added
+
+- Added Neuralwatt provider descriptor, OpenAI-compatible model manager options with metadata-driven discovery, and generated `models.json` entries.
 
 ## [16.3.7] - 2026-07-05
 

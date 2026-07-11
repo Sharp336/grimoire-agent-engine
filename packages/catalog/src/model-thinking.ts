@@ -136,7 +136,7 @@ export function resolveModelThinking<TApi extends Api>(
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
-	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	if (omitsWireReasoningEffort(spec, compat)) return undefined;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
@@ -225,19 +225,25 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 }
 
 /**
- * True when the model reasons natively but rejects the wire `reasoning.effort`
- * param. Scoped to openai-responses* because that's the only API surface where
- * `compat.supportsReasoningEffort: false` means "omit the field entirely"
- * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
- * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
- * without effort support — binary thinking formats (zai/qwen) drive reasoning
- * through other request fields.
+ * True when the model reasons natively but has no usable effort control
+ * surface. Responses APIs omit their unsupported reasoning.effort field
+ * globally; Neuralwatt chat-completions models need an explicit provider
+ * guard because their mapper uses the OpenAI dialect while the endpoint
+ * reports no reasoning_effort support. Other chat-completions providers can
+ * use mandatory or alternate thinking behavior and must not be generalized.
  */
-function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
-		return false;
+function omitsWireReasoningEffort<TApi extends Api>(spec: ModelSpec<TApi>, compat: CompatOf<TApi>): boolean {
+	if (
+		spec.api === "openai-responses" ||
+		spec.api === "openai-codex-responses" ||
+		spec.api === "azure-openai-responses"
+	) {
+		return (compat as ResolvedOpenAIResponsesCompat).supportsReasoningEffort === false;
 	}
-	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
+
+	if (spec.api !== "openai-completions" || spec.provider !== "neuralwatt") return false;
+	const resolved = compat as ResolvedOpenAICompat;
+	return resolved.thinkingFormat === "openai" && resolved.supportsReasoningEffort === false;
 }
 
 function inferEffortMap<TApi extends Api>(
@@ -306,8 +312,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 		// live endpoints):
 		//   - Z.ai/Zhipu ("zai" dialect) expose only high/max ("none" is the
 		//     thinking-off state, not a user tier).
-		//   - Umans, Ollama Cloud, and Baseten serve the same two-tier
-		//     high/max scale on their GLM-5.2 routes.
+		//   - Umans, Ollama Cloud, Baseten, and Neuralwatt serve the same
+		//     two-tier high/max scale on their GLM-5.2 routes.
 		//   - OpenRouter rejects `max` — `xhigh` IS its top tier.
 		//   - Other openai-compat hosts (Fireworks, resellers) pass the
 		//     default lower tiers through verbatim and expose the genuine
@@ -320,7 +326,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isZaiThinkingFormat(compat) ||
 			isUmansGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
-			spec.provider === "baseten"
+			spec.provider === "baseten" ||
+			spec.provider === "neuralwatt"
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

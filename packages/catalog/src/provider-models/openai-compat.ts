@@ -14,7 +14,15 @@ import {
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -1470,6 +1478,146 @@ export function zhipuCodingPlanModelManagerOptions(
 								thinkingFormat: "zai",
 								reasoningContentField: "reasoning_content",
 								supportsDeveloperRole: false,
+							},
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 6.8 Neuralwatt
+// ---------------------------------------------------------------------------
+
+interface NeuralwattMetadataCapabilities {
+	reasoning?: boolean;
+	reasoning_effort?: boolean;
+	vision?: boolean;
+	developer_role?: boolean;
+}
+
+interface NeuralwattMetadataLimits {
+	max_context_length?: number | null;
+	max_output_tokens?: number | null;
+}
+
+interface NeuralwattMetadataPricing {
+	input_per_million?: number;
+	output_per_million?: number;
+	cached_input_per_million?: number | null;
+}
+
+interface NeuralwattMetadata {
+	capabilities?: NeuralwattMetadataCapabilities;
+	limits?: NeuralwattMetadataLimits;
+	pricing?: NeuralwattMetadataPricing;
+}
+
+/**
+ * Neuralwatt's `/v1/models` returns a provider-specific `metadata` block with
+ * pricing, capabilities, and limits (see portal.neuralwatt.com/docs/api/models).
+ * Narrow each level at runtime — the OpenAI-compatible discovery path treats
+ * every record as `OpenAICompatibleModelRecord` (an index signature), so we
+ * must validate the shape before reading.
+ */
+function readNeuralwattMetadata(entry: OpenAICompatibleModelRecord): NeuralwattMetadata | undefined {
+	const raw = entry.metadata;
+	if (!isRecord(raw)) return undefined;
+	const capabilitiesRaw = raw.capabilities;
+	const limitsRaw = raw.limits;
+	const pricingRaw = raw.pricing;
+	const capabilities: NeuralwattMetadataCapabilities | undefined = isRecord(capabilitiesRaw)
+		? {
+				reasoning: toBoolean(capabilitiesRaw.reasoning),
+				reasoning_effort: toBoolean(capabilitiesRaw.reasoning_effort),
+				vision: toBoolean(capabilitiesRaw.vision),
+				developer_role: toBoolean(capabilitiesRaw.developer_role),
+			}
+		: undefined;
+	const limits: NeuralwattMetadataLimits | undefined = isRecord(limitsRaw)
+		? {
+				max_context_length: toPositiveNumberOrNull(limitsRaw.max_context_length),
+				max_output_tokens: toPositiveNumberOrNull(limitsRaw.max_output_tokens),
+			}
+		: undefined;
+	const pricing: NeuralwattMetadataPricing | undefined = isRecord(pricingRaw)
+		? {
+				input_per_million: toNumber(pricingRaw.input_per_million),
+				output_per_million: toNumber(pricingRaw.output_per_million),
+				cached_input_per_million: toNumber(pricingRaw.cached_input_per_million),
+			}
+		: undefined;
+	return { capabilities, limits, pricing };
+}
+
+export interface NeuralwattModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function neuralwattModelManagerOptions(
+	config?: NeuralwattModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.neuralwatt.com/v1";
+	return {
+		providerId: "neuralwatt",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "neuralwatt",
+					baseUrl,
+					apiKey,
+					mapModel: (
+						entry: OpenAICompatibleModelRecord,
+						defaults: ModelSpec<"openai-completions">,
+						_context: OpenAICompatibleModelMapperContext<"openai-completions">,
+					): ModelSpec<"openai-completions"> => {
+						const metadata = readNeuralwattMetadata(entry);
+						const capabilities = metadata?.capabilities;
+						const isReasoning =
+							capabilities?.reasoning ?? (isReasoningGlmModelId(defaults.id) || isKimiModelId(defaults.id));
+						const isKimi = isKimiModelId(defaults.id);
+						const isVision = capabilities?.vision ?? false;
+						const limits = metadata?.limits;
+						const pricing = metadata?.pricing;
+						const flexBaseId = defaults.id.endsWith("-flex") ? defaults.id.slice(0, -5) : undefined;
+						const extraBody: Record<string, unknown> | undefined = (() => {
+							const parts: Record<string, unknown> = {};
+							if (isKimi) {
+								parts.chat_template_kwargs = { preserve_thinking: true };
+							}
+							if (flexBaseId) {
+								parts.model = flexBaseId;
+								parts.service_tier = "flex";
+							}
+							return Object.keys(parts).length > 0 ? parts : undefined;
+						})();
+						return {
+							...defaults,
+							reasoning: isReasoning,
+							input: isVision ? (["text", "image"] as const) : ["text"],
+							cost: {
+								input: pricing?.input_per_million ?? defaults.cost.input,
+								output: pricing?.output_per_million ?? defaults.cost.output,
+								cacheRead: pricing?.cached_input_per_million ?? defaults.cost.cacheRead,
+								cacheWrite: defaults.cost.cacheWrite,
+							},
+							contextWindow: limits?.max_context_length ?? defaults.contextWindow,
+							maxTokens: limits?.max_output_tokens ?? limits?.max_context_length ?? defaults.maxTokens,
+							compat: {
+								thinkingFormat: "openai",
+								supportsDeveloperRole: capabilities?.developer_role ?? false,
+								supportsReasoningEffort: (capabilities?.reasoning_effort ?? false) && isReasoning,
+								maxTokensField: "max_tokens" as const,
+								reasoningContentField: "reasoning_content" as const,
+								requiresReasoningContentForToolCalls: isReasoning,
+								...(extraBody && { extraBody }),
 							},
 						};
 					},
