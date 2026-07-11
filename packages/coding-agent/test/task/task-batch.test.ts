@@ -345,6 +345,89 @@ describe("task.batch validation", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(taskTreeBudget.snapshot().spawns).toBe(1);
 	});
+
+	it("discovers an agent added after the tool is created", async () => {
+		let agents = [taskAgent];
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => ({
+			agents,
+			projectAgentsDir: null,
+		}));
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("dynamic"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false, "async.enabled": false } }));
+
+		agents = [
+			...agents,
+			{
+				name: "dynamic",
+				description: "Created during this session",
+				systemPrompt: "You are dynamic.",
+				source: "project",
+			},
+		];
+		const result = await tool.execute("tool-call-dynamic", { agent: "dynamic", task: "Run dynamic work." });
+
+		expect(getFirstText(result)).toContain("All done.");
+		expect(runSpy).toHaveBeenCalledWith(expect.objectContaining({ agent: expect.objectContaining({ name: "dynamic" }) }));
+	});
+
+	it("releases a queued sync spawn reservation when cancellation prevents execution", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 2 });
+		let allowFirstToFinish!: () => void;
+		const firstRunning = Promise.withResolvers<void>();
+		const firstFinished = new Promise<void>(resolve => {
+			allowFirstToFinish = resolve;
+		});
+		let calls = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			calls += 1;
+			if (calls === 1) {
+				firstRunning.resolve();
+				await firstFinished;
+			}
+			return makeResult(options.id ?? `spawn-${calls}`);
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, "async.enabled": false, "task.maxConcurrency": 1 },
+				taskTreeBudget,
+			}),
+		);
+
+		const first = tool.execute("tool-call-first", { agent: "task", task: "Hold the only slot." });
+		await firstRunning.promise;
+		const controller = new AbortController();
+		const cancelled = tool.execute("tool-call-cancelled", { agent: "task", task: "Never start." }, controller.signal);
+		controller.abort();
+		await expect(cancelled).rejects.toThrow();
+		expect(taskTreeBudget.snapshot().spawns).toBe(1);
+
+		allowFirstToFinish();
+		await first;
+		const later = await tool.execute("tool-call-later", { agent: "task", task: "Uses released capacity." });
+		expect(getFirstText(later)).toContain("All done.");
+		expect(calls).toBe(2);
+		expect(taskTreeBudget.snapshot().spawns).toBe(2);
+	});
+
+	it("releases spawn capacity when sync child-id allocation fails", async () => {
+		mockDiscovery();
+		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
+		const outputManager = { allocate: vi.fn().mockRejectedValue(new Error("allocation failed")) };
+		const tool = await TaskTool.create(
+			{
+				...createSession({
+					settings: { "task.batch": false, "async.enabled": false },
+					taskTreeBudget,
+				}),
+				agentOutputManager: outputManager,
+			} as ToolSession,
+		);
+
+		const result = await tool.execute("tool-call-allocation", { agent: "task", task: "Cannot allocate." });
+		expect(getFirstText(result)).toContain("Task execution failed");
+		expect(taskTreeBudget.snapshot().spawns).toBe(0);
+	});
 });
 
 describe("task.batch spawning", () => {
