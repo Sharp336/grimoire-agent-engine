@@ -122,8 +122,16 @@ describe("AuthStorage credential block persistence", () => {
 				blockedUntilMs: FUTURE_BLOCK_MS,
 			});
 
+			// `updatedAtMs` is the row's DB write time (issue #4980: same-deadline
+			// refreshes must be observable), so only its presence is asserted.
 			expect(storage.listCredentialBlocks([row.id])).toEqual([
-				{ credentialId: row.id, providerKey: PROVIDER_KEY, blockScope: "tier:fable", blockedUntilMs: longerBlock },
+				{
+					credentialId: row.id,
+					providerKey: PROVIDER_KEY,
+					blockScope: "tier:fable",
+					blockedUntilMs: longerBlock,
+					updatedAtMs: expect.any(Number),
+				},
 			]);
 		} finally {
 			storage.close();
@@ -157,6 +165,7 @@ describe("AuthStorage credential block persistence", () => {
 					providerKey: PROVIDER_KEY,
 					blockScope: "tier:fable",
 					blockedUntilMs: FUTURE_BLOCK_MS,
+					updatedAtMs: expect.any(Number),
 				},
 			]);
 
@@ -203,7 +212,7 @@ describe("AuthStorage credential block persistence", () => {
 		}
 	});
 
-	it("migrates a v4 auth database to v5 without dropping credential rows", async () => {
+	it("migrates a v4 auth database to current version 6 without dropping credential rows", async () => {
 		const legacyDb = new Database(dbPath);
 		legacyDb.run(`
 			CREATE TABLE auth_schema_version (
@@ -248,7 +257,7 @@ describe("AuthStorage credential block persistence", () => {
 			const rows = migratedStore.listAuthCredentials(PROVIDER);
 			expect(rows).toHaveLength(1);
 			expect(rows[0]!.credential).toMatchObject({ type: "oauth", access: "legacy-access" });
-			expect(readAuthSchemaVersion(dbPath)).toBe(5);
+			expect(readAuthSchemaVersion(dbPath)).toBe(6);
 			expect(tableExists(dbPath, "auth_credential_blocks")).toBe(true);
 		} finally {
 			migratedStore.close();

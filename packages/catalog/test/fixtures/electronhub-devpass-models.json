@@ -29,7 +29,7 @@
       "name": "Google: Gemma 4 31B (DevPass)",
       "object": "model",
       "owned_by": "google",
-      "tokens": 262000,
+      "tokens": 200000,
       "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
       "premium_model": false,
       "pricing": {
@@ -51,7 +51,7 @@
       "name": "Alibaba: Qwen3.6 27B (DevPass)",
       "object": "model",
       "owned_by": "alibaba",
-      "tokens": 1000000,
+      "tokens": 262000,
       "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
       "premium_model": false,
       "pricing": {
@@ -119,7 +119,7 @@
       "name": "ZhipuAI: GLM 5.2 (DevPass)",
       "object": "model",
       "owned_by": "zhipuai",
-      "tokens": 400000,
+      "tokens": 200000,
       "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages"],
       "premium_model": false,
       "pricing": {

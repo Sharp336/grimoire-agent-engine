@@ -71,12 +71,14 @@ function makeEntry(
 		functionCall?: boolean;
 		devpassOnly?: boolean;
 		devpassPlan?: boolean;
+		tokens?: number;
 	} = {},
 ) {
 	return {
 		id,
 		object: "model",
 		context_length: 100000,
+		...(opts.tokens !== undefined && { tokens: opts.tokens }),
 		metadata: {
 			vision: opts.vision ?? false,
 			reasoning: opts.reasoning ?? false,
@@ -114,9 +116,9 @@ describe("ElectronHub dynamic discovery", () => {
 
 	it("maps live metadata: vision → image input, reasoning always true for DevPass", async () => {
 		const fetchMock = mockElectronHubModelsResponse([
-			makeEntry("glm-5.2:dev", { reasoning: true, functionCall: true, vision: false }),
-			makeEntry("gemma-4-31b-it:dev", { reasoning: true, functionCall: true, vision: true }),
-			makeEntry("qwen3.6-27b:dev", { reasoning: false, functionCall: true, vision: true }),
+			makeEntry("glm-5.2:dev", { reasoning: true, functionCall: true, vision: false, tokens: 200000 }),
+			makeEntry("gemma-4-31b-it:dev", { reasoning: true, functionCall: true, vision: true, tokens: 200000 }),
+			makeEntry("qwen3.6-27b:dev", { reasoning: false, functionCall: true, vision: true, tokens: 262000 }),
 		]);
 
 		const manager = createModelManager(electronHubModelManagerOptions({ apiKey: "ek-dev_test", fetch: fetchMock }));
@@ -127,16 +129,21 @@ describe("ElectronHub dynamic discovery", () => {
 		expect(glm).toBeDefined();
 		expect(glm!.reasoning).toBe(true);
 		expect(glm!.input).toEqual(["text"]);
+		// Resolver reads entry.tokens (not context_length) — guard against
+		// the stale 400k that was in the fixture and static seed.
+		expect(glm!.contextWindow).toBe(200000);
 
 		const gemma = byId.get("gemma-4-31b-it:dev");
 		expect(gemma).toBeDefined();
 		expect(gemma!.reasoning).toBe(true);
 		expect(gemma!.input).toEqual(["text", "image"]);
+		expect(gemma!.contextWindow).toBe(200000);
 
 		const qwen = byId.get("qwen3.6-27b:dev");
 		expect(qwen).toBeDefined();
 		expect(qwen!.reasoning).toBe(true);
 		expect(qwen!.input).toEqual(["text", "image"]);
+		expect(qwen!.contextWindow).toBe(262000);
 	});
 });
 
@@ -164,6 +171,15 @@ describe("ElectronHub DevPass static seed mirrors live /v1/models", () => {
 			expect(
 				typeof pricing === "object" && pricing !== null && "plan" in pricing && pricing.plan === "devpass",
 			).toBe(true);
+		}
+	});
+
+	it("static seed contextWindow matches live fixture tokens for every model", () => {
+		const liveTokens = new Map(liveEntries.map(e => [e.id as string, e.tokens as number | undefined]));
+		for (const seed of ELECTRONHUB_DEVPASS_STATIC_MODELS) {
+			const live = liveTokens.get(seed.id);
+			expect(live).toBeDefined();
+			expect(seed.contextWindow).toBe(live ?? null);
 		}
 	});
 });
