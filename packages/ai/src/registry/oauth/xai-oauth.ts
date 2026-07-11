@@ -404,9 +404,10 @@ class XAIGrokBuildOAuthFlow extends OAuthCallbackFlow {
 		discovery: XAIOAuthDiscovery,
 		pkce: { verifier: string; challenge: string },
 		fetchImpl: FetchImpl,
+		callbackPort: number,
 	) {
 		super(ctrl, {
-			preferredPort: 0,
+			preferredPort: callbackPort,
 			callbackHostname: "127.0.0.1",
 			callbackPath: "/callback",
 		});
@@ -526,12 +527,12 @@ class XAIGrokBuildOAuthFlow extends OAuthCallbackFlow {
 	}
 }
 
-export async function loginXAIGrokBuild(ctrl: OAuthController): Promise<OAuthCredentials> {
+export async function loginXAIGrokBuild(ctrl: OAuthController, callbackPort: number): Promise<OAuthCredentials> {
 	const fetchImpl = ctrl.fetch ?? fetch;
 	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl, XAI_GROK_BUILD_PROVIDER, true);
 	const pkce = await generatePKCE();
 	try {
-		return await new XAIGrokBuildOAuthFlow(ctrl, discovery, pkce, fetchImpl).login();
+		return await new XAIGrokBuildOAuthFlow(ctrl, discovery, pkce, fetchImpl, callbackPort).login();
 	} catch (error) {
 		if (error instanceof AIError.OAuthError || error instanceof AIError.LoginCancelledError) throw error;
 		throw new AIError.OAuthError(error instanceof Error ? error.message : String(error), {

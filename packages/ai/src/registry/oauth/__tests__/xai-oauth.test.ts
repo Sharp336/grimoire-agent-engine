@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { OAuthError } from "../../../error";
 import type { FetchImpl } from "../../../types";
 import { getProviderDefinition, isOAuthOnlyProvider, PROVIDER_REGISTRY } from "../../registry";
+import { XAI_GROK_BUILD_CALLBACK_PORT } from "../../xai-grok-build";
 import { getOAuthProviders } from "../index";
 import {
 	isXAIAccessTokenExpiring,
@@ -203,12 +204,61 @@ describe("xAI Grok Build browser OAuth", () => {
 			oauthOnly: true,
 		});
 		expect(getProviderDefinition("xai-grok-build")?.storeCredentialsAs).toBeUndefined();
-		expect(getProviderDefinition("xai-grok-build")?.callbackPort).toBeUndefined();
+		expect(getProviderDefinition("xai-grok-build")?.callbackPort).toBe(XAI_GROK_BUILD_CALLBACK_PORT);
 		expect(isOAuthOnlyProvider("xai-grok-build")).toBe(true);
 		expect(isOAuthOnlyProvider("xai-oauth")).toBe(false);
 		expect(getOAuthProviders().filter(provider => provider.id === "xai-grok-build")).toEqual([
 			{ id: "xai-grok-build", name: "xAI Grok Build", available: true, storeCredentialsAs: undefined },
 		]);
+	});
+
+	it("uses its registered callback port for the actual loopback redirect", async () => {
+		const provider = getProviderDefinition("xai-grok-build");
+		if (!provider?.login || provider.callbackPort === undefined) {
+			throw new Error("xAI Grok Build provider must expose login and callback port");
+		}
+		const { fetchMock } = createBuildFlowFetch();
+		let callbackRequest: Promise<Response> | undefined;
+
+		const credentials = await provider.login({
+			fetch: fetchMock,
+			onAuth: info => {
+				const authorizationUrl = new URL(info.url);
+				const redirectUri = authorizationUrl.searchParams.get("redirect_uri");
+				const state = authorizationUrl.searchParams.get("state");
+				if (!redirectUri || !state) throw new Error("Missing callback parameters");
+				const callbackUrl = new URL(redirectUri);
+				expect(callbackUrl.hostname).toBe("127.0.0.1");
+				expect(callbackUrl.port).toBe(String(provider.callbackPort));
+				callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+			},
+			onPrompt: async () => {
+				throw new Error("Grok Build uses a loopback callback, not a prompt");
+			},
+		});
+
+		await callbackRequest;
+		expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
+	});
+
+	it("refreshes through the provider with its stored refresh credential", async () => {
+		const provider = getProviderDefinition("xai-grok-build");
+		if (!provider?.refreshToken) throw new Error("xAI Grok Build provider must expose token refresh");
+		const { fetchMock, requests } = createBuildFlowFetch();
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		const credentials = await provider.refreshToken({
+			access: "old-access",
+			refresh: "stored-build-refresh",
+			expires: 0,
+		});
+
+		expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
+		expect(Object.fromEntries(requestForm(requests.find(request => request.url === TOKEN_ENDPOINT)))).toEqual({
+			grant_type: "refresh_token",
+			client_id: CLIENT_ID,
+			refresh_token: "stored-build-refresh",
+		});
 	});
 
 	it("completes the discovery-driven PKCE loopback flow and records verified identity", async () => {
@@ -218,16 +268,19 @@ describe("xAI Grok Build browser OAuth", () => {
 		let authorizeUrl: URL | undefined;
 		let callbackRequest: Promise<Response> | undefined;
 
-		const credentials = await loginXAIGrokBuild({
-			fetch: fetchMock,
-			onAuth: info => {
-				authorizeUrl = new URL(info.url);
-				const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
-				const state = authorizeUrl.searchParams.get("state");
-				if (!redirectUri || !state) throw new Error("Missing redirect_uri or state");
-				callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+		const credentials = await loginXAIGrokBuild(
+			{
+				fetch: fetchMock,
+				onAuth: info => {
+					authorizeUrl = new URL(info.url);
+					const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
+					const state = authorizeUrl.searchParams.get("state");
+					if (!redirectUri || !state) throw new Error("Missing redirect_uri or state");
+					callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+				},
 			},
-		});
+			0,
+		);
 		await callbackRequest;
 		if (!authorizeUrl) throw new Error("Authorization URL was not published");
 
@@ -293,19 +346,22 @@ describe("xAI Grok Build browser OAuth", () => {
 		const controller = new AbortController();
 		const { fetchMock, requests } = createBuildFlowFetch();
 		let wrongCallback: Promise<Response> | undefined;
-		const login = loginXAIGrokBuild({
-			fetch: fetchMock,
-			signal: controller.signal,
-			onAuth: info => {
-				const authUrl = new URL(info.url);
-				const redirectUri = authUrl.searchParams.get("redirect_uri");
-				if (!redirectUri) throw new Error("Missing redirect_uri");
-				wrongCallback = fetch(`${redirectUri}?code=build-code&state=wrong-state`).then(response => {
-					controller.abort("test complete");
-					return response;
-				});
+		const login = loginXAIGrokBuild(
+			{
+				fetch: fetchMock,
+				signal: controller.signal,
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					const redirectUri = authUrl.searchParams.get("redirect_uri");
+					if (!redirectUri) throw new Error("Missing redirect_uri");
+					wrongCallback = fetch(`${redirectUri}?code=build-code&state=wrong-state`).then(response => {
+						controller.abort("test complete");
+						return response;
+					});
+				},
 			},
-		});
+			0,
+		);
 		await expect(login).rejects.toThrow(/State mismatch|CSRF/i);
 		expect((await wrongCallback)?.ok).toBe(false);
 		expect(requests.some(request => request.url === TOKEN_ENDPOINT)).toBe(false);
@@ -315,16 +371,19 @@ describe("xAI Grok Build browser OAuth", () => {
 		const { fetchMock } = createBuildFlowFetch({ userinfo: { email: "a@b.test" } });
 		let callbackRequest: Promise<Response> | undefined;
 		try {
-			await loginXAIGrokBuild({
-				fetch: fetchMock,
-				onAuth: info => {
-					const authUrl = new URL(info.url);
-					const redirectUri = authUrl.searchParams.get("redirect_uri");
-					const state = authUrl.searchParams.get("state");
-					if (!redirectUri || !state) throw new Error("Missing callback parameters");
-					callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+			await loginXAIGrokBuild(
+				{
+					fetch: fetchMock,
+					onAuth: info => {
+						const authUrl = new URL(info.url);
+						const redirectUri = authUrl.searchParams.get("redirect_uri");
+						const state = authUrl.searchParams.get("state");
+						if (!redirectUri || !state) throw new Error("Missing callback parameters");
+						callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+					},
 				},
-			});
+				0,
+			);
 			throw new Error("Expected login to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(OAuthError);
