@@ -678,12 +678,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		const params = repairTaskParams(rawParams as TaskParams);
-		// Schema defaults fill `agent` for model calls, but internal callers
-		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
-		// item's agent type against the session's actual default agent.
+		const repaired = repairTaskParams(rawParams as TaskParams);
+		// Schema defaults run for model calls, but internal callers and stale
+		// transcripts can bypass arktype. Normalize once so every downstream path
+		// sees the session's actual default agent.
 		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
 		const defaultAgent = spawnPolicy.defaultAgent;
+		const params =
+			typeof repaired.agent === "string" && repaired.agent.trim() !== ""
+				? repaired
+				: { ...repaired, agent: defaultAgent };
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {

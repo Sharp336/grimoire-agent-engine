@@ -296,9 +296,9 @@ describe("task.batch validation", () => {
 			agent: "task",
 			context: "Shared.",
 			tasks: [
-				{ id: "A", assignment: "Work A." },
-				{ id: "B", assignment: "Work B." },
-				{ id: "C", assignment: "Work C." },
+				{ id: "A", task: "Work A." },
+				{ id: "B", task: "Work B." },
+				{ id: "C", task: "Work C." },
 			],
 		});
 
@@ -331,7 +331,7 @@ describe("task.batch validation", () => {
 
 		const denied = await tool.execute("tool-call-denied", {
 			agent: "task",
-			assignment: "Denied.",
+			task: "Denied.",
 		});
 		expect(getFirstText(denied)).toContain("Cannot spawn 'task'");
 		expect(taskTreeBudget.snapshot().spawns).toBe(0);
@@ -339,7 +339,7 @@ describe("task.batch validation", () => {
 		spawnPolicy = "*";
 		const allowed = await tool.execute("tool-call-allowed", {
 			agent: "task",
-			assignment: "Allowed.",
+			task: "Allowed.",
 		});
 		expect(getFirstText(allowed)).toContain("All done.");
 		expect(runSpy).toHaveBeenCalledTimes(1);
@@ -550,7 +550,7 @@ describe("task.batch spawning", () => {
 
 		const result = await tool.execute("tc-disposed", {
 			agent: "task",
-			assignment: "Do work.",
+			task: "Do work.",
 		});
 
 		expect(getFirstText(result)).toContain("Failed to start background task job");
