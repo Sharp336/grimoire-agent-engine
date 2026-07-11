@@ -75,6 +75,10 @@ eval "$(omp completions bash)"
 omp completions fish > ~/.config/fish/completions/omp.fish
 ```
 
+### Loop engineering
+
+`omp loop` adds durable loop specs for recurring one-shot agent runs: initialize `.omp/loops/*.loop.yaml`, check readiness, run one scheduled-safe iteration, execute verifier commands, and append JSONL/Markdown run logs. See [docs/loop-engineering.md](docs/loop-engineering.md).
+
 ## Every tool, _benchmaxxed_.
 
 Edits that land on the first attempt. Reads that summarize files instead of dumping their content. Searches that return instantly. Pick any model — omp will get it right.

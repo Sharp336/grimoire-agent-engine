@@ -1,22 +1,44 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getPluginsDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const TOOL_NAME = "legacy-multi-file-tool";
+const XDG_VARS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
 
 describe("issue #983: multi-file legacy Pi extensions", () => {
 	const tempDirs: string[] = [];
+	const originalAgentDir = getAgentDir();
+	const originalXdg = new Map<string, string | undefined>();
 
 	afterEach(async () => {
+		spyOn(os, "homedir").mockRestore();
+		for (const [key, value] of originalXdg) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		originalXdg.clear();
+		setAgentDir(originalAgentDir);
 		await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 	});
 
 	it("loads legacy Pi extensions whose sibling TypeScript files import each other via relative paths", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-983-project-"));
 		tempDirs.push(projectDir);
+		const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-983-home-"));
+		tempDirs.push(tempHome);
+		for (const key of XDG_VARS) {
+			originalXdg.set(key, process.env[key]);
+			delete process.env[key];
+		}
+		spyOn(os, "homedir").mockReturnValue(tempHome);
+		setAgentDir(path.join(tempHome, ".omp", "agent"));
+		const pluginsDir = getPluginsDir();
+		if (!pluginsDir.startsWith(tempHome + path.sep)) {
+			throw new Error(`plugin isolation failed: getPluginsDir() resolved outside the temp home: ${pluginsDir}`);
+		}
 		const extensionDir = path.join(projectDir, "legacy-pi-multi-file-extension");
 
 		await fs.mkdir(extensionDir, { recursive: true });
