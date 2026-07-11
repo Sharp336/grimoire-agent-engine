@@ -350,6 +350,30 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		expect(mod.hasZod).toBe(true);
 	});
 
+	it("loads relative CommonJS helpers through createRequire without async hooks", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "create-require-ext", version: "1.0.0", type: "module" }),
+			"hooks/config.js": [
+				'const nested = require("./nested.js");',
+				'module.exports = { mode: "full", nested };',
+			].join("\n"),
+			"hooks/nested.js": 'module.exports = "native-cjs";',
+			"index.js": [
+				'import { createRequire } from "node:module";',
+				"const require = createRequire(import.meta.url);",
+				'const config = require("./hooks/config.js");',
+				"export { config };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.js"))) as {
+			config: { mode: string; nested: string };
+		};
+
+		expect(mod.config).toEqual({ mode: "full", nested: "native-cjs" });
+	});
+
 	it("exposes legacy root tool factories used by pi-lean-ctx", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "legacy-tool-factory-ext", version: "1.0.0" }),

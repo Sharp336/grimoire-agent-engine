@@ -1091,10 +1091,10 @@ function escapeRegExp(value: string): string {
 // Match source modules in an extension graph: relative imports, package
 // `imports` aliases such as `#src/*`, and extension-local bare dependency
 // entries. Bare imports inside node_modules dependencies remain native Bun
-// resolutions; once the dependency entry is hooked, its relative children are
-// still collected and rewritten with the reload mtime tag. `require()` calls
-// are scanned too so CJS entries and napi-rs loaders reached without an
-// import statement still join the graph.
+// resolutions; once an ESM dependency entry is hooked, its relative children
+// are still collected and rewritten with the reload mtime tag. Synchronous
+// `require()` children stay on Bun's native loader: routing them through our
+// async onLoad hook makes createRequire() fail before the module can execute.
 const EXTENSION_GRAPH_SPECIFIER_REGEX = /((?:from\s+|import\s+|import\s*\(\s*)["'])([^"'()\s]+)(["'])/g;
 
 // Extension source realpaths already covered by an installed load-time hook for
@@ -1171,9 +1171,6 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 		const dir = path.dirname(file);
 		const specifiers = new Set<string>();
 		for (const match of source.matchAll(EXTENSION_GRAPH_SPECIFIER_REGEX)) {
-			if (match[2]) specifiers.add(match[2]);
-		}
-		for (const match of source.matchAll(NATIVE_ADDON_REQUIRE_SPECIFIER_REGEX)) {
 			if (match[2]) specifiers.add(match[2]);
 		}
 		for (const specifier of specifiers) {
