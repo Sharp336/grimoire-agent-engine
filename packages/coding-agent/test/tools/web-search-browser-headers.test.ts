@@ -74,21 +74,42 @@ describe("browser navigation headers", () => {
 		expect(headers["Sec-Ch-Ua-Platform"]).toBe('"macOS"');
 	});
 
-	it("returns stable fallback headers when header-generator data files are unavailable", async () => {
+	it("returns stable fallback headers in compiled binaries when header-generator data files are unavailable", async () => {
 		const dataFilesDir = path.join(headerGeneratorRoot, "data_files");
 		const unavailableDataFilesDir = path.join(
 			headerGeneratorRoot,
 			`.data_files-unavailable-${process.pid}-${Date.now()}`,
 		);
+		const tempRoot = path.join(packageRoot, ".wt");
+		await fs.mkdir(tempRoot, { recursive: true });
+		const tempDir = await fs.mkdtemp(path.join(tempRoot, "browser-headers-"));
+		const entrypoint = path.join(tempDir, "entry.ts");
+		const outfile = path.join(tempDir, "browser-headers");
 
-		await fs.rename(dataFilesDir, unavailableDataFilesDir);
-		try {
-			const script = [
+		await Bun.write(
+			entrypoint,
+			[
 				'import { buildBrowserNavigationHeaders } from "@oh-my-pi/pi-coding-agent/web/search/providers/browser-headers";',
 				"const headers = buildBrowserNavigationHeaders();",
 				"process.stdout.write(JSON.stringify(headers));",
-			].join("\n");
-			const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			].join("\n"),
+		);
+
+		const build = await Bun.build({
+			entrypoints: [entrypoint],
+			root: packageRoot,
+			compile: {
+				outfile,
+			},
+			throw: false,
+		});
+		if (!build.success) {
+			throw new Error(`browser header compile failed:\n${build.logs.map(log => log.message).join("\n")}`);
+		}
+
+		await fs.rename(dataFilesDir, unavailableDataFilesDir);
+		try {
+			const proc = Bun.spawn([outfile], {
 				cwd: packageRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -101,12 +122,13 @@ describe("browser navigation headers", () => {
 			]);
 
 			if (exitCode !== 0) {
-				throw new Error(`browser header import failed with exit ${exitCode}:\n${stderr}`);
+				throw new Error(`compiled browser header probe failed with exit ${exitCode}:\n${stderr}`);
 			}
 
 			expect(JSON.parse(stdout)).toEqual(CHROME_FALLBACK_HEADERS);
 		} finally {
 			await fs.rename(unavailableDataFilesDir, dataFilesDir);
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 
