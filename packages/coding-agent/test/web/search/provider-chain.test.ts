@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import {
@@ -6,6 +6,7 @@ import {
 	setExcludedSearchProviders,
 	setPreferredSearchProvider,
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
+import { BraveProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/brave";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 const authStorage = {} as AuthStorage;
@@ -35,6 +36,7 @@ afterEach(() => {
 	setPreferredSearchProvider("auto");
 	setExcludedSearchProviders([]);
 	restoreEnv();
+	mock.restore();
 });
 
 describe("resolveProviderChain", () => {
@@ -64,6 +66,22 @@ describe("resolveProviderChain", () => {
 			"providers.webSearchExclude",
 			SEARCH_PROVIDER_ORDER.filter(id => id !== "jina"),
 		);
+
+		const providers = await resolveProviderChain(authStorage, "auto");
+
+		expect(providers.map(provider => provider.id)).toEqual(["jina"]);
+	});
+
+	it("skips a provider that throws while resolving instead of aborting the chain", async () => {
+		// Regression: a poisoned provider module (e.g. an init-order failure that
+		// surfaces as `undefined is not a constructor`) once escaped the resolve
+		// loop and disabled web_search entirely. A throw while loading/probing one
+		// provider must isolate to that provider, leaving the rest of the chain.
+		enableKeyBackedProviders();
+		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "brave" && id !== "jina"));
+		spyOn(BraveProvider.prototype, "isAvailable").mockImplementation(() => {
+			throw new Error("poisoned provider module");
+		});
 
 		const providers = await resolveProviderChain(authStorage, "auto");
 

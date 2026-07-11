@@ -9,6 +9,7 @@
 // listings can share it without importing provider implementations.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { SearchProvider } from "./providers/base";
 import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
 
@@ -221,9 +222,45 @@ export function isSearchProviderExcluded(id: SearchProviderId): boolean {
 }
 
 /**
+ * Load a provider and probe its availability, isolating any failure. A provider
+ * whose module throws at import/construction — or whose availability probe
+ * throws — is logged at debug and treated as unavailable rather than allowed to
+ * abort resolution of the rest of the chain.
+ *
+ * This guards against a single poisoned provider module (e.g. an init-order
+ * failure that surfaces as `undefined is not a constructor`) disabling
+ * `web_search` entirely: always-available providers such as DuckDuckGo/Google
+ * must still resolve even when one scraper module fails to load.
+ *
+ * `explicit` selects {@link SearchProvider.isExplicitlyAvailable} (used when the
+ * user forced this provider) over {@link SearchProvider.isAvailable} (auto chain).
+ */
+export async function loadAvailableProvider(
+	id: SearchProviderId,
+	authStorage: AuthStorage,
+	explicit = false,
+): Promise<SearchProvider | null> {
+	try {
+		const provider = await getSearchProvider(id);
+		const available = explicit
+			? await provider.isExplicitlyAvailable(authStorage)
+			: await provider.isAvailable(authStorage);
+		return available ? provider : null;
+	} catch (error) {
+		logger.debug("web search provider skipped after load/probe failure", {
+			provider: id,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return null;
+	}
+}
+
+/**
  * Determine which providers are configured and currently available.
  * Each candidate is loaded (and its `isAvailable()` called) only as the chain
- * is walked, so unconfigured providers never pay the load cost.
+ * is walked, so unconfigured providers never pay the load cost. Loads and
+ * availability probes are isolated per provider via {@link loadAvailableProvider},
+ * so one broken provider module never aborts resolution of the rest.
  */
 export async function resolveProviderChain(
 	authStorage: AuthStorage,
@@ -232,18 +269,14 @@ export async function resolveProviderChain(
 	const providers: SearchProvider[] = [];
 
 	if (preferredProvider !== "auto" && !isSearchProviderExcluded(preferredProvider)) {
-		const provider = await getSearchProvider(preferredProvider);
-		if (await provider.isExplicitlyAvailable(authStorage)) {
-			providers.push(provider);
-		}
+		const provider = await loadAvailableProvider(preferredProvider, authStorage, true);
+		if (provider) providers.push(provider);
 	}
 
 	for (const id of SEARCH_PROVIDER_ORDER) {
 		if (id === preferredProvider || isSearchProviderExcluded(id)) continue;
-		const provider = await getSearchProvider(id);
-		if (await provider.isAvailable(authStorage)) {
-			providers.push(provider);
-		}
+		const provider = await loadAvailableProvider(id, authStorage);
+		if (provider) providers.push(provider);
 	}
 
 	return providers;

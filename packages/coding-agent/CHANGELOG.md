@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `web_search` failing on every query when a single provider module threw while being resolved (e.g. a compiled-binary init-order failure surfacing as `undefined is not a constructor … .BingProvider`). Provider load and availability probes are now isolated per provider, so one broken provider is skipped instead of aborting the whole fallback chain and disabling web search entirely.
+
 ## [16.4.5] - 2026-07-11
 
 ### Breaking Changes

@@ -20,7 +20,7 @@ import { throwIfAborted } from "../../tools/tool-errors";
 import {
 	formatSearchProviderFailure,
 	formatSearchProviderFailures,
-	getSearchProvider,
+	loadAvailableProvider,
 	resolveProviderChain,
 	type SearchProvider,
 } from "./provider";
@@ -130,10 +130,8 @@ async function executeSearch(
 	const explicitProvider = params.provider;
 	let providers: SearchProvider[];
 	if (explicitProvider && explicitProvider !== "auto") {
-		const provider = await getSearchProvider(explicitProvider);
-		providers = (await provider.isExplicitlyAvailable(authStorage))
-			? [provider]
-			: await resolveProviderChain(authStorage, "auto");
+		const provider = await loadAvailableProvider(explicitProvider, authStorage, true);
+		providers = provider ? [provider] : await resolveProviderChain(authStorage, "auto");
 	} else if (explicitProvider === "auto") {
 		// Explicit `--provider auto` bypasses the configured preferred provider
 		// for this invocation; exclusions still apply.
