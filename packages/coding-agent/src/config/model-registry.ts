@@ -95,11 +95,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 
 function assertGrokBuildResolverTarget(target: string | ApiKeyResolverModel, options?: ApiKeyResolverOptions): void {
 	if (typeof target === "string") {
-		if (
-			target === "xai-grok-build" &&
-			options?.baseUrl !== undefined &&
-			options.baseUrl !== XAI_GROK_BUILD_BASE_URL
-		) {
+		if (target === "xai-grok-build" && options?.baseUrl !== XAI_GROK_BUILD_BASE_URL) {
 			throw new AIError.ConfigurationError(
 				`xAI Grok Build resolver targets require the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
 			);
@@ -1508,7 +1504,7 @@ export class ModelRegistry {
 			try {
 				const models = this.#applyProviderModelOverrides(
 					providerId,
-					await discoverModelsByProviderType(providerConfig, this.#discoveryContext()),
+					await discoverModelsByProviderType(providerConfig, this.#discoveryContext(providerConfig)),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -1559,15 +1555,16 @@ export class ModelRegistry {
 		);
 	}
 
-	#discoveryContext(): DiscoveryContext {
+	#discoveryContext(providerConfig: DiscoveryProviderConfig): DiscoveryContext {
 		return {
 			fetch: this.#fetch,
 			getBearerApiKeyResolver: async provider => {
-				const apiKey = await this.getApiKeyForProvider(provider);
+				const resolver = this.resolver(provider, { baseUrl: providerConfig.baseUrl });
+				const apiKey = await this.getApiKeyForProvider(provider, undefined, { baseUrl: providerConfig.baseUrl });
 				if (!isDiscoveryBearerApiKey(apiKey)) {
 					return undefined;
 				}
-				return this.resolver(provider);
+				return resolver;
 			},
 		};
 	}

@@ -35,6 +35,32 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		});
 	}
 
+	function writeGrokBuildDiscoveryConfig(baseUrl?: string): void {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						...(baseUrl === undefined ? {} : { baseUrl }),
+						api: "openai-responses",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+	}
+
+	async function storeGrokBuildCredential(): Promise<void> {
+		await authStorage.set("xai-grok-build", [
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+	}
+
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
@@ -247,6 +273,54 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(createOAuthResolverSpy).not.toHaveBeenCalled();
 		expect(getApiKeySpy).not.toHaveBeenCalled();
 	});
+
+	test("discovers canonical Build models with an OAuth bearer at the canonical origin", async () => {
+		writeGrokBuildDiscoveryConfig(XAI_GROK_BUILD_BASE_URL);
+		await storeGrokBuildCredential();
+		const requests: Array<{ url: string; authorization: string | null }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({
+				url: String(input),
+				authorization: new Headers(init?.headers).get("Authorization"),
+			});
+			return new Response(JSON.stringify({ data: [{ id: "grok-4.5" }] }));
+		};
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("xai-grok-build");
+
+		expect(requests).toEqual([
+			{
+				url: `${XAI_GROK_BUILD_BASE_URL}/models`,
+				authorization: "Bearer oauth-access",
+			},
+		]);
+	});
+
+	for (const [name, baseUrl] of [
+		["missing", undefined],
+		["noncanonical", "https://custom-build-proxy.example.com/v1"],
+	] as const) {
+		test(`rejects ${name} Build discovery URL before OAuth resolution or fetch`, async () => {
+			writeGrokBuildDiscoveryConfig(baseUrl);
+			await storeGrokBuildCredential();
+			let fetchCalls = 0;
+			const fetchMock: FetchImpl = async () => {
+				fetchCalls += 1;
+				throw new Error("Build discovery must not fetch an invalid origin");
+			};
+			const registry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+			const createOAuthResolverSpy = spyOn(authStorage, "createOAuthApiKeyResolver");
+			const getApiKeySpy = spyOn(authStorage, "getApiKey");
+
+			await registry.refreshProvider("xai-grok-build");
+
+			expect(createOAuthResolverSpy).not.toHaveBeenCalled();
+			expect(getApiKeySpy).not.toHaveBeenCalled();
+			expect(fetchCalls).toBe(0);
+			expect(registry.getProviderDiscoveryState("xai-grok-build")?.status).toBe("unavailable");
+		});
+	}
 
 	test("auth:none does not make OAuth-only Build keyless", async () => {
 		fs.writeFileSync(
