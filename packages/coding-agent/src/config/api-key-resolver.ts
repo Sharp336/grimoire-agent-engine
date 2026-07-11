@@ -1,7 +1,7 @@
 import type { Api, ApiKeyResolver, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
-export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "api">;
+export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "api" | "transport">;
 
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
@@ -10,6 +10,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** Transport determines whether a configured key authenticates a gateway instead of the upstream provider. */
+	transport?: Model<Api>["transport"];
 }
 
 /**
@@ -21,7 +23,13 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+		options?: {
+			baseUrl?: string;
+			modelId?: string;
+			transport?: Model<Api>["transport"];
+			forceRefresh?: boolean;
+			signal?: AbortSignal;
+		},
 	): Promise<string | undefined>;
 	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
 	/**
@@ -30,8 +38,8 @@ export interface ApiKeyResolverRegistry {
 	 * → rotate to a sibling credential, then re-resolve.
 	 *
 	 * Two call forms: `resolver(provider, options?)` for provider-scoped keys,
-	 * and `resolver(model, sessionId?)` which derives `baseUrl`/`modelId` from
-	 * the model. The resolver is stateless (safe to reuse across requests).
+	 * and `resolver(model, sessionId?)` which derives `baseUrl`/`modelId`/`transport`
+	 * from the model. The resolver is stateless (safe to reuse across requests).
 	 * Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
 	 */
@@ -48,12 +56,24 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, transport } = options;
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, transport });
 		}
 		if (lastChance) {
+			if (transport === "pi-native") {
+				// The configured key authenticates the gateway, not the upstream
+				// OAuth provider. Re-resolve it (including command-backed keys)
+				// without recording it as an OAuth credential or rotating accounts.
+				return registry.getApiKeyForProvider(provider, sessionId, {
+					baseUrl,
+					modelId,
+					transport,
+					forceRefresh: true,
+					signal,
+				});
+			}
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor any retry-after here — if a
 			// sibling exists we switch immediately; the precise no-sibling backoff
@@ -65,8 +85,14 @@ export function createApiKeyResolver(
 				signal,
 				apiKey: previousKey,
 			});
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, transport });
 		}
-		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+		return registry.getApiKeyForProvider(provider, sessionId, {
+			baseUrl,
+			modelId,
+			transport,
+			forceRefresh: true,
+			signal,
+		});
 	};
 }

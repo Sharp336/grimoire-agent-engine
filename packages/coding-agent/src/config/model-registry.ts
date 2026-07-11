@@ -95,7 +95,11 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 
 function assertGrokBuildResolverTarget(target: string | ApiKeyResolverModel, options?: ApiKeyResolverOptions): void {
 	if (typeof target === "string") {
-		if (target === "xai-grok-build" && options?.baseUrl !== XAI_GROK_BUILD_BASE_URL) {
+		if (
+			target === "xai-grok-build" &&
+			options?.transport !== "pi-native" &&
+			options?.baseUrl !== XAI_GROK_BUILD_BASE_URL
+		) {
 			throw new AIError.ConfigurationError(
 				`xAI Grok Build resolver targets require the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
 			);
@@ -105,6 +109,7 @@ function assertGrokBuildResolverTarget(target: string | ApiKeyResolverModel, opt
 
 	if (
 		target.provider === "xai-grok-build" &&
+		target.transport !== "pi-native" &&
 		(target.api !== "openai-responses" || target.baseUrl !== XAI_GROK_BUILD_BASE_URL)
 	) {
 		throw new AIError.ConfigurationError(
@@ -791,16 +796,31 @@ export class ModelRegistry {
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
 	#fetch: FetchImpl;
 
-	#resolveCommandBackedApiKey(provider: string): CommandApiKeyResolution {
-		if (isOAuthOnlyProvider(provider)) return { configured: false };
+	#hasConfiguredGatewayBearer(provider: string, transport: Model<Api>["transport"] | undefined): boolean {
+		return transport === "pi-native" && isAuthenticated(this.#customProviderApiKeys.get(provider));
+	}
+
+	#resolveCommandBackedApiKey(
+		provider: string,
+		transport: Model<Api>["transport"] | undefined,
+	): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		if (!isCommandConfigValue(keyConfig)) return { configured: false };
+		const gatewayBearer = this.#hasConfiguredGatewayBearer(provider, transport);
+		if (isOAuthOnlyProvider(provider) && !gatewayBearer) return { configured: false };
+		if (!isCommandConfigValue(keyConfig)) {
+			if (!gatewayBearer || !keyConfig) return { configured: false };
+			return { configured: true, value: resolveConfigValue(keyConfig) };
+		}
 		const value = resolveConfigValue(keyConfig);
 		if (value) {
-			this.authStorage.setConfigApiKey(provider, value);
+			if (!isOAuthOnlyProvider(provider)) {
+				this.authStorage.setConfigApiKey(provider, value);
+			}
 			return { configured: true, value };
 		}
-		this.authStorage.removeConfigApiKey(provider);
+		if (!isOAuthOnlyProvider(provider)) {
+			this.authStorage.removeConfigApiKey(provider);
+		}
 		return { configured: true };
 	}
 
@@ -1109,10 +1129,12 @@ export class ModelRegistry {
 		if (!descriptor) {
 			return providerId;
 		}
-		const baseUrl =
-			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
-			this.#providerOverrides.get(providerId)?.baseUrl ??
-			this.getProviderBaseUrl(providerId);
+		const providerOverride =
+			this.#runtimeProviderOverrides.get(providerId) ?? this.#providerOverrides.get(providerId);
+		if (providerId === "xai-grok-build" && providerOverride?.transport === "pi-native") {
+			return providerId;
+		}
+		const baseUrl = providerOverride?.baseUrl ?? this.getProviderBaseUrl(providerId);
 		return descriptor.createModelManagerOptions({ baseUrl, fetch: this.#fetch }).cacheProviderId ?? providerId;
 	}
 
@@ -1701,6 +1723,10 @@ export class ModelRegistry {
 		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
 			if (disabledProviders.has(descriptor.providerId)) return false;
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
+			const providerOverride =
+				this.#runtimeProviderOverrides.get(descriptor.providerId) ??
+				this.#providerOverrides.get(descriptor.providerId);
+			if (descriptor.providerId === "xai-grok-build" && providerOverride?.transport === "pi-native") return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
 		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
@@ -1945,21 +1971,25 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Availability predicate with per-provider memoization. Auth lookups
-	 * (`authStorage.hasAuth`) and the disabled-provider set are resolved once
-	 * per provider instead of once per model, which matters when filtering the
-	 * full bundled catalog (thousands of models, ~50 providers).
+	 * Availability predicate with per-provider/transport memoization. Auth
+	 * lookups (`authStorage.hasAuth`) and the disabled-provider set are resolved
+	 * once per provider transport, which matters when filtering the full bundled
+	 * catalog (thousands of models, ~50 providers).
 	 */
 	#createAvailabilityCheck(): (model: Model<Api>) => boolean {
 		const disabledProviders = getDisabledProviderIdsFromSettings();
-		const byProvider = new Map<string, boolean>();
+		const byProviderTransport = new Map<string, boolean>();
 		return model => {
-			let available = byProvider.get(model.provider);
+			const scope = `${model.provider}\0${model.transport ?? ""}`;
+			let available = byProviderTransport.get(scope);
 			if (available === undefined) {
+				const gatewayOnly = model.transport === "pi-native" && isOAuthOnlyProvider(model.provider);
 				available =
 					!disabledProviders.has(model.provider) &&
-					(this.#keylessProviders.has(model.provider) || this.authStorage.hasAuth(model.provider));
-				byProvider.set(model.provider, available);
+					(this.#keylessProviders.has(model.provider) ||
+						this.#hasConfiguredGatewayBearer(model.provider, model.transport) ||
+						(!gatewayOnly && this.authStorage.hasAuth(model.provider)));
+				byProviderTransport.set(scope, available);
 			}
 			return available;
 		};
@@ -1990,6 +2020,9 @@ export class ModelRegistry {
 	 * {@link ModelRegistry.resolver}.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		if (model.transport === "pi-native" && isOAuthOnlyProvider(model.provider)) {
+			return this.#hasConfiguredGatewayBearer(model.provider, model.transport);
+		}
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
 			(!isOAuthOnlyProvider(model.provider) && isCommandConfigValue(keyConfig)) ||
@@ -2027,9 +2060,9 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	async getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined> {
-		if (!isOAuthOnlyProvider(model.provider)) {
-			const commandKey = this.#resolveCommandBackedApiKey(model.provider);
-			if (commandKey.configured) return commandKey.value;
+		const commandKey = this.#resolveCommandBackedApiKey(model.provider, model.transport);
+		if (commandKey.configured || (model.transport === "pi-native" && isOAuthOnlyProvider(model.provider))) {
+			return commandKey.value;
 		}
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
 			return kNoAuth;
@@ -2047,11 +2080,17 @@ export class ModelRegistry {
 	async getApiKeyForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+		options?: {
+			baseUrl?: string;
+			modelId?: string;
+			transport?: Model<Api>["transport"];
+			forceRefresh?: boolean;
+			signal?: AbortSignal;
+		},
 	): Promise<string | undefined> {
-		if (!isOAuthOnlyProvider(provider)) {
-			const commandKey = this.#resolveCommandBackedApiKey(provider);
-			if (commandKey.configured) return commandKey.value;
+		const commandKey = this.#resolveCommandBackedApiKey(provider, options?.transport);
+		if (commandKey.configured || (options?.transport === "pi-native" && isOAuthOnlyProvider(provider))) {
+			return commandKey.value;
 		}
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;
@@ -2077,7 +2116,7 @@ export class ModelRegistry {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		assertGrokBuildResolverTarget(target, options);
 		if (typeof target === "string") {
-			if (isOAuthOnlyProvider(target)) {
+			if (isOAuthOnlyProvider(target) && options?.transport !== "pi-native") {
 				return this.authStorage.createOAuthApiKeyResolver(target, options?.sessionId, {
 					baseUrl: options?.baseUrl,
 					modelId: options?.modelId,
@@ -2085,7 +2124,7 @@ export class ModelRegistry {
 			}
 			return createApiKeyResolver(this, target, options);
 		}
-		if (isOAuthOnlyProvider(target.provider)) {
+		if (isOAuthOnlyProvider(target.provider) && target.transport !== "pi-native") {
 			return this.authStorage.createOAuthApiKeyResolver(target.provider, options?.sessionId, {
 				baseUrl: target.baseUrl,
 				modelId: target.id,
@@ -2095,12 +2134,13 @@ export class ModelRegistry {
 			...options,
 			baseUrl: target.baseUrl,
 			modelId: target.id,
+			transport: target.transport,
 		});
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
 		if (!isOAuthOnlyProvider(provider)) {
-			const commandKey = this.#resolveCommandBackedApiKey(provider);
+			const commandKey = this.#resolveCommandBackedApiKey(provider, undefined);
 			if (commandKey.configured) return commandKey.value;
 		}
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {

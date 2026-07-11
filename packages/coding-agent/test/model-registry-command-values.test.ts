@@ -20,13 +20,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	let authStorage: AuthStorage;
 	let modelsPath = "";
 
-	function grokBuildModel(api: Api, baseUrl: string): Model<Api> {
+	function grokBuildModel(api: Api, baseUrl: string, transport?: Model<Api>["transport"]): Model<Api> {
 		return buildModel({
 			id: "grok-4.5",
 			name: "Grok 4.5",
 			api,
 			provider: "xai-grok-build",
 			baseUrl,
+			transport,
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -211,6 +212,111 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
 		expect(await resolveApiKeyOnce(resolver)).toBe("oauth-access");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("0");
+	});
+
+	test("pi-native Build models use a configured literal as the gateway bearer", async () => {
+		const gatewayBaseUrl = "https://auth-gateway.example.com/v1";
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						baseUrl: gatewayBaseUrl,
+						apiKey: "gateway-literal",
+						transport: "pi-native",
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = grokBuildModel("openai-completions", gatewayBaseUrl, "pi-native");
+		const createOAuthResolverSpy = spyOn(authStorage, "createOAuthApiKeyResolver");
+
+		expect(registry.hasConfiguredAuth(model)).toBe(true);
+		expect(authStorage.hasAuth("xai-grok-build")).toBe(false);
+		expect(registry.getAvailable().some(candidate => candidate.provider === "xai-grok-build")).toBe(true);
+		expect(await registry.getApiKey(model)).toBe("gateway-literal");
+
+		const getApiKeySpy = spyOn(registry, "getApiKeyForProvider");
+		const resolver = registry.resolver(model, "session");
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(false);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBe("gateway-literal");
+		expect(getApiKeySpy).toHaveBeenCalledWith("xai-grok-build", "session", {
+			baseUrl: gatewayBaseUrl,
+			modelId: "grok-4.5",
+			transport: "pi-native",
+		});
+		expect(createOAuthResolverSpy).not.toHaveBeenCalled();
+	});
+
+	test("pi-native Build models re-resolve command gateway bearers without OAuth rotation", async () => {
+		const gatewayBaseUrl = "https://auth-gateway.example.com/v1";
+		const counterFile = path.join(tempDir, "gateway-command-counter.txt");
+		fs.writeFileSync(counterFile, "0");
+		const trackingCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+			`const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(counterFile)}, String(Number(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8")) + 1)); process.stdout.write("gateway-command");`,
+		)}`;
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						baseUrl: gatewayBaseUrl,
+						apiKey: `!${trackingCommand}`,
+						transport: "pi-native",
+					},
+				},
+			}),
+		);
+		await storeGrokBuildCredential();
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = grokBuildModel("openai-completions", gatewayBaseUrl, "pi-native");
+		const rotateSpy = spyOn(authStorage, "rotateSessionCredential");
+		const resolver = registry.resolver(model, "session");
+
+		expect(registry.hasConfiguredAuth(model)).toBe(true);
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(false);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBe("gateway-command");
+		await expect(
+			resolver({ lastChance: true, error: new Error("gateway rejected bearer"), previousKey: "gateway-command" }),
+		).resolves.toBe("gateway-command");
+		expect(rotateSpy).not.toHaveBeenCalled();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("pi-native Build models never forward stored OAuth credentials to the gateway", async () => {
+		const gatewayBaseUrl = "https://auth-gateway.example.com/v1";
+		await storeGrokBuildCredential();
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = grokBuildModel("openai-completions", gatewayBaseUrl, "pi-native");
+		const resolver = registry.resolver(model, "session");
+
+		expect(registry.hasConfiguredAuth(model)).toBe(false);
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(false);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBeUndefined();
+	});
+
+	test("direct Build models ignore configured literal bearers", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						apiKey: "direct-static-key",
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = grokBuildModel("openai-responses", XAI_GROK_BUILD_BASE_URL);
+		const resolver = registry.resolver(model, "session");
+
+		expect(authStorage.hasAuth("xai-grok-build")).toBe(false);
+		expect(registry.hasConfiguredAuth(model)).toBe(false);
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBeUndefined();
 	});
 
 	test("accepts canonical Build model resolver targets", async () => {
