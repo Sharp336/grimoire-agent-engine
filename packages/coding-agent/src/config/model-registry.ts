@@ -62,10 +62,12 @@ const BUILT_IN_DISCOVERY_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { isOAuthOnlyProvider } from "@oh-my-pi/pi-ai/registry";
 import { getBundledModelReferenceIndex, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
+import { XAI_GROK_BUILD_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
@@ -89,6 +91,30 @@ export const kNoAuth = "N/A";
 
 export function isAuthenticated(apiKey: string | undefined | null): apiKey is string {
 	return Boolean(apiKey) && apiKey !== kNoAuth;
+}
+
+function assertGrokBuildResolverTarget(target: string | ApiKeyResolverModel, options?: ApiKeyResolverOptions): void {
+	if (typeof target === "string") {
+		if (
+			target === "xai-grok-build" &&
+			options?.baseUrl !== undefined &&
+			options.baseUrl !== XAI_GROK_BUILD_BASE_URL
+		) {
+			throw new AIError.ConfigurationError(
+				`xAI Grok Build resolver targets require the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
+			);
+		}
+		return;
+	}
+
+	if (
+		target.provider === "xai-grok-build" &&
+		(target.api !== "openai-responses" || target.baseUrl !== XAI_GROK_BUILD_BASE_URL)
+	) {
+		throw new AIError.ConfigurationError(
+			`xAI Grok Build resolver targets require the openai-responses API and canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
+		);
+	}
 }
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
@@ -2052,6 +2078,7 @@ export class ModelRegistry {
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
+		assertGrokBuildResolverTarget(target, options);
 		if (typeof target === "string") {
 			if (isOAuthOnlyProvider(target)) {
 				return this.authStorage.createOAuthApiKeyResolver(target, options?.sessionId, {

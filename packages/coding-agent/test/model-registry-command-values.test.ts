@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isOAuthCredentialResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { XAI_GROK_BUILD_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -17,6 +19,21 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	let tempDir = "";
 	let authStorage: AuthStorage;
 	let modelsPath = "";
+
+	function grokBuildModel(api: Api, baseUrl: string): Model<Api> {
+		return buildModel({
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			api,
+			provider: "xai-grok-build",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		});
+	}
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
@@ -168,6 +185,67 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
 		expect(await resolveApiKeyOnce(resolver)).toBe("oauth-access");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("0");
+	});
+
+	test("accepts canonical Build model resolver targets", async () => {
+		await authStorage.set("xai-grok-build", [
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+
+		const resolver = registry.resolver(grokBuildModel("openai-responses", XAI_GROK_BUILD_BASE_URL), "session");
+
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBe("oauth-access");
+	});
+
+	test("rejects noncanonical Build base URLs before OAuth resolver creation", async () => {
+		await authStorage.set("xai-grok-build", [
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const createOAuthResolverSpy = spyOn(authStorage, "createOAuthApiKeyResolver");
+		const getApiKeySpy = spyOn(authStorage, "getApiKey");
+		const noncanonicalBaseUrl = "https://custom-build-proxy.example.com/v1";
+
+		expect(() => registry.resolver(grokBuildModel("openai-responses", noncanonicalBaseUrl), "session")).toThrow(
+			AIError.ConfigurationError,
+		);
+		expect(() => registry.resolver("xai-grok-build", { baseUrl: noncanonicalBaseUrl, sessionId: "session" })).toThrow(
+			AIError.ConfigurationError,
+		);
+		expect(createOAuthResolverSpy).not.toHaveBeenCalled();
+		expect(getApiKeySpy).not.toHaveBeenCalled();
+	});
+
+	test("rejects non-Responses Build models before OAuth resolver creation", async () => {
+		await authStorage.set("xai-grok-build", [
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const createOAuthResolverSpy = spyOn(authStorage, "createOAuthApiKeyResolver");
+		const getApiKeySpy = spyOn(authStorage, "getApiKey");
+
+		expect(() => registry.resolver(grokBuildModel("openai-completions", XAI_GROK_BUILD_BASE_URL), "session")).toThrow(
+			AIError.ConfigurationError,
+		);
+		expect(createOAuthResolverSpy).not.toHaveBeenCalled();
+		expect(getApiKeySpy).not.toHaveBeenCalled();
 	});
 
 	test("auth:none does not make OAuth-only Build keyless", async () => {
