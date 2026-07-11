@@ -10,7 +10,7 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthProviders, type OAuthPrompt } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
@@ -84,6 +84,32 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
+
+export async function resolveRpcLoginPrompt(
+	prompt: OAuthPrompt,
+	input: {
+		providerId: string;
+		authEmitted: () => boolean;
+		requestInput: (prompt: OAuthPrompt) => Promise<string | undefined>;
+	},
+): Promise<string> {
+	if (prompt.secret) {
+		if (prompt.allowEmpty) return "";
+		throw new Error(
+			`Provider '${input.providerId}' requires secret input which is not supported in RPC mode. ` +
+				"Use the terminal UI to log in.",
+		);
+	}
+
+	if (!input.authEmitted()) {
+		throw new Error(
+			`Provider '${input.providerId}' requires interactive prompts ` +
+				"which are not supported in RPC mode. Use the terminal UI to log in.",
+		);
+	}
+
+	return (await input.requestInput(prompt)) ?? "";
+}
 
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
@@ -1226,19 +1252,13 @@ export async function runRpcMode(
 						onProgress: message => {
 							uiCtx.notify(message, "info");
 						},
-						onPrompt: async prompt => {
-							if (!authEmitted) {
-								// onPrompt called before any auth URL — provider requires
-								// interactive input that cannot be satisfied headlessly.
-								return Promise.reject(
-									new Error(
-										`Provider '${command.providerId}' requires interactive prompts ` +
-											"which are not supported in RPC mode. Use the terminal UI to log in.",
-									),
-								);
-							}
-							return (await uiCtx.input(prompt.message, prompt.placeholder, { timeout: 600_000 })) ?? "";
-						},
+						onPrompt: prompt =>
+							resolveRpcLoginPrompt(prompt, {
+								providerId: command.providerId,
+								authEmitted: () => authEmitted,
+								requestInput: request =>
+									uiCtx.input(request.message, request.placeholder, { timeout: 600_000 }),
+							}),
 					});
 					await session.modelRegistry.refresh();
 					return success(id, "login", { providerId: command.providerId });

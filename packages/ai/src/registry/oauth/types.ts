@@ -20,6 +20,8 @@ export type OAuthPrompt = {
 	message: string;
 	placeholder?: string;
 	allowEmpty?: boolean;
+	/** Whether UIs should mask or redact the entered value as sensitive input. */
+	secret?: boolean;
 };
 
 export type OAuthAuthInfo = {

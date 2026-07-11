@@ -287,4 +287,76 @@ describe("Input component", () => {
 		input.pasteText("sk-line1\nsk-line2\r\nsk-line3");
 		expect(input.getValue()).toBe("sk-line1sk-line2sk-line3");
 	});
+	it("submits secret values without rendering their cleartext", () => {
+		const input = new Input();
+		const submitted: string[] = [];
+		input.onSubmit = value => submitted.push(value);
+
+		input.setSecret(true);
+		expect(input.getSecret()).toBe(true);
+		input.handleInput("refresh-token");
+		input.handleInput("\n");
+
+		expect(submitted).toEqual(["refresh-token"]);
+		expect(input.render(80)[0]).not.toContain("refresh-token");
+		expect(input.render(80)[0]).toContain("•".repeat("refresh-token".length));
+	});
+
+	it("submits blank secret input", () => {
+		const input = new Input();
+		const submitted: string[] = [];
+		input.onSubmit = value => submitted.push(value);
+
+		input.setSecret(true);
+		input.handleInput("\n");
+
+		expect(submitted).toEqual([""]);
+	});
+
+	it("masks each secret grapheme and preserves the raw cursor position", () => {
+		const input = new Input();
+		input.focused = true;
+		input.setUseTerminalCursor(true);
+		input.setSecret(true);
+		input.pasteText("a🔑b");
+		input.handleInput("\x02"); // Ctrl+B (left)
+
+		const [line] = input.render(80);
+		expect(line).not.toContain("a🔑b");
+		expect(line.replaceAll(CURSOR_MARKER, "")).toContain("•••");
+		expect(visibleWidth(line.slice(0, line.indexOf(CURSOR_MARKER)))).toBe(4);
+	});
+
+	it("masks bracketed secret pastes", () => {
+		const input = new Input();
+		input.setSecret(true);
+		input.handleInput("\x1b[200~refresh-token\x1b[201~");
+
+		expect(input.getValue()).toBe("refresh-token");
+		expect(input.render(80)[0]).not.toContain("refresh-token");
+	});
+
+	it("purges secret undo, yank, and buffered paste state on mode transitions", () => {
+		const input = new Input();
+		input.setValue("ordinary-token");
+		input.setSecret(true);
+		expect(input.getSecret()).toBe(true);
+		expect(input.getValue()).toBe("");
+
+		input.handleInput("refresh-token");
+		input.handleInput("\x17"); // Ctrl+W (kill backward word)
+		input.handleInput("replacement");
+		input.setSecret(false);
+		expect(input.getSecret()).toBe(false);
+		expect(input.getValue()).toBe("");
+
+		input.handleInput("\x19"); // Ctrl+Y (yank)
+		input.handleInput("\x1f"); // Ctrl+_ (undo)
+		expect(input.getValue()).toBe("");
+
+		input.handleInput("\x1b[200~refresh-token");
+		input.setSecret(true);
+		input.handleInput("\x1b[201~");
+		expect(input.getValue()).toBe("");
+	});
 });

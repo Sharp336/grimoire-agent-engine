@@ -5,6 +5,7 @@
 ### Added
 
 - Added `FuzzyText`, a prepared fuzzy-match handle that builds the search index once and matches many queries against it — for callers whose corpus exceeds the internal index cache's admission size (e.g. session/transcript search).
+- Added secret mode to `Input`, masking rendered graphemes while preserving raw submission and purging recoverable editing state when the mode changes.
 
 ### Fixed
 

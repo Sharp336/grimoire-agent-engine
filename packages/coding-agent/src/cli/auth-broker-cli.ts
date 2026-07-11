@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { Writable } from "node:stream";
 import {
 	type AuthCredential,
 	AuthStorage,
@@ -206,8 +207,10 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string) => promptLine(rl, `${msg} `);
+	const ask = (message: string, secret = false) => {
+		const question = `${message} `;
+		return secret ? promptSecretLine(process.stdin, process.stdout, question) : promptLine(question);
+	};
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.reload();
@@ -242,7 +245,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 				process.stdout.write(`${message}\n`);
 			},
 			onPrompt(p) {
-				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`, p.secret === true);
 			},
 			...(usesManualInput
 				? {
@@ -255,27 +258,57 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
 	} finally {
 		store.close();
-		rl.close();
 	}
 }
+
+type PromptInput = NodeJS.ReadableStream & {
+	isTTY?: boolean;
+	isRaw?: boolean;
+	setRawMode?: (mode: boolean) => void;
+};
+
+const MUTED_PROMPT_OUTPUT = new Writable({
+	write(_chunk, _encoding, callback) {
+		callback();
+	},
+});
 
 /**
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
  */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
+function promptLine(question: string): Promise<string> {
+	return promptQuestion(process.stdin, process.stdout, question, false);
+}
+
+/** @internal Visible for focused CLI input tests. */
+export function promptSecretLine(input: PromptInput, output: NodeJS.WritableStream, question: string): Promise<string> {
+	return promptQuestion(input, output, question, true);
+}
+
+function promptQuestion(
+	input: PromptInput,
+	output: NodeJS.WritableStream,
+	question: string,
+	secret: boolean,
+): Promise<string> {
+	const supportsRawMode = input.isTTY === true && typeof input.setRawMode === "function";
+	const wasRaw = supportsRawMode && input.isRaw === true;
+	const rl = readline.createInterface({
+		input,
+		output: secret ? MUTED_PROMPT_OUTPUT : output,
+		...(secret ? { historySize: 0, terminal: input.isTTY === true } : undefined),
+	});
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	const input = process.stdin as NodeJS.ReadStream;
-	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
-	const wasRaw = supportsRawMode ? input.isRaw : false;
 	let settled = false;
 
 	const cleanup = () => {
 		rl.off("SIGINT", onSigint);
-		if (supportsRawMode) {
-			input.off("keypress", onKeypress);
-			input.setRawMode?.(wasRaw);
-		}
+		rl.off("close", onClose);
+		input.off("data", onData);
+		input.off("keypress", onKeypress);
+		rl.close();
+		if (supportsRawMode && input.isRaw !== wasRaw) input.setRawMode?.(wasRaw);
 	};
 
 	const finish = (result: () => void) => {
@@ -293,23 +326,36 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 		cancel();
 	};
 
+	const onClose = () => {
+		if (secret) finish(() => resolve(""));
+	};
+
+	const onData = (chunk: string | Uint8Array) => {
+		const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+		if (text.includes("\u0003") || text === "\u001b") cancel();
+	};
+
 	const onKeypress = (_str: string, key: readline.Key) => {
-		if (key.name === "escape" || (key.ctrl && key.name === "c")) {
-			cancel();
-			rl.close();
-		}
+		if (key.name === "escape" || (key.ctrl && key.name === "c")) cancel();
 	};
 
 	if (supportsRawMode) {
 		readline.emitKeypressEvents(input, rl);
-		input.setRawMode(true);
 		input.on("keypress", onKeypress);
 	}
-
 	rl.once("SIGINT", onSigint);
-	rl.question(question, answer => {
-		finish(() => resolve(answer));
-	});
+	if (secret) {
+		rl.once("close", onClose);
+		input.prependListener("data", onData);
+		output.write(question);
+		rl.question("", answer => {
+			finish(() => resolve(answer));
+		});
+	} else {
+		rl.question(question, answer => {
+			finish(() => resolve(answer));
+		});
+	}
 	return promise;
 }
 
@@ -317,22 +363,17 @@ async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]
 	if (providers.length === 0) {
 		throw new Error("No OAuth providers registered");
 	}
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i].name}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index].id;
-	} finally {
-		rl.close();
+	process.stdout.write("Select a provider:\n\n");
+	for (let i = 0; i < providers.length; i++) {
+		process.stdout.write(`  ${i + 1}. ${providers[i].name}\n`);
 	}
+	process.stdout.write("\n");
+	const choice = await promptLine(`Enter number (1-${providers.length}): `);
+	const index = Number.parseInt(choice, 10) - 1;
+	if (Number.isNaN(index) || index < 0 || index >= providers.length) {
+		throw new Error(`Invalid selection: ${choice}`);
+	}
+	return providers[index].id;
 }
 
 async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
@@ -390,22 +431,17 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function pickStoredProviderInteractively(providers: string[]): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider to logout:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i]}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index];
-	} finally {
-		rl.close();
+	process.stdout.write("Select a provider to logout:\n\n");
+	for (let i = 0; i < providers.length; i++) {
+		process.stdout.write(`  ${i + 1}. ${providers[i]}\n`);
 	}
+	process.stdout.write("\n");
+	const choice = await promptLine(`Enter number (1-${providers.length}): `);
+	const index = Number.parseInt(choice, 10) - 1;
+	if (Number.isNaN(index) || index < 0 || index >= providers.length) {
+		throw new Error(`Invalid selection: ${choice}`);
+	}
+	return providers[index];
 }
 
 async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {

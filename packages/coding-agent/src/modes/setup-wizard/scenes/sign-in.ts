@@ -1,6 +1,6 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthPrompt, OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	type Component,
 	type Focusable,
@@ -65,6 +65,7 @@ interface PromptState {
 	message: string;
 	placeholder?: string;
 	input: CopyablePromptInput;
+	rawInput: Input;
 }
 
 /**
@@ -271,15 +272,16 @@ export class SignInTab implements SetupTab {
 		this.host.requestRender();
 	}
 
-	#showPrompt(prompt: { message: string; placeholder?: string }): Promise<string> {
+	#showPrompt(prompt: OAuthPrompt): Promise<string> {
 		this.#resolvePrompt("");
 		const input = new Input();
+		input.setSecret(prompt.secret ?? false);
 		const focusInput = new CopyablePromptInput(input, () => {
 			void this.#copyAuthUrl();
 		});
 		const pending = Promise.withResolvers<string>();
 		this.#promptResolve = pending.resolve;
-		this.#prompt = { message: prompt.message, placeholder: prompt.placeholder, input: focusInput };
+		this.#prompt = { message: prompt.message, placeholder: prompt.placeholder, input: focusInput, rawInput: input };
 		input.onSubmit = value => {
 			this.#resolvePrompt(value);
 		};
@@ -296,7 +298,9 @@ export class SignInTab implements SetupTab {
 		const resolve = this.#promptResolve;
 		if (!resolve) return;
 		this.#promptResolve = undefined;
+		const input = this.#prompt?.rawInput;
 		this.#prompt = undefined;
+		input?.setSecret(!input.getSecret());
 		this.host.restoreFocus();
 		resolve(value);
 		this.host.requestRender();

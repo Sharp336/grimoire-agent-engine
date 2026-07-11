@@ -27,6 +27,7 @@ interface InputState {
 export class Input implements Component, Focusable {
 	#value: string = "";
 	#cursor: number = 0; // Cursor position in the value
+	#secret = false;
 	#useTerminalCursor = false;
 	/** Rendered before the editable area; set to "" for chrome-less embedding. */
 	prompt = "> ";
@@ -54,6 +55,18 @@ export class Input implements Component, Focusable {
 		this.#value = value;
 		// Callers seed or replace the value wholesale; typing continues at the end.
 		this.#cursor = value.length;
+	}
+
+	setSecret(secret: boolean): void {
+		if (this.#secret === secret) {
+			return;
+		}
+		this.#secret = secret;
+		this.#purge();
+	}
+
+	getSecret(): boolean {
+		return this.#secret;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -345,6 +358,15 @@ export class Input implements Component, Focusable {
 		this.#undoStack.push({ value: this.#value, cursor: this.#cursor });
 	}
 
+	#purge(): void {
+		this.#value = "";
+		this.#cursor = 0;
+		this.#undoStack = [];
+		this.#killRing = new KillRing();
+		this.#pasteHandler = new BracketedPasteHandler();
+		this.#lastAction = null;
+	}
+
 	#undo(): void {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) {
@@ -415,9 +437,12 @@ export class Input implements Component, Focusable {
 			return [prompt];
 		}
 
-		const cursorIndex = this.#cursor;
+		const cursorIndex = this.#secret
+			? [...segmenter.segment(this.#value.slice(0, this.#cursor))].length
+			: this.#cursor;
+		const value = this.#secret ? [...segmenter.segment(this.#value)].map(() => "•").join("") : this.#value;
 		// Ensure we always have a grapheme to invert at the cursor (space at end).
-		const displayValue = cursorIndex >= this.#value.length ? `${this.#value} ` : this.#value;
+		const displayValue = cursorIndex >= value.length ? `${value} ` : value;
 
 		const totalCols = visibleWidth(displayValue);
 		const cursorCols = visibleWidth(displayValue.slice(0, cursorIndex));

@@ -1,4 +1,5 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthPrompt } from "@oh-my-pi/pi-ai/oauth/types";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { openPath } from "../../utils/open";
@@ -14,6 +15,7 @@ export class LoginDialogComponent extends Container {
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
+	#activePrompt?: OAuthPrompt;
 
 	constructor(
 		tui: TUI,
@@ -39,11 +41,19 @@ export class LoginDialogComponent extends Container {
 		// Input (always present, used when needed)
 		this.#input = new Input();
 		this.#input.onSubmit = () => {
-			if (this.#inputResolver) {
-				this.#inputResolver(this.#input.getValue());
-				this.#inputResolver = undefined;
-				this.#inputRejecter = undefined;
+			const resolver = this.#inputResolver;
+			if (!resolver) return;
+
+			const value = this.#input.getValue();
+			if (this.#activePrompt && value.length === 0 && !this.#activePrompt.allowEmpty) return;
+
+			if (this.#activePrompt?.secret) {
+				this.#input.setSecret(false);
 			}
+			this.#activePrompt = undefined;
+			resolver(value);
+			this.#inputResolver = undefined;
+			this.#inputRejecter = undefined;
 		};
 		this.#input.onEscape = () => {
 			this.#cancel();
@@ -58,6 +68,8 @@ export class LoginDialogComponent extends Container {
 	}
 
 	#cancel(): void {
+		this.#input.setSecret(false);
+		this.#activePrompt = undefined;
 		this.#abortController.abort();
 		if (this.#inputRejecter) {
 			this.#inputRejecter(new Error("Login cancelled"));
@@ -108,6 +120,8 @@ export class LoginDialogComponent extends Container {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
+		this.#activePrompt = undefined;
+		this.#input.setSecret(false);
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
 		if (!this.#contentContainer.children.includes(this.#input)) {
@@ -126,11 +140,16 @@ export class LoginDialogComponent extends Container {
 	 * Called by onPrompt callback - show prompt and wait for input
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
+	showPrompt(prompt: OAuthPrompt): Promise<string> {
+		this.#activePrompt = prompt;
+		this.#input.setSecret(prompt.secret ?? false);
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
-		if (placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 1, 0));
+		if (prompt.placeholder) {
+			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${prompt.placeholder}`), 1, 0));
+		}
+		if (prompt.secret) {
+			this.#contentContainer.addChild(new Text(theme.fg("dim", "(Input hidden)"), 1, 0));
 		}
 		if (!this.#contentContainer.children.includes(this.#input)) {
 			this.#contentContainer.addChild(this.#input);

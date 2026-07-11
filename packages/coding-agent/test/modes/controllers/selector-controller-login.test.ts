@@ -1,8 +1,13 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
+import type { OAuthLoginCallbacks, OAuthPrompt } from "@oh-my-pi/pi-ai/oauth/types";
+import { LoginDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/login-dialog";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { TUI } from "@oh-my-pi/pi-tui";
+import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
 interface RenderableBlock {
 	render(width: number): string[];
@@ -21,12 +26,23 @@ beforeAll(async () => {
 	await initTheme();
 });
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("SelectorController login", () => {
 	it("presents OAuth success as soon as credentials are saved", async () => {
 		const loginSaved = Promise.withResolvers<void>();
 		const presentedBlocks: unknown[] = [];
+		const prompt = {
+			message: "Paste your token",
+			secret: true,
+			allowEmpty: true,
+		} satisfies OAuthPrompt;
+		const showPrompt = vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("");
 		const authStorage = {
-			login: vi.fn(async () => {
+			login: vi.fn(async (_provider: string, callbacks: OAuthLoginCallbacks) => {
+				await callbacks.onPrompt(prompt);
 				loginSaved.resolve();
 			}),
 		} as unknown as AuthStorage;
@@ -66,6 +82,7 @@ describe("SelectorController login", () => {
 		expect(refreshInBackground).toHaveBeenCalledTimes(1);
 		expect(refresh).not.toHaveBeenCalled();
 		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(showPrompt).toHaveBeenCalledWith(prompt);
 	});
 
 	it("Esc during a pending login aborts the flow and restores the editor", async () => {
@@ -112,5 +129,88 @@ describe("SelectorController login", () => {
 		expect(ctx.showStatus).toHaveBeenCalledWith("Login cancelled");
 		expect(editorSlot).toEqual([editor]);
 		expect(renderPresented(presentedBlocks)).not.toContain("Successfully logged in");
+	});
+
+	it("keeps secret OAuth prompts hidden and purges their input state before the next prompt", async () => {
+		const secretMarker = "SENTINEL_TOKEN_XYZ";
+		const rawSecret = `  ${secretMarker}  `;
+		const tui = new TUI(new VirtualTerminal(120, 20));
+		const dialog = new LoginDialogComponent(tui, "xai-oauth", () => {});
+
+		try {
+			const rawSecretSubmitted = dialog.showPrompt({
+				message: "Paste your token",
+				secret: true,
+			});
+			dialog.handleInput(rawSecret);
+			const hiddenPrompt = stripVTControlCharacters(dialog.render(120).join("\n"));
+			expect(hiddenPrompt).toContain("Input hidden");
+			expect(hiddenPrompt).not.toContain(secretMarker);
+			dialog.handleInput("\n");
+			expect(await rawSecretSubmitted).toBe(rawSecret);
+
+			const blankSubmitted = dialog.showPrompt({
+				message: "Paste a token or leave blank",
+				secret: true,
+				allowEmpty: true,
+			});
+			dialog.handleInput("\n");
+			expect(await blankSubmitted).toBe("");
+
+			const clearedSecret = dialog.showPrompt({
+				message: "Clear sensitive input",
+				secret: true,
+				allowEmpty: true,
+			});
+			dialog.handleInput(rawSecret);
+			dialog.handleInput("\x01"); // Ctrl+A
+			dialog.handleInput("\x0b"); // Ctrl+K, puts the token in the kill ring
+			dialog.handleInput("\n");
+			await clearedSecret;
+
+			const ordinaryPrompt = dialog.showPrompt({
+				message: "Ordinary prompt",
+				allowEmpty: true,
+			});
+			dialog.handleInput("\x1f"); // Ctrl+_, undo
+			dialog.handleInput("\x19"); // Ctrl+Y, yank
+			const renderedOrdinaryPrompt = stripVTControlCharacters(dialog.render(120).join("\n"));
+			expect(renderedOrdinaryPrompt).not.toContain(secretMarker);
+			dialog.handleInput("\n");
+			await ordinaryPrompt;
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("purges cancelled secret prompts before a later ordinary prompt", async () => {
+		const secretMarker = "CANCELLED_SENTINEL_TOKEN_XYZ";
+		const tui = new TUI(new VirtualTerminal(120, 20));
+		const dialog = new LoginDialogComponent(tui, "xai-oauth", () => {});
+
+		try {
+			const cancelledPrompt = dialog.showPrompt({
+				message: "Paste your token",
+				secret: true,
+			});
+			dialog.handleInput(secretMarker);
+			dialog.handleInput("\x01"); // Ctrl+A
+			dialog.handleInput("\x0b"); // Ctrl+K, puts the token in the kill ring
+			dialog.handleInput("\x1b");
+			await expect(cancelledPrompt).rejects.toThrow("Login cancelled");
+
+			const ordinaryPrompt = dialog.showPrompt({
+				message: "Ordinary prompt",
+				allowEmpty: true,
+			});
+			dialog.handleInput("\x1f"); // Ctrl+_, undo
+			dialog.handleInput("\x19"); // Ctrl+Y, yank
+			const renderedOrdinaryPrompt = stripVTControlCharacters(dialog.render(120).join("\n"));
+			expect(renderedOrdinaryPrompt).not.toContain(secretMarker);
+			dialog.handleInput("\n");
+			await ordinaryPrompt;
+		} finally {
+			tui.stop();
+		}
 	});
 });

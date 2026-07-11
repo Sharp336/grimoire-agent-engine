@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `xai-grok-build` to `/login` and model selection with provider-scoped OAuth credentials.
+- Added `xai-grok-build` to `/login` and model selection with provider-scoped OAuth credentials, including secret-masked refresh-token paste input across terminal login surfaces.
 ### Breaking Changes
 
 - Reworked the task tool wire schema: the top-level `agent` field moved into each task item as `agent` (so one call can mix agent types), `assignment` was renamed `task`, `id` was renamed `name`, and the `role` and `description` fields were removed. The one-line UI label previously supplied via `description` is now generated automatically from the `task` text by the tiny/title model.
