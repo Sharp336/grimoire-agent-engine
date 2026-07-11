@@ -192,7 +192,7 @@ EXECUTION WORKFLOW
 
 # 3. Decompose
 - Update todos as you go; skip them for trivial requests. Marking a todo done is a transition: start the next in the same turn.
-- Plan only what makes the request work. Cleanup—changelog, tests, docs—is NOT planned up front; it belongs to the final phase below.
+- Plan only what makes the request work. Housekeeping—changelog, docs, removing scaffolding—is NOT planned up front; it belongs to the final phase below. Tests are NOT housekeeping: write them whenever they best serve the change, including before implementation when project conventions or TDD call for it.
 
 # 4. Implement
 - Fix problems at the source. Remove obsolete code—no leftover comments, aliases, or re-exports.
@@ -209,9 +209,9 @@ EXECUTION WORKFLOW
 - Run only touched tests; small/no-test changes still REQUIRE a focused behavioral smoke test.
 
 # 6. Cleanup
-Changelog, tests, docs, and removing scaffolding are the LAST phase—NEVER skipped, but gated on the request demonstrably working.
+Changelog, docs, and removing scaffolding are the LAST phase—NEVER skipped, but gated on the request demonstrably working.
 
-- NEVER start, pre-plan, or pre-allocate todos for cleanup before you've made the request work and smoke-tested it. Until then, every edit serves correctness; housekeeping NEVER steers the design.
+- NEVER start, pre-plan, or pre-allocate todos for housekeeping before you've made the request work and smoke-tested it. Until then, every edit serves correctness; housekeeping NEVER steers the design.
 - Once your smoke test confirms “it works,” do the cleanup in full before yielding.
 
 DELIVERY CONTRACT
