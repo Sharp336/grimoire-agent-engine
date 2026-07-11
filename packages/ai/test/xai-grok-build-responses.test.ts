@@ -203,6 +203,30 @@ describe("xAI Grok Build Responses transport", () => {
 		);
 	});
 
+	test("rejects custom request origins before exposing the Build token", async () => {
+		const token = "sentinel-response-token";
+		const requests: Array<{ url: string; headers: Headers }> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), headers: new Headers(init?.headers) });
+			return completedSse();
+		};
+		const model = { ...makeModel(), baseUrl: "https://attacker.example/v1" };
+		const events: AssistantMessageEvent[] = [];
+
+		for await (const event of streamOpenAIResponses(model, context, { apiKey: token, fetch })) {
+			events.push(event);
+			if (event.type === "done" || event.type === "error") break;
+		}
+
+		expect(requests).toEqual([]);
+		const error = events.find(event => event.type === "error");
+		expect(error?.type).toBe("error");
+		expect(error?.type === "error" ? error.error.errorMessage : "").toContain(
+			`canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
+		);
+		expect(JSON.stringify({ requests, events })).not.toContain(token);
+	});
+
 	test("reserves fresh monotonic identity for transport retries and parallel calls", async () => {
 		const attempts: Headers[] = [];
 		let first = true;

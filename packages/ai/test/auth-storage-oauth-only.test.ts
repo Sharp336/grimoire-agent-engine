@@ -71,6 +71,53 @@ describe("AuthStorage OAuth-only providers", () => {
 		expect(authStorage.describeCredentialSource(PROVIDER)).toContain("build@example.test");
 	});
 
+	test("account APIs retain Build OAuth despite mixed API-key overrides", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		authStorage.setRuntimeApiKey(PROVIDER, "runtime");
+		authStorage.setConfigApiKey(PROVIDER, "config");
+		await authStorage.set(PROVIDER, [
+			{ type: "api_key", key: "stored" },
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "account-1",
+				email: "build@example.test",
+			},
+		]);
+
+		expect(authStorage.listOAuthAccounts(PROVIDER)).toEqual([
+			expect.objectContaining({ position: 0, accountId: "account-1", email: "build@example.test" }),
+		]);
+		expect(await authStorage.getOAuthAccesses(PROVIDER)).toEqual([
+			expect.objectContaining({ ok: true, accessToken: "oauth-access", accountId: "account-1" }),
+		]);
+		expect(await authStorage.getOAuthAccessAt(PROVIDER, 0)).toEqual(
+			expect.objectContaining({ ok: true, accessToken: "oauth-access", accountId: "account-1" }),
+		);
+	});
+
+	test("account APIs still let API-key overrides replace OAuth for non-OAuth-only providers", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "xai-oauth";
+		authStorage.setRuntimeApiKey(provider, "runtime");
+		authStorage.setConfigApiKey(provider, "config");
+		await authStorage.set(provider, [
+			{ type: "api_key", key: "stored" },
+			{
+				type: "oauth",
+				access: "oauth-access",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		]);
+
+		expect(authStorage.listOAuthAccounts(provider)).toEqual([]);
+		expect(await authStorage.getOAuthAccesses(provider)).toEqual([]);
+		expect(await authStorage.getOAuthAccessAt(provider, 0)).toBeUndefined();
+	});
+
 	test("mints provider-bound provenance that generic seeding cannot forge", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		await authStorage.set(PROVIDER, [

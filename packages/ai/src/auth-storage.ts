@@ -4545,7 +4545,10 @@ export class AuthStorage {
 	 * account" UI should render `position + 1`.
 	 */
 	listOAuthAccounts(provider: string): OAuthAccountSummary[] {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (
+			!isOAuthOnlyProvider(provider) &&
+			(this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))
+		) {
 			return [];
 		}
 		return this.#getStoredOAuthSelections(provider).map((selection, position) => ({
@@ -4567,7 +4570,10 @@ export class AuthStorage {
 	 * exercise each stored account exactly once.
 	 */
 	async getOAuthAccesses(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (
+			!isOAuthOnlyProvider(provider) &&
+			(this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))
+		) {
 			return [];
 		}
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
@@ -4586,15 +4592,18 @@ export class AuthStorage {
 	 * failure of the targeted account surfaces as a failed resolution rather than
 	 * silently rotating or rate-tripping a sibling.
 	 *
-	 * Returns `undefined` when `position` is out of range or runtime/config
-	 * overrides have replaced OAuth with an explicit API key.
+	 * Returns `undefined` when `position` is out of range or, for providers that
+	 * permit API keys, runtime/config overrides have replaced OAuth.
 	 */
 	async getOAuthAccessAt(
 		provider: string,
 		position: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (
+			!isOAuthOnlyProvider(provider) &&
+			(this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))
+		) {
 			return undefined;
 		}
 		const selection = this.#getStoredOAuthSelections(provider)[position];

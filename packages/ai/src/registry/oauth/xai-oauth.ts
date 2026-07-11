@@ -48,6 +48,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+function isAllowlistedOAuthErrorCode(value: unknown): value is string {
+	return (
+		value === "invalid_request" ||
+		value === "invalid_client" ||
+		value === "invalid_grant" ||
+		value === "unauthorized_client" ||
+		value === "unsupported_grant_type" ||
+		value === "invalid_scope"
+	);
+}
+
 /**
  * Validate an xAI OIDC endpoint against its scheme and host.
  *
@@ -591,6 +602,25 @@ async function refreshXAIToken(
 	}
 
 	if (!response.ok) {
+		if (provider === XAI_GROK_BUILD_PROVIDER) {
+			let errorCode: string | undefined;
+			try {
+				const payload: unknown = await response.json();
+				if (isRecord(payload) && isAllowlistedOAuthErrorCode(payload.error)) {
+					errorCode = payload.error;
+				}
+			} catch {
+				// Build diagnostics never include untrusted response text.
+			}
+			throw new AIError.OAuthError(
+				`xAI token refresh failed: ${response.status}${errorCode ? ` ${errorCode}` : ""}`,
+				{
+					kind: "token-refresh",
+					provider,
+					status: response.status,
+				},
+			);
+		}
 		let detail = "";
 		try {
 			detail = (await response.text()).trim();

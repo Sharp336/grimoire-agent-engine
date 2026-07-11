@@ -1406,6 +1406,9 @@ export function xaiOAuthModelManagerOptions(
 export function xaiGrokBuildModelManagerOptions(
 	config?: XaiGrokBuildModelManagerConfig,
 ): ModelManagerOptions<"openai-responses"> {
+	if (config?.baseUrl !== undefined && config.baseUrl !== XAI_GROK_BUILD_BASE_URL) {
+		throw new Error(`xAI Grok Build requires the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`);
+	}
 	const baseUrl = config?.baseUrl ?? XAI_GROK_BUILD_BASE_URL;
 	const staticModels = buildXaiGrokBuildStaticSeed(baseUrl);
 	const base = createSimpleOpenAIResponsesOptions("xai-grok-build", XAI_GROK_BUILD_BASE_URL, {

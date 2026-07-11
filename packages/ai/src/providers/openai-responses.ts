@@ -1,5 +1,6 @@
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
+	XAI_GROK_BUILD_BASE_URL,
 	XAI_GROK_BUILD_CLIENT_IDENTIFIER,
 	XAI_GROK_BUILD_CLIENT_VERSION,
 	XAI_GROK_BUILD_TOKEN_AUTH,
@@ -245,6 +246,15 @@ function isGrokBuildProvider(model: Model<"openai-responses">): boolean {
 	return model.provider === "xai-grok-build";
 }
 
+function assertGrokBuildRequestBaseUrl(model: Model<"openai-responses">): void {
+	if (!isGrokBuildProvider(model)) return;
+	if (model.baseUrl !== XAI_GROK_BUILD_BASE_URL) {
+		throw new AIError.ConfigurationError(
+			`xAI Grok Build requests require the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
+		);
+	}
+}
+
 function isOpenAIResponsesStatefulEnabled(
 	options: OpenAIResponsesOptions | undefined,
 	baseUrl: string | undefined,
@@ -420,6 +430,7 @@ const streamOpenAIResponsesOnce = (
 			: undefined;
 
 		try {
+			assertGrokBuildRequestBaseUrl(model);
 			// Keep request routing on `sessionId` while allowing callers to pin a
 			// stable prompt-cache key independently. Side-channel calls use this to
 			// avoid perturbing provider conversation state without cold-starting the cache.

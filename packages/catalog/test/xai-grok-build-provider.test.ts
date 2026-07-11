@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/reference";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
-import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	buildXaiGrokBuildStaticSeed,
@@ -30,24 +29,23 @@ function paidReference(id: string): Model<"openai-responses"> {
 }
 
 describe("xAI Grok Build catalog provider", () => {
-	test("bundles exactly the two generated fallback models", () => {
-		const bundled = MODELS_JSON["xai-grok-build"];
-		const seed = buildXaiGrokBuildStaticSeed();
+	test("rejects custom discovery origins before exposing the Build token", () => {
+		const token = "sentinel-build-token";
+		const requests: Array<{ url: string; headers: Headers }> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), headers: new Headers(init?.headers) });
+			return Response.json({ data: [] });
+		};
 
-		expect(Object.keys(bundled ?? {}).sort()).toEqual([...BUILD_IDS].sort());
-		for (const model of seed) {
-			expect(bundled?.[model.id]).toMatchObject({
-				id: model.id,
-				name: model.name,
-				provider: model.provider,
-				baseUrl: model.baseUrl,
-				reasoning: model.reasoning,
-				input: model.input,
-				cost: model.cost,
-				contextWindow: model.contextWindow,
-				maxTokens: model.maxTokens,
-			});
-		}
+		expect(() =>
+			xaiGrokBuildModelManagerOptions({
+				apiKey: token,
+				baseUrl: "https://attacker.example/v1",
+				fetch,
+			}),
+		).toThrow(/canonical.*Build|Build.*canonical/i);
+		expect(requests).toEqual([]);
+		expect(JSON.stringify(requests)).not.toContain(token);
 	});
 
 	test("registers an OAuth-only-discovery descriptor with the two-model offline fallback", () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { OAuthError } from "../../../error";
+import type { FetchImpl } from "../../../types";
 import { getProviderDefinition, isOAuthOnlyProvider, PROVIDER_REGISTRY } from "../../registry";
 import { getOAuthProviders } from "../index";
 import {
@@ -169,6 +170,26 @@ describe("refreshXAIOAuthToken", () => {
 			/missing refresh_token/,
 		);
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("preserves raw non-2xx response diagnostics for xai-oauth", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url === DISCOVERY_URL) return jsonResponse({ token_endpoint: TOKEN_ENDPOINT });
+			if (url === TOKEN_ENDPOINT) {
+				return jsonResponse({ error: "invalid_grant", error_description: "legacy detail" }, 400);
+			}
+			throw new Error(`Unexpected refresh request: ${url}`);
+		};
+
+		try {
+			await refreshXAIOAuthToken("xai-refresh", fetchMock);
+			throw new Error("Expected xai-oauth refresh to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OAuthError);
+			expect(error).toMatchObject({ kind: "token-refresh", provider: "xai", status: 400 });
+			expect((error as Error).message).toContain('"error_description":"legacy detail"');
+		}
 	});
 });
 
@@ -347,6 +368,41 @@ describe("xAI Grok Build browser OAuth", () => {
 			expect(error).toBeInstanceOf(OAuthError);
 			expect(error).toMatchObject({ kind: "token-refresh", provider: "xai-grok-build" });
 			expect((error as Error).cause).toBe(transportFailure);
+		}
+	});
+
+	it("sanitizes Build refresh response diagnostics to status and allowlisted error code", async () => {
+		const refreshToken = "sentinel-refresh-token\r\ninjected";
+		for (const [errorCode, expectedMessage] of [
+			["invalid_grant", "xAI token refresh failed: 400 invalid_grant"],
+			[`${refreshToken}\u0000`, "xAI token refresh failed: 400"],
+		] as const) {
+			const fetchMock: FetchImpl = async input => {
+				const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+				if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+				if (url === TOKEN_ENDPOINT) {
+					return jsonResponse(
+						{
+							error: errorCode,
+							error_description: `refresh failed for ${refreshToken}\u0000`,
+							debug: refreshToken,
+						},
+						400,
+					);
+				}
+				throw new Error(`Unexpected refresh request: ${url}`);
+			};
+
+			try {
+				await refreshXAIGrokBuildToken(refreshToken, fetchMock);
+				throw new Error("Expected Build refresh to fail");
+			} catch (error) {
+				expect(error).toBeInstanceOf(OAuthError);
+				expect(error).toMatchObject({ kind: "token-refresh", provider: "xai-grok-build", status: 400 });
+				expect((error as Error).message).toBe(expectedMessage);
+				expect((error as Error).message).not.toContain(refreshToken);
+				expect((error as Error).message).not.toContain("error_description");
+			}
 		}
 	});
 });
