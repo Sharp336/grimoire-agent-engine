@@ -176,6 +176,7 @@ const realpathCache = new Map<string, Promise<string>>();
 const nativeAddonResolutionCache = new Map<string, Promise<string | null>>();
 const nativeAddonRequireScanCache = new Map<string, Promise<boolean>>();
 const nativeAddonLoaderModulePaths = new Set<string>();
+const synchronousRequireModulePaths = new Set<string>();
 
 function clearLegacyPiResolutionCaches(): void {
 	resolvedSpecifierFallbacks.clear();
@@ -187,6 +188,7 @@ function clearLegacyPiResolutionCaches(): void {
 	nativeAddonResolutionCache.clear();
 	nativeAddonRequireScanCache.clear();
 	nativeAddonLoaderModulePaths.clear();
+	synchronousRequireModulePaths.clear();
 	realpathCache.clear();
 }
 
@@ -1089,12 +1091,11 @@ function escapeRegExp(value: string): string {
 }
 
 // Match source modules in an extension graph: relative imports, package
-// `imports` aliases such as `#src/*`, and extension-local bare dependency
-// entries. Bare imports inside node_modules dependencies remain native Bun
-// resolutions; once an ESM dependency entry is hooked, its relative children
-// are still collected and rewritten with the reload mtime tag. Synchronous
-// `require()` children stay on Bun's native loader: routing them through our
-// async onLoad hook makes createRequire() fail before the module can execute.
+// `imports` aliases such as `#src/*`, extension-local bare dependencies, and
+// literal CommonJS requires. Required children are still traversed so nested
+// napi-rs loaders can receive the native-addon rewrite, but ordinary required
+// modules stay on Bun's synchronous native loader instead of being claimed by
+// the async ESM hook.
 const EXTENSION_GRAPH_SPECIFIER_REGEX = /((?:from\s+|import\s+|import\s*\(\s*)["'])([^"'()\s]+)(["'])/g;
 
 // Extension source realpaths already covered by an installed load-time hook for
@@ -1170,8 +1171,15 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 		modules.set(file, source);
 		const dir = path.dirname(file);
 		const specifiers = new Set<string>();
+		const requireSpecifiers = new Set<string>();
 		for (const match of source.matchAll(EXTENSION_GRAPH_SPECIFIER_REGEX)) {
 			if (match[2]) specifiers.add(match[2]);
+		}
+		for (const match of source.matchAll(NATIVE_ADDON_REQUIRE_SPECIFIER_REGEX)) {
+			if (match[2]) {
+				specifiers.add(match[2]);
+				requireSpecifiers.add(match[2]);
+			}
 		}
 		for (const specifier of specifiers) {
 			try {
@@ -1211,6 +1219,12 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 					}
 					nextFollowsBareDependencies = false;
 				}
+				if (resolved && requireSpecifiers.has(specifier)) {
+					synchronousRequireModulePaths.add(resolved);
+					if (await moduleRequiresNativeAddon(resolved)) {
+						nativeAddonLoaderModulePaths.add(resolved);
+					}
+				}
 				if (resolved && !modules.has(resolved)) {
 					const queuedFollowsBareDependencies = queuedFollowBareDependencies.get(resolved) ?? false;
 					const mergedFollowsBareDependencies = queuedFollowsBareDependencies || nextFollowsBareDependencies;
@@ -1218,7 +1232,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 					queue.push({ file: resolved, followBareDependencies: mergedFollowsBareDependencies });
 				}
 			} catch {
-				// Unresolvable import (e.g. a type-only path); skip it.
+				// Unresolvable specifier (e.g. a type-only path); skip it.
 			}
 		}
 	}
@@ -1227,9 +1241,10 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 
 /**
  * Install exact-path load hooks for the current extension graph. ESM/TS source
- * retains the async rewrite path. Native-addon CJS loaders use a synchronous
- * hook with source pre-rewritten during graph collection; Bun rejects a CJS
- * `require()` whose onLoad callback returns a promise.
+ * retains the async rewrite path. Modules reached through synchronous
+ * `require()` stay on Bun's native loader, except native-addon CJS loaders:
+ * those use a synchronous hook with source pre-rewritten during graph
+ * collection. Bun rejects any `require()` whose onLoad callback returns a promise.
  */
 function installExtensionGraphHook(
 	entryRealPath: string,
@@ -1238,8 +1253,11 @@ function installExtensionGraphHook(
 	const asyncModules = new Map<string, string>();
 	const syncCommonJsModules = new Map<string, string>();
 	for (const [modulePath, source] of modules) {
-		const destination = nativeAddonLoaderModulePaths.has(modulePath) ? syncCommonJsModules : asyncModules;
-		destination.set(modulePath, source);
+		if (nativeAddonLoaderModulePaths.has(modulePath)) {
+			syncCommonJsModules.set(modulePath, source);
+		} else if (!synchronousRequireModulePaths.has(modulePath)) {
+			asyncModules.set(modulePath, source);
+		}
 	}
 
 	if (asyncModules.size > 0) {
