@@ -159,33 +159,26 @@ describe("GPT-5.6 delegation prompt policy", () => {
 		return systemPrompt.join("\n\n");
 	}
 
-	it("keeps default GPT-5.6 sessions non-delegating", async () => {
-		const rendered = await renderDelegationPrompt(false);
+	it("keeps the canonical concurrency cap regardless of eager delegation", async () => {
+		const [defaultRendered, eagerRendered] = await Promise.all([
+			renderDelegationPrompt(false),
+			renderDelegationPrompt(true),
+		]);
 
-		expect(rendered).toContain("Do not spawn sub-agents unless");
-		expect(rendered).not.toContain("Proactive multi-agent delegation is active");
-		expect(rendered).not.toContain("Maximize parallelism");
-		expect(rendered).toContain("At most 12 subagents");
+		expect(defaultRendered).toContain("At most 12 subagents");
+		expect(eagerRendered).toContain("At most 12 subagents");
 	});
 
-	it("gives eager GPT-5.6 sessions bounded, supervised delegation guidance", async () => {
-		const rendered = await renderDelegationPrompt(true);
+	it("reserves eager delegation supervision for the top-level GPT-5.6 agent", async () => {
+		const [rootRendered, descendantRendered] = await Promise.all([
+			renderDelegationPrompt(true),
+			renderDelegationPrompt(true, true),
+		]);
 
-		expect(rendered).toContain("Proactive multi-agent delegation is active");
-		expect(rendered).toContain("Keep ownership of the overall task");
-		expect(rendered).toContain("Monitor sub-agents for stalls");
-		expect(rendered).toContain("At most 12 subagents");
-		expect(rendered).not.toContain("Do not spawn sub-agents unless");
-		expect(rendered).not.toContain("Maximize parallelism");
-	});
-
-	it("reserves active delegation supervision for the top-level GPT-5.6 agent", async () => {
-		const rendered = await renderDelegationPrompt(true, true);
-
-		expect(rendered).toContain("Proactive multi-agent delegation is active");
-		expect(rendered).toContain("At most 12 subagents");
-		expect(rendered).not.toContain("Keep ownership of the overall task");
-		expect(rendered).not.toContain("Monitor sub-agents for stalls");
+		expect(rootRendered).toContain("Keep ownership of the overall task");
+		expect(rootRendered).toContain("Monitor sub-agents for stalls");
+		expect(descendantRendered).not.toContain("Keep ownership of the overall task");
+		expect(descendantRendered).not.toContain("Monitor sub-agents for stalls");
 	});
 });
 
