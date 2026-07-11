@@ -120,6 +120,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isOAuthOnlyProvider } from "@oh-my-pi/pi-ai/registry";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
@@ -7739,6 +7740,12 @@ export class AgentSession {
 			// Validate API key
 			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
 			if (!apiKey) {
+				if (isOAuthOnlyProvider(this.model.provider)) {
+					throw new AIError.MissingApiKeyError(
+						this.model.provider,
+						`No OAuth credential for provider: ${this.model.provider}. Run /login.`,
+					);
+				}
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,

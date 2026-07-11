@@ -1,14 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, TempDir } from "@oh-my-pi/pi-utils";
 
 // Switching the active model (Ctrl+P role cycling, /models selection) must be a
 // cheap, synchronous operation. It used to call the async `getApiKey`, which can
@@ -43,13 +44,18 @@ describe("AgentSession model switch auth pre-flight", () => {
 		}
 	});
 
-	function modelOrThrow(id: string): Model<Api> {
-		const model = getBundledModel("anthropic", id);
-		if (!model) throw new Error(`Expected anthropic model ${id} to exist`);
+	function modelOrThrow(id: string, provider: GeneratedProvider = "anthropic"): Model<Api> {
+		const model = getBundledModel(provider, id);
+		if (!model) throw new Error(`Expected ${provider} model ${id} to exist`);
 		return model;
 	}
 
-	function makeSession(initialModel: Model<Api>, roles?: Record<string, string>): AgentSession {
+	function createSession(
+		initialModel: Model<Api>,
+		modelRegistry: ModelRegistry,
+		roles?: Record<string, string>,
+		streamFn?: StreamFn,
+	): AgentSession {
 		const settings = Settings.isolated();
 		if (roles) {
 			for (const role in roles) settings.setModelRole(role, roles[role]);
@@ -62,14 +68,52 @@ describe("AgentSession model switch auth pre-flight", () => {
 				messages: [],
 				thinkingLevel: Effort.Medium,
 			},
+			streamFn,
 		});
-		session = new AgentSession({
+		return new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
-			modelRegistry: registry,
+			modelRegistry,
 		});
+	}
+
+	function makeSession(initialModel: Model<Api>, roles?: Record<string, string>): AgentSession {
+		session = createSession(initialModel, registry, roles);
 		return session;
+	}
+
+	async function withIsolatedSession<T>(
+		initialModel: Model<Api>,
+		run: (testSession: AgentSession, testRegistry: ModelRegistry) => Promise<T>,
+		configureAuth?: (testAuthStorage: AuthStorage) => void,
+		streamFn?: StreamFn,
+	): Promise<T> {
+		const isolatedDir = TempDir.createSync("@pi-prompt-auth-");
+		const isolatedAuthStorage = await AuthStorage.create(path.join(isolatedDir.path(), "auth.db"));
+		try {
+			configureAuth?.(isolatedAuthStorage);
+			const isolatedRegistry = new ModelRegistry(isolatedAuthStorage, path.join(isolatedDir.path(), "models.yml"));
+			const isolatedSession = createSession(initialModel, isolatedRegistry, undefined, streamFn);
+			try {
+				return await run(isolatedSession, isolatedRegistry);
+			} finally {
+				await isolatedSession.dispose();
+			}
+		} finally {
+			isolatedAuthStorage.close();
+			isolatedDir.removeSync();
+		}
+	}
+
+	async function capturePromptError(testSession: AgentSession): Promise<Error> {
+		try {
+			await testSession.prompt("verify prompt authentication preflight");
+		} catch (error) {
+			if (error instanceof Error) return error;
+			throw new Error("Expected prompt authentication preflight to reject with an Error");
+		}
+		throw new Error("Expected prompt authentication preflight to reject");
 	}
 
 	it("switches the active model via the synchronous auth check, not the resolver", async () => {
@@ -133,5 +177,53 @@ describe("AgentSession model switch auth pre-flight", () => {
 		await expect(s.setModel(to)).rejects.toThrow(/No API key/);
 		expect(s.model?.id).toBe(from.id);
 		expect(getApiKeySpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects a Build prompt with an OAuth error before model dispatch", async () => {
+		let preflightChecked = false;
+		let agentPromptCalls = 0;
+		let modelDispatches = 0;
+		const error = await withIsolatedSession(
+			modelOrThrow("grok-4.5", "xai-grok-build"),
+			async (testSession, testRegistry) => {
+				const getApiKeySpy = spyOn(testRegistry, "getApiKey");
+				const agentPromptSpy = spyOn(testSession.agent, "prompt");
+				spies.push(getApiKeySpy, agentPromptSpy);
+				const error = await capturePromptError(testSession);
+				preflightChecked = getApiKeySpy.mock.calls.length > 0;
+				agentPromptCalls = agentPromptSpy.mock.calls.length;
+				return error;
+			},
+			testAuthStorage => testAuthStorage.setRuntimeApiKey("xai", "unrelated-api-key"),
+			() => {
+				modelDispatches++;
+				throw new Error("Build prompt unexpectedly reached model dispatch");
+			},
+		);
+
+		expect(preflightChecked).toBe(true);
+		expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
+		expect(error.message).toBe("No OAuth credential for provider: xai-grok-build. Run /login.");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
+		expect(agentPromptCalls).toBe(0);
+		expect(modelDispatches).toBe(0);
+	});
+
+	it("retains the generic missing-key error for regular providers", async () => {
+		let preflightChecked = false;
+		const error = await withIsolatedSession(modelOrThrow("claude-sonnet-4-5"), async (testSession, testRegistry) => {
+			const getApiKeySpy = spyOn(testRegistry, "getApiKey").mockImplementation(async () => {
+				preflightChecked = true;
+				return undefined;
+			});
+			spies.push(getApiKeySpy);
+			return capturePromptError(testSession);
+		});
+
+		expect(preflightChecked).toBe(true);
+		expect(error).not.toBeInstanceOf(AIError.MissingApiKeyError);
+		expect(error.message).toBe(
+			`No API key found for anthropic.\n\nUse /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+		);
 	});
 });
