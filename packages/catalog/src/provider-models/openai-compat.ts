@@ -1600,7 +1600,7 @@ export function neuralwattModelManagerOptions(
 							compat: {
 								thinkingFormat: "openai",
 								supportsDeveloperRole: capabilities?.developer_role ?? false,
-								supportsReasoningEffort: capabilities?.reasoning_effort ?? false,
+								supportsReasoningEffort: (capabilities?.reasoning_effort ?? false) && isReasoning,
 								maxTokensField: "max_tokens" as const,
 								reasoningContentField: "reasoning_content" as const,
 								requiresReasoningContentForToolCalls: isReasoning,

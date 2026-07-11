@@ -71,6 +71,18 @@ describe("Neuralwatt provider discovery", () => {
 					},
 				},
 			},
+			{
+				id: "glm-5.2-fast",
+				object: "model",
+				metadata: {
+					capabilities: {
+						reasoning: false,
+						reasoning_effort: true,
+						vision: false,
+						developer_role: false,
+					},
+				},
+			},
 		]);
 
 		const options = neuralwattModelManagerOptions({
@@ -86,7 +98,7 @@ describe("Neuralwatt provider discovery", () => {
 			},
 		]);
 		expect(models).toBeDefined();
-		expect(models).toHaveLength(3);
+		expect(models).toHaveLength(4);
 
 		// GLM-5.2: reasoning_effort: true → supportsReasoningEffort: true
 		const glm = models?.find(m => m.id === "glm-5.2");
@@ -121,6 +133,11 @@ describe("Neuralwatt provider discovery", () => {
 		expect(qwen).toMatchObject({ reasoning: false });
 		expect(qwen?.compat?.supportsReasoningEffort).toBe(false);
 		expect(qwen?.compat?.thinkingFormat).toBe("openai");
+		// GLM-5.2-fast: reasoning_effort is reported by metadata, but reasoning is false.
+		const fast = models?.find(m => m.id === "glm-5.2-fast");
+		expect(fast).toBeDefined();
+		expect(fast).toMatchObject({ reasoning: false });
+		expect(fast?.compat?.supportsReasoningEffort).toBe(false);
 	});
 
 	test("defaults supportsReasoningEffort to false when capabilities metadata is absent", async () => {

@@ -598,6 +598,60 @@ describe("model thinking derivation", () => {
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBeUndefined();
 	});
 
+	it.each(["kimi-k2.6", "qwen3.6-35b"])("hides the effort surface for Neuralwatt %s without hiding reasoning", id => {
+		const model = createModel({
+			id,
+			api: "openai-completions",
+			provider: "neuralwatt",
+			baseUrl: "https://api.neuralwatt.com/v1",
+			compat: { thinkingFormat: "openai", supportsReasoningEffort: false },
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			},
+		});
+
+		expect(model.reasoning).toBe(true);
+		expect(model.compat.thinkingFormat).toBe("openai");
+		expect(model.compat.supportsReasoningEffort).toBe(false);
+		expect(model.thinking).toBeUndefined();
+		expect(getSupportedEfforts(model)).toEqual([]);
+	});
+
+	it("keeps Neuralwatt GLM effort metadata when reasoning_effort is supported", () => {
+		const model = createModel({
+			id: "glm-5.2",
+			api: "openai-completions",
+			provider: "neuralwatt",
+			baseUrl: "https://api.neuralwatt.com/v1",
+			compat: { thinkingFormat: "openai", supportsReasoningEffort: true },
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			},
+		});
+
+		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+	});
+
+	it("does not apply the Neuralwatt suppression to MiniMax Coding Plan", () => {
+		const model = createModel({
+			id: "MiniMax-M2.7",
+			api: "openai-completions",
+			provider: "minimax-code",
+			baseUrl: "https://api.minimax.io/v1",
+			compat: { supportsReasoningEffort: false },
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+			},
+		});
+
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(model.thinking?.requiresEffort).toBe(true);
+	});
+
 	it("bakes the wire-exact five-tier low..max ladder on GPT-5.6 wire-effort APIs", () => {
 		const codex = createModel({
 			id: "gpt-5.6-sol",

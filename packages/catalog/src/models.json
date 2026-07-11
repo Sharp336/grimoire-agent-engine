@@ -55687,7 +55687,7 @@
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
-				"supportsReasoningEffort": true,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
@@ -55788,7 +55788,7 @@
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
-				"supportsReasoningEffort": true,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
@@ -55815,7 +55815,7 @@
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
-				"supportsReasoningEffort": true,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
@@ -55877,15 +55877,6 @@
 			},
 			"contextWindow": 262128,
 			"maxTokens": 262144,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -55942,15 +55933,6 @@
 			},
 			"contextWindow": 262128,
 			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -55979,15 +55961,6 @@
 			},
 			"contextWindow": 262128,
 			"maxTokens": 262144,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56016,15 +55989,6 @@
 			},
 			"contextWindow": 262128,
 			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56052,15 +56016,6 @@
 			},
 			"contextWindow": 262128,
 			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56116,15 +56071,6 @@
 			},
 			"contextWindow": 131056,
 			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,

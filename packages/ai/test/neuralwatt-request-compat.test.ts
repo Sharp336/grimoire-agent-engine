@@ -119,6 +119,11 @@ describe("neuralwatt Kimi-K2.6 OpenAI request contract", () => {
 	it("omits both thinking and reasoning_effort when reasoning high is requested", async () => {
 		const model = getBundledModel<"openai-completions">("neuralwatt", "kimi-k2.6");
 
+		// The bundled Kimi model still advertises reasoning but must expose no
+		// effort surface: Neuralwatt reports no supported reasoning_effort field.
+		expect(model.reasoning).toBe(true);
+		expect(model.thinking).toBeUndefined();
+
 		const payload = await capturePayload(model, testContext, {
 			reasoning: "high",
 			maxTokens: 64,
@@ -151,6 +156,27 @@ describe("neuralwatt Kimi-K2.6 OpenAI request contract", () => {
 		expect(payload?.thinking).toBeUndefined();
 		expect(payload?.reasoning_effort).toBeUndefined();
 		expect(result.stopReason).toBe("stop");
+	});
+});
+
+describe("neuralwatt GLM-5.2-fast non-reasoning request contract", () => {
+	it("omits reasoning_effort and tool_stream when a reasoning effort is requested with tools", async () => {
+		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2-fast");
+
+		// A non-reasoning fast alias must not inherit the GLM reasoning-effort
+		// dialect: supportsReasoningEffort resolves false, so neither the
+		// effort field nor the tool_stream flag is emitted.
+		expect(model.reasoning).toBe(false);
+		expect(model.compat.supportsReasoningEffort).toBe(false);
+
+		const payload = await capturePayload(
+			model,
+			{ messages: testContext.messages, tools: [harmlessTool] },
+			{ reasoning: "high", maxTokens: 64 },
+		);
+
+		expect(payload.reasoning_effort).toBeUndefined();
+		expect(payload.tool_stream).toBeUndefined();
 	});
 });
 
