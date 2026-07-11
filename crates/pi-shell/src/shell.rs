@@ -18,6 +18,7 @@ use brush_core::{
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
 	ShellVariable, SourceInfo, SpawnObserver, builtins,
 	env::EnvironmentScope,
+	jobs::JobState,
 	openfiles::{self, OpenFile, OpenFiles},
 };
 use bytes::Bytes;
@@ -195,12 +196,9 @@ impl Shell {
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
-	/// the persistent session. Completed jobs are reaped first via a silent
-	/// `JobManager::poll()` (no job-control notifications), so the count
-	/// reflects only processes still alive. Returns 0 when no session core is
-	/// materialized. The host uses this to decide whether to retain a per-call
-	/// shell whose background children are still running instead of dropping it
-	/// (which would SIGKILL them on kill-on-drop).
+	/// the persistent session. Completed jobs are reaped first while their
+	/// statuses remain available to a later `wait`, so the count reflects only
+	/// processes still alive. Returns 0 when no session core is materialized.
 	pub async fn live_background_job_count(&self) -> u32 {
 		let mut guard = self.session.lock().await;
 		let Some(core) = guard.as_mut() else {
@@ -210,14 +208,16 @@ impl Shell {
 		// Fail closed: a poll error leaves the job table in an unknown state, so
 		// report 0 (drop the shell) rather than pin a retained session forever on
 		// stale `representative_pid()` entries.
-		if jobs.poll().is_err() {
+		if jobs.reap_completed().is_err() {
 			return 0;
 		}
 		u32::try_from(
 			jobs
 				.jobs
 				.iter()
-				.filter(|job| job.representative_pid().is_some())
+				.filter(|job| {
+					!matches!(job.state, JobState::Done) && job.representative_pid().is_some()
+				})
 				.count(),
 		)
 		.unwrap_or(u32::MAX)
@@ -3279,6 +3279,46 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn live_background_job_count_retains_status_for_later_wait() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("reap-status");
+		let pid_file = root.join("pid");
+		let shell = Shell::new(None);
+		let start = format!("/bin/sh -c 'exit 37' & echo $! > {}", pid_file.display());
+		shell
+			.run(
+				ShellRunOptions { command: start, ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("start background job");
+		let pid: i32 = std::fs::read_to_string(&pid_file)
+			.expect("read background pid")
+			.trim()
+			.parse()
+			.expect("parse background pid");
+
+		assert_eq!(shell.live_background_job_count().await, 0);
+		assert!(
+			!std::path::Path::new(&format!("/proc/{pid}")).exists(),
+			"completed child must be reaped by the monitor poll",
+		);
+
+		let waited = shell
+			.run(
+				ShellRunOptions { command: format!("wait {pid}"), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("wait reaped background job");
+		assert_eq!(waited.exit_code, Some(37));
+		let _ = std::fs::remove_dir_all(root);
 	}
 
 	#[cfg(unix)]

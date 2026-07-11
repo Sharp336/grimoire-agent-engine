@@ -319,6 +319,21 @@ impl JobManager {
 
 		Ok(results)
 	}
+	/// Polls completed jobs while retaining them and their exit statuses for a
+	/// later `wait` by PID or job ID. This is used by hosts that need to reap
+	/// zombies without consuming shell-visible wait results.
+	pub fn reap_completed(&mut self) -> Result<(), error::Error> {
+		for job in &mut self.jobs {
+			if matches!(job.state, JobState::Done) {
+				continue;
+			}
+			if let Some(result) = job.poll_done()? {
+				job.completed_result = Some(result);
+			}
+		}
+		Ok(())
+	}
+
 
 	fn sweep_completed_jobs(&mut self) -> Vec<Job> {
 		let mut completed_jobs = vec![];
@@ -389,6 +404,12 @@ pub struct Job {
 	/// If available, the process group ID of the job's processes.
 	pgid: Option<sys::process::ProcessId>,
 
+	/// The PID retained after a background job is reaped.
+	reaped_pid: Option<sys::process::ProcessId>,
+
+	/// Exit status retained by a host-side background reaper.
+	completed_result: Option<Result<ExecutionResult, error::Error>>,
+
 	/// The annotation of the job (e.g., current, previous).
 	annotation: JobAnnotation,
 
@@ -431,6 +452,8 @@ impl Job {
 			id: 0,
 			tasks: tasks.into_iter().collect(),
 			pgid: None,
+			reaped_pid: None,
+			completed_result: None,
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
@@ -473,10 +496,17 @@ impl Job {
 	pub fn poll_done(
 		&mut self,
 	) -> Result<Option<Result<ExecutionResult, error::Error>>, error::Error> {
+		if self.tasks.is_empty() {
+			return Ok(self.completed_result.take());
+		}
+
 		let mut result: Option<Result<ExecutionResult, error::Error>> = None;
 
 		tracing::debug!(target: trace_categories::JOBS, "Polling job {} for completion...", self.id);
 
+		if self.reaped_pid.is_none() {
+			self.reaped_pid = self.representative_pid();
+		}
 		while !self.tasks.is_empty() {
 			let task = &mut self.tasks[0];
 			match task.poll() {
@@ -511,6 +541,11 @@ impl Job {
 		&mut self,
 		wait_for_terminate: bool,
 	) -> Result<ExecutionResult, error::Error> {
+		if let Some(result) = self.completed_result.take() {
+			self.state = JobState::Done;
+			return result;
+		}
+
 		let mut result = ExecutionResult::success();
 
 		while let Some(task) = self.tasks.back_mut() {
@@ -606,11 +641,14 @@ impl Job {
 	}
 
 	fn contains_process_id(&self, pid: i32) -> bool {
-		self.tasks.iter().any(|task| match task {
-			JobTask::External(process) => process.pid().is_some_and(|process_pid| process_pid == pid),
-			JobTask::Internal(_) => false,
-		})
-	}
+		self
+			.reaped_pid
+			.is_some_and(|reaped_pid| reaped_pid == pid)
+			|| self.tasks.iter().any(|task| match task {
+				JobTask::External(process) => process.pid().is_some_and(|process_pid| process_pid == pid),
+				JobTask::Internal(_) => false,
+			})
+		}
 
 	fn wait_identifier(&self) -> String {
 		self
@@ -620,6 +658,9 @@ impl Job {
 
 	/// Tries to retrieve a "representative" pid for the job.
 	pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
+		if let Some(pid) = self.reaped_pid {
+			return Some(pid);
+		}
 		for task in &self.tasks {
 			match task {
 				JobTask::External(p) => {

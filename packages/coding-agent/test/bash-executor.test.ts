@@ -1134,7 +1134,7 @@ describe("executeBash persistent background reaping", () => {
 		async () => {
 			const pidFile = path.join(tmp, "sleep-pid");
 			const release = path.join(tmp, "release");
-			const child = `while [ ! -f ${shellQuote(release)} ]; do sleep ${KILL_POLL_SECONDS}; done`;
+			const child = `while [ ! -f ${shellQuote(release)} ]; do sleep ${KILL_POLL_SECONDS}; done; exit 37`;
 			const result = await executeBash(
 				`/bin/sh -c ${shellQuote(child)} >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`,
 				{
@@ -1152,6 +1152,12 @@ describe("executeBash persistent background reaping", () => {
 			fs.writeFileSync(release, "");
 			await pollUntil(() => !fs.existsSync(procPath), Date.now() + 8_000);
 			expect(fs.existsSync(procPath)).toBe(false);
+			const waited = await executeBash(`wait ${pid}`, {
+				sessionKey: "persistent-periodic-reap-probe",
+				cwd: tmp,
+			});
+			expect(waited.cancelled).toBe(false);
+			expect(waited.exitCode).toBe(37);
 		},
 		10_000,
 	);
