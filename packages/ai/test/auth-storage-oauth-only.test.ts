@@ -6,8 +6,8 @@ import {
 	type AuthCredentialStore,
 	AuthStorage,
 	isOAuthCredentialResolver,
-	seedOAuthCredentialResolver,
 	SqliteAuthCredentialStore,
+	seedOAuthCredentialResolver,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { removeWithRetries } from "../../utils/src/temp";
 

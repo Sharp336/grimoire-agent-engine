@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	type OpenAIResponsesOptions,
-	streamOpenAIResponses,
-} from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { AssistantMessageEvent, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -126,7 +123,10 @@ async function drain(
 	model: Model<"openai-responses">,
 	fetch: FetchImpl,
 	providerSessionState?: Map<string, ProviderSessionState>,
-	extra: Pick<OpenAIResponsesOptions, "sessionId" | "promptCacheKey" | "headers" | "reasoning" | "reasoningSummary"> = {},
+	extra: Pick<
+		OpenAIResponsesOptions,
+		"sessionId" | "promptCacheKey" | "headers" | "reasoning" | "reasoningSummary"
+	> = {},
 ): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of streamOpenAIResponses(model, context, {

@@ -12,8 +12,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
-import * as AIError from "./error";
 import { getEnvApiKey, getEnvApiKeyName } from "./env-api-key";
+import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, isOAuthOnlyProvider, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
@@ -2271,7 +2271,8 @@ export class AuthStorage {
 		// account_uuid injection would misattribute traffic. Only apply this guard when
 		// sessionPref is absent; a recorded OAuth sticky (sessionPref.type === "oauth") must
 		// NOT be blocked even if an env key also happens to exist.
-		if (!oauthOnly && !sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
+		if (!oauthOnly && !sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider)))
+			return undefined;
 		// Resolve the sticky index against the full credential list — the index is
 		// recorded against the unfiltered provider array (by #recordSessionCredential /
 		// #tryOAuthCredential), not the OAuth-only subset, so dereferencing it into the
@@ -4461,7 +4462,10 @@ export class AuthStorage {
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth for providers that permit keys.
-		if (!isOAuthOnlyProvider(provider) && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) {
+		if (
+			!isOAuthOnlyProvider(provider) &&
+			(this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))
+		) {
 			return undefined;
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);

@@ -580,11 +580,14 @@ async function refreshXAIToken(
 		});
 	} catch (error) {
 		if (provider !== XAI_GROK_BUILD_PROVIDER || error instanceof AIError.OAuthError) throw error;
-		throw new AIError.OAuthError(`xAI token refresh failed: ${error instanceof Error ? error.message : String(error)}`, {
-			kind: "token-refresh",
-			provider: XAI_GROK_BUILD_PROVIDER,
-			cause: error,
-		});
+		throw new AIError.OAuthError(
+			`xAI token refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+			{
+				kind: "token-refresh",
+				provider: XAI_GROK_BUILD_PROVIDER,
+				cause: error,
+			},
+		);
 	}
 
 	if (!response.ok) {

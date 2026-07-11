@@ -214,9 +214,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await registry.refreshProvider("normal-keyless");
 		expect(requestedUrls).toEqual(["https://normal-keyless.example.com/v1/models"]);
 		expect(
-			registry.getAvailable().some(
-				model => model.provider === "normal-keyless" && model.id === "normal-keyless-model",
-			),
+			registry
+				.getAvailable()
+				.some(model => model.provider === "normal-keyless" && model.id === "normal-keyless-model"),
 		).toBe(true);
 		expect(registry.hasConfiguredAuth(normalKeylessModel)).toBe(true);
 		expect(await registry.getApiKey(normalKeylessModel)).toBe(kNoAuth);

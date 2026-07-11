@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import {
-	AuthStorage,
-	SqliteAuthCredentialStore,
-	seedApiKeyResolver,
-} from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { AuthStorage, SqliteAuthCredentialStore, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, Usage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -76,10 +72,14 @@ describe("OAuth-only stream admission", () => {
 
 	test("rejects static, arbitrary, cross-provider, and generic-seeded credentials before dispatch", async () => {
 		let dispatches = 0;
-		registerCustomApi(API, () => {
-			dispatches += 1;
-			return new AssistantMessageEventStream();
-		}, SOURCE);
+		registerCustomApi(
+			API,
+			() => {
+				dispatches += 1;
+				return new AssistantMessageEventStream();
+			},
+			SOURCE,
+		);
 		const store = await SqliteAuthCredentialStore.open(":memory:");
 		const storage = new AuthStorage(store);
 		const buildResolver = storage.createOAuthApiKeyResolver(PROVIDER);
@@ -96,10 +96,14 @@ describe("OAuth-only stream admission", () => {
 
 	test("fails a trusted empty resolver before dispatch", async () => {
 		let dispatches = 0;
-		registerCustomApi(API, () => {
-			dispatches += 1;
-			throw new Error("unexpected custom API dispatch");
-		}, SOURCE);
+		registerCustomApi(
+			API,
+			() => {
+				dispatches += 1;
+				throw new Error("unexpected custom API dispatch");
+			},
+			SOURCE,
+		);
 		const store = await SqliteAuthCredentialStore.open(":memory:");
 		const storage = new AuthStorage(store);
 		const buildResolver = storage.createOAuthApiKeyResolver(PROVIDER);
@@ -113,26 +117,30 @@ describe("OAuth-only stream admission", () => {
 
 	test("dispatches only with a provider-bound resolver", async () => {
 		let dispatches = 0;
-		registerCustomApi(API, (_model, _context, options) => {
-			dispatches += 1;
-			expect(options?.apiKey).toBe("oauth-access");
-			const events = new AssistantMessageEventStream();
-			const message: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "ok" }],
-				api: API,
-				provider: PROVIDER,
-				model: model.id,
-				timestamp: 1,
-				stopReason: "stop",
-				usage: usage(),
-			};
-			queueMicrotask(() => {
-				events.push({ type: "start", partial: message });
-				events.push({ type: "done", reason: "stop", message });
-			});
-			return events;
-		}, SOURCE);
+		registerCustomApi(
+			API,
+			(_model, _context, options) => {
+				dispatches += 1;
+				expect(options?.apiKey).toBe("oauth-access");
+				const events = new AssistantMessageEventStream();
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					api: API,
+					provider: PROVIDER,
+					model: model.id,
+					timestamp: 1,
+					stopReason: "stop",
+					usage: usage(),
+				};
+				queueMicrotask(() => {
+					events.push({ type: "start", partial: message });
+					events.push({ type: "done", reason: "stop", message });
+				});
+				return events;
+			},
+			SOURCE,
+		);
 		const store = await SqliteAuthCredentialStore.open(":memory:");
 		const storage = new AuthStorage(store);
 		await storage.set(PROVIDER, [

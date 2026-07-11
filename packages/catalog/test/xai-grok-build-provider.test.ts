@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/reference";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
+import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	buildXaiGrokBuildStaticSeed,
@@ -31,9 +31,7 @@ function paidReference(id: string): Model<"openai-responses"> {
 
 describe("xAI Grok Build catalog provider", () => {
 	test("bundles exactly the two generated fallback models", () => {
-		const bundled = (MODELS_JSON as Record<string, Record<string, ModelSpec<"openai-responses">>>)[
-			"xai-grok-build"
-		];
+		const bundled = MODELS_JSON["xai-grok-build"];
 		const seed = buildXaiGrokBuildStaticSeed();
 
 		expect(Object.keys(bundled ?? {}).sort()).toEqual([...BUILD_IDS].sort());
@@ -66,26 +64,26 @@ describe("xAI Grok Build catalog provider", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER["xai-grok-build"]).toBe("grok-4.5");
 		expect(seed.map(model => model.id)).toEqual(BUILD_IDS);
 		expect(seed).toMatchObject([
-		{
-			provider: "xai-grok-build",
-			baseUrl: "https://cli-chat-proxy.grok.com/v1",
-			name: "Grok 4.5",
-			contextWindow: 500_000,
-			maxTokens: 500_000,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		},
-		{
-			provider: "xai-grok-build",
-			name: "Grok Composer 2.5 Fast",
-			contextWindow: 200_000,
-			maxTokens: 200_000,
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		},
-	]);
+			{
+				provider: "xai-grok-build",
+				baseUrl: "https://cli-chat-proxy.grok.com/v1",
+				name: "Grok 4.5",
+				contextWindow: 500_000,
+				maxTokens: 500_000,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+			{
+				provider: "xai-grok-build",
+				name: "Grok Composer 2.5 Fast",
+				contextWindow: 200_000,
+				maxTokens: 200_000,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+		]);
 		const built = buildModel(seed[0] as ModelSpec<"openai-responses">);
 		expect(built.compat).toMatchObject({
 			supportsReasoningEffort: true,
@@ -168,7 +166,11 @@ describe("xAI Grok Build catalog provider", () => {
 			expect(result.stale).toBe(true);
 		} finally {
 			await Promise.all(
-				[cacheDbPath, `${cacheDbPath}-shm`, `${cacheDbPath}-wal`].map(path => Bun.file(path).delete().catch(() => {})),
+				[cacheDbPath, `${cacheDbPath}-shm`, `${cacheDbPath}-wal`].map(path =>
+					Bun.file(path)
+						.delete()
+						.catch(() => {}),
+				),
 			);
 		}
 	});
@@ -191,7 +193,11 @@ describe("xAI Grok Build catalog provider", () => {
 			expect(result.stale).toBe(false);
 		} finally {
 			await Promise.all(
-				[cacheDbPath, `${cacheDbPath}-shm`, `${cacheDbPath}-wal`].map(path => Bun.file(path).delete().catch(() => {})),
+				[cacheDbPath, `${cacheDbPath}-shm`, `${cacheDbPath}-wal`].map(path =>
+					Bun.file(path)
+						.delete()
+						.catch(() => {}),
+				),
 			);
 		}
 	});

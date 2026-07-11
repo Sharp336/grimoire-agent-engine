@@ -16,10 +16,12 @@ import {
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, getConfigRootDir, isEnoent, logger, withExtraCaFetch } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { isOAuthCredentialResolver } from "./auth-storage";
 import { AUTH_RETRY_STEPS, isApiKeyResolver, resolveRetryKey } from "./auth-retry";
+import { isOAuthCredentialResolver } from "./auth-storage";
 import { getEnvApiKey } from "./env-api-key";
+
 export { getEnvApiKey, getEnvApiKeyName, listProvidersWithEnvKey } from "./env-api-key";
+
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
@@ -685,7 +687,6 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 	}
 	return rewriteUrl(input);
 }
-
 
 export function stream<TApi extends Api>(
 	model: Model<TApi>,

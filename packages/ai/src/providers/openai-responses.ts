@@ -435,12 +435,17 @@ const streamOpenAIResponsesOnce = (
 				promptCacheSessionId,
 			});
 			const premiumRequestsTotal = copilotPremiumRequests;
-			const storedProviderSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+			const storedProviderSessionState = getOpenAIResponsesProviderSessionState(
+				model,
+				options?.providerSessionState,
+			);
 			const providerSessionState =
-				storedProviderSessionState ?? (isGrokBuildProvider(model) ? createOpenAIResponsesProviderSessionState() : undefined);
-			const grokBuildState = providerSessionState && isGrokBuildProvider(model)
-				? getGrokBuildRequestState(providerSessionState)
-				: undefined;
+				storedProviderSessionState ??
+				(isGrokBuildProvider(model) ? createOpenAIResponsesProviderSessionState() : undefined);
+			const grokBuildState =
+				providerSessionState && isGrokBuildProvider(model)
+					? getGrokBuildRequestState(providerSessionState)
+					: undefined;
 			const grokBuildConversationId = grokBuildState
 				? (promptCacheSessionId ?? grokBuildState.sessionId)
 				: undefined;
@@ -829,12 +834,7 @@ const streamOpenAIResponsesOnce = (
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) => {
 	if (isGrokBuildProvider(model) && !options?.providerSessionState) {
 		const providerSessionState = new Map<string, ProviderSessionState>();
-		return withEmptyCompletionRetry(
-			model,
-			context,
-			{ ...options, providerSessionState },
-			streamOpenAIResponsesOnce,
-		);
+		return withEmptyCompletionRetry(model, context, { ...options, providerSessionState }, streamOpenAIResponsesOnce);
 	}
 	return withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
 };

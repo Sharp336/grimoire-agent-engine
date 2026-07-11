@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as envApiKeyModule from "@oh-my-pi/pi-ai/env-api-key";
 import * as deepseekModule from "@oh-my-pi/pi-ai/registry/deepseek";
 import * as kagiModule from "@oh-my-pi/pi-ai/registry/kagi";
 import * as ollamaCloudModule from "@oh-my-pi/pi-ai/registry/ollama-cloud";
-import * as envApiKeyModule from "@oh-my-pi/pi-ai/env-api-key";
 import { removeWithRetries } from "../../utils/src/temp";
 
 function countCredentialRows(dbPath: string, provider: string): number {

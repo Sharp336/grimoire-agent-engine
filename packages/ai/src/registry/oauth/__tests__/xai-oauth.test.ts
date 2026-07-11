@@ -234,9 +234,9 @@ describe("xAI Grok Build browser OAuth", () => {
 		const tokenForm = requestForm(tokenRequest);
 		const codeVerifier = tokenForm.get("code_verifier");
 		if (!codeVerifier) throw new Error("Authorization-code token request omitted code_verifier");
-		const codeChallenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier))).toString(
-			"base64url",
-		);
+		const codeChallenge = Buffer.from(
+			await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier)),
+		).toString("base64url");
 		expect(Object.fromEntries(params)).toEqual({
 			response_type: "code",
 			client_id: CLIENT_ID,

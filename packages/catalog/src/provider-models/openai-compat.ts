@@ -1308,9 +1308,9 @@ function applyXAICuration(
 	}
 
 	const curatedIds = new Set(curatedModels.map(c => c.id));
-	const curatedFirst = curatedModels.map(c => byId.get(c.id)).filter(
-		(e): e is ModelSpec<"openai-responses"> => e !== undefined,
-	);
+	const curatedFirst = curatedModels
+		.map(c => byId.get(c.id))
+		.filter((e): e is ModelSpec<"openai-responses"> => e !== undefined);
 	const rest = filtered.filter(e => !curatedIds.has(e.id)).map(withXaiOAuthCompatDefaults);
 	return [...curatedFirst, ...rest];
 }

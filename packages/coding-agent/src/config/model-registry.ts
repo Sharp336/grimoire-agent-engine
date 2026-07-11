@@ -63,8 +63,8 @@ const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { isOAuthOnlyProvider } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+import { isOAuthOnlyProvider } from "@oh-my-pi/pi-ai/registry";
 import { getBundledModelReferenceIndex, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
