@@ -1282,7 +1282,17 @@ export async function runRpcMode(
 	// Listen for JSON input using Bun's stdin. Frame dispatch lives in
 	// dispatchRpcInputFrame so it can be exercised directly by tests; see the
 	// helper's docstring for the concurrency contract.
-	for await (const parsed of readJsonl(Bun.stdin.stream())) {
+	//
+	// A single malformed/non-JSON stdin line must not kill the process: report
+	// it with the same parse-error response frame the dispatch catch already
+	// emits, then keep reading subsequent frames (issue #5194).
+	for await (const parsed of readJsonl(Bun.stdin.stream(), undefined, {
+		continueOnError: true,
+		onParseError: e => {
+			const message = e instanceof Error ? e.message : String(e);
+			output(error(undefined, "parse", `Failed to parse command: ${message}`));
+		},
+	})) {
 		try {
 			const awaited = dispatchRpcInputFrame(parsed, dispatchFrameDeps);
 			if (awaited) {

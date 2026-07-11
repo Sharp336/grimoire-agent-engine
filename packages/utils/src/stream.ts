@@ -47,25 +47,60 @@ export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: Ab
 	}
 }
 
-export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<T> {
+export type ReadJsonlOptions = {
+	/**
+	 * When true, a parse error on one complete JSONL record does not terminate
+	 * the generator. The bad record is skipped and subsequent records continue
+	 * to yield. Callers that need to surface the failure (for example RPC mode)
+	 * can attach `onParseError`.
+	 */
+	continueOnError?: boolean;
+	/** Invoked once per recoverable parse failure when `continueOnError` is set. */
+	onParseError?: (error: unknown) => void;
+};
+
+function skipMalformedJsonlRegion(chunk: Uint8Array, read: number): number {
+	const nl = chunk.indexOf(LF, read);
+	return nl === -1 ? chunk.length : nl + 1;
+}
+
+export async function* readJsonl<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	options?: ReadJsonlOptions,
+): AsyncGenerator<T> {
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
+	const continueOnError = options?.continueOnError === true;
+	const onParseError = options?.onParseError;
 	try {
 		for await (const chunk of source) {
-			yield* buffer.pullJSONL<T>(chunk, 0, chunk.length);
+			yield* buffer.pullJSONL<T>(chunk, 0, chunk.length, {
+				continueOnError,
+				onParseError,
+			});
 		}
 		if (!buffer.isEmpty) {
-			const tail = buffer.flush();
-			if (tail) {
-				buffer.clear();
-				const { values, error, done } = parseJsonlChunkCompat(tail, 0, tail.length);
+			let remaining = buffer.flush();
+			buffer.clear();
+			while (remaining && remaining.length > 0) {
+				const { values, error, read, done } = parseJsonlChunkCompat(remaining, 0, remaining.length);
 				if (values.length > 0) {
 					yield* values as T[];
 				}
-				if (error) throw error;
-				if (!done) {
+				if (error) {
+					if (!continueOnError) throw error;
+					onParseError?.(error);
+					const next = skipMalformedJsonlRegion(remaining, read);
+					if (next >= remaining.length) break;
+					remaining = remaining.subarray(next);
+					continue;
+				}
+				if (done) break;
+				if (read === 0) {
 					throw new Error("JSONL stream ended unexpectedly");
 				}
+				remaining = remaining.subarray(read);
 			}
 		}
 	} catch (err) {
@@ -150,15 +185,37 @@ class ConcatSink {
 			}
 		}
 	}
-	*pullJSONL<T>(chunk: Uint8Array, beg: number, end: number) {
+	*pullJSONL<T>(
+		chunk: Uint8Array,
+		beg: number,
+		end: number,
+		options?: { continueOnError?: boolean; onParseError?: (error: unknown) => void },
+	) {
+		const continueOnError = options?.continueOnError === true;
+		const onParseError = options?.onParseError;
+
 		if (this.isEmpty) {
-			const { values, error, read, done } = parseJsonlChunkCompat(chunk, beg, end);
-			if (values.length > 0) {
-				yield* values as T[];
+			let start = beg;
+			while (start < end) {
+				const { values, error, read, done } = parseJsonlChunkCompat(chunk, start, end);
+				if (values.length > 0) {
+					yield* values as T[];
+				}
+				if (error) {
+					if (!continueOnError) throw error;
+					onParseError?.(error);
+					const next = skipMalformedJsonlRegion(chunk, Math.max(read, start));
+					if (next <= start) {
+						// No progress — drop the rest of the chunk rather than loop forever.
+						return;
+					}
+					start = next;
+					continue;
+				}
+				if (done) return;
+				this.reset(chunk.subarray(read, end));
+				return;
 			}
-			if (error) throw error;
-			if (done) return;
-			this.reset(chunk.subarray(read, end));
 			return;
 		}
 
@@ -169,20 +226,35 @@ class ConcatSink {
 		space.set(chunk.subarray(beg, end), offset);
 		this.#length = total;
 
-		const { values, error, read, done } = parseJsonlChunkCompat(space.subarray(0, total), 0, total);
-		if (values.length > 0) {
-			yield* values as T[];
-		}
-		if (error) throw error;
-		if (done) {
-			this.#length = 0;
+		let start = 0;
+		while (true) {
+			const currentLength = this.#length;
+			const { values, error, read, done } = parseJsonlChunkCompat(space.subarray(0, currentLength), start, currentLength);
+			if (values.length > 0) {
+				yield* values as T[];
+			}
+			if (error) {
+				if (!continueOnError) throw error;
+				onParseError?.(error);
+				const next = skipMalformedJsonlRegion(space.subarray(0, currentLength), Math.max(read, start));
+				if (next >= currentLength) {
+					this.#length = 0;
+					return;
+				}
+				start = next;
+				continue;
+			}
+			if (done) {
+				this.#length = 0;
+				return;
+			}
+			const rem = currentLength - read;
+			if (rem < currentLength) {
+				space.copyWithin(0, read, currentLength);
+			}
+			this.#length = rem;
 			return;
 		}
-		const rem = total - read;
-		if (rem < total) {
-			space.copyWithin(0, read, total);
-		}
-		this.#length = rem;
 	}
 }
 

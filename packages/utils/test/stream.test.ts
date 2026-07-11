@@ -144,6 +144,40 @@ describe("readJsonl", () => {
 		const output = await collectAsync(readJsonl(readable));
 		expect(output).toEqual([{ z: 9 }]);
 	});
+
+	it("throws on a malformed line by default", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode('{"a":1}\nls\n{"b":2}\n'));
+				controller.close();
+			},
+		});
+
+		await expect(collectAsync(readJsonl(readable))).rejects.toThrow();
+	});
+
+	it("continues after a malformed line when continueOnError is set", async () => {
+		const errors: unknown[] = [];
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode('{"a":1}\nls\n{"b":2}\n'));
+				controller.close();
+			},
+		});
+
+		const output = await collectAsync(
+			readJsonl(readable, undefined, {
+				continueOnError: true,
+				onParseError: error => {
+					errors.push(error);
+				},
+			}),
+		);
+		expect(output).toEqual([{ a: 1 }, { b: 2 }]);
+		// Bun.JSONL may surface the bad line both as a trailing error after a
+		// successful value and again when that line is parsed on its own.
+		expect(errors.length).toBeGreaterThanOrEqual(1);
+	});
 });
 
 describe("createSanitizerStream", () => {
