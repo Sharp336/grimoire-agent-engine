@@ -367,7 +367,9 @@ describe("task.batch validation", () => {
 		const result = await tool.execute("tool-call-dynamic", { agent: "dynamic", task: "Run dynamic work." });
 
 		expect(getFirstText(result)).toContain("All done.");
-		expect(runSpy).toHaveBeenCalledWith(expect.objectContaining({ agent: expect.objectContaining({ name: "dynamic" }) }));
+		expect(runSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ agent: expect.objectContaining({ name: "dynamic" }) }),
+		);
 	});
 
 	it("releases a queued sync spawn reservation when cancellation prevents execution", async () => {
@@ -414,15 +416,13 @@ describe("task.batch validation", () => {
 		mockDiscovery();
 		const taskTreeBudget = new executorModule.TaskTreeBudget({ maxSpawns: 1 });
 		const outputManager = { allocate: vi.fn().mockRejectedValue(new Error("allocation failed")) };
-		const tool = await TaskTool.create(
-			{
-				...createSession({
-					settings: { "task.batch": false, "async.enabled": false },
-					taskTreeBudget,
-				}),
-				agentOutputManager: outputManager,
-			} as ToolSession,
-		);
+		const tool = await TaskTool.create({
+			...createSession({
+				settings: { "task.batch": false, "async.enabled": false },
+				taskTreeBudget,
+			}),
+			agentOutputManager: outputManager,
+		} as unknown as ToolSession);
 
 		const result = await tool.execute("tool-call-allocation", { agent: "task", task: "Cannot allocate." });
 		expect(getFirstText(result)).toContain("Task execution failed");
