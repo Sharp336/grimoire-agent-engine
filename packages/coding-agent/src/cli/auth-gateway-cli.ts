@@ -135,6 +135,39 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 	return result.snapshot;
 }
 
+/**
+ * Build the auth-gateway model lookup from models accessible with the current
+ * broker credentials. Qualified ids always resolve. A bare id remains a legacy
+ * alias only while exactly one provider owns it.
+ */
+export function buildAuthGatewayModelIndex(models: Iterable<Model<Api>>): {
+	resolveModel: (id: string) => Model<Api> | undefined;
+	listModels: () => IterableIterator<Model<Api>>;
+} {
+	const qualifiedModels = new Map<string, Model<Api>>();
+	const bareModels = new Map<string, Model<Api>>();
+	const ambiguousBareIds = new Set<string>();
+
+	for (const model of models) {
+		const qualifiedId = `${model.provider}/${model.id}`;
+		qualifiedModels.set(qualifiedId, model);
+
+		if (ambiguousBareIds.has(model.id)) continue;
+		const existing = bareModels.get(model.id);
+		if (existing === undefined || existing.provider === model.provider) {
+			bareModels.set(model.id, model);
+		} else {
+			bareModels.delete(model.id);
+			ambiguousBareIds.add(model.id);
+		}
+	}
+
+	return {
+		resolveModel: id => qualifiedModels.get(id) ?? bareModels.get(id),
+		listModels: () => qualifiedModels.values(),
+	};
+}
+
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -166,24 +199,20 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const snapshot = storage.exportSnapshot();
 	const providersWithCreds = new Set<string>();
 	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
-	const modelById = new Map<string, Model<Api>>();
+	const models: Model<Api>[] = [];
 	for (const provider of getBundledProviders()) {
 		if (!providersWithCreds.has(provider)) continue;
-		for (const model of getBundledModels(provider as GeneratedProvider)) {
-			// Always set the qualified key (no collision possible)
-			modelById.set(`${model.provider}/${model.id}`, model);
-			// Bare id as fallback for legacy clients (first-write-wins)
-			if (!modelById.has(model.id)) modelById.set(model.id, model);
-		}
+		models.push(...getBundledModels(provider as GeneratedProvider));
 	}
+	const { resolveModel, listModels } = buildAuthGatewayModelIndex(models);
 
 	const handle = startAuthGateway({
 		storage,
 		bind,
 		bearerTokens: gatewayToken ? [gatewayToken] : [],
 		version: VERSION,
-		resolveModel: (id: string) => modelById.get(id),
-		listModels: () => modelById.values(),
+		resolveModel,
+		listModels,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
