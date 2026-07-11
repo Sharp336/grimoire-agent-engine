@@ -88,8 +88,9 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 		// error enters the generic retry path (the provider will NOT retry once
 		// it has replayed text to the consumer). The second attempt succeeds
 		// cleanly; the final message must NOT retain the stale stop_sequence.
-		const broken =
-			frame("message_start", {
+		const broken = sseResponse([
+			{
+				type: "message_start",
 				message: {
 					id: "msg_1",
 					type: "message",
@@ -100,10 +101,17 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 					stop_sequence: null,
 					usage: { input_tokens: 5, output_tokens: 0 },
 				},
-			}) +
-			frame("message_delta", messageDelta("stop_sequence", "STALE")) +
-			// Truncated JSON → transient stream-parse error → retry.
-			'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"stop_sequence"';
+			},
+			messageDelta("stop_sequence", "STALE"),
+			// A real, retryable Anthropic error SSE frame: the parser throws this
+			// outward (anthropic.ts:1368) as an overloaded_error, which the retry
+			// classifier treats as retryable. With no content streamed yet, the
+			// generic provider-retry path fires a second fetch.
+			{
+				type: "error",
+				error: { type: "overloaded_error", message: "Overloaded" },
+			},
+		]);
 
 		const clean = sseResponse([
 			{
@@ -126,10 +134,7 @@ describe("anthropic provider stop sequence (parser round-trip)", () => {
 			{ type: "message_stop" },
 		]);
 
-		const { fetch, calls } = makeFetchMock([
-			() => new Response(broken, { status: 200, headers: { "content-type": "text/event-stream" } }),
-			() => clean,
-		]);
+		const { fetch, calls } = makeFetchMock([() => broken, () => clean]);
 
 		const stream = streamAnthropic(makeModel(), makeContext(), { fetch, providerRetryWait: async () => {} });
 		const message = await stream.result();
