@@ -42,6 +42,9 @@
 ### Removed
 
 - Removed the bundled plan subagent from available task agents.
+### Fixed
+
+- Fixed empty background-job lists returning blank tool output instead of an explicit no-jobs status ([#5143](https://github.com/can1357/oh-my-pi/pull/5143) by [@lyc-aon](https://github.com/lyc-aon)).
 
 ## [16.4.2] - 2026-07-10
 
