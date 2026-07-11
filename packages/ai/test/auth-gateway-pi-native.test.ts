@@ -1,20 +1,71 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
-import type {
-	AssistantMessage,
-	AssistantMessageEvent,
-	AssistantMessageEventStream,
-	Context,
-	Usage,
-} from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent, Context, Model, Usage } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { XAI_GROK_BUILD_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
-function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
-	async function* iter() {
-		for (const e of events) yield e;
-	}
-	const stream = iter() as unknown as AssistantMessageEventStream;
-	(stream as { result(): Promise<AssistantMessage> }).result = async () => final;
+const GROK_BUILD_PROVIDER = "xai-grok-build";
+const GROK_BUILD_MODEL_ID = "grok-4.5";
+const GROK_BUILD_TOKEN = "stored-build-oauth-token";
+
+function makeGrokBuildModel(): Model<"openai-responses"> {
+	return buildModel({
+		api: "openai-responses",
+		provider: GROK_BUILD_PROVIDER,
+		id: GROK_BUILD_MODEL_ID,
+		name: "Grok 4.5",
+		baseUrl: XAI_GROK_BUILD_BASE_URL,
+		contextWindow: 500_000,
+		maxTokens: 32_768,
+		input: ["text", "image"],
+		reasoning: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
+}
+
+function completedResponsesSse(): Response {
+	const events = [
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		},
+		{ type: "response.content_part.added", output_index: 0, part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", output_index: 0, delta: "Build OAuth works" },
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: {
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Build OAuth works" }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_1",
+				status: "completed",
+				usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+function makeEventStream(events: AssistantMessageEvent[]): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		for (const event of events) stream.push(event);
+	});
 	return stream;
 }
 
@@ -209,7 +260,7 @@ describe("pi-native encodeStream", () => {
 			{ type: "text_end", contentIndex: 0, content: "hi", partial: partialAfterDelta },
 			{ type: "done", reason: "stop", message: finalMessage },
 		];
-		const chunks = await collectSse(encodeStream(makeEventStream(events, finalMessage)));
+		const chunks = await collectSse(encodeStream(makeEventStream(events)));
 		const parsed = chunks.map(parseSseLine);
 
 		// Every payload is the input event verbatim — partials, signatures,
@@ -229,7 +280,7 @@ describe("pi-native encodeStream", () => {
 			{ type: "text_delta", contentIndex: 0, delta: "abc", partial: final },
 			{ type: "done", reason: "stop", message: final },
 		];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, final)))).map(parseSseLine) as Array<
+		const parsed = (await collectSse(encodeStream(makeEventStream(events)))).map(parseSseLine) as Array<
 			Record<string, unknown>
 		>;
 		expect(parsed[0]).toHaveProperty("partial");
@@ -244,7 +295,7 @@ describe("pi-native encodeStream", () => {
 			// the stream so the client iterator resolves cleanly.
 			{ type: "text_delta", contentIndex: 0, delta: "ghost", partial: final },
 		];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, final)))).map(parseSseLine);
+		const parsed = (await collectSse(encodeStream(makeEventStream(events)))).map(parseSseLine);
 		expect(parsed.length).toBe(2);
 		expect((parsed[0] as { type: string }).type).toBe("done");
 		expect(parsed[1]).toBe("[DONE]");
@@ -257,7 +308,7 @@ describe("pi-native encodeStream", () => {
 			usage: { ...ZERO_USAGE, input: 3 },
 		});
 		const events: AssistantMessageEvent[] = [{ type: "error", reason: "error", error: errored }];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, errored)))).map(parseSseLine);
+		const parsed = (await collectSse(encodeStream(makeEventStream(events)))).map(parseSseLine);
 		expect(parsed[0]).toEqual({ type: "error", reason: "error", error: JSON.parse(JSON.stringify(errored)) });
 		expect(parsed[1]).toBe("[DONE]");
 	});
@@ -266,11 +317,13 @@ describe("pi-native encodeStream", () => {
 		// Source-stream failures (network drop after `streamSimple` returned)
 		// must not hang the client. We surface a minimal `error` event followed
 		// by `[DONE]` so the iterator on the other end resolves.
-		const broken = (async function* () {
-			yield { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
-			throw new Error("connection reset");
-		})() as unknown as AssistantMessageEventStream;
-		(broken as { result(): Promise<AssistantMessage> }).result = async () => baseAssistant();
+		class ThrowingEventStream extends AssistantMessageEventStream {
+			override async *[Symbol.asyncIterator]() {
+				yield { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
+				throw new Error("connection reset");
+			}
+		}
+		const broken = new ThrowingEventStream();
 
 		const parsed = (await collectSse(encodeStream(broken))).map(parseSseLine);
 		expect((parsed[0] as { type: string }).type).toBe("start");
@@ -285,5 +338,56 @@ describe("pi-native formatError", () => {
 		expect(res.status).toBe(401);
 		expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
 		expect(await res.json()).toEqual({ error: { type: "authentication_error", message: "no credential" } });
+	});
+});
+
+describe("auth-gateway pi-native xAI Grok Build OAuth", () => {
+	it("dispatches stored OAuth through the pi-native stream route at the canonical Build host", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store);
+		await storage.set(GROK_BUILD_PROVIDER, {
+			type: "oauth",
+			access: GROK_BUILD_TOKEN,
+			refresh: "stored-build-oauth-refresh",
+			expires: Date.now() + 60 * 60_000,
+		});
+		const model = makeGrokBuildModel();
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gateway-token"],
+			storage,
+			resolveModel: modelId => (modelId === GROK_BUILD_MODEL_ID ? model : undefined),
+			version: "test",
+		});
+		const realFetch = globalThis.fetch;
+		const outbound: Array<{ url: string; headers: Headers }> = [];
+		const mockFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = input instanceof Request ? input.url : input.toString();
+				if (url.startsWith(handle.url)) return realFetch(input, init);
+				outbound.push({ url, headers: new Headers(init?.headers) });
+				return completedResponsesSse();
+			},
+			{ preconnect: realFetch.preconnect },
+		);
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(mockFetch);
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gateway-token" },
+				body: JSON.stringify({ modelId: GROK_BUILD_MODEL_ID, context: baseContext, stream: true }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.text()).toContain('"type":"done"');
+			expect(outbound).toHaveLength(1);
+			expect(outbound[0]?.url).toBe(`${XAI_GROK_BUILD_BASE_URL}/responses`);
+			expect(outbound[0]?.headers.get("authorization")).toBe(`Bearer ${GROK_BUILD_TOKEN}`);
+		} finally {
+			fetchSpy.mockRestore();
+			await handle.close();
+			storage.close();
+		}
 	});
 });

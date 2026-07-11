@@ -28,6 +28,7 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
+import { isOAuthOnlyProvider } from "../registry";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -280,6 +281,12 @@ function buildGatewayApiKeyResolver(
 	format: string,
 	peer: string,
 ): ApiKeyResolver {
+	if (isOAuthOnlyProvider(model.provider)) {
+		return storage.createOAuthApiKeyResolver(model.provider, sessionId, {
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+		});
+	}
 	let lastKey = initialKey;
 	return async ({ lastChance, error, signal }) => {
 		const sig = signal ?? requestSignal;

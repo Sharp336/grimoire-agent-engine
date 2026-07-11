@@ -1,8 +1,71 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { XAI_GROK_BUILD_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+
+const GROK_BUILD_PROVIDER = "xai-grok-build";
+const GROK_BUILD_MODEL_ID = "grok-4.5";
+const GROK_BUILD_TOKEN = "stored-build-oauth-token";
+
+const grokBuildContext: Context = {
+	messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+};
+
+function makeGrokBuildModel(): Model<"openai-responses"> {
+	return buildModel({
+		api: "openai-responses",
+		provider: GROK_BUILD_PROVIDER,
+		id: GROK_BUILD_MODEL_ID,
+		name: "Grok 4.5",
+		baseUrl: XAI_GROK_BUILD_BASE_URL,
+		contextWindow: 500_000,
+		maxTokens: 32_768,
+		input: ["text", "image"],
+		reasoning: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
+}
+
+function completedResponsesSse(): Response {
+	const events = [
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		},
+		{ type: "response.content_part.added", output_index: 0, part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", output_index: 0, delta: "Build OAuth works" },
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: {
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Build OAuth works" }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_1",
+				status: "completed",
+				usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		headers: { "content-type": "text/event-stream" },
+	});
+}
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -690,5 +753,71 @@ describe("openai-responses encodeStream", () => {
 		const response = incomplete.response as Record<string, unknown>;
 		expect(response.status).toBe("incomplete");
 		expect(response.incomplete_details).toEqual({ reason: "max_output_tokens" });
+	});
+});
+
+describe("auth-gateway xAI Grok Build OAuth", () => {
+	it("dispatches stored OAuth through the OpenAI Responses route at the canonical Build host", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store);
+		await storage.set(GROK_BUILD_PROVIDER, {
+			type: "oauth",
+			access: GROK_BUILD_TOKEN,
+			refresh: "stored-build-oauth-refresh",
+			expires: Date.now() + 60 * 60_000,
+		});
+		const model = makeGrokBuildModel();
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gateway-token"],
+			storage,
+			resolveModel: modelId => (modelId === GROK_BUILD_MODEL_ID ? model : undefined),
+			version: "test",
+		});
+		const realFetch = globalThis.fetch;
+		const outbound: Array<{ url: string; headers: Headers }> = [];
+		const mockFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = input instanceof Request ? input.url : input.toString();
+				if (url.startsWith(handle.url)) return realFetch(input, init);
+				outbound.push({ url, headers: new Headers(init?.headers) });
+				return completedResponsesSse();
+			},
+			{ preconnect: realFetch.preconnect },
+		);
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(mockFetch);
+
+		try {
+			const response = await fetch(`${handle.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gateway-token" },
+				body: JSON.stringify({ model: GROK_BUILD_MODEL_ID, input: "Say hello", stream: true }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.text()).toContain("response.completed");
+			expect(outbound).toHaveLength(1);
+			expect(outbound[0]?.url).toBe(`${XAI_GROK_BUILD_BASE_URL}/responses`);
+			expect(outbound[0]?.headers.get("authorization")).toBe(`Bearer ${GROK_BUILD_TOKEN}`);
+		} finally {
+			fetchSpy.mockRestore();
+			await handle.close();
+			storage.close();
+		}
+	});
+
+	it("keeps static and untrusted resolvers outside the OAuth-only stream boundary", () => {
+		const fetchSpy = spyOn(globalThis, "fetch");
+		try {
+			expect(() =>
+				streamSimple(makeGrokBuildModel(), grokBuildContext, { apiKey: "user-supplied-static-key" }),
+			).toThrow(AIError.MissingApiKeyError);
+			expect(() =>
+				streamSimple(makeGrokBuildModel(), grokBuildContext, { apiKey: () => "untrusted-resolver-key" }),
+			).toThrow(AIError.MissingApiKeyError);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		} finally {
+			fetchSpy.mockRestore();
+		}
 	});
 });
