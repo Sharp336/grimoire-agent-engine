@@ -1598,7 +1598,7 @@ export function neuralwattModelManagerOptions(
 							contextWindow: limits?.max_context_length ?? defaults.contextWindow,
 							maxTokens: limits?.max_output_tokens ?? defaults.maxTokens,
 							compat: {
-								thinkingFormat: "zai",
+								thinkingFormat: "openai",
 								supportsDeveloperRole: capabilities?.developer_role ?? false,
 								supportsReasoningEffort: capabilities?.reasoning_effort ?? false,
 								maxTokensField: "max_tokens" as const,

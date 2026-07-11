@@ -989,19 +989,25 @@ export function disableChatCompletionsReasoningForDialect(
 }
 
 /**
- * Z.AI/GLM-5.2 reasoning-effort dialect predicate. GLM-5.2 models served on a
- * Z.AI-format host (thinkingFormat "zai") accept `reasoning_effort`, stream tool
- * calls via `tool_stream`, and clamp output to the model cap. Moonshot Kimi and
- * Xiaomi MiMo also resolve to thinkingFormat "zai" with supportsReasoningEffort
- * true but are NOT GLM-5.2, so the model-id check is load-bearing — never swap it
+ * GLM-5.2 reasoning-effort dialect predicate. GLM-5.2 models share a set of
+ * request policies regardless of which host serves them: they accept
+ * `reasoning_effort`, stream tool-call arguments via `tool_stream`, and clamp
+ * output to the model cap. Z.AI-format hosts (thinkingFormat "zai") opt in via
+ * the compat flag, while Neuralwatt serves GLM-5.2 through an OpenAI-format
+ * request body (thinkingFormat "openai") but must keep the same GLM policies,
+ * so the Neuralwatt provider is matched explicitly. Moonshot Kimi and Xiaomi
+ * MiMo also resolve to thinkingFormat "zai" with supportsReasoningEffort true
+ * but are NOT GLM-5.2, so the model-id check is load-bearing — never swap it
  * for `compat.supportsReasoningEffort`.
  */
-function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
-	return compat.thinkingFormat === "zai" && isGlm52ReasoningEffortModelId(model.id);
+function isGlm52ReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
+	return (
+		isGlm52ReasoningEffortModelId(model.id) && (compat.thinkingFormat === "zai" || model.provider === "neuralwatt")
+	);
 }
 
 /**
- * Output-token clamp for the Z.AI/GLM-5.2 reasoning dialect: these hosts accept
+ * Output-token clamp for the GLM-5.2 reasoning dialect: these hosts accept
  * the full model window on reasoning turns, so clamp to the model cap. Returns
  * `undefined` for every other model, leaving {@link resolveOpenAIOutputTokenParam}
  * on its default `OPENAI_MAX_OUTPUT_TOKENS` clamp.
@@ -1010,11 +1016,11 @@ export function resolveZaiReasoningOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
-	return isZaiReasoningEffortDialect(model, compat) ? (model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS) : undefined;
+	return isGlm52ReasoningEffortDialect(model, compat) ? (model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS) : undefined;
 }
 
 /**
- * Enable `tool_stream` for Z.AI/GLM-5.2 reasoning models when tools are present
+ * Enable `tool_stream` for GLM-5.2 reasoning models when tools are present
  * (GLM-5.2 streams tool-call arguments incrementally and needs the flag to do so).
  */
 export function applyChatCompletionsToolStream(
@@ -1023,7 +1029,7 @@ export function applyChatCompletionsToolStream(
 	compat: ResolvedOpenAICompat,
 ): void {
 	if (
-		isZaiReasoningEffortDialect(model, compat) &&
+		isGlm52ReasoningEffortDialect(model, compat) &&
 		compat.supportsReasoningEffort &&
 		Array.isArray(params.tools) &&
 		params.tools.length > 0

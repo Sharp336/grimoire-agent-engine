@@ -102,6 +102,7 @@ describe("Neuralwatt provider discovery", () => {
 		});
 		expect(glm?.compat?.supportsReasoningEffort).toBe(true);
 		expect(glm?.compat?.supportsDeveloperRole).toBe(true);
+		expect(glm?.compat?.thinkingFormat).toBe("openai");
 
 		// Kimi-K2.6: reasoning_effort: false → supportsReasoningEffort: false
 		// (reasoning model, but does not accept the reasoning_effort wire param)
@@ -112,12 +113,14 @@ describe("Neuralwatt provider discovery", () => {
 			input: ["text"],
 		});
 		expect(kimi?.compat?.supportsReasoningEffort).toBe(false);
+		expect(kimi?.compat?.thinkingFormat).toBe("openai");
 
 		// Qwen fast alias: no reasoning_effort field → defaults to false
 		const qwen = models?.find(m => m.id === "qwen3.6-fast");
 		expect(qwen).toBeDefined();
 		expect(qwen).toMatchObject({ reasoning: false });
 		expect(qwen?.compat?.supportsReasoningEffort).toBe(false);
+		expect(qwen?.compat?.thinkingFormat).toBe("openai");
 	});
 
 	test("defaults supportsReasoningEffort to false when capabilities metadata is absent", async () => {
