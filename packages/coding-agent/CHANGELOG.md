@@ -141,6 +141,9 @@
 ### Removed
 
 - Removed the bundled plan subagent from available task agents.
+### Fixed
+
+- Reaped completed background jobs from persistent shell sessions to prevent zombie processes accumulating during long runs ([#5144](https://github.com/can1357/oh-my-pi/pull/5144) by [@lyc-aon](https://github.com/lyc-aon)).
 
 ## [16.4.2] - 2026-07-10
 
