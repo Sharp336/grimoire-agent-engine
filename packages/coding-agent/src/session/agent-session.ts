@@ -9888,24 +9888,26 @@ export class AgentSession {
 
 			// Strategy honored on manual /compact too. Custom instructions (public
 			// user focus OR internal plan-mode guidance) imply a directed LLM
-			// summary; a text-only model cannot read snapcompact frames. When
-			// snapcompact itself was requested, fail locally instead of silently
-			// converting the "no LLM call" path into a provider-backed summary.
+			// summary. A text-only model cannot read snapcompact frames, so
+			// manual /compact falls back to LLM summarization (same as auto).
 			const wantsSnapcompact =
 				compactionPrep.kind !== "fromHook" &&
 				effectiveSettings.strategy === "snapcompact" &&
 				!customInstructions &&
 				!options?.internalGuidance;
-			const snapcompactReady = wantsSnapcompact;
+			// Text-only models cannot read snapcompact frames. Mirror the
+			// auto-compaction path: warn and fall through to LLM summarization
+			// instead of hard-failing manual /compact (issue #5064).
+			let snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
 			if (wantsSnapcompact && !this.model.input.includes("image")) {
 				this.emitNotice(
 					"warning",
-					`snapcompact needs a vision-capable model (${this.model.id} is text-only)`,
+					`snapcompact needs a vision-capable model (${this.model.id} is text-only); falling back to LLM compaction`,
 					"compaction",
 				);
-				throw new Error(`snapcompact cannot run locally: ${this.model.id} is text-only.`);
+				snapcompactReady = false;
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
