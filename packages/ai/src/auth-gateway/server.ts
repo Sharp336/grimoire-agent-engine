@@ -44,6 +44,7 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
 	type AuthGatewayAuditOutcome,
+	type AuthGatewayPool,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRouteFamily,
 	evaluateAuthGatewayAccess,
@@ -414,6 +415,42 @@ function buildGatewayApiKeyResolver(
 	};
 }
 
+interface TerminalCredentialErrorRecoveryOptions {
+	storage: AuthStorage;
+	model: Model<Api>;
+	sessionId: string;
+	getApiKey: () => string;
+	signal: AbortSignal;
+	format: string;
+	peer: string;
+	selection: AuthCredentialSelectionPolicy | undefined;
+	exhaustion: PoolExhaustionState;
+	onCredential: (credential: ResolvedAuthCredential) => void;
+}
+
+function buildTerminalCredentialErrorRecovery(
+	options: TerminalCredentialErrorRecoveryOptions,
+): (error: unknown) => Promise<PoolExhaustionFailure | undefined> {
+	return async error => {
+		if (!isTerminalCredentialError(error)) return undefined;
+		await refreshGatewayApiKeyAfterAuthError(
+			options.storage,
+			options.model,
+			options.sessionId,
+			options.model.provider,
+			options.getApiKey(),
+			error,
+			options.signal,
+			options.format,
+			options.peer,
+			options.selection,
+			options.exhaustion,
+			options.onCredential,
+		);
+		return describePoolExhaustion(options.exhaustion);
+	};
+}
+
 function qualifiedModelId(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
@@ -515,6 +552,21 @@ function zeroUsage(): Usage {
 	};
 }
 
+function streamPoolFailureMessage(model: Model<Api>, errorMessage: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: zeroUsage(),
+		stopReason: "error",
+		errorMessage,
+		timestamp: Date.now(),
+		duration: 0,
+	};
+}
+
 interface AuditRecorder {
 	setPrincipal(principal: AuthGatewayPrincipal): void;
 	setModel(requestedModel: string | null, provider: string | null, model: string | null): void;
@@ -600,15 +652,16 @@ function wrapEventsForAudit(
 	audit: AuditRecorder | undefined,
 	statusCode: number,
 	exhaustion: PoolExhaustionState,
+	model: Model<Api>,
 	signal?: AbortSignal,
 	onTerminalCredentialError?: (error: unknown) => Promise<PoolExhaustionFailure | undefined>,
 ): AssistantMessageEventStream {
-	if (!audit) return events;
-	const recorder: AuditRecorder = audit;
+	if (!audit && !onTerminalCredentialError) return events;
+	const recorder = audit;
 	async function* iter() {
 		try {
 			for await (const event of events) {
-				if (event.type === "done") recorder.record("success", statusCode, usageOf(event.message));
+				if (event.type === "done") recorder?.record("success", statusCode, usageOf(event.message));
 				if (event.type === "error") {
 					let poolFailure = describePoolExhaustion(exhaustion);
 					const terminalError = event.error.errorMessage ?? "Upstream request failed";
@@ -621,11 +674,11 @@ function wrapEventsForAudit(
 							errorMessage: "No eligible credential is available for this request",
 							stopReason: "error" as const,
 						};
-						recorder.record(poolFailure.outcome, poolFailure.status, usageOf(event.error), poolFailure.type);
+						recorder?.record(poolFailure.outcome, poolFailure.status, usageOf(event.error), poolFailure.type);
 						yield { ...event, error } satisfies AssistantMessageEvent;
 						continue;
 					}
-					recorder.record(
+					recorder?.record(
 						event.reason === "aborted" ? "request_aborted" : "upstream_error",
 						event.reason === "aborted" ? 499 : 502,
 						usageOf(event.error),
@@ -636,7 +689,17 @@ function wrapEventsForAudit(
 			}
 		} catch (error) {
 			const aborted = signal?.aborted ?? false;
-			recorder.record(
+			let poolFailure = aborted ? undefined : describePoolExhaustion(exhaustion);
+			if (!poolFailure && !aborted) {
+				poolFailure = await onTerminalCredentialError?.(error);
+			}
+			if (poolFailure) {
+				const message = streamPoolFailureMessage(model, "No eligible credential is available for this request");
+				recorder?.record(poolFailure.outcome, poolFailure.status, zeroUsage(), poolFailure.type);
+				yield { type: "error", reason: "error", error: message } satisfies AssistantMessageEvent;
+				return;
+			}
+			recorder?.record(
 				aborted ? "request_aborted" : "upstream_error",
 				aborted ? 499 : 502,
 				zeroUsage(),
@@ -649,9 +712,9 @@ function wrapEventsForAudit(
 	wrapped.result = async () => {
 		const message = await events.result();
 		if (message.stopReason === "stop" || message.stopReason === "length" || message.stopReason === "toolUse") {
-			recorder.record("success", statusCode, usageOf(message));
+			recorder?.record("success", statusCode, usageOf(message));
 		} else {
-			recorder.record(
+			recorder?.record(
 				message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
 				message.stopReason === "aborted" ? 499 : 502,
 				usageOf(message),
@@ -744,8 +807,8 @@ async function handleFormatEndpoint(
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = resolveAuthGatewayPoolSelection(
-			bootOpts.accessStore.listUserPools(principal.userId),
+		const poolSelection = bootOpts.accessStore.resolveUserPoolSelection(
+			principal.userId,
 			model.provider,
 			qualifiedModelId(model),
 		);
@@ -818,6 +881,24 @@ async function handleFormatEndpoint(
 		return response;
 	}
 
+	let currentApiKey = credential.apiKey;
+	const onCredential = (next: ResolvedAuthCredential): void => {
+		currentApiKey = next.apiKey;
+		audit?.setCredential(next.credentialId ?? null);
+	};
+	const recoverTerminalCredentialError = buildTerminalCredentialErrorRecovery({
+		storage: bootOpts.storage,
+		model,
+		sessionId: storageSessionId,
+		getApiKey: () => currentApiKey,
+		signal: controller.signal,
+		format: route.label,
+		peer,
+		selection,
+		exhaustion,
+		onCredential,
+	});
+
 	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
@@ -829,7 +910,7 @@ async function handleFormatEndpoint(
 		peer,
 		selection,
 		exhaustion,
-		nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
+		onCredential,
 	);
 
 	logger.info("auth-gateway request", {
@@ -861,22 +942,7 @@ async function handleFormatEndpoint(
 					audit?.record("request_aborted", 499, usageOf(message), "request_aborted");
 					return route.module.formatError(499, "request_aborted", errorMessage);
 				}
-				const terminalPoolFailure = isTerminalCredentialError(errorMessage)
-					? await refreshGatewayApiKeyAfterAuthError(
-							bootOpts.storage,
-							model,
-							storageSessionId,
-							model.provider,
-							credential.apiKey,
-							errorMessage,
-							controller.signal,
-							route.label,
-							peer,
-							selection,
-							exhaustion,
-							nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
-						).then(() => describePoolExhaustion(exhaustion))
-					: undefined;
+				const terminalPoolFailure = await recoverTerminalCredentialError(errorMessage);
 				if (terminalPoolFailure) {
 					audit?.record(
 						terminalPoolFailure.outcome,
@@ -927,6 +993,22 @@ async function handleFormatEndpoint(
 					poolFailure.retryAtMs,
 				);
 			}
+			const terminalPoolFailure = await recoverTerminalCredentialError(error);
+			if (terminalPoolFailure) {
+				audit?.record(
+					terminalPoolFailure.outcome,
+					terminalPoolFailure.status,
+					zeroUsage(),
+					terminalPoolFailure.type,
+				);
+				return poolFailureResponse(
+					route,
+					terminalPoolFailure.status,
+					terminalPoolFailure.type,
+					"No eligible credential is available for this request",
+					terminalPoolFailure.retryAtMs,
+				);
+			}
 			audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		}
@@ -950,27 +1032,30 @@ async function handleFormatEndpoint(
 				poolFailure.retryAtMs,
 			);
 		}
+		const terminalPoolFailure = await recoverTerminalCredentialError(error);
+		if (terminalPoolFailure) {
+			audit?.record(terminalPoolFailure.outcome, terminalPoolFailure.status, zeroUsage(), terminalPoolFailure.type);
+			return poolFailureResponse(
+				route,
+				terminalPoolFailure.status,
+				terminalPoolFailure.type,
+				"No eligible credential is available for this request",
+				terminalPoolFailure.retryAtMs,
+			);
+		}
 		audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	const auditedEvents = wrapEventsForAudit(events, audit, 200, exhaustion, controller.signal, async error => {
-		await refreshGatewayApiKeyAfterAuthError(
-			bootOpts.storage,
-			model,
-			storageSessionId,
-			model.provider,
-			credential.apiKey,
-			error,
-			controller.signal,
-			route.label,
-			peer,
-			selection,
-			exhaustion,
-			nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
-		);
-		return describePoolExhaustion(exhaustion);
-	});
+	const auditedEvents = wrapEventsForAudit(
+		events,
+		audit,
+		200,
+		exhaustion,
+		model,
+		controller.signal,
+		recoverTerminalCredentialError,
+	);
 	const sseStream = route.module.encodeStream(auditedEvents, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
@@ -1024,6 +1109,7 @@ async function handlePiNative(
 		body = await req.json();
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		audit?.record("invalid_request", 400, zeroUsage(), "invalid_json");
 		return piNative.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
@@ -1033,6 +1119,7 @@ async function handlePiNative(
 		parsed = piNative.parseRequest(body, req.headers);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		audit?.record("invalid_request", 400, zeroUsage(), "invalid_request");
 		const message = error instanceof Error ? error.message : String(error);
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
@@ -1065,8 +1152,8 @@ async function handlePiNative(
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = resolveAuthGatewayPoolSelection(
-			bootOpts.accessStore.listUserPools(principal.userId),
+		const poolSelection = bootOpts.accessStore.resolveUserPoolSelection(
+			principal.userId,
 			model.provider,
 			qualifiedModelId(model),
 		);
@@ -1124,7 +1211,23 @@ async function handlePiNative(
 		);
 		return response;
 	}
-	audit?.setCredential(credential.credential.credentialId ?? null);
+	let currentApiKey = credential.apiKey;
+	const onCredential = (next: ResolvedAuthCredential): void => {
+		currentApiKey = next.apiKey;
+		audit?.setCredential(next.credentialId ?? null);
+	};
+	const recoverTerminalCredentialError = buildTerminalCredentialErrorRecovery({
+		storage: bootOpts.storage,
+		model,
+		sessionId: credentialSessionId,
+		getApiKey: () => currentApiKey,
+		signal: controller.signal,
+		format: "pi-native",
+		peer,
+		selection,
+		exhaustion,
+		onCredential,
+	});
 
 	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey: credential.apiKey, signal: controller.signal };
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
@@ -1137,7 +1240,7 @@ async function handlePiNative(
 		peer,
 		selection,
 		exhaustion,
-		nextCredential => audit?.setCredential(nextCredential.credentialId ?? null),
+		onCredential,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -1194,6 +1297,22 @@ async function handlePiNative(
 					audit?.record("request_aborted", 499, usageOf(message), "request_aborted");
 					return piNative.formatError(499, "request_aborted", errorMessage);
 				}
+				const terminalPoolFailure = await recoverTerminalCredentialError(errorMessage);
+				if (terminalPoolFailure) {
+					audit?.record(
+						terminalPoolFailure.outcome,
+						terminalPoolFailure.status,
+						usageOf(message),
+						terminalPoolFailure.type,
+					);
+					return poolFailureResponse(
+						route,
+						terminalPoolFailure.status,
+						terminalPoolFailure.type,
+						"No eligible credential is available for this request",
+						terminalPoolFailure.retryAtMs,
+					);
+				}
 				const classified = classifyGatewayError(errorMessage);
 				audit?.record("upstream_error", classified.status, usageOf(message), classified.type);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
@@ -1211,6 +1330,22 @@ async function handlePiNative(
 					poolFailure.type,
 					"No eligible credential is available for this request",
 					poolFailure.retryAtMs,
+				);
+			}
+			const terminalPoolFailure = await recoverTerminalCredentialError(error);
+			if (terminalPoolFailure) {
+				audit?.record(
+					terminalPoolFailure.outcome,
+					terminalPoolFailure.status,
+					zeroUsage(),
+					terminalPoolFailure.type,
+				);
+				return poolFailureResponse(
+					route,
+					terminalPoolFailure.status,
+					terminalPoolFailure.type,
+					"No eligible credential is available for this request",
+					terminalPoolFailure.retryAtMs,
 				);
 			}
 			const classified = classifyGatewayError(error);
@@ -1238,12 +1373,31 @@ async function handlePiNative(
 				poolFailure.retryAtMs,
 			);
 		}
+		const terminalPoolFailure = await recoverTerminalCredentialError(error);
+		if (terminalPoolFailure) {
+			audit?.record(terminalPoolFailure.outcome, terminalPoolFailure.status, zeroUsage(), terminalPoolFailure.type);
+			return poolFailureResponse(
+				route,
+				terminalPoolFailure.status,
+				terminalPoolFailure.type,
+				"No eligible credential is available for this request",
+				terminalPoolFailure.retryAtMs,
+			);
+		}
 		audit?.record("upstream_error", classified.status, zeroUsage(), classified.type);
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const auditedEvents = wrapEventsForAudit(events, audit, 200, exhaustion, controller.signal);
+	const auditedEvents = wrapEventsForAudit(
+		events,
+		audit,
+		200,
+		exhaustion,
+		model,
+		controller.signal,
+		recoverTerminalCredentialError,
+	);
 	const sseStream = piNative.encodeStream(auditedEvents, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
@@ -1316,9 +1470,8 @@ async function handleCredentialsCheck(
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "check", true);
 		if (!access.allowed)
 			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
-		const liveRows = storage.listStoredCredentials();
-		const liveById = new Map(liveRows.map(row => [row.id, row]));
-		const eligible = new Set<number>();
+		const allowedPools: AuthGatewayPool[] = [];
+		const candidateIds: number[] = [];
 		for (const pool of accessStore.listUserPools(principal.userId)) {
 			const poolAccess = evaluateAuthGatewayAccess(principal, rules, {
 				route: "check",
@@ -1326,6 +1479,12 @@ async function handleCredentialsCheck(
 				...(pool.model ? { qualifiedModel: pool.model } : {}),
 			});
 			if (!poolAccess.allowed) continue;
+			allowedPools.push(pool);
+			for (const member of pool.members) candidateIds.push(member.credentialId);
+		}
+		const liveById = new Map(storage.listStoredCredentialsByIds(candidateIds).map(row => [row.id, row]));
+		const eligible = new Set<number>();
+		for (const pool of allowedPools) {
 			for (const member of pool.members) {
 				const live = liveById.get(member.credentialId);
 				if (live?.provider === pool.provider) eligible.add(member.credentialId);

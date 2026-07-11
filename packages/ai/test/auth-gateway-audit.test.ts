@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
@@ -44,6 +44,7 @@ describe("auth-gateway audit", () => {
 	let harness: GatewayHarness | undefined;
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await closeGatewayHarness(harness);
 		harness = undefined;
 	});
@@ -153,6 +154,51 @@ describe("auth-gateway audit", () => {
 		expect(persisted).not.toContain("secret@example.com");
 	});
 
+	test("audits malformed and schema-invalid managed pi-native requests as invalid requests", async () => {
+		harness = await createGatewayHarness();
+		const user = harness.accessStore.createUser({ name: "pinativeaudit" });
+
+		let response = await fetch(`${harness.handle.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: jsonHeaders(user.token.value),
+			body: "{",
+		});
+		expect(response.status).toBe(400);
+		let body = expectObject(await readJson(response));
+		expect(expectObject(body.error).type).toBe("invalid_request_error");
+		let [event] = harness.accessStore.listAudit({ userId: user.user.id, limit: 1 }).events;
+		expect(event).toMatchObject({
+			routeFamily: "pi-native",
+			outcome: "invalid_request",
+			statusCode: 400,
+			errorCode: "invalid_json",
+			requestedModel: null,
+			resolvedProvider: null,
+			resolvedModel: null,
+			credentialId: null,
+		});
+
+		response = await fetch(`${harness.handle.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: jsonHeaders(user.token.value),
+			body: JSON.stringify({ modelId: "model-a", stream: false }),
+		});
+		expect(response.status).toBe(400);
+		body = expectObject(await readJson(response));
+		expect(expectObject(body.error).type).toBe("invalid_request_error");
+		[event] = harness.accessStore.listAudit({ userId: user.user.id, limit: 1 }).events;
+		expect(event).toMatchObject({
+			routeFamily: "pi-native",
+			outcome: "invalid_request",
+			statusCode: 400,
+			errorCode: "invalid_request",
+			requestedModel: null,
+			resolvedProvider: null,
+			resolvedModel: null,
+			credentialId: null,
+		});
+	});
+
 	test("filters managed self-service usage by since and validates the query", async () => {
 		harness = await createGatewayHarness();
 		const [row] = harness.credentialStore.listAuthCredentials("mock");
@@ -246,6 +292,8 @@ describe("auth-gateway audit", () => {
 		expect(usage.userId).toBe(user.user.id);
 		expect(expectObject(usage.totals).requests).toBeGreaterThanOrEqual(1);
 
+		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
+
 		response = await fetch(`${harness.handle.url}/v1/credentials/check`, { headers: jsonHeaders(user.token.value) });
 		expect(response.status).toBe(200);
 		body = expectObject(await readJson(response));
@@ -253,6 +301,7 @@ describe("auth-gateway audit", () => {
 		expect(credentials).toBeArrayOfSize(1);
 		expect(credentials[0]?.member).toBe(1);
 		expect(credentials[0]).not.toHaveProperty("id");
+		expect(listStoredSpy).not.toHaveBeenCalled();
 		const serialized = JSON.stringify(body);
 		expect(serialized).toContain("member");
 		expect(serialized).not.toContain("secret-query-token");
@@ -260,7 +309,6 @@ describe("auth-gateway audit", () => {
 		expect(serialized).not.toContain("acct-secret");
 		expect(serialized).not.toContain("project-secret");
 		expect(serialized).not.toContain("oauth-access-secret");
-
 		response = await fetch(`${harness.handle.url}/v1/audit?userId=${user.user.id}&limit=1`, {
 			headers: jsonHeaders("legacy-token"),
 		});
@@ -278,5 +326,30 @@ describe("auth-gateway audit", () => {
 			const nextPage = expectObject(await readJson(response));
 			expect(nextPage.events).toBeArray();
 		}
+	});
+
+	test("managed credential checks return empty for stale pool members without falling back to unrelated live rows", async () => {
+		harness = await createGatewayHarness({
+			credentials: [{ type: "api_key", key: "stale-pool-secret" }],
+		});
+		const [staleRow] = harness.credentialStore.listAuthCredentials("mock");
+		if (!staleRow) throw new Error("expected stale candidate row");
+		harness.storage.upsertCredential("other-provider", { type: "api_key", key: "unrelated-live-secret" });
+		const user = harness.accessStore.createUser({ name: "stalecheckuser" });
+		const pool = harness.accessStore.createPool({ name: "stalecheckpool", provider: "mock" });
+		harness.accessStore.addPoolCredential(pool.id, staleRow.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+		expect(harness.storage.disableCredentialById(staleRow.id, "disabled by test")).toBe(true);
+		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
+
+		const response = await fetch(`${harness.handle.url}/v1/credentials/check`, {
+			headers: jsonHeaders(user.token.value),
+		});
+
+		expect(response.status).toBe(200);
+		const body = expectObject(await readJson(response));
+		expect(body.credentials).toEqual([]);
+		expect(listStoredSpy).not.toHaveBeenCalled();
+		expect(JSON.stringify(body)).not.toContain("unrelated-live-secret");
 	});
 });

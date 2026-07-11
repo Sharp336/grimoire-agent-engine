@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed auth-gateway credential pools to honor cross-type member order, retry eligible mixed members, preserve least-used session affinity, filter managed usage by since, and avoid repeated model/audit scans.
+- Fixed auth-gateway credential pools to honor cross-type member order, retry eligible mixed members, preserve least-used session affinity, keep stable pool bindings across same-identity re-login, make duplicate pool-member addition race-idempotent, keep pi-native audit and terminal-auth errors consistent with other gateway formats, reduce token/pool/scoped-credential hot-path work, filter managed usage by since, and avoid repeated model/audit scans.
 
 ## [16.4.0] - 2026-07-10
 

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -103,6 +103,8 @@ describe("SqliteAuthGatewayAccessStore", () => {
 	});
 
 	afterEach(async () => {
+		setSystemTime();
+		vi.useRealTimers();
 		store?.close();
 		if (tempDir) {
 			await removeWithRetries(tempDir);
@@ -141,6 +143,57 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		});
 		expect(store.getUser("999999")).toBeUndefined();
 		expect(store.getUser(String(alice.user.id))?.id).toBe(alice.user.id);
+	});
+
+	test("throttles managed-token last-used writes for sixty seconds", () => {
+		vi.useFakeTimers();
+		const firstNow = 1_700_000_000_000;
+		setSystemTime(firstNow);
+		const alice = store.createUser({ name: "alice" });
+
+		expect(store.authenticateToken(alice.token.value)).toMatchObject({
+			userId: alice.user.id,
+			tokenId: alice.token.id,
+		});
+		const firstUserLastUsedAt = store.getUser(alice.user.id)?.lastUsedAt;
+		const firstTokenLastUsedAt = store.listUserTokens(alice.user.id)[0]?.lastUsedAt;
+		expect(firstUserLastUsedAt).toBe(firstNow);
+		expect(firstTokenLastUsedAt).toBe(firstNow);
+
+		setSystemTime(firstNow + 30_000);
+		expect(store.authenticateToken(alice.token.value)).toMatchObject({
+			userId: alice.user.id,
+			tokenId: alice.token.id,
+		});
+		expect(store.getUser(alice.user.id)?.lastUsedAt).toBe(firstUserLastUsedAt);
+		expect(store.listUserTokens(alice.user.id)[0]?.lastUsedAt).toBe(firstTokenLastUsedAt);
+
+		const refreshedNow = firstNow + 60_001;
+		setSystemTime(refreshedNow);
+		expect(store.authenticateToken(alice.token.value)).toMatchObject({
+			userId: alice.user.id,
+			tokenId: alice.token.id,
+		});
+		expect(store.getUser(alice.user.id)?.lastUsedAt).toBe(refreshedNow);
+		expect(store.listUserTokens(alice.user.id)[0]?.lastUsedAt).toBe(refreshedNow);
+	});
+
+	test("rejects revoked tokens and disabled users inside the last-used throttle window", () => {
+		vi.useFakeTimers();
+		const firstNow = 1_700_000_000_000;
+		setSystemTime(firstNow);
+		const revoked = store.createUser({ name: "revoked" });
+		const disabled = store.createUser({ name: "disabled" });
+
+		expect(store.authenticateToken(revoked.token.value)?.userId).toBe(revoked.user.id);
+		expect(store.authenticateToken(disabled.token.value)?.userId).toBe(disabled.user.id);
+
+		setSystemTime(firstNow + 30_000);
+		expect(store.revokeUserToken(revoked.user.id, revoked.token.id)).toBe(true);
+		expect(store.authenticateToken(revoked.token.value)).toBeNull();
+
+		store.updateUser(disabled.user.id, { enabled: false });
+		expect(store.authenticateToken(disabled.token.value)).toBeNull();
 	});
 
 	test("recreates the additive audit cursor index when reopening a v1 database", async () => {
@@ -387,6 +440,95 @@ describe("SqliteAuthGatewayAccessStore", () => {
 			resolveAuthGatewayPoolSelection(store.listUserPools(alice.user.id), "anthropic", "anthropic/claude-3-5-sonnet")
 				?.poolId,
 		).toBe(modelPool.id);
+	});
+
+	test("resolves the winning user pool selection with ordered members", () => {
+		const alice = store.createUser({ name: "selection" });
+		const providerPool = store.createPool({
+			name: "anthropic-wide",
+			provider: "anthropic",
+			strategy: "round-robin",
+		});
+		const exactPool = store.createPool({
+			name: "anthropic-sonnet",
+			provider: "anthropic",
+			model: "claude-3-5-sonnet",
+			strategy: "failover",
+		});
+		const emptyExactPool = store.createPool({
+			name: "openai-gpt4o",
+			provider: "openai",
+			model: "gpt-4o",
+			strategy: "least-used",
+		});
+
+		store.addPoolCredential(providerPool.id, 20);
+		store.addPoolCredential(providerPool.id, 10);
+		store.addPoolCredential(exactPool.id, 30);
+		store.addPoolCredential(exactPool.id, 25);
+		store.bindUserPool(alice.user.id, providerPool.id);
+		store.bindUserPool(alice.user.id, exactPool.id);
+		store.bindUserPool(alice.user.id, emptyExactPool.id);
+
+		expect(store.resolveUserPoolSelection(alice.user.id, "anthropic", "anthropic/claude-3-5-sonnet")).toEqual({
+			poolId: exactPool.id,
+			provider: "anthropic",
+			qualifiedModel: "anthropic/claude-3-5-sonnet",
+			strategy: "failover",
+			credentialIds: [30, 25],
+		});
+		expect(store.resolveUserPoolSelection(alice.user.id, "anthropic", "anthropic/claude-3-haiku")).toEqual({
+			poolId: providerPool.id,
+			provider: "anthropic",
+			qualifiedModel: null,
+			strategy: "round-robin",
+			credentialIds: [20, 10],
+		});
+		expect(store.resolveUserPoolSelection(alice.user.id, "openai", "openai/gpt-4o")).toEqual({
+			poolId: emptyExactPool.id,
+			provider: "openai",
+			qualifiedModel: "openai/gpt-4o",
+			strategy: "least-used",
+			credentialIds: [],
+		});
+		expect(store.resolveUserPoolSelection(alice.user.id, "mock", "mock/model-a")).toBeNull();
+	});
+
+	test("treats a duplicate pool-member insert at the SQLite boundary as idempotent", async () => {
+		const pool = store.createPool({ name: "primary", provider: "anthropic" });
+		const triggerDb = new Database(dbPath);
+		try {
+			triggerDb.run(`
+				CREATE TRIGGER simulate_pool_member_race
+				BEFORE INSERT ON gateway_pool_credentials
+				WHEN NEW.credential_id = 42 AND NEW.created_at >= 0
+				BEGIN
+					INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at)
+					VALUES (NEW.pool_id, NEW.credential_id, NEW.position, -1);
+				END
+			`);
+		} finally {
+			triggerDb.close();
+		}
+
+		store.close();
+		store = await SqliteAuthGatewayAccessStore.open(dbPath);
+		try {
+			const result = store.addPoolCredential(pool.id, 42);
+
+			expect(result.created).toBe(false);
+			expect(result.pool.members.map(member => member.credentialId)).toEqual([42]);
+			expect(store.getPool(pool.id)?.members).toMatchObject([{ credentialId: 42, position: 0 }]);
+		} finally {
+			store.close();
+			const cleanupDb = new Database(dbPath);
+			try {
+				cleanupDb.run("DROP TRIGGER IF EXISTS simulate_pool_member_race");
+			} finally {
+				cleanupDb.close();
+			}
+			store = await SqliteAuthGatewayAccessStore.open(dbPath);
+		}
 	});
 
 	test("concurrent duplicate scope binds create one row and one conflict", async () => {

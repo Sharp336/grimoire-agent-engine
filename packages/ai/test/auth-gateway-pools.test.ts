@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import {
@@ -15,6 +16,20 @@ import {
 } from "./auth-gateway-integration-helpers";
 
 const OAUTH_SOURCE = "auth-gateway-pools-test";
+const THROWING_API = "auth-gateway-pools-throwing-api";
+
+function throwingTerminalModel(message: string): MockModel {
+	const model = createMockModel({ provider: "mock", id: "model-a" });
+	Object.defineProperty(model, "api", { value: THROWING_API });
+	registerCustomApi(
+		THROWING_API,
+		() => {
+			throw Object.assign(new Error(message), { status: 401 });
+		},
+		OAUTH_SOURCE,
+	);
+	return model;
+}
 
 function farExpiry(): number {
 	return Date.now() + 60 * 60_000;
@@ -201,6 +216,51 @@ describe("auth-gateway credential pools", () => {
 		}
 
 		expect(seenKeys).toEqual(["api-b", "oauth-a", "api-b"]);
+	});
+
+	test("same-identity OAuth re-login keeps existing pool member usable", async () => {
+		registerMockOAuthProvider();
+		const seenKeys: string[] = [];
+		const model = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: (_ctx, opts) => {
+				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
+				seenKeys.push(key);
+				return { content: [`used:${key}`] };
+			},
+		});
+		const original: AuthCredential = {
+			type: "oauth",
+			access: "oauth-before",
+			refresh: "refresh-before",
+			expires: farExpiry(),
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		};
+		harness = await createGatewayHarness({ models: [model], credentials: [original] });
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected oauth row");
+		const user = harness.accessStore.createUser({ name: "sameidentity" });
+		const pool = harness.accessStore.createPool({ name: "sameidentitypool", provider: "mock", strategy: "failover" });
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+
+		expect(harness.storage.disableCredentialById(row.id, "oauth refresh failed: invalid_grant")).toBe(true);
+		harness.storage.upsertCredential("mock", {
+			type: "oauth",
+			access: "oauth-after",
+			refresh: "refresh-after",
+			expires: farExpiry(),
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		});
+
+		expect(harness.accessStore.getPool(pool.id)?.members.map(member => member.credentialId)).toEqual([row.id]);
+		const response = await postChat(harness.handle.url, user.token.value);
+		expect(response.status).toBe(200);
+		expect(await responseText(response)).toBe("used:oauth-after");
+		expect(seenKeys).toEqual(["oauth-after"]);
 	});
 
 	test("sticky-session pools reuse the same member for the same prompt cache key", async () => {
@@ -482,6 +542,83 @@ describe("auth-gateway credential pools", () => {
 		});
 	});
 
+	test("format non-streaming thrown terminal auth failures exhaust managed pools", async () => {
+		const model = throwingTerminalModel("401 invalid_api_key thrown-selected-sentinel");
+		harness = await createGatewayHarness({
+			models: [model],
+			credentials: [{ type: "api_key", key: "selected-key" }],
+		});
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected credential row");
+		const user = harness.accessStore.createUser({ name: "throwninvalid" });
+		const pool = harness.accessStore.createPool({
+			name: "throwninvalidpool",
+			provider: "mock",
+			strategy: "failover",
+		});
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+
+		const response = await postChat(harness.handle.url, user.token.value);
+		expect(response.status).toBe(503);
+		const text = await response.text();
+		const body = JSON.parse(text) as unknown;
+		expect(body).toMatchObject({
+			error: {
+				type: "no_eligible_credential",
+				message: "No eligible credential is available for this request",
+			},
+		});
+		expect(text).not.toContain("thrown-selected-sentinel");
+		const audit = harness.accessStore.listAudit({ userId: user.user.id, limit: 5 }).events[0];
+		expect(audit).toMatchObject({
+			outcome: "no_eligible_credential",
+			statusCode: 503,
+			errorCode: "no_eligible_credential",
+		});
+	});
+
+	test("pi-native non-streaming terminal auth failures exhaust managed pools", async () => {
+		const model = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: () => ({
+				throw: Object.assign(new Error("401 invalid_api_key pi-native-selected-sentinel"), { status: 401 }),
+			}),
+		});
+		harness = await createGatewayHarness({
+			models: [model],
+			credentials: [{ type: "api_key", key: "selected-key" }],
+		});
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected credential row");
+		const user = harness.accessStore.createUser({ name: "pinativeinvalid" });
+		const pool = harness.accessStore.createPool({
+			name: "pinativeinvalidpool",
+			provider: "mock",
+			strategy: "failover",
+		});
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+
+		const response = await postPiNative(harness.handle.url, user.token.value);
+		expect(response.status).toBe(503);
+		const body = await readJson(response);
+		expect(body).toMatchObject({
+			error: {
+				type: "no_eligible_credential",
+				message: "No eligible credential is available for this request",
+			},
+		});
+		const audit = harness.accessStore.listAudit({ userId: user.user.id, limit: 5 }).events[0];
+		expect(audit).toMatchObject({
+			routeFamily: "pi-native",
+			outcome: "no_eligible_credential",
+			statusCode: 503,
+			errorCode: "no_eligible_credential",
+		});
+	});
+
 	test("stream audit distinguishes no eligible credential from usage limit", async () => {
 		const model = createMockModel({
 			provider: "mock",
@@ -514,6 +651,100 @@ describe("auth-gateway credential pools", () => {
 			statusCode: 503,
 			errorCode: "no_eligible_credential",
 		});
+	});
+
+	test("streaming rejected terminal auth failures emit managed pool exhaustion events", async () => {
+		const model = throwingTerminalModel("401 invalid_api_key rejected-stream-sentinel");
+		harness = await createGatewayHarness({
+			models: [model],
+			credentials: [{ type: "api_key", key: "selected-key" }],
+		});
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected credential row");
+		const user = harness.accessStore.createUser({ name: "rejectedstreaminvalid" });
+		const pool = harness.accessStore.createPool({
+			name: "rejectedstreaminvalidpool",
+			provider: "mock",
+			strategy: "failover",
+		});
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+
+		const response = await postChat(harness.handle.url, user.token.value, "model-a", true);
+		expect(response.status).toBe(200);
+		const text = await collectStreamText(response);
+		expect(text).toContain("No eligible credential is available for this request");
+		expect(text).not.toContain("rejected-stream-sentinel");
+		const audit = harness.accessStore.listAudit({ userId: user.user.id, limit: 5 }).events[0];
+		expect(audit).toMatchObject({
+			outcome: "no_eligible_credential",
+			statusCode: 503,
+			errorCode: "no_eligible_credential",
+		});
+	});
+
+	test("pi-native streaming terminal auth failures emit managed pool exhaustion events", async () => {
+		const model = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: () => ({
+				throw: Object.assign(new Error("401 invalid_api_key pi-native-stream-selected-sentinel"), {
+					status: 401,
+				}),
+			}),
+		});
+		harness = await createGatewayHarness({
+			models: [model],
+			credentials: [{ type: "api_key", key: "selected-key" }],
+		});
+		const [row] = harness.credentialStore.listAuthCredentials("mock");
+		if (!row) throw new Error("expected credential row");
+		const user = harness.accessStore.createUser({ name: "pinativestreaminvalid" });
+		const pool = harness.accessStore.createPool({
+			name: "pinativestreaminvalidpool",
+			provider: "mock",
+			strategy: "failover",
+		});
+		harness.accessStore.addPoolCredential(pool.id, row.id);
+		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
+
+		const response = await fetch(`${harness.handle.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: jsonHeaders(user.token.value),
+			body: JSON.stringify({
+				modelId: "model-a",
+				stream: true,
+				context: { systemPrompt: ["test"], messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+			}),
+		});
+		expect(response.status).toBe(200);
+		expect(await collectStreamText(response)).toContain("No eligible credential is available for this request");
+		const audit = harness.accessStore.listAudit({ userId: user.user.id, limit: 5 }).events[0];
+		expect(audit).toMatchObject({
+			routeFamily: "pi-native",
+			outcome: "no_eligible_credential",
+			statusCode: 503,
+			errorCode: "no_eligible_credential",
+		});
+	});
+
+	test("legacy pi-native terminal auth failures keep their upstream error", async () => {
+		const model = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: () => ({
+				throw: Object.assign(new Error("401 invalid_api_key legacy-pi-native-sentinel"), { status: 401 }),
+			}),
+		});
+		harness = await createGatewayHarness({
+			models: [model],
+			credentials: [{ type: "api_key", key: "legacy-key" }],
+		});
+
+		const response = await postPiNative(harness.handle.url, "legacy-token");
+		const text = await response.text();
+		expect(text).toContain("legacy-pi-native-sentinel");
+		expect(text).not.toContain("No eligible credential is available for this request");
 	});
 
 	test("returns 503 when a bound pool has no live provider-matching members", async () => {

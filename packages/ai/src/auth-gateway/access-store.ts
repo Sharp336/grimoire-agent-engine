@@ -11,6 +11,7 @@ import {
 	type AuthGatewayIssuedToken,
 	type AuthGatewayPool,
 	type AuthGatewayPoolMember,
+	type AuthGatewayPoolSelection,
 	type AuthGatewayPoolStrategy,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRole,
@@ -29,6 +30,7 @@ import { timingSafeEqual } from "./http";
 
 const ACCESS_SCHEMA_VERSION = 1;
 const DUMMY_TOKEN_DIGEST = new Uint8Array(32);
+const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 const TOKEN_PREFIX = "omp_gw_";
 const TOKEN_PUBLIC_BYTES = 12;
 const TOKEN_SECRET_BYTES = 32;
@@ -87,6 +89,7 @@ export interface AuthGatewayAccessStore {
 	bindUserPool(userId: number, poolId: number): { created: boolean };
 	unbindUserPool(userId: number, poolId: number): boolean;
 	listUserPools(userId: number): AuthGatewayPool[];
+	resolveUserPoolSelection(userId: number, provider: string, qualifiedModel: string): AuthGatewayPoolSelection | null;
 	listPoolUsers(poolId: number): AuthGatewayUser[];
 	recordAudit(input: Omit<AuthGatewayAuditEvent, "id">): AuthGatewayAuditEvent;
 	listAudit(query?: { userId?: number; limit?: number; before?: number }): {
@@ -132,6 +135,7 @@ interface TokenPrincipalRow extends TokenRow {
 	user_name: string;
 	user_role: AuthGatewayRole;
 	user_enabled: number;
+	user_last_used_at: number | null;
 }
 
 interface AclRuleRow {
@@ -153,10 +157,29 @@ interface PoolRow {
 	updated_at: number;
 }
 
+interface PoolWithMemberRow extends PoolRow {
+	credential_id: number | null;
+	position: number | null;
+	member_created_at: number | null;
+}
+
+interface PoolSelectionRow {
+	pool_id: number;
+	provider: string;
+	model: string | null;
+	strategy: AuthGatewayPoolStrategy;
+	credential_id: number | null;
+	position: number | null;
+}
+
 interface PoolMemberRow {
 	credential_id: number;
 	position: number;
 	created_at: number;
+}
+
+interface InsertedPoolCredentialRow {
+	credential_id: number;
 }
 
 interface AuditRow {
@@ -272,31 +295,61 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		const storedDigest =
 			row?.token_hash instanceof Uint8Array && row.token_hash.length === 32 ? row.token_hash : DUMMY_TOKEN_DIGEST;
 		if (!timingSafeEqual(presentedDigest, storedDigest)) return null;
-		if (!parsed || !row || row.revoked_at !== null || row.user_enabled !== 1) return null;
+		if (!parsed) return null;
+
+		const freshRow = this.#findTokenPrincipal(parsed.publicId);
+		if (!freshRow || freshRow.revoked_at !== null || freshRow.user_enabled !== 1) return null;
+		const now = Date.now();
+		const cutoff = now - LAST_USED_WRITE_INTERVAL_MS;
+		if (
+			freshRow.last_used_at !== null &&
+			freshRow.last_used_at > cutoff &&
+			freshRow.user_last_used_at !== null &&
+			freshRow.user_last_used_at > cutoff
+		) {
+			return mapTokenPrincipal(freshRow);
+		}
 
 		let principal: AuthGatewayPrincipal | null = null;
-		const now = Date.now();
 		this.#withImmediateTransaction(() => {
-			const activeRow = this.#findTokenPrincipal(parsed.publicId);
+			let activeRow = this.#findTokenPrincipal(parsed.publicId);
 			if (!activeRow || activeRow.revoked_at !== null || activeRow.user_enabled !== 1) return;
-			const tokenUpdate = this.#db
-				.prepare("UPDATE gateway_user_tokens SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL")
-				.run(now, activeRow.id);
-			if (tokenUpdate.changes !== 1) return;
-			const freshRow = this.#findTokenPrincipal(parsed.publicId);
-			if (!freshRow || freshRow.revoked_at !== null || freshRow.user_enabled !== 1) return;
-			const userUpdate = this.#db
-				.prepare("UPDATE gateway_users SET last_used_at = ?, updated_at = ? WHERE id = ? AND enabled = 1")
-				.run(now, now, freshRow.user_id);
-			if (userUpdate.changes !== 1) return;
-			principal = {
-				kind: "managed",
-				id: freshRow.user_id,
-				userId: freshRow.user_id,
-				name: freshRow.user_name,
-				role: freshRow.user_role,
-				tokenId: freshRow.id,
-			};
+			if (
+				activeRow.last_used_at !== null &&
+				activeRow.last_used_at > cutoff &&
+				activeRow.user_last_used_at !== null &&
+				activeRow.user_last_used_at > cutoff
+			) {
+				principal = mapTokenPrincipal(activeRow);
+				return;
+			}
+			if (activeRow.last_used_at === null || activeRow.last_used_at <= cutoff) {
+				const tokenUpdate = this.#db
+					.prepare(
+						`UPDATE gateway_user_tokens
+						SET last_used_at = ?
+						WHERE id = ? AND revoked_at IS NULL
+							AND (last_used_at IS NULL OR last_used_at <= ?)`,
+					)
+					.run(now, activeRow.id, cutoff);
+				if (tokenUpdate.changes !== 1) return;
+				activeRow = this.#findTokenPrincipal(parsed.publicId);
+				if (!activeRow || activeRow.revoked_at !== null || activeRow.user_enabled !== 1) return;
+			}
+			if (activeRow.user_last_used_at === null || activeRow.user_last_used_at <= cutoff) {
+				const userUpdate = this.#db
+					.prepare(
+						`UPDATE gateway_users
+						SET last_used_at = ?, updated_at = ?
+						WHERE id = ? AND enabled = 1
+							AND (last_used_at IS NULL OR last_used_at <= ?)`,
+					)
+					.run(now, now, activeRow.user_id, cutoff);
+				if (userUpdate.changes !== 1) return;
+			}
+			const finalRow = this.#findTokenPrincipal(parsed.publicId);
+			if (!finalRow || finalRow.revoked_at !== null || finalRow.user_enabled !== 1) return;
+			principal = mapTokenPrincipal(finalRow);
 		});
 		return principal;
 	}
@@ -497,22 +550,26 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		if (!Number.isInteger(credentialId) || credentialId <= 0) {
 			throw new AuthGatewayAccessError("invalid_request", "credential id must be a positive integer");
 		}
-		const existing = this.#db
-			.prepare("SELECT 1 AS count FROM gateway_pool_credentials WHERE pool_id = ? AND credential_id = ?")
-			.get(poolId, credentialId) as CountRow | undefined;
-		if (existing) return { pool: this.#requirePool(poolId), created: false };
+		const created = this.#withImmediateTransaction(() => {
+			const existing = this.#db
+				.prepare("SELECT 1 AS count FROM gateway_pool_credentials WHERE pool_id = ? AND credential_id = ?")
+				.get(poolId, credentialId) as CountRow | undefined;
+			if (existing) return false;
 
-		this.#withImmediateTransaction(() => {
 			const maxRow = this.#db
 				.prepare("SELECT COUNT(*) AS count FROM gateway_pool_credentials WHERE pool_id = ?")
 				.get(poolId) as CountRow | undefined;
-			this.#db
+			const inserted = this.#db
 				.prepare(
-					"INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at) VALUES (?, ?, ?, ?)",
+					`INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at)
+					 VALUES (?, ?, ?, ?)
+					 ON CONFLICT(pool_id, credential_id) DO NOTHING
+					 RETURNING credential_id`,
 				)
-				.run(poolId, credentialId, maxRow?.count ?? 0, Date.now());
+				.get(poolId, credentialId, maxRow?.count ?? 0, Date.now()) as InsertedPoolCredentialRow | undefined;
+			return inserted != null;
 		});
-		return { pool: this.#requirePool(poolId), created: true };
+		return { pool: this.#requirePool(poolId), created };
 	}
 
 	removePoolCredential(poolId: number, credentialId: number): boolean {
@@ -571,10 +628,60 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		this.#requireUser(userId);
 		const rows = this.#db
 			.prepare(
-				"SELECT p.* FROM gateway_pools p INNER JOIN gateway_user_pools up ON up.pool_id = p.id WHERE up.user_id = ? ORDER BY CASE WHEN p.model IS NULL THEN 1 ELSE 0 END, p.id ASC",
+				`SELECT
+					p.*,
+					pc.credential_id,
+					pc.position,
+					pc.created_at AS member_created_at
+				FROM gateway_user_pools up
+				INNER JOIN gateway_pools p ON p.id = up.pool_id
+				LEFT JOIN gateway_pool_credentials pc ON pc.pool_id = p.id
+				WHERE up.user_id = ?
+				ORDER BY CASE WHEN p.model IS NULL THEN 1 ELSE 0 END, p.id ASC, pc.position ASC, pc.credential_id ASC`,
 			)
-			.all(userId) as PoolRow[];
-		return rows.map(row => this.#mapPool(row));
+			.all(userId) as PoolWithMemberRow[];
+		return this.#mapPoolsWithMembers(rows);
+	}
+
+	resolveUserPoolSelection(userId: number, provider: string, qualifiedModel: string): AuthGatewayPoolSelection | null {
+		this.#requireUser(userId);
+		const rows = this.#db
+			.prepare(
+				`WITH selected_binding AS (
+					SELECT pool_id
+					FROM gateway_user_pools
+					WHERE user_id = ?
+					  AND provider = ?
+					  AND model_key IN (?, '')
+					ORDER BY CASE WHEN model_key = ? THEN 0 ELSE 1 END
+					LIMIT 1
+				)
+				SELECT
+					p.id AS pool_id,
+					p.provider,
+					p.model,
+					p.strategy,
+					pc.credential_id,
+					pc.position
+				FROM selected_binding b
+				INNER JOIN gateway_pools p ON p.id = b.pool_id
+				LEFT JOIN gateway_pool_credentials pc ON pc.pool_id = p.id
+				ORDER BY pc.position ASC, pc.credential_id ASC`,
+			)
+			.all(userId, provider, qualifiedModel, qualifiedModel) as PoolSelectionRow[];
+		const first = rows[0];
+		if (!first) return null;
+		const credentialIds: number[] = [];
+		for (const row of rows) {
+			if (row.credential_id !== null) credentialIds.push(row.credential_id);
+		}
+		return {
+			poolId: first.pool_id,
+			provider: first.provider,
+			qualifiedModel: first.model,
+			strategy: first.strategy,
+			credentialIds,
+		};
 	}
 
 	listPoolUsers(poolId: number): AuthGatewayUser[] {
@@ -820,7 +927,7 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	#findTokenPrincipal(publicId: string): TokenPrincipalRow | undefined {
 		return this.#db
 			.prepare(
-				`SELECT t.*, u.name AS user_name, u.role AS user_role, u.enabled AS user_enabled
+				`SELECT t.*, u.name AS user_name, u.role AS user_role, u.enabled AS user_enabled, u.last_used_at AS user_last_used_at
 				FROM gateway_user_tokens t
 				INNER JOIN gateway_users u ON u.id = t.user_id
 				WHERE t.public_id = ?`,
@@ -922,6 +1029,34 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		};
 	}
 
+	#mapPoolsWithMembers(rows: readonly PoolWithMemberRow[]): AuthGatewayPool[] {
+		const pools = new Map<number, AuthGatewayPool>();
+		for (const row of rows) {
+			let pool = pools.get(row.id);
+			if (!pool) {
+				pool = {
+					id: row.id,
+					name: row.name,
+					provider: row.provider,
+					model: row.model,
+					strategy: row.strategy,
+					createdAt: row.created_at,
+					updatedAt: row.updated_at,
+					members: [],
+				};
+				pools.set(row.id, pool);
+			}
+			if (row.credential_id !== null && row.position !== null && row.member_created_at !== null) {
+				pool.members.push({
+					credentialId: row.credential_id,
+					position: row.position,
+					createdAt: row.member_created_at,
+				});
+			}
+		}
+		return [...pools.values()];
+	}
+
 	#requireAudit(id: number): AuthGatewayAuditEvent {
 		const row = this.#db.prepare("SELECT * FROM gateway_audit_events WHERE id = ?").get(id) as AuditRow | undefined;
 		if (!row) throw new AuthGatewayAccessError("not_found", "audit row not found");
@@ -987,6 +1122,17 @@ function mapToken(row: TokenRow): AuthGatewayToken {
 		createdAt: row.created_at,
 		lastUsedAt: row.last_used_at,
 		revokedAt: row.revoked_at,
+	};
+}
+
+function mapTokenPrincipal(row: TokenPrincipalRow): AuthGatewayPrincipal {
+	return {
+		kind: "managed",
+		id: row.user_id,
+		userId: row.user_id,
+		name: row.user_name,
+		role: row.user_role,
+		tokenId: row.id,
 	};
 }
 

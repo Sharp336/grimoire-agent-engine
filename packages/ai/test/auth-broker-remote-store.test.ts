@@ -131,4 +131,44 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(callbacks[0].generation).toBe(refreshed.generation);
 		expect(callbacks[0].snapshot).toEqual(refreshed);
 	});
+
+	test("looks up credentials by id in requested order and rebuilds the index after snapshot replacement", async () => {
+		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		remote = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+		});
+		const first = remote.snapshot.credentials.find(
+			entry => entry.credential.type === "oauth" && entry.credential.access === "access-a",
+		);
+		const second = remote.snapshot.credentials.find(
+			entry => entry.credential.type === "oauth" && entry.credential.access === "access-b",
+		);
+		if (!first || !second) throw new Error("expected two initial credentials");
+
+		expect(remote.listAuthCredentialsByIds([second.id, 999_999, first.id, second.id]).map(row => row.id)).toEqual([
+			second.id,
+			first.id,
+		]);
+
+		remote.updateAuthCredential(second.id, mintOAuthCredential("b-updated", Date.now() + 180_000));
+		const [updatedSecond] = remote.listAuthCredentialsByIds([second.id]);
+		expect(updatedSecond?.credential).toMatchObject({ type: "oauth", access: "access-b-updated" });
+
+		storage!.upsertCredential("anthropic", mintOAuthCredential("c", Date.now() + 240_000));
+		await remote.refreshSnapshot();
+		const third = remote.snapshot.credentials.find(
+			entry => entry.credential.type === "oauth" && entry.credential.access === "access-c",
+		);
+		if (!third) throw new Error("expected third credential after refresh");
+		expect(remote.listAuthCredentialsByIds([third.id]).map(row => row.id)).toEqual([third.id]);
+
+		expect(storage!.disableCredentialById(first.id, "revoked by test")).toBe(true);
+		await remote.refreshSnapshot();
+		expect(remote.listAuthCredentialsByIds([first.id, second.id]).map(row => row.id)).toEqual([second.id]);
+	});
 });

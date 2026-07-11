@@ -78,7 +78,7 @@ export default class AuthGateway extends Command {
 	];
 
 	async run(): Promise<void> {
-		const { args, flags } = await this.parse(AuthGateway);
+		const { args, flags, argv } = await this.parse(AuthGateway);
 		if (!args.action) {
 			renderCommandHelp("omp", "auth-gateway", AuthGateway);
 			return;
@@ -88,6 +88,7 @@ export default class AuthGateway extends Command {
 			subaction: args.subaction,
 			target: args.target,
 			value: args.value,
+			positionals: argv,
 			flags: {
 				json: flags.json,
 				bind: flags.bind,

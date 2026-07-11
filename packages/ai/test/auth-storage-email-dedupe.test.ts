@@ -9,6 +9,11 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry
 
 const LEGACY_TIMESTAMP = 1_700_000_000;
 
+async function removeTempDirAfterSqliteClose(target: string): Promise<void> {
+	Bun.gc(true);
+	await removeWithRetries(target);
+}
+
 function createCredential(args: { suffix: string; accountId: string; email: string }): OAuthCredential {
 	return {
 		type: "oauth",
@@ -118,12 +123,13 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	});
 
 	afterEach(async () => {
+		authStorage?.close();
 		store?.close();
 		store = null;
 		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
-			await removeWithRetries(tempDir);
+			await removeTempDirAfterSqliteClose(tempDir);
 			tempDir = "";
 		}
 	});
@@ -425,6 +431,49 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([disabledCause]);
 	});
 
+	it("reactivates same-identity OAuth credentials in place and clears stale blocks", async () => {
+		if (!store || !dbPath) throw new Error("test setup failed");
+
+		const original = createCredential({
+			suffix: "original",
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		});
+		store.replaceAuthCredentialsForProvider("openai-codex", [original]);
+
+		const [credential] = store.listAuthCredentials("openai-codex");
+		if (!credential) throw new Error("expected stored credential");
+
+		const blockScope = "shared";
+		const providerKey = "openai-codex:oauth";
+		store.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey,
+			blockScope,
+			blockedUntilMs: Date.now() + 60_000,
+		});
+		store.deleteAuthCredential(credential.id, "oauth refresh failed: invalid_grant");
+
+		const refreshed = createCredential({
+			suffix: "refreshed",
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		});
+		const rows = store.upsertAuthCredentialForProvider("openai-codex", refreshed);
+
+		expect(rows).toHaveLength(1);
+		const [reactivated] = rows;
+		expect(reactivated?.id).toBe(credential.id);
+		expect(reactivated?.credential.type).toBe("oauth");
+		if (reactivated?.credential.type !== "oauth") throw new Error("expected oauth credential");
+		expect(reactivated.credential.access).toBe("access-refreshed");
+		expect(reactivated.credential.refresh).toBe("refresh-refreshed");
+		expect(store.listAuthCredentials("openai-codex").map(row => row.id)).toEqual([credential.id]);
+		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([]);
+		expect(countCredentialRows(dbPath, "openai-codex")).toBe(1);
+		expect(store.getCredentialBlock(credential.id, providerKey, blockScope)).toBeUndefined();
+	});
+
 	it("creates fresh auth schema without unixepoch defaults", async () => {
 		if (!tempDir) throw new Error("test setup failed");
 
@@ -663,7 +712,8 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 	afterEach(async () => {
 		unregisterOAuthProviders("auth-storage-login-upgrade-test");
 		if (tempDir) {
-			await removeWithRetries(tempDir);
+			await removeTempDirAfterSqliteClose(tempDir);
+			tempDir = "";
 		}
 	});
 
@@ -791,7 +841,7 @@ describe("AuthStorage persistent session stickiness", () => {
 	});
 
 	afterEach(async () => {
-		await removeWithRetries(tempDir);
+		await removeTempDirAfterSqliteClose(tempDir);
 	});
 
 	it("persists session-sticky credentials across AuthStorage restarts", async () => {

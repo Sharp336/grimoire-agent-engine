@@ -130,6 +130,29 @@ describe("auth-gateway managed users", () => {
 		expect(events.some(event => event.routeFamily === "pi-native" && event.outcome === "success")).toBe(true);
 	});
 
+	test("resolves a managed chat request through one targeted pool lookup", async () => {
+		harness = await createGatewayHarness({ credentials: credentials(["key-a"]) });
+		const managed = harness.accessStore.createUser({ name: "targeted" });
+		const pool = harness.accessStore.createPool({ name: "targetedpool", provider: "mock" });
+		harness.accessStore.addPoolCredential(pool.id, harness.credentialStore.listAuthCredentials("mock")[0]!.id);
+		await grantModelAccess(harness.accessStore, managed.user.id, pool.id);
+
+		const resolveUserPoolSelection = spyOn(harness.accessStore, "resolveUserPoolSelection");
+		const listUserPools = spyOn(harness.accessStore, "listUserPools");
+		try {
+			const response = await postChat(harness.handle.url, managed.token.value);
+
+			expect(response.status).toBe(200);
+			expect(harness.models.get("model-a")?.calls).toHaveLength(1);
+			expect(resolveUserPoolSelection).toHaveBeenCalledTimes(1);
+			expect(resolveUserPoolSelection).toHaveBeenCalledWith(managed.user.id, "mock", "mock/model-a");
+			expect(listUserPools).not.toHaveBeenCalled();
+		} finally {
+			resolveUserPoolSelection.mockRestore();
+			listUserPools.mockRestore();
+		}
+	});
+
 	test("filters /v1/models by ACL, pool binding, and live matching pool members", async () => {
 		const modelA = createMockModel({ provider: "mock", id: "model-a" });
 		const modelB = createMockModel({ provider: "mock", id: "model-b" });

@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed non-JSON managed-user token creation and rotation to print the one-time bearer value.
+- Fixed auth-gateway CLI output and validation so non-JSON managed-user token creation and rotation print the one-time bearer value, surplus positionals are rejected before side effects, and human `user show` exposes redacted token, ACL, and pool identifiers needed by operator commands.
 
 ## [16.4.0] - 2026-07-10
 

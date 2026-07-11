@@ -23,6 +23,9 @@
  *      skipped when OAuth refresh fails.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -30,11 +33,13 @@ import {
 	type CompletionProbe,
 	type CompletionProbeInput,
 	REMOTE_REFRESH_SENTINEL,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
+import { removeWithRetries } from "../../utils/src/temp";
 
 function oauthRow(id: number, email: string, opts?: { expired?: boolean }): StoredAuthCredential {
 	const credential: AuthCredential = {
@@ -48,6 +53,10 @@ function oauthRow(id: number, email: string, opts?: { expired?: boolean }): Stor
 	return { id, provider: "anthropic", credential, disabledCause: null };
 }
 
+function apiKeyRow(id: number, provider = "anthropic", key = `sk-test-${id}`): StoredAuthCredential {
+	return { id, provider, credential: { type: "api_key", key }, disabledCause: null };
+}
+
 function makeStore(
 	rows: StoredAuthCredential[],
 	refresh?: AuthCredentialStore["refreshOAuthCredential"],
@@ -55,8 +64,8 @@ function makeStore(
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	return {
 		close() {},
-		listAuthCredentials() {
-			return rows;
+		listAuthCredentials(provider?: string) {
+			return provider ? rows.filter(row => row.provider === provider) : rows;
 		},
 		updateAuthCredential() {},
 		deleteAuthCredential() {},
@@ -89,6 +98,111 @@ describe("AuthStorage.checkCredentials", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("uses the store by-id hook for scoped credential checks without probing unrelated rows", async () => {
+		const rows = [apiKeyRow(1), apiKeyRow(2), apiKeyRow(3)];
+		const store = makeStore(rows) as AuthCredentialStore & {
+			listAuthCredentialsByIds: (ids: readonly number[]) => StoredAuthCredential[];
+		};
+		const listAll = vi.spyOn(store, "listAuthCredentials");
+		const listByIds = vi.fn((ids: readonly number[]) => {
+			const byId = new Map(rows.map(row => [row.id, row]));
+			const seen = new Set<number>();
+			const out: StoredAuthCredential[] = [];
+			for (const id of ids) {
+				if (seen.has(id)) continue;
+				seen.add(id);
+				const row = byId.get(id);
+				if (row) out.push(row);
+			}
+			return out;
+		});
+		store.listAuthCredentialsByIds = listByIds;
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		listAll.mockClear();
+		listByIds.mockClear();
+		const probe = vi.fn<CompletionProbe>(async () => ({ ok: true }));
+
+		try {
+			const results = await storage.checkCredentials({ credentialIds: [2, 999, 2], completionProbe: probe });
+
+			expect(listByIds).toHaveBeenCalledTimes(1);
+			expect(listByIds).toHaveBeenCalledWith([2, 999, 2]);
+			expect(listAll).not.toHaveBeenCalled();
+			expect(results.map(result => result.id)).toEqual([2]);
+			expect(probe).toHaveBeenCalledTimes(1);
+			const [input] = probe.mock.calls[0];
+			expect(input?.credentialId).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("fallback by-id credential reads use the live store rather than the reload cache", async () => {
+		const rows = [apiKeyRow(1)];
+		const store = makeStore(rows);
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		rows.push(apiKeyRow(2));
+		const probe = vi.fn<CompletionProbe>(async () => ({ ok: true }));
+
+		try {
+			expect(storage.listStoredCredentialsByIds([2, 1, 2]).map(row => row.id)).toEqual([2, 1]);
+			const results = await storage.checkCredentials({ credentialIds: [2], completionProbe: probe });
+			expect(results.map(result => result.id)).toEqual([2]);
+			const [input] = probe.mock.calls[0];
+			expect(input?.credentialId).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("SQLite by-id lookups preserve requested order and omit disabled duplicates", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-by-id-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		try {
+			store.replaceAuthCredentialsForProvider("anthropic", [
+				{
+					type: "oauth",
+					access: "access-first",
+					refresh: "refresh-first",
+					expires: Date.now() + 60_000,
+					accountId: "account-first",
+					email: "first@example.com",
+				},
+				{
+					type: "oauth",
+					access: "access-second",
+					refresh: "refresh-second",
+					expires: Date.now() + 60_000,
+					accountId: "account-second",
+					email: "second@example.com",
+				},
+				{
+					type: "oauth",
+					access: "access-third",
+					refresh: "refresh-third",
+					expires: Date.now() + 60_000,
+					accountId: "account-third",
+					email: "third@example.com",
+				},
+			]);
+			const [first, second, third] = store.listAuthCredentials("anthropic");
+			if (!first || !second || !third) throw new Error("expected three credential rows");
+			store.deleteAuthCredential(second.id, "disabled by test");
+			const lookupStore = store as SqliteAuthCredentialStore & {
+				listAuthCredentialsByIds(ids: readonly number[]): StoredAuthCredential[];
+			};
+
+			expect(
+				lookupStore.listAuthCredentialsByIds([third.id, second.id, first.id, third.id]).map(row => row.id),
+			).toEqual([third.id, first.id]);
+			expect(lookupStore.listAuthCredentialsByIds([])).toEqual([]);
+		} finally {
+			store.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 	it("reports ok=true and surfaces probe identity for a healthy credential", async () => {
 		const store = makeStore([oauthRow(1, "alice@example.com")]);
 		const storage = new AuthStorage(store, {

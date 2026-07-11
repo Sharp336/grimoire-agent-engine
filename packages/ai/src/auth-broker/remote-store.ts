@@ -216,6 +216,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	#usageCacheEpoch = 0;
 	#closed = false;
+	#credentialIndex?: {
+		source: SnapshotResponse["credentials"];
+		byId: Map<number, SnapshotEntry>;
+	};
 	/**
 	 * `true` once the SSE consumer received its first frame and hasn't dropped
 	 * since. Writes consult this to suppress the otherwise-mandatory
@@ -408,6 +412,32 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const out: StoredAuthCredential[] = [];
 		for (const entry of this.#snapshot.credentials) {
 			if (provider !== undefined && entry.provider !== provider) continue;
+			out.push({
+				id: entry.id,
+				provider: entry.provider,
+				credential: entry.credential as AuthCredential,
+				disabledCause: null,
+			});
+		}
+		return out;
+	}
+
+	listAuthCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
+		if (ids.length === 0) return [];
+		let index = this.#credentialIndex;
+		if (!index || index.source !== this.#snapshot.credentials) {
+			const byId = new Map<number, SnapshotEntry>();
+			for (const entry of this.#snapshot.credentials) byId.set(entry.id, entry);
+			index = { source: this.#snapshot.credentials, byId };
+			this.#credentialIndex = index;
+		}
+		const out: StoredAuthCredential[] = [];
+		const seen = new Set<number>();
+		for (const id of ids) {
+			if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
+			seen.add(id);
+			const entry = index.byId.get(id);
+			if (!entry) continue;
 			out.push({
 				id: entry.id,
 				provider: entry.provider,

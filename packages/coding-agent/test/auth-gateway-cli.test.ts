@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthGatewayAuditEvent, SqliteAuthGatewayAccessStore } from "@oh-my-pi/pi-ai/auth-gateway";
 import {
+	type AuthGatewayAction,
 	type AuthGatewayCommandArgs,
 	type AuthGatewayCommandDependencies,
 	runAuthGatewayCommand,
@@ -57,6 +58,131 @@ async function expectCommandError(
 	} finally {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
 	}
+}
+
+interface SurplusPositionalCase {
+	name: string;
+	argv: readonly string[];
+	message: string;
+}
+
+const SURPLUS_POSITIONAL_CASES: readonly SurplusPositionalCase[] = [
+	{
+		name: "token garbage",
+		argv: ["token", "garbage"],
+		message: "Unexpected positional argument(s) for auth-gateway token: garbage",
+	},
+	{
+		name: "status garbage",
+		argv: ["status", "garbage"],
+		message: "Unexpected positional argument(s) for auth-gateway status: garbage",
+	},
+	{
+		name: "check garbage",
+		argv: ["check", "garbage"],
+		message: "Unexpected positional argument(s) for auth-gateway check: garbage",
+	},
+	{
+		name: "user list alice",
+		argv: ["user", "list", "alice"],
+		message: "Unexpected positional argument(s) for auth-gateway user list: alice",
+	},
+	{
+		name: "user create alice bob",
+		argv: ["user", "create", "alice", "bob"],
+		message: "Unexpected positional argument(s) for auth-gateway user create: bob",
+	},
+	{
+		name: "pool list primary",
+		argv: ["pool", "list", "primary"],
+		message: "Unexpected positional argument(s) for auth-gateway pool list: primary",
+	},
+	{
+		name: "audit list extra",
+		argv: ["audit", "list", "extra"],
+		message: "Unexpected positional argument(s) for auth-gateway audit list: extra",
+	},
+	{
+		name: "user token-revoke alice 1 extra",
+		argv: ["user", "token-revoke", "alice", "1", "extra"],
+		message: "Unexpected positional argument(s) for auth-gateway user token-revoke: extra",
+	},
+];
+
+function authGatewayCommandFromPositionals(
+	positionals: readonly string[],
+): AuthGatewayCommandArgs & { positionals: readonly string[] } {
+	const [action, subaction, target, value] = positionals;
+	if (!action) throw new Error("test command missing action");
+	return {
+		action: action as AuthGatewayAction,
+		subaction,
+		target,
+		value,
+		positionals,
+		flags: { json: true },
+	};
+}
+
+async function authGatewayCommandFromParser(
+	argv: readonly string[],
+): Promise<AuthGatewayCommandArgs & { positionals: readonly string[] }> {
+	const command = new AuthGatewayCommand([...argv], { bin: "omp", version: "0.0.0-test", commands: new Map() });
+	const parsed = await command.parse(AuthGatewayCommand);
+	if (!parsed.args.action) throw new Error("test parser command missing action");
+	return {
+		action: parsed.args.action as AuthGatewayAction,
+		subaction: parsed.args.subaction,
+		target: parsed.args.target,
+		value: parsed.args.value,
+		positionals: parsed.argv,
+		flags: {
+			json: parsed.flags.json,
+			bind: parsed.flags.bind,
+			regenerate: parsed.flags.regenerate,
+			description: parsed.flags.description,
+			owner: parsed.flags.owner,
+			role: parsed.flags.role,
+			label: parsed.flags.label,
+			provider: parsed.flags.provider,
+			model: parsed.flags.model,
+			route: parsed.flags.route,
+			strategy: parsed.flags.strategy,
+			since: parsed.flags.since,
+			limit: parsed.flags.limit,
+			user: parsed.flags.user,
+			before: parsed.flags.before,
+			noAuth: parsed.flags["no-auth"],
+			strict: parsed.flags.strict,
+		},
+	};
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	return fs
+		.stat(filePath)
+		.then(() => true)
+		.catch(() => false);
+}
+
+async function expectUnexpectedPositionalBeforeFiles(
+	cmd: AuthGatewayCommandArgs,
+	deps: AuthGatewayCommandDependencies,
+	message: string,
+	tokenFile: string,
+	dbPath: string,
+): Promise<void> {
+	await fs.rm(tokenFile, { force: true });
+	await fs.rm(dbPath, { force: true });
+	const restore = captureStdout();
+	try {
+		await expect(runAuthGatewayCommand(cmd, deps)).rejects.toThrow(message);
+		expect(restore()).toBe("");
+	} finally {
+		process.stdout.write = ORIGINAL_STDOUT_WRITE;
+	}
+	expect(await pathExists(tokenFile)).toBe(false);
+	expect(await pathExists(dbPath)).toBe(false);
 }
 
 function expectExactKeys(value: Record<string, unknown>, keys: string[]): void {
@@ -148,6 +274,30 @@ describe("auth-gateway CLI access management", () => {
 		expect(AuthGatewayCommand.examples.some(example => example.includes("--before="))).toBe(true);
 	});
 
+	test("rejects surplus positionals from direct dispatch before file side effects", async () => {
+		for (const testCase of SURPLUS_POSITIONAL_CASES) {
+			await expectUnexpectedPositionalBeforeFiles(
+				authGatewayCommandFromPositionals(testCase.argv),
+				deps,
+				testCase.message,
+				tokenFile,
+				dbPath,
+			);
+		}
+	});
+
+	test("rejects surplus positionals from parser dispatch before file side effects", async () => {
+		for (const testCase of SURPLUS_POSITIONAL_CASES) {
+			await expectUnexpectedPositionalBeforeFiles(
+				await authGatewayCommandFromParser(testCase.argv),
+				deps,
+				testCase.message,
+				tokenFile,
+				dbPath,
+			);
+		}
+	});
+
 	test("prints one-time managed token values in human output only on create, add, and rotate", async () => {
 		const created = await expectHumanCommand(
 			userCommand("create", "human", undefined, { json: false, label: "initial" }),
@@ -182,6 +332,60 @@ describe("auth-gateway CLI access management", () => {
 			expect(redactedOutput).not.toContain(token);
 		}
 		expect(redactedOutput).not.toContain("token_hash");
+	});
+
+	test("shows redacted revocation identifiers in human user details without exposing secrets", async () => {
+		const created = await expectJsonCommand<{
+			user: Record<string, unknown>;
+			token: Record<string, unknown>;
+		}>(
+			userCommand("create", "operator", undefined, {
+				description: "secret-project-alpha",
+				owner: "private-owner-team",
+				label: "initial\toperator\nlabel",
+			}),
+			deps,
+		);
+		const tokenId = Number(created.token.id);
+		const publicId = String(created.token.publicId);
+		const rawToken = String(created.token.value);
+
+		const allow = await expectJsonCommand<{ rule: Record<string, unknown> }>(
+			userCommand("allow", "operator", undefined, { provider: "anthropic" }),
+			deps,
+		);
+		const aclRuleId = Number(allow.rule.id);
+		const pool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
+			poolCommand("create", "primary", undefined, {
+				provider: "anthropic",
+				model: "claude-3-5-sonnet",
+				strategy: "failover",
+			}),
+			deps,
+		);
+		const poolId = Number(pool.pool.id);
+		await expectJsonCommand(poolCommand("add-account", "primary", "42"), deps);
+		await expectJsonCommand(userCommand("set-pool", "operator", "primary"), deps);
+
+		const shown = await expectHumanCommand(userCommand("show", "operator", undefined, { json: false }), deps);
+
+		expect(shown).toContain(`user operator (#${created.user.id}) enabled role=user\n`);
+		expect(shown).toContain("tokens:\nid\tpublicId\tlabel\tlastUsedAt\trevokedAt\n");
+		expect(shown).toContain(`${tokenId}\t${publicId}\tinitial operator label\t-\t-\n`);
+		expect(shown).toContain("acl:\nid\teffect\tkind\tpattern\n");
+		expect(shown).toContain(`${aclRuleId}\tallow\tprovider\tanthropic\n`);
+		expect(shown).toContain("pools:\nid\tname\tprovider\tmodel\tstrategy\taccounts\n");
+		expect(shown).toContain(`${poolId}\tprimary\tanthropic\tanthropic/claude-3-5-sonnet\tfailover\t42\n`);
+		expect(shown).not.toContain(rawToken);
+		expect(shown).not.toContain("omp_gw_");
+		expect(shown).not.toContain("token_hash");
+		expect(shown).not.toContain("api_key");
+		expect(shown).not.toContain("oauth");
+		expect(shown).not.toContain("accessToken");
+		expect(shown).not.toContain("refreshToken");
+		expect(shown).not.toContain("accountId");
+		expect(shown).not.toContain("secret-project-alpha");
+		expect(shown).not.toContain("private-owner-team");
 	});
 
 	test("pages audit events with --before cursor", async () => {

@@ -28,9 +28,11 @@ import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } fr
 import {
 	type AuthGatewayAclEffect,
 	type AuthGatewayAclKind,
+	type AuthGatewayAclRule,
 	type AuthGatewayPool,
 	type AuthGatewayPoolStrategy,
 	type AuthGatewayRole,
+	type AuthGatewayToken,
 	type AuthGatewayUser,
 	DEFAULT_AUTH_GATEWAY_BIND,
 	SqliteAuthGatewayAccessStore,
@@ -48,6 +50,7 @@ export interface AuthGatewayCommandArgs {
 	subaction?: string;
 	target?: string;
 	value?: string;
+	positionals?: readonly string[];
 	flags: {
 		json?: boolean;
 		bind?: string;
@@ -87,6 +90,40 @@ export interface AuthGatewayCommandDependencies {
 }
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit"];
+
+const USER_POSITIONAL_COUNTS: Record<string, number> = {
+	list: 2,
+	create: 3,
+	show: 3,
+	update: 3,
+	enable: 3,
+	disable: 3,
+	delete: 3,
+	token: 3,
+	allow: 3,
+	deny: 3,
+	acl: 3,
+	usage: 3,
+	"token-revoke": 4,
+	"acl-delete": 4,
+	"set-pool": 4,
+	"unset-pool": 4,
+};
+
+const POOL_POSITIONAL_COUNTS: Record<string, number> = {
+	list: 2,
+	create: 3,
+	show: 3,
+	delete: 3,
+	rename: 4,
+	"set-strategy": 4,
+	"add-account": 4,
+	"remove-account": 4,
+};
+
+const AUDIT_POSITIONAL_COUNTS: Record<string, number> = {
+	list: 2,
+};
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
@@ -498,6 +535,118 @@ function writeCommandOutput(flags: AuthGatewayCommandArgs["flags"], jsonValue: u
 	process.stdout.write(flags.json ? `${JSON.stringify(jsonValue)}\n` : human);
 }
 
+function formatHumanCell(value: string): string {
+	return value.replaceAll("\t", " ").replace(/[\r\n]/g, " ");
+}
+
+function formatUserShowHuman(value: {
+	user: AuthGatewayUser;
+	tokens: AuthGatewayToken[];
+	acl: AuthGatewayAclRule[];
+	pools: AuthGatewayPool[];
+}): string {
+	const lines = [
+		`user ${formatHumanCell(value.user.name)} (#${value.user.id}) ${formatHumanCell(
+			value.user.enabled ? "enabled" : "disabled",
+		)} role=${formatHumanCell(value.user.role)}`,
+		"tokens:",
+		"id\tpublicId\tlabel\tlastUsedAt\trevokedAt",
+		...value.tokens.map(token =>
+			[
+				String(token.id),
+				formatHumanCell(token.publicId),
+				token.label === null ? formatHumanCell("-") : formatHumanCell(token.label),
+				token.lastUsedAt === null ? formatHumanCell("-") : String(token.lastUsedAt),
+				token.revokedAt === null ? formatHumanCell("-") : String(token.revokedAt),
+			].join("\t"),
+		),
+		"acl:",
+		"id\teffect\tkind\tpattern",
+		...value.acl.map(rule =>
+			[
+				String(rule.id),
+				formatHumanCell(rule.effect),
+				formatHumanCell(rule.kind),
+				formatHumanCell(rule.pattern),
+			].join("\t"),
+		),
+		"pools:",
+		"id\tname\tprovider\tmodel\tstrategy\taccounts",
+		...value.pools.map(pool =>
+			[
+				String(pool.id),
+				formatHumanCell(pool.name),
+				formatHumanCell(pool.provider),
+				formatHumanCell(pool.model ?? "*"),
+				formatHumanCell(pool.strategy),
+				formatHumanCell(
+					pool.members.length > 0 ? pool.members.map(member => String(member.credentialId)).join(",") : "-",
+				),
+			].join("\t"),
+		),
+	];
+	return `${lines.join("\n")}\n`;
+}
+
+function positionalCountForGroupedCommand(
+	group: "user" | "pool" | "audit",
+	subaction: string | undefined,
+): number | undefined {
+	if (!subaction) return undefined;
+	if (group === "user") {
+		if (!Object.hasOwn(USER_POSITIONAL_COUNTS, subaction)) {
+			throw new Error(`Unknown auth-gateway user sub-command: ${subaction}`);
+		}
+		return USER_POSITIONAL_COUNTS[subaction]!;
+	}
+	if (group === "pool") {
+		if (!Object.hasOwn(POOL_POSITIONAL_COUNTS, subaction)) {
+			throw new Error(`Unknown auth-gateway pool sub-command: ${subaction}`);
+		}
+		return POOL_POSITIONAL_COUNTS[subaction]!;
+	}
+	if (!Object.hasOwn(AUDIT_POSITIONAL_COUNTS, subaction)) {
+		throw new Error(`Unknown auth-gateway audit sub-command: ${subaction}`);
+	}
+	return AUDIT_POSITIONAL_COUNTS[subaction]!;
+}
+
+function expectedAuthGatewayPositionals(cmd: AuthGatewayCommandArgs): number | undefined {
+	switch (cmd.action) {
+		case "serve":
+		case "token":
+		case "status":
+		case "check":
+			return 1;
+		case "user":
+			return positionalCountForGroupedCommand("user", cmd.subaction);
+		case "pool":
+			return positionalCountForGroupedCommand("pool", cmd.subaction);
+		case "audit":
+			return positionalCountForGroupedCommand("audit", cmd.subaction);
+		default: {
+			const _exhaustive: never = cmd.action;
+			throw new Error(`Unknown auth-gateway action: ${String(_exhaustive)}`);
+		}
+	}
+}
+
+function validateAuthGatewayPositionals(cmd: AuthGatewayCommandArgs): void {
+	const expectedCount = expectedAuthGatewayPositionals(cmd);
+	if (expectedCount === undefined) return;
+	const declared = [cmd.action, cmd.subaction, cmd.target, cmd.value] as const;
+	const lastDefinedIndex = declared.findLastIndex(value => value !== undefined);
+	const positionals = cmd.positionals ?? declared.slice(0, lastDefinedIndex + 1).map(value => value ?? "");
+	const extras = positionals.slice(expectedCount);
+	if (extras.length > 0) {
+		const label =
+			cmd.action === "user" || cmd.action === "pool" || cmd.action === "audit"
+				? `${cmd.action} ${cmd.subaction}`
+				: cmd.action;
+		throw new Error(`Unexpected positional argument(s) for auth-gateway ${label}: ${extras.join(" ")}`);
+	}
+}
+
 function requireSubaction(cmd: AuthGatewayCommandArgs, group: string): string {
 	if (!cmd.subaction) throw new Error(`Missing ${group} sub-command`);
 	return cmd.subaction;
@@ -618,11 +767,7 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				acl: store.listAclRules(user.id),
 				pools: store.listUserPools(user.id),
 			};
-			writeCommandOutput(
-				flags,
-				value,
-				`user ${user.name} (#${user.id}) ${user.enabled ? "enabled" : "disabled"} role=${user.role}\n`,
-			);
+			writeCommandOutput(flags, value, formatUserShowHuman(value));
 			return;
 		}
 		if (subaction === "update") {
@@ -858,6 +1003,7 @@ export async function runAuthGatewayCommand(
 	cmd: AuthGatewayCommandArgs,
 	deps?: AuthGatewayCommandDependencies,
 ): Promise<void> {
+	validateAuthGatewayPositionals(cmd);
 	switch (cmd.action) {
 		case "serve":
 			await runServe(cmd.flags, deps);

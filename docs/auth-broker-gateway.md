@@ -97,17 +97,20 @@ omp auth-gateway status  [--json]
 omp auth-gateway check   [--strict] [--json]
 
 omp auth-gateway user create <name> [--description=] [--owner=] [--role=user|admin] [--label=] [--json]
-omp auth-gateway user list|show|enable|disable|delete <name-or-id> [--json]
+omp auth-gateway user list [--json]
+omp auth-gateway user show|enable|disable|delete <name-or-id> [--json]
 omp auth-gateway user update <name-or-id> [--description=] [--owner=] [--role=] [--json]
 omp auth-gateway user token <name-or-id> [--label=] [--regenerate] [--json]
 omp auth-gateway user token-revoke <name-or-id> <token-id> [--json]
 omp auth-gateway user allow|deny <name-or-id> (--provider= | --model= | --route=) [--json]
-omp auth-gateway user acl|acl-delete <name-or-id> [<rule-id>] [--json]
+omp auth-gateway user acl <name-or-id> [--json]
+omp auth-gateway user acl-delete <name-or-id> <rule-id> [--json]
 omp auth-gateway user set-pool|unset-pool <name-or-id> <pool-name-or-id> [--json]
 omp auth-gateway user usage <name-or-id> [--since=<epoch-ms>] [--json]
 
 omp auth-gateway pool create <name> --provider=<id> [--model=<provider-model-id>] [--strategy=sticky-session|least-used|round-robin|failover] [--json]
-omp auth-gateway pool list|show|delete <name-or-id> [--json]
+omp auth-gateway pool list [--json]
+omp auth-gateway pool show|delete <name-or-id> [--json]
 omp auth-gateway pool set-strategy <name-or-id> <strategy> [--json]
 omp auth-gateway pool add-account|remove-account <name-or-id> <credential-id> [--json]
 omp auth-gateway pool rename <name-or-id> <new-name> [--json]
@@ -117,7 +120,7 @@ omp auth-gateway audit list [--user=<name-or-id>] [--limit=<1..1000>] [--before=
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, constructs an `AuthStorage` that resolves access tokens through the broker, and opens the gateway-local access database at `<config-dir>/auth-gateway.db` (`0600` in a `0700` parent dir). Default bind is `127.0.0.1:4000`. The legacy gateway token remains stored at `<config-dir>/auth-gateway.token` (`0600`); managed client tokens are accepted in addition to it. `--no-auth` disables bearer checks for inference/diagnostic routes but intentionally rejects remote HTTP management APIs.
 - `token` / `status` manage and inspect the legacy gateway bearer token and upstream broker readiness. `status --json` also reports `accessDb`, `managedUserCount`, `activeManagedTokenCount`, and `poolCount`; a missing access DB reports zero managed counts without creating it.
 - `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota. Managed regular users calling `/v1/credentials/check` receive only scoped, redacted pool-member health.
-- `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. `user create`, `user token`, and `user token --regenerate` print the raw managed token once in human output and include `token.value` in JSON output; list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
+- `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. `user create`, `user token`, and `user token --regenerate` print the raw managed token once in human output and include `token.value` in JSON output; human `user show` includes redacted token ids/public ids, ACL rule ids, and pool bindings for revocation and deletion commands, while list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
 
 ### Endpoints
 
@@ -140,7 +143,7 @@ There is no raw provider passthrough path. All supported routes go through `pi-a
 
 ### Managed users, ACLs, and pools
 
-The gateway stores client identities, SHA-256 hashes of managed client tokens, ACL rules, pool definitions, user-pool bindings, and audit rows in `<config-dir>/auth-gateway.db`. Managed tokens are generated as `omp_gw_<publicId>.<secret>` and are shown only once by `user create`, `user token`, or `user token --regenerate`; list/show commands display token public ids and revoked/last-used state only. The broker remains the only owner of provider OAuth refresh tokens and uploaded provider API-key credential payloads.
+The gateway stores client identities, SHA-256 hashes of managed client tokens, ACL rules, pool definitions, user-pool bindings, and audit rows in `<config-dir>/auth-gateway.db`. Managed tokens are generated as `omp_gw_<publicId>.<secret>` and are shown only once by `user create`, `user token`, or `user token --regenerate`; list/show commands display redacted token identifiers and revoked/last-used state, and human `user show` also displays ACL rule ids and pool bindings. The broker remains the only owner of provider OAuth refresh tokens and uploaded provider API-key credential payloads.
 
 Legacy `<config-dir>/auth-gateway.token` is a virtual full-admin identity for operational recovery. `--no-auth` is a virtual admin bypass for inference, `/v1/models`, `/v1/usage`, and `/v1/credentials/check`, but it cannot call HTTP management APIs; use the local CLI for management when `--no-auth` is active.
 
