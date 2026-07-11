@@ -149,9 +149,6 @@ Proactive multi-agent delegation is active. Any earlier instruction requiring an
 {{#unless isSubagent}}
 - Keep ownership of the overall task. Monitor sub-agents for stalls, repeated tool errors, scope drift, or disproportionate effort; intervene when needed and verify their results before relying on them.
 {{/unless}}
-{{#when MAX_CONCURRENCY ">" 0}}
-- **Concurrency cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} run at once in this session. Keep each fan-out at or under that cap; excess tasks only queue.
-{{/when}}
 {{else}}
 Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.
 {{/if}}

@@ -165,7 +165,7 @@ describe("GPT-5.6 delegation prompt policy", () => {
 		expect(rendered).toContain("Do not spawn sub-agents unless");
 		expect(rendered).not.toContain("Proactive multi-agent delegation is active");
 		expect(rendered).not.toContain("Maximize parallelism");
-		expect(rendered).not.toContain("At most 12 subagents");
+		expect(rendered).toContain("At most 12 subagents");
 	});
 
 	it("gives eager GPT-5.6 sessions bounded, supervised delegation guidance", async () => {
