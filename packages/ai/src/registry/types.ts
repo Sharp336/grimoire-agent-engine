@@ -36,6 +36,8 @@ export type KeyResolver = string | (() => string | undefined);
 export interface ProviderDefinition {
 	readonly id: string;
 	readonly name: string;
+	/** Only registry-managed OAuth credentials may authenticate this provider. */
+	readonly oauthOnly?: boolean;
 	/** Login-list availability flag. Defaults to true when shown. */
 	readonly available?: boolean;
 	/** Whether to surface in the interactive login list. Defaults to true when `login` is present. */

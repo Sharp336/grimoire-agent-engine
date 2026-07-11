@@ -59,6 +59,7 @@ import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
+import { xaiGrokBuildProvider } from "./xai-grok-build";
 import { xaiOauthProvider } from "./xai-oauth";
 import { xiaomiProvider } from "./xiaomi";
 import { xiaomiTokenPlanAmsProvider } from "./xiaomi-token-plan-ams";
@@ -89,6 +90,7 @@ const ALL = [
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,
 	xaiOauthProvider,
+	xaiGrokBuildProvider,
 	gitlabDuoProvider,
 	gitLabDuoWorkflowProvider,
 	alibabaCodingPlanProvider,
@@ -152,6 +154,10 @@ const BY_ID = new Map<string, ProviderDefinition>(ALL.map(p => [p.id, p] as [str
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
 	return BY_ID.get(id);
+}
+
+export function isOAuthOnlyProvider(id: string): boolean {
+	return BY_ID.get(id)?.oauthOnly === true;
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have a registry definition. */

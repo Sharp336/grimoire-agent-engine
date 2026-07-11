@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { isXAIAccessTokenExpiring, loginXAIOAuth, refreshXAIOAuthToken, validateXAIEndpoint } from "../xai-oauth";
+import { OAuthError } from "../../../error";
+import { getProviderDefinition, isOAuthOnlyProvider, PROVIDER_REGISTRY } from "../../registry";
+import { getOAuthProviders } from "../index";
+import {
+	isXAIAccessTokenExpiring,
+	loginXAIGrokBuild,
+	loginXAIOAuth,
+	refreshXAIGrokBuildToken,
+	refreshXAIOAuthToken,
+	validateXAIEndpoint,
+} from "../xai-oauth";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -14,8 +24,11 @@ function jwtWithExp(exp: number): string {
 const DISCOVERY_URL = "https://auth.x.ai/.well-known/openid-configuration";
 const DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const TOKEN_ENDPOINT = "https://auth.x.ai/oauth2/token";
+const AUTHORIZATION_ENDPOINT = "https://auth.x.ai/oauth2/authorize";
+const USERINFO_ENDPOINT = "https://auth.x.ai/oauth2/userinfo";
 const CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const SCOPE = "openid profile email offline_access grok-cli:access api:access";
+const BUILD_SCOPE = `${SCOPE} conversations:read conversations:write`;
 
 const DEVICE_AUTHORIZATION = {
 	device_code: "device-code-123",
@@ -81,6 +94,32 @@ function requestForm(request: RecordedRequest | undefined): URLSearchParams {
 	return body;
 }
 
+function buildDiscoveryResponse(): Response {
+	return jsonResponse({
+		authorization_endpoint: AUTHORIZATION_ENDPOINT,
+		token_endpoint: TOKEN_ENDPOINT,
+		userinfo_endpoint: USERINFO_ENDPOINT,
+	});
+}
+
+function createBuildFlowFetch(options?: { userinfo?: unknown; tokenStatus?: number }) {
+	const requests: RecordedRequest[] = [];
+	const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+		requests.push({ url, init });
+		if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+		if (url === TOKEN_ENDPOINT) {
+			return jsonResponse(
+				{ access_token: "build-access", refresh_token: "build-refresh", expires_in: 3600 },
+				options?.tokenStatus,
+			);
+		}
+		if (url === USERINFO_ENDPOINT) return jsonResponse(options?.userinfo ?? { sub: "account-42", email: "a@b.test" });
+		throw new Error(`Unexpected Build OAuth request: ${url}`);
+	});
+	return { fetchMock: fetchMock as unknown as typeof fetch, requests };
+}
+
 describe("isXAIAccessTokenExpiring", () => {
 	it("returns false for an empty string", () => {
 		expect(isXAIAccessTokenExpiring("")).toBe(false);
@@ -130,6 +169,185 @@ describe("refreshXAIOAuthToken", () => {
 			/missing refresh_token/,
 		);
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("xAI Grok Build browser OAuth", () => {
+	it("registers one OAuth-only login under its own provider id", () => {
+		const definitions = PROVIDER_REGISTRY.filter(provider => provider.id === "xai-grok-build");
+		expect(definitions).toHaveLength(1);
+		expect(getProviderDefinition("xai-grok-build")).toMatchObject({
+			id: "xai-grok-build",
+			name: "xAI Grok Build",
+			oauthOnly: true,
+		});
+		expect(getProviderDefinition("xai-grok-build")?.storeCredentialsAs).toBeUndefined();
+		expect(getProviderDefinition("xai-grok-build")?.callbackPort).toBeUndefined();
+		expect(isOAuthOnlyProvider("xai-grok-build")).toBe(true);
+		expect(isOAuthOnlyProvider("xai-oauth")).toBe(false);
+		expect(getOAuthProviders().filter(provider => provider.id === "xai-grok-build")).toEqual([
+			{ id: "xai-grok-build", name: "xAI Grok Build", available: true, storeCredentialsAs: undefined },
+		]);
+	});
+
+	it("completes the discovery-driven PKCE loopback flow and records verified identity", async () => {
+		const now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const { fetchMock, requests } = createBuildFlowFetch();
+		let authorizeUrl: URL | undefined;
+		let callbackRequest: Promise<Response> | undefined;
+
+		const credentials = await loginXAIGrokBuild({
+			fetch: fetchMock,
+			onAuth: info => {
+				authorizeUrl = new URL(info.url);
+				const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
+				const state = authorizeUrl.searchParams.get("state");
+				if (!redirectUri || !state) throw new Error("Missing redirect_uri or state");
+				callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+			},
+		});
+		await callbackRequest;
+		if (!authorizeUrl) throw new Error("Authorization URL was not published");
+
+		expect(authorizeUrl.origin + authorizeUrl.pathname).toBe(AUTHORIZATION_ENDPOINT);
+		const params = authorizeUrl.searchParams;
+		const redirectUri = params.get("redirect_uri");
+		if (!redirectUri) throw new Error("Authorization URL omitted redirect_uri");
+		expect([...params.keys()].sort()).toEqual([
+			"client_id",
+			"code_challenge",
+			"code_challenge_method",
+			"nonce",
+			"redirect_uri",
+			"referrer",
+			"response_type",
+			"scope",
+			"state",
+		]);
+		expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+		expect(params.get("state")).toHaveLength(36);
+		expect(params.get("nonce")).toHaveLength(36);
+		expect(params.get("code_challenge")).toHaveLength(43);
+
+		const tokenRequest = requests.find(request => request.url === TOKEN_ENDPOINT);
+		const tokenForm = requestForm(tokenRequest);
+		const codeVerifier = tokenForm.get("code_verifier");
+		if (!codeVerifier) throw new Error("Authorization-code token request omitted code_verifier");
+		const codeChallenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier))).toString(
+			"base64url",
+		);
+		expect(Object.fromEntries(params)).toEqual({
+			response_type: "code",
+			client_id: CLIENT_ID,
+			redirect_uri: redirectUri,
+			scope: BUILD_SCOPE,
+			code_challenge: codeChallenge,
+			code_challenge_method: "S256",
+			state: expect.any(String),
+			nonce: expect.any(String),
+			referrer: "grok-build",
+		});
+
+		expect(Object.fromEntries(tokenForm)).toEqual({
+			grant_type: "authorization_code",
+			client_id: CLIENT_ID,
+			code: "build-code",
+			code_verifier: codeVerifier,
+			redirect_uri: redirectUri,
+		});
+		expect(codeVerifier.length).toBeGreaterThanOrEqual(43);
+		const userinfoRequest = requests.find(request => request.url === USERINFO_ENDPOINT);
+		expect(new Headers(userinfoRequest?.init?.headers).get("Authorization")).toBe("Bearer build-access");
+		expect(credentials).toEqual({
+			access: "build-access",
+			refresh: "build-refresh",
+			expires: now + 3_300_000,
+			accountId: "account-42",
+			email: "a@b.test",
+		});
+	});
+
+	it("rejects a mismatched callback state before token exchange", async () => {
+		const controller = new AbortController();
+		const { fetchMock, requests } = createBuildFlowFetch();
+		let wrongCallback: Promise<Response> | undefined;
+		const login = loginXAIGrokBuild({
+			fetch: fetchMock,
+			signal: controller.signal,
+			onAuth: info => {
+				const authUrl = new URL(info.url);
+				const redirectUri = authUrl.searchParams.get("redirect_uri");
+				if (!redirectUri) throw new Error("Missing redirect_uri");
+				wrongCallback = fetch(`${redirectUri}?code=build-code&state=wrong-state`).then(response => {
+					controller.abort("test complete");
+					return response;
+				});
+			},
+		});
+		await expect(login).rejects.toThrow(/State mismatch|CSRF/i);
+		expect((await wrongCallback)?.ok).toBe(false);
+		expect(requests.some(request => request.url === TOKEN_ENDPOINT)).toBe(false);
+	});
+
+	it("attributes userinfo validation failures to xai-grok-build", async () => {
+		const { fetchMock } = createBuildFlowFetch({ userinfo: { email: "a@b.test" } });
+		let callbackRequest: Promise<Response> | undefined;
+		try {
+			await loginXAIGrokBuild({
+				fetch: fetchMock,
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					const redirectUri = authUrl.searchParams.get("redirect_uri");
+					const state = authUrl.searchParams.get("state");
+					if (!redirectUri || !state) throw new Error("Missing callback parameters");
+					callbackRequest = fetch(`${redirectUri}?code=build-code&state=${encodeURIComponent(state)}`);
+				},
+			});
+			throw new Error("Expected login to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OAuthError);
+			expect((error as OAuthError).provider).toBe("xai-grok-build");
+			expect((error as Error).message).toMatch(/userinfo response missing sub/);
+		}
+		await callbackRequest;
+	});
+
+	it("retains the existing refresh token when Build refresh omits a replacement", async () => {
+		const requests: RecordedRequest[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			requests.push({ url, init });
+			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+			if (url === TOKEN_ENDPOINT) return jsonResponse({ access_token: "next-access", expires_in: 3600 });
+			throw new Error(`Unexpected refresh request: ${url}`);
+		});
+		const credentials = await refreshXAIGrokBuildToken("existing-refresh", fetchMock as unknown as typeof fetch);
+		expect(credentials.refresh).toBe("existing-refresh");
+		expect(Object.fromEntries(requestForm(requests[1]))).toEqual({
+			grant_type: "refresh_token",
+			client_id: CLIENT_ID,
+			refresh_token: "existing-refresh",
+		});
+	});
+
+	it("labels Build refresh transport failures", async () => {
+		const transportFailure = new Error("connection reset");
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url === DISCOVERY_URL) return buildDiscoveryResponse();
+			if (url === TOKEN_ENDPOINT) throw transportFailure;
+			throw new Error(`Unexpected refresh request: ${url}`);
+		});
+
+		try {
+			await refreshXAIGrokBuildToken("build-refresh", fetchMock as unknown as typeof fetch);
+			throw new Error("Expected Build refresh to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OAuthError);
+			expect(error).toMatchObject({ kind: "token-refresh", provider: "xai-grok-build" });
+			expect((error as Error).cause).toBe(transportFailure);
+		}
 	});
 });
 

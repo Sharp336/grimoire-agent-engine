@@ -9,7 +9,9 @@
 
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
+import { OAuthCallbackFlow } from "./callback-server";
 import { type OAuthDeviceCodePollResult, pollOAuthDeviceCodeFlow } from "./device-code";
+import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const XAI_OAUTH_ISSUER = "https://auth.x.ai";
@@ -17,6 +19,9 @@ const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configur
 const XAI_OAUTH_DEVICE_CODE_URL = `${XAI_OAUTH_ISSUER}/oauth2/device/code`;
 const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access";
+const XAI_GROK_BUILD_SCOPE = `${XAI_OAUTH_SCOPE} conversations:read conversations:write`;
+const XAI_GROK_BUILD_REFERRER = "grok-build";
+const XAI_GROK_BUILD_PROVIDER = "xai-grok-build";
 
 // Mirrors the 5-min skew used by anthropic.ts:160 — keeps every provider on the
 // same conservative client-side expiry window.
@@ -26,7 +31,9 @@ const DISCOVERY_TIMEOUT_MS = 15_000;
 const TOKEN_REQUEST_TIMEOUT_MS = 20_000;
 
 interface XAIOAuthDiscovery {
+	authorization_endpoint: string;
 	token_endpoint: string;
+	userinfo_endpoint: string;
 }
 
 interface XAIDeviceAuthorization {
@@ -51,27 +58,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * @throws Error with message `Invalid xAI <field>: <url>` when the URL fails
  *         either scheme or host validation.
  */
-export function validateXAIEndpoint(url: string, field: string): string {
+export function validateXAIEndpoint(url: string, field: string, provider: string = "xai"): string {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
 	} catch {
-		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider: "xai" });
+		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider });
 	}
 	if (parsed.protocol !== "https:") {
-		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider: "xai" });
+		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider });
 	}
 	const host = parsed.hostname.toLowerCase();
 	if (!host || (host !== "x.ai" && !host.endsWith(".x.ai"))) {
-		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider: "xai" });
+		throw new AIError.OAuthError(`Invalid xAI ${field}: ${url}`, { kind: "validation", provider });
 	}
 	return url;
 }
 
-/** Fetch xAI's OIDC discovery document and validate the token endpoint. */
+/** Fetch xAI's OIDC discovery document and validate its browser/token endpoints. */
 async function xaiOAuthDiscovery(
 	timeoutMs: number = DISCOVERY_TIMEOUT_MS,
 	fetchOverride?: FetchImpl,
+	provider: string = "xai",
+	requireBrowserEndpoints: boolean = false,
 ): Promise<XAIOAuthDiscovery> {
 	const fetchImpl = fetchOverride ?? fetch;
 	let response: Response;
@@ -84,17 +93,13 @@ async function xaiOAuthDiscovery(
 	} catch (error) {
 		throw new AIError.OAuthError(
 			`xAI OIDC discovery failed: ${error instanceof Error ? error.message : String(error)}`,
-			{
-				kind: "discovery",
-				provider: "xai",
-				cause: error,
-			},
+			{ kind: "discovery", provider, cause: error },
 		);
 	}
 	if (response.status !== 200) {
 		throw new AIError.OAuthError(`xAI OIDC discovery returned status ${response.status}.`, {
 			kind: "discovery",
-			provider: "xai",
+			provider,
 			status: response.status,
 		});
 	}
@@ -104,24 +109,33 @@ async function xaiOAuthDiscovery(
 	} catch (error) {
 		throw new AIError.OAuthError(
 			`xAI OIDC discovery returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-			{ kind: "validation", provider: "xai", cause: error },
+			{ kind: "validation", provider, cause: error },
 		);
 	}
 	if (!isRecord(payload)) {
 		throw new AIError.OAuthError("xAI OIDC discovery response was not a JSON object.", {
 			kind: "validation",
-			provider: "xai",
+			provider,
 		});
 	}
-	const tokenEndpoint = typeof payload.token_endpoint === "string" ? payload.token_endpoint.trim() : "";
-	if (!tokenEndpoint) {
-		throw new AIError.OAuthError("xAI OIDC discovery response was missing token_endpoint.", {
-			kind: "validation",
-			provider: "xai",
-		});
+	const endpoints = {
+		authorization_endpoint:
+			typeof payload.authorization_endpoint === "string" ? payload.authorization_endpoint.trim() : "",
+		token_endpoint: typeof payload.token_endpoint === "string" ? payload.token_endpoint.trim() : "",
+		userinfo_endpoint: typeof payload.userinfo_endpoint === "string" ? payload.userinfo_endpoint.trim() : "",
+	};
+	for (const [field, endpoint] of Object.entries(endpoints)) {
+		const required = field === "token_endpoint" || requireBrowserEndpoints;
+		if (!endpoint) {
+			if (!required) continue;
+			throw new AIError.OAuthError(`xAI OIDC discovery response was missing ${field}.`, {
+				kind: "validation",
+				provider,
+			});
+		}
+		validateXAIEndpoint(endpoint, field, provider);
 	}
-	validateXAIEndpoint(tokenEndpoint, "token_endpoint");
-	return { token_endpoint: tokenEndpoint };
+	return endpoints;
 }
 
 /**
@@ -195,11 +209,16 @@ function parseXAIDeviceAuthorization(payload: unknown): XAIDeviceAuthorization {
 	};
 }
 
-function parseXAITokenResponse(payload: unknown, label: string, refreshTokenFallback?: string): OAuthCredentials {
+function parseXAITokenResponse(
+	payload: unknown,
+	label: string,
+	refreshTokenFallback?: string,
+	provider: string = "xai",
+): OAuthCredentials {
 	if (!isRecord(payload)) {
 		throw new AIError.OAuthError(`${label} was not a JSON object`, {
 			kind: "validation",
-			provider: "xai",
+			provider,
 		});
 	}
 	const accessToken = typeof payload.access_token === "string" ? payload.access_token : "";
@@ -207,22 +226,13 @@ function parseXAITokenResponse(payload: unknown, label: string, refreshTokenFall
 	const refreshToken = responseRefreshToken || refreshTokenFallback || "";
 	const expiresInSeconds = payload.expires_in;
 	if (!accessToken) {
-		throw new AIError.OAuthError(`${label} missing access_token`, {
-			kind: "validation",
-			provider: "xai",
-		});
+		throw new AIError.OAuthError(`${label} missing access_token`, { kind: "validation", provider });
 	}
 	if (!refreshToken) {
-		throw new AIError.OAuthError(`${label} missing refresh_token`, {
-			kind: "validation",
-			provider: "xai",
-		});
+		throw new AIError.OAuthError(`${label} missing refresh_token`, { kind: "validation", provider });
 	}
 	if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds)) {
-		throw new AIError.OAuthError(`${label} missing expires_in`, {
-			kind: "validation",
-			provider: "xai",
-		});
+		throw new AIError.OAuthError(`${label} missing expires_in`, { kind: "validation", provider });
 	}
 	return {
 		access: accessToken,
@@ -372,6 +382,155 @@ export async function loginXAIOAuth(ctrl: OAuthController): Promise<OAuthCredent
 	});
 }
 
+class XAIGrokBuildOAuthFlow extends OAuthCallbackFlow {
+	#discovery: XAIOAuthDiscovery;
+	#verifier: string;
+	#challenge: string;
+	#fetch: FetchImpl;
+
+	constructor(
+		ctrl: OAuthController,
+		discovery: XAIOAuthDiscovery,
+		pkce: { verifier: string; challenge: string },
+		fetchImpl: FetchImpl,
+	) {
+		super(ctrl, {
+			preferredPort: 0,
+			callbackHostname: "127.0.0.1",
+			callbackPath: "/callback",
+		});
+		this.#discovery = discovery;
+		this.#verifier = pkce.verifier;
+		this.#challenge = pkce.challenge;
+		this.#fetch = fetchImpl;
+	}
+
+	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string }> {
+		const params = new URLSearchParams({
+			response_type: "code",
+			client_id: XAI_OAUTH_CLIENT_ID,
+			redirect_uri: redirectUri,
+			scope: XAI_GROK_BUILD_SCOPE,
+			code_challenge: this.#challenge,
+			code_challenge_method: "S256",
+			state,
+			nonce: crypto.randomUUID(),
+			referrer: XAI_GROK_BUILD_REFERRER,
+		});
+		return { url: `${this.#discovery.authorization_endpoint}?${params.toString()}` };
+	}
+
+	generateState(): string {
+		return crypto.randomUUID();
+	}
+
+	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
+		let response: Response;
+		try {
+			response = await this.#fetch(this.#discovery.token_endpoint, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					Accept: "application/json",
+				},
+				body: new URLSearchParams({
+					grant_type: "authorization_code",
+					client_id: XAI_OAUTH_CLIENT_ID,
+					code,
+					code_verifier: this.#verifier,
+					redirect_uri: redirectUri,
+				}),
+				signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+			});
+		} catch (error) {
+			throw new AIError.OAuthError(
+				`xAI authorization-code exchange failed: ${error instanceof Error ? error.message : String(error)}`,
+				{ kind: "token-exchange", provider: XAI_GROK_BUILD_PROVIDER, cause: error },
+			);
+		}
+		if (!response.ok) {
+			throw new AIError.OAuthError(`xAI authorization-code exchange failed: ${response.status}`, {
+				kind: "token-exchange",
+				provider: XAI_GROK_BUILD_PROVIDER,
+				status: response.status,
+			});
+		}
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch (error) {
+			throw new AIError.OAuthError("xAI authorization-code exchange returned invalid JSON", {
+				kind: "validation",
+				provider: XAI_GROK_BUILD_PROVIDER,
+				cause: error,
+			});
+		}
+		const credentials = parseXAITokenResponse(
+			payload,
+			"xAI authorization-code token response",
+			undefined,
+			XAI_GROK_BUILD_PROVIDER,
+		);
+		return this.#attachUserInfo(credentials);
+	}
+
+	async #attachUserInfo(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+		let response: Response;
+		try {
+			response = await this.#fetch(this.#discovery.userinfo_endpoint, {
+				headers: { Authorization: `Bearer ${credentials.access}`, Accept: "application/json" },
+				signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+			});
+		} catch (error) {
+			throw new AIError.OAuthError(
+				`xAI userinfo request failed: ${error instanceof Error ? error.message : String(error)}`,
+				{ kind: "http", provider: XAI_GROK_BUILD_PROVIDER, cause: error },
+			);
+		}
+		if (!response.ok) {
+			throw new AIError.OAuthError(`xAI userinfo request failed: ${response.status}`, {
+				kind: "http",
+				provider: XAI_GROK_BUILD_PROVIDER,
+				status: response.status,
+			});
+		}
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch (error) {
+			throw new AIError.OAuthError("xAI userinfo response returned invalid JSON", {
+				kind: "validation",
+				provider: XAI_GROK_BUILD_PROVIDER,
+				cause: error,
+			});
+		}
+		if (!isRecord(payload) || typeof payload.sub !== "string" || !payload.sub.trim()) {
+			throw new AIError.OAuthError("xAI userinfo response missing sub", {
+				kind: "validation",
+				provider: XAI_GROK_BUILD_PROVIDER,
+			});
+		}
+		const email = typeof payload.email === "string" && payload.email.trim() ? payload.email : undefined;
+		return { ...credentials, accountId: payload.sub, ...(email ? { email } : {}) };
+	}
+}
+
+export async function loginXAIGrokBuild(ctrl: OAuthController): Promise<OAuthCredentials> {
+	const fetchImpl = ctrl.fetch ?? fetch;
+	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl, XAI_GROK_BUILD_PROVIDER, true);
+	const pkce = await generatePKCE();
+	try {
+		return await new XAIGrokBuildOAuthFlow(ctrl, discovery, pkce, fetchImpl).login();
+	} catch (error) {
+		if (error instanceof AIError.OAuthError || error instanceof AIError.LoginCancelledError) throw error;
+		throw new AIError.OAuthError(error instanceof Error ? error.message : String(error), {
+			kind: error instanceof AIError.ConfigurationError ? "configuration" : "validation",
+			provider: XAI_GROK_BUILD_PROVIDER,
+			cause: error,
+		});
+	}
+}
+
 /**
  * Refresh an xAI OAuth access token using a stored refresh_token.
  *
@@ -379,13 +538,28 @@ export async function loginXAIOAuth(ctrl: OAuthController): Promise<OAuthCredent
  * the stored refresh token.
  */
 export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials> {
+	return refreshXAIToken(refreshToken, fetchOverride, "xai");
+}
+
+export async function refreshXAIGrokBuildToken(
+	refreshToken: string,
+	fetchOverride?: FetchImpl,
+): Promise<OAuthCredentials> {
+	return refreshXAIToken(refreshToken, fetchOverride, XAI_GROK_BUILD_PROVIDER);
+}
+
+async function refreshXAIToken(
+	refreshToken: string,
+	fetchOverride: FetchImpl | undefined,
+	provider: string,
+): Promise<OAuthCredentials> {
 	const fetchImpl = fetchOverride ?? fetch;
 	if (typeof refreshToken !== "string" || !refreshToken.trim()) {
-		throw new AIError.OAuthError("missing refresh_token", { kind: "validation", provider: "xai" });
+		throw new AIError.OAuthError("missing refresh_token", { kind: "validation", provider });
 	}
 
-	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl);
-	const tokenEndpoint = validateXAIEndpoint(discovery.token_endpoint, "token_endpoint");
+	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl, provider);
+	const tokenEndpoint = validateXAIEndpoint(discovery.token_endpoint, "token_endpoint", provider);
 
 	const body = new URLSearchParams({
 		grant_type: "refresh_token",
@@ -393,15 +567,25 @@ export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?:
 		refresh_token: refreshToken,
 	});
 
-	const response = await fetchImpl(tokenEndpoint, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/x-www-form-urlencoded",
-			Accept: "application/json",
-		},
-		body,
-		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
-	});
+	let response: Response;
+	try {
+		response = await fetchImpl(tokenEndpoint, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Accept: "application/json",
+			},
+			body,
+			signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+		});
+	} catch (error) {
+		if (provider !== XAI_GROK_BUILD_PROVIDER || error instanceof AIError.OAuthError) throw error;
+		throw new AIError.OAuthError(`xAI token refresh failed: ${error instanceof Error ? error.message : String(error)}`, {
+			kind: "token-refresh",
+			provider: XAI_GROK_BUILD_PROVIDER,
+			cause: error,
+		});
+	}
 
 	if (!response.ok) {
 		let detail = "";
@@ -412,7 +596,7 @@ export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?:
 		}
 		throw new AIError.OAuthError(`xAI token refresh failed: ${response.status}${detail ? ` ${detail}` : ""}`, {
 			kind: "token-refresh",
-			provider: "xai",
+			provider,
 			status: response.status,
 		});
 	}
@@ -423,8 +607,8 @@ export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?:
 	} catch (error) {
 		throw new AIError.OAuthError(
 			`xAI token refresh returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-			{ kind: "validation", provider: "xai", cause: error },
+			{ kind: "validation", provider, cause: error },
 		);
 	}
-	return parseXAITokenResponse(payload, "xAI token refresh response", refreshToken);
+	return parseXAITokenResponse(payload, "xAI token refresh response", refreshToken, provider);
 }
