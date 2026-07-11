@@ -43,7 +43,7 @@ async function capturePayload(
 	model: Model<"openai-completions">,
 	context: Context = testContext,
 	options?: {
-		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 		disableReasoning?: boolean;
 		maxTokens?: number;
 	},
@@ -102,15 +102,15 @@ describe("neuralwatt GLM-5.2 OpenAI request contract", () => {
 		expect(payload.thinking).toBeUndefined();
 	});
 
-	it("emits reasoning_effort low and omits thinking for the lower effort tier", async () => {
+	it("emits reasoning_effort max and omits thinking for the upper effort tier", async () => {
 		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2");
 
 		const payload = await capturePayload(model, testContext, {
-			reasoning: "low",
+			reasoning: "max",
 			maxTokens: 64,
 		});
 
-		expect(payload.reasoning_effort).toBe("low");
+		expect(payload.reasoning_effort).toBe("max");
 		expect(payload.thinking).toBeUndefined();
 	});
 });
@@ -159,6 +159,42 @@ describe("neuralwatt Kimi-K2.6 OpenAI request contract", () => {
 	});
 });
 
+describe("neuralwatt extraBody request contract", () => {
+	it("sends chat_template_kwargs.preserve_thinking true for Kimi K2.6", async () => {
+		const model = getBundledModel<"openai-completions">("neuralwatt", "kimi-k2.6");
+
+		const payload = await capturePayload(model, testContext, {
+			reasoning: "high",
+			maxTokens: 64,
+		});
+
+		expect(payload.chat_template_kwargs).toEqual({ preserve_thinking: true });
+	});
+
+	it("omits chat_template_kwargs for GLM-5.2 (non-Kimi models get no preserve_thinking)", async () => {
+		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2");
+
+		const payload = await capturePayload(model, testContext, {
+			reasoning: "high",
+			maxTokens: 64,
+		});
+
+		expect(payload.chat_template_kwargs).toBeUndefined();
+	});
+
+	it("sends service_tier flex and base model id for glm-5.2-flex", async () => {
+		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2-flex");
+
+		const payload = await capturePayload(model, testContext, {
+			reasoning: "high",
+			maxTokens: 64,
+		});
+
+		expect(payload.service_tier).toBe("flex");
+		expect(payload.model).toBe("glm-5.2");
+	});
+});
+
 describe("neuralwatt GLM-5.2-fast non-reasoning request contract", () => {
 	it("omits reasoning_effort and tool_stream when a reasoning effort is requested with tools", async () => {
 		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2-fast");
@@ -177,6 +213,19 @@ describe("neuralwatt GLM-5.2-fast non-reasoning request contract", () => {
 
 		expect(payload.reasoning_effort).toBeUndefined();
 		expect(payload.tool_stream).toBeUndefined();
+	});
+
+	it("clamps max_tokens to the default output ceiling, not the inflated reasoning clamp", async () => {
+		const model = getBundledModel<"openai-completions">("neuralwatt", "glm-5.2-fast");
+
+		// A non-reasoning fast alias must not receive the GLM reasoning-specific
+		// output clamp (128000, the inflated reasoning max). The default 64000
+		// clamp applies, so requesting 200000 must be capped at 64000.
+		const payload = await capturePayload(model, testContext, {
+			maxTokens: 200_000,
+		});
+
+		expect(payload.max_tokens).toBeLessThanOrEqual(64000);
 	});
 });
 

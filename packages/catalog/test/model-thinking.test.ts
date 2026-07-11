@@ -631,7 +631,7 @@ describe("model thinking derivation", () => {
 			},
 		});
 
-		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 	});
 
 	it("does not apply the Neuralwatt suppression to MiniMax Coding Plan", () => {

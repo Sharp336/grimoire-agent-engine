@@ -5,6 +5,12 @@
 ### Added
 
 - Added Neuralwatt provider descriptor, OpenAI-compatible model manager options with metadata-driven discovery, and generated `models.json` entries.
+
+### Changed
+
+- Changed `isGlm52ReasoningEffortDialect` to gate on `model.reasoning`, preventing non-reasoning GLM fast aliases from receiving the inflated reasoning output clamp.
+- Changed Neuralwatt OpenAI-format caller-disable path to emit `reasoning_effort: "minimal"` (thinking-off) regardless of the exposed effort ladder, preserving the documented disable behavior after narrowing to `[High, Max]`.
+
 ## [16.4.5] - 2026-07-11
 
 ### Fixed

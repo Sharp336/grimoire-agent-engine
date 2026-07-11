@@ -83,6 +83,32 @@ describe("Neuralwatt provider discovery", () => {
 					},
 				},
 			},
+			{
+				id: "glm-5.2-flex",
+				object: "model",
+				metadata: {
+					capabilities: {
+						reasoning: true,
+						reasoning_effort: true,
+						vision: false,
+						developer_role: false,
+					},
+					limits: { max_context_length: 1048560, max_output_tokens: null },
+				},
+			},
+			{
+				id: "glm-5.2-null-output",
+				object: "model",
+				metadata: {
+					capabilities: {
+						reasoning: true,
+						reasoning_effort: true,
+						vision: false,
+						developer_role: false,
+					},
+					limits: { max_context_length: 262144, max_output_tokens: null },
+				},
+			},
 		]);
 
 		const options = neuralwattModelManagerOptions({
@@ -98,7 +124,7 @@ describe("Neuralwatt provider discovery", () => {
 			},
 		]);
 		expect(models).toBeDefined();
-		expect(models).toHaveLength(4);
+		expect(models).toHaveLength(6);
 
 		// GLM-5.2: reasoning_effort: true → supportsReasoningEffort: true
 		const glm = models?.find(m => m.id === "glm-5.2");
@@ -138,6 +164,17 @@ describe("Neuralwatt provider discovery", () => {
 		expect(fast).toBeDefined();
 		expect(fast).toMatchObject({ reasoning: false });
 		expect(fast?.compat?.supportsReasoningEffort).toBe(false);
+
+		// Null max_output_tokens: mapper must fall back to max_context_length so the
+		// output token param resolves against the context window, not the 64000 default clamp.
+		const nullOutput = models?.find(m => m.id === "glm-5.2-null-output");
+		expect(nullOutput).toBeDefined();
+		expect(nullOutput?.maxTokens).toBe(262144);
+
+		// GLM-5.2-flex: flex variant must carry an extraBody with the base model id and service_tier "flex".
+		const flex = models?.find(m => m.id === "glm-5.2-flex");
+		expect(flex).toBeDefined();
+		expect(flex?.compat?.extraBody).toEqual({ model: "glm-5.2", service_tier: "flex" });
 	});
 
 	test("defaults supportsReasoningEffort to false when capabilities metadata is absent", async () => {

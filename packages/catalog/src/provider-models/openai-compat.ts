@@ -1582,9 +1582,22 @@ export function neuralwattModelManagerOptions(
 						const capabilities = metadata?.capabilities;
 						const isReasoning =
 							capabilities?.reasoning ?? (isReasoningGlmModelId(defaults.id) || isKimiModelId(defaults.id));
+						const isKimi = isKimiModelId(defaults.id);
 						const isVision = capabilities?.vision ?? false;
 						const limits = metadata?.limits;
 						const pricing = metadata?.pricing;
+						const flexBaseId = defaults.id.endsWith("-flex") ? defaults.id.slice(0, -5) : undefined;
+						const extraBody: Record<string, unknown> | undefined = (() => {
+							const parts: Record<string, unknown> = {};
+							if (isKimi) {
+								parts.chat_template_kwargs = { preserve_thinking: true };
+							}
+							if (flexBaseId) {
+								parts.model = flexBaseId;
+								parts.service_tier = "flex";
+							}
+							return Object.keys(parts).length > 0 ? parts : undefined;
+						})();
 						return {
 							...defaults,
 							reasoning: isReasoning,
@@ -1596,7 +1609,7 @@ export function neuralwattModelManagerOptions(
 								cacheWrite: defaults.cost.cacheWrite,
 							},
 							contextWindow: limits?.max_context_length ?? defaults.contextWindow,
-							maxTokens: limits?.max_output_tokens ?? defaults.maxTokens,
+							maxTokens: limits?.max_output_tokens ?? limits?.max_context_length ?? defaults.maxTokens,
 							compat: {
 								thinkingFormat: "openai",
 								supportsDeveloperRole: capabilities?.developer_role ?? false,
@@ -1604,6 +1617,7 @@ export function neuralwattModelManagerOptions(
 								maxTokensField: "max_tokens" as const,
 								reasoningContentField: "reasoning_content" as const,
 								requiresReasoningContentForToolCalls: isReasoning,
+								...(extraBody && { extraBody }),
 							},
 						};
 					},

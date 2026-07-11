@@ -55646,13 +55646,10 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048560,
-			"maxTokens": 131072,
+			"maxTokens": 1048560,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
 					"max"
 				]
@@ -55683,7 +55680,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048560,
-			"maxTokens": 128000,
+			"maxTokens": 1048560,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -55710,13 +55707,10 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048560,
-			"maxTokens": null,
+			"maxTokens": 1048560,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
 					"max"
 				]
@@ -55727,7 +55721,11 @@
 				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"model": "glm-5.2",
+					"service_tier": "flex"
+				}
 			}
 		},
 		"glm-5.2-short": {
@@ -55747,13 +55745,10 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 199984,
-			"maxTokens": null,
+			"maxTokens": 199984,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
 					"max"
 				]
@@ -55784,7 +55779,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 199984,
-			"maxTokens": null,
+			"maxTokens": 199984,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -55811,14 +55806,18 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 199984,
-			"maxTokens": null,
+			"maxTokens": 199984,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false
+				"requiresReasoningContentForToolCalls": false,
+				"extraBody": {
+					"model": "glm-5.2-short-fast",
+					"service_tier": "flex"
+				}
 			}
 		},
 		"glm-5.2-short-flex": {
@@ -55838,13 +55837,10 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 199984,
-			"maxTokens": null,
+			"maxTokens": 199984,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
 					"max"
 				]
@@ -55855,7 +55851,11 @@
 				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"model": "glm-5.2-short",
+					"service_tier": "flex"
+				}
 			}
 		},
 		"kimi-k2.6": {
@@ -55876,14 +55876,19 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": 262144,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"chat_template_kwargs": {
+						"preserve_thinking": true
+					}
+				}
 			}
 		},
 		"kimi-k2.6-fast": {
@@ -55904,14 +55909,19 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": 32768,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false
+				"requiresReasoningContentForToolCalls": false,
+				"extraBody": {
+					"chat_template_kwargs": {
+						"preserve_thinking": true
+					}
+				}
 			}
 		},
 		"kimi-k2.6-flex": {
@@ -55932,14 +55942,21 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": null,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"chat_template_kwargs": {
+						"preserve_thinking": true
+					},
+					"model": "kimi-k2.6",
+					"service_tier": "flex"
+				}
 			}
 		},
 		"kimi-k2.7-code": {
@@ -55960,14 +55977,19 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": 262144,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"chat_template_kwargs": {
+						"preserve_thinking": true
+					}
+				}
 			}
 		},
 		"kimi-k2.7-code-flex": {
@@ -55988,14 +56010,21 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": null,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
+				"requiresReasoningContentForToolCalls": true,
+				"extraBody": {
+					"chat_template_kwargs": {
+						"preserve_thinking": true
+					},
+					"model": "kimi-k2.7-code",
+					"service_tier": "flex"
+				}
 			}
 		},
 		"qwen3.5-397b": {
@@ -56015,7 +56044,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": null,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56042,7 +56071,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262128,
-			"maxTokens": null,
+			"maxTokens": 262128,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56070,7 +56099,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 131056,
-			"maxTokens": null,
+			"maxTokens": 131056,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,
@@ -56098,7 +56127,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 131056,
-			"maxTokens": null,
+			"maxTokens": 131056,
 			"compat": {
 				"thinkingFormat": "openai",
 				"supportsDeveloperRole": false,

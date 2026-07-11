@@ -312,8 +312,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 		// live endpoints):
 		//   - Z.ai/Zhipu ("zai" dialect) expose only high/max ("none" is the
 		//     thinking-off state, not a user tier).
-		//   - Umans, Ollama Cloud, and Baseten serve the same two-tier
-		//     high/max scale on their GLM-5.2 routes.
+		//   - Umans, Ollama Cloud, Baseten, and Neuralwatt serve the same
+		//     two-tier high/max scale on their GLM-5.2 routes.
 		//   - OpenRouter rejects `max` — `xhigh` IS its top tier.
 		//   - Other openai-compat hosts (Fireworks, resellers) pass the
 		//     default lower tiers through verbatim and expose the genuine
@@ -326,7 +326,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isZaiThinkingFormat(compat) ||
 			isUmansGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
-			spec.provider === "baseten"
+			spec.provider === "baseten" ||
+			spec.provider === "neuralwatt"
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

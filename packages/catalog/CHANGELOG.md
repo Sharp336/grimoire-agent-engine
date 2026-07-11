@@ -6,6 +6,14 @@
 
 - Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping; reasoning requests now use documented OpenAI-style fields (`reasoning_effort`, `reasoning_content`).
 
+### Changed
+
+- Changed Neuralwatt mapper to fall back to `max_context_length` when `max_output_tokens` is null, preventing null token limits from clamping to the global default.
+- Changed Neuralwatt GLM-5.2 reasoning effort ladder to `[High, Max]` (2-tier), matching the provider's real wire levels instead of exposing phantom 5-tier granularity.
+- Changed Neuralwatt Kimi models to send `chat_template_kwargs.preserve_thinking: true` via `compat.extraBody` for multi-turn reasoning preservation.
+- Changed Neuralwatt `*-flex` variants to send `model` (base id) and `service_tier: "flex"` via `compat.extraBody` for flex-tier routing.
+---
+
 ## [16.4.3] - 2026-07-11
 
 ### Fixed

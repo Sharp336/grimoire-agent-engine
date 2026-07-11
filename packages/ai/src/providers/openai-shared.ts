@@ -789,11 +789,17 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 		compat.supportsReasoningEffort &&
 		!omitReasoningEffort
 	) {
-		const minEffort = getSupportedEfforts(model)[0];
-		if (minEffort === undefined) {
-			throw new AIError.ConfigurationError(`Model ${model.provider}/${model.id} has no supported reasoning efforts`);
+		if (model.provider === "neuralwatt" && compat.thinkingFormat === "openai") {
+			wireEffort = "minimal";
+		} else {
+			const minEffort = getSupportedEfforts(model)[0];
+			if (minEffort === undefined) {
+				throw new AIError.ConfigurationError(
+					`Model ${model.provider}/${model.id} has no supported reasoning efforts`,
+				);
+			}
+			wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 		}
-		wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 	}
 
 	return {
@@ -1002,7 +1008,9 @@ export function disableChatCompletionsReasoningForDialect(
  */
 function isGlm52ReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
 	return (
-		isGlm52ReasoningEffortModelId(model.id) && (compat.thinkingFormat === "zai" || model.provider === "neuralwatt")
+		model.reasoning &&
+		isGlm52ReasoningEffortModelId(model.id) &&
+		(compat.thinkingFormat === "zai" || model.provider === "neuralwatt")
 	);
 }
 
