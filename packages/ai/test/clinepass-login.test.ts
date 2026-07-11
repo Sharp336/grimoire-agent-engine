@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from "bun:test";
 
-import { loginClinepassApiKey } from "@oh-my-pi/pi-ai/registry/clinepass";
+import { loginClinepass, loginClinepassApiKey } from "@oh-my-pi/pi-ai/registry/clinepass";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 function makeController(fetchImpl: FetchImpl): Parameters<typeof loginClinepassApiKey>[0] {
@@ -51,6 +51,19 @@ describe("loginClinepassApiKey", () => {
 		expect(capturedBody.max_tokens).toBeUndefined();
 		// The probe reads only the response status, so it must not open an SSE stream.
 		expect(capturedBody.stream).toBe(false);
+	});
+
+	it("falls back to a static key when Cline CLI token refresh fails", async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(JSON.stringify({ success: true, data: { choices: [] } }), { status: 200 });
+
+		const key = await loginClinepass(makeController(fetchImpl), {
+			loginFromCli: async () => {
+				throw new Error("refresh token revoked");
+			},
+		});
+
+		expect(key).toBe("sk_TESTKEY");
 	});
 
 	it("surfaces upstream auth failures with status and body", async () => {

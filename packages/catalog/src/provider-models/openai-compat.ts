@@ -1843,6 +1843,86 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.6b Cline API (usage-credit gateway)
+// ---------------------------------------------------------------------------
+
+export function clineApiModelManagerOptions(
+	_config?: ClinepassModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		providerId: "cline-api",
+	};
+}
+
+const CLINE_API_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINE_API_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+
+function createClineApiStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-completions">["input"],
+	cost: ModelSpec<"openai-completions">["cost"],
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "cline-api",
+		baseUrl: CLINE_API_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost,
+		contextWindow,
+		maxTokens,
+		thinking: { mode: "effort", efforts: [...CLINE_API_EFFORTS] },
+	};
+}
+
+/** Curated agentic models available through Cline usage credits. */
+export const CLINE_API_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createClineApiStaticModel("zai/glm-5.2", "GLM 5.2 (Cline API)", 1_000_000, 131072, ["text"], {
+		input: 1.4,
+		output: 4.4,
+		cacheRead: 0.26,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel(
+		"moonshotai/kimi-k2.7-code",
+		"Kimi K2.7 Code (Cline API)",
+		262144,
+		262144,
+		["text", "image"],
+		{ input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+	),
+	createClineApiStaticModel("moonshotai/kimi-k2.6", "Kimi K2.6 (Cline API)", 262144, 65536, ["text", "image"], {
+		input: 0.95,
+		output: 4,
+		cacheRead: 0.16,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (Cline API)", 1_000_000, 384_000, ["text"], {
+		input: 0.435,
+		output: 0.87,
+		cacheRead: 0.003625,
+		cacheWrite: 0,
+	}),
+	createClineApiStaticModel(
+		"deepseek/deepseek-v4-flash",
+		"DeepSeek V4 Flash (Cline API)",
+		1_000_000,
+		384_000,
+		["text"],
+		{ input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	),
+];
+
+export function buildClineApiSeed(): ModelSpec<"openai-completions">[] {
+	return CLINE_API_STATIC_MODELS.map(model => ({ ...model }));
+}
+
+// ---------------------------------------------------------------------------
 // 7.6b ClinePass (Cline subscription gateway)
 // ---------------------------------------------------------------------------
 

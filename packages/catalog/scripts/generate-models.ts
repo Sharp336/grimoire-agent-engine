@@ -30,6 +30,7 @@ import {
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	buildClineApiSeed,
 	buildClinepassSeed,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
@@ -193,11 +194,9 @@ function applyGlobalModelsDevFallback(
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
 			model.provider === "baseten" ||
-			// ClinePass ships a curated, no-discovery seed with bare ids (`glm-5.2`,
-			// `mimo-v2.5`, …) that collide with vision-capable same-id models from
-			// other providers. Without this guard the global fallback overwrites the
-			// seed's `input`/`name`/`reasoning`, e.g. advertising `image` support the
-			// ClinePass source of truth never declared. Keep the curated fields.
+			// Cline providers ship curated seeds whose model ids collide with
+			// same-id entries from other gateways. Preserve their measured fields.
+			model.provider === "cline-api" ||
 			model.provider === "clinepass"
 		) {
 			return model;
@@ -529,6 +528,10 @@ async function generateModels() {
 	// surfaces them; the seed projects each base entry into a fast variant.
 	// Deduped behind any identical previous-snapshot entry.
 	allModels.push(...buildFireworksFastSeed());
+	// Seed the curated pay-as-you-go Cline API catalog. The gateway does not
+	// publish a documented model-list endpoint, so bundled agentic models are
+	// the deterministic onboarding source of truth.
+	allModels.push(...buildClineApiSeed());
 	// Seed the curated ClinePass catalog. ClinePass has no `/v1/models` endpoint
 	// (discovery 404s) and its descriptor deliberately omits `catalogDiscovery`,
 	// so the generator never fetches it; this seed is the source of truth and
@@ -615,6 +618,21 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);
+	}
+	// Cline's gateway accepts the advertised effort names verbatim. Family
+	// policies are upstream-specific and must not rewrite xhigh to max or
+	// collapse DeepSeek tiers after global policy and compat canonicalization.
+	const clineThinkingSeeds = [...buildClineApiSeed(), ...buildClinepassSeed()];
+	const clineThinkingByKey = new Map(
+		clineThinkingSeeds.map(model => [`${model.provider}/${model.id}`, model.thinking]),
+	);
+	for (const model of allModels) {
+		const thinking = clineThinkingByKey.get(`${model.provider}/${model.id}`);
+		if (!thinking?.efforts) continue;
+		model.thinking = {
+			...thinking,
+			effortMap: Object.fromEntries(thinking.efforts.map(effort => [effort, effort])),
+		};
 	}
 
 	// Group by provider and sort each provider's models

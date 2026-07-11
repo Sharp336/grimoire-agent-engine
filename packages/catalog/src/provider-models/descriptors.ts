@@ -14,6 +14,7 @@ import {
 	anthropicModelManagerOptions,
 	basetenModelManagerOptions,
 	cerebrasModelManagerOptions,
+	clineApiModelManagerOptions,
 	clinepassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
@@ -108,12 +109,18 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "Cerebras" },
 	},
 	{
+		id: "cline-api",
+		defaultModel: "zai/glm-5.2",
+		envVars: ["CLINE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => clineApiModelManagerOptions(config),
+	},
+	{
 		// ClinePass has no `/v1/models` endpoint (discovery 404s), so it ships no
 		// `catalogDiscovery` — the bundled `models.json` entries are canonical, like
 		// `firepass`.
 		id: "clinepass",
 		defaultModel: "glm-5.2",
-		envVars: ["CLINE_API_KEY"],
+		envVars: ["CLINEPASS_API_KEY", "CLINE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => clinepassModelManagerOptions(config),
 	},
 	{

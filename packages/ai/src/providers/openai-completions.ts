@@ -1566,7 +1566,10 @@ function buildParams(
 		omitMaxOutputTokens: model.omitMaxOutputTokens ?? false,
 		isOpenRouterHost: compat.isOpenRouterHost,
 		alwaysSendMaxTokens: compat.alwaysSendMaxTokens,
-		providerOutputClamp: resolveZaiReasoningOutputClamp(model, compat),
+		providerOutputClamp:
+			model.provider === "clinepass" || model.provider === "cline-api"
+				? (model.maxTokens ?? undefined)
+				: resolveZaiReasoningOutputClamp(model, compat),
 	});
 	if (outputToken) {
 		if (outputToken.field === "max_tokens") {

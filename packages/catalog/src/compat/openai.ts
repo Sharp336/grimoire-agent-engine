@@ -266,6 +266,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	// users who point a custom OpenAI-compat provider at it, and those must not
 	// get the `cline-pass/` wire prefix or the ClinePass family-remap suppression.
 	const isClinePass = provider === "clinepass";
+	const isClineApi = provider === "cline-api";
+	const isClineGateway = isClineApi || isClinePass;
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
@@ -419,7 +421,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// needing them (verified live). Pin `openai` so the Qwen models keep the
 		// full `xhigh` effort ladder ClinePass accepts, and no vendor-specific
 		// thinking fields are emitted.
-		isClinePass
+		isClineGateway
 			? "openai"
 			: isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
 				? "zai"
@@ -446,12 +448,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		// ClinePass MiMo SKUs must keep the MiMo clamp (minimal->low, xhigh->high):
-		// the model only supports low/medium/high, so the identity map would let an
-		// unsupported minimal/xhigh reach the wire. Non-MiMo ClinePass models take
-		// the identity passthrough that suppresses the family xhigh->max rewrite.
+		// Cline MiMo SKUs must keep the MiMo clamp (minimal->low, xhigh->high).
+		// Other Cline gateway models use the identity map accepted by the wire.
 		reasoningEffortMap:
-			isClinePass && !isMimoReasoningEffortModel
+			isClineGateway && !isMimoReasoningEffortModel
 				? CLINEPASS_REASONING_EFFORT_MAP
 				: isMimoReasoningEffortModel
 					? MIMO_REASONING_EFFORT_MAP
@@ -493,9 +493,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
-		// ClinePass streams chain-of-thought in `delta.reasoning` (OpenRouter-style),
-		// not the OpenAI-compat default `delta.reasoning_content` (verified live).
-		reasoningContentField: isClinePass ? "reasoning" : "reasoning_content",
+		// Both Cline billing routes stream chain-of-thought in `delta.reasoning`.
+		reasoningContentField: isClineGateway ? "reasoning" : "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API.
 		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models

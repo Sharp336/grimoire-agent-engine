@@ -1,4 +1,5 @@
 import { createApiKeyLogin } from "./api-key-login";
+import { isWorkosToken, loginFromClineCli, refreshWorkosToken } from "./oauth/clinepass";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
@@ -42,11 +43,17 @@ export const loginClinepassApiKey = createApiKeyLogin({
  * Try the Cline CLI's WorkOS credentials first; if the user is not logged in
  * with `cline auth`, fall back to the manual API-key paste flow.
  */
-export async function loginClinepass(cb: OAuthLoginCallbacks): Promise<OAuthCredentials | string> {
-	// Lazy import: keep the WorkOS/fs flow out of the eager registry graph.
-	const { loginFromClineCli } = await import("./oauth/clinepass");
-	const workos = await loginFromClineCli({ fetch: cb.fetch });
-	if (workos) return workos;
+export async function loginClinepass(
+	cb: Parameters<typeof loginClinepassApiKey>[0],
+	options: { loginFromCli?: typeof loginFromClineCli } = {},
+): Promise<OAuthCredentials | string> {
+	try {
+		const workos = await (options.loginFromCli ?? loginFromClineCli)({ fetch: cb.fetch });
+		if (workos) return workos;
+	} catch {
+		// Stale or revoked Cline CLI credentials must not block the supported
+		// static-key path. The manual prompt validates the replacement key.
+	}
 	return loginClinepassApiKey(cb);
 }
 
@@ -57,7 +64,6 @@ export const clinepassProvider = {
 	refreshToken: async (credentials: OAuthCredentials) => {
 		// Static API keys never expire and take the manual path; only WorkOS
 		// (`workos:`-prefixed) access tokens are refreshable.
-		const { isWorkosToken, refreshWorkosToken } = await import("./oauth/clinepass");
 		if (isWorkosToken(credentials.access)) return refreshWorkosToken(credentials);
 		return credentials;
 	},
