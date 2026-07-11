@@ -486,6 +486,13 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	goal: s => new GoalTool(s),
 };
 
+/**
+ * First-party tools registered outside BUILTIN_TOOLS / HIDDEN_TOOLS (SDK
+ * injects them as custom tools). Still OMP-shipped, so report_tool_issue must
+ * accept them when AutoQA is on.
+ */
+export const SHIPPED_CUSTOM_TOOL_NAMES = ["generate_image", "tts"] as const;
+
 export type ToolName = BuiltinToolName;
 
 /**
@@ -678,13 +685,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Injected unconditionally into every agent, regardless of requested tool list.
 	const autoQA = isAutoQaEnabled(session.settings);
 	if (autoQA && !tools.some(t => t.name === "report_tool_issue")) {
-		// Build the enum from tools we just constructed via BUILTIN_TOOLS / HIDDEN_TOOLS.
-		// Extension overrides (e.g. a user's custom `bash`) get added later by
-		// other code paths, so they're absent here — exactly what we want; MCP /
-		// extension tools never end up in the report enum.
+		// Build the enum from tools we just constructed via BUILTIN_TOOLS /
+		// HIDDEN_TOOLS, plus OMP-shipped custom tools (generate_image / tts)
+		// that are registered outside this factory but still first-party
+		// (issue #5175). Extension overrides and MCP tools stay excluded.
 		const activeBuiltinNames = tools
 			.map(t => t.name)
 			.filter(name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && name !== "report_tool_issue");
+		for (const shipped of SHIPPED_CUSTOM_TOOL_NAMES) {
+			if (!activeBuiltinNames.includes(shipped)) activeBuiltinNames.push(shipped);
+		}
 		const qaTool = createReportToolIssueTool(session, activeBuiltinNames);
 		if (qaTool) {
 			tools.push(wrapToolWithMetaNotice(qaTool));

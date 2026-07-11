@@ -299,6 +299,14 @@ let lastFailureAt = 0;
 export function __resetAutoQaFlushStateForTests(): void {
 	inFlightFlush = null;
 	lastFailureAt = 0;
+	if (cachedDb) {
+		try {
+			cachedDb.close();
+		} catch {
+			// ignore close races in tests
+		}
+		cachedDb = null;
+	}
 }
 
 function envOverrideString(name: string): string | undefined {
