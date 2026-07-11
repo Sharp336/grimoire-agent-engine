@@ -31,6 +31,7 @@
 - Fixed mouse hover and clicks in the /models Roles view landing one row above the pointer (the row mapping subtracted the status row twice).
 - Fixed model search keeping the most-recently-used model on top of the results: match quality now ranks first (an exact `gpt-5.5` beats the active `gpt-5.6-sol`), with MRU order only breaking ties between equally good matches.
 
+- Prevented shared batch context from expanding a subagent's executable assignment with parent-only orchestration work ([#5134](https://github.com/can1357/oh-my-pi/pull/5134) by [@lyc-aon](https://github.com/lyc-aon)).
 ## [16.4.5] - 2026-07-11
 
 ### Breaking Changes
