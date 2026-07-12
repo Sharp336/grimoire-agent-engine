@@ -51,6 +51,10 @@ interface AppKeybindings {
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.plan.toggle": true;
+	"app.approvalMode.cycle": true;
+	"app.approvalMode.alwaysAsk": true;
+	"app.approvalMode.write": true;
+	"app.approvalMode.yolo": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
 }
@@ -213,6 +217,22 @@ export const KEYBINDINGS = {
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
 		description: "Toggle plan mode",
+	},
+	"app.approvalMode.cycle": {
+		defaultKeys: "alt+shift+a",
+		description: "Cycle approval mode",
+	},
+	"app.approvalMode.alwaysAsk": {
+		defaultKeys: [],
+		description: "Set approval mode to always ask",
+	},
+	"app.approvalMode.write": {
+		defaultKeys: [],
+		description: "Set approval mode to write",
+	},
+	"app.approvalMode.yolo": {
+		defaultKeys: [],
+		description: "Set approval mode to yolo",
 	},
 	"app.history.search": {
 		defaultKeys: "ctrl+r",

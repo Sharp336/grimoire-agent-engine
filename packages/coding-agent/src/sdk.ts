@@ -2205,7 +2205,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				session.abort({ reason: USER_INTERRUPT_LABEL });
 			},
 			settings,
-			autoApprove: options.autoApprove ?? false,
+			autoApprove: session.getRuntimeAutoApprove(),
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 
@@ -2867,6 +2867,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			settings,
 			autoApprove: options.autoApprove,
+			getToolContext: () => toolContextStore.getContext(),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global

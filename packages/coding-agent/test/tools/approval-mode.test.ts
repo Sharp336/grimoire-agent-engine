@@ -180,6 +180,50 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("(no output)");
 	});
 
+	it("runtime approval mode can tighten and restore an auto-approved session", async () => {
+		const runtimeTempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-runtime-approval-mode-${Snowflake.next()}-`));
+		let runtimeSession: AgentSession | undefined;
+		try {
+			const cwd = path.join(runtimeTempDir, "cwd");
+			fs.mkdirSync(cwd, { recursive: true });
+			const sessionManager = SessionManager.create(cwd, path.join(runtimeTempDir, "sessions"));
+			const created = await createAgentSession({
+				cwd,
+				agentDir: runtimeTempDir,
+				sessionManager,
+				settings: Settings.isolated(BASE_SETTINGS),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				autoApprove: true,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				workspaceTree: emptyWorkspaceTree(cwd),
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				toolNames: ["bash"],
+			});
+			runtimeSession = created.session;
+			const bash = runtimeSession.getToolByName("bash");
+			if (!bash) throw new Error("Expected bash tool");
+
+			runtimeSession.setRuntimeApprovalMode("always-ask");
+			await expect(bash.execute("runtime-strict", { command: "echo blocked" })).rejects.toThrow(
+				/requires approval but no interactive UI available/,
+			);
+
+			runtimeSession.setRuntimeApprovalMode("yolo");
+			const result = await bash.execute("runtime-yolo", { command: "echo runtime-yolo" });
+			expect(textOf(result)).toContain("runtime-yolo");
+		} finally {
+			await runtimeSession?.dispose();
+			try {
+				removeSyncWithRetries(runtimeTempDir);
+			} catch {}
+		}
+	});
+
 	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {
 		// Regression lock for the architectural fix: the per-tool approval gate is implemented
 		// inside `ExtensionToolWrapper`, which is only attached when `session.extensionRunner` exists.

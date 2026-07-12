@@ -40,6 +40,8 @@ type FakeEditor = {
 
 type InputListenerResult = { consume: boolean } | undefined;
 type InputListener = (data: string) => InputListenerResult;
+type ApprovalMode = "always-ask" | "write" | "yolo";
+type MutableInputContext = InteractiveModeContext & { focusedAgentId?: string };
 
 function dispatchInput(listeners: InputListener[], data: string): InputListenerResult {
 	for (const listener of listeners) {
@@ -55,11 +57,16 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 
 async function createContext() {
 	let editorText = "";
+	let approvalMode: ApprovalMode = "always-ask";
 	const keyMap: Record<string, string[]> = {
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
+		"app.approvalMode.cycle": ["alt+shift+a"],
+		"app.approvalMode.alwaysAsk": ["ctrl+alt+1"],
+		"app.approvalMode.write": ["ctrl+alt+2"],
+		"app.approvalMode.yolo": ["ctrl+alt+3"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -82,6 +89,9 @@ async function createContext() {
 	const prompt = vi.fn(async () => {});
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
+	const setRuntimeApprovalMode = vi.fn((mode: ApprovalMode) => {
+		approvalMode = mode;
+	});
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
@@ -93,12 +103,14 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		setRuntimeApprovalMode,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
 	const handleBtwCopyKey = vi.fn(async () => true);
 	const canBranchBtw = vi.fn(() => false);
 	const canCopyBtw = vi.fn(() => false);
+	const invalidateStatusLine = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -149,6 +161,15 @@ async function createContext() {
 				return keyMap[action] ? [...keyMap[action]] : [];
 			},
 		} as InteractiveModeContext["keybindings"],
+		settings: {
+			get(key: string) {
+				if (key === "tools.approvalMode") return approvalMode;
+				return undefined;
+			},
+		},
+		statusLine: {
+			invalidate: invalidateStatusLine,
+		},
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: () => false,
 		recordLocalSubmission(this: InteractiveModeContext, text: string, imageCount = 0) {
@@ -198,7 +219,8 @@ async function createContext() {
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
-	} as unknown as InteractiveModeContext;
+	} as unknown as MutableInputContext;
+	const mutableCtx: MutableInputContext = ctx;
 
 	return {
 		InputController,
@@ -207,6 +229,9 @@ async function createContext() {
 		customHandlers,
 		setFocused(target: unknown) {
 			focused = target;
+		},
+		setFocusedAgentId(agentId: string | undefined) {
+			mutableCtx.focusedAgentId = agentId;
 		},
 		spies: {
 			setActionKeys,
@@ -223,6 +248,8 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			setRuntimeApprovalMode,
+			invalidateStatusLine,
 		},
 	};
 }
@@ -249,6 +276,49 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("cycles approval mode and announces the new runtime mode", async () => {
+		const { InputController, ctx, customHandlers, spies } = await createContext();
+		const showStatus = ctx.showStatus as Mock<(message: string) => void>;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const handler = customHandlers.get("alt+shift+a");
+		expect(handler).toBeDefined();
+		handler?.();
+
+		expect(spies.setRuntimeApprovalMode).toHaveBeenCalledWith("write");
+		expect(showStatus).toHaveBeenCalledWith("Approval mode: write");
+		expect(spies.invalidateStatusLine).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes direct approval mode actions to exact runtime modes", async () => {
+		const { InputController, ctx, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		customHandlers.get("ctrl+alt+1")?.();
+		customHandlers.get("ctrl+alt+2")?.();
+		customHandlers.get("ctrl+alt+3")?.();
+
+		expect(spies.setRuntimeApprovalMode).toHaveBeenNthCalledWith(1, "always-ask");
+		expect(spies.setRuntimeApprovalMode).toHaveBeenNthCalledWith(2, "write");
+		expect(spies.setRuntimeApprovalMode).toHaveBeenNthCalledWith(3, "yolo");
+	});
+
+	it("does not change approval mode while focused on a background agent", async () => {
+		const { InputController, ctx, customHandlers, setFocusedAgentId, spies } = await createContext();
+		const showStatus = ctx.showStatus as Mock<(message: string) => void>;
+		setFocusedAgentId("worker");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		customHandlers.get("alt+shift+a")?.();
+
+		expect(spies.setRuntimeApprovalMode).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith("Approval mode applies to the main session — press ←← to return first");
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {

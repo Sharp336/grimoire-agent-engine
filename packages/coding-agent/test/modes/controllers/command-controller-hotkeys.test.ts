@@ -7,6 +7,7 @@ describe("buildHotkeysMarkdown", () => {
 			"app.clipboard.copyLine": "Alt+Shift+L",
 			"app.clipboard.copyPrompt": "Ctrl+Shift+P",
 			"app.plan.toggle": "Alt+Shift+P",
+			"app.approvalMode.cycle": "Alt+Shift+A",
 			"app.tools.expand": "Ctrl+O",
 			"app.display.reset": "Ctrl+L",
 			"app.interrupt": "Esc",
@@ -41,6 +42,7 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Ctrl+L` | Reset terminal display |");
 		expect(markdown).toContain("| `Alt+R` | Retry last failed assistant turn |");
 		expect(markdown).toContain("| `Alt+Shift+P` | Toggle plan mode |");
+		expect(markdown).toContain("| `Alt+Shift+A` | Cycle approval mode |");
 		expect(markdown).toContain("| `#<number>` | GitHub issue/PR reference");
 		expect(markdown).toContain("| `#` / `#<text>` | Prompt actions");
 		for (const line of lines) {

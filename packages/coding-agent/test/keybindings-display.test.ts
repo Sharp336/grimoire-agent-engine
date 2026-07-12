@@ -16,6 +16,20 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
 	});
 
+	it("defaults approval mode cycle to Alt+Shift+A", () => {
+		const keybindings = KeybindingsManager.inMemory();
+
+		expect(keybindings.getDisplayString("app.approvalMode.cycle")).toBe("Alt+Shift+A");
+	});
+
+	it("leaves direct approval mode actions unbound by default", () => {
+		const keybindings = KeybindingsManager.inMemory();
+
+		expect(keybindings.getDisplayString("app.approvalMode.alwaysAsk")).toBe("");
+		expect(keybindings.getDisplayString("app.approvalMode.write")).toBe("");
+		expect(keybindings.getDisplayString("app.approvalMode.yolo")).toBe("");
+	});
+
 	it("formats multiple bindings with the existing separator", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],

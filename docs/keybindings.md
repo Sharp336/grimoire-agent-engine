@@ -10,6 +10,7 @@ User remaps live in `~/.omp/agent/keybindings.yml`. The file is a YAML mapping w
 app.model.cycleForward: Ctrl+P
 app.model.selectTemporary: Alt+P
 app.plan.toggle: Alt+Shift+P
+app.approvalMode.cycle: Alt+Shift+A
 ```
 
 Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
@@ -29,6 +30,10 @@ app.history.search: []
 | `app.model.selectTemporary` | `Alt+P`                                | Pick a model temporarily for this session     |
 | `app.model.select`          | `Alt+M`                                | Open the model selector and set roles         |
 | `app.plan.toggle`           | `Alt+Shift+P`                          | Toggle plan mode                              |
+| `app.approvalMode.cycle`     | `Alt+Shift+A`                          | Cycle tool approval mode: `always-ask` → `write` → `yolo` |
+| `app.approvalMode.alwaysAsk` | Unbound                                | Set tool approval mode to `always-ask` |
+| `app.approvalMode.write`     | Unbound                                | Set tool approval mode to `write` |
+| `app.approvalMode.yolo`      | Unbound                                | Set tool approval mode to `yolo` |
 | `app.history.search`        | `Ctrl+R`                               | Search prompt history                         |
 | `app.tools.expand`          | `Ctrl+O`                               | Toggle tool-output expansion                  |
 | `app.thinking.toggle`       | `Ctrl+T`                               | Toggle thinking-block visibility              |

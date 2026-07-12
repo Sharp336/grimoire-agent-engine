@@ -439,7 +439,7 @@ tools:
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `tools.approvalMode` | enum | `yolo` | `always-ask` (auto-approve read-only), `write` (auto-approve read + workspace-write), `yolo` (auto-approve all tiers). `--approval-mode` and `--auto-approve`/`--yolo` override per run. |
+| `tools.approvalMode` | enum | `yolo` | `always-ask` (auto-approve read-only), `write` (auto-approve read + workspace-write), `yolo` (auto-approve all tiers). `--approval-mode` and `--auto-approve`/`--yolo` override per run. In the TUI, approval-mode keybindings update the same runtime override in memory for the current session. |
 | `tools.approval` | record | `{}` | Per-tool policy keyed by tool name; each value is `allow`, `deny`, or `prompt`. e.g. `omp config set tools.approval '{"bash":"prompt"}'`. |
 | `tools.discoveryMode` | enum | `auto` | `auto`, `off`, `mcp-only`, `all`. Controls dynamic tool discovery. |
 | `tools.essentialOverride` | array | `[]` | Tool names kept available even when tools are narrowed. |

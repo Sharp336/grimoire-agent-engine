@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added TUI keybindings for changing the active tool approval mode during a session, including `Alt+Shift+A` to cycle modes and unbound direct mode actions. ([#2956](https://github.com/can1357/oh-my-pi/issues/2956))
 ## [16.4.8] - 2026-07-12
 
 ### Fixed

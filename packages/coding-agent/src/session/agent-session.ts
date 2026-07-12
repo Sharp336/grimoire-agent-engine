@@ -30,6 +30,8 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
+	type AgentToolContext,
+	type AgentToolExecFn,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
@@ -311,6 +313,7 @@ import {
 	isMCPToolName,
 	selectDiscoverableToolNamesByServer,
 } from "../tool-discovery/tool-index";
+import type { ApprovalMode } from "../tools/approval";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { normalizeToolNames } from "../tools/builtin-names";
@@ -714,6 +717,7 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	getToolContext?: () => AgentToolContext;
 	/** Creates the tools registered only while `/vibe` mode is active. */
 	createVibeTools?: () => AgentTool[];
 	/** Tool names whose current registry entry is still the built-in implementation. */
@@ -1595,6 +1599,7 @@ export class AgentSession {
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	#autoApprove: boolean;
+	#getToolContext: (() => AgentToolContext) | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -2096,6 +2101,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
+		this.#getToolContext = config.getToolContext;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
@@ -2339,6 +2345,15 @@ export class AgentSession {
 			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 			this.#buildAdvisorRuntime(true);
 		});
+	}
+
+	getRuntimeAutoApprove(): boolean {
+		return this.#autoApprove;
+	}
+
+	setRuntimeApprovalMode(mode: ApprovalMode): void {
+		this.settings.override("tools.approvalMode", mode);
+		this.#autoApprove = mode === "yolo";
 	}
 	// -------------------------------------------------------------------------
 	// Advisor runtime lifecycle
@@ -6136,7 +6151,17 @@ export class AgentSession {
 	 * Get a tool by name from the registry.
 	 */
 	getToolByName(name: string): AgentTool | undefined {
-		return this.#toolRegistry.get(name);
+		const tool = this.#toolRegistry.get(name);
+		if (!tool || !this.#getToolContext) return tool;
+		const getToolContext = this.#getToolContext;
+		return new Proxy(tool, {
+			get(target, prop, receiver) {
+				if (prop !== "execute") return Reflect.get(target, prop, receiver);
+				const execute: AgentToolExecFn = (toolCallId, args, signal, onUpdate, context) =>
+					target.execute(toolCallId, args, signal, onUpdate, context ?? getToolContext());
+				return execute;
+			},
+		});
 	}
 
 	/** True when the current registry entry for `name` came from a built-in factory. */
