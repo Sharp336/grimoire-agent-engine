@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed retained cross-chunk lines from `readLines` being mutated when its internal buffer was reused.
+- Fixed failed `TempDir.remove()` calls permanently preventing later cleanup retries.
+- Fixed bare `TempDir` prefixes creating temporary directories in the current working directory.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

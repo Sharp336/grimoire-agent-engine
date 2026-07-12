@@ -99,6 +99,12 @@ describe("terminal notifications", () => {
 		expect(terminal.formatNotification("hello")).toBe("\x1b]99;;hello\x1b\\");
 	});
 
+	it("strips control characters from basic notification payloads", () => {
+		const terminal = getTerminalInfo("kitty");
+		expect(terminal.formatNotification("safe\x07\x1b\\\x9bunsafe")).toBe("\x1b]99;;safe\\unsafe\x1b\\");
+		expect(terminal.formatNotification({ title: "Done\x07", body: "Now\x1b\\" })).toBe("\x1b]99;;Done: Now\\\x1b\\");
+	});
+
 	it("falls back to a single OSC 99 line until rich support is confirmed", () => {
 		const terminal = getTerminalInfo("kitty");
 		expect(terminal.formatNotification({ title: "Session", body: "Complete" })).toBe(

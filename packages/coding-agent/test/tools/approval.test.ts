@@ -79,14 +79,18 @@ describe("resolveApproval tier matrix", () => {
 describe("resolveApproval override and user policy", () => {
 	const dangerous = tool("bash", { tier: "exec", override: true, reason: "Critical pattern detected" });
 
-	it("ignores override-based prompts in yolo mode", () => {
+	it("honors override-based prompts in yolo mode", () => {
 		const result = resolveApproval(dangerous, {}, "yolo");
-		expect(result).toMatchObject({ policy: "allow", tier: "exec", override: false });
-		expect(result.reason).toBeUndefined();
+		expect(result).toMatchObject({
+			policy: "prompt",
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
 	});
 
-	it("user policy still controls execution in yolo mode", () => {
-		expect(resolveApproval(dangerous, {}, "yolo", { bash: "allow" }).policy).toBe("allow");
+	it("override prompts take precedence over allow while explicit deny remains authoritative", () => {
+		expect(resolveApproval(dangerous, {}, "yolo", { bash: "allow" }).policy).toBe("prompt");
 		expect(resolveApproval(dangerous, {}, "yolo", { bash: "prompt" }).policy).toBe("prompt");
 		expect(resolveApproval(dangerous, {}, "yolo", { bash: "deny" }).policy).toBe("deny");
 		expect(() => requiresApproval(dangerous, {}, "yolo", { bash: "deny" })).toThrow(

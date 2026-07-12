@@ -61,6 +61,22 @@ describe("readLines", () => {
 
 		expect(output).toEqual(["alpha", "beta", "gamma"]);
 	});
+
+	it("keeps retained cross-chunk lines stable", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("alpha"));
+				controller.enqueue(encoder.encode("-one\nbeta"));
+				controller.enqueue(encoder.encode("-two\ngamma"));
+				controller.enqueue(encoder.encode("-three\n"));
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const decoder = new TextDecoder();
+		expect(lines.map(line => decoder.decode(line))).toEqual(["alpha-one", "beta-two", "gamma-three"]);
+	});
 });
 
 describe("abortableSource (via readLines)", () => {

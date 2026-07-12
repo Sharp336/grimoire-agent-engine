@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed basic terminal notifications allowing embedded control characters to terminate OSC payloads.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

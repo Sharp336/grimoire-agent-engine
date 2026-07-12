@@ -1226,13 +1226,14 @@ export class Agent {
 
 					case "message_end":
 						partial = null;
+						this.#state.streamMessage = null;
+						if (event.discarded) break;
 						// Check if this is an assistant message with buffered Cursor tool results.
 						// If so, split the message to emit tool results at the correct position.
 						if (event.message.role === "assistant" && this.#cursorToolResultBuffer.length > 0) {
 							this.#emitCursorSplitAssistantMessage(event.message as AssistantMessage);
 							continue; // Skip default emit - split method handles everything
 						}
-						this.#state.streamMessage = null;
 						this.appendMessage(event.message);
 						break;
 

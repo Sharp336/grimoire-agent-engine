@@ -139,6 +139,25 @@ describe("Agent", () => {
 		expect(JSON.stringify(replayedMessages)).not.toContain("I can't assist");
 	});
 
+	it("does not persist discarded Harmony leak attempts", async () => {
+		const leak = "Some prose. analysis to=functions.edit code \u0436\u0443\u0440";
+		const mock = createMockModel({
+			provider: "openai-codex",
+			responses: [{ content: [leak] }, { content: ["clean retry response"] }],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+
+		await agent.prompt("trigger leak mitigation");
+
+		expect(mock.calls).toHaveLength(2);
+		expect(agent.state.messages).toHaveLength(2);
+		expect(JSON.stringify(agent.state.messages)).not.toContain("to=functions.edit");
+		expect(JSON.stringify(agent.state.messages)).toContain("clean retry response");
+	});
+
 	it("prompt() emits assistant error lifecycle for Anthropic output-blocked stream errors before assistant start", async () => {
 		const mock = createMockModel({ responses: [] });
 		const errorText = "Output blocked by content filtering policy";

@@ -101,9 +101,9 @@ export class TerminalInfo {
 			if (this.notifyProtocol === NotifyProtocol.Osc99 && osc99CapabilitiesConfirmed) {
 				return formatOsc99Notification(message);
 			}
-			return `${this.notifyProtocol}${notificationToLine(message)}\x1b\\`;
+			return `${this.notifyProtocol}${sanitizeBasicNotification(notificationToLine(message))}\x1b\\`;
 		}
-		return `${this.notifyProtocol}${message}\x1b\\`;
+		return `${this.notifyProtocol}${sanitizeBasicNotification(message)}\x1b\\`;
 	}
 
 	sendNotification(message: string | TerminalNotification): void {
@@ -1041,6 +1041,12 @@ export function isOsc99Supported(): boolean {
 function notificationToLine(n: TerminalNotification): string {
 	if (n.title && n.body) return `${n.title}: ${n.body}`;
 	return n.title ?? n.body ?? "";
+}
+
+const BASIC_NOTIFICATION_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/gu;
+
+function sanitizeBasicNotification(message: string): string {
+	return message.replace(BASIC_NOTIFICATION_UNSAFE, "");
 }
 
 // C0/C1 control characters that are unsafe inside an OSC payload (must base64).

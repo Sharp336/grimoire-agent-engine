@@ -1656,6 +1656,7 @@ function emitDiscardedHarmonyPartial(
 	stream.push({
 		type: "message_end",
 		message: snapshotAssistantMessage({ ...partialMessage, stopReason: "error", errorMessage }),
+		discarded: true,
 	});
 }
 

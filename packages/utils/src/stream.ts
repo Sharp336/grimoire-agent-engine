@@ -144,7 +144,9 @@ class ConcatSink {
 				this.append(suffix);
 				const payload = this.flush();
 				if (payload) {
-					yield payload;
+					// The sink reuses its backing buffer after this line. Return a copy so
+					// consumers can safely retain previously yielded lines.
+					yield Buffer.from(payload);
 					this.clear();
 				}
 			}

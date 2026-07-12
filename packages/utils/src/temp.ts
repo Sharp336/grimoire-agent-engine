@@ -33,6 +33,11 @@ export class TempDir {
 		}
 		const removePromise = removeWithRetries(this.#path);
 		this.#removePromise = removePromise;
+		void removePromise.catch(() => {
+			if (this.#removePromise === removePromise) {
+				this.#removePromise = null;
+			}
+		});
 		return removePromise;
 	}
 
@@ -71,10 +76,9 @@ const kTempDir = os.tmpdir();
 function normalizePrefix(prefix?: string): string {
 	if (!prefix) {
 		return `${kTempDir}${path.sep}pi-temp-`;
-	} else if (prefix.startsWith("@")) {
-		return path.join(kTempDir, prefix.slice(1));
 	}
-	return prefix;
+	if (path.isAbsolute(prefix)) return prefix;
+	return path.join(kTempDir, prefix.startsWith("@") ? prefix.slice(1) : prefix);
 }
 
 const kRemoveOptions = { recursive: true, force: true } as const;

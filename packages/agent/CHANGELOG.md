@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed discarded Harmony-leak retry attempts remaining in persisted agent state.
+
 ## [16.4.5] - 2026-07-11
 
 ### Added
