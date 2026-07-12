@@ -7,8 +7,7 @@ import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
-import { resolveModelRoleValue } from "../config/model-resolver";
-import { deleteProfile, getProfileNames, saveProfile, switchProfile } from "../config/profiles";
+import { deleteProfile, getProfileNames, saveProfile, switchProfileAndResolve } from "../config/profiles";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -424,27 +423,20 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			if (sub === "switch") {
 				if (!name) return usage("Usage: /profiles switch <name>", runtime);
-				const ok = switchProfile(runtime.settings, name);
-				if (!ok) {
+				const availableModels = runtime.session.getAvailableModels?.() ?? [];
+				const result = switchProfileAndResolve(runtime.settings, name, availableModels);
+				if (!result.ok) {
 					await runtime.output(`Profile not found: ${name}`);
 					return commandConsumed();
 				}
-				const defaultRole = runtime.settings.getModelRole("default");
-				if (defaultRole) {
-					const availableModels = runtime.session.getAvailableModels?.() ?? [];
-					const resolved = resolveModelRoleValue(defaultRole, availableModels, {
-						settings: runtime.settings,
-					});
-					if (resolved.model) {
-						try {
-							await runtime.session.setModel(resolved.model);
-							const thinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
-							if (thinking && thinking !== ThinkingLevel.Inherit) {
-								runtime.session.setThinkingLevel(thinking);
-							}
-						} catch {
-							// Settings still applied — user can /model manually
+				if (result.model) {
+					try {
+						await runtime.session.setModel(result.model);
+						if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+							runtime.session.setThinkingLevel(result.thinkingLevel);
 						}
+					} catch {
+						// Settings applied, model switch failed
 					}
 				}
 				await runtime.output(`Switched to profile: ${name}`);
@@ -469,7 +461,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 
 			runtime.ctx.editor.setText("");
 
-			if (!sub || sub === "list") {
+			if (!sub) {
+				// No args — open the interactive profile picker
+				runtime.ctx.showProfileSelector();
+				return commandConsumed();
+			}
+
+			if (sub === "list") {
 				const names = getProfileNames(runtime.ctx.settings);
 				if (names.length === 0) {
 					runtime.ctx.showStatus("No profiles saved. Use /profiles save <name> to create one.");
@@ -494,29 +492,22 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					runtime.ctx.showWarning("Usage: /profiles switch <name>");
 					return commandConsumed();
 				}
-				const ok = switchProfile(runtime.ctx.settings, name);
-				if (!ok) {
+				const availableModels = runtime.ctx.session.getAvailableModels?.() ?? [];
+				const result = switchProfileAndResolve(runtime.ctx.settings, name, availableModels);
+				if (!result.ok) {
 					runtime.ctx.showWarning(`Profile not found: ${name}`);
 					return commandConsumed();
 				}
-				const defaultRole = runtime.ctx.settings.getModelRole("default");
-				if (defaultRole) {
-					const availableModels = runtime.ctx.session.getAvailableModels?.() ?? [];
-					const resolved = resolveModelRoleValue(defaultRole, availableModels, {
-						settings: runtime.ctx.settings,
-					});
-					if (resolved.model) {
-						try {
-							await runtime.ctx.session.setModel(resolved.model);
-							const thinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
-							if (thinking && thinking !== ThinkingLevel.Inherit) {
-								runtime.ctx.session.setThinkingLevel(thinking);
-							}
-							runtime.ctx.statusLine.invalidate();
-							runtime.ctx.updateEditorBorderColor();
-						} catch {
-							// Settings applied, model switch failed
+				if (result.model) {
+					try {
+						await runtime.ctx.session.setModel(result.model);
+						if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+							runtime.ctx.session.setThinkingLevel(result.thinkingLevel);
 						}
+						runtime.ctx.statusLine.invalidate();
+						runtime.ctx.updateEditorBorderColor();
+					} catch {
+						// Settings applied, model switch failed
 					}
 				}
 				runtime.ctx.statusLine.invalidate();

@@ -1,3 +1,6 @@
+import type { Model } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "../thinking";
+import { resolveModelRoleValue } from "./model-resolver";
 import type { Settings } from "./settings";
 import type { ProfileSnapshot } from "./settings-schema";
 
@@ -54,4 +57,37 @@ export function deleteProfile(settings: Settings, name: string): boolean {
 	delete profiles[name];
 	settings.set("profiles", profiles);
 	return true;
+}
+
+export interface ProfileSwitchResult {
+	ok: boolean;
+	model?: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/**
+ * Switch to a named profile and resolve the default role's model + thinking
+ * level from the available models. Returns the resolved model and thinking
+ * level so the caller can apply them to the live session.
+ *
+ * This is the single source of truth for profile switching — the slash
+ * command handlers and the interactive picker all call this.
+ */
+export function switchProfileAndResolve(
+	settings: Settings,
+	name: string,
+	availableModels: ReadonlyArray<Model>,
+): ProfileSwitchResult {
+	const ok = switchProfile(settings, name);
+	if (!ok) return { ok: false };
+	const defaultRole = settings.getModelRole("default");
+	if (!defaultRole) return { ok: true };
+	const resolved = resolveModelRoleValue(defaultRole, availableModels as Model[], {
+		settings,
+	});
+	return {
+		ok: true,
+		model: resolved.model,
+		thinkingLevel: resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined,
+	};
 }

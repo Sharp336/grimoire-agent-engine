@@ -14,7 +14,7 @@ import {
 } from "../../advisor";
 import { formatModelSelectorValue, resolveAdvisorRoleSelection } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
-import { saveProfile } from "../../config/profiles";
+import { getProfileNames, saveProfile, switchProfileAndResolve } from "../../config/profiles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -71,6 +71,7 @@ import { LogoutAccountSelectorComponent } from "../components/logout-account-sel
 import { ModelHubComponent, type ModelHubMode } from "../components/model-hub";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
+import { ProfileSelectorComponent } from "../components/profile-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -1463,6 +1464,42 @@ export class SelectorController {
 		const { DebugSelectorComponent } = await import("../../debug");
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	showProfileSelector(): void {
+		const names = getProfileNames(this.ctx.settings);
+		this.showSelector(done => {
+			const selector = new ProfileSelectorComponent(names, {
+				onPick: name => {
+					done();
+					const availableModels = this.ctx.session.getAvailableModels?.() ?? [];
+					const result = switchProfileAndResolve(this.ctx.settings, name, availableModels);
+					if (!result.ok) {
+						this.ctx.showError(`Profile not found: ${name}`);
+						return;
+					}
+					if (result.model) {
+						try {
+							void this.ctx.session.setModel(result.model);
+							if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+								this.ctx.session.setThinkingLevel(result.thinkingLevel);
+							}
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+						} catch {
+							// Settings applied, model switch failed
+						}
+					}
+					this.ctx.statusLine.invalidate();
+					this.ctx.showStatus(`Switched to profile: ${name}`);
+				},
+				onCancel: () => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			});
 			return { component: selector, focus: selector };
 		});
 	}
