@@ -609,7 +609,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			}
 		}
 	} else if (strict) {
-		reject("strict schema mode requires a valid yield submission", undefined);
+		if (exitCode === 0) reject("strict schema mode requires a valid yield submission", undefined);
 	} else {
 		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, prepared) : null;

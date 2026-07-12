@@ -444,6 +444,17 @@ describe("strict schema finalization", () => {
 		}
 	});
 
+	it("preserves a non-yield execution failure instead of relabeling it as a schema violation", () => {
+		const rawOutput = "request failed before the model could respond";
+		const stderr = "provider error: rate limit exceeded";
+		const result = finalizeStrict({ rawOutput, exitCode: 1, stderr });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.rawOutput).toBe(rawOutput);
+		expect(result.stderr).toBe(stderr);
+		expect(result.failure).toBeUndefined();
+	});
+
 	it("rejects null and omitted yield data as typed strict failures", () => {
 		const nullResult = finalizeStrict({ yieldItems: [{ status: "success", data: null }] });
 		const missingResult = finalizeStrict({ yieldItems: [{ status: "success" }] });
