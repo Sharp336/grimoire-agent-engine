@@ -49,4 +49,8 @@ export class ProfileSelectorComponent extends Container {
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
 		routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
 	}
+
+	handleInput(data: string): void {
+		this.#selectList.handleInput(data);
+	}
 }
