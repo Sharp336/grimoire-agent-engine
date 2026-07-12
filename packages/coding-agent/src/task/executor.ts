@@ -625,8 +625,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				stderr = "";
 			}
 		} else if (
-			(prepared.normalized === undefined || prepared.normalized === true) &&
-			!prepared.error &&
+			(prepared.normalized === undefined || prepared.normalized === true || prepared.error) &&
 			allowFallback &&
 			rawOutput.trim().length > 0
 		) {

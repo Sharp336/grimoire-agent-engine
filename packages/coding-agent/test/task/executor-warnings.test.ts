@@ -211,6 +211,24 @@ describe("subagent warning injection", () => {
 		expect(result.stderr.startsWith("invalid output schema:")).toBe(true);
 	});
 
+	it("preserves raw output fallback when a permissive schema is malformed", () => {
+		const rawOutput = '{"verdict":"looks good"}';
+		const result = finalizeSubprocessOutput({
+			rawOutput,
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: undefined,
+			outputSchema: "",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.rawOutput).toBe(rawOutput);
+		expect(result.stderr).toBe("");
+		expect(result.failure).toBeUndefined();
+	});
+
 	it("assembles incremental typed yield sections on idle", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
