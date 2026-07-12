@@ -39,20 +39,34 @@ describe("ElectronHub provider catalog", () => {
 		}
 	});
 
-	it("only bundles GLM/Z.AI thinking compat on glm-5.2:dev, not the other five DevPass models", () => {
+	it("keeps glm-5.2:dev on ElectronHub's OpenAI-shaped reasoning_effort surface, remapping max to xhigh", () => {
+		// ElectronHub's /v1/chat/completions documents a flat reasoning_effort enum
+		// (none/minimal/low/medium/high/xhigh) for every proxied model, not Z.ai's native
+		// two-tier high/max scale. thinkingFormat "zai" would restrict the exposed ladder
+		// to high/max (getModelDefinedEfforts in model-thinking.ts) and let the unsupported
+		// "max" value reach the wire — so glm-5.2:dev must stay off it.
 		const glm = getBundledModel<"openai-completions">("electronhub", "glm-5.2:dev");
-		expect(glm.compat.thinkingFormat).toBe("zai");
+		expect(glm.compat.thinkingFormat).toBe("openai");
+		expect(glm.compat.thinkingFormat).not.toBe("zai");
+		// "omit" is exclusive to glm-5.2:dev among the six DevPass models — the other five
+		// fall through to the generic openai-format default ("lowest-effort").
 		expect(glm.compat.reasoningDisableMode).toBe("omit");
 		expect(glm.compat.reasoningContentField).toBe("reasoning_content");
+		// Leaving thinkingFormat "zai" also drops its reasoning_content continuation
+		// replay (openai-completions.ts only fires that branch for thinkingFormat ===
+		// "zai"); glm-5.2:dev opts back in explicitly so cross-turn behavior is
+		// unchanged by the dialect switch.
+		expect(glm.compat.replayReasoningContent).toBe(true);
+		// The resolved effort ladder still exposes a top "max" tier (from the generic
+		// openai-compat GLM-5.2 policy), but it must be remapped to ElectronHub's actual
+		// top tier "xhigh" before it reaches the wire — both on the raw compat override
+		// and on the model's resolved thinking.effortMap.
+		expect(glm.compat.reasoningEffortMap?.max).toBe("xhigh");
+		expect(glm.thinking?.effortMap?.max).toBe("xhigh");
 
-		// "zai" is the exclusive Z.AI/GLM thinkingFormat marker in this codebase — other
-		// DevPass families get their own generic thinking defaults (e.g. gpt-oss-120b:dev's
-		// harmony-family reasoningDisableMode/reasoningContentField, which happen to reuse
-		// some of the same generic field *names* as GLM but never this value), so only
-		// assert the one signal that is exclusively GLM's.
 		for (const id of DEVPASS_IDS.filter(candidate => candidate !== "glm-5.2:dev")) {
 			const model = getBundledModel<"openai-completions">("electronhub", id);
-			expect(model.compat.thinkingFormat).not.toBe("zai");
+			expect(model.compat.reasoningDisableMode).not.toBe("omit");
 		}
 	});
 

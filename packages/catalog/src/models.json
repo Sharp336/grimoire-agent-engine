@@ -17546,16 +17546,26 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"minimal",
+					"low",
+					"medium",
 					"high",
 					"max"
-				]
+				],
+				"effortMap": {
+					"max": "xhigh"
+				}
 			},
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
-				"thinkingFormat": "zai",
+				"thinkingFormat": "openai",
 				"reasoningDisableMode": "omit",
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_content",
+				"reasoningEffortMap": {
+					"max": "xhigh"
+				},
+				"replayReasoningContent": true
 			}
 		},
 		"gpt-oss-120b:dev": {

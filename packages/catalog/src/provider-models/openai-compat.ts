@@ -1865,9 +1865,27 @@ function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completio
 		...ELECTRONHUB_OPENAI_COMPAT,
 		...(isReasoningGlmModelId(id)
 			? {
-					thinkingFormat: "zai",
+					// ElectronHub's /v1/chat/completions documents a flat, OpenAI-shaped
+					// reasoning_effort enum (none/minimal/low/medium/high/xhigh) for every
+					// proxied model — not Z.ai's native two-tier high/max scale. Staying on
+					// thinkingFormat "zai" restricts the exposed ladder to high/max (see
+					// getModelDefinedEfforts in model-thinking.ts) and lets the unsupported
+					// "max" value reach the wire. Use the generic OpenAI dialect instead —
+					// it already resolves to the correct five-tier ladder — and remap that
+					// ladder's top "max" tier onto ElectronHub's actual top tier "xhigh"
+					// before it reaches the wire.
+					thinkingFormat: "openai",
 					reasoningDisableMode: "omit",
 					reasoningContentField: "reasoning_content",
+					reasoningEffortMap: { [Effort.Max]: "xhigh" },
+					// Moving off thinkingFormat "zai" also drops its reasoning_content
+					// continuation replay (openai-completions.ts only fires that branch
+					// when thinkingFormat === "zai"). ElectronHub is exactly the documented
+					// "custom proxy setup" escape hatch for this flag (see the
+					// PROXY_OPENAI_COMPAT_PROVIDERS comment in compat/openai.ts): opt back
+					// into replaying prior-turn reasoning_content on continuation turns so
+					// GLM's cross-turn behavior is unchanged by the dialect switch.
+					replayReasoningContent: true,
 				}
 			: isQwenModelId(id)
 				? {
