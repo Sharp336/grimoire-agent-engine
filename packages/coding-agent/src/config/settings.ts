@@ -40,6 +40,7 @@ import {
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
+	type ProfileSnapshot,
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingValue,
@@ -659,6 +660,17 @@ export class Settings {
 			}
 		}
 		return normalized;
+	}
+
+	/**
+	 * Get profiles from the global/persisted layer only (not merged with project
+	 * or runtime overrides). Used by saveProfile/deleteProfile to avoid copying
+	 * project-scoped profiles into the global config.
+	 */
+	getGlobalProfiles(): Record<string, ProfileSnapshot> {
+		const value = getByPath(this.#global, ["profiles"]);
+		if (!isRecord(value)) return {};
+		return value as Record<string, ProfileSnapshot>;
 	}
 
 	/*

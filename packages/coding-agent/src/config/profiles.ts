@@ -27,7 +27,9 @@ export function saveProfile(settings: Settings, name: string): void {
 		modelRoles,
 		defaultThinkingLevel,
 	};
-	const profiles = { ...getProfiles(settings) };
+	// Read from the global layer only — not the merged view — so we don't
+	// copy project-scoped profiles into the global config.
+	const profiles = { ...settings.getGlobalProfiles() };
 	profiles[name] = snapshot;
 	settings.set("profiles", profiles);
 }
@@ -55,7 +57,9 @@ export function switchProfile(settings: Settings, name: string): boolean {
 
 /** Delete a named profile. Returns true if it existed. */
 export function deleteProfile(settings: Settings, name: string): boolean {
-	const profiles = { ...getProfiles(settings) };
+	// Read from the global layer only — not the merged view — so we don't
+	// copy project-scoped profiles into the global config.
+	const profiles = { ...settings.getGlobalProfiles() };
 	if (!(name in profiles)) return false;
 	delete profiles[name];
 	settings.set("profiles", profiles);
