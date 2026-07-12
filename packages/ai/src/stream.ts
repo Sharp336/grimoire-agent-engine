@@ -952,7 +952,9 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	if (!isOAuthOnlyProvider(model.provider)) return streamSimpleResolved(model, context, options);
+	if (!isOAuthOnlyProvider(model.provider) || model.transport === "pi-native") {
+		return streamSimpleResolved(model, context, options);
+	}
 	const resolver = options?.apiKey;
 	if (!isApiKeyResolver(resolver) || !isOAuthCredentialResolver(resolver, model.provider)) {
 		throw missingCredentialError(model.provider);

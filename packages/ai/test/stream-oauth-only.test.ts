@@ -72,6 +72,7 @@ describe("OAuth-only stream admission", () => {
 
 	test("rejects static, arbitrary, cross-provider, and generic-seeded credentials before dispatch", async () => {
 		let dispatches = 0;
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
 		registerCustomApi(
 			API,
 			() => {
@@ -91,7 +92,32 @@ describe("OAuth-only stream admission", () => {
 		const otherModel = { ...model, provider: "xai-oauth" };
 		assertMissingOAuth(() => streamSimple(model, context, { apiKey: storage.resolver(otherModel.provider) }));
 		expect(dispatches).toBe(0);
+		expect(fetchSpy).not.toHaveBeenCalled();
 		store.close();
+	});
+
+	test("dispatches pi-native OAuth-only models through the gateway bearer resolver", async () => {
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(new Response("", { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+		const gatewayModel: Model<Api> = {
+			...model,
+			transport: "pi-native",
+			baseUrl: "http://gateway.test",
+		};
+		const gatewayResolver = vi.fn(() => "gateway-bearer");
+
+		const events = streamSimple(gatewayModel, context, { apiKey: gatewayResolver });
+		await events.result();
+
+		expect(gatewayResolver).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).toHaveBeenCalledWith(
+			"http://gateway.test/v1/pi/stream",
+			expect.objectContaining({
+				method: "POST",
+				headers: expect.objectContaining({ Authorization: "Bearer gateway-bearer" }),
+			}),
+		);
 	});
 
 	test("fails a trusted empty resolver before dispatch", async () => {
