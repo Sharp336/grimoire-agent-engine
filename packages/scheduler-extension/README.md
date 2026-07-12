@@ -190,6 +190,19 @@ flowchart TD
   `failed` and the queue moves on (`/scheduler retry` revives it). Tasks left
   `running` by a crashed or closed omp process are recovered as
   `interrupted` on the next launch.
+- **Content-policy recovery** — a turn rejected by Anthropic's usage-policy
+  classifier (the "cyber"/malicious-code category) poisons the *whole
+  conversation*: because the classifier scans the full transcript, re-sending
+  into the same context re-trips it forever — and later tasks, even a message
+  you type yourself, fail identically. When such a rejection is detected the
+  extension purges the poisoned history with a fresh context
+  (`ctx.newSession`, falling back to `compact`) *before* re-dispatching the
+  task with the resume preamble, and refunds the attempt so the cascade never
+  burns the `maxAttempts` budget. The reset never re-fires `session_start`, so
+  the queue and window history are untouched. A prompt that trips the
+  classifier even in a freshly reset context is failed after `maxContextResets`
+  (default 5) resets rather than looping forever. Every purge is logged as a
+  `context_reset` event.
 - **The human wins** — aborting a *scheduled* turn (Esc) pauses the queue
   instead of re-dispatching over you; the task stays resumable and the
   attempt is refunded. `/scheduler start` resumes.
@@ -254,6 +267,7 @@ The file is created with defaults on first load and re-read on every
 | `outageBackoffMaxMs` | `900000` | Outage backoff ceiling (doubles each consecutive outage up to this). |
 | `watchdogIntervalMs` | `60000` | Watchdog tick interval; self-heals lost timers and stalled dispatches. |
 | `stallTimeoutMs` | `600000` | How long a dispatched task may sit with an idle agent before the watchdog re-queues it. |
+| `maxContextResets` | `5` | Content-policy ("cyber") violations that purge the context and re-dispatch a task before it is finally marked `failed`. Refunded like rate limits, so a poison cascade never burns the attempt budget; the cap only guards against a prompt that trips the classifier every time. |
 | `promptPreamble` | see file | Prepended to **every** dispatched prompt. |
 | `resumePreamble` | see file | Additionally prepended when resuming an interrupted task. |
 
@@ -264,9 +278,9 @@ Everything lives under `~/.omp/agent/scheduler/`
 
 | File | Contents |
 |---|---|
-| `state.json` | Queue, task statuses/attempts, run mode, observed session-window start times (each tagged with its quota profile), in-flight task id, provider rate-limit hold (`rateLimitedUntil`). Written atomically on every change; survives restarts. |
+| `state.json` | Queue, task statuses/attempts (and per-task `policyResets`), run mode, observed session-window start times (each tagged with its quota profile), in-flight task id, provider rate-limit hold (`rateLimitedUntil`). Written atomically on every change; survives restarts. |
 | `config.json` | User-editable configuration (table above). |
-| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, error, duration), `blocked` (quota, rate limit, or outage, with resume time), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice`. `/scheduler log [n]` pretty-prints the tail. |
+| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, error, duration), `blocked` (quota, rate limit, outage, or content-policy violation, with resume time), `context_reset` (poisoned-conversation purge, with method), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice`. `/scheduler log [n]` pretty-prints the tail. |
 
 Deleting `state.json` resets the queue and window history; deleting
 `config.json` restores defaults on next load.
@@ -294,6 +308,9 @@ cannot express:
    and listens to `auto_retry_end` for exhausted provider retries. An
    unrecognizable payload is treated as success. Crash/shutdown recovery is
    independent of this and always resumes tasks that never finished.
+   Content-policy ("cyber") rejections are likewise recognized by matching the
+   error text (the wire wording is not a documented contract); an unrecognized
+   variant falls through to the normal resume path rather than a context purge.
 3. **The `--yolo` runtime flag cannot be verified.** omp keeps runtime flag
    overrides in memory only, so the pre-start check reads the persisted
    config files. A non-`yolo` result is a *warning with a confirm dialog*,

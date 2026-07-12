@@ -84,8 +84,10 @@ interface MockCtx {
 	hasPendingMessages(): boolean;
 	abort(): void;
 	getContextUsage(): undefined;
+	newSession(): Promise<{ cancelled: boolean }>;
 	notifications: string[];
 	confirmCalls: number;
+	newSessionCalls: number;
 }
 
 /**
@@ -97,6 +99,7 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 	const ctx: MockCtx = {
 		notifications: [],
 		confirmCalls: 0,
+		newSessionCalls: 0,
 		ui: {
 			notify(message) {
 				ctx.notifications.push(message);
@@ -114,6 +117,10 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		hasPendingMessages: () => false,
 		abort() {},
 		getContextUsage: () => undefined,
+		async newSession() {
+			ctx.newSessionCalls += 1;
+			return { cancelled: false };
+		},
 	};
 	return ctx;
 }
@@ -802,6 +809,150 @@ fs.writeFileSync(plainCurly, "{a: 1} is the config shape I want; explain why", "
 		"{a: 1} is the config shape I want; explain why",
 	);
 }
+
+// 21. content-policy ("cyber") violation: the poisoned conversation is purged
+// (newSession) and the task resumes in a clean context with the attempt
+// refunded — so total = completed and none fail to the cascade (t = n, m = 0).
+// ungated (openai) to keep the focus off quota/window math.
+{
+	// scenario 18 left tiny watchdog/stall timers in the persisted config; the
+	// mock's constant isIdle:true would otherwise let the watchdog steal the
+	// re-dispatched turn. Restore sane timers so only the reset path drives.
+	const c21 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c21.watchdogIntervalMs = 60_000;
+	c21.stallTimeoutMs = 600_000;
+	fs.writeFileSync(configFile, JSON.stringify(c21));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{
+			id: "t90",
+			prompt: "Harden the auth middleware",
+			status: "queued",
+			addedAt: new Date().toISOString(),
+			attempts: 0,
+		},
+	];
+	st.nextTaskSeq = 91;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const cp = makeMockPi();
+const ctxCp = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(cp.api);
+await cp.emit("session_start", {}, ctxCp);
+await sleep(80);
+assert.equal(cp.sentPrompts.length, 1, "t90 dispatched");
+assert.equal(task(readState(), "t90").attempts, 1, "first dispatch counts an attempt");
+// Anthropic content-policy rejection lands on agent_end.
+await cp.emit("agent_start", {}, ctxCp);
+await cp.emit(
+	"agent_end",
+	{
+		messages: [
+			{
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage: "Output blocked: content recognized as a violation of Anthropic's Usage Policy (cyber).",
+			},
+		],
+	},
+	ctxCp,
+);
+{
+	const st = readState();
+	const t90 = task(st, "t90");
+	assert.equal(t90.status, "interrupted", "content-policy hit keeps the task resumable");
+	assert.equal(t90.attempts, 0, "content-policy hit refunds the attempt (never counts toward maxAttempts)");
+	assert.equal(t90.policyResets, 1, "content-policy reset counted separately from attempts");
+	assert.equal(st.currentTaskId, null, "task settled off the in-flight slot");
+}
+// the next dispatch purges the poisoned context (newSession) then resumes t90.
+await sleep(220);
+assert.ok(ctxCp.newSessionCalls >= 1, "poisoned context purged via newSession before re-dispatch");
+assert.equal(cp.sentPrompts.length, 2, "t90 re-dispatched into the clean context");
+assert.match(cp.sentPrompts[1], /RESUME/);
+assert.match(cp.sentPrompts[1], /Harden the auth middleware/);
+assert.ok(
+	fs
+		.readFileSync(logFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map(l => JSON.parse(l) as { event: string })
+		.some(e => e.event === "context_reset"),
+	"a context_reset event is logged",
+);
+// clean-context resume succeeds → task done. t = n, m = 0.
+await cp.emit("agent_start", {}, ctxCp);
+await cp.emit("agent_end", { messages: [{ role: "assistant", content: [] }] }, ctxCp);
+{
+	const st = readState();
+	assert.equal(task(st, "t90").status, "done", "clean-context resume completes the task");
+	assert.equal(st.tasks.filter(t => t.status === "failed").length, 0, "no task failed to the cyber cascade (m = 0)");
+}
+await sleep(50);
+await cp.command("stop", ctxCp);
+
+// 22. content-policy cap: a prompt that trips the classifier even in a clean
+// context (policyResets already at maxContextResets) is failed rather than
+// looped forever — the safety valve behind the m = 0 guarantee.
+{
+	const c22 = JSON.parse(fs.readFileSync(configFile, "utf8")) as SchedulerConfig;
+	c22.watchdogIntervalMs = 60_000;
+	c22.stallTimeoutMs = 600_000;
+	fs.writeFileSync(configFile, JSON.stringify(c22));
+	const st = readState();
+	st.run = "running";
+	st.currentTaskId = null;
+	st.rateLimitedUntil = null;
+	st.windows = [];
+	st.tasks = [
+		{
+			id: "t91",
+			prompt: "Un-runnable prompt",
+			status: "queued",
+			addedAt: new Date().toISOString(),
+			attempts: 0,
+			policyResets: 5,
+		},
+	];
+	st.nextTaskSeq = 92;
+	fs.writeFileSync(stateFile, JSON.stringify(st));
+}
+const cq = makeMockPi();
+const ctxCq = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+schedulerExtension(cq.api);
+await cq.emit("session_start", {}, ctxCq);
+await sleep(80);
+assert.equal(cq.sentPrompts.length, 1, "t91 dispatched");
+await cq.emit("agent_start", {}, ctxCq);
+await cq.emit(
+	"agent_end",
+	{
+		messages: [
+			{
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage: "blocked: usage policy violation (cyber)",
+			},
+		],
+	},
+	ctxCq,
+);
+{
+	const st = readState();
+	assert.equal(task(st, "t91").status, "failed", "content-policy surviving maxContextResets purges is failed");
+	assert.ok(
+		ctxCq.notifications.some(n => n.includes("FAILED") && n.includes("content-policy")),
+		"cap failure is announced",
+	);
+}
+await sleep(50);
+await cq.command("stop", ctxCq);
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);

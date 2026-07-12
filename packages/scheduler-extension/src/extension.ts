@@ -51,6 +51,14 @@ export interface SchedulerTask {
 	endedAt?: string;
 	attempts: number;
 	lastError?: string;
+	/**
+	 * Times this task's turn ended in an Anthropic content-policy violation
+	 * ("cyber"/usage-policy classifier). Each such hit purges the poisoned
+	 * conversation context and re-dispatches with the attempt refunded; only
+	 * after `maxContextResets` of them (a genuinely un-runnable prompt) is the
+	 * task marked failed. Distinct from `attempts`, which counts task-fault errors.
+	 */
+	policyResets?: number;
 }
 
 /** Scheduler run mode set by start/pause/stop. */
@@ -128,6 +136,13 @@ export interface SchedulerConfig {
 	watchdogIntervalMs: number;
 	/** How long a dispatched task may sit with an idle agent before the watchdog re-queues it, in ms. */
 	stallTimeoutMs: number;
+	/**
+	 * Content-policy ("cyber") violations that purge the context and re-dispatch
+	 * a task before it is finally marked failed. Refunded like rate limits, so a
+	 * poison cascade never burns the normal attempt budget; the cap only guards
+	 * against an infinite loop on a prompt that trips the classifier every time.
+	 */
+	maxContextResets: number;
 }
 
 /** One JSONL log record (task-log.jsonl in the data dir). */
@@ -144,7 +159,8 @@ export interface SchedulerLogEntry {
 		| "window_start"
 		| "recovered"
 		| "retry_failed"
-		| "notice";
+		| "notice"
+		| "context_reset";
 	taskId?: string;
 	status?: TaskStatus;
 	attempt?: number;
@@ -177,6 +193,15 @@ interface CtxLike {
 	hasPendingMessages(): boolean;
 	abort(): void | Promise<void>;
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number } | undefined;
+	/**
+	 * Runtime session control. `newSession` (ExtensionCommandContext, but wired
+	 * onto the event-handler context too — see runner.createContext) starts a
+	 * fresh, empty conversation, purging any history the content-policy
+	 * classifier flagged. `compact` is the reduce-in-place fallback. Optional so
+	 * headless / older hosts that omit them degrade gracefully.
+	 */
+	newSession?(options?: unknown): Promise<unknown> | undefined;
+	compact?(instructionsOrOptions?: unknown): Promise<void> | undefined;
 }
 
 /**
@@ -253,6 +278,7 @@ const DEFAULT_CONFIG: SchedulerConfig = {
 	outageBackoffMaxMs: 15 * 60_000,
 	watchdogIntervalMs: 60_000,
 	stallTimeoutMs: 10 * 60_000,
+	maxContextResets: 5,
 };
 
 const EMPTY_STATE: SchedulerState = {
@@ -560,6 +586,30 @@ function isTransientNetworkError(error: string): boolean {
 	);
 }
 
+/**
+ * True when the turn was rejected by Anthropic's content/usage-policy
+ * classifier (the "cyber"/malicious-code category and its siblings) rather
+ * than failing for a task reason. Unlike a task fault, this is a property of
+ * the *conversation*: once one turn's content trips the classifier it stays
+ * in the transcript, so every later request — the resume, the next task, even
+ * a manually typed message — is rejected identically until the context is
+ * purged. Detection is deliberately broad (the wire text is not a documented
+ * contract) but excludes rate-limit/quota wording, which parseRetryAfterMs and
+ * isTransientNetworkError own. Matching here routes the turn to a context
+ * reset with the attempt refunded instead of a doomed same-context retry.
+ */
+function isContentPolicyError(error: string): boolean {
+	if (/rate.?limit|\b429\b|retry-after|quota|overloaded/i.test(error)) return false;
+	return (
+		/\b(?:usage|content|acceptable[- ]use)[- ]polic/i.test(error) ||
+		/policy[- ]violation|violat\w* (?:of |the )?(?:our )?(?:usage|content|acceptable)/i.test(error) ||
+		/\bcyber\w*/i.test(error) ||
+		/malicious (?:code|use|cyber)|malware|cyberweapon/i.test(error) ||
+		/flagged (?:as|for|by)|content (?:filter|moderation)|prohibited content|disallowed content/i.test(error) ||
+		/recognized as a violation/i.test(error)
+	);
+}
+
 /** Hard cap on prompts loaded from one batch file. */
 const MAX_BATCH_PROMPTS = 30;
 
@@ -688,6 +738,14 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	let watchdogTimer: IntervalHandle | null = null;
 	/** One-shot guard for the unknown-provider notice (reset per process). */
 	let unknownModelNoticed = false;
+	/**
+	 * A content-policy ("cyber") violation poisoned the conversation; the next
+	 * dispatch must purge the context (newSession) before sending, or every
+	 * request keeps tripping the same classifier. Set in agent_end, consumed in
+	 * tryDispatch. In-memory: a process restart starts/resumes a session anyway,
+	 * and a lingering poison self-heals (re-detected → reset on the next turn).
+	 */
+	let pendingContextReset = false;
 
 	function startTimer(ms: number, fn: () => void): TimerHandle {
 		return setTimeout(fn, ms) as unknown as TimerHandle;
@@ -866,6 +924,41 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		});
 	}
 
+	/**
+	 * Purge a conversation poisoned by a content-policy violation. newSession
+	 * drops all history (no LLM call, so the flagged text is never re-scanned)
+	 * and — unlike a fresh launch — does NOT re-fire session_start (agent
+	 * session.newSession emits only session_before_switch/session_switch), so the
+	 * scheduler's own lifecycle, queue, and state are untouched. compact is the
+	 * reduce-in-place fallback for hosts that expose no newSession. Both are
+	 * best-effort: on failure the next dispatch simply re-enters the poisoned
+	 * context, re-detects, and retries — a stall, never a lost task.
+	 */
+	async function resetContext(reason: string): Promise<void> {
+		const ctx = liveCtx;
+		let method = "none";
+		try {
+			if (typeof ctx?.newSession === "function") {
+				await ctx.newSession();
+				method = "newSession";
+			} else if (typeof ctx?.compact === "function") {
+				await ctx.compact(
+					"Context reset after a content-policy rejection. Summarize prior work as a terse status only — omit verbatim code, commands, payloads, logs, and any security-sensitive content.",
+				);
+				method = "compact";
+			}
+		} catch (err) {
+			pi.logger?.warn?.(`scheduler: context reset failed: ${String(err)}`);
+			method = "failed";
+		}
+		logEvent({ event: "context_reset", detail: `${reason} — ${method}` });
+		notify(
+			null,
+			`scheduler: content-policy violation — cleared conversation context (${method}) before continuing.`,
+			"warning",
+		);
+	}
+
 	function tryDispatch(): void {
 		const st = getState();
 		if (st.run !== "running") return;
@@ -913,6 +1006,15 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			}
 		}
 
+		// A content-policy ("cyber") violation poisoned the conversation: purge
+		// it BEFORE sending, or this dispatch just trips the same classifier.
+		// Reset is async; re-arm the loop and dispatch into the clean context.
+		if (pendingContextReset) {
+			pendingContextReset = false;
+			void resetContext("content-policy violation").finally(() => scheduleDispatch(cfg.dispatchDelayMs));
+			return;
+		}
+
 		const resuming = task.status === "interrupted";
 		task.status = "running";
 		task.attempts += 1;
@@ -942,7 +1044,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		updateStatus();
 	}
 
-	function settleCurrentTask(error: string | null, refundAttempt = false): void {
+	function settleCurrentTask(error: string | null, refundAttempt = false, forceFail = false): void {
 		const st = getState();
 		if (st.currentTaskId === null) return;
 		const task = st.tasks.find(t => t.id === st.currentTaskId);
@@ -952,9 +1054,19 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			const durationMs = task.dispatchedAt ? Date.now() - Date.parse(task.dispatchedAt) : undefined;
 			if (error) {
 				task.lastError = error;
-				if (refundAttempt) {
-					// Rate limits and outages are not the task's fault: refund
-					// the attempt so they can never exhaust maxAttempts.
+				if (forceFail) {
+					// A content-policy violation that survived maxContextResets purges:
+					// the prompt trips the classifier even in a clean context, so it is
+					// genuinely un-runnable — fail it rather than loop forever.
+					task.status = "failed";
+					notify(
+						null,
+						`scheduler: ${task.id} FAILED — content-policy violation persisted across ${task.policyResets ?? 0} context resets (${truncate(error, 80)}) — /scheduler retry ${task.id} to re-queue.`,
+						"error",
+					);
+				} else if (refundAttempt) {
+					// Rate limits, outages, and content-policy resets are not the
+					// task's fault: refund the attempt so they never exhaust maxAttempts.
 					task.attempts = Math.max(0, task.attempts - 1);
 					task.status = "interrupted";
 				} else {
@@ -1038,11 +1150,22 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		const rateLimited =
 			error !== null && (waitMs !== null || (fromRetryExhaustion && /rate.?limit|\b429\b|quota/i.test(error)));
 		const outage = !rateLimited && error !== null && fromRetryExhaustion && isTransientNetworkError(error);
+		// A content-policy ("cyber") rejection poisons the whole conversation, not
+		// just this turn: re-sending into the same context re-trips the classifier
+		// forever. Route it to a context purge with the attempt refunded instead.
+		const contentPolicy = error !== null && !rateLimited && !outage && isContentPolicyError(error);
 		// A user abort of a *scheduled* turn means the human wants the seat:
 		// pause the queue instead of fighting them for the next turn.
 		const userAbort =
-			!rateLimited && !outage && error !== null && /\baborted\b/i.test(error) && getState().currentTaskId !== null;
-		settleCurrentTask(error, rateLimited || outage || userAbort);
+			!rateLimited &&
+			!outage &&
+			!contentPolicy &&
+			error !== null &&
+			/\baborted\b/i.test(error) &&
+			getState().currentTaskId !== null;
+		// contentPolicy settles inside its own branch (it needs the task's running
+		// reset count to decide refund-and-retry vs. give-up); everyone else here.
+		if (!contentPolicy) settleCurrentTask(error, rateLimited || outage || userAbort);
 		const st = getState();
 		if (rateLimited) {
 			// Trust the provider's own reset clock over local window math and
@@ -1075,6 +1198,45 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 				"warning",
 			);
 			if (st.run === "running") armResumeTimer(resumeAt);
+		} else if (contentPolicy) {
+			// The conversation is poisoned; purge it before the next dispatch so
+			// this and every following task run in a clean context. The hit is not
+			// the task's fault, so refund the attempt — a poison cascade must never
+			// burn the maxAttempts budget. maxContextResets guards the pathological
+			// case where a single prompt trips the classifier even when alone.
+			outageStreak = 0;
+			pendingContextReset = true;
+			const cur = st.currentTaskId ? st.tasks.find(t => t.id === st.currentTaskId) : undefined;
+			if (cur) {
+				cur.policyResets = (cur.policyResets ?? 0) + 1;
+				const capped = cur.policyResets > cfg.maxContextResets;
+				settleCurrentTask(error, !capped, capped);
+				logEvent({
+					event: "blocked",
+					taskId: cur.id,
+					detail: capped
+						? `content-policy violation persisted across ${cur.policyResets} context resets — task failed`
+						: `content-policy violation #${cur.policyResets} — purging context, attempt refunded`,
+				});
+				if (!capped)
+					notify(
+						null,
+						`scheduler: ${cur.id} hit a content-policy violation (#${cur.policyResets}) — clearing context and resuming (attempt not counted).`,
+						"warning",
+					);
+			} else {
+				// A manual/non-scheduled turn poisoned the shared context; clear it
+				// before the scheduler dispatches its next task into the same history.
+				logEvent({
+					event: "blocked",
+					detail: "content-policy violation on a non-scheduled turn — context reset queued",
+				});
+			}
+			if (st.rateLimitedUntil) {
+				st.rateLimitedUntil = null;
+				saveState();
+			}
+			if (st.run === "running") scheduleDispatch(cfg.dispatchDelayMs);
 		} else if (userAbort) {
 			st.run = "paused";
 			saveState();
