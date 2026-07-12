@@ -519,7 +519,19 @@ function completion(prompt::String; model="default", system=nothing, schema=noth
     return schema === nothing ? text : Main.json_parse(string(text))
 end
 
-function agent(prompt::String; agent="task", model=nothing, label=nothing, schema=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false, kwargs...)
+if !isdefined(Main, :AgentSchemaViolationError)
+    struct AgentSchemaViolationError <: Exception
+        code::String
+        details
+    end
+
+    function Base.showerror(io::IO, err::AgentSchemaViolationError)
+        message = err.details isa AbstractDict ? get(err.details, "message", nothing) : nothing
+        print(io, message === nothing ? "Subagent output violated its schema." : message)
+    end
+end
+
+function agent(prompt::String; agent="task", model=nothing, label=nothing, schema=nothing, schema_mode=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false, kwargs...)
     args_dict = Dict{String, Any}("prompt" => prompt)
     if agent !== nothing
         args_dict["agent"] = agent
@@ -532,6 +544,9 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
     end
     if schema !== nothing
         args_dict["schema"] = schema
+    end
+    if schema_mode !== nothing
+        args_dict["schemaMode"] = schema_mode
     end
     # Isolation knobs mirror the `task` tool: strict opt-in via `isolated`,
     # with `apply`/`merge` controlling the post-run patch/branch merge.
@@ -553,6 +568,9 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
         args_dict["handle"] = true
     end
     res = __omp_call_bridge("__agent__", args_dict)
+    if res isa AbstractDict && haskey(res, "schemaViolation")
+        throw(AgentSchemaViolationError("schema_violation", res["schemaViolation"]))
+    end
     text = res isa AbstractDict ? get(res, "text", res) : res
     parsed = schema === nothing ? text : Main.json_parse(string(text))
     if !handle_result

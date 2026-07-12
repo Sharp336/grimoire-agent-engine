@@ -17,6 +17,34 @@ import {
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { jtdToJsonSchema, normalizeSchema } from "./jtd-to-json-schema";
 
+export type SchemaMode = "permissive" | "strict";
+
+export interface SchemaViolationResult {
+	error: "schema_violation";
+	message: string;
+	missingRequired: string[];
+	data: string;
+}
+
+const MAX_SCHEMA_VIOLATION_MESSAGE_LENGTH = 512;
+const MAX_SCHEMA_VIOLATION_MISSING_FIELDS = 6;
+const MAX_SCHEMA_VIOLATION_MISSING_FIELD_LENGTH = 48;
+const MAX_SCHEMA_VIOLATION_DATA_LENGTH = 256;
+const MAX_SCHEMA_VIOLATION_SERIALIZED_LENGTH = 2_048;
+const MAX_SCHEMA_RETRY_ISSUES = 16;
+const MAX_SCHEMA_RETRY_ISSUE_LENGTH = 256;
+const MAX_SCHEMA_RETRY_DIAGNOSTIC_LENGTH = 2_048;
+
+/** Ephemeral validated schema contract; persist only raw schema + mode. */
+export interface PreparedOutputSchema {
+	readonly outputSchema: unknown;
+	readonly schemaMode: SchemaMode;
+	readonly normalized?: unknown;
+	readonly jsonSchema?: Record<string, unknown>;
+	readonly validator?: OutputValidator;
+	readonly error?: string;
+}
+
 /** A validator bound to a specific output schema. */
 export interface OutputValidator {
 	/** Run JSON Schema validation; returns the raw `success`/`issues` shape so callers may inspect every failure. */
@@ -30,6 +58,8 @@ export interface OutputValidator {
 	 * one element, while scalar properties use the property schema directly.
 	 */
 	readonly validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	/** Required property names for each incremental section's value schema. */
+	readonly sectionRequiredFields: ReadonlyMap<string, readonly string[]>;
 	/** Whether top-level schema closure makes unknown incremental yield labels invalid. */
 	readonly rejectUnknownSections: boolean;
 	/** Finite top-level section labels declared directly by the schema. Pattern-backed labels are accepted via `isKnownSection`. */
@@ -92,18 +122,77 @@ export function buildOutputValidator(schema: unknown): BuildOutputValidatorResul
 			: jsonSchemaRecord;
 	const required = extractRequiredFields(labelSchema);
 	const sectionLabels = buildSectionLabelMetadata(labelSchema);
+	const sectionValidators = buildSectionValidators(labelSchema);
 	return {
 		normalized,
 		jsonSchema: jsonSchemaRecord,
 		validator: {
 			requiredFields: required,
 			validate: value => validateJsonSchemaValue(jsonSchemaRecord, value),
-			validateSection: buildSectionValidators(labelSchema),
+			validateSection: sectionValidators.validators,
+			sectionRequiredFields: sectionValidators.requiredFields,
 			rejectUnknownSections: sectionLabels.rejectUnknownSections,
 			knownSectionLabels: sectionLabels.labels,
 			isKnownSection: sectionLabels.isKnown,
 		},
 	};
+}
+
+/**
+ * True when a `$ref` survived local dereferencing. Values under data-bearing
+ * schema keywords are opaque JSON rather than schemas, so their `$ref` fields
+ * must not be interpreted as references.
+ */
+export function hasUnresolvedRefs(schema: unknown): boolean {
+	if (schema == null) return false;
+	if (Array.isArray(schema)) {
+		for (const item of schema) {
+			if (hasUnresolvedRefs(item)) return true;
+		}
+		return false;
+	}
+	if (typeof schema !== "object") return false;
+	const record = schema as Record<string, unknown>;
+	if (typeof record.$ref === "string") return true;
+	for (const key in record) {
+		if (key === "const" || key === "default" || key === "enum" || key === "examples") continue;
+		if (hasUnresolvedRefs(record[key])) return true;
+	}
+	return false;
+}
+
+/** Prepare one shared validator for tool-side and post-mortem enforcement. */
+export function prepareOutputSchema(
+	outputSchema: unknown,
+	schemaMode: SchemaMode = "permissive",
+): PreparedOutputSchema {
+	let built: BuildOutputValidatorResult;
+	try {
+		built = buildOutputValidator(outputSchema);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			outputSchema,
+			schemaMode,
+			error: `schema preparation failed: ${message}`,
+		};
+	}
+	const unresolvedRefs =
+		schemaMode === "strict" &&
+		built.jsonSchema !== undefined &&
+		hasUnresolvedRefs(dereferenceJsonSchema(built.jsonSchema));
+	const error = unresolvedRefs
+		? "schema contains unresolved $ref after dereferencing"
+		: schemaMode === "strict" && !built.validator
+			? (built.error ??
+				(built.normalized === undefined
+					? "strict schema mode requires an output schema"
+					: "strict schema mode requires a constraining output schema"))
+			: built.error;
+	if (unresolvedRefs) {
+		return { outputSchema, schemaMode, normalized: built.normalized, jsonSchema: built.jsonSchema, error };
+	}
+	return { outputSchema, schemaMode, ...built, error };
 }
 
 /**
@@ -115,12 +204,16 @@ export function buildOutputValidator(schema: unknown): BuildOutputValidatorResul
  * properties use the property schema directly. Closed top-level schemas reject labels that are
  * not declared as properties.
  */
-function buildSectionValidators(
-	jsonSchema: Record<string, unknown>,
-): ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> {
+interface SectionValidators {
+	readonly validators: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly requiredFields: ReadonlyMap<string, readonly string[]>;
+}
+
+function buildSectionValidators(jsonSchema: Record<string, unknown>): SectionValidators {
 	const validators = new Map<string, (value: unknown) => JsonSchemaValidationResult>();
+	const requiredFields = new Map<string, readonly string[]>();
 	const properties = jsonSchema.properties;
-	if (!isRecord(properties)) return validators;
+	if (!isRecord(properties)) return { validators, requiredFields };
 	for (const label in properties) {
 		const raw = properties[label];
 		const propRecord = isRecord(raw) ? raw : undefined;
@@ -129,8 +222,9 @@ function buildSectionValidators(
 				? propRecord.items
 				: raw;
 		validators.set(label, value => validateJsonSchemaValue(sectionSchema, value));
+		requiredFields.set(label, extractRequiredFields(sectionSchema));
 	}
-	return validators;
+	return { validators, requiredFields };
 }
 
 interface SectionLabelMetadata {
@@ -263,6 +357,53 @@ export function summarizeValidationFailure(
 	return { message, missingRequired: missing };
 }
 
+export function createSchemaViolationResult(
+	message: string,
+	missingRequired: readonly string[],
+	data: unknown,
+): SchemaViolationResult {
+	let preview: string;
+	try {
+		preview = JSON.stringify(data) ?? "null";
+	} catch {
+		try {
+			preview = String(data);
+		} catch {
+			preview = "[unserializable data]";
+		}
+	}
+	const violation: SchemaViolationResult = {
+		error: "schema_violation",
+		message: truncateJsonString(message, MAX_SCHEMA_VIOLATION_MESSAGE_LENGTH),
+		missingRequired: missingRequired
+			.slice(0, MAX_SCHEMA_VIOLATION_MISSING_FIELDS)
+			.map(field => truncateJsonString(field, MAX_SCHEMA_VIOLATION_MISSING_FIELD_LENGTH)),
+		data: truncateJsonString(preview, MAX_SCHEMA_VIOLATION_DATA_LENGTH),
+	};
+	const serialized = JSON.stringify(violation);
+	if (serialized.length <= MAX_SCHEMA_VIOLATION_SERIALIZED_LENGTH) return violation;
+	const dataBudget =
+		MAX_SCHEMA_VIOLATION_SERIALIZED_LENGTH - (serialized.length - JSON.stringify(violation.data).length);
+	return { ...violation, data: truncateJsonString(violation.data, Math.max(2, dataBudget)) };
+}
+
+function truncateJsonString(value: string, maxSerializedLength: number): string {
+	if (JSON.stringify(value).length <= maxSerializedLength) return value;
+	const suffix = "…";
+	let low = 0;
+	let high = value.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (JSON.stringify(`${value.slice(0, middle)}${suffix}`).length <= maxSerializedLength) low = middle;
+		else high = middle - 1;
+	}
+	return `${value.slice(0, low)}${suffix}`;
+}
+
+function truncateText(value: string, maxLength: number): string {
+	return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
 export function extractRequiredFields(jsonSchema: unknown): string[] {
 	if (!jsonSchema || typeof jsonSchema !== "object") return [];
 	const required = (jsonSchema as { required?: unknown }).required;
@@ -286,7 +427,7 @@ export function computeMissingRequired(required: readonly string[], value: unkno
 export function formatValidationIssueHeadline(issue: JsonSchemaValidationIssue | undefined): string | undefined {
 	if (!issue) return undefined;
 	const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
-	return `${path}: ${issue.message}`;
+	return truncateText(`${path}: ${issue.message}`, MAX_SCHEMA_VIOLATION_MESSAGE_LENGTH);
 }
 
 /**
@@ -298,10 +439,12 @@ export function formatValidationIssueHeadline(issue: JsonSchemaValidationIssue |
  */
 export function formatAllValidationIssues(issues: ReadonlyArray<JsonSchemaValidationIssue> | undefined): string {
 	if (!issues || issues.length === 0) return "Unknown schema validation error.";
-	return issues
+	const formatted = issues
+		.slice(0, MAX_SCHEMA_RETRY_ISSUES)
 		.map(issue => {
 			const path = issue.path.length === 0 ? "" : `${issue.path.map(seg => String(seg)).join("/")}: `;
-			return `${path}${issue.message}`;
+			return truncateText(`${path}${issue.message}`, MAX_SCHEMA_RETRY_ISSUE_LENGTH);
 		})
 		.join("; ");
+	return truncateText(formatted, MAX_SCHEMA_RETRY_DIAGNOSTIC_LENGTH);
 }

@@ -54,6 +54,7 @@ import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
+import type { PreparedOutputSchema, SchemaMode } from "./output-schema-validator";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { type TodoPhase, TodoTool } from "./todo";
@@ -188,6 +189,10 @@ export interface ToolSession {
 	eventBus?: EventBus;
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
+	/** Validation mode for structured subagent output. Omitted is permissive. */
+	schemaMode?: SchemaMode;
+	/** In-memory prepared structured-output contract. Never persisted. */
+	preparedOutputSchema?: PreparedOutputSchema;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Session starts with a prewalk hand-off armed. Keeps `todo` in yield-gated

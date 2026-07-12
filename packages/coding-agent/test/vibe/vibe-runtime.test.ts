@@ -25,6 +25,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { prepareOutputSchema } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
 function createSession(options: { manager?: AsyncJobManager } = {}): ToolSession {
@@ -374,6 +375,104 @@ describe("vibe session registry", () => {
 		expect(second.output).toContain("built on prior work");
 		expect(fake.prompts).toEqual(["do the first thing", "now extend it"]);
 		expect(fake.isDisposed()).toBe(false);
+	});
+	it("preserves the prepared strict contract through a follow-up finalization", async () => {
+		const fake = createFakeWorkerSession();
+		AgentRegistry.global().register({
+			id: "StrictWorker",
+			displayName: "StrictWorker",
+			kind: "sub",
+			parentId: "Main",
+			session: fake.session,
+			status: "idle",
+		});
+		const agent = { name: "task", description: "worker", systemPrompt: "sp", source: "bundled" as const };
+		const schema = {
+			type: "object",
+			required: ["left", "right"],
+			properties: {
+				left: { enum: ["a", "b"] },
+				right: { enum: ["a", "b"] },
+			},
+			oneOf: [
+				{ properties: { left: { const: "a" }, right: { const: "b" } } },
+				{ properties: { left: { const: "b" }, right: { const: "a" } } },
+			],
+		};
+		fake.setScript({
+			events: [
+				{
+					type: "tool_execution_end",
+					toolName: "yield",
+					result: { details: { status: "success", type: ["left"], data: "a" } },
+					isError: false,
+				},
+				{
+					type: "tool_execution_end",
+					toolName: "yield",
+					result: { details: { status: "success", type: ["right"], data: "a" } },
+					isError: false,
+				},
+			],
+			responseText: "assembled an invalid pair",
+		});
+
+		const result = await executorModule.runSubagentFollowUpTurn({
+			id: "StrictWorker",
+			agent,
+			message: "assemble the pair",
+			outputSchema: schema,
+			// Deliberately disagree: the prepared contract must win through
+			// follow-up finalization rather than being reconstructed permissively.
+			schemaMode: "permissive",
+			preparedOutputSchema: prepareOutputSchema(schema, "strict"),
+		});
+
+		expect(result.exitCode).toBeGreaterThan(0);
+		expect(result.failure).toMatchObject({ error: "schema_violation" });
+		expect(JSON.parse(result.output)).toMatchObject({ error: "schema_violation" });
+	});
+
+	it("forwards a vibe worker's prepared contract to every turn", async () => {
+		const fake = createFakeWorkerSession();
+		const schema = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const preparedOutputSchema = prepareOutputSchema(schema, "strict");
+		const firstTurns: Array<Record<string, unknown>> = [];
+		const followUps: Array<Record<string, unknown>> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			firstTurns.push(options as unknown as Record<string, unknown>);
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: fake.session,
+				status: "idle",
+			});
+			return makeResult(options.id);
+		});
+		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			followUps.push(options as unknown as Record<string, unknown>);
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const session = Object.assign(createSession({ manager }), {
+			outputSchema: schema,
+			schemaMode: "strict" as const,
+			preparedOutputSchema,
+		});
+		const registry = VibeSessionRegistry.global();
+		const spawned = await registry.spawn(session, { cli: "good", name: "Strict", prompt: "first" });
+		await manager.getJob(spawned.jobId)!.promise;
+		const followUp = await registry.send(session, { session: "Strict", message: "second" });
+		await manager.getJob(followUp.jobId!)!.promise;
+
+		for (const options of [...firstTurns, ...followUps]) {
+			expect(options.outputSchema).toBe(schema);
+			expect(options.schemaMode).toBe("strict");
+			expect(options.preparedOutputSchema).toBe(preparedOutputSchema);
+		}
 	});
 
 	it("wait wakes on the first settling turn among concurrent sessions and suppresses its re-delivery", async () => {

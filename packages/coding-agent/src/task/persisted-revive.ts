@@ -99,6 +99,7 @@ export function createPersistedSubagentReviverFactory(
 				taskDepth,
 				toolNames: init.tools,
 				outputSchema: init.outputSchema,
+				schemaMode: init.schemaMode ?? "permissive",
 				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let

@@ -92,6 +92,19 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
+	class AgentSchemaViolationError extends Error {
+		constructor(details) {
+			super(
+				details && typeof details === "object" && typeof details.message === "string"
+					? details.message
+					: "Subagent output violated its schema.",
+			);
+			this.name = "AgentSchemaViolationError";
+			this.code = "schema_violation";
+			this.details = details;
+		}
+	}
+
 	const completion = async (prompt, opts, ...rest) => {
 		const o = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
 		const res = await globalThis.__omp_call_tool__("__completion__", { prompt, ...o });
@@ -104,11 +117,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"agent",
 			opts,
 			rest,
-			["agent", "model", "label", "schema", "isolated", "apply", "merge"],
-			"{ agent, model, label, schema, isolated, apply, merge, handle }",
+			["agent", "model", "label", "schema", "isolated", "apply", "merge", "schemaMode"],
+			"{ agent, model, label, schema, schemaMode, isolated, apply, merge, handle }",
 		);
 		const { handle, ...callArgs } = o;
 		const res = await globalThis.__omp_call_tool__("__agent__", { prompt, ...callArgs, handle: Boolean(handle) });
+		if (res && typeof res === "object" && res.schemaViolation !== undefined) {
+			throw new AgentSchemaViolationError(res.schemaViolation);
+		}
 		const text = res && typeof res === "object" ? res.text : res;
 		const parsed = hasOwn(callArgs, "schema") ? JSON.parse(text) : text;
 		if (!handle) return parsed;

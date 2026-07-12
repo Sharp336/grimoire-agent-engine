@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../prelude";
 
 const pythonPath = Bun.env.PYTHON ?? "python3";
@@ -26,19 +29,23 @@ async function runPrelude(
 }
 
 describe("python prelude", () => {
-	it("exposes read(path, offset?, limit?) with positional optional args", () => {
-		// The eval docs advertise `read(path, offset?=1, limit?=None)`. A
-		// keyword-only signature (`def read(path, *, offset=1, limit=None)`)
-		// makes `read("file", 10)` raise `TypeError: read() takes 1 positional
-		// argument but 2 were given`, which agents in the wild repeatedly hit.
-		// Lock the contract so the helper accepts both positional and keyword
-		// forms.
-		const match = PYTHON_PRELUDE.match(/def\s+read\(([^)]+)\)/);
-		expect(match).not.toBeNull();
-		const signature = match?.[1] ?? "";
-		expect(signature).not.toContain("*,");
-		expect(signature).toContain("offset");
-		expect(signature).toContain("limit");
+	it("accepts positional read options at runtime", async () => {
+		using tempDir = TempDir.createSync("@omp-py-prelude-read-");
+		const file = path.join(tempDir.path(), "sample.txt");
+		await fs.writeFile(file, "first\nsecond\nthird\n");
+
+		const { exitCode, stderr, stdout } = await runPrelude(
+			[
+				`positional = read(${JSON.stringify(file)}, 2, 1)`,
+				`keyword = read(${JSON.stringify(file)}, offset=3, limit=1)`,
+				'print(json.dumps({"positional": positional, "keyword": keyword}))',
+			].join("\n"),
+			{},
+		);
+
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		expect(JSON.parse(stdout)).toEqual({ positional: "second\n", keyword: "third\n" });
 	});
 
 	it("appends line selectors to delegated URI paths", async () => {
@@ -84,6 +91,93 @@ describe("python prelude", () => {
 					args: { path: "mcp://server/resource:10-14" },
 				},
 			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("forwards caller-supplied schemas and returns parsed structured data", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({
+					ok: true,
+					value: {
+						text: '{"accepted":false,"zero":0}',
+						details: { agent: "task", id: "py-strict", structured: true },
+					},
+				});
+			},
+		});
+
+		try {
+			const { exitCode, stderr, stdout } = await runPrelude(
+				[
+					'result = agent("classify", schema={"type": "object"})',
+					'print(json.dumps(result))',
+				].join("\n"),
+				{
+					PI_TOOL_BRIDGE_URL: server.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+			expect(JSON.parse(stdout)).toEqual({ accepted: false, zero: 0 });
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__agent__",
+					args: { prompt: "classify", agent: "task", schema: { type: "object" } },
+				},
+			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("maps returned schema violations to AgentSchemaValidationError", async () => {
+		const violation = {
+			error: "schema_violation",
+			message: "result.data.answer must be string",
+			missingRequired: [],
+			data: '{"answer":7}',
+		};
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => Response.json({ ok: true, value: { schemaViolation: violation } }),
+		});
+
+		try {
+			const { exitCode, stderr, stdout } = await runPrelude(
+				[
+					"try:",
+					'    agent("classify", schema={"type": "object"}, handle=True)',
+					"except AgentSchemaValidationError as error:",
+					'    print(json.dumps({"type": type(error).__name__, "code": error.code, "message": str(error), "details": error.details}))',
+				].join("\n"),
+				{
+					PI_TOOL_BRIDGE_URL: server.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+			expect(JSON.parse(stdout)).toEqual({
+				type: "AgentSchemaValidationError",
+				code: "schema_violation",
+				message: violation.message,
+				details: violation,
+			});
 		} finally {
 			server.stop(true);
 		}

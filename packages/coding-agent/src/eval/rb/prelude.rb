@@ -392,12 +392,24 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     schema.nil? ? text : JSON.parse(text)
   end
 
-  def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, isolated: nil, apply: nil, merge: nil, handle: false)
+  class AgentSchemaViolationError < StandardError
+    attr_reader :code, :details
+
+    def initialize(details)
+      @code = "schema_violation"
+      @details = details
+      message = details["message"] if details.is_a?(Hash)
+      super(message || "Subagent output violated its schema.")
+    end
+  end
+
+  def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, schema_mode: nil, isolated: nil, apply: nil, merge: nil, handle: false)
     args = { "prompt" => prompt }
     args["agent"] = agent unless agent.nil?
     args["model"] = model unless model.nil?
     args["label"] = label unless label.nil?
     args["schema"] = schema unless schema.nil?
+    args["schemaMode"] = schema_mode unless schema_mode.nil?
     # Isolation knobs mirror the `task` tool: strict opt-in via `isolated`,
     # with `apply`/`merge` controlling the post-run patch/branch merge.
     args["isolated"] = !!isolated unless isolated.nil?
@@ -406,6 +418,7 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     # Tell the bridge a handle is wanted so it preserves the backing artifacts.
     args["handle"] = true if handle
     res = OmpBridge.call("__agent__", args)
+    raise AgentSchemaViolationError, res["schemaViolation"] if res.is_a?(Hash) && res.key?("schemaViolation")
     text = res.is_a?(Hash) ? res["text"] : res
     parsed = schema.nil? ? text : JSON.parse(text)
     return parsed unless handle

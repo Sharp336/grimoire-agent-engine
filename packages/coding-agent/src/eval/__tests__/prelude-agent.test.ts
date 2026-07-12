@@ -104,6 +104,92 @@ describe("eval js agent() handle", () => {
 		expect(node.isolationSummary).toContain("/artifacts/iso-1.patch");
 		expect("branchName" in node).toBe(false);
 	});
+
+	it("forwards strict schema mode and returns the structured value unchanged", async () => {
+		let seenArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return {
+				text: '{"accepted":false,"zero":0}',
+				details: { agent: "task", id: "strict-1", structured: true },
+			};
+		});
+
+		const output = await (sandbox.agent as AgentHelper)("classify", {
+			schema: { type: "object" },
+			schemaMode: "strict",
+		});
+
+		expect(seenArgs).toMatchObject({
+			prompt: "classify",
+			schema: { type: "object" },
+			schemaMode: "strict",
+			handle: false,
+		});
+		expect(output).toEqual({ accepted: false, zero: 0 });
+	});
+
+	it("keeps legacy positional isolation/apply/merge slots when schemaMode is appended", async () => {
+		let seenArgs: Record<string, unknown> | undefined;
+		const schema = { type: "object" };
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return {
+				text: '{"ok":true}',
+				details: { agent: "reviewer", id: "positional-1", structured: true },
+			};
+		});
+
+		const output = await (sandbox.agent as (...args: unknown[]) => Promise<unknown>)(
+			"inspect",
+			"reviewer",
+			["p/fast"],
+			"Positionally",
+			schema,
+			true,
+			false,
+			true,
+			"strict",
+		);
+
+		expect(seenArgs).toEqual({
+			prompt: "inspect",
+			agent: "reviewer",
+			model: ["p/fast"],
+			label: "Positionally",
+			schema,
+			isolated: true,
+			apply: false,
+			merge: true,
+			schemaMode: "strict",
+			handle: false,
+		});
+		expect(output).toEqual({ ok: true });
+	});
+
+	it("throws a machine-distinguishable error with violation details", async () => {
+		const violation = {
+			error: "schema_violation",
+			message: "result.data.answer must be string",
+			missingRequired: [],
+			data: '{"answer":7}',
+		};
+		let seenArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return { schemaViolation: violation };
+		});
+
+		await expect(
+			(sandbox.agent as AgentHelper)("classify", { schema: { type: "object" }, schemaMode: "strict", handle: true }),
+		).rejects.toMatchObject({
+			name: "AgentSchemaViolationError",
+			code: "schema_violation",
+			message: violation.message,
+			details: violation,
+		});
+		expect(seenArgs).toMatchObject({ handle: true, schemaMode: "strict" });
+	});
 });
 
 describe("eval js read() URI delegation", () => {

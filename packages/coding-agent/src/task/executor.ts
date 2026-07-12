@@ -47,8 +47,15 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
-import { normalizeSchema } from "../tools/jtd-to-json-schema";
-import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
+import {
+	createSchemaViolationResult,
+	type OutputValidator,
+	type PreparedOutputSchema,
+	prepareOutputSchema,
+	type SchemaMode,
+	type SchemaViolationResult,
+	summarizeValidationFailure,
+} from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -60,6 +67,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	type ReviewFinding,
 	type SingleResult,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -293,6 +301,8 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	outputSchema?: unknown;
+	schemaMode?: SchemaMode;
+	preparedOutputSchema?: PreparedOutputSchema;
 	/**
 	 * Caller supplied a schema that supersedes the agent's native output prompt.
 	 * Eval `agent(..., schema=...)` sets this so built-in agents ignore stale yield labels.
@@ -402,16 +412,6 @@ function parseStringifiedJson(value: unknown): unknown {
 	}
 }
 
-function previewOffendingData(value: unknown, maxLength = 500): string {
-	let serialized: string;
-	try {
-		serialized = JSON.stringify(value) ?? "null";
-	} catch {
-		serialized = String(value);
-	}
-	return serialized.length > maxLength ? `${serialized.slice(0, maxLength)}…` : serialized;
-}
-
 function tryParseJsonOutput(text: string): unknown | undefined {
 	const trimmed = text.trim();
 	if (!trimmed) return undefined;
@@ -431,14 +431,48 @@ function extractCompletionData(parsed: unknown): unknown {
 	return parsed;
 }
 
-function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { data: unknown } | null {
+/**
+ * Resolve the final yielded payload, optionally splicing collected
+ * `report_finding` entries into a top-level `findings` array.
+ *
+ * Injection is suppressed when an active validator would reject the augmented
+ * payload (e.g. a caller-supplied schema with `additionalProperties: false`
+ * that does not declare `findings`). That keeps the in-tool yield validator
+ * (which only sees the raw, pre-injection data) in lockstep with this
+ * post-mortem validator — honoring the "accepted in-tool ⇒ accepted
+ * post-mortem" guarantee documented in `output-schema-validator.ts`. The
+ * dropped findings are still preserved verbatim in the agent's progress
+ * stream and JSONL artifact, so no information is lost when injection is
+ * suppressed.
+ */
+function normalizeCompleteData(
+	data: unknown,
+	reportFindings: ReviewFinding[] | undefined,
+	validator: OutputValidator | undefined,
+): unknown {
+	const normalized = parseStringifiedJson(data ?? null);
+	if (
+		!Array.isArray(reportFindings) ||
+		reportFindings.length === 0 ||
+		!normalized ||
+		typeof normalized !== "object" ||
+		Array.isArray(normalized)
+	) {
+		return normalized;
+	}
+	const record = normalized as Record<string, unknown>;
+	if ("findings" in record) return normalized;
+	const injected = { ...record, findings: reportFindings };
+	if (validator && !validator.validate(injected).success) return normalized;
+	return injected;
+}
+
+function resolveFallbackCompletion(rawOutput: string, prepared: PreparedOutputSchema): { data: unknown } | null {
 	const parsed = tryParseJsonOutput(rawOutput);
 	if (parsed === undefined) return null;
 	const candidate = parseStringifiedJson(extractCompletionData(parsed));
-	if (candidate === undefined) return null;
-	const { validator, error } = buildOutputValidator(outputSchema);
-	if (error) return null;
-	if (validator && !validator.validate(candidate).success) return null;
+	if (candidate === undefined || prepared.error) return null;
+	if (prepared.validator && !prepared.validator.validate(candidate).success) return null;
 	return { data: candidate };
 }
 
@@ -449,7 +483,10 @@ interface FinalizeSubprocessOutputArgs {
 	doneAborted: boolean;
 	signalAborted: boolean;
 	yieldItems?: YieldItem[];
+	reportFindings?: ReviewFinding[];
 	outputSchema: unknown;
+	schemaMode?: SchemaMode;
+	preparedOutputSchema?: PreparedOutputSchema;
 	lastAssistantText?: string;
 }
 
@@ -459,6 +496,7 @@ interface FinalizeSubprocessOutputResult {
 	stderr: string;
 	abortedViaYield: boolean;
 	hasYield: boolean;
+	failure?: SchemaViolationResult;
 }
 export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
 	"SYSTEM WARNING: Subagent exhausted schema-retry budget; result was accepted despite failing the output schema.";
@@ -467,127 +505,140 @@ export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
-function buildSchemaViolationOutcome(
-	failure: { message: string; missingRequired: string[] },
-	data: unknown,
-): { rawOutput: string; stderr: string; exitCode: number } {
-	const missing = failure.missingRequired;
+function buildSchemaViolationOutcome(failure: SchemaViolationResult): {
+	rawOutput: string;
+	stderr: string;
+	exitCode: number;
+	failure: SchemaViolationResult;
+} {
 	const headline =
-		missing.length > 0
-			? `schema_violation: missing required fields: ${missing.join(", ")}`
+		failure.missingRequired.length > 0
+			? `schema_violation: missing required fields: ${failure.missingRequired.join(", ")}`
 			: `schema_violation: ${failure.message}`;
-	const payload = {
-		error: "schema_violation",
-		message: failure.message,
-		missingRequired: missing,
-		data: previewOffendingData(data),
-	};
 	let rawOutput: string;
 	try {
-		rawOutput = JSON.stringify(payload, null, 2);
+		rawOutput = JSON.stringify(failure, null, 2);
 	} catch {
 		rawOutput = `{"error":"schema_violation","message":${JSON.stringify(headline)}}`;
 	}
-	return { rawOutput, stderr: headline, exitCode: 1 };
+	return { rawOutput, stderr: headline, exitCode: 1, failure };
 }
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
-	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const { yieldItems, reportFindings, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const prepared = args.preparedOutputSchema ?? prepareOutputSchema(outputSchema, args.schemaMode);
+	const strict = prepared.schemaMode === "strict";
 	let abortedViaYield = false;
+	let failure: SchemaViolationResult | undefined;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
-
+	const reject = (message: string, data: unknown, missingRequired: readonly string[] = []): void => {
+		const outcome = buildSchemaViolationOutcome(createSchemaViolationResult(message, missingRequired, data));
+		rawOutput = outcome.rawOutput;
+		stderr = outcome.stderr;
+		exitCode = outcome.exitCode;
+		failure = outcome.failure;
+	};
+	if (strict && (doneAborted || signalAborted)) {
+		// Cancellation is terminal regardless of any payload that raced it. Keep
+		// its native abort identity instead of misreporting it as a schema error.
+		if (exitCode === 0) exitCode = 1;
+		return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, failure };
+	}
 	if (hasYield) {
 		const lastYield = yieldItems[yieldItems.length - 1];
-		if (lastYield?.status === "aborted") {
+		if (lastYield?.status === "schema_violation" && lastYield.schemaViolation) {
+			const outcome = buildSchemaViolationOutcome(lastYield.schemaViolation);
+			rawOutput = outcome.rawOutput;
+			stderr = outcome.stderr;
+			exitCode = outcome.exitCode;
+			failure = outcome.failure;
+		} else if (lastYield?.status === "aborted") {
 			abortedViaYield = true;
-			exitCode = 0;
+			exitCode = strict ? 1 : 0;
 			stderr = lastYield.error || "Subagent aborted task";
-			try {
-				rawOutput = JSON.stringify({ aborted: true, error: lastYield.error }, null, 2);
-			} catch {
-				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
-			}
+			rawOutput = JSON.stringify({ aborted: true, error: lastYield.error }, null, 2);
 		} else {
-			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
+			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema), strict);
 			if (!assembled || assembled.missingData) {
-				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
-			} else {
-				const { validator, error: schemaError } = buildOutputValidator(outputSchema);
-				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
-				const result =
-					schemaError || assembled.schemaOverridden
-						? { success: true as const }
-						: (validator?.validate(completeData) ?? { success: true as const });
-				if (!result.success) {
-					const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
-					const outcome = buildSchemaViolationOutcome(summary, completeData);
-					rawOutput = outcome.rawOutput;
-					stderr = outcome.stderr;
-					exitCode = outcome.exitCode;
+				if (strict) reject("strict schema mode requires complete explicit yield data", assembled?.data);
+				else rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
+			} else if (strict && (assembled.schemaOverridden || assembled.usedLastTurn || assembled.rawText)) {
+				reject(
+					assembled.schemaOverridden
+						? "strict schema mode rejects schema-validation overrides"
+						: "strict schema mode rejects last-turn and raw-text fallback",
+					assembled.data,
+				);
+			} else if (prepared.error) {
+				if (strict) {
+					reject(`invalid output schema: ${prepared.error}`, assembled.data);
 				} else {
-					try {
-						rawOutput =
-							assembled.rawText && typeof completeData === "string"
-								? completeData
-								: (JSON.stringify(completeData, null, 2) ?? "null");
-					} catch (err) {
-						const errorMessage = err instanceof Error ? err.message : String(err);
-						rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
-					}
+					rawOutput = JSON.stringify(assembled.data, null, 2) ?? "null";
+					if (exitCode === 0) stderr = `invalid output schema: ${prepared.error}`;
+				}
+			} else {
+				const completeData =
+					strict || assembled.rawText
+						? assembled.data
+						: normalizeCompleteData(assembled.data, reportFindings, prepared.validator);
+				const result =
+					!strict && assembled.schemaOverridden
+						? { success: true as const }
+						: (prepared.validator?.validate(completeData) ?? { success: true as const });
+				if (!result.success) {
+					const summary = summarizeValidationFailure(
+						result,
+						completeData,
+						prepared.validator?.requiredFields ?? [],
+					);
+					reject(summary.message, completeData, summary.missingRequired);
+				} else {
+					rawOutput =
+						!strict && assembled.rawText && typeof completeData === "string"
+							? completeData
+							: (JSON.stringify(completeData, null, 2) ?? "null");
 					if (!hadFailureBeforeYield) {
 						exitCode = 0;
-						stderr = assembled.schemaOverridden
-							? SUBAGENT_WARNING_SCHEMA_OVERRIDDEN
-							: schemaError
-								? `invalid output schema: ${schemaError}`
-								: "";
+						stderr = assembled.schemaOverridden ? SUBAGENT_WARNING_SCHEMA_OVERRIDDEN : "";
 					} else if (!stderr) {
 						stderr = "Subagent failed after yielding a result.";
 					}
 				}
 			}
 		}
+	} else if (strict) {
+		reject("strict schema mode requires a valid yield submission", undefined);
 	} else {
 		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
-		const { normalized: normalizedSchema, error: schemaError } = normalizeSchema(outputSchema);
-		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
-		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
+		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, prepared) : null;
 		if (fallback) {
-			const { validator } = buildOutputValidator(outputSchema);
-			const completeData = parseStringifiedJson(fallback.data ?? null);
-			const result = validator?.validate(completeData) ?? { success: true as const };
+			const completeData = normalizeCompleteData(fallback.data, reportFindings, prepared.validator);
+			const result = prepared.validator?.validate(completeData) ?? { success: true as const };
 			if (!result.success) {
-				const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
-				const outcome = buildSchemaViolationOutcome(summary, completeData);
-				rawOutput = outcome.rawOutput;
-				stderr = outcome.stderr;
-				exitCode = outcome.exitCode;
+				const summary = summarizeValidationFailure(result, completeData, prepared.validator?.requiredFields ?? []);
+				reject(summary.message, completeData, summary.missingRequired);
 			} else {
-				try {
-					rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
-				} catch (err) {
-					const errorMessage = err instanceof Error ? err.message : String(err);
-					rawOutput = `{"error":"Failed to serialize fallback completion: ${errorMessage}"}`;
-				}
+				rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
 				exitCode = 0;
 				stderr = "";
 			}
-		} else if (!hasOutputSchema && allowFallback && rawOutput.trim().length > 0) {
+		} else if (
+			(prepared.normalized === undefined || prepared.normalized === true) &&
+			!prepared.error &&
+			allowFallback &&
+			rawOutput.trim().length > 0
+		) {
 			exitCode = 0;
 			stderr = "";
 		} else if (exitCode === 0) {
-			const hasRawOutput = rawOutput.trim().length > 0;
 			rawOutput = rawOutput ? `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_MISSING_YIELD;
-			if (hasOutputSchema || !hasRawOutput) {
-				exitCode = 1;
-				stderr = SUBAGENT_WARNING_MISSING_YIELD;
-			}
+			exitCode = 1;
+			stderr = SUBAGENT_WARNING_MISSING_YIELD;
 		}
 	}
-
-	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield };
+	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, failure };
 }
 
 /**
@@ -1710,6 +1761,8 @@ interface FinalizeRunArgs {
 	assignment?: string;
 	modelOverride?: string | string[];
 	outputSchema?: unknown;
+	schemaMode?: SchemaMode;
+	preparedOutputSchema?: PreparedOutputSchema;
 	signal?: AbortSignal;
 	artifactsDir?: string;
 	eventBus?: EventBus;
@@ -1747,6 +1800,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			signalAborted: Boolean(signal?.aborted),
 			yieldItems,
 			outputSchema: args.outputSchema,
+			schemaMode: args.schemaMode,
+			preparedOutputSchema: args.preparedOutputSchema,
 			lastAssistantText: monitor.lastAssistantSalvageText(),
 		});
 	} finally {
@@ -1768,7 +1823,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	}
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
-	const { abortedViaYield, hasYield } = finalized;
+	const { abortedViaYield } = finalized;
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
 		maxBytes: MAX_OUTPUT_BYTES,
 		maxLines: MAX_OUTPUT_LINES,
@@ -1800,8 +1855,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	if (runtimeLimitExceeded && exitCode === 0) {
 		exitCode = 1;
 	}
-	const wasAborted =
-		runtimeLimitExceeded || abortedViaYield || (!hasYield && (done.aborted || signal?.aborted || false));
+	const wasAborted = runtimeLimitExceeded || abortedViaYield || done.aborted || signal?.aborted || false;
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()
@@ -1841,6 +1895,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		output: truncatedOutput,
 		stderr,
 		truncated: Boolean(truncated),
+		failure: finalized.failure,
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
 		requests: progress.requests,
@@ -1943,6 +1998,12 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Structured-output contract inherited from the original spawn. */
+	outputSchema?: unknown;
+	/** Validation mode inherited from the original spawn. */
+	schemaMode?: SchemaMode;
+	/** Prepared structured-output contract inherited from the original spawn. */
+	preparedOutputSchema?: PreparedOutputSchema;
 }
 
 /**
@@ -2026,6 +2087,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		detached: true,
 		sessionFile,
 		startTime,
+		outputSchema: options.outputSchema,
+		schemaMode: options.schemaMode,
+		preparedOutputSchema: options.preparedOutputSchema,
 	});
 }
 
@@ -2074,6 +2138,34 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			error: "Cancelled before start",
 			aborted: true,
 			abortReason: "Cancelled before start",
+		};
+	}
+	const preparedOutputSchema = options.preparedOutputSchema ?? prepareOutputSchema(outputSchema, options.schemaMode);
+	if (preparedOutputSchema.schemaMode === "strict" && preparedOutputSchema.error) {
+		const failure = createSchemaViolationResult(
+			`invalid output schema: ${preparedOutputSchema.error}`,
+			[],
+			undefined,
+		);
+		const outcome = buildSchemaViolationOutcome(failure);
+		return {
+			index,
+			id,
+			agent: agent.name,
+			agentSource: agent.source,
+			task,
+			assignment,
+			description: options.description,
+			exitCode: outcome.exitCode,
+			output: outcome.rawOutput,
+			stderr: outcome.stderr,
+			truncated: false,
+			durationMs: 0,
+			tokens: 0,
+			requests: 0,
+			modelOverride,
+			error: outcome.stderr,
+			failure,
 		};
 	}
 
@@ -2391,7 +2483,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
-			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const normalizedOutputSchema = preparedOutputSchema.normalized;
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -2411,6 +2503,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				thinkingLevel: effectiveThinkingLevel,
 				toolNames,
 				outputSchema,
+				schemaMode: preparedOutputSchema.schemaMode,
+				preparedOutputSchema,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
@@ -2427,6 +2521,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
+						strictSchema: preparedOutputSchema.schemaMode === "strict",
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
 						ircSelfId: ircEnabled ? id : "",
@@ -2524,6 +2619,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				outputSchema,
+				schemaMode: preparedOutputSchema.schemaMode,
 			});
 
 			abortSignal.addEventListener(
@@ -2720,6 +2816,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		modelOverride,
 		outputSchema,
+		schemaMode: preparedOutputSchema.schemaMode,
+		preparedOutputSchema,
 		signal,
 		artifactsDir: options.artifactsDir,
 		eventBus: options.eventBus,

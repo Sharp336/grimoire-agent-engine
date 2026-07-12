@@ -31,6 +31,7 @@ import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
+import { type PreparedOutputSchema, prepareOutputSchema, type SchemaMode } from "../tools/output-schema-validator";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 
@@ -84,6 +85,9 @@ interface VibeRecord {
 	ownerId: string;
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
+	outputSchema?: unknown;
+	schemaMode: SchemaMode;
+	preparedOutputSchema: PreparedOutputSchema;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -294,6 +298,11 @@ export class VibeSessionRegistry {
 			fallbackModelPattern: session.getModelString?.(),
 		});
 
+		const outputSchema = agent.output ?? session.outputSchema;
+		const preparedOutputSchema =
+			agent.output === undefined && session.preparedOutputSchema
+				? session.preparedOutputSchema
+				: prepareOutputSchema(outputSchema, session.schemaMode);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
@@ -309,6 +318,9 @@ export class VibeSessionRegistry {
 			state: "starting",
 			createdAt: Date.now(),
 			lastActivityAt: Date.now(),
+			outputSchema,
+			schemaMode: preparedOutputSchema.schemaMode,
+			preparedOutputSchema,
 			queue: [],
 			turnCount: 0,
 			killed: false,
@@ -509,6 +521,9 @@ export class VibeSessionRegistry {
 			modelOverride: record.modelOverride,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
+			outputSchema: record.outputSchema,
+			schemaMode: record.schemaMode,
+			preparedOutputSchema: record.preparedOutputSchema,
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
@@ -591,6 +606,9 @@ export class VibeSessionRegistry {
 								onProgress,
 								eventBus: session.eventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								outputSchema: record.outputSchema,
+								schemaMode: record.schemaMode,
+								preparedOutputSchema: record.preparedOutputSchema,
 							});
 					return this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {

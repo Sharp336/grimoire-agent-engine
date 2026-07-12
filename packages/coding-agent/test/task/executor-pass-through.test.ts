@@ -146,6 +146,68 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedCustomToolPaths).toBeUndefined();
 	});
 
+	it("preflights an invalid strict schema before creating a session or resolving a model", async () => {
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		const refresh = vi.fn(async () => {});
+		const modelRegistry = {
+			authStorage: {},
+			refresh,
+		} as unknown as ModelRegistry;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			modelRegistry,
+			outputSchema: false,
+			schemaMode: "strict",
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.failure).toMatchObject({
+			error: "schema_violation",
+			message: expect.stringContaining("invalid output schema"),
+		});
+		expect(createSession).not.toHaveBeenCalled();
+		expect(refresh).not.toHaveBeenCalled();
+	});
+
+	it("preflights a nested external strict reference before creating a session or resolving a model", async () => {
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		const refresh = vi.fn(async () => {});
+		const modelRegistry = {
+			authStorage: {},
+			refresh,
+		} as unknown as ModelRegistry;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			modelRegistry,
+			outputSchema: {
+				$ref: "#/$defs/Result",
+				$defs: {
+					Result: {
+						type: "object",
+						properties: { payload: { $ref: "#/$defs/Payload" } },
+						required: ["payload"],
+					},
+					Payload: {
+						type: "object",
+						properties: { detail: { $ref: "https://example.com/missing-schema.json#/Detail" } },
+						required: ["detail"],
+					},
+				},
+			},
+			schemaMode: "strict",
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.failure).toMatchObject({
+			error: "schema_violation",
+			message: expect.stringContaining("unresolved $ref after dereferencing"),
+		});
+		expect(createSession).not.toHaveBeenCalled();
+		expect(refresh).not.toHaveBeenCalled();
+	});
+
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

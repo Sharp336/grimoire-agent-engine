@@ -89,6 +89,36 @@ describe("SessionManager immediate JSONL persistence", () => {
 		expect(messageContent(entries[3] ?? {})).toBe("written immediately");
 	});
 
+	it("persists strict schema mode in the session_init contract", () => {
+		const cwd = makeTempDir("@pi-session-init-schema-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+		const schema = {
+			type: "object",
+			properties: { accepted: { type: "boolean" } },
+			required: ["accepted"],
+		};
+
+		manager.appendSessionInit({
+			systemPrompt: "Return structured data.",
+			task: "classify",
+			tools: ["read", "yield"],
+			outputSchema: schema,
+			schemaMode: "strict",
+		});
+		manager.appendMessage(assistantMessage("done"));
+
+		const init = readJsonl(sessionFile).find(entry => entry.type === "session_init");
+		expect(init).toMatchObject({
+			systemPrompt: "Return structured data.",
+			task: "classify",
+			tools: ["read", "yield"],
+			outputSchema: schema,
+			schemaMode: "strict",
+		});
+	});
+
 	it("keeps pre-assistant sessions out of history during shutdown", async () => {
 		const cwd = makeTempDir("@pi-empty-session-cwd-");
 		const sessionDir = path.join(cwd, "sessions");

@@ -28,6 +28,7 @@ import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { type AgentDefinition, type AgentProgress, canSpawnAtDepth, type SingleResult } from "../task/types";
 import { type NestedRepoPatch, parseIsolationMode } from "../task/worktree";
 import type { ToolSession } from "../tools";
+import { prepareOutputSchema, type SchemaMode, type SchemaViolationResult } from "../tools/output-schema-validator";
 import { ToolError } from "../tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -52,6 +53,7 @@ const agentArgsSchema = type({
 	"model?": "string>0|string>0[]",
 	"label?": "string",
 	"schema?": "unknown",
+	"schemaMode?": "'permissive' | 'strict'",
 	"isolated?": "boolean",
 	"apply?": "boolean",
 	"merge?": "boolean",
@@ -64,6 +66,7 @@ interface EvalAgentArgs {
 	model?: string | string[];
 	label?: string;
 	schema?: unknown;
+	schemaMode?: SchemaMode;
 	/**
 	 * Run this subagent inside an isolation worktree (copy-on-write of the
 	 * parent repo). Strict opt-in: defaults to `false` regardless of the
@@ -97,7 +100,7 @@ export interface EvalAgentBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
-export interface EvalAgentResult {
+export interface EvalAgentSuccessResult {
 	text: string;
 	details: {
 		agent: string;
@@ -123,6 +126,11 @@ export interface EvalAgentResult {
 		/** Human-readable isolation apply/merge summary; kept out of schema-backed `text`. */
 		isolationSummary?: string;
 	};
+}
+
+export interface EvalAgentResult extends EvalAgentSuccessResult {
+	/** Present only when strict final-output validation rejects the subagent result. */
+	schemaViolation?: SchemaViolationResult;
 }
 
 function parseAgentArgs(args: unknown): EvalAgentArgs {
@@ -310,9 +318,17 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
  */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	const parsed = parseAgentArgs(args);
-	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
 	const structured = Object.hasOwn(parsed, "schema");
-
+	const schemaModeSupplied = Object.hasOwn(parsed, "schemaMode");
+	if (schemaModeSupplied && !structured) {
+		throw new ToolError("agent() requires schema when schemaMode is supplied.");
+	}
+	const schemaMode = parsed.schemaMode ?? "permissive";
+	const preparedOutputSchema = structured ? prepareOutputSchema(parsed.schema, schemaMode) : undefined;
+	if (schemaMode === "strict" && preparedOutputSchema?.error) {
+		throw new ToolError(`agent() received invalid strict schema: ${preparedOutputSchema.error}`);
+	}
+	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
 	assertNotPlanMode(options.session);
 	assertDepthAllowed(options.session);
 	assertSpawnAllowed(options.session, agentName);
@@ -397,7 +413,14 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		modelOverride,
 		parentActiveModelPattern,
 		thinkingLevel: effectiveAgent.thinkingLevel,
-		...(structured ? { outputSchema: parsed.schema, outputSchemaOverridesAgent: true } : {}),
+		...(structured
+			? {
+					outputSchema: parsed.schema,
+					schemaMode,
+					preparedOutputSchema,
+					outputSchemaOverridesAgent: true,
+				}
+			: {}),
 		sessionFile,
 		persistArtifacts: Boolean(sessionFile),
 		artifactsDir,
@@ -500,8 +523,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					},
 				});
 			})();
-
-			if (result.exitCode !== 0 || result.error || result.aborted) {
+			const strictSchemaFailure = result.failure !== undefined;
+			if (!strictSchemaFailure && (result.exitCode !== 0 || result.error || result.aborted)) {
 				const failureMessage = buildSubagentFailureMessage(agentName, result);
 				const recoveryHint = isIsolated ? await buildIsolationRecoveryHint(result, artifactsDir) : "";
 				throw new ToolError(`${failureMessage}${recoveryHint}`);
@@ -509,7 +532,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 
 			let mergeSummary = "";
 			let changesApplied: boolean | null = null;
-			if (isIsolated && isolationContext) {
+			if (!strictSchemaFailure && isIsolated && isolationContext) {
 				if (applyChanges) {
 					const outcome = await mergeIsolatedChanges({
 						result,
@@ -558,15 +581,14 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				}
 			}
 
-			// Clean up the temp artifacts dir we created for this call only when the
-			// caller will not need files from it later. Keep it when the runtime helper
-			// will return an `agent://` handle (the `.md`/`.jsonl` backing files live
-			// here) and on `apply=false` (`changesApplied === null`) where the caller
-			// consumes `details.patchPath` / `details.branchName` /
-			// `details.nestedPatches` out of band. Failed isolated applies throw
-			// earlier with a recovery hint, so they never reach this gate.
+			// Clean up only temporary per-call artifacts the runtime cannot consume.
+			// Successful non-handle runs have no surviving artifact contract; isolated
+			// apply=false runs preserve captured patch metadata for manual recovery.
+			// A strict schema failure is returned to the runtime as a typed result, not
+			// recoverable agent output, so it always removes temporary artifacts—even
+			// with handle=true.
 			const shouldCleanupTempArtifacts =
-				tempArtifactsDir && !parsed.handle && (!isIsolated || changesApplied === true);
+				tempArtifactsDir && (strictSchemaFailure || (!parsed.handle && (!isIsolated || changesApplied === true)));
 			if (shouldCleanupTempArtifacts) {
 				await fs.rm(artifactsDir, { recursive: true, force: true });
 				unregisterArtifactsDir?.();
@@ -578,7 +600,18 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		},
 		{ deferExternalAbort: true },
 	);
-
+	if (result.failure) {
+		return {
+			text: result.output,
+			details: {
+				agent: result.agent,
+				id: result.id,
+				model: result.resolvedModel ?? modelOverride,
+				structured,
+			},
+			schemaViolation: result.failure,
+		};
+	}
 	return {
 		text: structured ? result.output : result.output + mergeSummary,
 		details: {

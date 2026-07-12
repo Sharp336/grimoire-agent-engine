@@ -2,9 +2,11 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildOutputValidator,
 	computeMissingRequired,
+	createSchemaViolationResult,
 	extractRequiredFields,
 	formatAllValidationIssues,
 	formatValidationIssueHeadline,
+	prepareOutputSchema,
 	summarizeValidationFailure,
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 
@@ -98,6 +100,7 @@ describe("buildOutputValidator", () => {
 		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(false);
 		// Unknown labels have no validator so user-defined sections stay loose.
 		expect(sections?.has("scratchpad")).toBe(false);
+		expect(validator?.sectionRequiredFields.get("findings")).toEqual(["title", "body"]);
 	});
 });
 describe("summarizeValidationFailure", () => {
@@ -143,6 +146,19 @@ describe("formatAllValidationIssues", () => {
 		expect(formatAllValidationIssues(undefined)).toBe("Unknown schema validation error.");
 		expect(formatAllValidationIssues([])).toBe("Unknown schema validation error.");
 	});
+
+	it("bounds oversized retry diagnostics while preserving the first actionable issue", () => {
+		const diagnostic = formatAllValidationIssues(
+			Array.from({ length: 32 }, (_, index) => ({
+				path: [`field_${index}`, "x".repeat(1_000)],
+				message: `must be present: ${"y".repeat(1_000)}`,
+				keyword: "required",
+			})),
+		);
+
+		expect(diagnostic).toContain("field_0");
+		expect(diagnostic.length).toBeLessThanOrEqual(2_048);
+	});
 });
 
 describe("extractRequiredFields / computeMissingRequired", () => {
@@ -161,5 +177,107 @@ describe("extractRequiredFields / computeMissingRequired", () => {
 		expect(computeMissingRequired(["a"], 42)).toEqual([]);
 		expect(computeMissingRequired(["a"], [])).toEqual([]);
 		expect(computeMissingRequired([], { x: 1 })).toEqual([]);
+	});
+});
+
+describe("prepareOutputSchema", () => {
+	it("preserves a usable strict schema as a validated preparation", () => {
+		const prepared = prepareOutputSchema(
+			{
+				type: "object",
+				properties: { answer: { type: "string" } },
+				required: ["answer"],
+				additionalProperties: false,
+			},
+			"strict",
+		);
+
+		expect(prepared.schemaMode).toBe("strict");
+		expect(prepared.error).toBeUndefined();
+		expect(prepared.validator?.validate({ answer: "done" }).success).toBe(true);
+		expect(prepared.validator?.validate({}).success).toBe(false);
+	});
+
+	it("rejects nested external references only when strict preparation cannot resolve them", () => {
+		const nestedExternalRef = {
+			$ref: "#/$defs/Result",
+			$defs: {
+				Result: {
+					type: "object",
+					properties: { payload: { $ref: "#/$defs/Payload" } },
+					required: ["payload"],
+				},
+				Payload: {
+					type: "object",
+					properties: { detail: { $ref: "https://example.com/missing-schema.json#/Detail" } },
+					required: ["detail"],
+				},
+			},
+		};
+
+		const strict = prepareOutputSchema(nestedExternalRef, "strict");
+		const permissive = prepareOutputSchema(nestedExternalRef, "permissive");
+
+		expect(strict).toMatchObject({
+			schemaMode: "strict",
+			error: "schema contains unresolved $ref after dereferencing",
+		});
+		expect(strict.validator).toBeUndefined();
+		expect(permissive.error).toBeUndefined();
+		expect(permissive.validator).toBeDefined();
+	});
+
+	it("retains strict mode and reports unusable schemas rather than silently treating them as prepared", () => {
+		const circularSchema: Record<string, unknown> = { type: "object" };
+		circularSchema.self = circularSchema;
+
+		const normalizedFailure = prepareOutputSchema(false, "strict");
+		const dereferenceFailure = prepareOutputSchema(circularSchema, "strict");
+
+		expect(normalizedFailure).toMatchObject({
+			schemaMode: "strict",
+			error: "boolean false schema rejects all outputs",
+		});
+		expect(dereferenceFailure.schemaMode).toBe("strict");
+		expect(dereferenceFailure.error).toMatch(/^schema preparation failed:/);
+		expect(dereferenceFailure.validator).toBeUndefined();
+	});
+});
+
+describe("createSchemaViolationResult", () => {
+	it("keeps typed violations bounded while preserving the payload preview contract", () => {
+		const violation = createSchemaViolationResult("answer: must be string", ["answer"], {
+			answer: "x".repeat(1_000),
+		});
+
+		expect(violation).toMatchObject({
+			error: "schema_violation",
+			message: "answer: must be string",
+			missingRequired: ["answer"],
+		});
+		expect(JSON.stringify(violation.data).length).toBeLessThanOrEqual(256);
+		expect(violation.data.endsWith("…")).toBe(true);
+	});
+
+	it("bounds diagnostics emitted from oversized schemas and escaped messages", () => {
+		const required = Array.from({ length: 100 }, (_, index) => `missing_${index}_${"n".repeat(1_000)}`);
+		const { validator } = buildOutputValidator({
+			type: "object",
+			properties: Object.fromEntries(required.map(name => [name, { type: "string" }])),
+			required,
+		});
+		const validation = validator?.validate({});
+		const summary = summarizeValidationFailure(validation!, {}, validator?.requiredFields ?? []);
+		const violation = createSchemaViolationResult(
+			`${"\u0000".repeat(10_000)}${summary.message}`,
+			summary.missingRequired,
+			{ payload: "\u0000".repeat(10_000) },
+		);
+
+		expect(JSON.stringify(violation.message).length).toBeLessThanOrEqual(512);
+		expect(violation.missingRequired).toHaveLength(6);
+		expect(violation.missingRequired.every(field => JSON.stringify(field).length <= 48)).toBe(true);
+		expect(JSON.stringify(violation.data).length).toBeLessThanOrEqual(256);
+		expect(JSON.stringify(violation).length).toBeLessThanOrEqual(2_048);
 	});
 });

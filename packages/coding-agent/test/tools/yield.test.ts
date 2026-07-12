@@ -1236,4 +1236,187 @@ describe("YieldTool", () => {
 			} as never),
 		).rejects.toThrow("Output does not match schema");
 	});
+	it("accepts a valid terminal strict result without an override", async () => {
+		const tool = new YieldTool(
+			createSession({
+				schemaMode: "strict",
+				outputSchema: {
+					type: "object",
+					properties: { answer: { type: "string" } },
+					required: ["answer"],
+					additionalProperties: false,
+				},
+			}),
+		);
+
+		const result = await tool.execute("call-strict-valid", { result: { data: { answer: "done" } } } as never);
+
+		expect(result.details).toMatchObject({ data: { answer: "done" }, status: "success" });
+		expect(result.details?.schemaOverridden).toBeUndefined();
+	});
+
+	it("turns a fourth strict terminal schema mismatch into a typed violation instead of overriding it", async () => {
+		const tool = new YieldTool(
+			createSession({
+				schemaMode: "strict",
+				outputSchema: {
+					type: "object",
+					properties: { answer: { type: "string", minLength: 3 } },
+					required: ["answer"],
+					additionalProperties: false,
+				},
+			}),
+		);
+
+		const retryHints = [
+			"2 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"1 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"this is the final correction attempt; the next invalid submission fails closed.",
+		];
+		for (const [index, hint] of retryHints.entries()) {
+			await expect(
+				tool.execute(`call-strict-terminal-${index + 1}`, { result: { data: { answer: "no" } } } as never),
+			).rejects.toThrow(hint);
+		}
+		const terminal = await tool.execute("call-strict-terminal-4", {
+			result: { data: { answer: "no" } },
+		} as never);
+
+		expect(terminal.details).toMatchObject({
+			status: "schema_violation",
+			data: { answer: "no" },
+			schemaViolation: {
+				error: "schema_violation",
+				missingRequired: [],
+			},
+		});
+		expect(terminal.details?.schemaViolation?.message).toMatch(/answer: must be at least 3 characters/);
+		expect(terminal.details?.schemaOverridden).toBeUndefined();
+	});
+
+	it("reports section-level required fields after strict incremental retries are exhausted", async () => {
+		const tool = new YieldTool(
+			createSession({
+				schemaMode: "strict",
+				outputSchema: {
+					properties: { summary: { type: "string" } },
+					optionalProperties: {
+						findings: {
+							elements: {
+								properties: {
+									title: { type: "string" },
+									body: { type: "string" },
+								},
+							},
+						},
+					},
+				},
+			}),
+		);
+
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await expect(
+				tool.execute(`call-strict-section-${attempt}`, {
+					type: ["findings"],
+					result: { data: { body: "missing the finding headline" } },
+				} as never),
+			).rejects.toThrow(/Section "findings" does not match schema.*title/);
+		}
+		const terminal = await tool.execute("call-strict-section-4", {
+			type: ["findings"],
+			result: { data: { body: "missing the finding headline" } },
+		} as never);
+
+		expect(terminal.details).toMatchObject({
+			status: "schema_violation",
+			schemaViolation: {
+				error: "schema_violation",
+				missingRequired: ["title"],
+			},
+		});
+		expect(terminal.details?.schemaViolation?.message).toMatch(/title: is required/);
+		expect(terminal.details?.schemaOverridden).toBeUndefined();
+	});
+
+	it("retries strict data-less terminal success three times before returning a typed violation", async () => {
+		const tool = new YieldTool(
+			createSession({
+				schemaMode: "strict",
+				outputSchema: {
+					type: "object",
+					properties: { answer: { type: "string" } },
+					required: ["answer"],
+				},
+			}),
+		);
+
+		const retryHints = [
+			"2 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"1 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"this is the final correction attempt; the next invalid submission fails closed.",
+		];
+		for (const [index, hint] of retryHints.entries()) {
+			await expect(
+				tool.execute(`call-strict-last-turn-${index + 1}`, { type: "summary", result: {} } as never),
+			).rejects.toThrow(hint);
+		}
+
+		const terminal = await tool.execute("call-strict-last-turn-4", { type: "summary", result: {} } as never);
+		expect(terminal.details).toMatchObject({
+			status: "schema_violation",
+			schemaViolation: {
+				error: "schema_violation",
+				message: "strict schema mode requires explicit data; last-turn extraction is disabled",
+			},
+		});
+	});
+
+	it("preserves explicit falsy and JSON-looking string values under strict validation", async () => {
+		const cases: Array<[unknown, Record<string, unknown>]> = [
+			[false, { type: "boolean" }],
+			[0, { type: "number" }],
+			["", { type: "string" }],
+			["false", { type: "string" }],
+			['{"done":true}', { type: "string" }],
+		];
+
+		for (const [value, outputSchema] of cases) {
+			const tool = new YieldTool(createSession({ schemaMode: "strict", outputSchema }));
+			const result = await tool.execute("call-strict-falsy", { result: { data: value } } as never);
+			expect(result.details).toMatchObject({ status: "success", data: value });
+		}
+	});
+
+	it("exhausts retries for closed strict unknown section labels without accepting an override", async () => {
+		const tool = new YieldTool(
+			createSession({
+				schemaMode: "strict",
+				outputSchema: {
+					type: "object",
+					properties: { verdict: { enum: ["clean", "blockers"] } },
+					required: ["verdict"],
+					additionalProperties: false,
+				},
+			}),
+		);
+
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await expect(
+				tool.execute(`call-strict-unknown-${attempt}`, {
+					type: ["unrecognized"],
+					result: { data: "anything" },
+				} as never),
+			).rejects.toThrow(/unknown incremental yield label/);
+		}
+		const terminal = await tool.execute("call-strict-unknown-4", {
+			type: ["unrecognized"],
+			result: { data: "anything" },
+		} as never);
+
+		expect(terminal.details).toMatchObject({
+			status: "schema_violation",
+			schemaViolation: { error: "schema_violation" },
+		});
+		expect(terminal.details?.schemaOverridden).toBeUndefined();
+	});
 });

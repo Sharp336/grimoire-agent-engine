@@ -6,6 +6,25 @@ import {
 	SUBAGENT_WARNING_SCHEMA_OVERRIDDEN,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 
+const strictObjectSchema = {
+	type: "object",
+	required: ["ok"],
+	properties: { ok: { type: "boolean" } },
+};
+
+function finalizeStrict(overrides: Partial<Parameters<typeof finalizeSubprocessOutput>[0]> = {}) {
+	return finalizeSubprocessOutput({
+		rawOutput: "",
+		exitCode: 0,
+		stderr: "",
+		doneAborted: false,
+		signalAborted: false,
+		outputSchema: strictObjectSchema,
+		schemaMode: "strict",
+		...overrides,
+	});
+}
+
 describe("subagent warning injection", () => {
 	it("injects null-data warning when yield is success without data", () => {
 		const result = finalizeSubprocessOutput({
@@ -373,5 +392,215 @@ describe("subagent warning injection", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.rawOutput).toBe("plain final answer");
+	});
+});
+
+describe("strict schema finalization", () => {
+	it("keeps valid terminal yield data unchanged", () => {
+		const result = finalizeStrict({ yieldItems: [{ status: "success", data: { ok: true } }] });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.failure).toBeUndefined();
+		expect(result.rawOutput).toBe('{\n  "ok": true\n}');
+	});
+
+	it("rejects a schema override as a typed, nonzero failure", () => {
+		const result = finalizeStrict({
+			yieldItems: [{ status: "success", data: { ok: true }, schemaOverridden: true }],
+		});
+
+		expect(result.exitCode).toBeGreaterThan(0);
+		expect(result.failure).toMatchObject({ error: "schema_violation" });
+		expect(result.stderr).toContain("rejects schema-validation overrides");
+		expect(JSON.parse(result.rawOutput)).toEqual(result.failure);
+	});
+
+	it("never salvages valid or malformed raw output without an explicit strict yield", () => {
+		for (const rawOutput of ['{"ok":true}', "not valid JSON"]) {
+			const result = finalizeStrict({ rawOutput });
+
+			expect(result.exitCode).toBeGreaterThan(0);
+			expect(result.failure).toMatchObject({ error: "schema_violation" });
+			expect(result.stderr).toContain("requires a valid yield submission");
+			expect(result.rawOutput).not.toBe(rawOutput);
+		}
+	});
+
+	it("rejects null and omitted yield data as typed strict failures", () => {
+		const nullResult = finalizeStrict({ yieldItems: [{ status: "success", data: null }] });
+		const missingResult = finalizeStrict({ yieldItems: [{ status: "success" }] });
+
+		for (const result of [nullResult, missingResult]) {
+			expect(result.exitCode).toBeGreaterThan(0);
+			expect(result.failure).toMatchObject({ error: "schema_violation" });
+			expect(JSON.parse(result.rawOutput)).toEqual(result.failure);
+		}
+		expect(missingResult.stderr).toContain("requires complete explicit yield data");
+	});
+
+	it("validates complete incremental assembly and rejects an incomplete one", () => {
+		const schema = {
+			type: "object",
+			required: ["summary", "count"],
+			properties: { summary: { type: "string" }, count: { type: "number" } },
+		};
+		const complete = finalizeStrict({
+			outputSchema: schema,
+			yieldItems: [
+				{ status: "success", type: ["summary"], data: "finished" },
+				{ status: "success", type: ["count"], data: 2 },
+			],
+		});
+		const incomplete = finalizeStrict({
+			outputSchema: schema,
+			yieldItems: [{ status: "success", type: ["summary"], data: "unfinished" }],
+		});
+
+		expect(complete.exitCode).toBe(0);
+		expect(JSON.parse(complete.rawOutput)).toEqual({ summary: "finished", count: 2 });
+		expect(incomplete.exitCode).toBeGreaterThan(0);
+		expect(incomplete.failure?.missingRequired).toEqual(["count"]);
+	});
+
+	it("validates the assembled whole even when each incremental section is individually valid", () => {
+		const result = finalizeStrict({
+			outputSchema: {
+				type: "object",
+				required: ["left", "right"],
+				properties: {
+					left: { enum: ["a", "b"] },
+					right: { enum: ["a", "b"] },
+				},
+				oneOf: [
+					{ properties: { left: { const: "a" }, right: { const: "b" } } },
+					{ properties: { left: { const: "b" }, right: { const: "a" } } },
+				],
+			},
+			yieldItems: [
+				{ status: "success", type: ["left"], data: "a" },
+				{ status: "success", type: ["right"], data: "a" },
+			],
+		});
+
+		expect(result.exitCode).toBeGreaterThan(0);
+		expect(result.failure).toMatchObject({ error: "schema_violation" });
+	});
+
+	it("preserves explicit JSON-looking strings and falsy terminal values exactly", () => {
+		const cases: Array<{ schema: unknown; value: unknown }> = [
+			{ schema: { type: "string" }, value: '{"ok":true}' },
+			{ schema: { type: "boolean" }, value: false },
+			{ schema: { type: "number" }, value: 0 },
+		];
+
+		for (const { schema, value } of cases) {
+			const result = finalizeStrict({
+				outputSchema: schema,
+				yieldItems: [{ status: "success", data: value }],
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.rawOutput)).toEqual(value);
+		}
+	});
+
+	it("requires strict yields to include report findings explicitly", () => {
+		const schema = {
+			type: "object",
+			required: ["summary", "findings"],
+			properties: {
+				summary: { type: "string" },
+				findings: { type: "array", minItems: 1 },
+			},
+		};
+		const reportFindings = [
+			{
+				title: "Missing guard",
+				body: "The request can be null.",
+				priority: 1,
+				confidence: 0.9,
+				file_path: "src/example.ts",
+				line_start: 4,
+				line_end: 4,
+			},
+		];
+		const strict = finalizeStrict({
+			outputSchema: schema,
+			yieldItems: [{ status: "success", data: { summary: "reviewed" } }],
+			reportFindings,
+		});
+		const permissive = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			outputSchema: schema,
+			yieldItems: [{ status: "success", data: { summary: "reviewed" } }],
+			reportFindings,
+		});
+
+		expect(strict.exitCode).toBeGreaterThan(0);
+		expect(strict.failure?.missingRequired).toEqual(["findings"]);
+		expect(permissive.exitCode).toBe(0);
+		expect(JSON.parse(permissive.rawOutput)).toMatchObject({
+			summary: "reviewed",
+			findings: [{ title: "Missing guard" }],
+		});
+	});
+
+	it("keeps signal, completed-run abort, and explicit abort distinct from schema violations", () => {
+		const signalResult = finalizeStrict({
+			rawOutput: "partial result",
+			stderr: "cancelled by caller",
+			signalAborted: true,
+			yieldItems: [{ status: "success", data: { ok: true } }],
+		});
+		const completedAbortResult = finalizeStrict({
+			rawOutput: "partial result",
+			stderr: "runtime limit exceeded",
+			doneAborted: true,
+			yieldItems: [{ status: "success", data: { ok: true } }],
+		});
+		const explicitAbortResult = finalizeStrict({
+			yieldItems: [{ status: "aborted", error: "blocked by permissions" }],
+		});
+
+		for (const result of [signalResult, completedAbortResult, explicitAbortResult]) {
+			expect(result.exitCode).toBeGreaterThan(0);
+			expect(result.failure).toBeUndefined();
+			expect(result.stderr).not.toContain("schema_violation");
+		}
+		expect(signalResult.rawOutput).toBe("partial result");
+		expect(completedAbortResult.rawOutput).toBe("partial result");
+		expect(JSON.parse(explicitAbortResult.rawOutput)).toEqual({
+			aborted: true,
+			error: "blocked by permissions",
+		});
+	});
+
+	it("retains permissive override and raw-output fallback behavior when mode is omitted", () => {
+		const overridden = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			outputSchema: strictObjectSchema,
+			yieldItems: [{ status: "success", data: { wrong: true }, schemaOverridden: true }],
+		});
+		const fallback = finalizeSubprocessOutput({
+			rawOutput: '{"data":{"ok":true}}',
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			outputSchema: strictObjectSchema,
+		});
+
+		expect(overridden.exitCode).toBe(0);
+		expect(overridden.stderr).toBe(SUBAGENT_WARNING_SCHEMA_OVERRIDDEN);
+		expect(fallback.exitCode).toBe(0);
+		expect(JSON.parse(fallback.rawOutput)).toEqual({ ok: true });
 	});
 });

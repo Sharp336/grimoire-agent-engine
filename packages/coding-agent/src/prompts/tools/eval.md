@@ -18,7 +18,7 @@ env(key?=None, value?=None) → str | None | dict
 output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | dict | list[dict]
 tool.<name>(args) → unknown
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → str | dict
-{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", model?=None, schema?=None, handle?=False) → str | dict{{#if spawnAllowedAgentsText}}  Allowed: {{spawnAllowedAgentsText}}.{{/if}}
+{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", model?=None, schema?=None, handle?=False) → str | dict{{#if spawnAllowedAgentsText}}  Allowed: {{spawnAllowedAgentsText}}.{{/if}} `schema` → fail-closed structured output; omit it for unstructured output.
 {{#if js}}    JS: agent(prompt, { agent, schema, handle }).{{/if}}
 {{/if}}
 parallel(thunks) → list     pipeline(items, ...stages) → list

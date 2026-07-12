@@ -14,12 +14,20 @@ import {
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { ToolSession } from ".";
-import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
+import {
+	createSchemaViolationResult,
+	formatAllValidationIssues,
+	hasUnresolvedRefs,
+	prepareOutputSchema,
+	type SchemaMode,
+	type SchemaViolationResult,
+	summarizeValidationFailure,
+} from "./output-schema-validator";
 
 export interface YieldDetails {
 	/** Successful result payload, or omitted when `useLastTurn` requests last-turn extraction. */
 	data?: unknown;
-	status: "success" | "aborted";
+	status: "success" | "aborted" | "schema_violation";
 	error?: string;
 	/** Optional result section/classification supplied by the yield caller. */
 	type?: string | string[];
@@ -33,6 +41,8 @@ export interface YieldDetails {
 	 * subagent's acceptance and the parent's view of the result in lockstep.
 	 */
 	schemaOverridden?: boolean;
+	/** Typed terminal strict-schema failure. */
+	schemaViolation?: SchemaViolationResult;
 }
 
 function formatSchema(schema: unknown): string {
@@ -51,24 +61,6 @@ function looseRecordSchema(description: string): Record<string, unknown> {
 		additionalProperties: true,
 		description,
 	};
-}
-
-function hasUnresolvedRefs(schema: unknown): boolean {
-	if (schema == null) return false;
-	if (Array.isArray(schema)) {
-		for (const item of schema) {
-			if (hasUnresolvedRefs(item)) return true;
-		}
-		return false;
-	}
-	if (typeof schema !== "object") return false;
-	const record = schema as Record<string, unknown>;
-	if (typeof record.$ref === "string") return true;
-	for (const key in record) {
-		if (key === "const" || key === "default" || key === "enum" || key === "examples") continue;
-		if (hasUnresolvedRefs(record[key])) return true;
-	}
-	return false;
 }
 
 const yieldTypeSchema: Record<string, unknown> = {
@@ -190,11 +182,9 @@ function wrapYieldParameters(dataSchema: Record<string, unknown>): Record<string
 }
 
 /**
- * Max consecutive schema-validation failures before the yield tool overrides validation
- * and lets non-conforming data through. The override is a safety net for schemas the
- * JTD→JSON-Schema converter cannot fully express; it should not be reached during normal
- * model retries. Three matches the existing "3 reminders" pattern elsewhere in the agent
- * runtime.
+ * Max consecutive schema-validation failures before permissive mode overrides validation.
+ * Strict mode instead returns a typed schema violation after the same correction budget.
+ * Three matches the existing "3 reminders" pattern elsewhere in the agent runtime.
  */
 const MAX_SCHEMA_RETRIES = 3;
 
@@ -205,6 +195,10 @@ const MAX_SCHEMA_RETRIES = 3;
  * stop the parent waits forever.
  */
 const MAX_EMPTY_RESULT_RETRIES = 3;
+interface SectionValidationFailure {
+	readonly result: JsonSchemaValidationResult;
+	readonly requiredFields: readonly string[];
+}
 
 export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly name = "yield";
@@ -221,33 +215,64 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #sectionRequiredFields?: ReadonlyMap<string, readonly string[]>;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
 	#schemaValidationFailures = 0;
 	#emptyResultFailures = 0;
+	#requiredFields: readonly string[] = [];
+	readonly #schemaMode: SchemaMode;
+
+	#strictFailure(
+		message: string,
+		data: unknown,
+		sectionFailure?: JsonSchemaValidationResult,
+		requiredFields: readonly string[] = this.#requiredFields,
+	): AgentToolResult<YieldDetails> {
+		const summary =
+			sectionFailure && !sectionFailure.success
+				? summarizeValidationFailure(sectionFailure, data, requiredFields)
+				: { message, missingRequired: [] };
+		const schemaViolation = createSchemaViolationResult(summary.message, summary.missingRequired, data);
+		return {
+			content: [{ type: "text", text: `Schema violation: ${schemaViolation.message}` }],
+			details: { data, status: "schema_violation", schemaViolation },
+		};
+	}
+
+	#retryHint(remaining: number): string {
+		if (this.#schemaMode !== "strict") {
+			return remaining > 0
+				? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
+				: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
+		}
+		return remaining > 0
+			? ` Call yield again with the corrected shape — ${remaining} correction attempt(s) remain; after that, the next invalid submission fails closed.`
+			: " Call yield again with the corrected shape — this is the final correction attempt; the next invalid submission fails closed.";
+	}
 
 	constructor(session: ToolSession) {
+		const prepared = session.preparedOutputSchema ?? prepareOutputSchema(session.outputSchema, session.schemaMode);
+		this.#schemaMode = prepared.schemaMode;
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
+		let sectionRequiredFields: ReadonlyMap<string, readonly string[]> | undefined;
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
 		let isKnownSection: ((label: string) => boolean) | undefined;
 		let parameters: TSchema;
 
 		try {
-			const {
-				validator,
-				jsonSchema: normalizedSchema,
-				normalized,
-				error: schemaError,
-			} = buildOutputValidator(session.outputSchema);
+			const { validator, jsonSchema: normalizedSchema, normalized, error: schemaError } = prepared;
 			if (validator) {
 				validate = value => validator.validate(value);
 				validateSection = validator.validateSection;
+				sectionRequiredFields = validator.sectionRequiredFields;
 				rejectUnknownSections = validator.rejectUnknownSections;
 				knownSectionLabels = validator.knownSectionLabels;
 				isKnownSection = label => validator.isKnownSection(label);
+				this.#requiredFields = validator.requiredFields;
 			}
 
 			const schemaHint = formatSchema(normalizedSchema ?? session.outputSchema);
@@ -298,6 +323,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 		this.#validate = validate;
 		this.#validateSection = validateSection;
+		this.#sectionRequiredFields = sectionRequiredFields;
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
@@ -366,17 +392,34 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (unknownLabels.length > 0) {
 				const validLabels =
 					this.#knownSectionLabels.length > 0 ? formatYieldLabels(this.#knownSectionLabels) : "none";
-				throw new Error(
-					`Section ${formatYieldLabels(yieldType as string[])} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`,
-				);
+				const message = `Section ${formatYieldLabels(yieldType as string[])} uses unknown incremental yield label(s): ${formatYieldLabels(unknownLabels)}. Resubmit with one of the schema's labels: ${validLabels}.`;
+				if (this.#schemaMode === "strict") {
+					this.#schemaValidationFailures++;
+					if (this.#schemaValidationFailures > MAX_SCHEMA_RETRIES) return this.#strictFailure(message, data);
+					throw new Error(`${message}${this.#retryHint(MAX_SCHEMA_RETRIES - this.#schemaValidationFailures)}`);
+				}
+				throw new Error(message);
 			}
 		}
+		if (status === "success" && useLastTurn && this.#schemaMode === "strict") {
+			const message = "strict schema mode requires explicit data; last-turn extraction is disabled";
+			this.#schemaValidationFailures++;
+			if (this.#schemaValidationFailures > MAX_SCHEMA_RETRIES) return this.#strictFailure(message, data);
+			throw new Error(
+				`Output does not match schema: ${message}.${this.#retryHint(
+					MAX_SCHEMA_RETRIES - this.#schemaValidationFailures,
+				)}`,
+			);
+		}
 		if (status === "success" && !useLastTurn) {
-			if (data === null) {
+			if (data === null && this.#schemaMode !== "strict") {
 				throw new Error("data is required when yield indicates success");
 			}
-			const sectionFailure = isIncremental
+			const sectionValidation = isIncremental
 				? this.#validateIncrementalSection(yieldType as string[], data)
+				: undefined;
+			const sectionFailure = isIncremental
+				? sectionValidation?.result
 				: this.#validate
 					? this.#validate(data)
 					: undefined;
@@ -384,13 +427,17 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				this.#schemaValidationFailures++;
 				if (this.#schemaValidationFailures <= MAX_SCHEMA_RETRIES) {
 					const remaining = MAX_SCHEMA_RETRIES - this.#schemaValidationFailures;
-					const retryHint =
-						remaining > 0
-							? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
-							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
 					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
 					throw new Error(
-						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
+						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${this.#retryHint(remaining)}`,
+					);
+				}
+				if (this.#schemaMode === "strict") {
+					return this.#strictFailure(
+						"schema validation failed",
+						data,
+						sectionFailure,
+						sectionValidation?.requiredFields ?? this.#requiredFields,
 					);
 				}
 				schemaValidationOverridden = true;
@@ -438,14 +485,19 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	 * the parent's post-mortem `schema_violation`. Unknown labels under a closed schema are
 	 * handled separately by `#unknownIncrementalLabels` and never reach this validator.
 	 */
-	#validateIncrementalSection(labels: string[], data: unknown): JsonSchemaValidationResult | undefined {
+	#validateIncrementalSection(labels: string[], data: unknown): SectionValidationFailure | undefined {
 		const subValidators = this.#validateSection;
 		if (!subValidators || subValidators.size === 0) return undefined;
 		for (const label of labels) {
 			const sub = subValidators.get(label);
 			if (!sub) continue;
-			const parsed = sub(data);
-			if (!parsed.success) return parsed;
+			const result = sub(data);
+			if (!result.success) {
+				return {
+					result,
+					requiredFields: this.#sectionRequiredFields?.get(label) ?? [],
+				};
+			}
 		}
 		return undefined;
 	}
@@ -458,7 +510,14 @@ subprocessToolRegistry.register<YieldDetails>("yield", {
 		if (!details || typeof details !== "object") return undefined;
 		const record = details as Record<string, unknown>;
 		const status = record.status;
-		if (status !== "success" && status !== "aborted") return undefined;
+		if (status !== "success" && status !== "aborted" && status !== "schema_violation") return undefined;
+		const schemaViolation = record.schemaViolation;
+		if (
+			status === "schema_violation" &&
+			(!schemaViolation || typeof schemaViolation !== "object" || Array.isArray(schemaViolation))
+		) {
+			return undefined;
+		}
 		return {
 			data: record.data,
 			status,
@@ -466,6 +525,7 @@ subprocessToolRegistry.register<YieldDetails>("yield", {
 			type: isYieldType(record.type) ? record.type : undefined,
 			useLastTurn: record.useLastTurn === true ? true : undefined,
 			schemaOverridden: record.schemaOverridden === true ? true : undefined,
+			schemaViolation: schemaViolation as SchemaViolationResult | undefined,
 		};
 	},
 	shouldTerminate: event => {

@@ -53,7 +53,7 @@ While work remains, you MUST continue with another tool call — investigate, ed
 Yield protocol:
 - Omit `type` for the normal single terminal structured result in `result.data`.
 - Use non-empty `type: string[]` for incremental, non-terminal sections; calls accumulate by section.
-- Use `type: string` for a terminal result; if data is omitted, your last assistant turn becomes the raw final result.
+- Use `type: string` for a terminal result.{{#if strictSchema}} You MUST include explicit `result.data` in strict schema mode.{{else}} If data is omitted, your last assistant turn becomes the raw final result.{{/if}}
 
 This is your only way to return a final result. For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`.
 

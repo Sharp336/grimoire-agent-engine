@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { SchemaMode } from "../tools/output-schema-validator";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -166,6 +167,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	tools: string[];
 	/** Output schema if structured output was requested */
 	outputSchema?: unknown;
+	/** Validation mode for structured output. Absent on legacy entries means permissive. */
+	schemaMode?: SchemaMode;
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */

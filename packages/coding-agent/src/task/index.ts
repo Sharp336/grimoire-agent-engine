@@ -29,6 +29,7 @@ import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "tex
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
+import { type PreparedOutputSchema, prepareOutputSchema } from "../tools/output-schema-validator";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
@@ -328,6 +329,7 @@ interface SyncSpawnRef {
 	item: TaskItem;
 	index: number;
 	preAllocatedId?: string;
+	preparedOutputSchema?: PreparedOutputSchema;
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -585,6 +587,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return this.session.settings.get("task.batch");
 	}
 
+	async #prepareOutputSchemas(spawnItems: TaskItem[], defaultAgent: string): Promise<PreparedOutputSchema[]> {
+		const { agents } = await discoverAgents(this.session.cwd);
+		const schemaMode = this.session.schemaMode ?? "permissive";
+		const preparedBySchema = new Map<unknown, PreparedOutputSchema>();
+		return spawnItems.map(item => {
+			const agent = agents.find(candidate => candidate.name === (item.agent?.trim() || defaultAgent));
+			const outputSchema = agent?.output ?? this.session.outputSchema;
+			const sessionPreparedOutputSchema = this.session.preparedOutputSchema;
+			if (
+				agent?.output === undefined &&
+				sessionPreparedOutputSchema?.schemaMode === schemaMode &&
+				Object.is(sessionPreparedOutputSchema.outputSchema, outputSchema)
+			) {
+				return sessionPreparedOutputSchema;
+			}
+			let prepared = preparedBySchema.get(outputSchema);
+			if (!prepared) {
+				prepared = prepareOutputSchema(outputSchema, schemaMode);
+				preparedBySchema.set(outputSchema, prepared);
+			}
+			return prepared;
+		});
+	}
+
 	#getSpawnSemaphore(): Semaphore {
 		const max = this.session.settings.get("task.maxConcurrency");
 		if (this.#spawnSemaphore) {
@@ -613,6 +639,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		// Match the executor's already-aborted outcome before doing any schema
+		// preparation or scheduling work. In particular, an inherited malformed
+		// strict schema must not mask the caller's cancellation.
+		if (signal?.aborted) {
+			return createTaskModeError("Cancelled before start");
+		}
 		const params = repairTaskParams(rawParams as TaskParams);
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -626,6 +658,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const spawnItems = resolveSpawnItems(params);
 		const resolvedAgents = spawnItems.map(item => item.agent?.trim() || defaultAgent);
+		const preparedOutputSchemas = await this.#prepareOutputSchemas(spawnItems, defaultAgent);
+		const invalidPreparedSchema =
+			(this.session.schemaMode ?? "permissive") === "strict"
+				? preparedOutputSchemas.find(prepared => prepared.error)
+				: undefined;
+		if (invalidPreparedSchema?.error) {
+			return createTaskModeError(`Invalid strict output schema: ${invalidPreparedSchema.error}`);
+		}
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
@@ -679,7 +719,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
 			return withAdvisory(
-				await this.#executeSyncFanout(toolCallId, params, spawnItems, defaultAgent, signal, onUpdate),
+				await this.#executeSyncFanout(
+					toolCallId,
+					params,
+					spawnItems,
+					preparedOutputSchemas,
+					defaultAgent,
+					signal,
+					onUpdate,
+				),
 			);
 		}
 
@@ -692,6 +740,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			item: TaskItem;
 			index: number;
 			blocking: boolean;
+			preparedOutputSchema: PreparedOutputSchema;
 			progress: AgentProgress;
 		}> = [];
 		for (let index = 0; index < spawnItems.length; index++) {
@@ -705,6 +754,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				item,
 				index,
 				blocking: itemBlocking[index],
+				preparedOutputSchema: preparedOutputSchemas[index],
 				progress: {
 					index,
 					id: agentId,
@@ -762,6 +812,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					toolCallId,
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
+					preparedOutputSchema: spawn.preparedOutputSchema,
 					progress: spawn.progress,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
@@ -858,7 +909,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),
+			spawns: syncSpawns.map(spawn => ({
+				item: spawn.item,
+				index: spawn.index,
+				preAllocatedId: spawn.agentId,
+				preparedOutputSchema: spawn.preparedOutputSchema,
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						const spawn = spawns[index];
@@ -918,6 +974,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		manager: AsyncJobManager;
 		toolCallId: string;
 		spawnParams: TaskParams;
+		preparedOutputSchema: PreparedOutputSchema;
 		agentId: string;
 		progress: AgentProgress;
 		ircEnabled: boolean;
@@ -925,8 +982,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+			preparedOutputSchema,
+		} = options;
 		const buildFollowUpHint = (aborted: boolean): string => {
 			if (aborted) {
 				const status = AgentRegistry.global().get(agentId)?.status;
@@ -986,6 +1053,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.index,
 						true,
 						{ invokedAt: startedAt, acquiredAt },
+						preparedOutputSchema,
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
@@ -1051,6 +1119,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		toolCallId: string,
 		params: TaskParams,
 		spawnItems: TaskItem[],
+		preparedOutputSchemas: PreparedOutputSchema[],
 		defaultAgent: string,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
@@ -1070,6 +1139,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					0,
 					false,
 					{ invokedAt, acquiredAt },
+					preparedOutputSchemas[0],
 				);
 			} finally {
 				this.#releaseSpawnSemaphore();
@@ -1097,7 +1167,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: spawnItems.map((item, index) => ({ item, index })),
+			spawns: spawnItems.map((item, index) => ({
+				item,
+				index,
+				preparedOutputSchema: preparedOutputSchemas[index],
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						latestProgress.set(index, { ...progress, index });
@@ -1163,6 +1237,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						spawn.index,
 						false,
 						{ invokedAt, acquiredAt },
+						spawn.preparedOutputSchema,
 					);
 				} finally {
 					this.#releaseSpawnSemaphore();
@@ -1188,8 +1263,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		preparedOutputSchema?: PreparedOutputSchema,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, spawnIndex, detached, launchTiming);
+		return this.#runSpawn(
+			toolCallId,
+			params,
+			signal,
+			onUpdate,
+			preAllocatedId,
+			spawnIndex,
+			detached,
+			launchTiming,
+			preparedOutputSchema,
+		);
 	}
 
 	/** Spawn a fresh subagent and run it to completion. */
@@ -1202,6 +1288,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		preparedOutputSchema?: PreparedOutputSchema,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
@@ -1283,7 +1370,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Output schema priority: agent frontmatter > inherited parent session.
 		// The task call itself never carries a schema; workflows needing ad-hoc
 		// structured output go through eval agent(prompt, schema).
-		const effectiveOutputSchema = effectiveAgent.output ?? this.session.outputSchema;
+		const schemaMode = this.session.schemaMode ?? "permissive";
+		const outputSchema = effectiveAgent.output ?? this.session.outputSchema;
+		const matchingPreparedOutputSchema =
+			preparedOutputSchema?.schemaMode === schemaMode && Object.is(preparedOutputSchema.outputSchema, outputSchema)
+				? preparedOutputSchema
+				: undefined;
+		const sessionPreparedOutputSchema = this.session.preparedOutputSchema;
+		const matchingSessionPreparedOutputSchema =
+			effectiveAgent.output === undefined &&
+			sessionPreparedOutputSchema?.schemaMode === schemaMode &&
+			Object.is(sessionPreparedOutputSchema.outputSchema, outputSchema)
+				? sessionPreparedOutputSchema
+				: undefined;
+		const effectivePreparedOutputSchema =
+			matchingPreparedOutputSchema ??
+			matchingSessionPreparedOutputSchema ??
+			prepareOutputSchema(outputSchema, schemaMode);
+		const effectiveOutputSchema = effectivePreparedOutputSchema.outputSchema;
+		if (schemaMode === "strict" && effectivePreparedOutputSchema.error) {
+			return {
+				content: [{ type: "text", text: `Invalid strict output schema: ${effectivePreparedOutputSchema.error}` }],
+				details: { projectAgentsDir, results: [], totalDurationMs: Date.now() - startTime },
+			};
+		}
 
 		let isolationContext: IsolationContext | null = null;
 		if (isIsolated) {
@@ -1433,6 +1543,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				parentActiveModelPattern,
 				thinkingLevel: thinkingLevelOverride,
 				outputSchema: effectiveOutputSchema,
+				schemaMode,
+				preparedOutputSchema: effectivePreparedOutputSchema,
 				sessionFile,
 				persistArtifacts: !!artifactsDir,
 				artifactsDir: effectiveArtifactsDir,

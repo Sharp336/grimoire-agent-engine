@@ -14,11 +14,12 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import type { YieldItem } from "./types";
 
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
-interface AssembledYieldResult {
+export interface AssembledYieldResult {
 	data: unknown;
 	schemaOverridden: boolean;
 	rawText: boolean;
 	missingData: boolean;
+	usedLastTurn: boolean;
 }
 
 function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
@@ -44,6 +45,7 @@ function resolveYieldPayload(
 	item: YieldItem,
 	lastAssistantText: string | undefined,
 	labels: string[],
+	strict: boolean,
 ): { value: unknown; fromLastAssistantText: boolean; missingData: boolean } {
 	const hasData = item.data !== undefined;
 	const shouldUseLastTurn = item.useLastTurn === true || (labels.length > 0 && !hasData);
@@ -57,7 +59,7 @@ function resolveYieldPayload(
 	return {
 		value: item.data,
 		fromLastAssistantText: false,
-		missingData: item.data === undefined || item.data === null,
+		missingData: item.data === undefined || (!strict && item.data === null),
 	};
 }
 
@@ -131,6 +133,7 @@ export function assembleYieldResult(
 	yieldItems: YieldItem[],
 	lastAssistantText?: string,
 	arrayLabels?: ReadonlySet<string>,
+	strict = false,
 ): AssembledYieldResult | undefined {
 	if (yieldItems.length === 0) return undefined;
 
@@ -154,14 +157,16 @@ export function assembleYieldResult(
 	const sectionCounts = new Map<string, number>();
 	let schemaOverridden = false;
 	let missingData = false;
+	let usedLastTurn = false;
 	let hasSections = false;
 	for (const item of yieldItems) {
 		if (item.status === "aborted") continue;
 		if (!isIncrementalYieldType(item.type)) continue;
 		schemaOverridden ||= item.schemaOverridden === true;
 		const labels = getYieldLabels(item.type);
-		const resolved = resolveYieldPayload(item, lastAssistantText, labels);
+		const resolved = resolveYieldPayload(item, lastAssistantText, labels, strict);
 		missingData ||= resolved.missingData;
+		usedLastTurn ||= resolved.fromLastAssistantText;
 		for (const label of labels) {
 			appendYieldSection(sections, sectionCounts, label, resolved.value, arrayLabels?.has(label) ?? false);
 			hasSections = true;
@@ -172,27 +177,29 @@ export function assembleYieldResult(
 	// `type: "result"` finalize that carries `data` is the complete result, used
 	// verbatim — never wrapped in a section.
 	if (terminalItem && terminalItem.data !== undefined) {
-		const resolved = resolveYieldPayload(terminalItem, lastAssistantText, []);
+		const resolved = resolveYieldPayload(terminalItem, lastAssistantText, [], strict);
 		return {
 			data: resolved.value,
 			schemaOverridden: terminalItem.schemaOverridden === true,
 			rawText: resolved.fromLastAssistantText && typeof resolved.value === "string",
 			missingData: resolved.missingData,
+			usedLastTurn: resolved.fromLastAssistantText,
 		};
 	}
 
 	// A data-less terminal finalize keeps accumulated sections; only when none
 	// exist does the last assistant turn become the raw result.
 	if (hasSections) {
-		return { data: sections, schemaOverridden, rawText: false, missingData };
+		return { data: sections, schemaOverridden, rawText: false, missingData, usedLastTurn };
 	}
 
 	if (!terminalItem) return undefined;
-	const resolved = resolveYieldPayload(terminalItem, lastAssistantText, getYieldLabels(terminalItem.type));
+	const resolved = resolveYieldPayload(terminalItem, lastAssistantText, getYieldLabels(terminalItem.type), strict);
 	return {
 		data: resolved.value,
 		schemaOverridden: terminalItem.schemaOverridden === true,
 		rawText: resolved.fromLastAssistantText && typeof resolved.value === "string",
 		missingData: resolved.missingData,
+		usedLastTurn: resolved.fromLastAssistantText,
 	};
 }

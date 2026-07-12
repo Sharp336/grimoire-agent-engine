@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import { AgentProtocolHandler } from "../../internal-urls/agent-protocol";
-import { resetRegisteredArtifactDirsForTests } from "../../internal-urls/registry-helpers";
+import { artifactsDirsFromRegistry, resetRegisteredArtifactDirsForTests } from "../../internal-urls/registry-helpers";
 import type { PlanModeState } from "../../plan-mode/state";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
@@ -15,6 +15,7 @@ import * as isolationRunner from "../../task/isolation-runner";
 import { AgentOutputManager } from "../../task/output-manager";
 import type { AgentDefinition, AgentProgress, SingleResult } from "../../task/types";
 import type { ToolSession } from "../../tools";
+import type { SchemaViolationResult } from "../../tools/output-schema-validator";
 import { EVAL_AGENT_MAX_DEPTH, runEvalAgent } from "../agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { IdleTimeout } from "../idle-timeout";
@@ -309,6 +310,70 @@ describe("runEvalAgent", () => {
 		expect(firstOptions.modelOverride).toEqual(["p/override"]);
 		expect(secondOptions.outputSchema).toBeUndefined();
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
+	});
+
+	it("forwards explicit strict mode and defaults omitted mode to permissive", async () => {
+		mockAgents();
+		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await runEvalAgent({ prompt: "strict", schema, schemaMode: "strict" }, { session: makeSession() });
+		await runEvalAgent({ prompt: "legacy", schema }, { session: makeSession() });
+
+		const strictOptions = runSpy.mock.calls[0]?.[0];
+		const legacyOptions = runSpy.mock.calls[1]?.[0];
+		if (!strictOptions || !legacyOptions) throw new Error("runSubprocess was not called twice");
+		expect(strictOptions.schemaMode).toBe("strict");
+		expect(strictOptions.preparedOutputSchema?.schemaMode).toBe("strict");
+		expect(legacyOptions.schemaMode).toBe("permissive");
+		expect(legacyOptions.preparedOutputSchema?.schemaMode).toBe("permissive");
+	});
+
+	it("rejects invalid schema mode contracts before dispatching", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession();
+
+		await expect(runEvalAgent({ prompt: "missing", schemaMode: "strict" }, { session })).rejects.toThrow(
+			"requires schema",
+		);
+		await expect(
+			runEvalAgent({ prompt: "invalid", schema: false, schemaMode: "strict" }, { session }),
+		).rejects.toThrow("invalid strict schema");
+		await expect(
+			runEvalAgent({ prompt: "unknown", schema: { type: "object" }, schemaMode: "enforced" }, { session }),
+		).rejects.toThrow("invalid arguments");
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("preserves a valid strict structured result and exposes schema failures as typed bridge results", async () => {
+		mockAgents();
+		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
+		const violation: SchemaViolationResult = {
+			error: "schema_violation",
+			message: "result.data.accepted must be boolean",
+			missingRequired: [],
+			data: '{"accepted":"no"}',
+		};
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess");
+		runSpy.mockImplementationOnce(async options => singleResult(options, { output: '{"accepted":false}' }));
+		runSpy.mockImplementationOnce(async options => singleResult(options, { exitCode: 1, failure: violation }));
+
+		const success = await runEvalAgent({ prompt: "valid", schema, schemaMode: "strict" }, { session: makeSession() });
+		const failure = await runEvalAgent(
+			{ prompt: "invalid", schema, schemaMode: "strict" },
+			{ session: makeSession() },
+		);
+
+		expect(success).toEqual({
+			text: '{"accepted":false}',
+			details: expect.objectContaining({ structured: true, agent: "task" }),
+		});
+		expect(failure).toMatchObject({
+			text: "ok",
+			details: { structured: true, agent: "task" },
+			schemaViolation: violation,
+		});
 	});
 
 	it("forces LSP off for bridge subagents even when task.enableLsp is on", async () => {
@@ -979,6 +1044,57 @@ describe("runEvalAgent isolation", () => {
 		expect(plainSpy).toHaveBeenCalledTimes(1);
 		expect(explicitOn.details.isolated).toBe(true);
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("skips isolated apply but accounts for and removes strict-failure artifacts even with handle", async () => {
+		mockAgents();
+		mockIsolationContext();
+		const violation: SchemaViolationResult = {
+			error: "schema_violation",
+			message: "result.data.accepted must be boolean",
+			missingRequired: [],
+			data: '{"accepted":"no"}',
+		};
+		const usage: number[] = [];
+		const session = isolatedSession();
+		session.recordEvalSubagentUsage = output => usage.push(output);
+		let artifactsDir: string | undefined;
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
+			artifactsDir = options.baseOptions.artifactsDir;
+			if (!artifactsDir) throw new Error("artifactsDir missing");
+			await fs.writeFile(path.join(artifactsDir, "strict-failure.md"), "must be removed");
+			return singleResult(options.baseOptions, {
+				exitCode: 1,
+				output: "",
+				failure: violation,
+				usage: {
+					input: 0,
+					output: 17,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 17,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+		});
+		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+
+		const result = await runEvalAgent(
+			{ prompt: "classify", schema: { type: "object" }, schemaMode: "strict", isolated: true, handle: true },
+			{ session },
+		);
+
+		expect(result.schemaViolation).toEqual(violation);
+		expect(mergeSpy).not.toHaveBeenCalled();
+		expect(usage).toEqual([17]);
+		if (!artifactsDir) throw new Error("strict failure did not allocate artifacts");
+		expect(
+			await fs.stat(artifactsDir).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(artifactsDirsFromRegistry()).not.toContain(artifactsDir);
 	});
 
 	it("preserves temp artifacts for non-isolated handle outputs", async () => {

@@ -18,6 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import type { SchemaMode } from "../tools/output-schema-validator";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import {
@@ -1510,6 +1511,7 @@ export class SessionManager {
 		task: string;
 		tools: string[];
 		outputSchema?: unknown;
+		schemaMode?: SchemaMode;
 		spawns?: string;
 		readSummarize?: boolean;
 	}): string {
@@ -1948,6 +1950,7 @@ export class SessionManager {
 			task: string;
 			tools: string[];
 			outputSchema?: unknown;
+			schemaMode?: SchemaMode;
 			spawns?: string;
 			readSummarize?: boolean;
 		} | null;
@@ -1966,6 +1969,7 @@ export class SessionManager {
 			task: string;
 			tools: string[];
 			outputSchema?: unknown;
+			schemaMode?: SchemaMode;
 			spawns?: string;
 			readSummarize?: boolean;
 		} | null = null;
@@ -1977,6 +1981,7 @@ export class SessionManager {
 					task: entry.task,
 					tools: entry.tools,
 					outputSchema: entry.outputSchema,
+					schemaMode: entry.schemaMode,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 				};

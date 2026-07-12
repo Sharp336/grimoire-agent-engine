@@ -82,6 +82,22 @@ describe("createAgentSession session storage isolation", () => {
 		}
 	});
 
+	it("rejects an invalid strict schema before accessing model or session dependencies", async () => {
+		const modelRegistry = {
+			get authStorage(): never {
+				throw new Error("model registry must not be accessed for invalid strict schema");
+			},
+		} as unknown as ModelRegistry;
+
+		await expect(
+			createAgentSession({
+				outputSchema: false,
+				schemaMode: "strict",
+				modelRegistry,
+			}),
+		).rejects.toThrow("Invalid strict output schema");
+	});
+
 	it("uses the provided agentDir for the default persistent session root", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-session-isolation-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);

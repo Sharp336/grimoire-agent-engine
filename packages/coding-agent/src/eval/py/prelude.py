@@ -480,6 +480,15 @@ if "__omp_prelude_loaded__" not in globals():
         text = res.get("text") if isinstance(res, dict) else res
         return json.loads(text) if schema is not None else text
 
+    class AgentSchemaValidationError(RuntimeError):
+        """Raised when a caller-supplied subagent schema rejects final output."""
+
+        def __init__(self, details):
+            self.code = "schema_violation"
+            self.details = details
+            message = details.get("message") if isinstance(details, dict) else None
+            super().__init__(message or "Subagent output violated its schema.")
+
     def agent(
         prompt,
         *,
@@ -496,9 +505,11 @@ if "__omp_prelude_loaded__" not in globals():
 
         `agent` selects the subagent definition (default "task"). Pass
         `model` to override that agent's model, `label` for the output artifact
-        id, and `schema` to request structured JSON output; when `schema` is
-        supplied the parsed object is returned. Share background by writing a
-        local:// file and referencing it in the prompt.
+        id, and `schema` to request structured JSON output. A supplied schema
+        strictly validates the final output; on failure this raises
+        ``AgentSchemaValidationError``. Successful schema-backed calls return
+        the parsed object. Share background by writing a local:// file and
+        referencing it in the prompt.
 
         Pass `isolated=True` to run the subagent inside an isolation worktree
         (copy-on-write of the parent repo) so parallel `agent()` spawns can
@@ -548,6 +559,8 @@ if "__omp_prelude_loaded__" not in globals():
         if handle:
             args["handle"] = True
         res = _bridge_call("__agent__", args)
+        if isinstance(res, dict) and "schemaViolation" in res:
+            raise AgentSchemaViolationError(res["schemaViolation"])
         text = res.get("text") if isinstance(res, dict) else res
         parsed = json.loads(text) if schema is not None else text
         if not handle:

@@ -3,6 +3,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { type BaseType, type } from "arktype";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { SchemaViolationResult } from "../tools/output-schema-validator";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
@@ -313,7 +314,7 @@ export interface AgentDefinition {
 /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
 export interface YieldItem {
 	data?: unknown;
-	status?: "success" | "aborted";
+	status?: "success" | "aborted" | "schema_violation";
 	error?: string;
 	/** A string label is terminal; a non-empty array of labels is incremental. */
 	type?: string | string[];
@@ -325,6 +326,7 @@ export interface YieldItem {
 	 * during post-mortem validation.
 	 */
 	schemaOverridden?: boolean;
+	schemaViolation?: SchemaViolationResult;
 }
 
 /** Progress tracking for a single agent */
@@ -426,6 +428,8 @@ export interface SingleResult {
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
 	resolvedModel?: string;
 	error?: string;
+	/** Typed terminal strict-schema failure; output/stderr retain its JSON wire form. */
+	failure?: SchemaViolationResult;
 	aborted?: boolean;
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */

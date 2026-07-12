@@ -46,10 +46,17 @@ describe("SessionManager.peekSessionInit", () => {
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
 
 		manager.appendSessionInit({ systemPrompt: "first", task: "t1", tools: ["read"], spawns: "" });
+		const schema = {
+			type: "object",
+			properties: { accepted: { type: "boolean" } },
+			required: ["accepted"],
+		};
 		manager.appendSessionInit({
 			systemPrompt: "second",
 			task: "t2",
 			tools: ["read", "bash", "yield"],
+			outputSchema: schema,
+			schemaMode: "strict",
 			spawns: "task",
 			readSummarize: false,
 		});
@@ -61,6 +68,8 @@ describe("SessionManager.peekSessionInit", () => {
 		// Latest init wins — the reviver must rebuild from the most recent contract.
 		expect(peek?.init?.systemPrompt).toBe("second");
 		expect(peek?.init?.tools).toEqual(["read", "bash", "yield"]);
+		expect(peek?.init?.outputSchema).toEqual(schema);
+		expect(peek?.init?.schemaMode).toBe("strict");
 		expect(peek?.init?.spawns).toBe("task");
 		expect(peek?.init?.readSummarize).toBe(false);
 	});

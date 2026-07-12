@@ -182,6 +182,7 @@ import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
+import { type PreparedOutputSchema, prepareOutputSchema, type SchemaMode } from "./tools/output-schema-validator";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -487,6 +488,10 @@ export interface CreateAgentSessionOptions {
 
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
+	/** Enforcement policy for {@link outputSchema}. Defaults to permissive. */
+	schemaMode?: SchemaMode;
+	/** In-memory prepared output-schema contract. Never persisted. */
+	preparedOutputSchema?: PreparedOutputSchema;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
@@ -1090,6 +1095,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
+	const schemaMode = options.schemaMode ?? "permissive";
+	const preparedOutputSchema =
+		options.preparedOutputSchema?.schemaMode === schemaMode &&
+		Object.is(options.preparedOutputSchema.outputSchema, options.outputSchema)
+			? options.preparedOutputSchema
+			: prepareOutputSchema(options.outputSchema, schemaMode);
+	if (schemaMode === "strict" && preparedOutputSchema.error) {
+		throw new Error(`Invalid strict output schema: ${preparedOutputSchema.error}`);
+	}
 
 	registerSshCleanup();
 	registerEvalCleanup();
@@ -1564,6 +1578,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rules: allRules,
 			eventBus,
 			outputSchema: options.outputSchema,
+			schemaMode,
+			preparedOutputSchema,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,

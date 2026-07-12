@@ -252,6 +252,12 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			...baseOptions,
 			id: "subagent-late-yield",
 			settings,
+			outputSchema: {
+				type: "object",
+				required: ["lateButLanded"],
+				properties: { lateButLanded: { type: "boolean" } },
+			},
+			schemaMode: "strict",
 		});
 
 		expect(abortCount).toBeGreaterThanOrEqual(1);
@@ -261,6 +267,8 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		// Yield data is preserved for inspection — the regression was only in
 		// the exit status / abort flag, not in the captured payload.
 		expect(result.extractedToolData?.yield).toBeDefined();
+		expect(result.failure).toBeUndefined();
+		expect(result.output).not.toContain("schema_violation");
 	});
 
 	it("commits a yield tool call before the soft request budget aborts the turn", async () => {

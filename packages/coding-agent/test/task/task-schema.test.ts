@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type } from "arktype";
 
@@ -81,5 +82,58 @@ describe("task spawn validation", () => {
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "explore" });
 		expect(text).toContain("Missing `task`");
+	});
+
+	it("rejects an invalid inherited strict schema before dispatching a subagent", async () => {
+		const session = createSession();
+		Object.assign(session, { outputSchema: false, schemaMode: "strict" });
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "Do the task.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(session);
+
+		const result = await tool.execute("tool-call", { task: "classify" });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+
+		expect(text).toContain("Invalid strict output schema");
+		expect(dispatch).not.toHaveBeenCalled();
+	});
+
+	it("returns cancellation before preparing an invalid inherited strict schema", async () => {
+		const session = createSession();
+		Object.assign(session, { outputSchema: false, schemaMode: "strict" });
+		const discovery = vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "Do the task.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(session);
+		const discoveriesAtCreation = discovery.mock.calls.length;
+		const controller = new AbortController();
+		controller.abort();
+
+		const result = await tool.execute("tool-call", { task: "classify" }, controller.signal);
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+
+		expect(text).toBe("Cancelled before start");
+		expect(text).not.toContain("Invalid strict output schema");
+		expect(discovery).toHaveBeenCalledTimes(discoveriesAtCreation);
+		expect(dispatch).not.toHaveBeenCalled();
 	});
 });

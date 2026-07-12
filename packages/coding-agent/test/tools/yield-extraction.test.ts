@@ -30,6 +30,43 @@ describe("yield subprocess extraction", () => {
 		});
 	});
 
+	it("extracts and terminates on typed schema violations", () => {
+		const event = {
+			toolName: "yield",
+			toolCallId: "call-schema-violation",
+			result: {
+				content: [{ type: "text" as const, text: "Schema violation: answer is required" }],
+				details: {
+					status: "schema_violation",
+					data: { answer: 42 },
+					schemaViolation: {
+						error: "schema_violation",
+						message: "answer: is required",
+						missingRequired: ["answer"],
+						data: '{"answer":42}',
+					},
+				},
+			},
+			isError: false,
+		};
+
+		expect(handler?.extractData?.(event)).toEqual({
+			status: "schema_violation",
+			data: { answer: 42 },
+			error: undefined,
+			type: undefined,
+			useLastTurn: undefined,
+			schemaOverridden: undefined,
+			schemaViolation: {
+				error: "schema_violation",
+				message: "answer: is required",
+				missingRequired: ["answer"],
+				data: '{"answer":42}',
+			},
+		});
+		expect(handler?.shouldTerminate?.(event)).toBe(true);
+	});
+
 	it("ignores malformed yield details without status", () => {
 		const data = handler?.extractData?.({
 			toolName: "yield",
