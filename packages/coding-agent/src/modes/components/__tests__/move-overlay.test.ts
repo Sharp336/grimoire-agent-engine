@@ -1,14 +1,16 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "../../theme/theme";
 import { MoveOverlay, type MoveOverlayResult, resolveExistingDirectory, resolveMovePath } from "../move-overlay";
 
 // Strip SGR colors so assertions see visible text only.
-const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
+const strip = (lines: readonly string[]): string => lines.map(stripAnsi).join("\n");
 
 describe("resolveMovePath", () => {
 	it("expands ~ to homedir", () => {
@@ -80,6 +82,19 @@ describe("MoveOverlay", () => {
 		const text = strip(overlay.render(80));
 		expect(text).toContain("Move to directory");
 		expect(text).toContain("Path:");
+	});
+
+	it("renders every frame row at the assigned overlay width", () => {
+		const overlay = new MoveOverlay(cwd, () => {});
+		const lines = overlay.render(72);
+		const plainLines = lines.map(stripAnsi);
+
+		expect(lines.map(line => visibleWidth(line))).toEqual(Array(lines.length).fill(72));
+		expect(plainLines[0]!.endsWith(uiTheme.boxRound.topRight)).toBe(true);
+		expect(plainLines.at(-1)!.endsWith(uiTheme.boxRound.bottomRight)).toBe(true);
+		for (const line of plainLines.slice(1, -1)) {
+			expect(line.endsWith(uiTheme.boxRound.vertical)).toBe(true);
+		}
 	});
 
 	it("lists child directories (excluding hidden and files) on empty input", () => {
@@ -162,5 +177,76 @@ describe("MoveOverlay", () => {
 		overlay.handleInput("\r");
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe(path.join(cwd, "alpha"));
+	});
+
+	it("does not stat every directory entry per keystroke", async () => {
+		// Regression: `readDirCached` used to cache names and re-`statSync` every
+		// entry per keystroke. Populate with mostly files so the old code path
+		// would have stat'd all of them; the fix classifies via `Dirent` and only
+		// falls back to `statSync` on symlink entries.
+		const bulk = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-move-overlay-bulk-"));
+		try {
+			for (let i = 0; i < 60; i++) {
+				fs.writeFileSync(path.join(bulk, `f_${String(i).padStart(3, "0")}.txt`), "x");
+			}
+			for (let i = 0; i < 10; i++) fs.mkdirSync(path.join(bulk, `sub_${i}`));
+
+			const statSpy = spyOn(fs, "statSync");
+			try {
+				const overlay = new MoveOverlay(bulk, () => {});
+				statSpy.mockClear();
+				overlay.handleInput("s");
+				overlay.handleInput("u");
+				overlay.handleInput("b");
+				// Each keystroke may `statSync` at most once — the
+				// `resolveExistingDirectory` probe on the typed prefix. Entries
+				// are classified via `Dirent`, not one stat apiece.
+				expect(statSpy.mock.calls.length).toBeLessThanOrEqual(3);
+			} finally {
+				statSpy.mockRestore();
+			}
+		} finally {
+			await fsp.rm(bulk, { recursive: true, force: true });
+		}
+	});
+
+	it("classifies unknown-type Dirents via statSync fallback", async () => {
+		// Regression: filesystems that report UV_DIRENT_UNKNOWN return Dirents
+		// whose isDirectory()/isFile()/isSymbolicLink() all report false. Those
+		// entries must fall back to statSync so /move still lists real
+		// directories on NFS/FUSE/older SMB.
+		const unknownFs = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-move-overlay-unknown-"));
+		try {
+			const realDir = path.join(unknownFs, "real-dir");
+			const realFile = path.join(unknownFs, "real-file.txt");
+			fs.mkdirSync(realDir);
+			fs.writeFileSync(realFile, "x");
+
+			const fakeDirent = (name: string): fs.Dirent =>
+				({
+					name,
+					isDirectory: () => false,
+					isFile: () => false,
+					isSymbolicLink: () => false,
+					isBlockDevice: () => false,
+					isCharacterDevice: () => false,
+					isFIFO: () => false,
+					isSocket: () => false,
+				}) as fs.Dirent;
+			const readdirSpy = spyOn(fs, "readdirSync").mockReturnValue([
+				fakeDirent("real-dir"),
+				fakeDirent("real-file.txt"),
+			] as never);
+			try {
+				const overlay = new MoveOverlay(unknownFs, () => {});
+				const text = strip(overlay.render(80));
+				expect(text).toContain("real-dir/");
+				expect(text).not.toContain("real-file.txt");
+			} finally {
+				readdirSpy.mockRestore();
+			}
+		} finally {
+			await fsp.rm(unknownFs, { recursive: true, force: true });
+		}
 	});
 });

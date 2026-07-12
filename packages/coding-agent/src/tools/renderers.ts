@@ -30,7 +30,17 @@ import { resolveToolRenderer } from "./resolve";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
 import { todoToolRenderer } from "./todo";
+import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
+
+/**
+ * Per-renderer opt-in for a full viewport replay when the first result
+ * replaces a painted pending-call render. A predicate receives the painted
+ * call args and render options so the repaint stays scoped to the pending
+ * shapes that actually re-anchor (an over-eager replay wipes native
+ * scrollback on direct terminals).
+ */
+export type FirstResultViewportRepaint = boolean | ((args: unknown, options: RenderResultOptions) => boolean);
 
 export type ToolRenderer = {
 	renderCall: (args: unknown, options: RenderResultOptions, theme: Theme) => Component;
@@ -44,25 +54,28 @@ export type ToolRenderer = {
 	/** Render without background box, inline in the response flow */
 	inline?: boolean;
 	/**
-	 * Whether pending-call rows are provisional: useful on screen while a tool is
-	 * streaming, but not durable transcript history. `true` means every pending
-	 * shape is provisional. `"collapsed"` means only the collapsed pending shape
-	 * is provisional; expanded rendering is top-anchored/append-shaped enough to
-	 * let the transcript commit its settled prefix. Absent = the pending preview
-	 * streams rows the result render preserves.
+	 * Whether the renderer's pending-call path visibly consumes
+	 * `options.spinnerFrame`. Used to avoid scheduling repaint ticks for live
+	 * partial calls whose bytes cannot change between spinner frames.
 	 */
-	provisionalPendingPreview?: boolean | "collapsed";
+	animatedPendingPreview?: boolean | ((args: unknown) => boolean);
 	/**
-	 * Whether the partial-result render is provisional: chrome rows (header
-	 * glyph, frame state) that change between `options.isPartial === true` and
-	 * the final result render. When `true`, the block is treated as
-	 * commit-unstable while a partial result is in flight, so the
-	 * stable-prefix ratchet in `deriveLiveCommitState` cannot promote the
-	 * partial chrome to native scrollback only to have the final render strand
-	 * it above the settled frame. Absent = the partial render is byte-stable
-	 * with the final render and may commit like any settled stream.
+	 * Whether the renderer's partial-result path visibly consumes
+	 * `options.spinnerFrame`.
 	 */
-	provisionalPartialResult?: boolean;
+	animatedPartialResult?: boolean | ((args: unknown) => boolean);
+	/**
+	 * Whether replacing a pending call render with the first result requires a
+	 * full viewport repaint. Use for merged renderers whose pending rows can be
+	 * re-anchored instead of preserved by the result render.
+	 */
+	forceFirstResultViewportRepaint?: FirstResultViewportRepaint;
+	/**
+	 * Whether settling a provisional partial result into the final render requires
+	 * a full viewport repaint. Use when the result renderer changes chrome or
+	 * frame topology at `options.isPartial: true -> false`.
+	 */
+	forceResultViewportRepaintOnSettle?: boolean;
 };
 
 export const toolRenderers: Record<string, ToolRenderer> = {
@@ -99,5 +112,10 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
+	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
+	vibe_send: createVibeToolRenderer("send") as ToolRenderer,
+	vibe_wait: createVibeToolRenderer("wait") as ToolRenderer,
+	vibe_kill: createVibeToolRenderer("kill") as ToolRenderer,
+	vibe_list: createVibeToolRenderer("list") as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
 };

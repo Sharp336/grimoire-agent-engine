@@ -33,7 +33,12 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 	[ThinkingLevel.XHigh]: {
 		value: ThinkingLevel.XHigh,
 		label: "xhigh",
-		description: "Maximum reasoning (~32k tokens)",
+		description: "Extended reasoning (~32k tokens)",
+	},
+	[ThinkingLevel.Max]: {
+		value: ThinkingLevel.Max,
+		label: "max",
+		description: "Maximum reasoning the model supports",
 	},
 };
 
@@ -43,7 +48,7 @@ const EFFORT_BY_SELECTOR: Readonly<Record<string, Effort>> = {
 	[Effort.Medium]: Effort.Medium,
 	[Effort.High]: Effort.High,
 	[Effort.XHigh]: Effort.XHigh,
-	max: Effort.XHigh,
+	[Effort.Max]: Effort.Max,
 };
 const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
 	[ThinkingLevel.Inherit]: ThinkingLevel.Inherit,
@@ -53,6 +58,7 @@ const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
 	[ThinkingLevel.Medium]: ThinkingLevel.Medium,
 	[ThinkingLevel.High]: ThinkingLevel.High,
 	[ThinkingLevel.XHigh]: ThinkingLevel.XHigh,
+	[ThinkingLevel.Max]: ThinkingLevel.Max,
 };
 
 function getOwnSelector<T>(selectors: Readonly<Record<string, T>>, value: string | null | undefined): T | undefined {
@@ -124,6 +130,11 @@ export const AUTO_THINKING = "auto" as const;
 /** A thinking selector as configured by the user — a concrete level or `auto`. */
 export type ConfiguredThinkingLevel = ThinkingLevel | typeof AUTO_THINKING;
 
+/** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
+export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
+	return level === AUTO_THINKING ? undefined : level;
+}
+
 /** Metadata used to render the `auto` selector value alongside concrete levels. */
 export interface ConfiguredThinkingLevelMetadata {
 	value: ConfiguredThinkingLevel;
@@ -144,7 +155,6 @@ const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
  */
 export function parseConfiguredThinkingLevel(value: string | null | undefined): ConfiguredThinkingLevel | undefined {
 	if (value === AUTO_THINKING) return AUTO_THINKING;
-	if (value === "max") return ThinkingLevel.XHigh;
 	return parseThinkingLevel(value);
 }
 
@@ -155,7 +165,7 @@ export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLeve
 
 /**
  * Thinking selectors accepted by the `--thinking` CLI flag, in display order:
- * `off`, every concrete effort (`minimal`..`xhigh`), then `auto`. Single source
+ * `off`, every concrete effort (`minimal`..`max`), then `auto`. Single source
  * for the flag's `options` list, shell completions, and the "invalid level"
  * warning so all three stay in sync.
  */
@@ -163,7 +173,7 @@ export const CLI_THINKING_LEVELS: readonly string[] = [ThinkingLevel.Off, ...THI
 
 /**
  * Parses a `--thinking` CLI value. Accepts every {@link parseConfiguredThinkingLevel}
- * selector (`off`, `auto`, `minimal`..`xhigh`, plus the `max` alias) but rejects
+ * selector (`off`, `auto`, `minimal`..`max`) but rejects
  * `inherit`: an explicit `inherit` on the command line would suppress the
  * settings/scoped-model fallback during startup resolution only to resolve back
  * to the provider default, which is never what the user means.
@@ -206,9 +216,13 @@ export function clampAutoThinkingEffort(model: Model | undefined, effort: Effort
 /**
  * The provisional concrete level shown while `auto` is configured but before a
  * turn has been classified. Prefers the model's `defaultLevel`, otherwise High,
- * clamped into the auto range. Returns `undefined` for non-reasoning models.
+ * clamped into the auto range. Auto never provisions {@link Effort.Max} (the
+ * classifier ceiling is XHigh; only an explicit user request reaches Max), so a
+ * `defaultLevel` of `max` is capped at XHigh before clamping. Returns
+ * `undefined` for non-reasoning models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
 	if (!model?.reasoning) return undefined;
-	return clampAutoThinkingEffort(model, model.thinking?.defaultLevel ?? Effort.High);
+	const preferred = model.thinking?.defaultLevel ?? Effort.High;
+	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred);
 }

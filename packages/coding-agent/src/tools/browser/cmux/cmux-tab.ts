@@ -1,18 +1,19 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../../eval/js/shared/runtime";
-import type { JsDisplayOutput } from "../../../eval/js/shared/types";
 import { callSessionTool } from "../../../eval/js/tool-bridge";
-import type { ToolSession } from "../../../sdk";
 import { resizeImage } from "../../../utils/image-resize";
+import type { ToolSession } from "../../index";
 import { resolveToCwd } from "../../path-utils";
 import { formatScreenshot } from "../../render-utils";
-import { ToolAbortError, ToolError } from "../../tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "../../tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import { extractReadableFromHtml, type ReadableFormat } from "../readable";
+import { bindBrowserRunFacade, waitForBrowserRun } from "../run-cancellation";
+import { cloneSafe, RunOutput } from "../run-output";
 import type { Observation, ReadyInfo, RunResultOk, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
 import {
 	type CmuxEvalResult,
@@ -23,7 +24,8 @@ import {
 	cmuxSnapshotToObservation,
 	GEOMETRY_SCRIPT,
 	mapWaitUntil,
-	serializeEval,
+	serializeEvalWithEnvelope,
+	unwrapEvalEnvelope,
 } from "./rpc";
 import type { CmuxSocketClient } from "./socket-client";
 
@@ -42,9 +44,9 @@ interface ObserveOptions {
 
 interface RunContext {
 	session: SessionSnapshot;
-	displays: RunResultOk["displays"];
+	output: RunOutput;
 	screenshots: ScreenshotResult[];
-	signal?: AbortSignal;
+	signal: AbortSignal;
 	timeoutMs: number;
 }
 
@@ -444,10 +446,14 @@ export class CmuxTab {
 		fn: string | ((...args: TArgs) => TResult | Promise<TResult>),
 		...args: TArgs
 	): Promise<TResult> {
-		const result = (await this.#request("browser.eval", {
-			script: serializeEval(fn as string | ((...args: unknown[]) => unknown), args),
-		})) as CmuxEvalResult;
-		return result.value as TResult;
+		// A script that throws inside the daemon comes back as a bare
+		// `js_error: A JavaScript exception occurred` with no message or stack.
+		// Catch page-side instead so the exception is diagnosable, and turn the
+		// daemon's other blind spot — Promise return values it cannot
+		// serialize — into an actionable error instead of "unsupported type".
+		const script = serializeEvalWithEnvelope(fn as string | ((...args: unknown[]) => unknown), args);
+		const result = (await this.#request("browser.eval", { script })) as CmuxEvalResult;
+		return unwrapEvalEnvelope<TResult>(result.value, "tab.evaluate()");
 	}
 
 	async scrollIntoView(selector: string): Promise<void> {
@@ -478,10 +484,22 @@ export class CmuxTab {
 
 	async screenshot(opts: ScreenshotOptions = {}): Promise<ScreenshotResult> {
 		const context = this.#requireRunContext("tab.screenshot()");
+		// The cmux daemon's `browser.screenshot` captures the surface viewport
+		// only — it has no element-clip or full-page mode, and Bun.Image cannot
+		// crop locally. Degrade transparently instead of silently mislabeling
+		// the capture: scroll the element into view, then TELL the model the
+		// image is the full viewport (reports showed selector captures being
+		// consumed as element crops).
+		const captureNotes: string[] = [];
 		if (opts.selector) {
 			await this.scrollIntoView(opts.selector);
+			captureNotes.push(
+				`selector ${JSON.stringify(opts.selector)} was scrolled into view, but this surface cannot clip to an element — the image is the full viewport`,
+			);
 		}
-		void opts.fullPage;
+		if (opts.fullPage) {
+			captureNotes.push("fullPage is unavailable on this surface — the image is the viewport only");
+		}
 		const result = await this.#captureScreenshotPng(context.timeoutMs);
 		const buffer = Buffer.from(result.png_base64, "base64");
 		const captureMime = "image/png";
@@ -527,17 +545,21 @@ export class CmuxTab {
 				dest,
 				resized,
 			});
-			context.displays.push({ type: "text", text: lines.join("\n") });
-			context.displays.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
+			if (captureNotes.length > 0) {
+				lines.push(`[cmux surface: ${captureNotes.join("; ")}]`);
+			}
+			context.output.push({ type: "text", text: lines.join("\n") });
+			context.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
 		}
 		return info;
 	}
 
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		const signal = this.#runContext?.signal;
 		if (typeof pattern === "string") {
-			await this.#request("browser.wait", { url_contains: pattern, timeout_ms: timeoutMs }, timeoutMs);
-			const result = (await this.#request("browser.url.get", {}, timeoutMs)) as CmuxUrlGetResult;
+			await this.#request("browser.wait", { url_contains: pattern, timeout_ms: timeoutMs }, timeoutMs, signal);
+			const result = (await this.#request("browser.url.get", {}, timeoutMs, signal)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
 			}
@@ -545,29 +567,45 @@ export class CmuxTab {
 		}
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
-			const result = (await this.#request("browser.url.get", {}, Math.min(timeoutMs, 5_000))) as CmuxUrlGetResult;
+			const result = (await this.#request(
+				"browser.url.get",
+				{},
+				Math.min(timeoutMs, 5_000),
+				signal,
+			)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
 				if (pattern.test(result.url)) return result.url;
 			}
-			await Bun.sleep(200);
+			await untilAborted(signal, () => Bun.sleep(200));
 		}
 		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms`);
 	}
 
 	async waitForNavigation(opts?: { waitUntil?: WaitUntil; timeout?: number }): Promise<null> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		const signal = this.#runContext?.signal;
 		// Cmux has no native "next navigation" wait — snapshot the current URL via a fresh
 		// `browser.url.get` (never the possibly-stale `#lastUrl`), then poll for a change
 		// from it (mirroring headless `page.waitForNavigation` intent) and optionally settle
 		// on the requested load state. Start it BEFORE the click/submit that navigates; after
 		// a completed nav it times out like puppeteer does.
-		const baseline = (await this.#request("browser.url.get", {}, Math.min(timeoutMs, 5_000))) as CmuxUrlGetResult;
+		const baseline = (await this.#request(
+			"browser.url.get",
+			{},
+			Math.min(timeoutMs, 5_000),
+			signal,
+		)) as CmuxUrlGetResult;
 		const startUrl = typeof baseline.url === "string" && baseline.url.length > 0 ? baseline.url : this.#lastUrl;
 		if (typeof baseline.url === "string" && baseline.url.length > 0) this.#lastUrl = baseline.url;
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
-			const result = (await this.#request("browser.url.get", {}, Math.min(timeoutMs, 5_000))) as CmuxUrlGetResult;
+			const result = (await this.#request(
+				"browser.url.get",
+				{},
+				Math.min(timeoutMs, 5_000),
+				signal,
+			)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
 				if (result.url !== startUrl) {
@@ -576,12 +614,13 @@ export class CmuxTab {
 							"browser.wait",
 							{ load_state: mapWaitUntil(opts.waitUntil), timeout_ms: timeoutMs },
 							timeoutMs,
+							signal,
 						);
 					}
 					return null;
 				}
 			}
-			await Bun.sleep(200);
+			await untilAborted(signal, () => Bun.sleep(200));
 		}
 		throw new ToolError(`tab.waitForNavigation() timed out after ${timeoutMs}ms`);
 	}
@@ -627,6 +666,7 @@ export class CmuxTab {
 		opts?: { timeout?: number },
 	): Promise<CmuxResponse> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		const signal = this.#runContext?.signal;
 		await this.#installResponseObserver();
 		const startId = await this.#responseCursor();
 		const deadline = Date.now() + timeoutMs;
@@ -640,7 +680,7 @@ export class CmuxTab {
 					return response;
 				}
 			}
-			await Bun.sleep(100);
+			await untilAborted(signal, () => Bun.sleep(100));
 		}
 		throw new ToolError(`tab.waitForResponse() timed out after ${timeoutMs}ms`);
 	}
@@ -665,8 +705,14 @@ export class CmuxTab {
 		method: string,
 		params: Record<string, unknown>,
 		timeoutMs?: number,
+		signal: AbortSignal | undefined = this.#runContext?.signal,
 	): Promise<Record<string, unknown>> {
-		return await this.#client.request(method, { surface_id: this.#surfaceId, ...params }, { timeoutMs });
+		throwIfAborted(signal);
+		const result = await untilAborted(signal, () =>
+			this.#client.request(method, { surface_id: this.#surfaceId, ...params }, { timeoutMs }),
+		);
+		throwIfAborted(signal);
+		return result;
 	}
 
 	async #readGeometry(timeoutMs?: number): Promise<CmuxGeometry> {
@@ -698,7 +744,12 @@ export class CmuxTab {
 			const callable = (0, eval)("(" + source + ")");
 			return callable(element, ...args);
 		})()`;
-		return await this.#evalScript<TResult>(script);
+		// Envelope so a stale selector or a throwing callback reports its actual
+		// error instead of the daemon's generic js_error (see tab.evaluate()).
+		const result = (await this.#request("browser.eval", {
+			script: serializeEvalWithEnvelope(script, []),
+		})) as CmuxEvalResult;
+		return unwrapEvalEnvelope<TResult>(result.value, "elementHandle.evaluate()");
 	}
 
 	async pageContent(): Promise<string> {
@@ -717,12 +768,13 @@ export class CmuxTab {
 		...args: unknown[]
 	): Promise<unknown> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		const signal = this.#runContext?.signal;
 		const pollingMs = typeof opts?.polling === "number" ? opts.polling : 200;
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
 			const value = typeof fn === "string" ? await this.#evalScript<unknown>(fn) : await this.evaluate(fn, ...args);
 			if (value) return value;
-			await Bun.sleep(pollingMs);
+			await untilAborted(signal, () => Bun.sleep(pollingMs));
 		}
 		throw new ToolError(`page.waitForFunction() timed out after ${timeoutMs}ms`);
 	}
@@ -863,16 +915,17 @@ export class CmuxTab {
 	}
 
 	async #waitForSelector(selector: string, timeoutMs: number): Promise<void> {
+		const signal = this.#runContext?.signal;
 		const spec = this.#selectorSpec(selector);
 		const nativeSelector = this.#nativeSelector(spec);
 		if (nativeSelector) {
-			await this.#request("browser.wait", { selector: nativeSelector, timeout_ms: timeoutMs }, timeoutMs);
+			await this.#request("browser.wait", { selector: nativeSelector, timeout_ms: timeoutMs }, timeoutMs, signal);
 			return;
 		}
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
 			if (await this.#selectorExists(spec)) return;
-			await Bun.sleep(100);
+			await untilAborted(signal, () => Bun.sleep(100));
 		}
 		throw new ToolError(`tab.waitFor(${JSON.stringify(selector)}) timed out after ${timeoutMs}ms`);
 	}
@@ -1069,6 +1122,10 @@ class CmuxElementHandle {
 		await this.#tab.fill(this.#selector, value);
 	}
 
+	async press(key: string): Promise<void> {
+		await this.#tab.press(key, { selector: this.#selector });
+	}
+
 	async focus(): Promise<void> {
 		await this.#tab.focus(this.#selector);
 	}
@@ -1251,40 +1308,67 @@ class CmuxBrowserFacade {
 }
 
 export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promise<RunResultOk> {
+	const runAc = new AbortController();
 	const timeoutSignal = AbortSignal.timeout(opts.timeoutMs);
-	const signal = opts.signal ? AbortSignal.any([timeoutSignal, opts.signal]) : timeoutSignal;
-	const displays: RunResultOk["displays"] = [];
+	const signal = AbortSignal.any(
+		opts.signal ? [timeoutSignal, opts.signal, runAc.signal] : [timeoutSignal, runAc.signal],
+	);
+	const output = new RunOutput();
 	const screenshots: ScreenshotResult[] = [];
 	const runId = crypto.randomUUID();
-	tab.setRunContext({ session: opts.snapshot, displays, screenshots, signal, timeoutMs: opts.timeoutMs });
-	const runtime = tab.ensureRuntime(opts.snapshot);
-	runtime.setCwd(opts.snapshot.cwd);
-	runtime.setRunScope({
-		page: tab.page,
-		browser: tab.browser,
-		tab,
-		assert: (cond: unknown, text?: string): void => {
-			if (!cond) throw new ToolError(text ?? "Assertion failed");
-		},
-		wait: (ms: number): Promise<void> => Bun.sleep(ms),
-	});
+	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs });
 
 	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
+	// If the synchronous setup below throws (same-realm ownership conflict)
+	// while `signal` is already aborted, `Promise.race` never attaches a
+	// handler to this promise; keep its armed rejection from surfacing as an
+	// unhandled rejection — the postmortem-fatal path this run guards against.
+	cancelRejection.catch(() => {});
 	const onAbort = (): void => {
 		if (timeoutSignal.aborted) {
 			reject(new ToolError(`Browser code execution timed out after ${opts.timeoutMs}ms`));
 		} else {
-			reject(new ToolAbortError());
+			reject(
+				signal.reason instanceof ToolAbortError
+					? signal.reason
+					: new ToolAbortError(undefined, { cause: signal.reason }),
+			);
 		}
 	};
 	if (signal.aborted) onAbort();
 	else signal.addEventListener("abort", onAbort, { once: true });
 
 	try {
+		const runtime = tab.ensureRuntime(opts.snapshot);
+		// setCwd is non-exclusive; setRunScope/run still assert same-realm ownership.
+		// Keep both inside try so a concurrent in-process eval/browser run surfaces as
+		// a rejected promise the supervisor can report, never an unhandled rejection.
+		runtime.setCwd(opts.snapshot.cwd);
+		const runTab = bindBrowserRunFacade(tab, signal);
+		runtime.setRunScope({
+			page: bindBrowserRunFacade(tab.page, signal),
+			browser: bindBrowserRunFacade(tab.browser, signal),
+			tab: runTab,
+			assert: (cond: unknown, text?: string): void => {
+				if (!cond) throw new ToolError(text ?? "Assertion failed");
+			},
+			wait: (ms: number): Promise<void> => waitForBrowserRun(ms, signal),
+		});
+
 		const hooks: RuntimeHooks = {
-			onText: chunk => logger.debug(chunk.replace(/\n$/, "")),
-			onDisplay: output => pushDisplay(displays, output),
-			callTool: (name, args) => callSessionTool(name, args, { session: opts.session, signal }),
+			onText: chunk => {
+				throwIfAborted(signal);
+				output.pushText(chunk);
+				logger.debug(chunk.replace(/\n$/, ""));
+			},
+			onDisplay: displayed => {
+				throwIfAborted(signal);
+				output.pushDisplay(displayed);
+			},
+			callTool: (name, args) => {
+				throwIfAborted(signal);
+				return callSessionTool(name, args, { session: opts.session, signal });
+			},
 		};
 		// Like the inline worker fallback, cmux runs user JS in-process: awaited cmux/tool calls
 		// observe this abort signal, but a synchronous infinite loop cannot be interrupted here.
@@ -1292,43 +1376,12 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 			runtime.run(opts.code, `cmux-run-${runId}.js`, hooks, { runId, cwd: opts.snapshot.cwd }),
 			cancelRejection,
 		]);
-		return { displays, returnValue: cloneSafe(returnValue), screenshots };
+		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
 	} finally {
 		signal.removeEventListener("abort", onAbort);
+		runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended")));
 		tab.clearRunContext();
 	}
-}
-
-function pushDisplay(displays: RunResultOk["displays"], output: JsDisplayOutput): void {
-	if (output.type === "image") {
-		displays.push({ type: "image", data: output.data, mimeType: output.mimeType });
-		return;
-	}
-	if (output.type === "json") {
-		displays.push({ type: "text", text: safeJsonStringify(output.data) });
-		return;
-	}
-	displays.push({ type: "text", text: safeJsonStringify(output.event) });
-}
-
-function safeJsonStringify(value: unknown): string {
-	try {
-		return JSON.stringify(value, null, 2);
-	} catch {
-		return String(value);
-	}
-}
-
-function cloneSafe(value: unknown): unknown {
-	if (value === undefined) return undefined;
-	try {
-		structuredClone(value);
-		return value;
-	} catch {}
-	try {
-		return JSON.parse(JSON.stringify(value)) as unknown;
-	} catch {}
-	return String(value);
 }
 
 function numberFrom(value: unknown, fallback: number): number {

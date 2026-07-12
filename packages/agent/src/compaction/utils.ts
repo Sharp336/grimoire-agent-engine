@@ -4,7 +4,7 @@
 
 import type { Message, ToolCall } from "@oh-my-pi/pi-ai";
 import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
-import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
+import { formatGroupedPaths, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
@@ -199,13 +199,12 @@ export function upsertFileOperations(
 const TOOL_RESULT_MAX_CHARS = 2000;
 
 /**
- * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Truncate tool results to the same representation used in summarization prompts.
  */
-function truncateForSummary(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+export function truncateToolResultForSummary(text: string): string {
+	if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
+	const truncatedChars = text.length - TOOL_RESULT_MAX_CHARS;
+	return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n\n[... ${truncatedChars} more characters truncated]`;
 }
 
 /**
@@ -241,7 +240,7 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 				if (!text) continue;
 				processed.push({
 					...msg,
-					content: [{ type: "text", text: truncateForSummary(text, TOOL_RESULT_MAX_CHARS) }],
+					content: [{ type: "text", text: truncateToolResultForSummary(text) }],
 				});
 				continue;
 			}
@@ -293,7 +292,7 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 				.map(c => c.text)
 				.join("");
 			if (content) {
-				const text = truncateForSummary(content, TOOL_RESULT_MAX_CHARS);
+				const text = truncateToolResultForSummary(content);
 				parts.push(`[Tool Result]: ${text}`);
 			}
 		}
@@ -310,7 +309,7 @@ function renderToolCalls(calls: ToolCall[]): string {
 	return calls
 		.map(call => {
 			const argsStr = Object.entries(call.arguments as Record<string, unknown>)
-				.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+				.map(([k, v]) => `${k}=${stringifyJson(v) ?? "null"}`)
 				.join(", ");
 			return `${call.name}(${argsStr})`;
 		})

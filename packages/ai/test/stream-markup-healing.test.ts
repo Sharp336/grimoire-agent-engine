@@ -5,9 +5,10 @@ import {
 	type InbandScanEvent,
 	ThinkingInbandScanner,
 } from "@oh-my-pi/pi-ai/dialect";
+import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { stream } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, TextContent, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { getStreamMarkupHealingPattern, StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -38,7 +39,7 @@ interface SseChunk {
 	}>;
 }
 
-function sseResponse(events: ReadonlyArray<SseChunk | "[DONE]">): Response {
+function sseResponse(events: ReadonlyArray<unknown | "[DONE]">): Response {
 	const payload = `${events
 		.map(event => `data: ${typeof event === "string" ? event : JSON.stringify(event)}`)
 		.join("\n\n")}\n\n`;
@@ -48,7 +49,7 @@ function sseResponse(events: ReadonlyArray<SseChunk | "[DONE]">): Response {
 	});
 }
 
-function mockFetch(events: ReadonlyArray<SseChunk | "[DONE]">): FetchImpl {
+function mockFetch(events: ReadonlyArray<unknown | "[DONE]">): FetchImpl {
 	const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> => sseResponse(events);
 	return Object.assign(fn, { preconnect: fetch.preconnect });
 }
@@ -123,6 +124,21 @@ const deepseekCloudModel: Model<"ollama-chat"> = buildModel({
 	contextWindow: 131_072,
 	maxTokens: 8_192,
 });
+
+function geminiCliModel(): Model<"google-gemini-cli"> {
+	return buildModel({
+		id: "gemini-3.5-flash",
+		name: "Gemini 3.5 Flash",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: "https://antigravity.test",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 8_192,
+	});
+}
 
 function ndjsonResponse(lines: ReadonlyArray<unknown>): Response {
 	const body = `${lines.map(line => JSON.stringify(line)).join("\n")}\n`;
@@ -227,6 +243,102 @@ describe("openai-completions leaked thinking healing", () => {
 		expect(thinking).toBe("structured reasoning");
 		expect(thinking).not.toContain("leaked copy");
 		expect(text.trim()).toBe("visible");
+	});
+});
+
+describe("official OpenAI leaked thinking healing exemption", () => {
+	// The official OpenAI endpoint returns structured reasoning and never leaks
+	// fences, so neither the provider-local healer nor the central
+	// wrapLeakedThinkingStream wrap runs — a ` ```thinking ` block the model chose
+	// to write must stay verbatim visible text. Routed through stream() (not the
+	// provider directly) so both gates are exercised.
+	const officialOpenAI = getBundledModel("openai", "gpt-5.5");
+	const completionsModel = buildModel({
+		...officialOpenAI,
+		api: "openai-completions",
+	});
+
+	it("leaves a leaked fence intact for the official OpenAI endpoint", async () => {
+		const leaked = "```thinking\nWeigh the options.\n```\nFinal answer.";
+		const result = await stream(completionsModel, baseContext(), {
+			apiKey: "test",
+			fetch: mockFetch([
+				chunk(completionsModel.id, { content: leaked }),
+				chunk(completionsModel.id, {}, "stop"),
+				"[DONE]",
+			]),
+		}).result();
+
+		expect(result.content.map(b => b.type)).toEqual(["text"]);
+		expect(result.content.filter((b): b is ThinkingContent => b.type === "thinking")).toHaveLength(0);
+		expect(result.content.map(b => (b.type === "text" ? b.text : "")).join("")).toBe(leaked);
+	});
+});
+
+describe("google-gemini-cli leaked thinking healing", () => {
+	it("lifts a leaked Gemini thinking fence before a native tool call", async () => {
+		const model = geminiCliModel();
+		const fetchMock = mockFetch([
+			{
+				response: {
+					candidates: [
+						{
+							content: {
+								role: "model",
+								parts: [
+									{
+										text: "```thinking\nCheck the provider path.\n```\nI will inspect the file.",
+										thoughtSignature: "visible-text-signature",
+									},
+									{
+										functionCall: {
+											name: "read",
+											args: { path: "packages/ai/src/providers/google-gemini-cli.ts" },
+											id: "call_read_1",
+										},
+										thoughtSignature: "function-call-signature",
+									},
+								],
+							},
+							finishReason: "STOP",
+						},
+					],
+					usageMetadata: {
+						promptTokenCount: 10,
+						candidatesTokenCount: 5,
+						thoughtsTokenCount: 3,
+						totalTokenCount: 18,
+					},
+				},
+			},
+		]);
+
+		const result = await streamGoogleGeminiCli(
+			model,
+			{ ...baseContext(), tools: [readTool] },
+			{
+				apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
+				fetch: fetchMock,
+			},
+		).result();
+
+		expect(result.content.map(block => block.type)).toEqual(["thinking", "text", "toolCall"]);
+		const thinking = result.content
+			.filter((block): block is ThinkingContent => block.type === "thinking")
+			.map(block => block.thinking)
+			.join("");
+		const textBlocks = result.content.filter((block): block is TextContent => block.type === "text");
+		const text = textBlocks.map(block => block.text).join("");
+		const calls = result.content.filter((block): block is ToolCall => block.type === "toolCall");
+
+		expect(thinking).toBe("Check the provider path.\n");
+		expect(text).toBe("\nI will inspect the file.");
+		expect(text).not.toContain("```thinking");
+		expect(calls).toHaveLength(1);
+		expect(textBlocks[0]?.textSignature).toBe("visible-text-signature");
+		expect(calls[0]?.id).toBe("call_read_1");
+		expect(calls[0]?.thoughtSignature).toBe("function-call-signature");
+		expect(result.stopReason).toBe("toolUse");
 	});
 });
 

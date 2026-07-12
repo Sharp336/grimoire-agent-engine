@@ -4,7 +4,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
@@ -118,7 +117,15 @@ function messageFingerprint(msg: AgentMessage): string {
 					redactedLen += b.data.length;
 				} else if (b.type === "toolCall") {
 					if (typeof b.name === "string") textLen += b.name.length;
-					textLen += b.arguments === undefined ? 0 : JSON.stringify(b.arguments).length;
+					if (b.arguments !== undefined) {
+						try {
+							textLen += JSON.stringify(b.arguments, (_key, value) =>
+								typeof value === "bigint" ? value.toString() : value,
+							).length;
+						} catch {
+							textLen += String(b.arguments).length;
+						}
+					}
 				}
 			}
 		}
@@ -160,6 +167,29 @@ interface ActiveRepoCache {
 	projectDir: string;
 	activeRepo: ActiveRepoContext | null;
 	effectiveGitCwd: string;
+	/** Project + worktree dir name when `projectDir` is a linked worktree, else null. */
+	worktree: WorktreeContext | null;
+}
+
+interface WorktreeContext {
+	/** Primary-checkout (project) name shown by the path segment. */
+	projectName: string;
+	/** Worktree directory name — suppressed from the path when it equals the branch. */
+	worktreeName: string;
+}
+
+/**
+ * Project + worktree-dir names when `cwd` is a linked git worktree, else null.
+ * The project name comes from the shared primary checkout; bare-repo worktrees
+ * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
+ */
+function resolveWorktreeContext(cwd: string): WorktreeContext | null {
+	const worktree = git.repo.linkedWorktreeSync(cwd);
+	if (!worktree) return null;
+	const base = path.basename(worktree.primaryRoot);
+	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
+	if (!projectName) return null;
+	return { projectName, worktreeName: path.basename(worktree.root) };
 }
 
 /**
@@ -245,6 +275,7 @@ export class StatusLineComponent implements Component {
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: { enabled: boolean } | null = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
+	#vibeModeStatus: { enabled: boolean } | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
@@ -312,7 +343,10 @@ export class StatusLineComponent implements Component {
 
 		const activeRepo = resolveActiveRepoContextSync(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
-		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd };
+		// Only collapse the bare-cwd case: a single-direct-child-repo context
+		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
+		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
+		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd, worktree };
 		return this.#activeRepoCache;
 	}
 
@@ -468,6 +502,10 @@ export class StatusLineComponent implements Component {
 
 	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#goalModeStatus = status ?? null;
+	}
+
+	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
+		this.#vibeModeStatus = status ?? null;
 	}
 
 	setCollabStatus(status: CollabStatus | null): void {
@@ -673,14 +711,22 @@ export class StatusLineComponent implements Component {
 				}
 			};
 			try {
-				// Requires `gh repo set-default` to be configured; fails gracefully if not
-				const result = await $`gh pr view --json number,url`.cwd(lookupCwd).quiet().nothrow();
+				// Route through the shared `gh` helper so the child inherits
+				// `GH_NON_INTERACTIVE_ENV` (disables terminal/keychain prompts) and
+				// hard-terminates on the git command deadline instead of stalling
+				// the status-line indefinitely (#4234). Requires `gh repo set-default`;
+				// non-zero exit still falls through to the null cache below.
+				const result = await git.github.run(
+					lookupCwd,
+					["pr", "view", "--json", "number,url"],
+					AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+				);
 				if (this.#disposed) return;
 				if (result.exitCode !== 0) {
 					setCachedPr(null);
 					return;
 				}
-				const pr = JSON.parse(result.stdout.toString()) as { number: number; url: string };
+				const pr = JSON.parse(result.stdout) as { number: number; url: string };
 				if (typeof pr.number === "number") {
 					setCachedPr({ number: pr.number, url: pr.url });
 				} else {
@@ -957,6 +1003,10 @@ export class StatusLineComponent implements Component {
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
+			totalTokens: 0,
+			orchestrationInput: 0,
+			orchestrationOutput: 0,
+			orchestrationCacheRead: 0,
 			premiumRequests: 0,
 			cost: 0,
 		};
@@ -988,7 +1038,7 @@ export class StatusLineComponent implements Component {
 		const projectDir = getProjectDir();
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
-			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir };
+			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
 		const gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
 		const gitStatus = includeGit ? this.#getGitStatus(activeRepoCache.effectiveGitCwd) : null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
@@ -1002,6 +1052,7 @@ export class StatusLineComponent implements Component {
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
 			goalMode: this.#goalModeStatus,
+			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,
@@ -1015,6 +1066,7 @@ export class StatusLineComponent implements Component {
 				status: gitStatus,
 				pr: gitPr,
 			},
+			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
 		};
 	}
@@ -1189,9 +1241,21 @@ export class StatusLineComponent implements Component {
 					}
 				}
 			}
+			const leftOverflowDropIndex = (): number => {
+				// Preserve the current working directory as long as possible. The
+				// previous right-to-left pop could collapse a normal-width bar to
+				// just the model segment, hiding the path before less-critical left
+				// segments such as model/mode/collab were removed.
+				for (let i = leftSegIds.length - 1; i >= 0; i--) {
+					if (leftSegIds[i] !== "path") return i;
+				}
+				return left.length - 1;
+			};
+
 			while (totalWidth() > topFillWidth && left.length > 0) {
-				left.pop();
-				leftSegIds.pop();
+				const dropIdx = leftOverflowDropIndex();
+				left.splice(dropIdx, 1);
+				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
 			}
 		}

@@ -1,7 +1,9 @@
 //! Runtime-agnostic brush shell execution.
 
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashMap,
 	fs,
 	io::{self, Write},
 	str,
@@ -14,18 +16,16 @@ use brush_builtins::{BuiltinSet, default_builtins};
 use brush_core::{
 	ExecutionContext, ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
-	ShellVariable, SourceInfo, builtins,
+	ShellVariable, SourceInfo, SpawnObserver, builtins,
 	env::EnvironmentScope,
 	openfiles::{self, OpenFile, OpenFiles},
 };
 use bytes::Bytes;
 use clap::Parser;
+use flume::Sender;
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
-use tokio::{
-	sync::{Mutex as TokioMutex, mpsc},
-	time,
-};
+use tokio::{sync::Mutex as TokioMutex, time};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
@@ -57,6 +57,24 @@ impl ShellAbortState {
 			abort_token.abort(AbortReason::Signal);
 		}
 	}
+}
+
+fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
+	let requested = std::path::Path::new(cwd);
+	if !requested.is_absolute() {
+		return false;
+	}
+	let current = shell.working_dir();
+	current == requested
+}
+
+fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
+	if shell_working_dir_matches(shell, cwd) {
+		return Ok(());
+	}
+	shell
+		.set_working_dir(cwd)
+		.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))
 }
 
 #[derive(Clone)]
@@ -99,10 +117,11 @@ pub struct MinimizerResult {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
-	pub exit_code: Option<i32>,
-	pub cancelled: bool,
-	pub timed_out: bool,
-	pub minimized: Option<MinimizerResult>,
+	pub exit_code:   Option<i32>,
+	pub cancelled:   bool,
+	pub timed_out:   bool,
+	pub minimized:   Option<MinimizerResult>,
+	pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -151,7 +170,7 @@ impl Shell {
 	pub async fn run(
 		&self,
 		options: ShellRunOptions,
-		on_chunk: Option<mpsc::UnboundedSender<String>>,
+		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
@@ -207,7 +226,7 @@ impl Shell {
 
 pub async fn execute_shell(
 	options: ShellExecuteOptions,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let minimizer = options
@@ -232,8 +251,8 @@ pub async fn execute_shell(
 /// its bytes are dropped.
 #[derive(Default)]
 pub struct StreamSinks {
-	pub stdout: Option<mpsc::UnboundedSender<Bytes>>,
-	pub stderr: Option<mpsc::UnboundedSender<Bytes>>,
+	pub stdout: Option<Sender<Bytes>>,
+	pub stderr: Option<Sender<Bytes>>,
 }
 
 /// One-shot execution that delivers stdout/stderr as raw byte chunks.
@@ -265,26 +284,42 @@ async fn run_shell_session(
 	abort_state: ShellAbortState,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
-	let baseline_descendants = process::current_descendant_pids();
+	let spawn_registry = Arc::new(process::SpawnRegistry::new());
+	let process_cancel_bridge = tokio::spawn({
+		let tokio_cancel = tokio_cancel.clone();
+		let spawn_registry = spawn_registry.clone();
+		async move {
+			tokio_cancel.cancelled().await;
+			terminate_run(&spawn_registry).await;
+		}
+	});
 
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
 		let abort_state = abort_state.clone();
 		let tokio_cancel = tokio_cancel.clone();
 		let at = ct.emplace_abort_token();
+		let spawn_registry = spawn_registry.clone();
 		async move {
 			let mut session_guard = session.lock().await;
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
-				None => session_guard.insert(create_session(&config).await?),
+				None => session_guard.insert(
+					create_session_for_run(
+						&config,
+						Some(spawn_registry.clone()),
+						Some(tokio_cancel.clone()),
+					)
+					.await?,
+				),
 			};
 			abort_state.set(at).await;
-			run_shell_command(session, &run_config, on_chunk, tokio_cancel).await
+			run_shell_command(session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
 		}
 	});
 
@@ -292,7 +327,6 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			terminate_new_descendants(&baseline_descendants).await;
 			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
 			if graceful.is_err() {
 				run_task.abort();
@@ -305,27 +339,32 @@ async fn run_shell_session(
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 			}
+			let _ = process_cancel_bridge.await;
 			return Ok(ShellRunResult {
-				exit_code: None,
-				cancelled: matches!(reason, AbortReason::Signal),
-				timed_out: matches!(reason, AbortReason::Timeout),
-				minimized: None,
+				exit_code:   None,
+				cancelled:   matches!(reason, AbortReason::Signal),
+				timed_out:   matches!(reason, AbortReason::Timeout),
+				minimized:   None,
+				working_dir: None,
 			});
 		}
 	};
 	let res =
 		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
+	process_cancel_bridge.abort();
+	let _ = process_cancel_bridge.await;
 	abort_state.clear().await;
 
-	let keepalive = res.as_ref().is_ok_and(|pair| session_keepalive(&pair.0));
+	let keepalive = res.as_ref().is_ok_and(|(exec, ..)| session_keepalive(exec));
 	if !keepalive {
 		*session.lock().await = None;
 	}
-	let (exec, minimized) = res?;
+	let (exec, minimized, working_dir) = res?;
 	Ok(ShellRunResult {
 		exit_code: Some(exit_code(&exec)),
 		cancelled: false,
 		timed_out: false,
+		working_dir,
 		minimized,
 	})
 }
@@ -333,17 +372,31 @@ async fn run_shell_session(
 async fn run_shell_oneshot(
 	config: ShellConfig,
 	run_config: ShellRunConfig,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
-	let baseline_descendants = process::current_descendant_pids();
+	let spawn_registry = Arc::new(process::SpawnRegistry::new());
+	let process_cancel_bridge = tokio::spawn({
+		let tokio_cancel = tokio_cancel.clone();
+		let spawn_registry = spawn_registry.clone();
+		async move {
+			tokio_cancel.cancelled().await;
+			terminate_run(&spawn_registry).await;
+		}
+	});
 
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
+		let spawn_registry = spawn_registry.clone();
 		async move {
-			let mut session = create_session(&config).await?;
-			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel).await
+			let mut session = create_session_for_run(
+				&config,
+				Some(spawn_registry.clone()),
+				Some(tokio_cancel.clone()),
+			)
+			.await?;
+			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
 		}
 	});
 
@@ -351,28 +404,32 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			terminate_new_descendants(&baseline_descendants).await;
 			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
 			}
+			let _ = process_cancel_bridge.await;
 			return Ok(ShellExecuteResult {
-				exit_code: None,
-				cancelled: matches!(reason, AbortReason::Signal),
-				timed_out: matches!(reason, AbortReason::Timeout),
-				minimized: None,
+				exit_code:   None,
+				cancelled:   matches!(reason, AbortReason::Signal),
+				timed_out:   matches!(reason, AbortReason::Timeout),
+				minimized:   None,
+				working_dir: None,
 			});
 		},
 	};
 
+	process_cancel_bridge.abort();
+	let _ = process_cancel_bridge.await;
 	let res = run_result
 		.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	let (exec, minimized) = res?;
+	let (exec, minimized, working_dir) = res?;
 	Ok(ShellExecuteResult {
 		exit_code: Some(exit_code(&exec)),
 		cancelled: false,
 		timed_out: false,
+		working_dir,
 		minimized,
 	})
 }
@@ -384,13 +441,28 @@ async fn run_shell_oneshot_streams(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
-	let baseline_descendants = process::current_descendant_pids();
+	let spawn_registry = Arc::new(process::SpawnRegistry::new());
+	let process_cancel_bridge = tokio::spawn({
+		let tokio_cancel = tokio_cancel.clone();
+		let spawn_registry = spawn_registry.clone();
+		async move {
+			tokio_cancel.cancelled().await;
+			terminate_run(&spawn_registry).await;
+		}
+	});
 
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
+		let spawn_registry = spawn_registry.clone();
 		async move {
-			let mut session = create_session(&config).await?;
-			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel).await
+			let mut session = create_session_for_run(
+				&config,
+				Some(spawn_registry.clone()),
+				Some(tokio_cancel.clone()),
+			)
+			.await?;
+			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel, spawn_registry)
+				.await
 		}
 	});
 
@@ -398,28 +470,32 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			terminate_new_descendants(&baseline_descendants).await;
 			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
 			}
+			let _ = process_cancel_bridge.await;
 			return Ok(ShellExecuteResult {
 				exit_code: None,
 				cancelled: matches!(reason, AbortReason::Signal),
 				timed_out: matches!(reason, AbortReason::Timeout),
 				minimized: None,
+				working_dir: None,
 			});
 		},
 	};
 
+	process_cancel_bridge.abort();
+	let _ = process_cancel_bridge.await;
 	let res = run_result
 		.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	let exec = res?;
+	let (exec, working_dir) = res?;
 	Ok(ShellExecuteResult {
 		exit_code: Some(exit_code(&exec)),
 		cancelled: false,
 		timed_out: false,
+		working_dir,
 		minimized: None,
 	})
 }
@@ -501,7 +577,16 @@ fn merge_path_values(_existing: &str, incoming: &str) -> String {
 	incoming.to_string()
 }
 
+#[cfg(test)]
 async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
+	create_session_for_run(config, None, None).await
+}
+
+async fn create_session_for_run(
+	config: &ShellConfig,
+	spawn_registry: Option<Arc<process::SpawnRegistry>>,
+	cancel_token: Option<CancellationToken>,
+) -> Result<ShellSessionCore> {
 	let mut shell = BrushShell::builder()
 		.do_not_inherit_env(true)
 		.profile(ProfileLoadBehavior::Skip)
@@ -537,6 +622,41 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 		shell.register_builtin("fd", crate::fd::fd_builtin());
 		shell.register_builtin("cat", crate::coreutils::cat_builtin());
 		shell.register_builtin("uniq", crate::coreutils::uniq_builtin());
+		shell.register_builtin("base64", crate::coreutils::base64_builtin());
+		shell.register_builtin("md5sum", crate::coreutils::md5sum_builtin());
+		shell.register_builtin("sha1sum", crate::coreutils::sha1sum_builtin());
+		shell.register_builtin("sha224sum", crate::coreutils::sha224sum_builtin());
+		shell.register_builtin("sha256sum", crate::coreutils::sha256sum_builtin());
+		shell.register_builtin("sha384sum", crate::coreutils::sha384sum_builtin());
+		shell.register_builtin("sha512sum", crate::coreutils::sha512sum_builtin());
+		shell.register_builtin("b2sum", crate::coreutils::b2sum_builtin());
+		shell.register_builtin("basename", crate::coreutils::basename_builtin());
+		shell.register_builtin("dirname", crate::coreutils::dirname_builtin());
+		shell.register_builtin("readlink", crate::coreutils::readlink_builtin());
+		shell.register_builtin("realpath", crate::coreutils::realpath_builtin());
+		shell.register_builtin("touch", crate::coreutils::touch_builtin());
+		shell.register_builtin("stat", crate::coreutils::stat_builtin());
+		shell.register_builtin("date", crate::coreutils::date_builtin());
+		shell.register_builtin("mktemp", crate::coreutils::mktemp_builtin());
+		shell.register_builtin("seq", crate::coreutils::seq_builtin());
+		shell.register_builtin("yes", crate::coreutils::yes_builtin());
+		shell.register_builtin("printenv", crate::coreutils::printenv_builtin());
+		shell.register_builtin("truncate", crate::coreutils::truncate_builtin());
+		shell.register_builtin("tac", crate::coreutils::tac_builtin());
+		shell.register_builtin("nproc", crate::coreutils::nproc_builtin());
+		shell.register_builtin("uname", crate::coreutils::uname_builtin());
+		shell.register_builtin("whoami", crate::coreutils::whoami_builtin());
+		shell.register_builtin("hostname", crate::coreutils::hostname_builtin());
+		shell.register_builtin("which", crate::which::which_builtin());
+		shell.register_builtin("diff", crate::coreutils::diff_builtin());
+		shell.register_builtin("cut", crate::coreutils::cut_builtin());
+		shell.register_builtin("tee", crate::coreutils::tee_builtin());
+		shell.register_builtin("tr", crate::coreutils::tr_builtin());
+		shell.register_builtin("paste", crate::coreutils::paste_builtin());
+		shell.register_builtin("comm", crate::coreutils::comm_builtin());
+		shell.register_builtin("sed", crate::coreutils::sed_builtin());
+		shell.register_builtin("xargs", crate::coreutils::xargs_builtin());
+		shell.register_builtin("jq", crate::coreutils::jq_builtin());
 		if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE") {
 			if !uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN") {
 				shell.register_builtin("rm", crate::coreutils::rm_builtin());
@@ -544,6 +664,8 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 			if !uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN") {
 				shell.register_builtin("mv", crate::coreutils::mv_builtin());
 			}
+			// ln can clobber existing files via -f; gate it with the destructive set.
+			shell.register_builtin("ln", crate::coreutils::ln_builtin());
 		}
 	}
 
@@ -625,18 +747,29 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 	configure_windows_path(&mut shell)?;
 
 	if let Some(snapshot_path) = config.snapshot_path.as_ref() {
-		source_snapshot(&mut shell, snapshot_path).await?;
+		source_snapshot(&mut shell, snapshot_path, spawn_registry, cancel_token).await?;
 	}
 
 	Ok(ShellSessionCore { shell })
 }
 
-async fn source_snapshot(shell: &mut BrushShell, snapshot_path: &str) -> Result<()> {
+async fn source_snapshot(
+	shell: &mut BrushShell,
+	snapshot_path: &str,
+	spawn_registry: Option<Arc<process::SpawnRegistry>>,
+	cancel_token: Option<CancellationToken>,
+) -> Result<()> {
 	let mut params = shell.default_exec_params();
 	let source_info = SourceInfo::from("pi-natives:snapshot");
 	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
 	params.set_fd(OpenFiles::STDOUT_FD, null_file()?);
 	params.set_fd(OpenFiles::STDERR_FD, null_file()?);
+	if let Some(cancel_token) = cancel_token {
+		params.set_cancel_token(cancel_token);
+	}
+	if let Some(spawn_registry) = spawn_registry {
+		params.set_spawn_observer(spawn_registry);
+	}
 
 	let escaped = snapshot_path.replace('\'', "'\\''");
 	let command = format!("source '{escaped}'");
@@ -686,14 +819,12 @@ impl ChainCapture {
 async fn run_shell_command(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
-) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
+	spawn_registry: Arc<process::SpawnRegistry>,
+) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
 	if let Some(cwd) = options.cwd.as_deref() {
-		session
-			.shell
-			.set_working_dir(cwd)
-			.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))?;
+		set_shell_working_dir_if_changed(&mut session.shell, cwd)?;
 	}
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
@@ -706,10 +837,19 @@ async fn run_shell_command(
 
 	let result = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
-			run_shell_command_segmented_chain(session, options, on_chunk, cancel_token).await
+			run_shell_command_segmented_chain(session, options, on_chunk, cancel_token, spawn_registry)
+				.await
 		},
 		minimizer::engine::MinimizerMode::WholeCommand | minimizer::engine::MinimizerMode::None => {
-			run_shell_command_single(session, options, on_chunk, cancel_token, minimizer_mode).await
+			run_shell_command_single(
+				session,
+				options,
+				on_chunk,
+				cancel_token,
+				spawn_registry,
+				minimizer_mode,
+			)
+			.await
 		},
 	};
 
@@ -721,14 +861,18 @@ async fn run_shell_command(
 			.map_err(|err| Error::msg(format!("Failed to pop env scope: {err}")))?;
 	}
 
-	result
+	result.map(|(exec, minimized)| {
+		let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
+		(exec, minimized, working_dir)
+	})
 }
 
 async fn run_shell_command_single(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
+	spawn_registry: Arc<process::SpawnRegistry>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
 ) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
@@ -751,6 +895,7 @@ async fn run_shell_command_single(
 		params,
 		on_chunk,
 		cancel_token,
+		spawn_registry,
 		capture_mode,
 	)
 	.await?;
@@ -808,8 +953,9 @@ async fn run_shell_command_single(
 async fn run_shell_command_segmented_chain(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
+	spawn_registry: Arc<process::SpawnRegistry>,
 ) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
 	let Some(config) = options.minimizer.as_ref() else {
 		return run_shell_command_single(
@@ -817,6 +963,7 @@ async fn run_shell_command_segmented_chain(
 			options,
 			on_chunk,
 			cancel_token,
+			spawn_registry,
 			minimizer::engine::MinimizerMode::None,
 		)
 		.await;
@@ -829,6 +976,7 @@ async fn run_shell_command_segmented_chain(
 			options,
 			on_chunk,
 			cancel_token,
+			spawn_registry,
 			minimizer::engine::MinimizerMode::None,
 		)
 		.await;
@@ -842,6 +990,7 @@ async fn run_shell_command_segmented_chain(
 			options,
 			on_chunk,
 			cancel_token,
+			spawn_registry,
 			minimizer::engine::MinimizerMode::None,
 		)
 		.await;
@@ -871,6 +1020,7 @@ async fn run_shell_command_segmented_chain(
 			segment_params,
 			on_chunk.clone(),
 			cancel_token.clone(),
+			spawn_registry.clone(),
 			capture_mode,
 		)
 		.await?;
@@ -945,8 +1095,9 @@ async fn run_shell_command_once(
 	session: &mut ShellSessionCore,
 	mut command: String,
 	mut params: ExecutionParameters,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
+	spawn_registry: Arc<process::SpawnRegistry>,
 	capture_mode: CommandCaptureMode,
 ) -> Result<CommandRunOutput> {
 	let (reader_file, writer_file) = pipe_to_files("output")?;
@@ -963,9 +1114,9 @@ async fn run_shell_command_once(
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
-	let baseline_descendants = process::current_descendant_pids();
+	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
-	let (activity_tx, mut activity_rx) = mpsc::channel::<()>(1);
+	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
 	let mut reader_handle = tokio::spawn({
 		let reader_cancel = reader_cancel.clone();
@@ -996,14 +1147,6 @@ async fn run_shell_command_once(
 		async move {
 			cancel_token.cancelled().await;
 			reader_cancel.cancel();
-		}
-	});
-	let process_cancel_bridge = tokio::spawn({
-		let cancel_token = cancel_token.clone();
-		let baseline_descendants = baseline_descendants.clone();
-		async move {
-			cancel_token.cancelled().await;
-			terminate_new_descendants(&baseline_descendants).await;
 		}
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
@@ -1040,8 +1183,8 @@ async fn run_shell_command_once(
 				reader_finished = true;
 				break;
 			}
-			msg = activity_rx.recv() => {
-				if msg.is_none() {
+			msg = activity_rx.recv_async() => {
+				if msg.is_err() {
 					break;
 				}
 				idle_timer.as_mut().reset(time::Instant::now() + POST_EXIT_IDLE);
@@ -1053,30 +1196,17 @@ async fn run_shell_command_once(
 
 	if !reader_finished {
 		reader_cancel.cancel();
-		if let Ok(res) = time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_handle).await {
-			if let Ok(output) = res
-				&& let Ok(output) = output
-			{
-				reader_output = Some(output);
-			}
-		} else {
-			reader_handle.abort();
-			let _ = reader_handle.await;
+		match time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_handle).await {
+			Ok(Ok(Ok(output))) => reader_output = Some(output),
+			Ok(_) => {},
+			Err(_) => {
+				reader_handle.abort();
+				let _ = reader_handle.await;
+			},
 		}
 	}
 	cancel_bridge.abort();
 	let _ = cancel_bridge.await;
-	if cancel_token.is_cancelled() {
-		// Cancel fired — the bridge is actively running its rescan-and-signal
-		// loop. Let it run to completion so all three waves get a chance to
-		// reach stragglers; aborting here would cut the kill loop short.
-		let _ = process_cancel_bridge.await;
-	} else {
-		// Happy path — the bridge is still parked on `cancel_token.cancelled()`
-		// and would never exit on its own. Tear it down.
-		process_cancel_bridge.abort();
-		let _ = process_cancel_bridge.await;
-	}
 
 	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 	let buffered = match reader_output {
@@ -1091,12 +1221,10 @@ async fn run_shell_command_streams(
 	options: &ShellRunConfig,
 	streams: StreamSinks,
 	cancel_token: CancellationToken,
-) -> Result<ExecutionResult> {
+	spawn_registry: Arc<process::SpawnRegistry>,
+) -> Result<(ExecutionResult, Option<String>)> {
 	if let Some(cwd) = options.cwd.as_deref() {
-		session
-			.shell
-			.set_working_dir(cwd)
-			.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))?;
+		set_shell_working_dir_if_changed(&mut session.shell, cwd)?;
 	}
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
@@ -1113,9 +1241,9 @@ async fn run_shell_command_streams(
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
-	let baseline_descendants = process::current_descendant_pids();
+	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
-	let (activity_tx, mut activity_rx) = mpsc::channel::<()>(1);
+	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 
 	let StreamSinks { stdout: stdout_sink, stderr: stderr_sink } = streams;
 	let mut stdout_handle = tokio::spawn(Box::pin(read_output_bytes(
@@ -1137,35 +1265,6 @@ async fn run_shell_command_streams(
 		async move {
 			cancel_token.cancelled().await;
 			reader_cancel.cancel();
-		}
-	});
-	let process_cancel_bridge = tokio::spawn({
-		let cancel_token = cancel_token.clone();
-		let baseline_descendants = baseline_descendants.clone();
-		async move {
-			cancel_token.cancelled().await;
-			const WAVES: u32 = 3;
-			for wave in 0..WAVES {
-				let mut targets = process::TerminationTargets::new();
-				process::add_new_descendants(&mut targets, &baseline_descendants);
-				if targets.is_empty() {
-					return;
-				}
-				let signal = if wave == 0 {
-					process::TERM_SIGNAL
-				} else {
-					process::KILL_SIGNAL
-				};
-				targets.signal(signal);
-				if wave + 1 < WAVES {
-					let pause = if wave == 0 {
-						Duration::from_millis(75)
-					} else {
-						Duration::from_millis(150)
-					};
-					time::sleep(pause).await;
-				}
-			}
 		}
 	});
 	let mut command = options.command.clone();
@@ -1212,8 +1311,8 @@ async fn run_shell_command_streams(
 				let _ = res;
 				stderr_finished = true;
 			}
-			msg = activity_rx.recv() => {
-				if msg.is_none() {
+			msg = activity_rx.recv_async() => {
+				if msg.is_err() {
 					break;
 				}
 				idle_timer.as_mut().reset(time::Instant::now() + POST_EXIT_IDLE);
@@ -1244,24 +1343,17 @@ async fn run_shell_command_streams(
 	}
 	cancel_bridge.abort();
 	let _ = cancel_bridge.await;
-	if cancel_token.is_cancelled() {
-		// Let the kill-wave bridge finish all three signal passes so stragglers
-		// have a chance to receive SIGKILL.
-		let _ = process_cancel_bridge.await;
-	} else {
-		process_cancel_bridge.abort();
-		let _ = process_cancel_bridge.await;
-	}
 
 	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	Ok(result)
+	let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
+	Ok((result, working_dir))
 }
 
 async fn read_output_bytes(
 	reader: fs::File,
-	sink: Option<mpsc::UnboundedSender<Bytes>>,
+	sink: Option<Sender<Bytes>>,
 	cancel_token: CancellationToken,
-	activity: mpsc::Sender<()>,
+	activity: Sender<()>,
 ) {
 	const BUF: usize = 65536;
 
@@ -1315,23 +1407,44 @@ async fn read_output_bytes(
 	}
 }
 
-// Rescan-and-signal loop for cancellation. Each pass picks up descendants
-// spawned during the previous wave's grace period, then exits as soon as no
-// targets remain so unrelated later commands are not swept into old cancels.
-async fn terminate_new_descendants<S: std::hash::BuildHasher + Sync>(baseline: &HashSet<i32, S>) {
+impl SpawnObserver for process::SpawnRegistry {
+	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
+		// Pin a stable process reference *now*, before the pid can be recycled.
+		// On Windows an open handle keeps the pid slot reserved for the lifetime
+		// of the handle; on Linux the pidfd carries identity; on macOS the
+		// recorded start-time triple detects impersonation. Deferring the open
+		// to `build_targets` (as the old code did) let a recycled pid resolve
+		// to an unrelated process — issue #4605.
+		let process = process::Process::from_pid(pid);
+		self.record(pgid, process);
+	}
+}
+
+// Escalating TERM -> KILL waves over the processes this run spawned, scoped via
+// the per-run `SpawnRegistry`. The kill set is rebuilt each wave so a child
+// spawned in a grace window — or a grandchild whose recorded parent already
+// exited but whose process group is still live — is still reaped, and the loop
+// stops as soon as the run's whole tree is gone. Scoping to the registry (vs a
+// process-global descendant diff) is what keeps a cancel from reaping a
+// concurrent run's children in a shared host process.
+async fn terminate_run(registry: &process::SpawnRegistry) {
 	const WAVES: u32 = 3;
+	let mut saw_targets = false;
 	for wave in 0..WAVES {
-		let mut targets = process::TerminationTargets::new();
-		process::add_new_descendants(&mut targets, baseline);
+		let targets = registry.build_targets();
 		if targets.is_empty() {
-			return;
-		}
-		let signal = if wave == 0 {
-			process::TERM_SIGNAL
+			if saw_targets || wave + 1 == WAVES {
+				return;
+			}
 		} else {
-			process::KILL_SIGNAL
-		};
-		targets.signal(signal);
+			saw_targets = true;
+			let signal = if wave == 0 {
+				process::TERM_SIGNAL
+			} else {
+				process::KILL_SIGNAL
+			};
+			targets.signal(signal);
+		}
 		if wave + 1 < WAVES {
 			let pause = if wave == 0 {
 				Duration::from_millis(75)
@@ -1514,9 +1627,9 @@ struct BufferedOutput {
 
 async fn read_output(
 	reader: fs::File,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
-	activity: mpsc::Sender<()>,
+	activity: Sender<()>,
 ) {
 	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
@@ -1573,7 +1686,7 @@ async fn read_output(
 			let pending = &buf[..it];
 			match str::from_utf8(pending) {
 				Ok(text) => {
-					emit_chunk(text, on_chunk.as_ref());
+					emit_chunk(text, on_chunk.as_ref()).await;
 					it = 0;
 					break;
 				},
@@ -1582,7 +1695,7 @@ async fn read_output(
 					if p > 0 {
 						// SAFETY: [..p] is guaranteed valid UTF-8 by valid_up_to().
 						let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-						emit_chunk(text, on_chunk.as_ref());
+						emit_chunk(text, on_chunk.as_ref()).await;
 						// copy p..it to the beginning of the buffer
 						buf.copy_within(p..it, 0);
 						it -= p;
@@ -1591,7 +1704,7 @@ async fn read_output(
 					match err.error_len() {
 						Some(p) => {
 							// Invalid byte sequence: emit replacement and drop those bytes.
-							emit_chunk(REPLACEMENT, on_chunk.as_ref());
+							emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
 							// copy p..it to the beginning of the buffer
 							buf.copy_within(p..it, 0);
 							it -= p;
@@ -1612,19 +1725,19 @@ async fn read_output(
 	for chunk in buf[..it].utf8_chunks() {
 		let valid = chunk.valid();
 		if !valid.is_empty() {
-			emit_chunk(valid, on_chunk.as_ref());
+			emit_chunk(valid, on_chunk.as_ref()).await;
 		}
 		if !chunk.invalid().is_empty() {
-			emit_chunk(REPLACEMENT, on_chunk.as_ref());
+			emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
 		}
 	}
 }
 
 async fn read_output_buffered(
 	reader: fs::File,
-	on_chunk: Option<mpsc::UnboundedSender<String>>,
+	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
-	activity: mpsc::Sender<()>,
+	activity: Sender<()>,
 	max_capture_bytes: usize,
 ) -> BufferedOutput {
 	const REPLACEMENT: &str = "\u{FFFD}";
@@ -1701,7 +1814,7 @@ async fn read_output_buffered(
 			while !pending.is_empty() {
 				match str::from_utf8(&pending) {
 					Ok(text) => {
-						emit_chunk(text, Some(cb));
+						emit_chunk(text, Some(cb)).await;
 						pending.clear();
 						break;
 					},
@@ -1710,12 +1823,12 @@ async fn read_output_buffered(
 						if p > 0 {
 							// SAFETY: [..p] is valid UTF-8 per valid_up_to().
 							let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-							emit_chunk(text, Some(cb));
+							emit_chunk(text, Some(cb)).await;
 							pending.drain(..p);
 						}
 						match err.error_len() {
 							Some(skip) => {
-								emit_chunk(REPLACEMENT, Some(cb));
+								emit_chunk(REPLACEMENT, Some(cb)).await;
 								pending.drain(..skip);
 							},
 							None => break,
@@ -1731,10 +1844,10 @@ async fn read_output_buffered(
 		for chunk in pending.utf8_chunks() {
 			let valid = chunk.valid();
 			if !valid.is_empty() {
-				emit_chunk(valid, Some(cb));
+				emit_chunk(valid, Some(cb)).await;
 			}
 			if !chunk.invalid().is_empty() {
-				emit_chunk(REPLACEMENT, Some(cb));
+				emit_chunk(REPLACEMENT, Some(cb)).await;
 			}
 		}
 	}
@@ -1782,9 +1895,16 @@ fn read_nonblocking<T: std::os::fd::AsRawFd>(file: &T, buf: &mut [u8]) -> io::Re
 	}
 }
 
-fn emit_chunk(text: &str, callback: Option<&mpsc::UnboundedSender<String>>) {
+/// Forward one decoded chunk to the streaming callback, honouring channel
+/// backpressure: on a bounded channel (the pi-natives JS bridge) the send
+/// parks until the consumer frees a slot — which parks the pipe reader and,
+/// transitively, the child on its stdout/stderr pipe — so a fast producer
+/// can never buffer unbounded output in memory (#4078). A disconnected
+/// receiver (consumer gone) fails immediately, so the pipe keeps draining
+/// and the child never wedges on a full pipe.
+async fn emit_chunk(text: &str, callback: Option<&Sender<String>>) {
 	if let Some(callback) = callback {
-		let _ = callback.send(text.to_string());
+		let _ = callback.send_async(text.to_string()).await;
 	}
 }
 
@@ -2765,6 +2885,142 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
 
+	/// The vendored `sed` builtin must stream pipeline stdin through scripts and
+	/// perform `-i` in-place edits (with backup suffix) against the shell
+	/// working directory rather than the host process cwd.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_sed_substitutes_streams_and_edits_in_place() {
+		let tmp = std::env::temp_dir().join(format!("pi-sed-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		std::fs::write(tmp.join("conf.txt"), "x=1\n").expect("conf");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// Piped stdin through a quiet substitute-and-print script.
+		session
+			.shell
+			.run_string("printf 'hello\\nworld\\n' | sed -n 's/hello/HI/p' > sed.txt", &si, &params)
+			.await
+			.expect("sed pipeline");
+		assert_eq!(read("sed.txt"), "HI\n");
+		// In-place edit of a cwd-relative operand, keeping the requested backup.
+		session
+			.shell
+			.run_string("sed -i.bak 's/1/2/' conf.txt", &si, &params)
+			.await
+			.expect("sed -i");
+		assert_eq!(read("conf.txt"), "x=2\n", "in-place edit must land in the shell cwd");
+		assert_eq!(read("conf.txt.bak"), "x=1\n", "backup must keep the original");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// The `xargs` builtin spawns real child processes, but their stdout must
+	/// flow back into the shell pipeline (ctx streams, not the host fds), items
+	/// must batch per `-n`, and a failing invocation must surface GNU's 123.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_xargs_children_feed_pipeline_and_report_failure() {
+		let tmp = std::env::temp_dir().join(format!("pi-xargs-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// Default echo action: child stdout is captured into the redirect.
+		session
+			.shell
+			.run_string("printf 'a b c\\n' | xargs > xargs.txt", &si, &params)
+			.await
+			.expect("xargs default");
+		assert_eq!(read("xargs.txt"), "a b c\n");
+		// -n batching, with child output feeding a downstream builtin stage.
+		session
+			.shell
+			.run_string(
+				"printf '1\\n2\\n3\\n4\\n' | xargs -n2 echo | wc -l > batches.txt",
+				&si,
+				&params,
+			)
+			.await
+			.expect("xargs -n2");
+		assert_eq!(read("batches.txt").trim(), "2");
+		// A child exiting 1-125 makes xargs exit 123 (GNU contract).
+		session
+			.shell
+			.run_string("printf 'x\\n' | xargs false; printf %s $? > code.txt", &si, &params)
+			.await
+			.expect("xargs false");
+		assert_eq!(read("code.txt"), "123");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// The `jq` builtin must evaluate filters over piped JSON, resolve file
+	/// operands against the shell working directory, and propagate `-e`'s
+	/// null/false exit status through the shell.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_jq_filters_json_and_propagates_exit_status() {
+		let tmp = std::env::temp_dir().join(format!("pi-jq-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		std::fs::write(tmp.join("in.json"), "{\"name\":\"pi\"}\n").expect("in.json");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// Compact filter over piped stdin.
+		session
+			.shell
+			.run_string("printf '{\"a\":{\"b\":2}}' | jq -c .a > jq.txt", &si, &params)
+			.await
+			.expect("jq pipeline");
+		assert_eq!(read("jq.txt"), "{\"b\":2}\n");
+		// Raw output from a cwd-relative file operand.
+		session
+			.shell
+			.run_string("jq -r .name in.json > name.txt", &si, &params)
+			.await
+			.expect("jq file");
+		assert_eq!(read("name.txt"), "pi\n");
+		// -e maps a null result to exit status 1.
+		session
+			.shell
+			.run_string("printf 'null' | jq -e . > /dev/null; printf %s $? > code.txt", &si, &params)
+			.await
+			.expect("jq -e");
+		assert_eq!(read("code.txt"), "1");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
 	/// A stdin-reading builtin blocked on an open pipe must honor abort/timeout:
 	/// the context's cancel flag makes the read return EOF so the utility
 	/// unwinds promptly and the command reports interrupted (130) — it must not
@@ -2930,7 +3186,7 @@ mod tests {
 		cancel_token: CancelToken,
 	) -> (ShellExecuteResult, String) {
 		let _guard = shell_test_lock().lock().await;
-		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: command.to_string(),
 			cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
@@ -2941,7 +3197,7 @@ mod tests {
 			.await
 			.expect("execute_shell");
 		let mut output = String::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			output.push_str(&chunk);
 		}
 		(result, output)
@@ -3416,6 +3672,196 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	/// Cancelling one `Shell::run` must only signal processes spawned by that
+	/// run. Run B starts first so its old host-descendant baseline would not
+	/// include run A's later-spawned child; pre-fix, cancelling B classified A's
+	/// child as "new" and SIGTERM'd it, so run A returned 143 instead of 0.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_one_run_spares_a_concurrent_runs_child() {
+		let _guard = shell_test_lock().lock().await;
+
+		let shell_b = Shell::new(None);
+		let (tx_b, rx_b) = flume::unbounded::<String>();
+		let mut ct_b = CancelToken::default();
+		let abort_b = ct_b.emplace_abort_token();
+		let handle_b = tokio::spawn(async move {
+			shell_b
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+						..Default::default()
+					},
+					Some(tx_b),
+					ct_b,
+				)
+				.await
+		});
+
+		let mut b_output = String::new();
+		let b_ready = time::timeout(Duration::from_secs(5), async {
+			loop {
+				let chunk = rx_b
+					.recv_async()
+					.await
+					.expect("run B ended before printing readiness");
+				b_output.push_str(&chunk);
+				if let Some(line_end) = b_output.find('\n') {
+					return b_output[..line_end].to_string();
+				}
+			}
+		})
+		.await
+		.expect("timed out waiting for run B readiness");
+		assert_eq!(b_ready.trim(), "ready", "run B should reach its long sleep before run A starts");
+
+		let shell_a = Shell::new(None);
+		let (tx_a, rx_a) = flume::unbounded::<String>();
+		let handle_a = tokio::spawn(async move {
+			shell_a
+				.run(
+					ShellRunOptions {
+						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+						..Default::default()
+					},
+					Some(tx_a),
+					CancelToken::default(),
+				)
+				.await
+		});
+
+		let mut a_output = String::new();
+		let a_child_pid = time::timeout(Duration::from_secs(5), async {
+			loop {
+				let chunk = rx_a
+					.recv_async()
+					.await
+					.expect("run A ended before printing its child pid");
+				a_output.push_str(&chunk);
+				if let Some(line_end) = a_output.find('\n') {
+					return a_output[..line_end]
+						.trim()
+						.parse::<i32>()
+						.expect("run A pid line should be an integer");
+				}
+			}
+		})
+		.await
+		.expect("timed out waiting for run A child pid");
+		assert!(a_child_pid > 0, "got non-positive run A child pid: {a_child_pid}");
+
+		abort_b.abort(AbortReason::Signal);
+
+		let result_a = time::timeout(Duration::from_secs(10), handle_a)
+			.await
+			.expect("run A timed out")
+			.expect("run A task panicked")
+			.expect("run A failed");
+		let result_b = time::timeout(Duration::from_secs(10), handle_b)
+			.await
+			.expect("run B timed out")
+			.expect("run B task panicked")
+			.expect("run B failed");
+
+		assert_eq!(result_a.exit_code, Some(0), "cancelling run B must not SIGTERM run A's child");
+		assert!(!result_a.cancelled, "run A was never cancelled");
+		assert!(result_b.cancelled, "run B should report cancellation");
+	}
+
+	/// Cancelling while `Shell::run` is still sourcing a snapshot must terminate
+	/// the foreground process spawned by that snapshot. The snapshot runs before
+	/// the user command, so this specifically guards the shared cancel token and
+	/// spawn registry wiring passed into `source_snapshot`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_while_sourcing_snapshot_kills_snapshot_foreground_child() {
+		let _guard = shell_test_lock().lock().await;
+		let root = unique_temp_dir("snapshot-cancel");
+		let snapshot_path = root.join("snapshot.sh");
+		let pid_path = root.join("snapshot-child.pid");
+		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
+		std::fs::write(
+			&snapshot_path,
+			format!(
+				"/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"
+			),
+		)
+		.expect("write snapshot file");
+
+		let shell = Shell::new(Some(ShellOptions {
+			snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+			..Default::default()
+		}));
+		let mut cancel_token = CancelToken::default();
+		let abort_token = cancel_token.emplace_abort_token();
+		let run_handle = tokio::spawn(async move {
+			shell
+				.run(
+					ShellRunOptions { command: "printf done".into(), ..Default::default() },
+					None,
+					cancel_token,
+				)
+				.await
+		});
+
+		let child_pid = time::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Ok(pid_text) = std::fs::read_to_string(&pid_path)
+					&& let Ok(pid) = pid_text.trim().parse::<i32>()
+					&& pid > 0
+				{
+					return pid;
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.expect("timed out waiting for snapshot foreground child to write its positive PID");
+
+		abort_token.abort(AbortReason::Signal);
+
+		let result = time::timeout(Duration::from_secs(10), run_handle)
+			.await
+			.expect("timed out waiting for cancellation while sourcing snapshot")
+			.expect("snapshot sourcing run task panicked")
+			.expect("shell run failed while cancelling snapshot sourcing");
+		assert!(result.cancelled, "cancelling while sourcing a snapshot should report cancellation");
+		assert_eq!(
+			result.exit_code, None,
+			"cancelled snapshot sourcing run should not report an exit code"
+		);
+		assert!(
+			!result.timed_out,
+			"signal cancellation during snapshot sourcing must not report timeout"
+		);
+
+		let child_dead = time::timeout(Duration::from_secs(5), async {
+			loop {
+				// SAFETY: `child_pid` came from the foreground `/bin/sh` spawned by the
+				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
+				let kill_result = unsafe { libc::kill(child_pid, 0) };
+				if kill_result == -1 {
+					let err = std::io::Error::last_os_error();
+					if err.raw_os_error() == Some(libc::ESRCH) {
+						return;
+					}
+					panic!(
+						"kill({child_pid}, 0) failed with unexpected error while checking snapshot \
+						 child cleanup: {err}"
+					);
+				}
+				time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await;
+		let _ = std::fs::remove_dir_all(&root);
+		assert!(
+			child_dead.is_ok(),
+			"snapshot foreground child PID {child_pid} was still alive after cancelling while \
+			 sourcing snapshot; cancel bridge did not terminate the snapshot-spawned process"
+		);
+	}
+
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
 	/// inside a pipeline** (`zsh -i ... | awk`) used to stay in the host
 	/// session, open `/dev/tty`, `tcsetpgrp` itself to the foreground, and
@@ -3612,7 +4058,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn read_output_stops_when_cancelled_before_pipe_eof() {
 		let (reader, _writer) = pipe_to_files("test").expect("test pipe should be created");
 		let cancel = CancellationToken::new();
-		let (activity_tx, _activity_rx) = mpsc::channel(1);
+		let (activity_tx, _activity_rx) = flume::bounded(1);
 		let handle = tokio::spawn(read_output(reader, None, cancel.clone(), activity_tx));
 
 		time::sleep(Duration::from_millis(10)).await;
@@ -3627,8 +4073,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn execute_shell_streams_separates_stdout_and_stderr() {
-		let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel::<Bytes>();
-		let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<Bytes>();
+		let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
+		let (stderr_tx, stderr_rx) = flume::unbounded::<Bytes>();
 		let options = ShellExecuteOptions {
 			command: "echo out; echo err 1>&2".to_string(),
 			..Default::default()
@@ -3641,11 +4087,11 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(!result.cancelled);
 
 		let mut stdout = Vec::new();
-		while let Some(chunk) = stdout_rx.recv().await {
+		while let Ok(chunk) = stdout_rx.recv_async().await {
 			stdout.extend_from_slice(&chunk);
 		}
 		let mut stderr = Vec::new();
-		while let Some(chunk) = stderr_rx.recv().await {
+		while let Ok(chunk) = stderr_rx.recv_async().await {
 			stderr.extend_from_slice(&chunk);
 		}
 		assert_eq!(stdout, b"out\n");
@@ -3674,7 +4120,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn powershell_env_reference_survives_brush_expansion() {
-		let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+		let (tx, rx) = flume::unbounded::<Bytes>();
 		let options = ShellExecuteOptions {
 			command: "printf '%s' \"$env:SystemRoot\"".to_string(),
 			..Default::default()
@@ -3686,7 +4132,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(result.exit_code, Some(0));
 
 		let mut stdout = Vec::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			stdout.extend_from_slice(&chunk);
 		}
 		assert_eq!(stdout, b"$env:SystemRoot");
@@ -3698,7 +4144,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn user_env_assignment_shadows_powershell_fallback() {
-		let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+		let (tx, rx) = flume::unbounded::<Bytes>();
 		let options = ShellExecuteOptions {
 			command: "env=prod; printf '%s' \"$env:8080\"".to_string(),
 			..Default::default()
@@ -3710,7 +4156,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(result.exit_code, Some(0));
 
 		let mut stdout = Vec::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			stdout.extend_from_slice(&chunk);
 		}
 		assert_eq!(stdout, b"prod:8080");
@@ -3786,7 +4232,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn nohup_background_captures_operand_pid() {
-		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: "nohup /bin/sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \
 			          \"$pid\"; test -n \"$pid\""
@@ -3801,7 +4247,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(!result.timed_out);
 
 		let mut out = String::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			out.push_str(&chunk);
 		}
 		let pid = out
@@ -3815,14 +4261,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	/// and exit code 125 (a nohup-level error, distinct from any command code).
 	#[tokio::test(flavor = "multi_thread")]
 	async fn nohup_builtin_without_command_reports_missing_operand() {
-		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions { command: "nohup".to_string(), ..Default::default() };
 		let result = execute_shell(options, Some(tx), CancelToken::default())
 			.await
 			.expect("execute should succeed");
 		assert_eq!(result.exit_code, Some(125));
 		let mut out = String::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			out.push_str(&chunk);
 		}
 		assert!(
@@ -3856,7 +4302,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let probe = "import signal,sys; sys.stdout.write('IGN' if \
 		             signal.getsignal(signal.SIGHUP)==signal.SIG_IGN else 'DFL')";
-		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
 			command: format!("nohup python3 -c \"{probe}\""),
 			..Default::default()
@@ -3866,12 +4312,47 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("execute should succeed");
 		assert_eq!(result.exit_code, Some(0));
 		let mut out = String::new();
-		while let Some(chunk) = rx.recv().await {
+		while let Ok(chunk) = rx.recv_async().await {
 			out.push_str(&chunk);
 		}
 		assert!(
 			out.contains("DFL") && !out.contains("IGN"),
 			"builtin nohup masked SIGHUP like the external tool (output: {out:?})",
 		);
+	}
+
+	/// Regression for #4078: the JS bridge hands the pipe readers a *bounded*
+	/// chunk channel. With a consumer slower than the producer the readers
+	/// must park on `send_async` (backpressuring the child through its pipe)
+	/// rather than buffer unboundedly — and, unlike a drop-on-full design,
+	/// every produced byte must still reach the consumer.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn streaming_output_backpressures_on_bounded_channel_without_loss() {
+		const TOTAL_BYTES: usize = 1_048_576;
+		let (tx, rx) = flume::bounded::<String>(4);
+		let options = ShellExecuteOptions {
+			command: format!("yes x | head -c {TOTAL_BYTES}"),
+			..Default::default()
+		};
+		let run = tokio::spawn(execute_shell(options, Some(tx), CancelToken::default()));
+
+		let mut received = 0usize;
+		while let Ok(chunk) = rx.recv_async().await {
+			received += chunk.len();
+			// Slow consumer: forces the bounded queue to fill and the readers
+			// to park between chunks.
+			time::sleep(Duration::from_micros(50)).await;
+		}
+
+		let result = time::timeout(Duration::from_secs(30), run)
+			.await
+			.expect("command should finish despite backpressure")
+			.expect("run task should not panic")
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(0));
+		assert!(!result.cancelled);
+		assert!(!result.timed_out);
+		assert_eq!(received, TOTAL_BYTES, "streamed bytes were dropped under backpressure");
 	}
 }

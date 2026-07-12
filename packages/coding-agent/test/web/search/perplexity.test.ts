@@ -138,7 +138,7 @@ describe("Perplexity API-key request shape", () => {
 
 		expect(response.relatedQuestions).toBeUndefined();
 	});
-	it("falls back to OpenRouter with the selected API-key config after direct Perplexity fails", async () => {
+	it("falls back to OpenRouter with the selected API-key config after a non-retryable direct Perplexity failure", async () => {
 		process.env.OPENROUTER_API_KEY = "openrouter-test-key";
 		const urls: string[] = [];
 		const bodies: Record<string, unknown>[] = [];
@@ -146,7 +146,7 @@ describe("Perplexity API-key request shape", () => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			urls.push(url);
 			bodies.push(JSON.parse(init?.body as string));
-			if (url === API_URL) return new Response("direct failed", { status: 500 });
+			if (url === API_URL) return new Response("direct failed", { status: 400 });
 			if (url === OPENROUTER_API_URL) return sseResponse(baseResponse());
 			return new Response("not mocked", { status: 500 });
 		};
@@ -356,9 +356,11 @@ describe("Perplexity OAuth request shape", () => {
 
 		// The consumer ask endpoint has no system slot; prepending the prompt makes
 		// the model refuse ("I don't have web-search tools in this turn").
-		expect(body?.query_str).toBe("quic vs tcp");
-		expect((body?.params as Record<string, unknown>).query_str).toBe("quic vs tcp");
-		expect((body?.params as Record<string, unknown>).model_preference).toBe("experimental");
+		expect(body).toBeDefined();
+		expect(body!.query_str).toBe("quic vs tcp");
+		const params = body!.params as Record<string, unknown>;
+		expect(params.query_str).toBe("quic vs tcp");
+		expect(params.model_preference).toBe("experimental");
 		// The ask endpoint authenticates via the next-auth session cookie; a bearer
 		// header is ignored and silently downgrades to the anonymous `turbo` model.
 		expect(headers?.get("cookie")).toBe("__Secure-next-auth.session-token=test-oauth-token");

@@ -31,6 +31,22 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function configureBashUserShell(homeDir: string): boolean {
+	if (process.platform === "win32" || !fs.existsSync("/bin/bash")) return false;
+	Settings.instance.set("shellPath", "/bin/bash");
+	vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+		shell: "/bin/bash",
+		args: ["-c"],
+		env: {
+			PATH: Bun.env.PATH ?? "",
+			HOME: homeDir,
+			SHELL: "/bin/bash",
+		},
+		prefix: undefined,
+	});
+	return true;
+}
+
 /** Resolve once `predicate()` holds or `deadlineMs` passes, polling every 2ms. */
 async function pollUntil(predicate: () => boolean, deadlineMs: number): Promise<void> {
 	while (!predicate() && Date.now() < deadlineMs) {
@@ -118,21 +134,26 @@ describe("executeBash", () => {
 
 	it("honors cwd", async () => {
 		const result = await executeBash("pwd", { cwd: tempDir, timeout: 5000 });
-		expect(result.output.trim()).toBe(fs.realpathSync(tempDir));
+		expect(result.output.trim()).toBe(tempDir);
 	});
 
-	it("canonicalizes symlinked cwd before execution", async () => {
+	it("honors symlinked cwd requests in persistent shells", async () => {
 		if (process.platform === "win32") {
 			return;
 		}
+		if (!configureBashUserShell(tempDir)) return;
 
 		const realDir = path.join(tempDir, "real");
 		const linkDir = path.join(tempDir, "link");
 		fs.mkdirSync(realDir);
 		fs.symlinkSync(realDir, linkDir, "dir");
+		const sessionKey = `cwd-symlink-${Date.now()}`;
 
-		const result = await executeBash("pwd", { cwd: linkDir, timeout: 5000 });
-		expect(result.output.trim()).toBe(fs.realpathSync(linkDir));
+		await executeBash("pwd", { sessionKey, cwd: realDir, timeout: 5000, useUserShell: true });
+		const result = await executeBash("pwd", { sessionKey, cwd: linkDir, timeout: 5000, useUserShell: true });
+
+		expect(result.output.trim()).toBe(linkDir);
+		expect(result.workingDir).toBe(linkDir);
 	});
 
 	it("passes env vars", async () => {
@@ -381,6 +402,15 @@ exit 64
 		expect(result.output).not.toContain("done");
 	});
 
+	it("does not arm a deadline when timeout is zero", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const result = await executeBash("sleep 1.2; echo done", { cwd: tempDir, timeout: 0 });
+		expect(result.cancelled).toBe(false);
+		expect(result.output.trim()).toBe("done");
+	});
+
 	it("aborts commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -490,11 +520,7 @@ exit 64
 		expect(next.output.trim()).toBe("still_persistent");
 	});
 
-	it("returns at the JavaScript timeout when native timeout cleanup stalls", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-
+	it("does not abort the native signal when the JavaScript timeout fallback returns streamed output", async () => {
 		// Compress the JS-side fallback timer (floored at 1000ms in the source) so
 		// the safety-net fires deterministically without a real 1s wait. Only long
 		// timers are shrunk — fs/subprocess setup keeps real scheduling — and the
@@ -507,8 +533,12 @@ exit 64
 				...rest,
 			)) as typeof globalThis.setTimeout);
 
-		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
-			onChunk?.(null, "started\n");
+		let nativeSignal: AbortSignal | undefined;
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((options, onChunk) => {
+			if (options.signal instanceof AbortSignal) {
+				nativeSignal = options.signal;
+			}
+			onChunk?.(null, "streamed-before-timeout\n");
 			return Promise.withResolvers<never>().promise;
 		});
 		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
@@ -516,12 +546,15 @@ exit 64
 		const result = await executeBash("sleep 10", {
 			cwd: tempDir,
 			timeout: 1000,
-			sessionKey: "hung-native-timeout",
+			sessionKey: "explicit-timeout-keeps-native-signal",
 		});
 
 		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(abortSpy).toHaveBeenCalled();
+		expect(nativeSignal).toBeDefined();
+		expect(nativeSignal?.aborted).toBe(false);
+		expect(abortSpy).not.toHaveBeenCalled();
 	});
 
 	it("aborts before follow-up output", async () => {

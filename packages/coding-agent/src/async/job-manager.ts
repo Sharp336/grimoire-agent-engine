@@ -45,6 +45,12 @@ export interface AsyncJob {
 	 */
 	ownerId?: string;
 	/**
+	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
+	 * job-view code link a job row to its AgentRegistry ref even when the job
+	 * id differs from the agent id (vibe turn jobs, tan clones).
+	 */
+	agentId?: string;
+	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
 	 * until the caller invokes `markRunning()` from the run context.
@@ -79,6 +85,8 @@ export interface AsyncJobRegisterOptions {
 	id?: string;
 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
+	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
+	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -192,6 +200,7 @@ export class AsyncJobManager {
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
+			agentId: options?.agentId,
 			queued: options?.queued === true,
 		};
 
@@ -397,6 +406,27 @@ export class AsyncJobManager {
 		await Promise.all(Array.from(this.#jobs.values()).map(job => job.promise));
 	}
 
+	async #waitForAllUntil(deadline: number): Promise<boolean> {
+		const promises = Array.from(this.#jobs.values()).map(job => job.promise);
+		if (promises.length === 0) return true;
+		if (deadline === Number.POSITIVE_INFINITY) {
+			await Promise.all(promises);
+			return true;
+		}
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) return false;
+
+		const timeout = Promise.withResolvers<"timeout">();
+		const timer = setTimeout(() => timeout.resolve("timeout"), remainingMs);
+		timer.unref();
+		try {
+			const result = await Promise.race([Promise.all(promises).then(() => "settled" as const), timeout.promise]);
+			return result === "settled";
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
 	async drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean> {
 		const timeoutMs = options?.timeoutMs;
 		const filter = options?.filter;
@@ -445,8 +475,10 @@ export class AsyncJobManager {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
 		this.cancelAll();
-		await this.waitForAll();
-		const drained = await this.drainDeliveries({ timeoutMs: options?.timeoutMs ?? 3_000 });
+		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
+		const deadline = Date.now() + timeoutMs;
+		const jobsSettled = await this.#waitForAllUntil(deadline);
+		const drained = await this.drainDeliveries({ timeoutMs: Math.max(deadline - Date.now(), 0) });
 		this.#clearEvictionTimers();
 		this.#jobs.clear();
 		this.#deliveries.length = 0;
@@ -454,7 +486,7 @@ export class AsyncJobManager {
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
 		this.#pollEscalation.clear();
-		return drained;
+		return jobsSettled && drained;
 	}
 
 	#resolveJobId(preferredId?: string): string {
@@ -483,6 +515,7 @@ export class AsyncJobManager {
 	}
 
 	#scheduleEviction(jobId: string): void {
+		if (this.#disposed) return;
 		if (this.#retentionMs <= 0) {
 			this.#jobs.delete(jobId);
 			this.#suppressedDeliveries.delete(jobId);

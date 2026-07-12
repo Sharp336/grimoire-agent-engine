@@ -7,8 +7,8 @@
  * with only `sessionId`/`getApiKey`/telemetry — it dropped the session's
  * `streamFn` wrapper (so `providers.openrouterVariant` and `loopGuard` never
  * landed on advisor requests), its `promptCacheKey` (so OpenAI Responses
- * fell back to a different cache shard), and its shared `providerSessionState`
- * (so Codex websocket / Anthropic fast-mode state was not reused).
+ * fell back to a different cache shard), its shared `providerSessionState`,
+ * and its explicit websocket preference.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -22,6 +22,11 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+/** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
+ *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
+ *  labels stay local-only (telemetry, transcripts). */
+const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 describe("AgentSession advisor provider-options parity", () => {
 	let sharedDir: TempDir;
@@ -68,7 +73,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		} catch {}
 	});
 
-	it("inherits streamFn, promptCacheKey and providerSessionState from the session", () => {
+	it("inherits streamFn, promptCacheKey, and providerSessionState from the session", () => {
 		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -80,6 +85,7 @@ describe("AgentSession advisor provider-options parity", () => {
 			modelRegistry,
 			advisorTools: [],
 			advisorStreamFn,
+			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -98,9 +104,12 @@ describe("AgentSession advisor provider-options parity", () => {
 		// Anthropic fast-mode fallbacks consistent across the two agents.
 		expect(advisor.providerSessionState).toBe(session.providerSessionState);
 
-		// Stable cache key on the advisor session id pins consecutive advisor
-		// turns to the same OpenAI Responses cache shard.
-		expect(advisor.sessionId).toMatch(/-advisor$/);
+		// The advisor's session identity is its own provider-facing UUIDv7
+		// (issue #5040), distinct from the parent's. Without a pinned parent
+		// `promptCacheKey` the advisor caches on that same UUID so consecutive
+		// advisor turns stay on one OpenAI Responses shard.
+		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
+		expect(advisor.sessionId).not.toBe(mainAgent.sessionId);
 		expect(advisor.promptCacheKey).toBe(advisor.sessionId);
 	});
 
@@ -131,6 +140,7 @@ describe("AgentSession advisor provider-options parity", () => {
 			onResponse,
 			onSseEvent,
 			transformProviderContext,
+			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -157,8 +167,45 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.onPayload).toBe(onPayload);
 
 		// Cache routing identity threaded through into the actual stream call.
+		// Without a parent `providerPromptCacheKey`, the advisor's effective key
+		// is its own provider-facing UUIDv7 session id (issue #5040).
 		expect(opts.sessionId).toBe(advisor.sessionId);
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
+		expect(opts.preferWebsockets).toBe(true);
+	});
+
+	it("reuses the main agent's providerPromptCacheKey unchanged so tan/shared sessions stay on the parent shard", () => {
+		// Regression for codex-connector review on #3640: when the SDK pins
+		// `agent.promptCacheKey` (tan/shared-session callers do this to share
+		// the parent provider cache while keeping a distinct providerSessionId),
+		// the advisor MUST pass that key through unchanged or it cannot read the
+		// exact shard populated by the parent turn.
+		const parentPromptCacheKey = "tan-parent-cache-key";
+		const mainAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			promptCacheKey: parentPromptCacheKey,
+		});
+		session = new AgentSession({
+			agent: mainAgent,
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+		});
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		// Explicit provider cache keys are shared byte-for-byte with the parent
+		// live turn; only the provider session id stays advisor-scoped.
+		expect(advisor.promptCacheKey).toBe(parentPromptCacheKey);
+		// Session id remains a distinct provider-facing UUIDv7 (issue #5040) so
+		// credential stickiness and session-keyed telemetry stay distinct from
+		// the parent.
+		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
+		expect(advisor.sessionId).not.toBe(advisor.promptCacheKey);
 	});
 });

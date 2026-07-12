@@ -13,7 +13,7 @@ import type {
 	Context,
 	ImageContent,
 	Message,
-	ResolvedServiceTier,
+	ServiceTier,
 	StopReason,
 	TextContent,
 	Tool,
@@ -35,10 +35,17 @@ export type { ParsedRequest };
 type ReasoningEffort = NonNullable<ParsedRequest["options"]["reasoning"]>;
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
-	return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+	return (
+		value === "minimal" ||
+		value === "low" ||
+		value === "medium" ||
+		value === "high" ||
+		value === "xhigh" ||
+		value === "max"
+	);
 }
 
-function isServiceTier(value: unknown): value is ResolvedServiceTier {
+function isServiceTier(value: unknown): value is ServiceTier {
 	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
 }
 

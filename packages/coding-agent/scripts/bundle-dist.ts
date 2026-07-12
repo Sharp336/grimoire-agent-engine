@@ -3,16 +3,24 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { buildDocsIndexPayload } from "./generate-docs-index";
 
 const packageDir = path.join(import.meta.dir, "..");
 const outDir = path.join(packageDir, "dist");
 const cliPath = path.join(outDir, "cli.js");
 const shebang = "#!/usr/bin/env bun\n";
 
-// Native / optional / platform-specific deps that are never bundled — installed on
-// demand (transformers/fastembed/onnxruntime) or shipped as their own artifact
-// (native addon, mupdf).
-const ALWAYS_EXTERNAL = ["mupdf", "@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+// Native / optional / platform-specific deps are loaded from installed files.
+// `omp-legacy-pi-modules` exists only in compiled binaries via the build plugin;
+// the npm bundle never executes that `isCompiledBinary()` branch.
+const ALWAYS_EXTERNAL = [
+	"mupdf",
+	"@oh-my-pi/pi-natives",
+	"@huggingface/transformers",
+	"fastembed",
+	"onnxruntime-node",
+	"omp-legacy-pi-modules",
+];
 
 // Heavy, lazily-used third-party leaf deps. Each is a declared `dependency`, so the
 // published package resolves it from node_modules at runtime; bundling only embeds a
@@ -75,27 +83,34 @@ async function cleanBundleOutputs(): Promise<void> {
 async function main(): Promise<void> {
 	const start = Bun.nanoseconds();
 	await cleanBundleOutputs();
-	// The npm bundle ships no stats dashboard sources or prebuilt dist/client,
-	// so embed the dashboard archive the same way compiled binaries do
-	// (scripts/build-binary.ts). Reset afterwards to keep the checked-in
-	// placeholder empty.
+	// The npm bundle ships no stats dashboard sources, so embed the dashboard
+	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
+	// afterwards to keep the checked-in placeholder empty.
 	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
 	try {
-		await runCommand([
-			"bun",
-			"build",
-			"--target=bun",
-			"--outdir",
-			"dist",
-			// Full minify (whitespace + syntax + identifiers); --keep-names retains
-			// fn/class .name where code depends on it.
-			"--minify",
-			"--keep-names",
-			...[...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL].flatMap(dep => ["--external", dep]),
-			"--define",
-			'process.env.PI_BUNDLED="true"',
-			"./src/cli.ts",
-		]);
+		// Build in-process: the docs embed payload is far larger than Linux's
+		// 128KiB per-argv-string cap, so it can never be passed as a CLI
+		// `--define` (posix_spawn fails with E2BIG).
+		const output = await Bun.build({
+			entrypoints: [path.join(packageDir, "src/cli.ts")],
+			outdir: outDir,
+			target: "bun",
+			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
+			define: {
+				"process.env.PI_BUNDLED": JSON.stringify("true"),
+				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
+			},
+			minify: {
+				whitespace: true,
+				syntax: true,
+				identifiers: true,
+				keepNames: true,
+			},
+			throw: false,
+		});
+		if (!output.success) {
+			throw new Error(`CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
+		}
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}

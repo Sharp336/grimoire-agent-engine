@@ -34,6 +34,7 @@ import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { createUsageRowBlock } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
+import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
@@ -45,15 +46,17 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext } from "../../session/session-context";
+import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
+	assistantUsageIsBilled,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
 	normalizeToolArgs,
-	resolveAssistantErrorMessage,
+	resolveAssistantErrorPresentation,
 } from "./transcript-render-helpers";
 
 type TextBlock = { type: "text"; text: string };
@@ -296,12 +299,16 @@ export class UiHelpers {
 		// read run so the row sits under it. Mirrors the live path, where the read
 		// group is created during streaming and the row is appended below it.
 		let pendingUsage: Usage | undefined;
+		let pendingUsageDuration: number | undefined;
+		let pendingUsageTtft: number | undefined;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			readGroup?.seal();
 			readGroup = null;
-			this.ctx.chatContainer.addChild(createUsageRowBlock(pendingUsage));
+			this.ctx.chatContainer.addChild(createUsageRowBlock(pendingUsage, pendingUsageDuration, pendingUsageTtft));
 			pendingUsage = undefined;
+			pendingUsageDuration = undefined;
+			pendingUsageTtft = undefined;
 		};
 		// Rebuild-time mirror of the event controller's displaceable-poll
 		// bookkeeping: a `job` poll that found every watched job still running is
@@ -312,7 +319,11 @@ export class UiHelpers {
 			const previous = waitingPoll;
 			if (!previous) return;
 			waitingPoll = null;
-			if (nextToolName === "job" && previous.isDisplaceableBlock()) {
+			if (
+				nextToolName === "job" &&
+				previous.isDisplaceableBlock() &&
+				this.ctx.chatContainer.isBlockUncommitted(previous)
+			) {
 				this.ctx.chatContainer.removeChild(previous);
 			}
 			// Sealing freezes the block and stops the waiting-poll spinner that
@@ -329,7 +340,9 @@ export class UiHelpers {
 			}
 			if (previous.canBeDisplacedBy(nextToolName)) {
 				todoSnapshot = null;
-				this.ctx.chatContainer.removeChild(previous);
+				if (this.ctx.chatContainer.isBlockUncommitted(previous)) {
+					this.ctx.chatContainer.removeChild(previous);
+				}
 				previous.seal();
 				return;
 			}
@@ -367,10 +380,9 @@ export class UiHelpers {
 					readGroup?.seal();
 					readGroup = null;
 				}
-				const { hasErrorStop, errorMessage } = resolveAssistantErrorMessage(
-					message,
-					this.ctx.viewSession.retryAttempt,
-				);
+				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
+				const hasErrorStop = errorPresentation.kind === "full";
+				const errorMessage = hasErrorStop ? errorPresentation.text : null;
 
 				// Render tool call components
 				for (const content of message.content) {
@@ -412,8 +424,18 @@ export class UiHelpers {
 					readGroup = null;
 					const tool = this.ctx.viewSession.getToolByName(content.name);
 					const partialJson = getStreamingPartialJson(content);
+					// Mid-stream rebuild (theme change, settings, focus replay): decode
+					// display args from the raw stream exactly like the live reveal path.
+					// The provider-parsed `arguments` lag the stream by up to a throttled
+					// parse window, so spreading them alone would freeze a long write/edit
+					// preview at its last full parse.
+					const rawInput = content.customWireName !== undefined;
 					const renderArgs = partialJson
-						? { ...content.arguments, __partialJson: partialJson }
+						? decodeStreamedToolArgs(partialJson, {
+								rawInput,
+								fullArgs: content.arguments,
+								streamingStringKeys: streamingStringKeysForTool(content.name, rawInput),
+							})
 						: content.arguments;
 					const component = new ToolExecutionComponent(
 						content.name,
@@ -443,7 +465,12 @@ export class UiHelpers {
 						this.ctx.pendingTools.set(content.id, component);
 					}
 				}
-				pendingUsage = this.ctx.settings.get("display.showTokenUsage") ? message.usage : undefined;
+				pendingUsage =
+					this.ctx.settings.get("display.showTokenUsage") && assistantUsageIsBilled(message.usage)
+						? message.usage
+						: undefined;
+				pendingUsageDuration = message.duration;
+				pendingUsageTtft = message.ttft;
 			} else if (message.role === "toolResult") {
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =
@@ -531,14 +558,35 @@ export class UiHelpers {
 		// hand it back to the controller so a follow-up `todo` update keeps
 		// displacing instead of stacking. Idle rebuilds (resume / compaction)
 		// fall through to the seal path so the snapshot freezes as history.
-		if (todoSnapshot && this.ctx.session?.isStreaming) {
+		if (todoSnapshot && this.ctx.viewSession.isStreaming) {
 			this.ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
 			todoSnapshot = null;
 		} else {
 			resolveTodoSnapshot();
 		}
 
-		this.ctx.pendingTools.clear();
+		// Entries still in `pendingTools` are toolCalls whose result never landed
+		// during the replay — with `keepDanglingToolCalls` these are exactly the
+		// turn's in-flight calls (assistant turn persisted at message_end, tool
+		// still executing). While the viewed session streams, keep them tracked so
+		// the live event stream routes `tool_execution_update`/`_end` into the
+		// rebuilt components instead of dropping the result; their args are final,
+		// so mark them complete. Idle rebuilds have no result coming: seal so the
+		// blocks freeze as history instead of pinning the live region, then clear
+		// so reconstructed historical components never leak into live tracking.
+		// (`rebuildChatFromMessages` builds its context WITHOUT dangling calls and
+		// restores its own preserved live components afterwards — for that caller
+		// the map is empty here either way.)
+		if (this.ctx.viewSession.isStreaming) {
+			for (const [toolCallId, component] of this.ctx.pendingTools) {
+				component.setArgsComplete(toolCallId);
+			}
+		} else {
+			for (const component of this.ctx.pendingTools.values()) {
+				component.seal();
+			}
+			this.ctx.pendingTools.clear();
+		}
 		this.ctx.ui.requestRender();
 	}
 
@@ -555,13 +603,19 @@ export class UiHelpers {
 		} else {
 			this.ctx.resetTranscript();
 		}
-		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.pendingMessagesContainer.disposeChildren();
 		this.ctx.pendingBashComponents = [];
 		this.ctx.pendingPythonComponents = [];
 
 		// Live display uses the compacted transcript tail; export/resume callers
-		// can still request the full inline compaction history.
-		const context = this.ctx.viewSession.buildTranscriptSessionContext({ collapseCompactedHistory: true });
+		// can still request the full inline compaction history. Mid-turn rebuilds
+		// (focus attach/unfocus while a tool executes) keep dangling toolCalls so
+		// the in-flight call re-renders as pending instead of vanishing;
+		// renderSessionContext then keeps it in `pendingTools` for live routing.
+		const context = this.ctx.viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: true,
+			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+		});
 		this.ctx.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: !this.ctx.focusedAgentId,
@@ -621,38 +675,36 @@ export class UiHelpers {
 	}
 
 	updatePendingMessagesDisplay(): void {
-		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.pendingMessagesContainer.disposeChildren();
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
-		const steeringMessages: Array<{ message: string; label: string }> = [];
-		for (const message of queuedMessages.steering) {
-			steeringMessages.push({ message, label: "Steer" });
-		}
+		const steeringMessages = [...queuedMessages.steering];
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") {
-				steeringMessages.push({ message: entry.text, label: "Steer" });
-			}
+			if (entry.mode === "steer") steeringMessages.push(entry.text);
 		}
 
-		const followUpMessages: Array<{ message: string; label: string }> = [];
-		for (const message of queuedMessages.followUp) {
-			followUpMessages.push({ message, label: "Follow-up" });
-		}
+		const followUpMessages = [...queuedMessages.followUp];
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") {
-				followUpMessages.push({ message: entry.text, label: "Follow-up" });
-			}
+			if (entry.mode === "followUp") followUpMessages.push(entry.text);
 		}
 
-		const allMessages = [...steeringMessages, ...followUpMessages];
-		if (allMessages.length > 0) {
+		const groups = [
+			{ label: "Steering", messages: steeringMessages },
+			{ label: "After yield", messages: followUpMessages },
+		].filter(group => group.messages.length > 0);
+		if (groups.length > 0) {
 			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));
-			for (const entry of allMessages) {
-				const queuedText = theme.fg("dim", `${entry.label}: ${entry.message}`);
-				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
+			for (const group of groups) {
+				const heading = theme.fg("muted", `${group.label}${theme.sep.dot}${group.messages.length}`);
+				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(heading, 1, 0));
+				for (let index = 0; index < group.messages.length; index++) {
+					const message = replaceTabs(group.messages[index] ?? "").replace(/\r?\n/g, " ↵ ");
+					const queuedText = theme.fg("dim", `  ${index + 1}. ${message}`);
+					this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
+				}
 			}
 			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
-			const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to edit`);
+			const hintText = theme.fg("dim", `  ${theme.tree.hook} ${dequeueKey} to edit`);
 			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}

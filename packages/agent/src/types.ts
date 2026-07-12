@@ -83,6 +83,17 @@ export function isSoftToolRequirement(directive: ToolChoiceDirective | undefined
 	return typeof directive === "object" && directive !== null && (directive as SoftToolRequirement).soft === true;
 }
 
+/** Source category for a queued steering interrupt observed without consuming the queue. */
+export type SteeringInterruptSource = "user" | "system" | "unknown";
+
+/** Non-consuming summary of whether queued steering should interrupt a tool batch. */
+export interface SteeringQueueState {
+	/** True when at least one steering message is queued. */
+	queued: boolean;
+	/** Best-effort origin used only to word synthetic skipped-tool results. */
+	source?: SteeringInterruptSource;
+}
+
 /**
  * Configuration for the agent loop.
  */
@@ -194,10 +205,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * restore queued messages while in-flight tools settle, and an external
 	 * abort in that window leaves the queue intact for a post-abort continue.
 	 *
+	 * Returning `true` is treated as user-originated steering for compatibility.
+	 * Return a {@link SteeringQueueState} when the queue can distinguish system
+	 * advisories from real user messages.
+	 *
 	 * When omitted, steering never interrupts a running tool batch; queued
 	 * messages are still delivered at the next injection boundary.
 	 */
-	hasSteeringMessages?: () => boolean | Promise<boolean>;
+	hasSteeringMessages?: () => boolean | SteeringQueueState | Promise<boolean | SteeringQueueState>;
+
+	/**
+	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
+	 *
+	 * Uses the same delivery rules as steering: the poll is non-consuming, only
+	 * runs for interruptible tools, and is ignored when interruptMode is "wait".
+	 * The host owns message injection at the next boundary.
+	 */
+	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -315,6 +339,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the next model call instead of waiting for the next prompt.
 	 */
 	getReasoning?: () => Effort | undefined;
+	/**
+	 * Dynamic model override, resolved once per LLM call. When set, each
+	 * provider call re-reads the model (like {@link getReasoning}) so mid-run
+	 * model switches — context promotion, retry fallback — apply on the next
+	 * call instead of the run finishing on the stale model captured at
+	 * run-loop start. Falls back to the static {@link model} when unset.
+	 */
+	getModel?: () => Model;
 
 	/**
 	 * Dynamic reasoning-disable override, resolved per LLM call. When set,

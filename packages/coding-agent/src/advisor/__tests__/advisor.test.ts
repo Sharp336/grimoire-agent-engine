@@ -41,7 +41,7 @@ describe("advisor", () => {
 							type: "toolCall",
 							id: "search-timeout",
 							name: "grep",
-							arguments: { pattern: "needle", paths: ["packages/coding-agent/src"] },
+							arguments: { pattern: "needle", path: "packages/coding-agent/src" },
 						},
 					],
 					timestamp: 1,
@@ -163,6 +163,65 @@ describe("advisor", () => {
 			const md = formatSessionHistoryMarkdown([irc], { expandPrimaryContext: true });
 			expect(md).toContain("[irc]");
 			expect(md).not.toContain("<primary-context");
+		});
+
+		it("omits hidden non-primary custom messages while keeping visible custom messages", () => {
+			const hiddenPrelude = {
+				role: "custom",
+				customType: "eager-todo-prelude",
+				content: "<system-reminder>Task delegation is enabled",
+				display: false,
+				timestamp: 1,
+			} as AgentMessage;
+			const hiddenHookMessage = {
+				role: "hookMessage",
+				customType: "hidden-hook-reminder",
+				content: "Hidden hook reminder should never reach advisor history",
+				display: false,
+				timestamp: 2,
+			} as AgentMessage;
+			const visibleCustom = {
+				role: "custom",
+				customType: "visible-status",
+				content: "Visible custom update",
+				display: true,
+				timestamp: 3,
+			} as AgentMessage;
+
+			const md = formatSessionHistoryMarkdown([hiddenPrelude, hiddenHookMessage, visibleCustom], {
+				expandPrimaryContext: true,
+			});
+
+			expect(md).toContain("[visible-status] Visible custom update");
+			expect(md).not.toContain("eager-todo-prelude");
+			expect(md).not.toContain("system-reminder");
+			expect(md).not.toContain("Task delegation");
+			expect(md).not.toContain("hidden-hook-reminder");
+			expect(md).not.toContain("Hidden hook reminder");
+		});
+
+		it("keeps hidden image descriptions because they are the text transcript for attached images", () => {
+			const imageDescription = {
+				role: "custom",
+				customType: "image-attachment-description",
+				content: [{ type: "text", text: '<image path="local://session/cat.png">cat on a keyboard</image>' }],
+				display: false,
+				timestamp: 1,
+			} as AgentMessage;
+			const hiddenPrelude = {
+				role: "custom",
+				customType: "eager-todo-prelude",
+				content: "<system-reminder>Task delegation is enabled",
+				display: false,
+				timestamp: 2,
+			} as AgentMessage;
+
+			const md = formatSessionHistoryMarkdown([imageDescription, hiddenPrelude], { expandPrimaryContext: true });
+
+			expect(md).toContain("[image-attachment-description]");
+			expect(md).toContain("cat on a keyboard");
+			expect(md).not.toContain("eager-todo-prelude");
+			expect(md).not.toContain("Task delegation");
 		});
 	});
 
@@ -1235,6 +1294,151 @@ describe("advisor", () => {
 			expect(failures).toHaveLength(2);
 		});
 
+		it("calls onTurnError with state.error before retrying the batch", async () => {
+			const promptInputs: string[] = [];
+			const turnErrors: unknown[] = [];
+			const events: string[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptCalls++;
+					promptInputs.push(input);
+					events.push(`prompt:${promptCalls}`);
+					state.error = promptCalls === 1 ? "provider failed" : undefined;
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				onTurnError: error => {
+					turnErrors.push(error);
+					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 1);
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(turnErrors).toHaveLength(1);
+			const error = turnErrors[0];
+			if (!(error instanceof Error)) throw new Error("expected advisor turn error");
+			expect(error.message).toBe("provider failed");
+			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
+			expect(runtime.backlog).toBe(0);
+		});
+
+		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {
+			const promptInputs: string[] = [];
+			const turnErrors: unknown[] = [];
+			const failures: unknown[] = [];
+			const events: string[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptCalls++;
+					promptInputs.push(input);
+					events.push(`prompt:${promptCalls}`);
+					state.error = `provider failed ${promptCalls}`;
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				onTurnError: error => {
+					turnErrors.push(error);
+					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
+				},
+				notifyFailure: error => {
+					failures.push(error);
+					events.push(`notify:${error instanceof Error ? error.message : String(error)}`);
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 1);
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(3);
+			expect(turnErrors.map(error => (error instanceof Error ? error.message : String(error)))).toEqual([
+				"provider failed 1",
+				"provider failed 2",
+				"provider failed 3",
+			]);
+			expect(failures).toHaveLength(1);
+			const failure = failures[0];
+			if (!(failure instanceof Error)) throw new Error("expected advisor failure error");
+			expect(failure.message).toBe("provider failed 3");
+			expect(events).toEqual([
+				"prompt:1",
+				"hook:provider failed 1",
+				"prompt:2",
+				"hook:provider failed 2",
+				"prompt:3",
+				"hook:provider failed 3",
+				"notify:provider failed 3",
+			]);
+			expect(runtime.backlog).toBe(0);
+		});
+
+		it("continues retrying when onTurnError rejects", async () => {
+			const promptInputs: string[] = [];
+			const turnErrors: unknown[] = [];
+			const events: string[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptCalls++;
+					promptInputs.push(input);
+					events.push(`prompt:${promptCalls}`);
+					state.error = promptCalls === 1 ? "provider failed" : undefined;
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				onTurnError: async error => {
+					turnErrors.push(error);
+					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
+					throw new Error("hook failed");
+				},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 1);
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(turnErrors).toHaveLength(1);
+			const error = turnErrors[0];
+			if (!(error instanceof Error)) throw new Error("expected advisor turn error");
+			expect(error.message).toBe("provider failed");
+			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
+			expect(runtime.backlog).toBe(0);
+		});
+
 		it("rolls advisor state back after each failed prompt so retries don't replay duplicate turns", async () => {
 			// The real `Agent` appends the user batch + a synthetic `stopReason: "error"`
 			// assistant turn before `state.error` is read. Without rollback, the runtime's
@@ -1579,7 +1783,7 @@ describe("advisor", () => {
 
 	describe("AdvisorConfigOverlayComponent", () => {
 		const deps = {
-			modelRegistry: { getCanonicalModelSelections: () => [] } as unknown as ModelRegistry,
+			modelRegistry: {} as unknown as ModelRegistry,
 			settings: {} as unknown as Settings,
 			scopedModels: [],
 			availableToolNames: ["read", "grep", "glob", "lsp", "web_search"],
@@ -1621,6 +1825,19 @@ describe("advisor", () => {
 			// Right preview reflects the highlighted (first) advisor.
 			expect(text).toContain("x-ai/grok-code-fast:high");
 			expect(text).toContain("read, grep, glob (default)");
+		});
+
+		it("renders an explicit no-tools advisor distinctly from the omitted default", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const overlay = make({
+				advisors: [{ name: "Blank", tools: [] }],
+			});
+
+			const text = strip(overlay.render(200));
+			expect(text.toLowerCase()).toContain("no tools");
+			expect(text).not.toContain("read, grep, glob (default)");
 		});
 
 		it("moves the preview with keyboard selection and preserves an explicit tool set", async () => {

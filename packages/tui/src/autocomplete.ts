@@ -182,6 +182,8 @@ export interface SlashCommand {
 	aliases?: string[];
 	description?: string;
 	argumentHint?: string;
+	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
+	allowArgs?: boolean;
 	/** Dynamic display-only description for slash-command autocomplete. Must be synchronous and side-effect free. */
 	getAutocompleteDescription?: () => string | undefined;
 	// Function to get argument completions for this command
@@ -274,7 +276,7 @@ function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): bool
 	return getCommandAliases(cmd).includes(commandName);
 }
 
-function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
+export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix.length === 0) return 1;
 	if (lowerPrefix === lowerTarget) return 1000;
 	// Flat score for every prefix match so same-prefix commands keep registry
@@ -357,9 +359,40 @@ function hasPromptTextBeforeSlash(
 	return textBeforeCursor.slice(0, slashStart).trim() !== "";
 }
 
+const SKILL_NAMESPACE = "skill:";
+
+/**
+ * Whether a mid-prompt slash token (`prose … /tok`) is skill-shaped enough to
+ * surface `name` in the skill popup. Deliberately stricter than submitted
+ * slash-command matching: a stray `/word` in running prose must not keep the
+ * popup alive through fuzzy name/description hits, so a token only matches as
+ * - a prefix of the `skill:` namespace (incl. the bare `/` entry point),
+ * - an explicit `skill:…` query (full fuzzy name/description search), or
+ * - a prefix of the skill's bare name (`/hum` → `skill:humanizer`).
+ * Anything else yields no items, letting the caller fall through to path
+ * completion or close the popup. Shared with the editor's accept-time
+ * staleness guard so Tab/Enter never accepts a skill the refreshed popup
+ * would no longer show.
+ */
+export function midPromptSkillTokenMatches(lowerToken: string, name: string, description?: string): boolean {
+	if (SKILL_NAMESPACE.startsWith(lowerToken)) return true;
+	const lowerName = name.toLowerCase();
+	if (lowerToken.startsWith(SKILL_NAMESPACE)) {
+		if (scoreCommandTextMatch(lowerToken, lowerName) > 0) return true;
+		return !!description && scoreCommandTextMatch(lowerToken, description.toLowerCase()) > 0;
+	}
+	return lowerName.startsWith(SKILL_NAMESPACE) && lowerName.slice(SKILL_NAMESPACE.length).startsWith(lowerToken);
+}
+
 function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
 	return buildSlashCommandCompletions(
-		commands.filter(cmd => getCommandName(cmd)?.startsWith("skill:")),
+		commands.filter(cmd => {
+			const name = getCommandName(cmd);
+			return (
+				name?.startsWith(SKILL_NAMESPACE) &&
+				midPromptSkillTokenMatches(lowerPrefix, name, getStaticCommandDescription(cmd))
+			);
+		}),
 		lowerPrefix,
 	);
 }
@@ -386,6 +419,75 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
+
+		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
+		const trailingSlashStart = findTrailingSlashCommandStart(textBeforeCursor);
+		const hasPromptTextBeforeTrailingSlash =
+			trailingSlashStart !== null &&
+			hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, trailingSlashStart);
+		const hasPromptTextBeforeLeadingSlash =
+			leadingSlashStart !== null && hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, leadingSlashStart);
+		const slashStart = hasPromptTextBeforeTrailingSlash
+			? trailingSlashStart
+			: hasPromptTextBeforeLeadingSlash
+				? null
+				: leadingSlashStart;
+		if (slashStart !== null) {
+			const commandText = textBeforeCursor.slice(slashStart);
+			const spaceIndex = commandText.indexOf(" ");
+			const isMidPromptSkillLookup = hasPromptTextBeforeTrailingSlash;
+
+			if (spaceIndex === -1) {
+				// No space yet - complete command names
+				const prefix = commandText.slice(1); // Remove the "/"
+				const lowerPrefix = prefix.toLowerCase();
+
+				const matches = isMidPromptSkillLookup
+					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
+					: buildSlashCommandCompletions(this.#commands, lowerPrefix);
+
+				if (matches.length > 0) {
+					return {
+						items: matches,
+						// Preserve the full text-before-cursor for submitted slash
+						// commands so the editor's Enter-staleness check still applies
+						// completion for `  /sk`. Mid-prompt skill lookup keeps only
+						// the slash token because accepting it replaces the whole draft.
+						prefix: isMidPromptSkillLookup ? commandText : textBeforeCursor,
+					};
+				}
+				// A slash token with no matching command may still be an absolute
+				// path (`/tmp/fo` at prompt start, `see /tmp` mid-prompt); fall
+				// through to file-path completion.
+			} else if (!isMidPromptSkillLookup) {
+				// Submitted slash commands own their argument text only when the
+				// matched command accepts args. No-arg slash-looking prompts such
+				// as `/settings @file` still fall through to prompt-composer
+				// completions because submit treats them as normal prompt text.
+				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
+				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
+
+				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
+					return null;
+				}
+				if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
+					if (!("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
+						return null; // No argument completion for this command
+					}
+
+					const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+					if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
+						return null;
+					}
+
+					return {
+						items: argumentSuggestions,
+						prefix: argumentText,
+					};
+				}
+			}
+		}
 
 		// Check for @ file reference (fuzzy search) - must be after a delimiter or at start
 		const atPrefix = this.#extractAtPrefix(textBeforeCursor);
@@ -417,62 +519,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				items: suggestions,
 				prefix: atPrefix,
 			};
-		}
-
-		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
-		const trailingSlashStart = findTrailingSlashCommandStart(textBeforeCursor);
-		const hasPromptTextBeforeTrailingSlash =
-			trailingSlashStart !== null &&
-			hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, trailingSlashStart);
-		const slashStart = hasPromptTextBeforeTrailingSlash ? trailingSlashStart : leadingSlashStart;
-		if (slashStart !== null) {
-			const commandText = textBeforeCursor.slice(slashStart);
-			const spaceIndex = commandText.indexOf(" ");
-			const isMidPromptSkillLookup = hasPromptTextBeforeTrailingSlash;
-
-			if (spaceIndex === -1) {
-				// No space yet - complete command names
-				const prefix = commandText.slice(1); // Remove the "/"
-				const lowerPrefix = prefix.toLowerCase();
-
-				const matches = isMidPromptSkillLookup
-					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
-					: buildSlashCommandCompletions(this.#commands, lowerPrefix);
-
-				if (matches.length > 0) {
-					return {
-						items: matches,
-						// Preserve the full text-before-cursor for submitted slash
-						// commands so the editor's Enter-staleness check still applies
-						// completion for `  /sk`. Mid-prompt skill lookup keeps only
-						// the slash token because accepting it replaces the whole draft.
-						prefix: isMidPromptSkillLookup ? commandText : textBeforeCursor,
-					};
-				}
-				if (!isMidPromptSkillLookup) return null;
-				// A mid-prompt slash token with no matching skill may still be an
-				// absolute path (`see /tmp`); fall through to file-path completion.
-			} else if (!isMidPromptSkillLookup) {
-				// Space found - complete command arguments
-				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
-				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
-
-				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
-				if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
-					return null; // No argument completion for this command
-				}
-
-				const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-				if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
-					return null;
-				}
-
-				return {
-					items: argumentSuggestions,
-					prefix: argumentText,
-				};
-			}
-			if (!isMidPromptSkillLookup) return null;
 		}
 
 		// Check for file paths - triggered by Tab or if we detect a path pattern
@@ -522,19 +568,34 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, trailingSlashStart) &&
 			findTrailingSlashCommandStart(prefix) !== null;
 
-		if (isMidPromptSkillLookup) {
-			const newLine = `/${item.value}`;
+		if (isMidPromptSkillLookup && trailingSlashStart !== null) {
+			// Replace ONLY the partial slash token (e.g. "/sec") at the cursor with
+			// `/skill:<name> `; the rest of the user's draft — prose typed before
+			// the slash, text after the cursor, and any other lines — is preserved.
+			// The submit-time parser (`parseSkillInvocation` in coding-agent/skills)
+			// detects the mid-prompt `/skill:<name>` token and threads the surrounding
+			// prose through as `args`, so the skill still invokes (issue #3913, after
+			// the original mid-prompt autocomplete landed in #3654 wiped the draft).
+			const beforeSlash = currentLine.slice(0, trailingSlashStart);
+			const insert = `/${item.value} `;
+			const newLine = `${beforeSlash}${insert}${afterCursor}`;
+			const newLines = [...lines];
+			newLines[cursorLine] = newLine;
 			return {
-				lines: [newLine],
-				cursorLine: 0,
-				cursorCol: newLine.length,
+				lines: newLines,
+				cursorLine,
+				cursorCol: beforeSlash.length + insert.length,
 			};
 		}
 
 		// Slash command suggestions can be accepted before the debounced refresh
 		// catches up to newly typed characters. Replace the live command token,
 		// not only the prefix captured when the suggestion list was rendered.
-		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null) {
+		// Absolute-path completions share the leading-slash prefix shape but
+		// insert values starting with `/` (or `"` when quoted); those must take
+		// the path tail below instead of command-style `/<name> ` insertion.
+		const isPathCompletionItem = item.value.startsWith("/") || item.value.startsWith('"');
+		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null && !isPathCompletionItem) {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
 			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);

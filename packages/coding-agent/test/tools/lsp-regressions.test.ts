@@ -2,13 +2,17 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { applyTextEditsToString, applyWorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/edits";
+import {
+	applyTextEditsToString,
+	applyWorkspaceEdit,
+	sortAndValidateTextEdits,
+} from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import { renderCall, renderResult } from "@oh-my-pi/pi-coding-agent/lsp/render";
 import type {
 	CodeAction,
@@ -16,6 +20,7 @@ import type {
 	DeleteFile,
 	Diagnostic,
 	LspClient,
+	LspToolDetails,
 	RenameFile,
 	ServerConfig,
 	SymbolInformation,
@@ -39,6 +44,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
+import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { getLanguageFromPath } from "../../src/utils/lang-from-path";
 
@@ -183,6 +189,57 @@ function installFakeLsp(handler: FakeLspHandler): FakeLspServer {
 
 	vi.spyOn(piUtils.ptree, "spawn").mockReturnValue(proc);
 	return server;
+}
+
+type BunSpawnOptions = Bun.SpawnOptions.SpawnOptions<
+	Bun.SpawnOptions.Writable,
+	Bun.SpawnOptions.Readable,
+	Bun.SpawnOptions.Readable
+>;
+
+interface BunSpawnCall {
+	cmd: string[];
+	options?: BunSpawnOptions;
+}
+
+interface BunSpawnOutput {
+	stdout?: string;
+	stderr?: string;
+	exitCode?: number;
+}
+
+function textStream(text: string): ReadableStream<Uint8Array> {
+	const body = new Response(text).body;
+	if (!body) {
+		throw new Error("Failed to create text stream");
+	}
+	return body;
+}
+
+function completedProcess(stdout = "", stderr = "", exitCode = 0): Subprocess {
+	return {
+		pid: 12_345,
+		stdout: textStream(stdout),
+		stderr: textStream(stderr),
+		exited: Promise.resolve(exitCode),
+		kill: () => {},
+	} as Subprocess;
+}
+
+function recordBunSpawn(calls: BunSpawnCall[], outputForCommand: (cmd: string[]) => BunSpawnOutput = () => ({})): void {
+	vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[], options?: BunSpawnOptions) => {
+		const recordedCmd = [...cmd];
+		calls.push({ cmd: recordedCmd, options });
+		const output = outputForCommand(recordedCmd);
+		return completedProcess(output.stdout, output.stderr, output.exitCode);
+	}) as typeof Bun.spawn);
+}
+
+function textResult(result: AgentToolResult<LspToolDetails>): string {
+	return result.content
+		.filter(block => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
 }
 
 describe("lsp regressions", () => {
@@ -1053,6 +1110,86 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("treats a go.work-only root as a Go workspace for workspace diagnostics", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-go-work-only-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls, cmd => {
+			if (cmd.join("\0") === "go\0work\0edit\0-json") {
+				return { stdout: JSON.stringify({ Use: [{ DiskPath: "./service" }] }) };
+			}
+			return {};
+		});
+
+		try {
+			const serviceDir = path.join(tempDir.path(), "service");
+			await fs.promises.mkdir(serviceDir, { recursive: true });
+			await Bun.write(path.join(tempDir.path(), "go.work"), ["go 1.22", "", "use ./service", ""].join("\n"));
+			await Bun.write(path.join(serviceDir, "go.mod"), "module example.com/service\n\ngo 1.22\n");
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const result = await tool.execute("go-work-only-diagnostics", {
+				action: "diagnostics",
+				file: "*",
+			});
+
+			const buildCalls = spawnCalls.filter(call => call.cmd[0] === "go" && call.cmd[1] === "build");
+			expect(buildCalls).toHaveLength(1);
+			expect(buildCalls[0]?.cmd).toEqual(["go", "build", "./service/..."]);
+			expect(buildCalls[0]?.options?.cwd).toBe(tempDir.path());
+			const output = textResult(result);
+			expect(output).toContain("Workspace diagnostics (");
+			expect(output).toContain("go build");
+			expect(output).toContain("No issues found");
+			expect(output).not.toContain("Cannot detect project type");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("builds every go.work use module when go.work and go.mod coexist", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-go-work-before-mod-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls, cmd => {
+			if (cmd.join("\0") === "go\0work\0edit\0-json") {
+				return {
+					stdout: JSON.stringify({
+						Use: [{ DiskPath: "." }, { DiskPath: "./service" }, { DiskPath: "./tools/helper" }],
+					}),
+				};
+			}
+			return {};
+		});
+
+		try {
+			const serviceDir = path.join(tempDir.path(), "service");
+			const helperDir = path.join(tempDir.path(), "tools", "helper");
+			await fs.promises.mkdir(serviceDir, { recursive: true });
+			await fs.promises.mkdir(helperDir, { recursive: true });
+			await Bun.write(path.join(tempDir.path(), "go.mod"), "module example.com/root\n\ngo 1.22\n");
+			await Bun.write(path.join(serviceDir, "go.mod"), "module example.com/service\n\ngo 1.22\n");
+			await Bun.write(path.join(helperDir, "go.mod"), "module example.com/helper\n\ngo 1.22\n");
+			await Bun.write(
+				path.join(tempDir.path(), "go.work"),
+				["go 1.22", "", "use (", "\t.", "\t./service", "\t./tools/helper", ")", ""].join("\n"),
+			);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const result = await tool.execute("go-work-module-patterns", {
+				action: "diagnostics",
+				file: "*",
+			});
+
+			const buildCalls = spawnCalls.filter(call => call.cmd[0] === "go" && call.cmd[1] === "build");
+			expect(buildCalls).toHaveLength(1);
+			expect(buildCalls[0]?.cmd.slice(0, 2)).toEqual(["go", "build"]);
+			expect(buildCalls[0]?.cmd.slice(2).sort()).toEqual(["./...", "./service/...", "./tools/helper/..."]);
+			expect(textResult(result)).toContain("Workspace diagnostics (");
+			expect(textResult(result)).toContain("go build");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("detects Windows local .exe LSP shims in node_modules/.bin", async () => {
 		if (process.platform !== "win32") {
 			return;
@@ -1074,6 +1211,91 @@ describe("lsp regressions", () => {
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
+		}
+	});
+
+	it("detects Ruff in Windows virtualenv Scripts directories", async () => {
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
+
+		const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-");
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+
+		try {
+			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
+			const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
+			await fs.promises.mkdir(scriptsDir, { recursive: true });
+			const localRuff = path.join(scriptsDir, "ruff.exe");
+			await Bun.write(localRuff, "");
+
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
+			expect(whichSpy).not.toHaveBeenCalledWith("ruff");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("detects Ruff in Windows virtualenv Scripts directories for Ruff-only roots", async () => {
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+
+		try {
+			for (const marker of ["ruff.toml", ".ruff.toml"] as const) {
+				const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-marker-");
+				try {
+					await Bun.write(path.join(tempDir.path(), marker), "");
+					const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
+					await fs.promises.mkdir(scriptsDir, { recursive: true });
+					const localRuff = path.join(scriptsDir, "ruff.exe");
+					await Bun.write(localRuff, "");
+
+					const config = loadConfig(tempDir.path());
+					expect(config.servers.ruff?.resolvedCommand).toBe(localRuff);
+				} finally {
+					tempDir.removeSync();
+				}
+			}
+			expect(whichSpy).not.toHaveBeenCalledWith("ruff");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("detects pyright and pylsp in Windows virtualenv Scripts for Python-only roots", async () => {
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+
+		try {
+			const cases: Array<{ marker: string; server: string; binary: string }> = [
+				{ marker: "pyrightconfig.json", server: "pyright", binary: "pyright-langserver.exe" },
+				{ marker: "setup.cfg", server: "pylsp", binary: "pylsp.exe" },
+			];
+			for (const { marker, server, binary } of cases) {
+				const tempDir = TempDir.createSync("@omp-lsp-win32-py-marker-");
+				try {
+					await Bun.write(path.join(tempDir.path(), marker), "");
+					const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
+					await fs.promises.mkdir(scriptsDir, { recursive: true });
+					const localBin = path.join(scriptsDir, binary);
+					await Bun.write(localBin, "");
+
+					const config = loadConfig(tempDir.path());
+					expect(config.servers[server]?.resolvedCommand).toBe(localBin);
+				} finally {
+					tempDir.removeSync();
+				}
+			}
+			expect(whichSpy).not.toHaveBeenCalledWith("pyright-langserver");
+			expect(whichSpy).not.toHaveBeenCalledWith("pylsp");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1734,6 +1956,35 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("dedupes byte-identical non-empty text edits before overlap validation", () => {
+		const edit = {
+			range: { start: { line: 9, character: 55 }, end: { line: 9, character: 62 } },
+			newText: "./megaMenu",
+		};
+
+		expect(sortAndValidateTextEdits([edit, { ...edit }])).toEqual([edit]);
+		expect(
+			applyTextEditsToString("import x from './menu';\n", [
+				{
+					range: { start: { line: 0, character: 15 }, end: { line: 0, character: 21 } },
+					newText: "./megaMenu",
+				},
+				{
+					range: { start: { line: 0, character: 15 }, end: { line: 0, character: 21 } },
+					newText: "./megaMenu",
+				},
+			]),
+		).toBe("import x from './megaMenu';\n");
+	});
+
+	it("keeps byte-identical zero-width inserts because they are not idempotent", () => {
+		const result = applyTextEditsToString("abc", [
+			{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "X" },
+			{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "X" },
+		]);
+		expect(result).toBe("aXXbc");
+	});
+
 	it("applies equal-position inserts in array order", () => {
 		// LSP spec: multiple inserts at the same position land in the order they
 		// appear in the edits array (import + reference insertions rely on this).
@@ -2061,7 +2312,7 @@ describe("lsp regressions", () => {
 			expect(loadConfigSpy).toHaveBeenCalledTimes(3);
 			expect(starOutput).toContain("Reloaded test-lsp");
 			expect(omittedOutput).toContain("Reloaded test-lsp");
-			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path());
+			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path(), undefined, expect.anything());
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
@@ -2167,6 +2418,255 @@ describe("lsp regressions", () => {
 		} finally {
 			tempDir.removeSync();
 		}
+	});
+
+	// #3962 — LSP cold-start and notification writes must honor the tool's
+	// combined timeout/caller abort signal. Before the fix, a wedged server
+	// hung past the tool's advertised deadline: `initialize` fell back to the
+	// 30s internal timer because no signal was threaded, and notification
+	// writes (`didOpen`/`didChange`/`didSave`) had no timeout at all, so a
+	// stuck `sink.flush()` blocked every later op on the client's write queue.
+	describe("lsp cold-start and notification writes honor caller signal (#3962)", () => {
+		it("aborts a wedged cold-start initialize on the caller signal instead of the 30s internal fallback", async () => {
+			// Server accepts spawn but never answers the `initialize` request.
+			// Pre-fix, `getOrCreateClient` swallowed the signal and only bailed
+			// after the 30s `DEFAULT_REQUEST_TIMEOUT_MS` fallback fired.
+			installFakeLsp(() => {});
+
+			const tempDir = TempDir.createSync("@omp-lsp-init-abort-");
+			try {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 100);
+				const config: ServerConfig = {
+					command: "fake-lsp-init-abort",
+					fileTypes: ["ts"],
+					rootMarkers: [],
+				};
+
+				const start = Date.now();
+				await expect(
+					lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal),
+				).rejects.toBeInstanceOf(Error);
+				const elapsed = Date.now() - start;
+				clearTimeout(timer);
+				// The signal fired at 100ms. Allow a wide margin, but the pre-fix
+				// path only bailed after 30s.
+				expect(elapsed).toBeLessThan(2_000);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("does not negative-cache caller-aborted initialize attempts", async () => {
+			installFakeLsp(() => {});
+
+			const tempDir = TempDir.createSync("@omp-lsp-init-abort-cache-");
+			try {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 100);
+				const config: ServerConfig = {
+					command: "fake-lsp-init-abort-cache",
+					fileTypes: ["ts"],
+					rootMarkers: [],
+				};
+
+				await expect(
+					lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal),
+				).rejects.toBeInstanceOf(Error);
+				clearTimeout(timer);
+
+				await expect(lspClient.getOrCreateClient(config, tempDir.path(), 25)).rejects.not.toThrow(
+					"failed to initialize recently",
+				);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("does not tear down when a caller aborts before its queued write reaches flush", async () => {
+			const firstFlush = Promise.withResolvers<number>();
+			const writes: Array<string | Uint8Array> = [];
+			const kill = vi.fn();
+			const client: LspClient = {
+				name: "fake-lsp-queued-abort:/tmp",
+				cwd: "/tmp",
+				config: { command: "fake-lsp-queued-abort", fileTypes: ["ts"], rootMarkers: [] },
+				proc: {
+					exited: new Promise<number>(() => {}),
+					exitCode: null,
+					stdin: {
+						write(chunk: string | Uint8Array) {
+							writes.push(chunk);
+							return typeof chunk === "string" ? Buffer.byteLength(chunk, "utf-8") : chunk.byteLength;
+						},
+						flush: () => firstFlush.promise,
+					},
+					stdout: new ReadableStream<Uint8Array>(),
+					peekStderr: () => "",
+					kill,
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(0),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			const first = lspClient.sendNotification(client, "workspace/didChangeConfiguration", { settings: {} });
+			await Bun.sleep(0);
+
+			const controller = new AbortController();
+			const second = lspClient.sendNotification(client, "textDocument/didOpen", {}, controller.signal);
+			controller.abort();
+			await Bun.sleep(0);
+
+			expect(kill).not.toHaveBeenCalled();
+			firstFlush.resolve(0);
+			await first;
+			await expect(second).rejects.toBeInstanceOf(Error);
+			expect(kill).not.toHaveBeenCalled();
+			expect(writes).toHaveLength(1);
+		});
+
+		it("bounds a wedged notification flush on the caller signal and tears down the client", async () => {
+			// Custom fake: stdin.flush is gated by a controllable promise so we
+			// can simulate a server that stopped draining stdin AFTER init has
+			// completed. Pre-fix, `sendNotification` had no signal and the
+			// stuck flush wedged the write queue permanently.
+			const encoder = new TextEncoder();
+			const { promise: exited, resolve: resolveExited } = Promise.withResolvers<number>();
+			let stdoutController: ReadableStreamDefaultController<Uint8Array> | null = null;
+			let exitCode: number | null = null;
+			let killed = false;
+			let flushGate: Promise<void> = Promise.resolve();
+
+			const frame = (message: RpcMessage): Uint8Array => {
+				const content = JSON.stringify(message);
+				return encoder.encode(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+			};
+
+			const stdout = new ReadableStream<Uint8Array>({
+				start(c) {
+					stdoutController = c;
+				},
+			});
+
+			let pendingBytes = Buffer.alloc(0);
+			let chain: Promise<void> = Promise.resolve();
+			const feed = (raw: string | Uint8Array): void => {
+				const chunk = typeof raw === "string" ? Buffer.from(raw, "utf-8") : Buffer.from(raw);
+				pendingBytes = pendingBytes.length === 0 ? chunk : Buffer.concat([pendingBytes, chunk]);
+				chain = chain.then(async () => {
+					while (true) {
+						const headerEnd = pendingBytes.indexOf("\r\n\r\n");
+						if (headerEnd === -1) break;
+						const match = /Content-Length: (\d+)/i.exec(pendingBytes.toString("utf-8", 0, headerEnd));
+						if (!match) {
+							pendingBytes = pendingBytes.subarray(headerEnd + 4);
+							continue;
+						}
+						const start = headerEnd + 4;
+						const end = start + Number(match[1]);
+						if (pendingBytes.length < end) break;
+						const message = JSON.parse(pendingBytes.toString("utf-8", start, end)) as RpcMessage;
+						pendingBytes = pendingBytes.subarray(end);
+						if (message.method === "initialize") {
+							stdoutController?.enqueue(frame({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } }));
+						}
+					}
+				});
+			};
+
+			const proc = {
+				get exited() {
+					return exited;
+				},
+				get exitCode() {
+					return exitCode;
+				},
+				stdin: {
+					write(chunk: string | Uint8Array) {
+						feed(chunk);
+						return typeof chunk === "string" ? Buffer.byteLength(chunk, "utf-8") : chunk.byteLength;
+					},
+					flush: async () => {
+						await flushGate;
+						return 0;
+					},
+					end: async () => 0,
+				},
+				stdout,
+				peekStderr: () => "",
+				kill() {
+					killed = true;
+					if (exitCode === null) {
+						exitCode = 0;
+						stdoutController?.close();
+						resolveExited(0);
+					}
+				},
+			} as unknown as LspClient["proc"];
+
+			vi.spyOn(piUtils.ptree, "spawn").mockReturnValue(proc);
+
+			const tempDir = TempDir.createSync("@omp-lsp-flush-wedge-");
+			try {
+				const config: ServerConfig = {
+					command: "fake-lsp-flush-wedge",
+					fileTypes: ["ts"],
+					rootMarkers: [],
+				};
+
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(true);
+
+				// Wedge every subsequent flush: sink.flush() now awaits a promise
+				// that never settles, mirroring a server that stopped draining stdin.
+				flushGate = new Promise<void>(() => {});
+
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 100);
+
+				const start = Date.now();
+				await expect(
+					lspClient.sendNotification(
+						client,
+						"textDocument/didOpen",
+						{
+							textDocument: {
+								uri: "file:///tmp/x.ts",
+								languageId: "typescript",
+								version: 1,
+								text: "",
+							},
+						},
+						controller.signal,
+					),
+				).rejects.toBeInstanceOf(Error);
+				const elapsed = Date.now() - start;
+				clearTimeout(timer);
+				expect(elapsed).toBeLessThan(2_000);
+
+				// Teardown contract: an aborted write kills the client so the
+				// next `getOrCreateClient` spawns a fresh server instead of
+				// queueing behind the wedged flush forever.
+				expect(killed).toBe(true);
+				expect(lspClient.getActiveClients().some(s => s.name === config.command)).toBe(false);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
 	});
 });
 

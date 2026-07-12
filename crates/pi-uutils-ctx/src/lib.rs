@@ -51,6 +51,8 @@ thread_local! {
 	static SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
+static RAYON_GLOBAL_POOL_AVAILABLE: AtomicBool = AtomicBool::new(!cfg!(target_os = "windows"));
+
 /// I/O streams, working directory, environment, and cancel flag for a single
 /// utility invocation. Grouped into one value to keep [`scope`] readable.
 pub struct ScopeIo {
@@ -124,6 +126,20 @@ pub fn is_active() -> bool {
 	SCOPE_DEPTH.with(|d| d.get() > 0)
 }
 
+/// Records whether patched native callsites may use Rayon's process-global
+/// worker pool without risking lazy initialization under Windows commit
+/// pressure.
+pub fn set_rayon_global_pool_available(available: bool) {
+	RAYON_GLOBAL_POOL_AVAILABLE.store(available, Ordering::SeqCst);
+}
+
+/// Returns whether patched native callsites may enter Rayon's process-global
+/// worker pool.
+#[must_use]
+pub fn rayon_global_pool_available() -> bool {
+	RAYON_GLOBAL_POOL_AVAILABLE.load(Ordering::SeqCst)
+}
+
 /// Returns the exit code accumulated via [`set_exit_code`] during the current
 /// scope (0 when none was set or no context is installed).
 pub fn exit_code() -> i32 {
@@ -172,6 +188,23 @@ pub fn var(key: &str) -> Option<String> {
 			.and_then(|ctx| ctx.env.get(key).cloned())
 	})
 }
+
+/// Returns a snapshot of the scope's entire environment map (the shell's
+/// exported variables), or an empty vector when no scope is installed.
+/// Utilities that spawn child processes use this to build the child
+/// environment (`env_clear().envs(..)`), because the shell's exported
+/// variables are not present in the host process environment.
+#[must_use]
+pub fn env_snapshot() -> Vec<(String, String)> {
+	CTX.with(|c| {
+		c.borrow().as_ref().map_or_else(Vec::new, |ctx| {
+			ctx.env
+				.iter()
+				.map(|(k, v)| (k.clone(), v.clone()))
+				.collect()
+		})
+	})
+}
 /// Returns true when scoped stdin is a shell pipe or custom stream that should
 /// be treated as `rg PATTERN`'s implicit input instead of searching `.`.
 #[must_use]
@@ -180,6 +213,22 @@ pub fn stdin_is_search_input() -> bool {
 		c.borrow()
 			.as_ref()
 			.is_some_and(|ctx| ctx.stdin_is_search_input)
+	})
+}
+
+/// Returns true when the host has asked the active scope to cancel (e.g. on
+/// shell `abort`/`timeout`). uutils utilities running long internal loops —
+/// recursive directory walks in particular — poll this so cancellation is
+/// observed without waiting for stdin or for the whole work item to finish.
+///
+/// Returns false when no scope is installed; the cancel flag itself is the
+/// same one observed by [`CtxStdin::read`].
+#[must_use]
+pub fn is_cancelled() -> bool {
+	CTX.with(|c| {
+		c.borrow()
+			.as_ref()
+			.is_some_and(|ctx| ctx.cancel.load(Ordering::Relaxed))
 	})
 }
 

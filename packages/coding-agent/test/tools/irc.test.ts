@@ -348,6 +348,28 @@ describe("IRC", () => {
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.unreadCount("0-Parked")).toBe(0);
 		});
+
+		it("wait with liveness aborts when the last running sender becomes idle after commitment", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
+
+			const waiting = bus.wait("0-Main", {}, 1000, undefined, { liveness: { registry, senderId: "0-Main" } });
+			registry.setStatus("0-Sub", "idle");
+
+			await expect(waiting).rejects.toThrow("no running peers remain");
+		});
+
+		it("wait with liveness aborts when a specific sender becomes idle after commitment", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
+
+			const waiting = bus.wait("0-Main", { from: "0-Sub" }, 1000, undefined, {
+				liveness: { registry, senderId: "0-Main" },
+			});
+			registry.setStatus("0-Sub", "idle");
+
+			await expect(waiting).rejects.toThrow('agent "0-Sub" is not running');
+		});
 	});
 
 	describe("IrcTool", () => {
@@ -366,7 +388,7 @@ describe("IRC", () => {
 			expect(IrcTool.createIf(session)).toBeNull();
 		});
 
-		it("createIf enables irc while the task tool is available", () => {
+		it("createIf enables interruptible irc while the task tool is available", () => {
 			const session: ToolSession = {
 				cwd: "/tmp",
 				hasUI: false,
@@ -378,7 +400,9 @@ describe("IRC", () => {
 			};
 			// Default task.maxRecursionDepth (2) at depth 0: task can spawn, and a
 			// finished subagent must stay reachable.
-			expect(IrcTool.createIf(session)).toBeInstanceOf(IrcTool);
+			const tool = IrcTool.createIf(session);
+			expect(tool).toBeInstanceOf(IrcTool);
+			expect(tool?.interruptible).toBe(true);
 		});
 
 		it("createIf enables irc for a subagent even at the recursion-depth cap", () => {
@@ -504,7 +528,10 @@ describe("IRC", () => {
 			const main = makeFakeSession();
 			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
 			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			// Recipient starts idle: send wakes it, and its immediate reply must
+			// still reach the pre-armed await waiter — proving `send await:true`
+			// never arms the liveness auto-cancel that op:"wait" uses.
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "idle" });
 			sub.onDeliver(msg => {
 				// Reply synchronously during delivery: the tool has already parked
 				// a future-only waiter, so the immediate reply is handed directly
@@ -556,6 +583,35 @@ describe("IRC", () => {
 			expect(text).toContain("No reply from 0-Sub");
 		});
 
+		it("op=send await=true preserves the delivery receipt when the wait is interrupted", async () => {
+			// Regression: the tool is marked interruptible so `job poll` / `irc wait` return
+			// early on incoming messages, but `send await:true` also runs the reply wait under
+			// the same signal. If the abort lands after the message was delivered, the tool
+			// must surface a successful receipt so the agent loop keeps the tool as "sent"
+			// and does not report it as skipped — which would prompt a duplicate resend.
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const controller = new AbortController();
+			// Abort once delivery reaches the peer, mimicking a steering / IRC interrupt
+			// landing between the send resolving and the reply arriving.
+			sub.onDeliver(() => controller.abort(new Error("mock interrupt")));
+
+			const result = await tool.execute(
+				"call-1",
+				{ op: "send", to: "0-Sub", message: "ping", await: true, timeoutMs: 30_000 },
+				controller.signal,
+			);
+
+			expect(result.isError).toBeFalsy();
+			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
+			expect(result.details?.receipts?.[0]?.outcome).toBe("injected");
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("Send delivered");
+			expect(text).toContain("interrupted");
+		});
+
 		it("op=send rejects await with to=all and self-sends", async () => {
 			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
 			const broadcast = await tool.execute("call-1", { op: "send", to: "all", message: "x", await: true });
@@ -572,12 +628,115 @@ describe("IRC", () => {
 		});
 
 		it("op=wait returns a clean non-error timeout result", async () => {
+			const fake = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: fake.session, status: "running" });
 			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
 			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
 			expect(result.isError).toBeFalsy();
 			expect(result.details?.waited).toBeNull();
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("No message");
+		});
+
+		it("op=wait returns an error if no active agents exist", async () => {
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
+			expect(result.isError).toBe(true);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("no running peers remain");
+		});
+
+		it("op=wait returns an error if the requested specific 'from' agent is not active", async () => {
+			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: null, status: "parked" });
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "wait", from: "0-Sub", timeoutMs: 5 });
+			expect(result.isError).toBe(true);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain('agent "0-Sub" is not running');
+		});
+
+		it("op=wait consumes a pending IRC aside before honoring a queued interrupt abort", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Running", displayName: "task", kind: "sub", session });
+
+			const delivery = await session.deliverIrcMessage({
+				id: "msg-wait-pending",
+				from: "0-Main",
+				to: "0-Running",
+				body: "queued interrupt note",
+				ts: Date.now(),
+			});
+			expect(delivery).toBe("injected");
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Running"));
+			const controller = new AbortController();
+			controller.abort(new Error("queued IRC interrupt"));
+
+			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 30_000 }, controller.signal);
+
+			expect(result.isError).toBeFalsy();
+			expect(result.details?.waited).toMatchObject({
+				id: "msg-wait-pending",
+				from: "0-Main",
+				to: "0-Running",
+				body: "queued interrupt note",
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("queued interrupt note");
+
+			const empty = await tool.execute("call-2", { op: "inbox" });
+			expect(empty.details?.inbox).toEqual([]);
+		});
+
+		it("op=inbox drains IRC asides that arrived while the caller was running", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Running", displayName: "task", kind: "sub", session });
+
+			const delivery = await session.deliverIrcMessage({
+				id: "msg-running",
+				from: "0-Main",
+				to: "0-Running",
+				body: "parallel note",
+				ts: Date.now(),
+			});
+			expect(delivery).toBe("injected");
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Running"));
+			const result = await tool.execute("call-1", { op: "inbox" });
+
+			expect(result.details?.inbox?.map(msg => msg.body)).toEqual(["parallel note"]);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("parallel note");
+		});
+
+		it("op=inbox peek surfaces a pending IRC aside and prevents it auto-injecting", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Running", displayName: "task", kind: "sub", session });
+
+			await session.deliverIrcMessage({
+				id: "msg-peek",
+				from: "0-Main",
+				to: "0-Running",
+				body: "peeked note",
+				ts: Date.now(),
+			});
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Running"));
+			const peeked = await tool.execute("call-1", { op: "inbox", peek: true });
+			expect(peeked.details?.inbox?.map(msg => msg.body)).toEqual(["peeked note"]);
+
+			// The peek surfaced the body via the tool result, so the aside-channel
+			// copy must NOT also be auto-injected at the next step: a second drain
+			// returns nothing (the pending aside was consumed out of the
+			// auto-inject queue when peek surfaced it).
+			const second = await tool.execute("call-2", { op: "inbox" });
+			expect(second.details?.inbox).toEqual([]);
 		});
 
 		it("op=inbox drains the caller's mailbox", async () => {
@@ -620,7 +779,8 @@ describe("IRC", () => {
 			expect(promptSpy).toHaveBeenCalledTimes(1);
 			// The idle wake routes through #wakeForIrc, which batches records into one prompt —
 			// even a lone incoming message is delivered as a one-element array.
-			const prompted = (promptSpy.mock.calls[0]?.[0] as unknown as CustomMessage[])[0];
+			expect(promptSpy.mock.calls[0]).toBeDefined();
+			const prompted = (promptSpy.mock.calls[0]![0] as unknown as CustomMessage[])[0];
 			expect(prompted).toMatchObject({ role: "custom", customType: "irc:incoming" });
 			expect(prompted.details).toMatchObject({ id: "msg-1", from: "0-Peer", message: "wake up" });
 
@@ -628,7 +788,7 @@ describe("IRC", () => {
 			expect(event.type).toBe("irc_message");
 		});
 
-		it("queues a non-interrupting aside when a turn is streaming", async () => {
+		it("queues peer IRC as an interrupt while a turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -643,6 +803,32 @@ describe("IRC", () => {
 			});
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
+		});
+
+		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-parent",
+				from: "Main",
+				to: "0-Child",
+				body: "change approach",
+				ts: Date.now(),
+			});
+			const queued = session.agent.peekSteeringQueue();
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(queued).toHaveLength(1);
+			const parentSteer = queued[0];
+			expect(parentSteer?.role).toBe("user");
+			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
+			expect(parentSteer.content).toContain("change approach");
 		});
 
 		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {

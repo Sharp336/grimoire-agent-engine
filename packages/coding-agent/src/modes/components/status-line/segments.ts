@@ -20,6 +20,13 @@ function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
 
+/** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
+function clampPathLength(pwd: string, maxLen: number): string {
+	if (pwd.length <= maxLen) return pwd;
+	const ellipsis = "…";
+	return `${ellipsis}${pwd.slice(-Math.max(0, maxLen - ellipsis.length))}`;
+}
+
 /**
  * Leading glyph of a thinking-level display string (e.g. "◉ xhigh" → "◉").
  * Compact mode promotes this glyph to the model-segment icon so the level
@@ -206,6 +213,12 @@ const modeSegment: StatusLineSegment = {
 			return renderGoalMode(ctx, goal);
 		}
 
+		const vibe = ctx.vibeMode;
+		if (vibe?.enabled) {
+			const content = withIcon(theme.icon.agents, "Vibe");
+			return { content: theme.fg("accent", content), visible: true };
+		}
+
 		const loop = ctx.loopMode;
 		if (loop?.enabled) {
 			const content = withIcon(theme.icon.loop, "Loop");
@@ -220,12 +233,24 @@ const pathSegment: StatusLineSegment = {
 	id: "path",
 	render(ctx) {
 		const opts = ctx.options.path ?? {};
+		const stripPrefix = opts.stripWorkPrefix !== false;
+
+		// Linked git worktree: the on-disk path nests the worktree base, the
+		// project, and a worktree dir that usually duplicates the branch (already
+		// shown by the git segment). Collapse to the project name, appending the
+		// worktree dir only when it diverges from the branch.
+		if (stripPrefix && ctx.worktree) {
+			const { projectName, worktreeName } = ctx.worktree;
+			const label = ctx.git.branch === worktreeName ? projectName : `${projectName}/${worktreeName}`;
+			const content = withIcon(theme.icon.worktree, clampPathLength(label, opts.maxLength ?? 40));
+			return { content: theme.fg("statusLinePath", content), visible: true };
+		}
 
 		const projectDir = ctx.activeRepo?.cwd ?? getProjectDir();
 		const { scratch, relative } = classifyProjectDir(projectDir);
 		let pwd = projectDir;
 
-		if (opts.stripWorkPrefix !== false) {
+		if (stripPrefix) {
 			if (scratch) {
 				if (relative) pwd = relative;
 			} else {
@@ -237,17 +262,12 @@ const pathSegment: StatusLineSegment = {
 			pwd = shortenPath(pwd);
 		}
 
-		const maxLen = opts.maxLength ?? 40;
-		if (pwd.length > maxLen) {
-			const ellipsis = "…";
-			const sliceLen = Math.max(0, maxLen - ellipsis.length);
-			pwd = `${ellipsis}${pwd.slice(-sliceLen)}`;
-		}
+		pwd = clampPathLength(pwd, opts.maxLength ?? 40);
 		if (repoSuffix) {
 			pwd = `${pwd}${repoSuffix}`;
 		}
 
-		const showScratchIcon = scratch && opts.stripWorkPrefix !== false;
+		const showScratchIcon = scratch && stripPrefix;
 		const icon = showScratchIcon ? theme.icon.scratchFolder : theme.icon.folder;
 		const content = withIcon(icon, pwd);
 		return { content: theme.fg("statusLinePath", content), visible: true };
@@ -348,10 +368,11 @@ const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
 	render(ctx) {
 		// Excludes cacheRead: that field re-reads the full cached context every
-		// turn, making the cumulative sum N×context_size. The dedicated cache_read
-		// segment handles cache monitoring; the cost segment handles billing.
-		const { input, output, cacheWrite } = ctx.usageStats;
-		const total = input + output + cacheWrite;
+		// turn, making the cumulative sum N×context_size. Orchestration cache read
+		// follows the same rule; orchestration input/output remain in the total so
+		// provider-side service work is preserved without labeling it prompt input.
+		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
+		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
 
 		const content = withIcon(theme.icon.tokens, formatNumber(total));
@@ -365,7 +386,7 @@ const tokenRateSegment: StatusLineSegment = {
 		const { tokensPerSecond } = ctx.usageStats;
 		if (!tokensPerSecond) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.output, `${tokensPerSecond.toFixed(1)}/s`);
+		const content = withIcon(theme.icon.throughput, `${tokensPerSecond.toFixed(1)} tok/s`);
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
 };
@@ -484,7 +505,7 @@ const cacheReadSegment: StatusLineSegment = {
 		const { cacheRead } = ctx.usageStats;
 		if (!cacheRead) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, theme.icon.output, formatNumber(cacheRead)].filter(Boolean);
+		const parts = [theme.icon.cache, formatNumber(cacheRead)].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
@@ -496,7 +517,7 @@ const cacheWriteSegment: StatusLineSegment = {
 		const { cacheWrite } = ctx.usageStats;
 		if (!cacheWrite) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, theme.icon.input, formatNumber(cacheWrite)].filter(Boolean);
+		const parts = [theme.icon.cache, formatNumber(cacheWrite)].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},

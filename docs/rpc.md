@@ -127,6 +127,13 @@ Important edge behavior from runtime:
 - `{ id?, type: "bash", command: string }`
 - `{ id?, type: "abort_bash" }`
 
+`bash` is dispatched concurrently: the RPC server continues reading commands
+while the shell command runs, so `abort_bash` (or any other command) sent
+during a long-running `bash` is handled without waiting for it to finish on
+its own. The `bash` response is emitted when the command completes; hosts
+correlate it via `id`. Ordering across concurrent commands is not guaranteed
+— clients MUST match responses on `id`, not on emission order.
+
 ### Session
 
 - `{ id?, type: "get_session_stats" }`
@@ -185,7 +192,7 @@ Local-only slash commands may emit `command_output` frames before completing via
 ```json
 {
   "model": { "provider": "...", "id": "..." },
-  "thinkingLevel": "off|minimal|low|medium|high|xhigh",
+  "thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
   "isStreaming": false,
   "isCompacting": false,
   "steeringMode": "all|one-at-a-time",

@@ -4,6 +4,7 @@ import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
+import { basetenProvider } from "./baseten";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
@@ -33,6 +34,7 @@ import { minimaxCodeCnProvider } from "./minimax-code-cn";
 import { mistralProvider } from "./mistral";
 import { moonshotProvider } from "./moonshot";
 import { nanogptProvider } from "./nanogpt";
+import { novitaProvider } from "./novita";
 import { nvidiaProvider } from "./nvidia";
 import { ollamaProvider } from "./ollama";
 import { ollamaCloudProvider } from "./ollama-cloud";
@@ -105,9 +107,11 @@ const ALL = [
 	deepseekProvider,
 	moonshotProvider,
 	cerebrasProvider,
+	basetenProvider,
 	fireworksProvider,
 	togetherProvider,
 	nvidiaProvider,
+	novitaProvider,
 	huggingfaceProvider,
 	perplexityProvider,
 	qianfanProvider,

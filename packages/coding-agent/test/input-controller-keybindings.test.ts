@@ -26,6 +26,7 @@ type FakeEditor = {
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
 	getText(): string;
+	getExpandedText(): string;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -115,6 +116,9 @@ async function createContext() {
 			editorText = text;
 		},
 		getText() {
+			return editorText;
+		},
+		getExpandedText() {
 			return editorText;
 		},
 		addToHistory: vi.fn(),
@@ -315,6 +319,23 @@ describe("InputController keybinding setup", () => {
 
 		expect(spies.setRuntimeApprovalMode).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Approval mode applies to the main session — press ←← to return first");
+	});
+
+	it("does not mark pasted shell prompts as Python mode while editing", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		editor.onChange?.("$ cd ~/project && sudo ./build-and-push.sh o5.7 2>&1 | tail -4");
+
+		expect(ctx.isPythonMode).toBe(false);
+		expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
+
+		editor.onChange?.("$ print(1)");
+
+		expect(ctx.isPythonMode).toBe(true);
+		expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(1);
 	});
 
 	it("registers retry as an editor action and retries the failed turn", async () => {

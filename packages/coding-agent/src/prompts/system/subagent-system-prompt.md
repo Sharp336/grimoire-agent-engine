@@ -3,10 +3,6 @@ ROLE
 
 {{agent}}
 
-{{#if role}}
-You are specializing as: **{{role}}**. Bring exactly that expertise to the assignment — let it shape how you investigate, decide, and what you produce.
-{{/if}}
-
 {{#if context}}
 CONTEXT
 ===================================
@@ -42,7 +38,7 @@ You can reach other live agents via the `irc` tool. Your id is `{{ircSelfId}}`. 
 {{ircPeers}}
 
 Use `irc` only for quick coordination, never long-form content. Address peers by id or use `"all"` to broadcast.
-- Discovery: the roster above shows each peer's role and what it is doing now; `irc` op:"list" refreshes it.
+- Discovery: the roster above shows each peer and what it is doing now; `irc` op:"list" refreshes it.
 - Coordination: before you edit a file or start work a sibling may already own, message that peer first — overlapping edits collide.
 - Follow-up: answer a peer's question with a short reply (set `replyTo`); use `await` only when you genuinely cannot proceed without the answer.
 {{/if}}
@@ -61,10 +57,13 @@ Yield protocol:
 
 This is your only way to return a final result. For structured results, you NEVER put JSON in plain text or substitute a text summary for `result.data`.
 
+{{#if outputSchemaOverridesAgent}}
+Caller schema overrides agent-native output instructions. Ignore ROLE-provided output/yield labels, field names, examples, and procedures that conflict with the interface below. Use ONLY labels/fields from the caller schema; safest path: omit `type` and terminal-yield the full `result.data` object.
+{{/if}}
 {{#if outputSchema}}
-Your result MUST match this TypeScript interface:
+Your terminal `yield` MUST use exactly this shape — the schema fields go inside `result.data`, NEVER at the top level and NEVER as a stringified summary:
 ```ts
-{{jtdToTypeScript outputSchema}}
+{{renderYieldSchema outputSchema}}
 ```
 {{/if}}
 

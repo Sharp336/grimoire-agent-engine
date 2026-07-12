@@ -209,6 +209,41 @@ uutil_builtin!(pub fn rm_builtin => uu_rm::run);
 uutil_builtin!(pub fn mv_builtin => uu_mv::run);
 uutil_builtin!(pub fn cat_builtin => uu_cat::run);
 uutil_builtin!(pub fn uniq_builtin => uu_uniq::run);
+uutil_builtin!(pub fn base64_builtin => uu_base64::run);
+uutil_builtin!(pub fn md5sum_builtin => uu_md5sum::run);
+uutil_builtin!(pub fn sha1sum_builtin => uu_sha1sum::run);
+uutil_builtin!(pub fn sha224sum_builtin => uu_sha224sum::run);
+uutil_builtin!(pub fn sha256sum_builtin => uu_sha256sum::run);
+uutil_builtin!(pub fn sha384sum_builtin => uu_sha384sum::run);
+uutil_builtin!(pub fn sha512sum_builtin => uu_sha512sum::run);
+uutil_builtin!(pub fn b2sum_builtin => uu_b2sum::run);
+uutil_builtin!(pub fn basename_builtin => uu_basename::run);
+uutil_builtin!(pub fn dirname_builtin => uu_dirname::run);
+uutil_builtin!(pub fn readlink_builtin => uu_readlink::run);
+uutil_builtin!(pub fn realpath_builtin => uu_realpath::run);
+uutil_builtin!(pub fn touch_builtin => uu_touch::run);
+uutil_builtin!(pub fn stat_builtin => uu_stat::run);
+uutil_builtin!(pub fn date_builtin => uu_date::run);
+uutil_builtin!(pub fn mktemp_builtin => uu_mktemp::run);
+uutil_builtin!(pub fn seq_builtin => uu_seq::run);
+uutil_builtin!(pub fn yes_builtin => uu_yes::run);
+uutil_builtin!(pub fn printenv_builtin => uu_printenv::run);
+uutil_builtin!(pub fn ln_builtin => uu_ln::run);
+uutil_builtin!(pub fn truncate_builtin => uu_truncate::run);
+uutil_builtin!(pub fn tac_builtin => uu_tac::run);
+uutil_builtin!(pub fn nproc_builtin => uu_nproc::run);
+uutil_builtin!(pub fn uname_builtin => uu_uname::run);
+uutil_builtin!(pub fn whoami_builtin => uu_whoami::run);
+uutil_builtin!(pub fn hostname_builtin => uu_hostname::run);
+uutil_builtin!(pub fn diff_builtin => pi_uu_diff::run);
+uutil_builtin!(pub fn cut_builtin => uu_cut::run);
+uutil_builtin!(pub fn tee_builtin => uu_tee::run);
+uutil_builtin!(pub fn tr_builtin => uu_tr::run);
+uutil_builtin!(pub fn paste_builtin => uu_paste::run);
+uutil_builtin!(pub fn comm_builtin => uu_comm::run);
+uutil_builtin!(pub fn sed_builtin => uu_sed::run);
+uutil_builtin!(pub fn xargs_builtin => uu_xargs::run);
+uutil_builtin!(pub fn jq_builtin => jaq::run);
 
 #[cfg(test)]
 mod tests {
@@ -217,14 +252,16 @@ mod tests {
 		ffi::OsString,
 		io::{self, Write},
 		path::PathBuf,
-		sync::{Arc, atomic::AtomicBool, mpsc},
+		sync::{Arc, atomic::AtomicBool},
 	};
+
+	use flume::Sender;
 
 	use super::{UutilRun, run_caught};
 
 	/// `Send` writer that forwards every write onto a channel so a test can
 	/// inspect what the utility wrote to the scope's stderr.
-	struct ChanWriter(mpsc::Sender<Vec<u8>>);
+	struct ChanWriter(Sender<Vec<u8>>);
 	impl Write for ChanWriter {
 		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 			let _ = self.0.send(buf.to_vec());
@@ -250,7 +287,7 @@ mod tests {
 	}
 
 	fn run_in_scope(run: UutilRun, argv: Vec<OsString>) -> (i32, String) {
-		let (tx, rx) = mpsc::channel();
+		let (tx, rx) = flume::unbounded();
 		let code = pi_uutils_ctx::scope(scope_io(Box::new(ChanWriter(tx))), || run_caught(run, argv));
 		let mut err = Vec::new();
 		while let Ok(chunk) = rx.try_recv() {

@@ -11,6 +11,7 @@ import {
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	resolveThresholdTokens,
 	shouldCompact,
 } from "@oh-my-pi/pi-agent-core/compaction/compaction";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -241,6 +242,48 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(84000, 100000, settings)).toBe(false);
 	});
 
+	it("uses proportional reserve when the DEFAULTED reserve nearly consumes a small window", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdPercent: -1,
+			// reserveTokens deliberately unset: provenance, not value equality,
+			// is what allows the proportional fallback.
+			keepRecentTokens: 20_000,
+		};
+
+		// 16,385-token GPT-3.5 windows should keep the same 15% reserve behavior
+		// used by smaller windows instead of collapsing the threshold to one token.
+		expect(shouldCompact(10_000, 16_385, settings)).toBe(false);
+		expect(shouldCompact(13_929, 16_385, settings)).toBe(true);
+	});
+
+	it("honors an EXPLICIT reserve equal to the old default on a small window", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdPercent: -1,
+			reserveTokens: 16_384,
+			keepRecentTokens: 20_000,
+		};
+
+		// The user chose 16,384 on purpose; it must not be mistaken for the
+		// defaulted reserve and silently replaced with the proportional one.
+		expect(resolveThresholdTokens(16_385, settings)).toBe(1);
+		expect(shouldCompact(2, 16_385, settings)).toBe(true);
+	});
+
+	it("respects a large valid configured reserve", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdPercent: -1,
+			reserveTokens: 90_000,
+			keepRecentTokens: 20_000,
+		};
+
+		expect(resolveThresholdTokens(100_000, settings)).toBe(10_000);
+		expect(shouldCompact(10_000, 100_000, settings)).toBe(false);
+		expect(shouldCompact(10_001, 100_000, settings)).toBe(true);
+	});
+
 	it("should use configured threshold percent", () => {
 		const settings: CompactionSettings = {
 			enabled: true,
@@ -354,6 +397,64 @@ describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
 		// exactly what a before_provider_request compressor (e.g. Headroom) shrinks,
 		// so the floor must still see its real size.
 		expect(estimateTokens(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
+	});
+});
+
+describe("bigint tool arguments", () => {
+	it("preserves exact values through local compaction estimation and summary rendering", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 model to exist");
+
+		const toolCallMessage: AssistantMessage = {
+			...createAssistantMessage("", createMockUsage(1_000, 100)),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_bigint",
+					name: "lookup",
+					arguments: { rowId: 9_007_199_254_740_993n },
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Look up the row")),
+			createMessageEntry(toolCallMessage),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "call_bigint",
+				toolName: "lookup",
+				content: [{ type: "text", text: "found" }],
+				isError: false,
+				timestamp: Date.now(),
+			}),
+			createMessageEntry(createUserMessage("Continue")),
+			createMessageEntry(createAssistantMessage("Done", createMockUsage(2_000, 100))),
+		];
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+			remoteEnabled: false,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const result = await compact(preparation, model, "test-api-key");
+
+		let renderedPrompts = "";
+		for (const call of completeSpy.mock.calls) {
+			for (const message of call[1].messages) {
+				if (typeof message.content === "string") {
+					renderedPrompts += message.content;
+					continue;
+				}
+				for (const block of message.content) {
+					if (block.type === "text") renderedPrompts += block.text;
+				}
+			}
+		}
+		expect(renderedPrompts).toContain('"9007199254740993"');
+		expect(result.summary).toContain("summary");
 	});
 });
 
@@ -1173,8 +1274,10 @@ describe("buildSessionContext", () => {
 			collapseCompactedHistory: true,
 		});
 
-		expect(transcript.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
-		expect((transcript.messages[0] as { summary: string }).summary).toContain("Second summary");
+		expect(transcript.messages.map(m => m.role)).toEqual(["user", "compactionSummary", "user"]);
+		const summaryMsg = transcript.messages[1];
+		if (summaryMsg?.role !== "compactionSummary") throw new Error("Expected compaction summary at index 1");
+		expect(summaryMsg.summary).toContain("Second summary");
 		expect(transcript.cacheMissExplainedAt).toEqual([false, false, false]);
 	});
 
@@ -1204,7 +1307,7 @@ describe("buildSessionContext", () => {
 		// The provider payload is attached to the summary for LLM replay only; the
 		// collapsed display must still emit the kept SessionEntry rows so a
 		// remotely-compacted session keeps its recent turns visible.
-		expect(transcript.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "assistant", "user"]);
+		expect(transcript.messages.map(m => m.role)).toEqual(["user", "assistant", "compactionSummary", "user"]);
 		const dump = JSON.stringify(transcript.messages);
 		expect(dump).toContain("kept-user");
 		expect(dump).toContain("kept-assistant");

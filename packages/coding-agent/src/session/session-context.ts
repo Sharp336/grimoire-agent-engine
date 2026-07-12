@@ -1,15 +1,65 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ProviderPayload, ServiceTier } from "@oh-my-pi/pi-ai";
+import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
+import {
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	isCustomMessageContent,
+	normalizeCustomMessagePayload,
+} from "./messages";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+
+// #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
+// ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
+// carry shape metadata; only legacy archives with frame payload risk get this
+// conservative LLM-payload guard, and transcript rendering remains intact.
+const LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD = 16;
+const LEGACY_SNAPCOMPACT_ARCHIVE_TEXT_GUARD = 250_000;
+const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
+
+function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
+	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
+}
+
+function hasCrashRiskSnapcompactFramePayload(archive: snapcompact.Archive): boolean {
+	return (
+		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
+		snapcompact.frameDataBytes(archive.frames) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+	);
+}
+
+function hasCrashRiskSnapcompactArchiveSize(archive: snapcompact.Archive): boolean {
+	return (
+		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
+		archive.truncatedChars >= LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD ||
+		(snapcompact.archiveSourceText(archive)?.length ?? 0) >= LEGACY_SNAPCOMPACT_ARCHIVE_TEXT_GUARD
+	);
+}
+
+function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): boolean {
+	return (
+		hasLegacySnapcompactFrames(archive) &&
+		hasCrashRiskSnapcompactFramePayload(archive) &&
+		hasCrashRiskSnapcompactArchiveSize(archive)
+	);
+}
+
+function snapcompactHistoryBlockOptions(
+	archive: snapcompact.Archive,
+	options: BuildSessionContextOptions | undefined,
+): snapcompact.HistoryBlockOptions | undefined {
+	if (options?.transcript) return undefined;
+	if (isCrashRiskLegacySnapcompactArchive(archive)) return { maxFrameDataBytes: 0 };
+	return { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
+}
 
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
-	serviceTier?: ServiceTier;
+	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
 	/** Names of TTSR rules that have been injected this session */
@@ -70,6 +120,15 @@ export interface BuildSessionContextOptions {
 	transcript?: boolean;
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
+	/**
+	 * Transcript mode only: keep `toolCall` blocks that have no matching
+	 * `toolResult` on the path instead of stripping them. Pass this when the
+	 * session is mid-turn (a tool is still executing, its result not yet
+	 * persisted) so the rebuilt transcript renders the in-flight call as
+	 * pending; without it a focus/unfocus or overlay-close rebuild silently
+	 * hides the call the agent is still waiting on.
+	 */
+	keepDanglingToolCalls?: boolean;
 }
 
 /**
@@ -77,6 +136,15 @@ export interface BuildSessionContextOptions {
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
  */
+function snapcompactHistoryBlocksForContext(
+	archive: snapcompact.Archive | undefined,
+	options: BuildSessionContextOptions | undefined,
+) {
+	if (!archive) return undefined;
+	if (options?.transcript && options.collapseCompactedHistory) return undefined;
+	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -131,14 +199,15 @@ export function buildSessionContext(
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
-		path.unshift(current);
+		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
+	path.reverse();
 
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
-	let serviceTier: ServiceTier | undefined;
+	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
@@ -169,7 +238,7 @@ export function buildSessionContext(
 				}
 			}
 		} else if (entry.type === "service_tier_change") {
-			serviceTier = entry.serviceTier ?? undefined;
+			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			// Legacy fallback: infer default model from assistant messages only
 			// when no explicit `model_change` (role=default) entry has been
@@ -239,16 +308,26 @@ export function buildSessionContext(
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				entry.message.retryRecovery?.status === "recovered"
+			) {
+				return;
+			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
+			if (!isCustomMessageContent(entry.content)) return;
+			const normalized = normalizeCustomMessagePayload(entry);
+			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
 			pushMessage(
 				createCustomMessage(
-					entry.customType,
-					entry.content,
-					entry.display,
-					entry.details,
+					normalized.customType,
+					normalized.content,
+					normalized.display,
+					normalized.details,
 					entry.timestamp,
-					entry.attribution,
+					attribution,
 				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
@@ -273,7 +352,7 @@ export function buildSessionContext(
 						entry.shortSummary,
 						undefined,
 						undefined,
-						snapcompactArchive ? snapcompact.historyBlocks(snapcompactArchive) : undefined,
+						snapcompactHistoryBlocksForContext(snapcompactArchive, options),
 					),
 				);
 			} else {
@@ -295,21 +374,23 @@ export function buildSessionContext(
 		})();
 		const remoteReplacementHistory = providerPayload?.items;
 
-		if (options?.transcript) handleEntryResetTracking(compaction);
-		// Emit summary first; re-attach any archived snapcompact frames so the
-		// model can keep reading the archived history after every context rebuild.
+		// Re-attach any archived snapcompact frames so the model can keep
+		// reading the archived history after every context rebuild.
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
-		pushMessage(
-			createCompactionSummaryMessage(
-				compaction.summary,
-				compaction.tokensBefore,
-				compaction.timestamp,
-				compaction.shortSummary,
-				providerPayload,
-				undefined,
-				snapcompactArchive ? snapcompact.historyBlocks(snapcompactArchive) : undefined,
-			),
+		const compactionSummaryMsg = createCompactionSummaryMessage(
+			compaction.summary,
+			compaction.tokensBefore,
+			compaction.timestamp,
+			compaction.shortSummary,
+			providerPayload,
+			undefined,
+			snapcompactHistoryBlocksForContext(snapcompactArchive, options),
 		);
+		// Agent context (non-transcript): summary first so the LLM sees the
+		// compacted context before recent messages.
+		if (!options?.transcript) {
+			pushMessage(compactionSummaryMsg);
+		}
 
 		// Find compaction index in path
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
@@ -331,6 +412,16 @@ export function buildSessionContext(
 					appendMessage(entry);
 				}
 			}
+		}
+
+		// Display transcript: emit the summary at the chronological compaction
+		// point (after kept messages, before post-compaction) so it stays in
+		// the live region where Ctrl+O can expand it. Reset tracking fires
+		// here so the first post-compaction assistant turn — not a kept
+		// pre-compaction one — is marked as a cache miss.
+		if (options?.transcript) handleEntryResetTracking(compaction);
+		if (options?.transcript) {
+			pushMessage(compactionSummaryMsg);
 		}
 
 		// Emit messages after compaction
@@ -364,34 +455,42 @@ export function buildSessionContext(
 	// plaintext to keep) and clear `thinking` signatures so the provider encoder
 	// downgrades them to plain text (verified accepted by the live API), preserving the
 	// visible reasoning while removing the immutability/invalid-signature hazard. Drop a
-	// turn left with no content. (Live turns never qualify: their results are persisted
-	// on the same path before any context rebuild.)
-	const pairedToolResultIds = new Set<string>();
-	for (const message of messages) {
-		if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
-	}
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role !== "assistant") continue;
-		const hasDangling = message.content.some(
-			block => block.type === "toolCall" && !pairedToolResultIds.has(block.id),
-		);
-		if (!hasDangling) continue;
-		const normalized = message.content
-			.filter(
-				block =>
-					!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) && block.type !== "redactedThinking",
-			)
-			.map(block =>
-				block.type === "thinking" && block.thinkingSignature ? { ...block, thinkingSignature: undefined } : block,
+	// turn left with no content. (Live turns only qualify mid-turn: a transcript rebuild
+	// while the tool still executes sees the persisted assistant turn without its result.
+	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
+	// a pending block instead of vanishing from the chat.)
+	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
+	if (!keepDangling) {
+		const pairedToolResultIds = new Set<string>();
+		for (const message of messages) {
+			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
+		}
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant") continue;
+			const hasDangling = message.content.some(
+				block => block.type === "toolCall" && !pairedToolResultIds.has(block.id),
 			);
-		if (normalized.length === 0) {
-			messages.splice(i, 1);
-			if (options?.transcript) {
-				cacheMissExplainedAt.splice(i, 1);
+			if (!hasDangling) continue;
+			const normalized = message.content
+				.filter(
+					block =>
+						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
+						block.type !== "redactedThinking",
+				)
+				.map(block =>
+					block.type === "thinking" && block.thinkingSignature
+						? { ...block, thinkingSignature: undefined }
+						: block,
+				);
+			if (normalized.length === 0) {
+				messages.splice(i, 1);
+				if (options?.transcript) {
+					cacheMissExplainedAt.splice(i, 1);
+				}
+			} else {
+				messages[i] = { ...message, content: normalized };
 			}
-		} else {
-			messages[i] = { ...message, content: normalized };
 		}
 	}
 

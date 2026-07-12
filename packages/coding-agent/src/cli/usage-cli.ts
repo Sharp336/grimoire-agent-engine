@@ -23,6 +23,7 @@ import { discoverAuthStorage } from "../sdk";
 const BAR_WIDTH = 28;
 
 export interface UsageCommandArgs {
+	action?: string;
 	json?: boolean;
 	provider?: string;
 	redact?: boolean;
@@ -370,6 +371,29 @@ function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): 
 	return lines;
 }
 
+interface ProviderLimitTemplate {
+	id: string;
+	title: string;
+}
+
+function collectProviderLimitTemplates(reports: UsageReport[]): ProviderLimitTemplate[] {
+	const seen = new Set<string>();
+	const templates: ProviderLimitTemplate[] = [];
+	for (const report of reports) {
+		for (const limit of report.limits) {
+			if (seen.has(limit.id)) continue;
+			seen.add(limit.id);
+			templates.push({ id: limit.id, title: limitTitle(limit) });
+		}
+	}
+	return templates;
+}
+
+function formatMissingLimitLine(template: ProviderLimitTemplate, labelWidth: number): string {
+	const padded = template.title.padEnd(labelWidth);
+	return `      ${chalk.dim("○")} ${padded}  ${chalk.dim("·".repeat(BAR_WIDTH))}  ${chalk.dim("not reported")}`;
+}
+
 /** Per-window capacity stat: how much account quota is burned and left. */
 export interface ProviderWindowStat {
 	/** Compact window label, e.g. "5h", "7d". */
@@ -474,9 +498,8 @@ export function formatUsageBreakdown(
 		for (const note of providerNotes)
 			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
 
-		const labelWidth = providerReports
-			.flatMap(report => report.limits)
-			.reduce((max, limit) => Math.max(max, limitTitle(limit).length), 0);
+		const providerLimitTemplates = collectProviderLimitTemplates(providerReports);
+		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
 
 		providerReports.forEach((report, index) => {
 			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
@@ -484,8 +507,15 @@ export function formatUsageBreakdown(
 				lines.push(`      ${chalk.dim("no limits reported")}`);
 				return;
 			}
-			for (const limit of report.limits) {
-				lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+			const limitsById = new Map<string, UsageLimit>();
+			for (const limit of report.limits) limitsById.set(limit.id, limit);
+			for (const template of providerLimitTemplates) {
+				const limit = limitsById.get(template.id);
+				if (limit) {
+					lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+				} else {
+					lines.push(formatMissingLimitLine(template, labelWidth));
+				}
 			}
 		});
 
@@ -726,6 +756,16 @@ function redactReportForJson(
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const authStorage = await discoverAuthStorage();
 	try {
+		if (cmd.action === "invalidate") {
+			const provider = cmd.provider?.toLowerCase();
+			await authStorage.invalidateUsageCache(provider);
+			if (provider) {
+				process.stdout.write(`Invalidated cached usage reports for provider "${provider}".\n`);
+			} else {
+				process.stdout.write("Invalidated cached usage reports for all providers.\n");
+			}
+			return;
+		}
 		if (cmd.history) {
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
