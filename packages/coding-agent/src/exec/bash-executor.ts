@@ -504,27 +504,30 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			userSignal.removeEventListener("abort", abortHandler);
 		}
 		if (ownsPersistentSession) {
-			shellSessionsInUse.delete(sessionKey);
-			if (resetSession && shellSession) {
-				const monitor = shellBackgroundJobMonitors.get(shellSession);
-				if (monitor) stopShellBackgroundJobMonitor(shellSession, monitor);
-			}
-			if (resetSession || options?.sessionKey?.includes(":async:")) {
-				// `:async:` keys are per-job (jobId is unique), so the Shell would
-				// otherwise stay in the process-global map forever after completion.
-				shellSessions.delete(sessionKey);
-				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
-				// any `nohup`/`&` children (kill-on-drop). If the command left a live
-				// background job, retain the Shell so the process survives across
-				// turns; it is reaped once its last job exits and still dies with the
-				// harness. Skip on resetSession (cancel/error) — those tear down.
-				if (!resetSession && shellSession) {
-					await monitorShellBackgroundJobs(shellSession, true);
+			try {
+				if (resetSession && shellSession) {
+					const monitor = shellBackgroundJobMonitors.get(shellSession);
+					if (monitor) stopShellBackgroundJobMonitor(shellSession, monitor);
 				}
-			} else if (shellSession) {
-				// Persistent shells stay in the reuse map, but their completed
-				// background children still need periodic polling to be reaped.
-				await monitorShellBackgroundJobs(shellSession, false);
+				if (resetSession || options?.sessionKey?.includes(":async:")) {
+					// `:async:` keys are per-job (jobId is unique), so the Shell would
+					// otherwise stay in the process-global map forever after completion.
+					shellSessions.delete(sessionKey);
+					// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
+					// any `nohup`/`&` children (kill-on-drop). If the command left a live
+					// background job, retain the Shell so the process survives across
+					// turns; it is reaped once its last job exits and still dies with the
+					// harness. Skip on resetSession (cancel/error) — those tear down.
+					if (!resetSession && shellSession) {
+						await monitorShellBackgroundJobs(shellSession, true);
+					}
+				} else if (shellSession) {
+					// Persistent shells stay in the reuse map, but their completed
+					// background children still need periodic polling to be reaped.
+					await monitorShellBackgroundJobs(shellSession, false);
+				}
+			} finally {
+				shellSessionsInUse.delete(sessionKey);
 			}
 		}
 	}
