@@ -1,26 +1,20 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { FileType, listWorkspace } from "@oh-my-pi/pi-natives";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	available as embeddingsAvailable,
 	currentEmbeddingModel,
-	embed,
 	embedQuery,
 	embeddingDimFor,
-	type CodeChunk,
 	ZVecCodeStore,
 	type ZVecSearchResult,
-	zvecChunkOverlap,
-	zvecChunkSize,
 	zvecCodeIndexPath,
-	zvecEnabled,
 	zvecTopK,
 } from "@oh-my-pi/pi-mnemopi";
 import { type } from "arktype";
 import * as path from "node:path";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import codeSearchDescription from "../prompts/tools/code-search.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "./tool-errors";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
 
 const codeSearchSchema = type({
@@ -31,150 +25,23 @@ const codeSearchSchema = type({
 
 export type CodeSearchParams = typeof codeSearchSchema.infer;
 
-// ─── Language detection ─────────────────────────────────────────────────────
-
-const EXTENSION_TO_LANGUAGE: ReadonlyMap<string, string> = new Map([
-	["ts", "typescript"],
-	["tsx", "typescript"],
-	["js", "javascript"],
-	["jsx", "javascript"],
-	["mjs", "javascript"],
-	["cjs", "javascript"],
-	["py", "python"],
-	["rs", "rust"],
-	["go", "go"],
-	["java", "java"],
-	["c", "c"],
-	["cpp", "cpp"],
-	["cc", "cpp"],
-	["h", "c"],
-	["hpp", "cpp"],
-	["hxx", "cpp"],
-	["rb", "ruby"],
-	["lua", "lua"],
-	["sql", "sql"],
-	["sh", "shell"],
-	["bash", "shell"],
-	["zsh", "shell"],
-	["fish", "shell"],
-	["ps1", "powershell"],
-	["yaml", "yaml"],
-	["yml", "yaml"],
-	["json", "json"],
-	["toml", "toml"],
-	["xml", "xml"],
-	["html", "html"],
-	["css", "css"],
-	["scss", "scss"],
-	["less", "less"],
-	["vue", "vue"],
-	["svelte", "svelte"],
-	["md", "markdown"],
-	["mdx", "markdown"],
-	["php", "php"],
-	["swift", "swift"],
-	["kt", "kotlin"],
-	["scala", "scala"],
-	["clj", "clojure"],
-	["ex", "elixir"],
-	["exs", "elixir"],
-	["erl", "erlang"],
-	["hs", "haskell"],
-	["ml", "ocaml"],
-	["nim", "nim"],
-	["zig", "zig"],
-	["v", "verilog"],
-	["sv", "systemverilog"],
-	["dart", "dart"],
-	["gradle", "gradle"],
-	["dockerfile", "dockerfile"],
-	["makefile", "makefile"],
-	["r", "r"],
-	["jl", "julia"],
-]);
-
-const INDEXABLE_EXTENSIONS: ReadonlySet<string> = new Set(EXTENSION_TO_LANGUAGE.keys());
-
-const SKIP_DIRECTORIES = new Set([
-	"node_modules",
-	".git",
-	"dist",
-	"build",
-	"target",
-	".next",
-	"out",
-	"coverage",
-]);
-
-const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
-const BINARY_CHECK_BYTES = 8192;
-
-function detectLanguage(filePath: string): string {
-	const ext = path.extname(filePath).slice(1).toLowerCase();
-	if (ext === "") {
-		const basename = path.basename(filePath).toLowerCase();
-		if (basename === "dockerfile") return "dockerfile";
-		if (basename === "makefile") return "makefile";
-	}
-	return EXTENSION_TO_LANGUAGE.get(ext) ?? "text";
-}
-
-function isIndexableFile(filePath: string): boolean {
-	const ext = path.extname(filePath).slice(1).toLowerCase();
-	if (ext !== "") return INDEXABLE_EXTENSIONS.has(ext);
-	const basename = path.basename(filePath).toLowerCase();
-	return basename === "dockerfile" || basename === "makefile";
-}
-
-// ─── Code chunking ──────────────────────────────────────────────────────────
-
-interface Chunk {
-	lineStart: number;
-	lineEnd: number;
-	content: string;
-}
-
-function chunkFile(content: string, chunkSize: number, overlap: number): Chunk[] {
-	const lines = content.split("\n");
-	if (lines.length === 0) return [];
-	const chunks: Chunk[] = [];
-	const step = Math.max(1, chunkSize - overlap);
-	for (let start = 0; start < lines.length; start += step) {
-		const end = Math.min(start + chunkSize - 1, lines.length - 1);
-		const chunkLines = lines.slice(start, end + 1);
-		chunks.push({
-			lineStart: start + 1,
-			lineEnd: end + 1,
-			content: chunkLines.join("\n"),
-		});
-		if (end === lines.length - 1) break;
-	}
-	return chunks;
-}
-
-// ─── Binary detection ───────────────────────────────────────────────────────
-
-function isBinaryContent(buffer: Buffer): boolean {
-	const checkLen = Math.min(buffer.length, BINARY_CHECK_BYTES);
-	for (let i = 0; i < checkLen; i++) {
-		if (buffer[i] === 0) return true;
-	}
-	return false;
-}
-
 // ─── Result formatting ───────────────────────────────────────────────────────
 
 function formatSearchResult(
 	results: ZVecSearchResult[],
-	searchedFileCount: number,
+	indexedChunkCount: number,
 	mode: "hybrid" | "fts",
+	indexEmpty: boolean,
 ): string {
 	if (results.length === 0) {
-		return `No matches found (searched ${searchedFileCount} file${searchedFileCount === 1 ? "" : "s"}, Zvec index, ${mode} mode).`;
+		if (indexEmpty) {
+			return `No matches found. The code index is empty — run /code-index to index your workspace.`;
+		}
+		return `No matches found (${indexedChunkCount} indexed chunk${indexedChunkCount === 1 ? "" : "s"}, Zvec index, ${mode} mode).`;
 	}
 
 	const lines: string[] = [
-		`Found ${results.length} match${results.length === 1 ? "" : "es"} (searched ${searchedFileCount} file${searchedFileCount === 1 ? "" : "s"}, Zvec index, ${mode} mode)`,
+		`Found ${results.length} match${results.length === 1 ? "" : "es"} (${indexedChunkCount} indexed chunk${indexedChunkCount === 1 ? "" : "s"}, Zvec index, ${mode} mode)`,
 		"",
 	];
 
@@ -209,12 +76,11 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 
 	#store: ZVecCodeStore | null = null;
 	#storePromise: Promise<ZVecCodeStore> | null = null;
-	#searchedFileCount = 0;
 
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): CodeSearchTool | null {
-		if (!zvecEnabled()) return null;
+		if (!session.settings.get("tools.codeSearchEnabled")) return null;
 		if (!ZVecCodeStore.available()) return null;
 		return new CodeSearchTool(session);
 	}
@@ -241,155 +107,18 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 
 		// Try to open existing index, fall back to create.
 		try {
-			return await ZVecCodeStore.open(indexPath);
+			return ZVecCodeStore.open(indexPath);
 		} catch {
-			return await ZVecCodeStore.create(indexPath, dimension);
-		}
-	}
-
-	// ─── Workspace scanning ──────────────────────────────────────────────────
-
-	async #collectSourceFiles(cwd: string, signal?: AbortSignal): Promise<string[]> {
-		const result = await listWorkspace({
-			path: cwd,
-			maxDepth: 20,
-			gitignore: true,
-			hidden: false,
-			signal,
-		});
-
-		const files: string[] = [];
-		for (const entry of result.entries) {
-			if (entry.fileType !== FileType.File) continue;
-			if (!isIndexableFile(entry.path)) continue;
-			if (entry.size !== undefined && entry.size > MAX_FILE_SIZE) continue;
-
-			// Check skip directories in the relative path.
-			const parts = entry.path.split("/");
-			if (parts.some(p => SKIP_DIRECTORIES.has(p))) continue;
-
-			files.push(path.join(cwd, entry.path));
-		}
-		return files;
-	}
-
-	// ─── Indexing ───────────────────────────────────────────────────────────
-
-	async #ensureIndexed(signal?: AbortSignal): Promise<void> {
-		const store = await this.#getStore();
-		const cwd = this.session.cwd;
-
-		const sourceFiles = await this.#collectSourceFiles(cwd, signal);
-		this.#searchedFileCount = sourceFiles.length;
-
-		if (sourceFiles.length === 0) return;
-
-		// Get currently indexed file hashes from the store.
-		const storeFileHashes = store.getFileHashes();
-
-		// Build a set of indexed file paths for deletion detection.
-		const indexedPaths = new Set(storeFileHashes.keys());
-
-		// Process each file: read, hash, compare, chunk, embed, upsert.
-		const chunksToUpsert: CodeChunk[] = [];
-		const filesToRemove: string[] = [];
-		const currentFiles = new Set<string>();
-		const chunkSize = zvecChunkSize();
-		const overlap = zvecChunkOverlap();
-		const canEmbed = await embeddingsAvailable();
-
-		for (const filePath of sourceFiles) {
-			throwIfAborted(signal);
-			currentFiles.add(filePath);
-
-			// Read file content.
-			const file = Bun.file(filePath);
-			const exists = await file.exists();
-			if (!exists) continue;
-
-			const stat = await file.stat();
-			if (stat.size > MAX_FILE_SIZE) continue;
-
-			const buffer = Buffer.from(await file.arrayBuffer());
-			if (isBinaryContent(buffer)) continue;
-
-			const content = buffer.toString("utf-8");
-			const fileHash = Bun.hash(content).toString(16);
-
-			// Chunk the file and compute per-chunk hashes for change detection.
-			const chunks = chunkFile(content, chunkSize, overlap);
-			const newChunkHashes = new Set(chunks.map(c => Bun.hash(c.content).toString(16)));
-
-			// Check if file is already indexed with identical chunk hashes.
-			const indexedHashes = storeFileHashes.get(filePath);
-			if (indexedHashes !== undefined) {
-				if (setsEqual(indexedHashes, newChunkHashes)) continue; // No chunks changed — skip.
-				// Some chunks changed — remove old ones before re-indexing.
-				store.removeFile(filePath);
-			}
-
-			// File is new or changed — embed and collect for upsert.
-			const language = detectLanguage(filePath);
-			const batchSize = 32;
-			for (let i = 0; i < chunks.length; i += batchSize) {
-				throwIfAborted(signal);
-				const batch = chunks.slice(i, i + batchSize);
-				let embeddings: Float32Array[] | null = null;
-				if (canEmbed) {
-					try {
-						embeddings = await embed(batch.map(c => c.content));
-					} catch (err) {
-						logger.debug("code_search: embedding batch failed", { error: String(err) });
-					}
-				}
-
-				for (let j = 0; j < batch.length; j++) {
-					const chunk = batch[j]!;
-					chunksToUpsert.push({
-						id: `${fileHash}-${chunk.lineStart}`,
-						filePath,
-						language,
-						lineStart: chunk.lineStart,
-						lineEnd: chunk.lineEnd,
-						content: chunk.content,
-						chunkHash: Bun.hash(chunk.content).toString(16),
-						embedding: embeddings?.[j] ? Array.from(embeddings[j]!) : [],
-					});
-				}
-			}
-		}
-
-		// Detect deleted files.
-		for (const indexedPath of indexedPaths) {
-			if (!currentFiles.has(indexedPath)) {
-				filesToRemove.push(indexedPath);
-			}
-		}
-
-		// Remove deleted files from the store.
-		for (const filePath of filesToRemove) {
-			store.removeFile(filePath);
-		}
-
-		// Upsert new/changed chunks.
-		if (chunksToUpsert.length > 0) {
-			store.upsertChunks(chunksToUpsert);
-		}
-
-		// Optimize the index after updates.
-		if (chunksToUpsert.length > 0 || filesToRemove.length > 0) {
-			store.optimize();
+			return ZVecCodeStore.create(indexPath, dimension);
 		}
 	}
 
 	// ─── Search ─────────────────────────────────────────────────────────────
 
-	async #search(query: string, topK: number, signal?: AbortSignal): Promise<{ results: ZVecSearchResult[]; mode: "hybrid" | "fts" }> {
-		await this.#ensureIndexed(signal);
-
+	async #search(query: string, topK: number, signal?: AbortSignal): Promise<{ results: ZVecSearchResult[]; mode: "hybrid" | "fts"; indexEmpty: boolean }> {
 		const store = await this.#getStore();
 		if (store.docCount === 0) {
-			return { results: [], mode: "fts" };
+			return { results: [], mode: "fts", indexEmpty: true };
 		}
 
 		const canEmbed = await embeddingsAvailable();
@@ -399,7 +128,7 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 				if (queryEmbedding) {
 					const vector = Array.from(queryEmbedding);
 					const results = store.searchHybrid({ vector, fts: query }, topK);
-					return { results, mode: "hybrid" };
+					return { results, mode: "hybrid", indexEmpty: false };
 				}
 			} catch (err) {
 				logger.debug("code_search: query embedding failed, falling back to FTS", { error: String(err) });
@@ -409,7 +138,7 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 		}
 
 		const results = store.searchFts(query, topK);
-		return { results, mode: "fts" };
+		return { results, mode: "fts", indexEmpty: false };
 	}
 
 	// ─── Execute ────────────────────────────────────────────────────────────
@@ -426,7 +155,7 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 				throw new ToolError("topK must be a positive integer.");
 			}
 
-			const { results, mode } = await this.#search(query, topK, signal);
+			const { results, mode, indexEmpty } = await this.#search(query, topK, signal);
 
 			// Apply optional glob pattern filter.
 			let filtered = results;
@@ -435,7 +164,8 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 				filtered = results.filter(r => matchesGlob(r.filePath, globPattern));
 			}
 
-			const text = formatSearchResult(filtered, this.#searchedFileCount, mode);
+			const store = await this.#getStore();
+			const text = formatSearchResult(filtered, store.docCount, mode, indexEmpty);
 
 			return {
 				content: [{ type: "text", text }],
@@ -446,12 +176,6 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function setsEqual<T>(a: Set<T>, b: Set<T>): boolean {
-	if (a.size !== b.size) return false;
-	for (const item of a) if (!b.has(item)) return false;
-	return true;
-}
 
 function matchesGlob(filePath: string, pattern: string): boolean {
 	// Simple glob matching: convert pattern to regex.

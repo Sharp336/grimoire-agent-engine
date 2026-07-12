@@ -3644,6 +3644,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.codeSearchEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Code Search (Zvec)",
+			description:
+				"Enable semantic code search using Zvec in-process vector database. Use /code-index to build the index before searching.",
+		},
+	},
+
 	"browser.enabled": {
 		type: "boolean",
 		default: true,
