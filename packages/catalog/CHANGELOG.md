@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub Coding Plan (DevPass) catalog support with all six live `:dev` models (`kimi-k2.6:dev`, `minimax-m2.7:dev`, `gpt-oss-120b:dev`, `glm-5.2:dev`, `gemma-4-31b-it:dev`, `qwen3.6-27b:dev`) bundled statically, plus runtime discovery filtered to DevPass-only models (`:dev` suffix, `metadata.devpass_only`, or `pricing.plan === "devpass"`) and a fixture-backed contract test asserting the static seed matches a live `/v1/models` snapshot.
+
+### Fixed
+
+- Fixed ElectronHub DevPass reasoning dialect mapping: `glm-5.2:dev` and `qwen3.6-27b:dev` now use ElectronHub's OpenAI-shaped `reasoning_effort` surface instead of each model's native Z.ai/Qwen dialect, with `glm-5.2:dev`'s top effort tier remapped onto ElectronHub's actual top tier `xhigh`. Disabling reasoning now sends an explicit `reasoning_effort: "none"` across all six DevPass models instead of falling back to a reduced-effort or provider-default request.
+- Fixed ElectronHub DevPass dynamic discovery disabling tool calling whenever a live `/v1/models` record reported stale `metadata.function_call: false`; every DevPass model supports function calling per ElectronHub's docs, so discovery no longer trusts that flag.
+
 ## [16.4.3] - 2026-07-11
 
 ### Fixed
@@ -101,9 +110,6 @@
 - Fixed LiteLLM discovery stopping at `/model_group/info` when that endpoint omitted `supports_vision`; it now continues to `/model/info` and preserves `model_info.supports_vision=true` for vision-capable proxy models. ([#4747](https://github.com/can1357/oh-my-pi/issues/4747))
 - Fixed LiteLLM discovery to fall back to bundled catalog metadata when `models.dev` lacks a model reference, preserving reasoning and thinking support for models such as `glm-5.2`. ([#4695](https://github.com/can1357/oh-my-pi/issues/4695))
 - Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
-### Added
-
-- Added ElectronHub Coding Plan (DevPass) catalog support with all six live `:dev` models (`kimi-k2.6:dev`, `minimax-m2.7:dev`, `gpt-oss-120b:dev`, `glm-5.2:dev`, `gemma-4-31b-it:dev`, `qwen3.6-27b:dev`) bundled statically, plus runtime discovery filtered to DevPass-only models (`:dev` suffix, `metadata.devpass_only`, or `pricing.plan === "devpass"`) and a fixture-backed contract test asserting the static seed matches a live `/v1/models` snapshot.
 
 ## [16.3.11] - 2026-07-06
 

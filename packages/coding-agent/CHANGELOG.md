@@ -18,6 +18,8 @@
 - Redesigned Agent Hub entries into a cleaner two-line card layout showing identity, active model, reasoning level, age, and task description.
 - Added a project-scoped `launch` tool (gated by `launch.enabled`) for managing shared long-running services and debuggers, featuring readiness probes, bounded logs, PTY input, restart policies, and automatic teardown.
 - Added support for `detached` launches, allowing standalone services to survive broker shutdowns and reconnect to subsequent sessions.
+- Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
+- Documented the `ELECTRONHUB_DEV_API_KEY` environment variable in `omp --help` for ElectronHub Coding Plan (DevPass) models.
 
 ### Changed
 
@@ -291,9 +293,6 @@
 ### Added
 
 - Typing `#<number>` (e.g. `#3164`) in the prompt now offers PR and Issue autocomplete candidates that rewrite to the `pr://`/`issue://` internal URL, resolved from the current repo's git remote via the existing `read` tool → InternalUrlRouter → `gh` pipeline. Naming the type (`pr #3164` / `issue #3164`) constrains the candidates to that kind, and embedded hashes like `owner/repo#N`, `foo#N`, or URL fragments are left untouched ([#3218](https://github.com/can1357/oh-my-pi/issues/3218))
-### Added
-
-- Documented the `ELECTRONHUB_DEV_API_KEY` environment variable in `omp --help` for ElectronHub Coding Plan (DevPass) models.
 
 ### Changed
 
