@@ -98,7 +98,8 @@ function assertGrokBuildResolverTarget(target: string | ApiKeyResolverModel, opt
 		if (
 			target === "xai-grok-build" &&
 			options?.transport !== "pi-native" &&
-			options?.baseUrl !== XAI_GROK_BUILD_BASE_URL
+			options?.baseUrl !== undefined &&
+			options.baseUrl !== XAI_GROK_BUILD_BASE_URL
 		) {
 			throw new AIError.ConfigurationError(
 				`xAI Grok Build resolver targets require the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
@@ -150,6 +151,8 @@ interface ProviderOverride {
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	transport?: Model<Api>["transport"];
 }
+
+type DiscoverableProviderConfig = DiscoveryProviderConfig & Pick<ProviderOverride, "transport">;
 
 /**
  * Merge a freshly discovered model with the matching bundled/configured entry
@@ -771,7 +774,7 @@ export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#customProviderApiKeys: Map<string, string> = new Map();
 	#keylessProviders: Set<string> = new Set();
-	#discoverableProviders: DiscoveryProviderConfig[] = [];
+	#discoverableProviders: DiscoverableProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
@@ -1338,7 +1341,7 @@ export class ModelRegistry {
 		const overrides = new Map<string, ProviderOverride>();
 		const allModelOverrides = new Map<string, Map<string, ModelOverride>>();
 		const keylessProviders = new Set<string>();
-		const discoverableProviders: DiscoveryProviderConfig[] = [];
+		const discoverableProviders: DiscoverableProviderConfig[] = [];
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
@@ -1386,6 +1389,7 @@ export class ModelRegistry {
 					headers: resolvedProviderHeaders,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
+					transport: providerConfig.transport,
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
@@ -1489,7 +1493,7 @@ export class ModelRegistry {
 	}
 
 	async #discoverProviderModels(
-		providerConfig: DiscoveryProviderConfig,
+		providerConfig: DiscoverableProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<Model<Api>[]> {
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
@@ -1500,7 +1504,7 @@ export class ModelRegistry {
 			strategy === "online-if-uncached" && (cacheOlderThanConfig || bypassFreshCache) ? "online" : strategy;
 		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
 		if (requiresAuth) {
-			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
+			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider, providerConfig.transport);
 			if (!isAuthenticated(apiKey)) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,
@@ -1524,6 +1528,15 @@ export class ModelRegistry {
 		let discoveryError: string | undefined;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
+				if (
+					providerConfig.provider === "xai-grok-build" &&
+					providerConfig.transport !== "pi-native" &&
+					providerConfig.baseUrl !== XAI_GROK_BUILD_BASE_URL
+				) {
+					throw new AIError.ConfigurationError(
+						`xAI Grok Build discovery requires the canonical base URL ${XAI_GROK_BUILD_BASE_URL}`,
+					);
+				}
 				const models = this.#applyProviderModelOverrides(
 					providerId,
 					await discoverModelsByProviderType(providerConfig, this.#discoveryContext(providerConfig)),
@@ -1577,12 +1590,18 @@ export class ModelRegistry {
 		);
 	}
 
-	#discoveryContext(providerConfig: DiscoveryProviderConfig): DiscoveryContext {
+	#discoveryContext(providerConfig: DiscoverableProviderConfig): DiscoveryContext {
 		return {
 			fetch: this.#fetch,
 			getBearerApiKeyResolver: async provider => {
-				const resolver = this.resolver(provider, { baseUrl: providerConfig.baseUrl });
-				const apiKey = await this.getApiKeyForProvider(provider, undefined, { baseUrl: providerConfig.baseUrl });
+				const resolver = this.resolver(provider, {
+					baseUrl: providerConfig.baseUrl,
+					transport: providerConfig.transport,
+				});
+				const apiKey = await this.getApiKeyForProvider(provider, undefined, {
+					baseUrl: providerConfig.baseUrl,
+					transport: providerConfig.transport,
+				});
 				if (!isDiscoveryBearerApiKey(apiKey)) {
 					return undefined;
 				}
@@ -2138,10 +2157,10 @@ export class ModelRegistry {
 		});
 	}
 
-	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
-		if (!isOAuthOnlyProvider(provider)) {
-			const commandKey = this.#resolveCommandBackedApiKey(provider, undefined);
-			if (commandKey.configured) return commandKey.value;
+	async #peekApiKeyForProvider(provider: string, transport?: Model<Api>["transport"]): Promise<string | undefined> {
+		const commandKey = this.#resolveCommandBackedApiKey(provider, transport);
+		if (commandKey.configured || (transport === "pi-native" && isOAuthOnlyProvider(provider))) {
+			return commandKey.value;
 		}
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
 			return kNoAuth;

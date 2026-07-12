@@ -336,6 +336,16 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await expect(resolveApiKeyOnce(resolver)).resolves.toBe("oauth-access");
 	});
 
+	test("accepts an omitted Build provider resolver URL as canonical", async () => {
+		await storeGrokBuildCredential();
+		const registry = new ModelRegistry(authStorage, modelsPath);
+
+		const resolver = registry.resolver("xai-grok-build", { sessionId: "session" });
+
+		expect(isOAuthCredentialResolver(resolver, "xai-grok-build")).toBe(true);
+		await expect(resolveApiKeyOnce(resolver)).resolves.toBe("oauth-access");
+	});
+
 	test("rejects noncanonical Build base URLs before OAuth resolver creation", async () => {
 		await authStorage.set("xai-grok-build", [
 			{
@@ -399,6 +409,42 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{
 				url: `${XAI_GROK_BUILD_BASE_URL}/models`,
 				authorization: "Bearer oauth-access",
+			},
+		]);
+	});
+
+	test("discovers pi-native Build models with the configured gateway bearer", async () => {
+		const gatewayBaseUrl = "https://auth-gateway.example.com/v1";
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"xai-grok-build": {
+						baseUrl: gatewayBaseUrl,
+						api: "openai-completions",
+						apiKey: "gateway-bearer",
+						transport: "pi-native",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		const requests: Array<{ url: string; authorization: string | null }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({
+				url: String(input),
+				authorization: new Headers(init?.headers).get("Authorization"),
+			});
+			return new Response(JSON.stringify({ data: [{ id: "grok-4.5" }] }));
+		};
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("xai-grok-build");
+
+		expect(requests).toEqual([
+			{
+				url: `${gatewayBaseUrl}/models`,
+				authorization: "Bearer gateway-bearer",
 			},
 		]);
 	});

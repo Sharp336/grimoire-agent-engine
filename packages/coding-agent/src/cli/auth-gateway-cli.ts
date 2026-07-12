@@ -22,6 +22,7 @@ import {
 	type CompletionProbeInput,
 	type CredentialCompletionResult,
 	completeSimple,
+	isOAuthOnlyProvider,
 	type Model,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
@@ -138,7 +139,8 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 /**
  * Build the auth-gateway model lookup from models accessible with the current
  * broker credentials. Qualified ids always resolve. A bare id remains a legacy
- * alias only while exactly one provider owns it.
+ * alias only while exactly one provider owns it; collisions are advertised
+ * using their qualified ids so every listed row is callable.
  */
 export function buildAuthGatewayModelIndex(models: Iterable<Model<Api>>): {
 	resolveModel: (id: string) => Model<Api> | undefined;
@@ -162,9 +164,14 @@ export function buildAuthGatewayModelIndex(models: Iterable<Model<Api>>): {
 		}
 	}
 
+	const listedModels = new Map<string, Model<Api>>();
+	for (const [qualifiedId, model] of qualifiedModels) {
+		listedModels.set(qualifiedId, ambiguousBareIds.has(model.id) ? { ...model, id: qualifiedId } : model);
+	}
+
 	return {
 		resolveModel: id => qualifiedModels.get(id) ?? bareModels.get(id),
-		listModels: () => qualifiedModels.values(),
+		listModels: () => listedModels.values(),
 	};
 }
 
@@ -506,8 +513,14 @@ async function probeOneModel(
  * Stops as soon as one model returns a successful response (the credential
  * authenticated against at least one model in the catalog).
  */
-function createStrictCompletionProbe(): CompletionProbe {
+export function createStrictCompletionProbe(): CompletionProbe {
 	return async (input: CompletionProbeInput): Promise<CredentialCompletionResult> => {
+		if (isOAuthOnlyProvider(input.provider)) {
+			return {
+				ok: null,
+				reason: `strict completion probe is unavailable for OAuth-only provider ${input.provider}`,
+			};
+		}
 		const candidates = pickProbeCandidates(input.provider).slice(0, STRICT_PROBE_MAX_CANDIDATES);
 		if (candidates.length === 0) {
 			return { ok: null, reason: `no bearer-compatible probe model bundled for provider ${input.provider}` };

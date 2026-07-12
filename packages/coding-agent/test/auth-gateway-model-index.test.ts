@@ -44,12 +44,19 @@ describe("auth-gateway model index", () => {
 		expect(index.resolveModel("shared-model")).toBeUndefined();
 	});
 
-	test("lists each model once instead of once per index alias", () => {
+	test("advertises unique ids bare and colliding ids qualified without duplicates", () => {
 		const unique = createModel("provider-a", "unique-model");
 		const first = createModel("provider-a", "shared-model");
 		const second = createModel("provider-b", "shared-model");
 		const index = buildAuthGatewayModelIndex([unique, first, second]);
 
-		expect([...index.listModels()]).toEqual([unique, first, second]);
+		expect([...index.listModels()]).toEqual([
+			unique,
+			{ ...first, id: "provider-a/shared-model" },
+			{ ...second, id: "provider-b/shared-model" },
+		]);
+		expect(index.resolveModel("unique-model")).toBe(unique);
+		expect(index.resolveModel("provider-a/shared-model")).toBe(first);
+		expect(index.resolveModel("provider-b/shared-model")).toBe(second);
 	});
 });
