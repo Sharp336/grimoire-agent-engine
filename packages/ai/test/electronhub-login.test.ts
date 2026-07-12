@@ -111,7 +111,7 @@ describe("electronhub login wiring", () => {
 			fetch: fetchMock,
 		});
 
-		expect(await storage.get("electronhub")).toEqual({ type: "api_key", key: "ek-dev-trimmed" });
+		expect(await storage.get("electronhub")).toEqual({ type: "api_key", key: "ek-dev-trimmed", source: "login" });
 
 		expect(fetchCalls.map(call => call.url)).toEqual(["https://api.electronhub.ai/v1/chat/completions"]);
 		const headers = new Headers(fetchCalls[0]?.init?.headers);
