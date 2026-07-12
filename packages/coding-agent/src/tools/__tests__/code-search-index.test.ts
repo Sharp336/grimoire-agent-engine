@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type CodeChunk, ZVecCodeStore } from "@oh-my-pi/pi-mnemopi";
+
+// Zvec native FFI calls (upsert/optimize/searchFts) are slow on CI hardware.
+setDefaultTimeout(15_000);
 
 describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", () => {
 	let tempDir: string;
