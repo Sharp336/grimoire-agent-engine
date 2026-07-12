@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/ty
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { buildWellKnownUrls, issuerMatchesBase } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -307,6 +308,19 @@ export interface MCPOAuthConfig {
 	stripSameOriginResource?: boolean;
 	/** Fetch implementation for token exchange and discovery requests. */
 	fetch?: FetchImpl;
+	/**
+	 * RFC 7591 dynamic client registration endpoint advertised by the
+	 * authorization server's RFC 8414 metadata, captured during discovery.
+	 * When set, DCR uses it directly instead of re-deriving the well-known URL.
+	 */
+	registrationEndpoint?: string;
+	/**
+	 * OAuth issuer / authorization-server base URL. Used to derive the RFC 8414
+	 * §3.1 well-known metadata URL for DCR fallback probing when
+	 * {@link registrationEndpoint} is absent — RFC 8414 anchors the well-known
+	 * suffix at the issuer, not the authorization endpoint.
+	 */
+	authServerUrl?: string;
 }
 
 /**
@@ -619,38 +633,38 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async #resolveRegistrationEndpoint(): Promise<string | null> {
-		const authorizationUrl = new URL(this.config.authorizationUrl);
+		// Preferred: the registration endpoint captured alongside the other
+		// OAuth endpoints during discovery (RFC 8414 metadata). Avoids
+		// re-deriving — and mis-deriving — the well-known URL. See
+		// discoverOAuthEndpoints / findEndpoints in oauth-discovery.ts.
+		const advertised = this.config.registrationEndpoint?.trim();
+		if (advertised) return advertised;
 
-		// origin-root well-known; most servers serve metadata here.
-		const rootUrl = new URL("/.well-known/oauth-authorization-server", authorizationUrl.origin).toString();
-		const endpoint = await this.#tryWellKnownForRegistration(rootUrl);
-		if (endpoint) return endpoint;
-
-		// path-prefixed well-known for gateways (e.g. https://gateway.example.com/my-service/).
-		const normalizedPath = authorizationUrl.pathname.replace(/\/$/, "");
-		const lastSlash = normalizedPath.lastIndexOf("/");
-		// Bare-origin authorization URL — nothing further to try.
-		if (lastSlash < 0) return null;
-
-		// Single-segment paths are the gateway prefix itself; multi-segment paths
-		// drop the trailing segment (typically a service endpoint).
-		const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
-		const prefixedUrl = new URL(
-			".well-known/oauth-authorization-server",
-			`${authorizationUrl.origin}${prefixPath}/`,
-		).toString();
-		const prefixedEndpoint = await this.#tryWellKnownForRegistration(prefixedUrl);
-		if (prefixedEndpoint) return prefixedEndpoint;
-
-		// RFC 8414 §3.1 path-ful issuer form: /.well-known/oauth-authorization-server/<path>.
-		const pathfulUrl = new URL(
-			`/.well-known/oauth-authorization-server${normalizedPath}`,
-			authorizationUrl.origin,
-		).toString();
-		return await this.#tryWellKnownForRegistration(pathfulUrl);
+		// Fallback (JSON-error-body path, where endpoints came from the
+		// challenge rather than a metadata fetch): probe the well-known metadata
+		// document. RFC 8414 §3.1 anchors the well-known suffix at the OAuth
+		// *issuer*, NOT the authorization endpoint, so derive candidates from
+		// the issuer when known; only fall back to the authorization endpoint's
+		// origin/path when no issuer is available.
+		const rawIssuer = this.config.authServerUrl?.trim();
+		let issuerBase: string | undefined;
+		if (rawIssuer) {
+			try {
+				new URL(rawIssuer);
+				issuerBase = rawIssuer;
+			} catch {
+				// Malformed issuer URL — fall back to the authorization endpoint.
+			}
+		}
+		const base = issuerBase ?? this.config.authorizationUrl;
+		for (const candidate of buildWellKnownUrls("/.well-known/oauth-authorization-server", base)) {
+			const endpoint = await this.#tryWellKnownForRegistration(candidate.toString(), issuerBase);
+			if (endpoint) return endpoint;
+		}
+		return null;
 	}
 
-	async #tryWellKnownForRegistration(wellKnownUrl: string): Promise<string | null> {
+	async #tryWellKnownForRegistration(wellKnownUrl: string, expectedIssuer?: string): Promise<string | null> {
 		try {
 			const response = await this.#fetch(wellKnownUrl, {
 				method: "GET",
@@ -658,7 +672,14 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				signal: this.ctrl.signal,
 			});
 			if (!response.ok) return null;
-			const metadata = (await response.json()) as { registration_endpoint?: string };
+			const metadata = (await response.json()) as { registration_endpoint?: string; issuer?: string };
+			// RFC 8414 §3.3: a metadata document's `issuer` must match the issuer
+			// we queried. Enforcing it stops a multi-tenant root document from
+			// being mistaken for a path-scoped tenant's metadata, since the
+			// origin-root candidate is probed before the path-ful one.
+			if (expectedIssuer !== undefined && !issuerMatchesBase(metadata.issuer, expectedIssuer)) {
+				return null;
+			}
 			if (metadata.registration_endpoint && metadata.registration_endpoint.trim() !== "") {
 				return metadata.registration_endpoint;
 			}

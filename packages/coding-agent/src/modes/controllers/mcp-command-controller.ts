@@ -606,6 +606,8 @@ export class MCPCommandController {
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
 									stripSameOriginResource: oauthResourceIsFallback,
+									registrationEndpoint: oauth.registrationEndpoint,
+									authServerUrl: oauth.issuer ?? authResult.authServerUrl,
 								},
 							);
 							finalConfig = this.#persistOAuthResult(finalConfig, oauthResult, {
@@ -686,6 +688,8 @@ export class MCPCommandController {
 			serverUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
+			registrationEndpoint?: string;
+			authServerUrl?: string;
 			/**
 			 * External cancellation source: when this signal aborts, the in-flight
 			 * OAuth flow is torn down and {@link MCPOAuthCancelledError} is thrown.
@@ -756,6 +760,8 @@ export class MCPCommandController {
 					callbackPath: opts?.callbackPath,
 					resource: opts?.resource,
 					stripSameOriginResource: opts?.stripSameOriginResource,
+					registrationEndpoint: opts?.registrationEndpoint,
+					authServerUrl: opts?.authServerUrl,
 				},
 				{
 					onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
@@ -1044,6 +1050,8 @@ export class MCPCommandController {
 		clientId?: string;
 		scopes?: string;
 		resource?: string;
+		registrationEndpoint?: string;
+		issuer?: string;
 	}> {
 		// Stdio servers manage credentials inside the child process; OMP's OAuth
 		// flow only applies to http/sse transports. Without this guard the
@@ -1095,7 +1103,7 @@ export class MCPCommandController {
 			throw new Error("Could not discover OAuth endpoints from server response.");
 		}
 
-		return oauth;
+		return { ...oauth, issuer: oauth.issuer ?? authResult.authServerUrl };
 	}
 
 	async #waitForServerConnectionWithAnimation(
@@ -1742,6 +1750,8 @@ export class MCPCommandController {
 					serverUrl,
 					resource: oauthResource,
 					stripSameOriginResource: oauthResourceIsFallback,
+					registrationEndpoint: oauth.registrationEndpoint,
+					authServerUrl: oauth.issuer,
 				},
 			);
 

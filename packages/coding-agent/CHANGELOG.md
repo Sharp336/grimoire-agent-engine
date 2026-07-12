@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed MCP OAuth dynamic client registration (DCR) failing against authorization servers whose `authorization_endpoint` path differs from their issuer path (e.g. Supabase/GoTrue-style servers with an `/auth/v1` issuer). Discovery now captures the `registration_endpoint` advertised in the RFC 8414 metadata instead of discarding it, and the DCR fallback probe derives the well-known URL from the OAuth issuer (with RFC 8414 §3.3 issuer validation) rather than the authorization endpoint — so servers that advertise DCR no longer wrongly fall back to demanding a manual `oauth.clientId`. ([#5267](https://github.com/can1357/oh-my-pi/issues/5267))
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

@@ -1155,3 +1155,87 @@ describe("mcp oauth flow", () => {
 		expect(flow.authorizationUrl).toBe("https://auth.example.com/authorize");
 	});
 });
+
+describe("mcp oauth flow — registration endpoint resolution", () => {
+	it("uses config.registrationEndpoint directly without probing well-known metadata", async () => {
+		const requestedUrls: string[] = [];
+		let registrationPayload: Record<string, unknown> | null = null;
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://api.example.com/auth/v1/oauth/authorize",
+				tokenUrl: "https://api.example.com/auth/v1/oauth/token",
+				registrationEndpoint: "https://api.example.com/auth/v1/oauth/clients/register",
+				fetch: async (input, init) => {
+					const url = String(input);
+					requestedUrls.push(url);
+					if (url === "https://api.example.com/auth/v1/oauth/clients/register") {
+						registrationPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+						return new Response(JSON.stringify({ client_id: "dcr-client-id" }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+					throw new Error(`Unexpected fetch: ${url}`);
+				},
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:53270/callback");
+
+		expect(registrationPayload).not.toBeNull();
+		expect(new URL(url).searchParams.get("client_id")).toBe("dcr-client-id");
+		// The advertised endpoint is used directly — no well-known GET at all.
+		expect(requestedUrls).toEqual(["https://api.example.com/auth/v1/oauth/clients/register"]);
+	});
+
+	it("derives the fallback DCR endpoint from the issuer path and skips a mismatched root document", async () => {
+		const requestedUrls: string[] = [];
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://api.example.com/auth/v1/oauth/authorize",
+				tokenUrl: "https://api.example.com/auth/v1/oauth/token",
+				authServerUrl: "https://api.example.com/auth/v1",
+				fetch: async input => {
+					const url = String(input);
+					requestedUrls.push(url);
+					// Origin-root metadata belongs to a DIFFERENT (root) issuer and
+					// must be rejected by RFC 8414 §3.3 issuer validation.
+					if (url === "https://api.example.com/.well-known/oauth-authorization-server") {
+						return new Response(
+							JSON.stringify({
+								issuer: "https://api.example.com",
+								registration_endpoint: "https://api.example.com/oauth/clients/register",
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					// Path-ful metadata for the /auth/v1 issuer carries the correct DCR endpoint.
+					if (url === "https://api.example.com/.well-known/oauth-authorization-server/auth/v1") {
+						return new Response(
+							JSON.stringify({
+								issuer: "https://api.example.com/auth/v1",
+								registration_endpoint: "https://api.example.com/auth/v1/oauth/clients/register",
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					if (url === "https://api.example.com/auth/v1/oauth/clients/register") {
+						return new Response(JSON.stringify({ client_id: "tenant-client-id" }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+					return new Response("not found", { status: 404 });
+				},
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:53271/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe("tenant-client-id");
+		// The root document's DCR endpoint (wrong tenant) must never be POSTed to.
+		expect(requestedUrls).not.toContain("https://api.example.com/oauth/clients/register");
+	});
+});

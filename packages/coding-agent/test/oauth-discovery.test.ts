@@ -320,6 +320,7 @@ describe("resource_metadata chain", () => {
 			tokenUrl: "https://sso.example.com/oauth/token",
 			scopes: "k8s.logging-mcp-server k8s.annotations",
 			resource: "https://gateway.example.com",
+			issuer: "https://sso.example.com",
 		});
 	});
 
@@ -509,6 +510,8 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 		expect(oauth).toEqual({
 			authorizationUrl: "https://mcp.atlassian.com/v1/authorize",
 			tokenUrl: "https://cf.mcp.atlassian.com/v1/token",
+			registrationEndpoint: "https://cf.mcp.atlassian.com/v1/register",
+			issuer: "https://cf.mcp.atlassian.com",
 		});
 		expect(calls[0]).toBe("https://mcp.atlassian.com/.well-known/oauth-authorization-server");
 	});
@@ -575,6 +578,7 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			authorizationUrl: "https://mcp.plane.so/http/authorize",
 			tokenUrl: "https://mcp.plane.so/http/token",
 			resource: "https://mcp.plane.so/http/mcp",
+			issuer: "https://mcp.plane.so/http",
 		});
 		// Wrong-issuer origin-root metadata WAS fetched and skipped.
 		expect(calls).toContain("https://mcp.plane.so/.well-known/oauth-authorization-server");
@@ -606,6 +610,7 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 		expect(oauth).toEqual({
 			authorizationUrl: "https://auth.example.com/oauth/authorize",
 			tokenUrl: "https://auth.example.com/oauth/token",
+			issuer: "https://auth.example.com/",
 		});
 	});
 
@@ -634,5 +639,39 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			authorizationUrl: "https://auth.example.com/oauth",
 			tokenUrl: "https://auth.example.com/token",
 		});
+	});
+});
+
+describe("RFC 7591 registration endpoint capture", () => {
+	it("captures registration_endpoint and issuer from path-ful RFC 8414 metadata", async () => {
+		// GoTrue/Supabase shape: the issuer carries a sub-path (/auth/v1) and the
+		// authorization-server metadata lives at the RFC 8414 §3.1 path-ful
+		// well-known URL — /.well-known/oauth-authorization-server/auth/v1 — while
+		// the authorization endpoint sits deeper (/auth/v1/oauth/authorize).
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			if (url === "https://api.example.com/.well-known/oauth-authorization-server/auth/v1") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://api.example.com/auth/v1",
+						authorization_endpoint: "https://api.example.com/auth/v1/oauth/authorize",
+						token_endpoint: "https://api.example.com/auth/v1/oauth/token",
+						registration_endpoint: "https://api.example.com/auth/v1/oauth/clients/register",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://mcp.example.com/mcp",
+			"https://api.example.com/auth/v1",
+			undefined,
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth?.registrationEndpoint).toBe("https://api.example.com/auth/v1/oauth/clients/register");
+		expect(oauth?.issuer).toBe("https://api.example.com/auth/v1");
 	});
 });

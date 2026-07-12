@@ -13,6 +13,14 @@ export interface OAuthEndpoints {
 	clientId?: string;
 	scopes?: string;
 	resource?: string;
+	/**
+	 * RFC 7591 dynamic client registration endpoint, when the authorization
+	 * server advertises one in its RFC 8414 metadata. Captured during discovery
+	 * so the OAuth flow never has to re-derive the well-known URL.
+	 */
+	registrationEndpoint?: string;
+	/** OAuth issuer identifier from the metadata document (RFC 8414 `issuer`). */
+	issuer?: string;
 }
 
 export interface AuthDetectionResult {
@@ -101,8 +109,15 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			(obj.resource as string | undefined) ||
 			(obj.resource_uri as string | undefined) ||
 			(obj.resourceUri as string | undefined);
+		const registrationEndpoint =
+			typeof obj.registration_endpoint === "string"
+				? obj.registration_endpoint
+				: typeof obj.registrationEndpoint === "string"
+					? obj.registrationEndpoint
+					: undefined;
+		const issuer = typeof obj.issuer === "string" ? obj.issuer : undefined;
 
-		return { authorizationUrl, tokenUrl, clientId, scopes, resource };
+		return { authorizationUrl, tokenUrl, clientId, scopes, resource, registrationEndpoint, issuer };
 	};
 
 	const clientIdFromAuthUrl = (authorizationUrl: string): string | undefined => {
@@ -292,7 +307,7 @@ function normalizeIssuerUrl(value: string): string | undefined {
  *     today's permissive behavior), or
  *   - the issuer matches `baseUrl` after trailing-slash normalization.
  */
-function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
+export function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
 	if (typeof metadataIssuer !== "string" || !metadataIssuer.trim()) {
 		return true;
 	}
@@ -427,6 +442,9 @@ export async function discoverOAuthEndpoints(
 									: undefined,
 				scopes: readMetadataScopes(metadata) ?? protectedScopes,
 				resource,
+				registrationEndpoint:
+					typeof metadata.registration_endpoint === "string" ? metadata.registration_endpoint : undefined,
+				issuer: typeof metadata.issuer === "string" ? metadata.issuer : undefined,
 			};
 		}
 
@@ -450,6 +468,14 @@ export async function discoverOAuthEndpoints(
 										: undefined,
 					scopes: readMetadataScopes(oauthData) ?? protectedScopes,
 					resource,
+					registrationEndpoint:
+						typeof oauthData.registration_endpoint === "string" ? oauthData.registration_endpoint : undefined,
+					issuer:
+						typeof oauthData.issuer === "string"
+							? oauthData.issuer
+							: typeof metadata.issuer === "string"
+								? metadata.issuer
+								: undefined,
 				};
 			}
 		}
@@ -517,7 +543,7 @@ export async function discoverOAuthEndpoints(
 	return null;
 }
 
-function buildWellKnownUrls(wellKnownPath: string, baseUrl: string): URL[] {
+export function buildWellKnownUrls(wellKnownPath: string, baseUrl: string): URL[] {
 	let parsed: URL;
 	try {
 		parsed = new URL(baseUrl);

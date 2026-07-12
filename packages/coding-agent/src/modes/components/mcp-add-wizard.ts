@@ -63,6 +63,8 @@ export interface MCPAddWizardOAuthResult {
 interface MCPAddWizardOAuthOptions {
 	serverUrl?: string;
 	resource?: string;
+	registrationEndpoint?: string;
+	authServerUrl?: string;
 	/**
 	 * External cancellation source. Aborting it tears down the in-flight OAuth
 	 * flow and surfaces a neutral cancellation error. The wizard wires its own
@@ -86,6 +88,8 @@ interface WizardState {
 	oauthClientSecret: string;
 	oauthScopes: string;
 	oauthResource: string;
+	oauthRegistrationEndpoint: string;
+	oauthAuthServerUrl: string;
 	oauthCredentialId: string | null;
 	apiKey: string;
 	authLocation: AuthLocation | null;
@@ -117,6 +121,8 @@ export class MCPAddWizard extends Container {
 		oauthClientSecret: "",
 		oauthScopes: "",
 		oauthResource: "",
+		oauthRegistrationEndpoint: "",
+		oauthAuthServerUrl: "",
 		oauthCredentialId: null,
 		apiKey: "",
 		authLocation: null,
@@ -1029,6 +1035,8 @@ export class MCPAddWizard extends Container {
 					this.#state.oauthClientId = oauth.clientId || "";
 					this.#state.oauthScopes = oauth.scopes || "";
 					this.#state.oauthResource = oauth.resource || (this.#state.transport === "stdio" ? "" : this.#state.url);
+					this.#state.oauthRegistrationEndpoint = oauth.registrationEndpoint ?? "";
+					this.#state.oauthAuthServerUrl = oauth.issuer ?? authResult.authServerUrl ?? "";
 					this.#state.authMethod = "oauth";
 
 					this.#contentContainer.clear();
@@ -1197,6 +1205,8 @@ export class MCPAddWizard extends Container {
 				{
 					serverUrl: this.#state.url || undefined,
 					resource: oauthResource || undefined,
+					registrationEndpoint: this.#state.oauthRegistrationEndpoint || undefined,
+					authServerUrl: this.#state.oauthAuthServerUrl || undefined,
 					abortSignal: this.#oauthAbort.signal,
 				},
 			);
