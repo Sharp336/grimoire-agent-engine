@@ -18,7 +18,7 @@ import {
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
-import { getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
+import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -698,9 +698,7 @@ export class SelectorController {
 						const matchPreferences = getModelMatchPreferences(this.ctx.settings);
 						let resolvedThinkingLevel: ConfiguredThinkingLevel | undefined;
 
-						for (const role of MODEL_ROLE_IDS) {
-							const roleModelStr = this.ctx.settings.getModelRole(role);
-							if (!roleModelStr) continue;
+						for (const [, roleModelStr] of Object.entries(this.ctx.settings.getModelRoles())) {
 							const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 								settings: this.ctx.settings,
 								matchPreferences,
