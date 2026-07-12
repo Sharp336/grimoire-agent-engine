@@ -36,6 +36,10 @@ describe("ElectronHub provider catalog", () => {
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			// ElectronHub is OpenAI-compatible but does not support the OpenAI `store` flag.
 			expect(model.compat.supportsStore).toBe(false);
+			// ElectronHub documents reasoning_effort: "none" as the explicit way to hide
+			// reasoning output; the generic "openai" dialect default ("lowest-effort") would
+			// still send the ladder's floor tier instead of actually turning reasoning off.
+			expect(model.compat.reasoningDisableMode).toBe("reasoning-effort-none");
 		}
 	});
 
@@ -48,9 +52,8 @@ describe("ElectronHub provider catalog", () => {
 		const glm = getBundledModel<"openai-completions">("electronhub", "glm-5.2:dev");
 		expect(glm.compat.thinkingFormat).toBe("openai");
 		expect(glm.compat.thinkingFormat).not.toBe("zai");
-		// "omit" is exclusive to glm-5.2:dev among the six DevPass models — the other five
-		// fall through to the generic openai-format default ("lowest-effort").
-		expect(glm.compat.reasoningDisableMode).toBe("omit");
+		// reasoningDisableMode is asserted uniformly across all six DevPass models
+		// (including glm-5.2:dev) in the "bundles all six DevPass models" test above.
 		expect(glm.compat.reasoningContentField).toBe("reasoning_content");
 		// Leaving thinkingFormat "zai" also drops its reasoning_content continuation
 		// replay (openai-completions.ts only fires that branch for thinkingFormat ===
@@ -63,11 +66,6 @@ describe("ElectronHub provider catalog", () => {
 		// and on the model's resolved thinking.effortMap.
 		expect(glm.compat.reasoningEffortMap?.max).toBe("xhigh");
 		expect(glm.thinking?.effortMap?.max).toBe("xhigh");
-
-		for (const id of DEVPASS_IDS.filter(candidate => candidate !== "glm-5.2:dev")) {
-			const model = getBundledModel<"openai-completions">("electronhub", id);
-			expect(model.compat.reasoningDisableMode).not.toBe("omit");
-		}
 	});
 
 	it("overrides qwen3.6-27b:dev onto ElectronHub's OpenAI-shaped reasoning dialect, not native Qwen enable_thinking", () => {

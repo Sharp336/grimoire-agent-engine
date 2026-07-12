@@ -1857,6 +1857,12 @@ const ELECTRONHUB_API_BASE_URL = "https://api.electronhub.ai/v1";
 const ELECTRONHUB_OPENAI_COMPAT = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
+	// ElectronHub's /v1/chat/completions documents reasoning_effort: "none" as
+	// the way to fully hide reasoning output — the generic "openai" dialect's
+	// default ("lowest-effort", sending the ladder's floor tier) still produces
+	// some reasoning, and simply omitting the field falls back to ElectronHub's
+	// own server-side default rather than honoring the caller's disable choice.
+	reasoningDisableMode: "reasoning-effort-none",
 } as const satisfies ModelSpec<"openai-completions">["compat"];
 
 function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completions">["compat"] | undefined) {
@@ -1875,7 +1881,6 @@ function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completio
 					// ladder's top "max" tier onto ElectronHub's actual top tier "xhigh"
 					// before it reaches the wire.
 					thinkingFormat: "openai",
-					reasoningDisableMode: "omit",
 					reasoningContentField: "reasoning_content",
 					reasoningEffortMap: { [Effort.Max]: "xhigh" },
 					// Moving off thinkingFormat "zai" also drops its reasoning_content

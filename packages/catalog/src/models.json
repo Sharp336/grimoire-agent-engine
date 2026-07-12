@@ -17522,7 +17522,8 @@
 			},
 			"compat": {
 				"supportsStore": false,
-				"supportsDeveloperRole": false
+				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
 		"glm-5.2:dev": {
@@ -17559,8 +17560,8 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none",
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "omit",
 				"reasoningContentField": "reasoning_content",
 				"reasoningEffortMap": {
 					"max": "xhigh"
@@ -17596,7 +17597,8 @@
 			},
 			"compat": {
 				"supportsStore": false,
-				"supportsDeveloperRole": false
+				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
 		"kimi-k2.6:dev": {
@@ -17629,7 +17631,8 @@
 			},
 			"compat": {
 				"supportsStore": false,
-				"supportsDeveloperRole": false
+				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
 		"minimax-m2.7:dev": {
@@ -17661,7 +17664,8 @@
 			},
 			"compat": {
 				"supportsStore": false,
-				"supportsDeveloperRole": false
+				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
 		"qwen3.6-27b:dev": {
@@ -17696,6 +17700,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"reasoningDisableMode": "reasoning-effort-none",
 				"thinkingFormat": "openai"
 			}
 		}
