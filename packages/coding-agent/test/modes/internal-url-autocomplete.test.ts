@@ -228,5 +228,40 @@ describe("internal-url-autocomplete", () => {
 			const applied = provider.applyCompletion([line], 0, line.length, result!.items[0]!, result!.prefix);
 			expect(applied.lines[0]).toBe("look at skill://humanizer ");
 		});
+
+		it("returns url suggestions inside slash-command args when the command has no argument completion", async () => {
+			const provider = new PromptActionAutocompleteProvider(
+				[{ name: "btw", allowArgs: true }] as never,
+				process.cwd(),
+				[],
+			);
+			const line = "/btw skill://hum";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			expect(result?.prefix).toBe("skill://hum");
+			expect(result?.items.map(i => i.value)).toEqual(["skill://humanizer"]);
+		});
+
+		it("returns url suggestions inside slash-command args when argument completion yields no match", async () => {
+			const provider = new PromptActionAutocompleteProvider(
+				[{ name: "mcp", allowArgs: true, getArgumentCompletions: () => null }] as never,
+				process.cwd(),
+				[],
+			);
+			const line = "/mcp skill://hum";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			expect(result?.prefix).toBe("skill://hum");
+			expect(result?.items.map(i => i.value)).toEqual(["skill://humanizer"]);
+		});
+
+		it("still treats # tokens as literal text inside slash-command args", async () => {
+			const provider = new PromptActionAutocompleteProvider(
+				[{ name: "btw", allowArgs: true }] as never,
+				process.cwd(),
+				[],
+			);
+			const line = "/btw #copy";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			expect(result).toBeNull();
+		});
 	});
 });

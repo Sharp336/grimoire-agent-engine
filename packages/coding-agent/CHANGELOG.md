@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed internal URL autocomplete (`agent://`, `skill://`, `rule://`, etc.) not triggering when typing inside a slash command's arguments (e.g. `/btw agent://Main`). The argument-completion early return short-circuited to `null` for commands without `getArgumentCompletions` instead of falling through to URL completion.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

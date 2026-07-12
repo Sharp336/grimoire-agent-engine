@@ -156,7 +156,13 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const commandName = commandText.slice(1, spaceIndex);
 			const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
 			if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
-				return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+				const baseResult = await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+				if (baseResult) return baseResult;
+				// Slash command has no argument completion for this input. Try
+				// internal URL completion (e.g. `/btw agent://Main`) but do not
+				// fall through to prompt-action (#) or github-ref completion —
+				// # tokens are literal text inside slash command arguments.
+				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
 			}
 		}
 
