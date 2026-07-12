@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added auth-gateway pool rename and audit-list cursor pagination to the operator CLI.
+- Added auth-gateway pool rename, audit-list cursor pagination, named secure remote connections, Gateway settings profile UI, standalone and `/gateway` operator TUIs, local account login, adaptive polling, and responsive controls to the operator workflow.
 
 ### Fixed
 

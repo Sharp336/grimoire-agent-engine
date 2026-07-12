@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added masked rendering and secure clearing support to `Input` so secret prompts can hide values while clearing undo, kill-ring, and paste buffers.
+
 ## [16.4.0] - 2026-07-10
 
 ### Fixed

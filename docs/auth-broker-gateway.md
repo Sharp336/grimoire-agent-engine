@@ -95,6 +95,7 @@ omp auth-gateway serve   [--bind=host:port] [--no-auth]
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
 omp auth-gateway check   [--strict] [--json]
+omp auth-gateway tui     [--connection=<name>]
 
 omp auth-gateway user create <name> [--description=] [--owner=] [--role=user|admin] [--label=] [--json]
 omp auth-gateway user list [--json]
@@ -121,6 +122,7 @@ omp auth-gateway audit list [--user=<name-or-id>] [--limit=<1..1000>] [--before=
 - `token` / `status` manage and inspect the legacy gateway bearer token and upstream broker readiness. `status --json` also reports `accessDb`, `managedUserCount`, `activeManagedTokenCount`, and `poolCount`; a missing access DB reports zero managed counts without creating it.
 - `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota. Managed regular users calling `/v1/credentials/check` receive only scoped, redacted pool-member health.
 - `user`, `pool`, and `audit` manage gateway-local identities, independently rotatable managed tokens, ACLs, credential-pool bindings, per-user usage summaries, and newest-first audit rows. `user create`, `user token`, and `user token --regenerate` print the raw managed token once in human output and include `token.value` in JSON output; human `user show` includes redacted token ids/public ids, ACL rule ids, and pool bindings for revocation and deletion commands, while list/show output never includes raw token bytes, token hashes, broker OAuth refresh tokens, OAuth access tokens, provider API keys, account metadata, or project metadata.
+- `tui` opens the remote operator console from the administrator's local omp install. It resolves a named user-scoped gateway connection (or the active connection when omitted), then connects over HTTPS with a managed admin token. Loopback development URLs may use `http://localhost`, `http://127.0.0.1`, or `http://[::1]`; every non-loopback hostname must use `https://`. There is no `--insecure`, broker-token prompt, plaintext-remote override, or local SQLite fallback.
 
 ### Endpoints
 
@@ -175,10 +177,40 @@ HTTP management routes require an authenticated legacy or managed admin token. T
 | `GET` / `PATCH` / `DELETE` | `/v1/pools/:id` | Show, update name/strategy, or delete a pool |
 | `POST` / `DELETE` | `/v1/pools/:id/members[/:credentialId]` | Add or remove broker credential ids |
 | `GET` | `/v1/audit?userId=&limit=&before=` | Newest-first audit rows with an exclusive `before` id cursor |
+| `GET` | `/v1/admin/status` | Remote console status, current principal, counts, and gateway version |
+| `GET` / `POST` | `/v1/admin/credentials` | List redacted provider accounts; upload one locally-acquired credential |
+| `POST` / `DELETE` | `/v1/admin/credentials/:id[/refresh]` | Refresh OAuth credentials or remove an unused account |
+| `PATCH` | `/v1/pools/:id/members` | Atomically replace the complete ordered credential-id membership |
+| `GET` | `/v1/pools/:id/users` | List users bound to one pool |
 
 For managed regular users, `/v1/usage[?since=<ms>]` returns `{ usage: AuthGatewayUsageSummary }` aggregated from successful provider/model audit rows, not broker account-quota reports. Omitted `since` means `0`; non-finite or negative values return `400 invalid_request_error`; legacy, managed-admin, and `--no-auth` callers continue to receive broker quota reports. `/v1/credentials/check` returns response-local member ordinals, provider, type, `ok`, and coarse reason codes only; it omits broker credential ids, emails, account/project ids, provider payloads, upstream reason strings, headers, and raw metadata.
 
 Audit rows snapshot request id, user id/name, token id, method, query-stripped pathname, route family, requested/resolved model, selected credential id, outcome, status, token counts, cost, and sanitized error code. They never persist URL query/search/hash, request bodies, headers, raw gateway tokens, provider API keys, OAuth access tokens, OAuth refresh tokens, raw upstream errors, account ids, project ids, or emails.
+
+### Remote operator console
+
+Remote administration is deliberately split between host-side bootstrap, local profile configuration, and live remote operations.
+
+1. On the gateway host, create the first managed administrator token with `omp auth-gateway user create <name> --role=admin`. The raw managed bearer is shown once; copy it directly into the administrator client's profile wizard. The legacy `<config-dir>/auth-gateway.token` remains a recovery/bootstrap bearer, but normal operator profiles should use revocable managed-admin tokens.
+2. On the administrator client, open `/settings` and select the **Gateway** tab to create or edit named connections only. The settings tab stores connection metadata in the active omp profile's `auth-gateways.json`, not in project `.omp` settings, and it never stores pasted bearer bytes in that JSON. Managed-file tokens live separately as `<connection>.token` files under the active profile's gateway-token directory with private file permissions; env sources store only the environment variable name; command sources store only the command reference. Profile URLs are normalized, reject URL credentials/query/hash, preserve a reverse-proxy path prefix, and reject non-loopback `http://` before any token source is read.
+3. Open live administration with `/gateway [connection]` inside interactive omp or `omp auth-gateway tui --connection=<name>` from the CLI. Omitting the connection uses the active profile. If no connection exists, the same profile editor opens in onboarding mode and proceeds to the console only after authenticated status succeeds.
+
+The console has five tabs and shared keys: `1`-`5` switch tabs, arrow keys or `j`/`k` move selection (`Accounts` reserves `k` for masked API-key entry, so use arrows or `j` there), `/` filters the current list (`Audit` filters only the loaded page text), `r` refreshes the visible resource, `?` opens help, `Enter` opens detail on medium-width terminals, and `Esc` returns from detail or closes. It uses a two-column list/detail layout at wide widths, a drill-in detail view at medium widths, and short tab labels with aggressive ANSI-aware truncation on narrow terminals. Remote labels are tab/newline-sanitized and all error/detail text is ANSI-wrapped.
+
+- **Overview** shows the active connection, health (`Connected`, `Stale`, or `Error`), gateway version, server time, current principal, resource counts, and last refresh. Keys: `s` switches to another named connection after authenticated status succeeds; `r` refreshes status.
+- **Users** manages managed users, tokens, ACLs, pool bindings, and usage. Keys: `c` creates a user and opens the one-time token modal; `e` edits description, owner, and role; `t` enables/disables the selected user; `d` deletes after typing the user name; `T` creates one token and opens the one-time token modal; `v` revokes a token with `token-id|confirmation`; `R` rotates all active tokens after typing `rotate <user-name>` and opens the one-time token modal; `U` loads usage with an optional `since` timestamp, blank for all time; `a` adds an ACL rule as `effect|kind|pattern`; `x` deletes an ACL rule with `rule-id|y`; `b` binds a pool id; `u` unbinds with `pool-id|y`. Disabling/deleting the currently authenticated admin warns that the console will disconnect and requires the stronger `disconnect <user-name>` confirmation; revoking the current token warns the same way and requires the token public id. After any one-time token modal closes, the raw bearer is cleared and cannot be reopened.
+- **Pools** manages credential pools and ordered account membership. Keys: `c` creates a pool from `name|provider|model|strategy`; `e` edits name and strategy; `d` deletes after typing the pool name; `a` adds a credential id; `x` removes a credential with `credential-id|y`; `[` and `]` select the account member shown in the detail pane; `+` and `-` move the selected account by replacing the complete member order. The detail pane shows bound users. Provider and model are immutable after creation; create a replacement pool to change either one.
+- **Accounts** lists redacted provider accounts and never exposes provider secrets. Keys: `l` starts local provider OAuth/API-key login; `k` adds a masked direct API key for a typed provider id; `o` refreshes the selected OAuth credential only; `d` removes the selected account after typing its numeric id; `c` copies only non-secret identifiers. API-key rows say to remove and add a new key to rotate. Removing an account that is still in any pool returns `credential_in_use` with the pool names and leaves both the broker credential and pool state unchanged.
+- **Audit** shows newest-first events and a detail inspector. Keys: `u` sets or clears the remote user-id filter; `/` applies a local text filter over the loaded page; `n` loads the next cursor page; `p` returns to the previous cursor page; `r` refreshes the current page. Audit has no delete or export action.
+
+Local account login runs on the administrator client. The console invokes the registered provider flow locally, opens/copies the full auth URL from that machine, collects any manual code or masked API-key prompt locally, then immediately uploads the acquired credential to the gateway with `POST /v1/admin/credentials`. The gateway is the only broker client: it writes the credential to the broker through `RemoteAuthCredentialStore`, and management responses return only redacted summaries. The administrator profile, console state, errors, renders, and admin responses must not contain provider API keys, OAuth access tokens, OAuth refresh tokens, or the broker bearer.
+
+Troubleshooting:
+
+- `401 Unauthorized` means the selected profile's token is missing, malformed, expired, revoked, or was read from the wrong file/env/command source. Create or rotate a managed admin on the gateway host (`omp auth-gateway user create <name> --role=admin` or `omp auth-gateway user token <name> --regenerate`) and update the profile.
+- `403 forbidden` means the token authenticated but is not a managed admin, or the gateway was started with `--no-auth` and management routes intentionally reject no-auth principals.
+- TLS or certificate failures on remote hosts must be fixed in the OS/runtime trust store or reverse proxy. The console intentionally has no certificate bypass and refuses plaintext non-loopback `http://` before token resolution.
+- A malformed profile JSON fails closed and is preserved byte-for-byte for repair. Fix duplicate names, dangling active connection names, unsupported document versions, invalid token-source fields, or invalid URLs in the active omp profile's `auth-gateways.json`.
 
 ## Usage cache: server-side 5-min jitter + client-side 15 s single-flight
 

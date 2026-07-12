@@ -1587,7 +1587,13 @@ function classifyRoute(pathname: string): AuthGatewayRouteFamily {
 	if (pathname === "/v1/models") return "models";
 	if (pathname === "/v1/usage") return "usage";
 	if (pathname === "/v1/credentials/check") return "check";
-	if (pathname.startsWith("/v1/users") || pathname.startsWith("/v1/pools") || pathname.startsWith("/v1/audit"))
+	if (
+		pathname.startsWith("/v1/admin/") ||
+		pathname === "/v1/admin" ||
+		pathname.startsWith("/v1/users") ||
+		pathname.startsWith("/v1/pools") ||
+		pathname.startsWith("/v1/audit")
+	)
 		return "management";
 	return "unknown";
 }
@@ -1595,7 +1601,7 @@ function classifyRoute(pathname: string): AuthGatewayRouteFamily {
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
-	const version = opts.version;
+	const version = opts.version ?? "dev";
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -1617,7 +1623,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				if (!principal) {
 					logger.info("auth-gateway request unauthorized", { method: req.method, path: pathname, peer });
 					audit?.record("unauthorized", 401, zeroUsage(), "unauthorized");
-					return withCors(json(401, { error: "unauthorized" }), req);
+					return withCors(
+						routeFamily === "management"
+							? json(401, { error: { code: "unauthorized", message: "Unauthorized" } })
+							: json(401, { error: "unauthorized" }),
+						req,
+					);
 				}
 				audit?.setPrincipal(principal);
 
@@ -1628,6 +1639,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						principal,
 						opts.accessStore,
 						opts.storage,
+						version,
 					);
 					if (management) {
 						audit?.record(

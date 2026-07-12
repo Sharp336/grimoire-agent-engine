@@ -21,6 +21,12 @@ interface VersionRow {
 	version: number;
 }
 
+interface PoolCredentialRow {
+	credential_id: number;
+	position: number;
+	created_at: number;
+}
+
 function readSchemaVersion(dbPath: string): number | null {
 	const db = new Database(dbPath, { readonly: true });
 	try {
@@ -39,6 +45,19 @@ function countRows(dbPath: string, table: string): number {
 	try {
 		const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as CountRow | undefined;
 		return row?.count ?? 0;
+	} finally {
+		db.close();
+	}
+}
+
+function readPoolCredentialRows(dbPath: string, poolId: number): PoolCredentialRow[] {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return db
+			.prepare(
+				"SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC",
+			)
+			.all(poolId) as PoolCredentialRow[];
 	} finally {
 		db.close();
 	}
@@ -682,5 +701,56 @@ describe("SqliteAuthGatewayAccessStore", () => {
 			{ provider: "anthropic", model: "claude", requests: 1, totalTokens: 20, costUsd: 0.25 },
 			{ provider: "anthropic", model: "haiku", requests: 1, totalTokens: 3, costUsd: 0.5 },
 		]);
+	});
+
+	test("reorders pool credentials as an exact atomic permutation and preserves member timestamps", () => {
+		const pool = store.createPool({ name: "ordered", provider: "anthropic" });
+		store.addPoolCredential(pool.id, 10);
+		store.addPoolCredential(pool.id, 20);
+		store.addPoolCredential(pool.id, 30);
+		const before = readPoolCredentialRows(dbPath, pool.id);
+
+		const reordered = store.setPoolCredentialOrder(pool.id, [30, 10, 20]);
+		expect(reordered.members).toMatchObject([
+			{ credentialId: 30, position: 0 },
+			{ credentialId: 10, position: 1 },
+			{ credentialId: 20, position: 2 },
+		]);
+		const after = readPoolCredentialRows(dbPath, pool.id);
+		expect(after.map(row => row.position)).toEqual([0, 1, 2]);
+		expect(new Map(after.map(row => [row.credential_id, row.created_at]))).toEqual(
+			new Map(before.map(row => [row.credential_id, row.created_at])),
+		);
+
+		for (const credentialIds of [
+			[30, 30, 20],
+			[30, 10],
+			[30, 10, 20, 40],
+			[30, 10, 0],
+		]) {
+			try {
+				store.setPoolCredentialOrder(pool.id, credentialIds);
+			} catch (error) {
+				assertAccessError(error, "invalid_request");
+			}
+			expect(store.getPool(pool.id)?.members.map(member => member.credentialId)).toEqual([30, 10, 20]);
+			expect(readPoolCredentialRows(dbPath, pool.id).map(row => row.position)).toEqual([0, 1, 2]);
+		}
+
+		expect(() => store.setPoolCredentialOrder(999999, [30, 10, 20])).toThrow(AuthGatewayAccessError);
+	});
+
+	test("lists credential pools by pool id without consulting credential storage", () => {
+		const first = store.createPool({ name: "first", provider: "anthropic" });
+		const second = store.createPool({ name: "second", provider: "anthropic" });
+		const unrelated = store.createPool({ name: "unrelated", provider: "mock" });
+		store.addPoolCredential(second.id, 42);
+		store.addPoolCredential(first.id, 42);
+		store.addPoolCredential(unrelated.id, 7);
+
+		expect(store.listCredentialPools(42).map(pool => pool.id)).toEqual([first.id, second.id]);
+		expect(store.listCredentialPools(42).map(pool => pool.name)).toEqual(["first", "second"]);
+		expect(store.listCredentialPools(7).map(pool => pool.id)).toEqual([unrelated.id]);
+		expect(store.listCredentialPools(999999)).toEqual([]);
 	});
 });

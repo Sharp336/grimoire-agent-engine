@@ -1,8 +1,18 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AuthGatewayAuditEvent, SqliteAuthGatewayAccessStore } from "@oh-my-pi/pi-ai/auth-gateway";
+import type {
+	AuthGatewayAdminClient,
+	AuthGatewayAdminStatus,
+	AuthGatewayAuditEvent,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import { SqliteAuthGatewayAccessStore } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
+import {
+	runAuthGatewayTuiWithDependencies,
+	showAuthGatewayConsoleOverlay,
+} from "@oh-my-pi/pi-coding-agent/auth-gateway/run-tui";
 import {
 	type AuthGatewayAction,
 	type AuthGatewayCommandArgs,
@@ -10,6 +20,7 @@ import {
 	runAuthGatewayCommand,
 } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
 import AuthGatewayCommand from "@oh-my-pi/pi-coding-agent/commands/auth-gateway";
+import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
@@ -22,6 +33,12 @@ function captureStdout(): () => string {
 		return true;
 	}) as typeof process.stdout.write;
 	return () => captured;
+}
+
+async function flushMicrotasks(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
 }
 
 async function expectJsonCommand<T>(cmd: AuthGatewayCommandArgs, deps: AuthGatewayCommandDependencies): Promise<T> {
@@ -44,6 +61,91 @@ async function expectHumanCommand(cmd: AuthGatewayCommandArgs, deps: AuthGateway
 	} finally {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
 	}
+}
+
+function createFakeTui(): {
+	ui: TUI;
+	getOverlay(): Component | undefined;
+	hideCalls: Component[];
+	focusCalls: Array<Component | null>;
+	requestRenderCalls: number[];
+	overlayShown: Promise<Component>;
+} {
+	const overlayShown = Promise.withResolvers<Component>();
+	let overlayComponent: Component | undefined;
+	const hideCalls: Component[] = [];
+	const focusCalls: Array<Component | null> = [];
+	const requestRenderCalls: number[] = [];
+	const ui = {
+		terminal: {
+			rows: 24,
+			columns: 100,
+			hideCursor(): void {},
+		},
+		showOverlay(component: Component): OverlayHandle {
+			overlayComponent = component;
+			overlayShown.resolve(component);
+			return {
+				hide(): void {
+					hideCalls.push(component);
+					overlayComponent = undefined;
+				},
+				setHidden(): void {},
+				isHidden(): boolean {
+					return false;
+				},
+			};
+		},
+		setFocus(component: Component | null): void {
+			focusCalls.push(component);
+		},
+		requestRender(): void {
+			requestRenderCalls.push(1);
+		},
+	} as unknown as TUI;
+	return {
+		ui,
+		getOverlay: () => overlayComponent,
+		hideCalls,
+		focusCalls,
+		requestRenderCalls,
+		overlayShown: overlayShown.promise,
+	};
+}
+
+function createReadyGatewayClient(): AuthGatewayAdminClient {
+	return {
+		status: async () => ({
+			ok: true,
+			version: "test",
+			serverTime: 1,
+			principal: { kind: "managed", userId: 1, name: "admin", role: "admin", tokenId: 1 },
+			counts: { users: 0, activeTokens: 0, pools: 0, credentials: 0 },
+		}),
+	} as unknown as AuthGatewayAdminClient;
+}
+
+function createHangingGatewayClient(onAbort: () => void): AuthGatewayAdminClient {
+	return {
+		status: (signal?: AbortSignal) => {
+			signal?.addEventListener("abort", onAbort, { once: true });
+			return Promise.withResolvers<AuthGatewayAdminStatus>().promise;
+		},
+	} as unknown as AuthGatewayAdminClient;
+}
+
+async function createTempProfileStore(root: string): Promise<AuthGatewayProfileStore> {
+	const store = AuthGatewayProfileStore.open({
+		documentPath: path.join(root, "auth-gateways.json"),
+		tokenDir: path.join(root, "tokens"),
+	});
+	process.env.OMP_TASK7_GATEWAY_TOKEN = "admin-token";
+	await store.upsert({
+		name: "prod",
+		url: "http://127.0.0.1:4000",
+		tokenSource: { type: "env", variable: "OMP_TASK7_GATEWAY_TOKEN" },
+	});
+	return store;
 }
 
 async function expectCommandError(
@@ -103,6 +205,11 @@ const SURPLUS_POSITIONAL_CASES: readonly SurplusPositionalCase[] = [
 		message: "Unexpected positional argument(s) for auth-gateway audit list: extra",
 	},
 	{
+		name: "tui prod positional",
+		argv: ["tui", "prod"],
+		message: "Unexpected positional argument(s) for auth-gateway tui: prod",
+	},
+	{
 		name: "user token-revoke alice 1 extra",
 		argv: ["user", "token-revoke", "alice", "1", "extra"],
 		message: "Unexpected positional argument(s) for auth-gateway user token-revoke: extra",
@@ -152,6 +259,7 @@ async function authGatewayCommandFromParser(
 			limit: parsed.flags.limit,
 			user: parsed.flags.user,
 			before: parsed.flags.before,
+			connection: parsed.flags.connection,
 			noAuth: parsed.flags["no-auth"],
 			strict: parsed.flags.strict,
 		},
@@ -215,6 +323,175 @@ function poolCommand(
 ): AuthGatewayCommandArgs {
 	return { action: "pool", subaction, target, value, flags: { json: true, ...flags } };
 }
+
+interface TestInputComponent extends Component {
+	handleInput(data: string): void;
+}
+
+function requireInputComponent(component: Component | undefined): TestInputComponent {
+	const candidate = component as { handleInput?: unknown } | undefined;
+	if (typeof candidate?.handleInput !== "function") throw new Error("Expected focused auth-gateway component");
+	return component as TestInputComponent;
+}
+
+describe("auth-gateway TUI entrypoint", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-gateway-tui-entry-"));
+		delete process.env.OMP_TASK7_GATEWAY_TOKEN;
+	});
+
+	afterEach(async () => {
+		delete process.env.OMP_TASK7_GATEWAY_TOKEN;
+		vi.restoreAllMocks();
+		if (tempDir) await removeWithRetries(tempDir);
+	});
+
+	test("parses standalone tui connection flag without treating it as an outer profile", async () => {
+		const cmd = await authGatewayCommandFromParser(["tui", "--connection=prod"]);
+
+		expect(cmd.action).toBe("tui");
+		expect(cmd.positionals).toEqual(["tui"]);
+		expect(cmd.flags.connection).toBe("prod");
+	});
+
+	test("dispatches tui action to the standalone runner without retargeting local commands", async () => {
+		const runTui = vi.fn(async () => {});
+
+		await runAuthGatewayCommand({ action: "tui", flags: { connection: "prod" } }, { runTui });
+
+		expect(runTui).toHaveBeenCalledTimes(1);
+		expect(runTui).toHaveBeenCalledWith({ connection: "prod" });
+	});
+
+	test("opens onboarding when no active connection is configured", async () => {
+		const harness = createFakeTui();
+		const store = AuthGatewayProfileStore.open({
+			documentPath: path.join(tempDir, "empty-auth-gateways.json"),
+			tokenDir: path.join(tempDir, "empty-tokens"),
+		});
+		const closed = showAuthGatewayConsoleOverlay({
+			ui: harness.ui,
+			profileStore: store,
+			createClient: () => createReadyGatewayClient(),
+			afterClose: () => harness.focusCalls.push(null),
+		});
+
+		const onboarding = requireInputComponent(await harness.overlayShown);
+		expect(onboarding.constructor.name).toBe("GatewayProfileSettingsComponent");
+
+		onboarding.handleInput("\x1b");
+		await closed;
+		expect(harness.hideCalls).toHaveLength(1);
+		expect(harness.focusCalls.at(-1)).toBeNull();
+	});
+
+	test("rejects an unknown requested connection before opening a console", async () => {
+		const harness = createFakeTui();
+		const store = AuthGatewayProfileStore.open({
+			documentPath: path.join(tempDir, "unknown-auth-gateways.json"),
+			tokenDir: path.join(tempDir, "unknown-tokens"),
+		});
+
+		await expect(
+			showAuthGatewayConsoleOverlay({
+				ui: harness.ui,
+				profileStore: store,
+				connection: "prod",
+				createClient: () => createReadyGatewayClient(),
+			}),
+		).rejects.toThrow("Unknown auth-gateway connection: prod");
+		expect(harness.getOverlay()).toBeUndefined();
+	});
+
+	test("stops the standalone TUI after a normal console close", async () => {
+		const harness = createFakeTui();
+		const store = await createTempProfileStore(tempDir);
+		const start = vi.fn();
+		const stop = vi.fn();
+		const running = runAuthGatewayTuiWithDependencies({
+			ui: harness.ui,
+			profileStore: store,
+			connection: "prod",
+			createClient: () => createReadyGatewayClient(),
+			openInBrowser: () => {},
+			start,
+			stop,
+		});
+
+		expect(start).toHaveBeenCalledTimes(1);
+		requireInputComponent(await harness.overlayShown).handleInput("\x1b");
+		await running;
+
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(harness.hideCalls).toHaveLength(1);
+	});
+
+	test("stops the standalone TUI when closed during the initial status load", async () => {
+		const harness = createFakeTui();
+		const store = await createTempProfileStore(tempDir);
+		const start = vi.fn();
+		const stop = vi.fn();
+		const abortObserved = vi.fn();
+		const running = runAuthGatewayTuiWithDependencies({
+			ui: harness.ui,
+			profileStore: store,
+			connection: "prod",
+			createClient: () => createHangingGatewayClient(abortObserved),
+			openInBrowser: () => {},
+			start,
+			stop,
+		});
+
+		expect(start).toHaveBeenCalledTimes(1);
+		requireInputComponent(await harness.overlayShown).handleInput("\x1b");
+
+		let outcome: "closed" | "pending" | "rejected" = "pending";
+		let rejection: unknown;
+		void running.then(
+			() => {
+				outcome = "closed";
+			},
+			error => {
+				outcome = "rejected";
+				rejection = error;
+			},
+		);
+		await flushMicrotasks();
+
+		if (rejection) throw rejection;
+
+		expect(outcome as string).toBe("closed");
+		expect(abortObserved).toHaveBeenCalledTimes(1);
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(harness.hideCalls).toHaveLength(1);
+		expect(harness.getOverlay()).toBeUndefined();
+	});
+
+	test("stops the standalone TUI on startup error", async () => {
+		const harness = createFakeTui();
+		const store = await createTempProfileStore(tempDir);
+		const stop = vi.fn();
+
+		await expect(
+			runAuthGatewayTuiWithDependencies({
+				ui: harness.ui,
+				profileStore: store,
+				connection: "prod",
+				createClient: () => {
+					throw new Error("startup failed");
+				},
+				openInBrowser: () => {},
+				start: () => {},
+				stop,
+			}),
+		).rejects.toThrow("startup failed");
+
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(harness.getOverlay()).toBeUndefined();
+	});
+});
 
 describe("auth-gateway CLI access management", () => {
 	let agentDir = "";

@@ -41,9 +41,10 @@ import {
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { runAuthGatewayTui } from "../auth-gateway/run-tui";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
-export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit";
+export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit" | "tui";
 
 export interface AuthGatewayCommandArgs {
 	action: AuthGatewayAction;
@@ -67,6 +68,7 @@ export interface AuthGatewayCommandArgs {
 		limit?: string;
 		before?: string;
 		user?: string;
+		connection?: string;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
 		 * is bound to loopback (the default `127.0.0.1:4000`) and you don't want
@@ -87,9 +89,10 @@ export interface AuthGatewayCommandArgs {
 export interface AuthGatewayCommandDependencies {
 	accessDbPath?: string;
 	loadBrokerCredentials?: () => Promise<Array<{ id: number; provider: string; type: "oauth" | "api_key" }>>;
+	runTui?: (options: { connection?: string }) => Promise<void>;
 }
 
-const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit"];
+const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit", "tui"];
 
 const USER_POSITIONAL_COUNTS: Record<string, number> = {
 	list: 2,
@@ -618,6 +621,8 @@ function expectedAuthGatewayPositionals(cmd: AuthGatewayCommandArgs): number | u
 		case "status":
 		case "check":
 			return 1;
+		case "tui":
+			return 1;
 		case "user":
 			return positionalCountForGroupedCommand("user", cmd.subaction);
 		case "pool":
@@ -1025,6 +1030,9 @@ export async function runAuthGatewayCommand(
 			return;
 		case "audit":
 			await runAuditCommand(cmd, deps);
+			return;
+		case "tui":
+			await (deps?.runTui ?? runAuthGatewayTui)({ connection: cmd.flags.connection });
 			return;
 		default: {
 			const _exhaustive: never = cmd.action;

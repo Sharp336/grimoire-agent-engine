@@ -49,6 +49,7 @@ export default class AuthGateway extends Command {
 		limit: Flags.string({ description: "Audit limit (1..1000)" }),
 		user: Flags.string({ description: "Audit user name/id filter" }),
 		before: Flags.string({ description: "Audit cursor/event id" }),
+		connection: Flags.string({ description: "Named remote gateway connection for `tui`" }),
 		"no-auth": Flags.boolean({
 			description:
 				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
@@ -75,6 +76,7 @@ export default class AuthGateway extends Command {
 		"# Show audit events for one user\n  omp auth-gateway audit list --user=alice --limit=25",
 		"# Rename a credential pool\n  omp auth-gateway pool rename primary primary-prod",
 		"# Show audit events before one event id\n  omp auth-gateway audit list --user=alice --limit=25 --before=12345",
+		"# Open the remote admin console for a named connection\n  omp auth-gateway tui --connection=prod",
 	];
 
 	async run(): Promise<void> {
@@ -105,6 +107,7 @@ export default class AuthGateway extends Command {
 				limit: flags.limit,
 				user: flags.user,
 				before: flags.before,
+				connection: flags.connection,
 				noAuth: flags["no-auth"],
 				strict: flags.strict,
 			},

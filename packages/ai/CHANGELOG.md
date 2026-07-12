@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added gateway principals, provider/model/route ACL enforcement, scoped credential-pool selection, request audit attribution, and admin HTTP management APIs for shared auth-gateway deployments ([#5098](https://github.com/can1357/oh-my-pi/issues/5098)).
+- Added gateway principals, provider/model/route ACL enforcement, scoped credential-pool selection, request audit attribution, admin HTTP management APIs, a typed remote admin client, redacted account lifecycle routes, and atomic pool-member ordering for shared auth-gateway deployments ([#5098](https://github.com/can1357/oh-my-pi/issues/5098)).
 
 ### Fixed
 

@@ -205,6 +205,28 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "gateway",
+		description: "Open auth-gateway remote admin console",
+		allowArgs: true,
+		inlineHint: "[connection]",
+		handleTui: (command, runtime) => {
+			const args = command.args.trim();
+			const parts = args.length === 0 ? [] : args.split(/\s+/);
+			if (parts.length > 1) {
+				runtime.ctx.showError("Usage: /gateway [connection]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (runtime.ctx.focusedAgentId) {
+				runtime.ctx.showError("/gateway is only available from the main session");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.editor.setText("");
+			runtime.ctx.showAuthGatewayConsole(parts[0]);
+		},
+	},
+	{
 		name: "setup",
 		aliases: ["providers"],
 		description: "Open provider setup",

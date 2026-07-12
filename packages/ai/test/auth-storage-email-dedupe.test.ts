@@ -3,7 +3,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, type FetchImpl, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	acquireAuthCredential,
+	type FetchImpl,
+	type OAuthCredential,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai";
 import { removeWithRetries } from "../../utils/src/temp";
 import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry/oauth";
 
@@ -714,6 +721,99 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 		if (tempDir) {
 			await removeTempDirAfterSqliteClose(tempDir);
 			tempDir = "";
+		}
+	});
+
+	it("acquires OAuth credentials for the storage provider without mutating storage", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const dbPath = path.join(tempDir, "acquire-oauth.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const authStorage = new AuthStorage(store);
+		const credentials = {
+			refresh: "acquire-refresh",
+			access: "acquire-access",
+			expires: Date.now() + 60_000,
+			email: "acquire@example.com",
+			accountId: "acct-acquire",
+		};
+
+		try {
+			await authStorage.set("unit-acquire-oauth-storage", { type: "api_key", key: "existing-key" });
+			registerOAuthProvider({
+				id: "unit-acquire-oauth",
+				name: "Unit Acquire OAuth",
+				sourceId: "auth-storage-login-upgrade-test",
+				storeCredentialsAs: "unit-acquire-oauth-storage",
+				login: async callbacks => {
+					callbacks.onAuth({ url: "https://example.com/auth" });
+					return credentials;
+				},
+			});
+
+			const result = await acquireAuthCredential("unit-acquire-oauth", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			expect(result).toEqual({
+				provider: "unit-acquire-oauth-storage",
+				credential: { type: "oauth", ...credentials },
+			});
+			expect(authStorage.listStoredCredentials("unit-acquire-oauth-storage").map(row => row.credential)).toEqual([
+				{ type: "api_key", key: "existing-key" },
+			]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("persists OAuth login through the remote upsert hook", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const dbPath = path.join(tempDir, "remote-oauth-login.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const storeWithRemote: AuthCredentialStore = store;
+		const remoteCalls: Array<{ provider: string; credential: OAuthCredential }> = [];
+		const credentials = {
+			refresh: "remote-refresh",
+			access: "remote-access",
+			expires: Date.now() + 60_000,
+			email: "remote@example.com",
+			accountId: "acct-remote",
+		};
+		storeWithRemote.upsertAuthCredentialRemote = async (provider, credential) => {
+			if (credential.type !== "oauth") throw new Error("expected OAuth credential");
+			remoteCalls.push({ provider, credential });
+			return store.upsertAuthCredentialForProvider(provider, credential);
+		};
+		const authStorage = new AuthStorage(storeWithRemote);
+
+		try {
+			registerOAuthProvider({
+				id: "unit-remote-oauth-login",
+				name: "Unit Remote OAuth Login",
+				sourceId: "auth-storage-login-upgrade-test",
+				storeCredentialsAs: "unit-remote-oauth-storage",
+				login: async () => credentials,
+			});
+
+			await authStorage.login("unit-remote-oauth-login", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			expect(remoteCalls).toEqual([
+				{
+					provider: "unit-remote-oauth-storage",
+					credential: { type: "oauth", ...credentials },
+				},
+			]);
+			expect(authStorage.listStoredCredentials("unit-remote-oauth-storage").map(row => row.credential)).toEqual([
+				{ type: "oauth", ...credentials },
+			]);
+		} finally {
+			authStorage.close();
 		}
 	});
 

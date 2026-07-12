@@ -1,5 +1,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { AuthGatewayAdminClient } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
@@ -12,6 +13,8 @@ import {
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
 } from "../../advisor";
+import { AuthGatewayProfileStore } from "../../auth-gateway/profiles";
+import { showAuthGatewayConsoleOverlay } from "../../auth-gateway/run-tui";
 import { formatModelSelectorValue, resolveAdvisorRoleSelection } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -150,6 +153,12 @@ export class SelectorController {
 					model: this.ctx.session.model,
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
+					gatewayProfiles: {
+						profileStore: AuthGatewayProfileStore.open(),
+						createClient: connection =>
+							new AuthGatewayAdminClient({ url: connection.profile.url, token: connection.token }),
+						requestRender: () => this.ctx.ui.requestRender(),
+					},
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
@@ -215,6 +224,23 @@ export class SelectorController {
 			this.ctx.ui.setFocus(selector);
 			this.ctx.ui.requestRender();
 		});
+	}
+
+	async showAuthGatewayConsole(connection?: string): Promise<void> {
+		try {
+			await showAuthGatewayConsoleOverlay({
+				ui: this.ctx.ui,
+				connection,
+				profileStore: AuthGatewayProfileStore.open(),
+				openInBrowser: url => this.ctx.openInBrowser(url),
+				afterClose: () => {
+					this.focusActiveEditorArea();
+					this.ctx.ui.requestRender();
+				},
+			});
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	showAdvisorConfigure(): void {

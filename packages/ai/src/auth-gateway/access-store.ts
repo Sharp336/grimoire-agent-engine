@@ -86,6 +86,8 @@ export interface AuthGatewayAccessStore {
 	deletePool(ref: number | string): boolean;
 	addPoolCredential(poolId: number, credentialId: number): { pool: AuthGatewayPool; created: boolean };
 	removePoolCredential(poolId: number, credentialId: number): boolean;
+	setPoolCredentialOrder(poolId: number, credentialIds: readonly number[]): AuthGatewayPool;
+	listCredentialPools(credentialId: number): AuthGatewayPool[];
 	bindUserPool(userId: number, poolId: number): { created: boolean };
 	unbindUserPool(userId: number, poolId: number): boolean;
 	listUserPools(userId: number): AuthGatewayPool[];
@@ -591,6 +593,72 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 			}
 			return true;
 		});
+	}
+
+	setPoolCredentialOrder(poolId: number, credentialIds: readonly number[]): AuthGatewayPool {
+		this.#requirePool(poolId);
+		return this.#withImmediateTransaction(() => {
+			const rows = this.#db
+				.prepare(
+					"SELECT credential_id, position, created_at FROM gateway_pool_credentials WHERE pool_id = ? ORDER BY position ASC, credential_id ASC",
+				)
+				.all(poolId) as PoolMemberRow[];
+			if (credentialIds.length !== rows.length) {
+				throw new AuthGatewayAccessError(
+					"invalid_request",
+					"credential order must include every current pool member exactly once",
+				);
+			}
+			const currentIds = new Set(rows.map(row => row.credential_id));
+			const requestedIds = new Set<number>();
+			for (const credentialId of credentialIds) {
+				if (!Number.isSafeInteger(credentialId) || credentialId <= 0) {
+					throw new AuthGatewayAccessError("invalid_request", "credential id must be a positive integer");
+				}
+				if (requestedIds.has(credentialId)) {
+					throw new AuthGatewayAccessError("invalid_request", "credential order must not contain duplicates");
+				}
+				requestedIds.add(credentialId);
+				if (!currentIds.has(credentialId)) {
+					throw new AuthGatewayAccessError(
+						"invalid_request",
+						"credential order must include every current pool member exactly once",
+					);
+				}
+			}
+			for (let index = 0; index < rows.length; index++) {
+				this.#db
+					.prepare("UPDATE gateway_pool_credentials SET position = ? WHERE pool_id = ? AND credential_id = ?")
+					.run(-(index + 1), poolId, rows[index]!.credential_id);
+			}
+			for (let position = 0; position < credentialIds.length; position++) {
+				this.#db
+					.prepare("UPDATE gateway_pool_credentials SET position = ? WHERE pool_id = ? AND credential_id = ?")
+					.run(position, poolId, credentialIds[position]!);
+			}
+			return this.#requirePool(poolId);
+		});
+	}
+
+	listCredentialPools(credentialId: number): AuthGatewayPool[] {
+		if (!Number.isSafeInteger(credentialId) || credentialId <= 0) {
+			throw new AuthGatewayAccessError("invalid_request", "credential id must be a positive integer");
+		}
+		const rows = this.#db
+			.prepare(
+				`SELECT
+					p.*,
+					pc_all.credential_id,
+					pc_all.position,
+					pc_all.created_at AS member_created_at
+				FROM gateway_pool_credentials target
+				INNER JOIN gateway_pools p ON p.id = target.pool_id
+				LEFT JOIN gateway_pool_credentials pc_all ON pc_all.pool_id = p.id
+				WHERE target.credential_id = ?
+				ORDER BY p.id ASC, pc_all.position ASC, pc_all.credential_id ASC`,
+			)
+			.all(credentialId) as PoolWithMemberRow[];
+		return this.#mapPoolsWithMembers(rows);
 	}
 
 	bindUserPool(userId: number, poolId: number): { created: boolean } {

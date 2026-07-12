@@ -4080,6 +4080,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
+	showAuthGatewayConsole(connection?: string): void {
+		void this.#selectorController.showAuthGatewayConsole(connection);
+	}
+
 	showAdvisorConfigure(): void {
 		this.#selectorController.showAdvisorConfigure();
 	}

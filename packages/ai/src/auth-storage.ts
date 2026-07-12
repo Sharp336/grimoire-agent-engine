@@ -75,6 +75,56 @@ export type OAuthCredential = {
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
+export interface AcquiredAuthCredential {
+	provider: string;
+	credential: AuthCredential;
+}
+
+export async function acquireAuthCredential(
+	provider: OAuthProviderId,
+	controller: OAuthController,
+): Promise<AcquiredAuthCredential | null> {
+	// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
+	// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
+	// providers the `OAuthCallbackFlow` would otherwise race this readline prompt
+	// against the HTTP callback and, when the callback wins, leave the prompt
+	// outstanding — a dirty/blocked terminal. Synthesizing the default only for
+	// paste-code providers is the authoritative gate (it covers every caller, not
+	// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
+	// honored for any provider as an escape hatch.
+	const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
+		? () =>
+				controller.onPrompt?.({ message: "Paste the authorization code (or full redirect URL):" }) ??
+				Promise.resolve("")
+		: undefined;
+	// Built-in registry first, then runtime-registered extension providers.
+	const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
+	if (!def?.login) {
+		throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
+	}
+	const storageProvider = def.storeCredentialsAs ?? provider;
+	let result: OAuthCredentials | string;
+	try {
+		result = await def.login({
+			onAuth: controller.onAuth!,
+			onProgress: controller.onProgress,
+			onPrompt: controller.onPrompt!,
+			onManualCodeInput: controller.onManualCodeInput ?? manualCodeInput,
+			signal: controller.signal,
+			fetch: controller.fetch,
+		});
+	} catch (error) {
+		if (error instanceof AIError.LoginCancelledError) return null;
+		throw error;
+	}
+	if (typeof result === "string") {
+		// Some flows (e.g. ollama) return "" to signal that no key was entered.
+		if (!result) return null;
+		return { provider: storageProvider, credential: { type: "api_key", key: result } };
+	}
+	return { provider: storageProvider, credential: { type: "oauth", ...result } };
+}
+
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
 export type AuthStorageData = Record<string, AuthCredentialEntry>;
@@ -2306,51 +2356,16 @@ export class AuthStorage {
 			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
 		},
 	): Promise<void> {
-		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
-		// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
-		// providers the `OAuthCallbackFlow` would otherwise race this readline prompt
-		// against the HTTP callback and, when the callback wins, leave the prompt
-		// outstanding — a dirty/blocked terminal. Synthesizing the default only for
-		// paste-code providers is the authoritative gate (it covers every caller, not
-		// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
-		// honored for any provider as an escape hatch.
-		const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
-			? () => ctrl.onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
-			: undefined;
-		// Built-in registry first, then runtime-registered extension providers.
-		const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
-		if (!def?.login) {
-			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
-		}
-		const result = await def.login({
-			onAuth: ctrl.onAuth,
-			onProgress: ctrl.onProgress,
-			onPrompt: ctrl.onPrompt,
-			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
-			signal: ctrl.signal,
-			fetch: ctrl.fetch,
-		});
-		if (typeof result === "string") {
-			// Some flows (e.g. ollama) return "" to signal that no key was entered.
-			if (!result) {
-				return;
-			}
-			const newCredential: ApiKeyCredential = { type: "api_key", key: result, source: "login" };
-			const stored = this.#store.upsertAuthCredentialRemote
-				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
-				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
-			this.#setStoredCredentials(
-				provider,
-				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-			);
-			this.#resetProviderAssignments(provider);
+		const acquired = await acquireAuthCredential(provider, ctrl);
+		if (!acquired) return;
+		if (acquired.credential.type === "api_key") {
+			await this.upsertCredentialAsync(acquired.provider, { ...acquired.credential, source: "login" });
 			return;
 		}
-		const newCredential: OAuthCredential = { type: "oauth", ...result };
 		// Use #upsertOAuthCredential to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
+		await this.#upsertOAuthCredential(acquired.provider, acquired.credential);
 	}
 
 	/**
@@ -5440,6 +5455,18 @@ export class AuthStorage {
 				identityKey: resolveCredentialIdentityKey(provider, persisted),
 			};
 		});
+	}
+
+	async upsertCredentialAsync(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+		const stored = this.#store.upsertAuthCredentialRemote
+			? await this.#store.upsertAuthCredentialRemote(provider, credential)
+			: this.#store.upsertAuthCredentialForProvider(provider, credential);
+		this.#setStoredCredentials(
+			provider,
+			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
+		);
+		this.#resetProviderAssignments(provider);
+		return stored;
 	}
 
 	/**
