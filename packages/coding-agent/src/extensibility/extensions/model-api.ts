@@ -15,7 +15,7 @@ import type { ExtensionModelQuery } from "./types";
 
 /**
  * Build the `ctx.models` facade. `getModel` is read lazily so `current()` always
- * reflects the live session model (it can change mid-session via `/model`).
+ * reflects the live session model (it can change mid-session via `/models`).
  */
 export function createExtensionModelQuery(
 	modelRegistry: ModelRegistry,

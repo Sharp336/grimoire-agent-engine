@@ -17,11 +17,11 @@ function createRuntime() {
 	};
 }
 
-describe("/model slash command", () => {
+describe("/models slash command", () => {
 	it("opens the model setup picker for role and thinking assignment", async () => {
 		const harness = createRuntime();
 
-		const handled = await executeBuiltinSlashCommand("/model", harness.runtime);
+		const handled = await executeBuiltinSlashCommand("/models", harness.runtime);
 
 		expect(handled).toBe(true);
 		expect(harness.showModelSelector.mock.calls).toEqual([[]]);

@@ -12,7 +12,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 // Regression: `#closeProviderSessionsForModelSwitch` historically only handled
 // the `openai-codex-responses` / `openai-responses` keys and left
 // `openai-completions:<provider>:<baseUrl>:<modelId>` entries behind on a
-// /model switch. The cached strict-tools disable scopes and reasoning-effort
+// /models switch. The cached strict-tools disable scopes and reasoning-effort
 // fallbacks for the old backend then survived indefinitely — repro reported
 // in #3260 (PR #3236).
 

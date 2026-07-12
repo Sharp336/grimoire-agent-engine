@@ -2140,7 +2140,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				modelFallbackMessage =
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+						: "No models available. Use /login or set an API key environment variable. Then use /models to select a model.";
 			}
 		}
 

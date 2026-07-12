@@ -1570,13 +1570,13 @@ describe("ACP agent", () => {
 		];
 		// Extension runner: unique command + one colliding with an ACP builtin
 		// ("fast") + a colon-namespaced one whose prefix is a builtin
-		// ("model:foo" parses as builtin `/model` with args `foo` at dispatch).
+		// ("models:foo" parses as builtin `/models` with args `foo` at dispatch).
 		(session as unknown as { extensionRunner: unknown }).extensionRunner = {
 			getRegisteredCommands(reserved?: Set<string>) {
 				return [
 					{ name: "my-ext-cmd", description: "Extension command", handler: async () => {} },
 					{ name: "fast", description: "Would shadow builtin", handler: async () => {} },
-					{ name: "model:foo", description: "Colon-shadowed by /model", handler: async () => {} },
+					{ name: "models:foo", description: "Colon-shadowed by /models", handler: async () => {} },
 				].filter(cmd => !reserved?.has(cmd.name));
 			},
 		};
@@ -1611,8 +1611,8 @@ describe("ACP agent", () => {
 		// ACP builtin "fast" appears exactly once (reserved-set exclusion, no duplicate from extension).
 		expect(names.filter(n => n === "fast").length).toBe(1);
 		// Colon-namespaced collision with a builtin prefix is not advertised:
-		// ACP would dispatch `/model:foo` to the `/model` builtin, not the extension.
-		expect(names).not.toContain("model:foo");
+		// ACP would dispatch `/models:foo` to the `/models` builtin, not the extension.
+		expect(names).not.toContain("models:foo");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

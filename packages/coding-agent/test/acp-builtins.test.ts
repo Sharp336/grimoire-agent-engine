@@ -414,36 +414,36 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("No messages");
 	});
 
-	// /model
-	it("model: returns current model when set", async () => {
+	// /models
+	it("models: returns current model when set", async () => {
 		const { output, runtime } = createRuntime();
 		runtime.session.model = { provider: "anthropic", id: "claude-opus-4-5" } as never;
 
-		const result = await executeAcpBuiltinSlashCommand("/model", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("anthropic/claude-opus-4-5");
 	});
 
-	it("model: returns no-selection message when undefined", async () => {
+	it("models: returns no-selection message when undefined", async () => {
 		const { output, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/model", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("No model");
 	});
 
-	it("model: returns ACP usage message when args provided", async () => {
+	it("models: returns ACP usage message when args provided", async () => {
 		const { output, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models claude-3-5-sonnet", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]?.toLowerCase()).toContain("acp");
 	});
 
-	it("model: applies known id and emits both title + config change notifications", async () => {
+	it("models: applies known id and emits both title + config change notifications", async () => {
 		const { output, runtime, session } = createRuntime();
 		const available = [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
 		session.getAvailableModels = () => available;
@@ -457,7 +457,7 @@ describe("ACP builtin slash commands", () => {
 		};
 		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
 
-		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models claude-3-5-sonnet", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(setModelSpy).toHaveBeenCalledWith(available[0]);
@@ -466,14 +466,14 @@ describe("ACP builtin slash commands", () => {
 		expect(configNotified).toBe(1);
 	});
 
-	it("model: does not emit config change when id is unknown", async () => {
+	it("models: does not emit config change when id is unknown", async () => {
 		const { runtime } = createRuntime();
 		let configNotified = 0;
 		runtime.notifyConfigChanged = () => {
 			configNotified++;
 		};
 
-		await executeAcpBuiltinSlashCommand("/model nonexistent", runtime);
+		await executeAcpBuiltinSlashCommand("/models nonexistent", runtime);
 
 		expect(configNotified).toBe(0);
 	});
@@ -1035,23 +1035,23 @@ describe("wave 5 — adapters and polish", () => {
 		}
 	});
 
-	// /model with unknown id
-	it("/model gpt-fake-9000: returns unknown-model message", async () => {
+	// /models with unknown id
+	it("/models gpt-fake-9000: returns unknown-model message", async () => {
 		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/model gpt-fake-9000", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models gpt-fake-9000", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Unknown model");
 	});
 
-	// /model with known id (fake registry)
-	it("/model known-id: reports model set and triggers notifyTitleChanged", async () => {
+	// /models with known id (fake registry)
+	it("/models known-id: reports model set and triggers notifyTitleChanged", async () => {
 		const { output, session, runtime } = createRuntime();
 		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-sonnet-test" }];
 		let titleChanged = false;
 		runtime.notifyTitleChanged = () => {
 			titleChanged = true;
 		};
-		const result = await executeAcpBuiltinSlashCommand("/model claude-sonnet-test", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/models claude-sonnet-test", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Model set to anthropic/claude-sonnet-test.");
 		expect(titleChanged).toBe(true);

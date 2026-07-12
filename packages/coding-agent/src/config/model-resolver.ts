@@ -1399,7 +1399,7 @@ export async function resolveAllowedModels(
 /**
  * Synchronous subset of {@link resolveAllowedModels} for contexts where async is unavailable
  * (e.g. `getAvailableModels()` which is called from the ACP model-list advertisement, RPC
- * `get_available_models`, and the `/model` slash command). Uses the same effective
+ * `get_available_models`, and the `/models` slash command). Uses the same effective
  * `enabledModels` scope semantics as startup resolution:
  *
  * - Glob selectors match `provider/modelId` and bare model id

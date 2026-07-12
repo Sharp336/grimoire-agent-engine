@@ -187,7 +187,7 @@ describe("prompt action autocomplete", () => {
 
 	it("delegates trySyncSlashCompletion to CombinedAutocompleteProvider", () => {
 		const provider = createPromptActionAutocompleteProvider({
-			commands: [{ name: "model", description: "Switch AI model" }],
+			commands: [{ name: "models", description: "Switch AI model" }],
 			basePath: "/tmp",
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
@@ -201,12 +201,12 @@ describe("prompt action autocomplete", () => {
 
 		const result = provider.trySyncSlashCompletion("/mo");
 		expect(result).not.toBeNull();
-		expect(result!.items.map(i => i.value)).toContain("model");
+		expect(result!.items.map(i => i.value)).toContain("models");
 	});
 
 	it("returns null from trySyncSlashCompletion for non-slash text", () => {
 		const provider = createPromptActionAutocompleteProvider({
-			commands: [{ name: "model", description: "Switch AI model" }],
+			commands: [{ name: "models", description: "Switch AI model" }],
 			basePath: "/tmp",
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},

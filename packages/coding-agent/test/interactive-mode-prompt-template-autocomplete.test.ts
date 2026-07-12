@@ -201,7 +201,7 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		expect(matches.filter(name => name === "exit")).toHaveLength(1);
 	});
 
-	it("does not duplicate templates whose names collide with builtin slash command aliases", async () => {
+	it("does not duplicate templates whose names collide with builtin slash command names", async () => {
 		const created = createHarness([
 			{
 				name: "models",
@@ -217,7 +217,7 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		const provider = slot.current;
 		expect(provider).toBeDefined();
 		const matches = await fetchSlashSuggestions(provider!, "/models");
-		// Builtin `/model` owns the `/models` alias. The colliding template is filtered
+		// Builtin `/models` is the canonical command name. The colliding template is filtered
 		// out so autocomplete follows the interactive slash-command resolution path.
 		expect(matches.filter(name => name === "models")).toHaveLength(1);
 	});

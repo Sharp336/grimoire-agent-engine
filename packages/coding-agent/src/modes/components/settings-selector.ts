@@ -367,7 +367,7 @@ export interface SettingsRuntimeContext {
 	thinkingLevel: ThinkingLevel | undefined;
 	/** Available themes */
 	availableThemes: string[];
-	/** Provider/source ids shown in /model. */
+	/** Provider/source ids shown in /models. */
 	providers: string[];
 	/** Working directory for plugins tab */
 	cwd: string;

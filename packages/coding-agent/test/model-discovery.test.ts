@@ -1171,7 +1171,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("llama.cpp router preset refresh honors --ctx-size when the child hasn't been loaded yet", async () => {
-		// Reporter's workflow: `/model` picks a preset. On its very first switch
+		// Reporter's workflow: `/models` picks a preset. On its very first switch
 		// the child hasn't been spawned yet (meta.n_ctx absent), but the
 		// configured window is still what the user wants surfaced.
 		writeModelCache(

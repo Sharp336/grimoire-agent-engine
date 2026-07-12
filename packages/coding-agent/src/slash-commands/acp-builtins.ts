@@ -8,7 +8,7 @@ export type { AcpBuiltinSlashCommandResult } from "./types";
 /**
  * All names (primary + aliases) that are reserved by ACP builtins. Used to
  * filter out extension commands that would shadow a builtin or its alias at
- * dispatch time (e.g. `models` is an alias for `/model`, so an extension
+ * dispatch time (e.g. `/models` is the canonical builtin name, so an extension
  * registering `models` would appear in the palette but execute the builtin).
  */
 export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
@@ -19,8 +19,8 @@ export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
  * Whether an extension command named `name` would be captured by ACP builtin
  * dispatch before reaching the extension handler. Beyond exact name/alias
  * collisions, `parseSlashCommand` treats `:` as a name/args separator, so a
- * colon-namespaced name whose prefix is a handled builtin (e.g. `model:foo`)
- * executes the `/model` builtin with `foo` as args. Such names must not be
+ * colon-namespaced name whose prefix is a handled builtin (e.g. `models:foo`)
+ * executes the `/models` builtin with `foo` as args. Such names must not be
  * advertised to ACP clients.
  */
 export function isAcpBuiltinShadowedName(name: string): boolean {

@@ -51,7 +51,7 @@ describe("shouldSkipHistory — security filter for slash command history", () =
 		expect(shouldSkipHistory("/plan do something")).toBe(false);
 		expect(shouldSkipHistory("/settings")).toBe(false);
 		expect(shouldSkipHistory("/btw what is this")).toBe(false);
-		expect(shouldSkipHistory("/model claude")).toBe(false);
+		expect(shouldSkipHistory("/models claude")).toBe(false);
 	});
 
 	it("returns false for non-slash text", () => {

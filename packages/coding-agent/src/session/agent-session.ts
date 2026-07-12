@@ -7849,7 +7849,7 @@ export class AgentSession {
 				throw new Error(
 					"No model selected.\n\n" +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
-						"Then use /model to select a model.",
+						"Then use /models to select a model.",
 				);
 			}
 
@@ -9170,7 +9170,7 @@ export class AgentSession {
 
 		// Trust the recorded role only while its resolved model still IS the
 		// active model. A model switch through another surface (alt+m, retry
-		// fallback, /model) or a role re-configuration leaves the recorded role
+		// fallback, /models) or a role re-configuration leaves the recorded role
 		// pointing at a model the session no longer runs; cycling from that
 		// stale slot lands on the wrong neighbor and reads as a skipped entry.
 		const lastRole = this.sessionManager.getLastModelChangeRole();
@@ -10312,7 +10312,7 @@ export class AgentSession {
 						return stream.result();
 					},
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
-					// Honor the user's /model thinking selection on the handoff path.
+					// Honor the user's /models thinking selection on the handoff path.
 					// Clamped per-model inside generateHandoffFromContext via
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
@@ -12219,7 +12219,7 @@ export class AgentSession {
 						metadata: this.agent.metadataForProvider(candidate.provider),
 						convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						telemetry,
-						// Honor the user's /model thinking selection (incl. `off`) on
+						// Honor the user's /models thinking selection (incl. `off`) on
 						// the manual `/compact` path. Clamped per-model inside compact()
 						// via resolveCompactionEffort so unsupported-effort models
 						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
@@ -12926,7 +12926,7 @@ export class AgentSession {
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 									telemetry,
-									// Honor the user's /model thinking selection on the
+									// Honor the user's /models thinking selection on the
 									// auto-compaction path — the most-fired compaction
 									// site. Clamped per-model inside compact() via
 									// resolveCompactionEffort.

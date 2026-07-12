@@ -694,7 +694,7 @@ export class SelectorController {
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
 						this.ctx.showStatus(
-							`Session-only model: ${selector ?? model.id}. Use ${roleSelectorHint} or /model for roles.`,
+							`Session-only model: ${selector ?? model.id}. Use ${roleSelectorHint} or /models for roles.`,
 						);
 						done();
 					} catch (error) {

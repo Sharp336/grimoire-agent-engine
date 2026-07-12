@@ -633,7 +633,7 @@ describe("AgentSession role model thinking behavior", () => {
 		// Record a model_change for the "slow" role WITHOUT switching the
 		// active model — the session still runs the default model. This is the
 		// stale state left behind when the model is changed through another
-		// surface (alt+m, temporary model, /model) after a role cycle.
+		// surface (alt+m, temporary model, /models) after a role cycle.
 		session.sessionManager.appendModelChange(`${slowModel.provider}/${slowModel.id}`, "slow");
 		expect(session.sessionManager.getLastModelChangeRole()).toBe("slow");
 		expect(session.model?.id).toBe(defaultModel.id);

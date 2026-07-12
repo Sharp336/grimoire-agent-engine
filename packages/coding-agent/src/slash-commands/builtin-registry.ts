@@ -336,8 +336,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "model",
-		aliases: ["models"],
+		name: "models",
 		description: "Switch model for this session",
 		acpDescription: "Show current model selection",
 		getTuiAutocompleteDescription: runtime => {
@@ -353,7 +352,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				);
 				if (!match) {
 					return usage(
-						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
+						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /models.`,
 						runtime,
 					);
 				}

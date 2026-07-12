@@ -208,7 +208,7 @@ describe("internal-url-autocomplete", () => {
 
 		it("rejects non-url prefixes", () => {
 			expect(isInternalUrlPrefix("@src/foo")).toBe(false);
-			expect(isInternalUrlPrefix("/model")).toBe(false);
+			expect(isInternalUrlPrefix("/models")).toBe(false);
 		});
 	});
 
