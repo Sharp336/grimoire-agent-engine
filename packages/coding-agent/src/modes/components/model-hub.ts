@@ -1422,7 +1422,7 @@ export class ModelHubComponent implements Component {
 			this.#openRoleNameStrip();
 			return;
 		}
-		if (printable === "s") {
+		if (matchesKey(data, "ctrl+s")) {
 			this.#openProfileNameStrip();
 			return;
 		}
@@ -1921,7 +1921,7 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new · s save profile";
+			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new · ctrl+s save profile";
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
