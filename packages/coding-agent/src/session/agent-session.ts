@@ -6157,9 +6157,8 @@ export class AgentSession {
 		return new Proxy(tool, {
 			get(target, prop, receiver) {
 				if (prop !== "execute") return Reflect.get(target, prop, receiver);
-				const execute: AgentToolExecFn = function (toolCallId, args, signal, onUpdate, context) {
-					return target.execute(toolCallId, args, signal, onUpdate, context ?? getToolContext());
-				};
+				const execute: AgentToolExecFn = (toolCallId, args, signal, onUpdate, context) =>
+					target.execute(toolCallId, args, signal, onUpdate, context ?? getToolContext());
 				return execute;
 			},
 		});
