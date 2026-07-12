@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added model profiles: save and switch between named model configurations (role assignments + thinking level) with `/profiles save|switch|delete|list` or press `s` in the `/models` roles view.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

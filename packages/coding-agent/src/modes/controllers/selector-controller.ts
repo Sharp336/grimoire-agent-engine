@@ -14,6 +14,7 @@ import {
 } from "../../advisor";
 import { formatModelSelectorValue, resolveAdvisorRoleSelection } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
+import { saveProfile } from "../../config/profiles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -711,6 +712,14 @@ export class SelectorController {
 						this.ctx.showStatus(
 							order.length > 0 ? `Quick-switch cycle: ${order.join(" → ")}` : "Quick-switch cycle cleared",
 						);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onSaveProfile: name => {
+					try {
+						saveProfile(this.ctx.settings, name);
+						this.ctx.showStatus(`Profile saved: ${name}`);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}

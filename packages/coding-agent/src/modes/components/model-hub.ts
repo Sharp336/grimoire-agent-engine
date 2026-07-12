@@ -95,6 +95,8 @@ export interface ModelHubCallbacks {
 	onLoginRequest?: (providerId: string) => void;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
+	/** Save the current model configuration as a named profile. */
+	onSaveProfile?: (name: string) => void;
 	onCancel: () => void;
 }
 
@@ -143,6 +145,11 @@ type StripState =
 	| {
 			/** Footer text input naming a new custom role. */
 			kind: "roleName";
+			input: Input;
+	  }
+	| {
+			/** Footer text input naming a profile to save. */
+			kind: "profileName";
 			input: Input;
 	  };
 
@@ -925,7 +932,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "roleName") return;
+		if (!strip || strip.kind === "roleName" || strip.kind === "profileName") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1135,6 +1142,22 @@ export class ModelHubComponent implements Component {
 		this.#startAssign(name);
 	}
 
+	/** Open the footer name input that saves the current config as a profile. */
+	#openProfileNameStrip(): void {
+		this.#strip = { kind: "profileName", input: new Input() };
+	}
+
+	/** Validate and commit the profile name: save current model config. */
+	#submitProfileName(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "profileName") return;
+		const name = strip.input.getValue().trim();
+		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
+		this.#strip = null;
+		this.#chipRanges = [];
+		this.#callbacks.onSaveProfile?.(name);
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Input
 	// ═══════════════════════════════════════════════════════════════════════
@@ -1234,6 +1257,14 @@ export class ModelHubComponent implements Component {
 		if (strip.kind === "roleName") {
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 				this.#submitRoleName();
+				return;
+			}
+			strip.input.handleInput(data);
+			return;
+		}
+		if (strip.kind === "profileName") {
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+				this.#submitProfileName();
 				return;
 			}
 			strip.input.handleInput(data);
@@ -1391,6 +1422,10 @@ export class ModelHubComponent implements Component {
 			this.#openRoleNameStrip();
 			return;
 		}
+		if (printable === "s") {
+			this.#openProfileNameStrip();
+			return;
+		}
 		if (printable === "t") {
 			const assignment = role ? this.#roles[role] : undefined;
 			if (role && assignment) {
@@ -1431,7 +1466,7 @@ export class ModelHubComponent implements Component {
 		// Footer strip chips.
 		if (event.row === this.#footerRow && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName") {
+			if (event.leftClick && strip.kind !== "roleName" && strip.kind !== "profileName") {
 				for (const range of this.#chipRanges) {
 					if (event.col >= range.start && event.col < range.end) {
 						strip.index = range.index;
@@ -1854,6 +1889,9 @@ export class ModelHubComponent implements Component {
 			if (strip.kind === "roleName") {
 				return "Enter create + pick model · Esc cancel";
 			}
+			if (strip.kind === "profileName") {
+				return "Enter save · Esc cancel";
+			}
 			return strip.kind === "role"
 				? "←/→ choose · Enter assign/clear · Esc cancel"
 				: "←/→ thinking level · Enter apply · Esc keep";
@@ -1883,7 +1921,7 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new · s save profile";
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
@@ -1907,6 +1945,13 @@ export class ModelHubComponent implements Component {
 		if (strip.kind === "roleName") {
 			const label = theme.fg("accent", "New role name:");
 			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
+			const inputLine = strip.input.render(inputWidth)[0] ?? "";
+			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
+		}
+
+		if (strip.kind === "profileName") {
+			const label = theme.fg("accent", "Profile name:");
+			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("Profile name:") - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
 		}

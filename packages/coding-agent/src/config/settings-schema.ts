@@ -279,6 +279,12 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+/** Snapshot of model configuration captured by a named profile. */
+export interface ProfileSnapshot {
+	modelRoles: Record<string, string>;
+	defaultThinkingLevel: SettingValue<"defaultThinkingLevel">;
+}
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -287,6 +293,7 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["job", "irc"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
+const EMPTY_PROFILES_RECORD: Record<string, ProfileSnapshot> = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -480,6 +487,8 @@ export const SETTINGS_SCHEMA = {
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
+
+	profiles: { type: "record", default: EMPTY_PROFILES_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
@@ -5254,6 +5263,7 @@ export interface GroupTypeMap {
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
 	modelRoles: Record<string, string>;
+	profiles: Record<string, ProfileSnapshot>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
