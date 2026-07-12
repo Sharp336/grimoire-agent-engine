@@ -7,9 +7,20 @@
  * SQLite store, never POSTs the broker sentinel to an OpenAI token endpoint.
  */
 import * as os from "node:os";
-import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	type AuthStorage,
+	type FetchImpl,
+	type OAuthAccess,
+	createOpenAICodexCompatibilityMetadata,
+	withOAuthAccess,
+} from "@oh-my-pi/pi-ai";
 import { decodeJwt } from "@oh-my-pi/pi-ai/oauth/openai-codex";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	CODEX_CLIENT_VERSION,
+	OPENAI_HEADER_VALUES,
+	OPENAI_HEADERS,
+} from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, readSseJson } from "@oh-my-pi/pi-utils";
 import packageJson from "../../../../package.json" with { type: "json" };
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
@@ -22,6 +33,9 @@ const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
 const FALLBACK_MODEL = "gpt-5.5";
 const DEFAULT_MODEL_PREFERENCES = [
+	"gpt-5.6-luna",
+	"gpt-5.6-terra",
+	"gpt-5.6-sol",
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5-codex",
@@ -38,6 +52,35 @@ const DEFAULT_INSTRUCTIONS =
 function getConfiguredModel(): string | undefined {
 	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
 	return configuredModel ? configuredModel : undefined;
+}
+type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+function parseConfiguredModel(configuredModel: string | undefined): {
+	modelId?: string;
+	reasoningEffort: CodexReasoningEffort;
+} {
+	if (!configuredModel) return { reasoningEffort: "xhigh" };
+
+	const separator = configuredModel.indexOf(":");
+	if (separator === -1) return { modelId: configuredModel, reasoningEffort: "xhigh" };
+
+	const modelId = configuredModel.slice(0, separator);
+	const effort = configuredModel.slice(separator + 1);
+	if (
+		!modelId ||
+		configuredModel.indexOf(":", separator + 1) !== -1 ||
+		!["low", "medium", "high", "xhigh", "max"].includes(effort)
+	) {
+		throw new Error(`Unsupported Codex reasoning effort selector in model '${configuredModel}'`);
+	}
+	return { modelId, reasoningEffort: effort as CodexReasoningEffort };
+}
+
+function validateConfiguredModelEffort(modelId: string | undefined, reasoningEffort: CodexReasoningEffort): void {
+	if (!modelId) return;
+	const model = getBundledModels("openai-codex").find(candidate => candidate.id === modelId);
+	if (!model?.thinking || model.thinking.efforts.includes(reasoningEffort)) return;
+	throw new Error(`Unsupported Codex reasoning effort '${reasoningEffort}' for model '${modelId}'`);
 }
 
 function getDefaultModelCandidates(): string[] {
@@ -298,16 +341,39 @@ async function findCodexAuth(
 /**
  * Builds HTTP headers for Codex API requests.
  */
-function buildCodexHeaders(accessToken: string, accountId: string): Record<string, string> {
+function buildCodexHeaders(
+	accessToken: string,
+	accountId: string,
+	useResponsesLite: boolean,
+	compatibilityHeaders?: Record<string, string>,
+): Record<string, string> {
 	return {
 		Authorization: `Bearer ${accessToken}`,
-		"chatgpt-account-id": accountId,
-		"OpenAI-Beta": "responses=experimental",
-		originator: "pi",
+		[OPENAI_HEADERS.ACCOUNT_ID]: accountId,
+		[OPENAI_HEADERS.BETA]: OPENAI_HEADER_VALUES.BETA_RESPONSES,
+		[OPENAI_HEADERS.ORIGINATOR]: "codex_cli_rs",
+		[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
+		...(useResponsesLite ? { [OPENAI_HEADERS.RESPONSES_LITE]: "true" } : {}),
+		...(compatibilityHeaders ?? {}),
 		"User-Agent": `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`,
 		Accept: "text/event-stream",
 		"Content-Type": "application/json",
 	};
+}
+
+function applyResponsesLiteShape(body: Record<string, unknown>): void {
+	const input = Array.isArray(body.input) ? body.input : [];
+	body.parallel_tool_calls = false;
+	body.input = [
+		{ type: "additional_tools", role: "developer", tools: Array.isArray(body.tools) ? body.tools : [] },
+		...(typeof body.instructions === "string" && body.instructions.length > 0
+			? [{ type: "message", role: "developer", content: [{ type: "input_text", text: body.instructions }] }]
+			: []),
+		...input,
+	];
+	delete body.tools;
+	delete body.instructions;
+	delete body.tool_choice;
 }
 
 /**
@@ -324,6 +390,7 @@ async function callCodexSearch(
 		systemPrompt?: string;
 		searchContextSize?: "low" | "medium" | "high";
 		modelId: string;
+		reasoningEffort: CodexReasoningEffort;
 		fetch?: FetchImpl;
 	},
 ): Promise<{
@@ -334,10 +401,21 @@ async function callCodexSearch(
 	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 }> {
 	const url = `${CODEX_BASE_URL}${CODEX_RESPONSES_PATH}`;
-	const headers = buildCodexHeaders(auth.accessToken, auth.accountId);
-
 	const requestedModel = options.modelId;
-
+	const useResponsesLite = getBundledModels("openai-codex").find(model => model.id === requestedModel)?.useResponsesLite === true;
+	const compatibilityMetadata = useResponsesLite
+		? createOpenAICodexCompatibilityMetadata({
+				requestKind: "turn",
+				startNewTurn: true,
+				includeInstallationHeader: true,
+			})
+		: undefined;
+	const headers = buildCodexHeaders(
+		auth.accessToken,
+		auth.accountId,
+		useResponsesLite,
+		compatibilityMetadata?.headers,
+	);
 	const body: Record<string, unknown> = {
 		model: requestedModel,
 		stream: true,
@@ -358,6 +436,14 @@ async function callCodexSearch(
 		tool_choice: { type: "web_search" },
 		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
 	};
+	if (useResponsesLite) {
+		body.reasoning = { effort: options.reasoningEffort, summary: "detailed", context: "all_turns" };
+		body.text = { verbosity: "high" };
+		body.include = ["reasoning.encrypted_content"];
+		body.stream_options = { reasoning_summary_delivery: "sequential_cutoff" };
+		if (compatibilityMetadata) body.client_metadata = compatibilityMetadata.clientMetadata;
+		applyResponsesLiteShape(body);
+	}
 
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(url, {
@@ -503,7 +589,9 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 	}
 
 	const configuredModel = getConfiguredModel();
-	const modelCandidates = configuredModel ? [configuredModel] : getDefaultModelCandidates();
+	const parsedConfiguredModel = parseConfiguredModel(configuredModel);
+	const modelCandidates = parsedConfiguredModel.modelId ? [parsedConfiguredModel.modelId] : getDefaultModelCandidates();
+	validateConfiguredModelEffort(parsedConfiguredModel.modelId, parsedConfiguredModel.reasoningEffort);
 
 	const result = await withOAuthAccess(
 		params.authStorage,
@@ -529,6 +617,7 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 						systemPrompt: params.systemPrompt,
 						searchContextSize: "high",
 						modelId,
+						reasoningEffort: parsedConfiguredModel.reasoningEffort,
 						fetch: params.fetch,
 					});
 				} catch (error) {
