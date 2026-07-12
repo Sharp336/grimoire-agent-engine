@@ -82,8 +82,8 @@ export function wrapShellLineForClientTerminal(
  */
 export const CRITICAL_BASH_PATTERNS = [
 	// Recursive destruction.
-	/\brm\s+-[a-z]*[rRfF][a-z]*\s+\//i, // rm -rf /, rm -fr /, rm -r /, rm -f /…
-	/\bsudo\s+rm\b/i, // any `sudo rm`.
+	/\brm\s+(?:(?:-[a-z]*[rRfF][a-z]*|--(?:recursive|force)|--)\s+)+\//i, // destructive short/long options, optional `--`, absolute target.
+	/\bsudo(?:\s+(?:-[^\s]+|command|env|[A-Za-z_][A-Za-z0-9_]*=\S+))*\s+rm\b/i, // `sudo rm`, including command/env wrappers and sudo options.
 	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
 	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
 	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.

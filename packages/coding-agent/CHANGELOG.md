@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed critical bash approval missing destructive `rm` when long options or an intervening `--` precede an absolute path (e.g. `rm -rf -- /`, `rm --recursive --force /`); those forms still force a prompt when `tools.approval.bash` is `allow`
+
 ## [16.4.6] - 2026-07-12
 
 ### Added
