@@ -797,9 +797,17 @@ impl Job {
 
 		let mut result = ExecutionResult::success();
 
-		while let Some(task) = self.tasks.back_mut() {
-			match task.wait(wait_for_terminate).await? {
+		while !self.tasks.is_empty() {
+			let index = self.tasks.len() - 1;
+			let is_pipeline_result = self.is_unconsumed_pipeline_task(index);
+			match self.tasks[index].wait(wait_for_terminate).await? {
 				JobTaskWaitResult::Completed(execution_result) => {
+					if is_pipeline_result {
+						self.completed_result = Some(Ok(ExecutionResult {
+							next_control_flow: execution_result.next_control_flow,
+							exit_code: execution_result.exit_code,
+						}));
+					}
 					result = execution_result;
 					self.tasks.pop_back();
 				},
@@ -1347,6 +1355,27 @@ mod tests {
 
 		assert_eq!(job.representative_pid(), Some(second_pid));
 		assert_eq!(job.process_group_id(), Some(second_pid));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn job_wait_preserves_final_status_after_nonfinal_pid_wait() {
+		let (_, first_task) = spawn_shell_task("sleep 2; exit 23");
+		let (middle_pid, middle_task) = spawn_exit_task(0);
+		let (_, final_task) = spawn_shell_task("sleep 1; exit 37");
+		let mut job = Job::new(
+			[first_task, middle_task, final_task],
+			"first | middle | final".into(),
+			JobState::Running,
+		);
+
+		let middle_result = job
+			.wait_for_process(middle_pid, false)
+			.await
+			.expect("wait middle child");
+		assert_eq!(u8::from(&middle_result.exit_code), 0);
+		let job_result = job.wait().await.expect("wait remaining pipeline");
+		assert_eq!(u8::from(&job_result.exit_code), 37);
 	}
 
 	#[cfg(unix)]

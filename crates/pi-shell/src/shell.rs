@@ -1459,6 +1459,9 @@ fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
+		if matches!(job.state, JobState::Done) {
+			continue;
+		}
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
