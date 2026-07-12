@@ -14,6 +14,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
@@ -44,14 +45,14 @@ function getLastAssistantMessage(session: AgentSession): AssistantMessage {
 	return lastMessage;
 }
 
-function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Agent {
+function createFallbackAgent(primaryModel: Model, requestedModels: string[], systemPrompt = ["Test"]): Agent {
 	const mock = createMockModel();
 	let primaryAttempts = 0;
 	return new Agent({
 		getApiKey: model => `${model.provider}-test-key`,
 		initialState: {
 			model: primaryModel,
-			systemPrompt: ["Test"],
+			systemPrompt,
 			tools: [],
 			messages: [],
 		},
@@ -84,6 +85,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
 		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.setRuntimeApiKey("openai-codex", "openai-codex-test-key");
 		authStorage.setRuntimeApiKey("google", "google-test-key");
 		authStorage.setRuntimeApiKey("google-vertex", "google-vertex-test-key");
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
@@ -323,11 +325,36 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("falls back to the chain when credential rotation exhausts the retry budget", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-luna");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
+		const renderPrompt = async (model: Model): Promise<string[]> => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir.path(),
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["task"],
+				workspaceTree: {
+					rootPath: tempDir.path(),
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				activeRepoContext: null,
+				model: `${model.provider}/${model.id}`,
+				includeModelInPrompt: false,
+				eagerTasks: true,
+				taskBatch: true,
+				taskMaxConcurrency: 12,
+			});
+			return systemPrompt;
+		};
+		const initialSystemPrompt = await renderPrompt(primaryModel);
+		expect(initialSystemPrompt.join("\n\n")).toContain("Proactive multi-agent delegation is active");
 
 		const requestedModels: string[] = [];
 		const mock = createMockModel();
@@ -335,7 +362,7 @@ describe("AgentSession retry fallback", () => {
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
 				model: primaryModel,
-				systemPrompt: ["Test"],
+				systemPrompt: initialSystemPrompt,
 				tools: [],
 				messages: [],
 			},
@@ -369,6 +396,7 @@ describe("AgentSession retry fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			rebuildSystemPrompt: async () => ({ systemPrompt: await renderPrompt(session?.model ?? primaryModel) }),
 		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
@@ -389,6 +417,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryStartEvents.map(event => event.attempt)).toEqual([1, 2, 1]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		const fallbackPrompt = session.agent.state.systemPrompt.join("\n\n");
+		expect(fallbackPrompt).toContain("Delegation is preferred here.");
+		expect(fallbackPrompt).not.toContain("Proactive multi-agent delegation is active");
+		expect(fallbackPrompt).not.toContain("Keep ownership of the overall task");
 	});
 
 	it("applies a provider-wildcard chain to any model of that provider", async () => {
@@ -1632,14 +1664,39 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-luna");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
+		const renderPrompt = async (model: Model): Promise<string[]> => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir.path(),
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["task"],
+				workspaceTree: {
+					rootPath: tempDir.path(),
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				activeRepoContext: null,
+				model: `${model.provider}/${model.id}`,
+				includeModelInPrompt: false,
+				eagerTasks: true,
+				taskBatch: true,
+				taskMaxConcurrency: 12,
+			});
+			return systemPrompt;
+		};
+		const initialSystemPrompt = await renderPrompt(primaryModel);
+		expect(initialSystemPrompt.join("\n\n")).toContain("Proactive multi-agent delegation is active");
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, initialSystemPrompt);
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -1656,6 +1713,7 @@ describe("AgentSession retry fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			rebuildSystemPrompt: async () => ({ systemPrompt: await renderPrompt(session?.model ?? primaryModel) }),
 		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -1678,6 +1736,9 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
+		const fallbackPrompt = session.agent.state.systemPrompt.join("\n\n");
+		expect(fallbackPrompt).toContain("Delegation is preferred here.");
+		expect(fallbackPrompt).not.toContain("Proactive multi-agent delegation is active");
 
 		now += 240;
 		await session.prompt("Third prompt should lazily revert to primary");
@@ -1690,6 +1751,9 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
+		const restoredPrompt = session.agent.state.systemPrompt.join("\n\n");
+		expect(restoredPrompt).toContain("Proactive multi-agent delegation is active");
+		expect(restoredPrompt).toContain("Keep ownership of the overall task");
 	});
 
 	it("restores routed fallback primaries after cooldown expiry", async () => {

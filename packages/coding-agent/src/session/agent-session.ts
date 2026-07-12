@@ -13757,6 +13757,7 @@ export class AgentSession {
 		currentSelector: string,
 		options?: { pinFallback?: boolean },
 	): Promise<void> {
+		const previousEditMode = this.#resolveActiveEditMode();
 		const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
 		const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -13776,6 +13777,7 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.setThinkingLevel(nextThinkingLevel);
+		await this.#syncAfterModelChange(previousEditMode);
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,
@@ -13909,10 +13911,12 @@ export class AgentSession {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
+		const previousEditMode = this.#resolveActiveEditMode();
 		this.#setModelWithProviderSessionReset(primaryModel);
 		this.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.setThinkingLevel(thinkingToApply);
+		await this.#syncAfterModelChange(previousEditMode);
 		this.#clearActiveRetryFallback();
 	}
 
