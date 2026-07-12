@@ -1975,8 +1975,8 @@ export const SETTINGS_SCHEMA = {
 			description: "Fixed token limit for context maintenance; overrides percentage if set",
 			options: [
 				{ value: "default", label: "Default", description: "Use percentage-based threshold" },
-				{ value: "25000", label: "25K tokens", description: "Quarter of a 200K window" },
-				{ value: "50000", label: "50K tokens", description: "Half of a 200K window" },
+				{ value: "25000", label: "25K tokens", description: "Eighth of a 200K window" },
+				{ value: "50000", label: "50K tokens", description: "Quarter of a 200K window" },
 				{ value: "100000", label: "100K tokens", description: "Half of a 200K window" },
 				{ value: "150000", label: "150K tokens", description: "Three-quarters of a 200K window" },
 				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
