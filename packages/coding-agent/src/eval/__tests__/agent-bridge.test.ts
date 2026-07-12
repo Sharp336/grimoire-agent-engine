@@ -16,6 +16,7 @@ import { AgentOutputManager } from "../../task/output-manager";
 import type { AgentDefinition, AgentProgress, SingleResult } from "../../task/types";
 import type { ToolSession } from "../../tools";
 import type { SchemaViolationResult } from "../../tools/output-schema-validator";
+import { ToolError } from "../../tools/tool-errors";
 import { EVAL_AGENT_MAX_DEPTH, runEvalAgent } from "../agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { IdleTimeout } from "../idle-timeout";
@@ -374,6 +375,29 @@ describe("runEvalAgent", () => {
 			details: { structured: true, agent: "task" },
 			schemaViolation: violation,
 		});
+	});
+
+	it("keeps schema validation failures on the generic ToolError path in permissive mode", async () => {
+		mockAgents();
+		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
+		const violation: SchemaViolationResult = {
+			error: "schema_violation",
+			message: "result.data.accepted must be boolean",
+			missingRequired: [],
+			data: '{"accepted":"no"}',
+		};
+		const runSpy = vi
+			.spyOn(taskExecutor, "runSubprocess")
+			.mockImplementation(async options => singleResult(options, { exitCode: 1, failure: violation }));
+
+		await expect(runEvalAgent({ prompt: "default", schema }, { session: makeSession() })).rejects.toBeInstanceOf(
+			ToolError,
+		);
+		await expect(
+			runEvalAgent({ prompt: "explicit", schema, schemaMode: "permissive" }, { session: makeSession() }),
+		).rejects.toBeInstanceOf(ToolError);
+
+		expect(runSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("forces LSP off for bridge subagents even when task.enableLsp is on", async () => {

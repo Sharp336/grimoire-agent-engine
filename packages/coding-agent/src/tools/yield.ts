@@ -443,6 +443,12 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				schemaValidationOverridden = true;
 			}
 		}
+		// A successful data-bearing yield ends the current correction streak. A later,
+		// independent section must receive the full retry budget; an overridden
+		// invalid payload and last-turn extraction are deliberately not resets.
+		if (status === "success" && !useLastTurn && !schemaValidationOverridden) {
+			this.#schemaValidationFailures = 0;
+		}
 
 		this.#emptyResultFailures = 0;
 		const responseText =

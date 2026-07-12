@@ -523,8 +523,11 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					},
 				});
 			})();
-			const strictSchemaFailure = result.failure !== undefined;
-			if (!strictSchemaFailure && (result.exitCode !== 0 || result.error || result.aborted)) {
+			const strictSchemaFailure = schemaMode === "strict" && result.failure !== undefined;
+			if (
+				!strictSchemaFailure &&
+				(result.failure !== undefined || result.exitCode !== 0 || result.error || result.aborted)
+			) {
 				const failureMessage = buildSubagentFailureMessage(agentName, result);
 				const recoveryHint = isIsolated ? await buildIsolationRecoveryHint(result, artifactsDir) : "";
 				throw new ToolError(`${failureMessage}${recoveryHint}`);

@@ -1294,6 +1294,60 @@ describe("YieldTool", () => {
 		expect(terminal.details?.schemaOverridden).toBeUndefined();
 	});
 
+	it("resets strict correction retries after a valid terminal or incremental yield", async () => {
+		const validYields = [
+			{ name: "terminal", params: { result: { data: { answer: "done" } } } },
+			{ name: "incremental", params: { type: ["answer"], result: { data: "done" } } },
+		];
+		const retryHints = [
+			"2 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"1 correction attempt(s) remain; after that, the next invalid submission fails closed.",
+			"this is the final correction attempt; the next invalid submission fails closed.",
+		];
+
+		for (const validYield of validYields) {
+			const tool = new YieldTool(
+				createSession({
+					schemaMode: "strict",
+					outputSchema: {
+						type: "object",
+						properties: { answer: { type: "string", minLength: 3 } },
+						required: ["answer"],
+						additionalProperties: false,
+					},
+				}),
+			);
+
+			for (let attempt = 1; attempt <= 2; attempt++) {
+				await expect(
+					tool.execute(`call-${validYield.name}-before-${attempt}`, {
+						result: { data: { answer: "no" } },
+					} as never),
+				).rejects.toThrow(retryHints[attempt - 1]);
+			}
+
+			const accepted = await tool.execute(`call-${validYield.name}-valid`, validYield.params as never);
+			expect(accepted.details).toMatchObject({ status: "success" });
+
+			for (const [index, hint] of retryHints.entries()) {
+				await expect(
+					tool.execute(`call-${validYield.name}-after-${index + 1}`, {
+						result: { data: { answer: "no" } },
+					} as never),
+				).rejects.toThrow(hint);
+			}
+
+			const terminal = await tool.execute(`call-${validYield.name}-after-4`, {
+				result: { data: { answer: "no" } },
+			} as never);
+			expect(terminal.details).toMatchObject({
+				status: "schema_violation",
+				schemaViolation: { error: "schema_violation" },
+			});
+			expect(terminal.details?.schemaOverridden).toBeUndefined();
+		}
+	});
+
 	it("reports section-level required fields after strict incremental retries are exhausted", async () => {
 		const tool = new YieldTool(
 			createSession({
