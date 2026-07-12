@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed the temporary model selector (`Alt+P` / `/switch` / `/model --temporary`) ignoring custom role-specific thinking level overrides from `config.yml` (e.g. `:high`), reverting to the model's native default level instead
 - Improved search reliability for Perplexity provider by forcing retrieval for all queries
 - Fixed JS eval cells losing top-level `function` and `var` declarations across cells when the defining cell contained top-level `await` — the async wrapper scoped them to the cell's IIFE instead of publishing them to the worker global
 

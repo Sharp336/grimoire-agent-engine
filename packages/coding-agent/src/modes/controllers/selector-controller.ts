@@ -12,8 +12,13 @@ import {
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
 } from "../../advisor";
-import { formatModelSelectorValue, resolveAdvisorRoleSelection } from "../../config/model-resolver";
-import { getRoleInfo } from "../../config/model-roles";
+import {
+	formatModelSelectorValue,
+	getModelMatchPreferences,
+	resolveAdvisorRoleSelection,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
+import { getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -688,8 +693,32 @@ export class SelectorController {
 				},
 				onPick: async (model, selector) => {
 					try {
+						// Resolve configured thinking level from settings roles if it matches this model
+						const availableModels = this.ctx.session.modelRegistry.getAvailable();
+						const matchPreferences = getModelMatchPreferences(this.ctx.settings);
+						let resolvedThinkingLevel: ConfiguredThinkingLevel | undefined;
+
+						for (const role of MODEL_ROLE_IDS) {
+							const roleModelStr = this.ctx.settings.getModelRole(role);
+							if (!roleModelStr) continue;
+							const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
+								settings: this.ctx.settings,
+								matchPreferences,
+							});
+							if (
+								resolved.model &&
+								resolved.model.provider === model.provider &&
+								resolved.model.id === model.id
+							) {
+								if (resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined) {
+									resolvedThinkingLevel = resolved.thinkingLevel;
+									break;
+								}
+							}
+						}
+
 						// Session-only: update agent state but don't persist the model to settings.
-						await this.ctx.session.setModelTemporary(model);
+						await this.ctx.session.setModelTemporary(model, resolvedThinkingLevel);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
