@@ -1492,6 +1492,15 @@ export class SelectorController {
 							// Settings applied, model switch failed
 						}
 					}
+					if (result.needsReset) {
+						try {
+							await this.ctx.session.resetToDefaultModel?.();
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+						} catch {
+							// Non-critical — settings are still applied
+						}
+					}
 					this.ctx.statusLine.invalidate();
 					this.ctx.showStatus(`Switched to profile: ${name}`);
 				},

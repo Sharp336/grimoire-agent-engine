@@ -70,6 +70,9 @@ export interface ProfileSwitchResult {
 	ok: boolean;
 	model?: Model;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** True when the profile has no explicit default role — the caller should
+	 *  reset the session to its automatic/default model. */
+	needsReset?: boolean;
 }
 
 /**
@@ -88,7 +91,7 @@ export function switchProfileAndResolve(
 	const ok = switchProfile(settings, name);
 	if (!ok) return { ok: false };
 	const defaultRole = settings.getModelRole("default");
-	if (!defaultRole) return { ok: true };
+	if (!defaultRole) return { ok: true, needsReset: true };
 	const resolved = resolveModelRoleValue(defaultRole, availableModels as Model[], {
 		settings,
 	});

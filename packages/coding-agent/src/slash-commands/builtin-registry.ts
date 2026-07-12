@@ -439,6 +439,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 						// Settings applied, model switch failed
 					}
 				}
+				if (result.needsReset) {
+					try {
+						await runtime.session.resetToDefaultModel?.();
+					} catch {
+						// Non-critical — settings are still applied
+					}
+				}
 				await runtime.output(`Switched to profile: ${name}`);
 				await runtime.notifyTitleChanged?.();
 				await runtime.notifyConfigChanged?.();
@@ -508,6 +515,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 						runtime.ctx.updateEditorBorderColor();
 					} catch {
 						// Settings applied, model switch failed
+					}
+				}
+				if (result.needsReset) {
+					try {
+						await runtime.ctx.session.resetToDefaultModel?.();
+						runtime.ctx.statusLine.invalidate();
+						runtime.ctx.updateEditorBorderColor();
+					} catch {
+						// Non-critical — settings are still applied
 					}
 				}
 				runtime.ctx.statusLine.invalidate();
