@@ -14,6 +14,7 @@ import {
 } from "../../advisor";
 import { formatModelSelectorValue, resolveAdvisorRoleSelection } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
+import { getProfileNames, saveProfile, switchProfileAndResolve } from "../../config/profiles";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -70,6 +71,7 @@ import { LogoutAccountSelectorComponent } from "../components/logout-account-sel
 import { ModelHubComponent, type ModelHubMode } from "../components/model-hub";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
+import { ProfileSelectorComponent } from "../components/profile-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -711,6 +713,14 @@ export class SelectorController {
 						this.ctx.showStatus(
 							order.length > 0 ? `Quick-switch cycle: ${order.join(" → ")}` : "Quick-switch cycle cleared",
 						);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onSaveProfile: name => {
+					try {
+						saveProfile(this.ctx.settings, name);
+						this.ctx.showStatus(`Profile saved: ${name}`);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -1455,6 +1465,54 @@ export class SelectorController {
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
 			return { component: selector, focus: selector };
+		});
+	}
+
+	showProfileSelector(): void {
+		const names = getProfileNames(this.ctx.settings);
+		this.showSelector(done => {
+			const selector = new ProfileSelectorComponent(names, {
+				onPick: async name => {
+					done();
+					const availableModels = this.ctx.session.getAvailableModels?.() ?? [];
+					const result = switchProfileAndResolve(this.ctx.settings, name, availableModels);
+					if (!result.ok) {
+						this.ctx.showError(`Profile not found: ${name}`);
+						return;
+					}
+					if (result.unresolvedDefault) {
+						this.ctx.showWarning(`Profile "${name}" default unavailable — using automatic selection`);
+					}
+					if (result.model) {
+						try {
+							await this.ctx.session.setModel(result.model);
+							if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+								this.ctx.session.setThinkingLevel(result.thinkingLevel);
+							}
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+						} catch {
+							// Settings applied, model switch failed
+						}
+					}
+					if (result.needsReset) {
+						try {
+							await this.ctx.session.resetToDefaultModel?.();
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+						} catch {
+							// Non-critical — settings are still applied
+						}
+					}
+					this.ctx.statusLine.invalidate();
+					this.ctx.showStatus(`Switched to profile: ${name}`);
+				},
+				onCancel: () => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			});
+			return { component: selector, focus: selector.getSelectList() };
 		});
 	}
 

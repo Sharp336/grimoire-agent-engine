@@ -1,11 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { deleteProfile, getProfileNames, saveProfile, switchProfileAndResolve } from "../config/profiles";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -377,6 +379,178 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "profiles",
+		description: "Manage model profiles (save, switch, delete, list)",
+		acpDescription: "Manage model profiles",
+		acpInputHint: "<subcommand>",
+		inlineHint: "<subcommand>",
+		subcommands: [
+			{ name: "save", description: "Save current model configuration as a profile", usage: "<name>" },
+			{ name: "switch", description: "Switch to a saved profile", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved profile", usage: "<name>" },
+			{ name: "list", description: "List all saved profiles" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const names = getProfileNames(runtime.ctx.settings);
+			return names.length > 0 ? `Profiles: ${names.length} saved` : "Profiles: none saved";
+		},
+		handle: async (command, runtime) => {
+			const [sub, ...rest] = command.args.trim().split(/\s+/);
+			const name = rest.join(" ").trim();
+
+			if (!sub || sub === "list") {
+				const names = getProfileNames(runtime.settings);
+				if (names.length === 0) {
+					await runtime.output("No profiles saved. Use /profiles save <name> to create one.");
+				} else {
+					const lines = names.map(n => `  • ${n}`);
+					await runtime.output(`Saved profiles:\n${lines.join("\n")}`);
+				}
+				return commandConsumed();
+			}
+
+			if (sub === "save") {
+				if (!name) return usage("Usage: /profiles save <name>", runtime);
+				saveProfile(runtime.settings, name);
+				await runtime.output(`Profile saved: ${name}`);
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+
+			if (sub === "switch") {
+				if (!name) return usage("Usage: /profiles switch <name>", runtime);
+				const availableModels = runtime.session.getAvailableModels?.() ?? [];
+				const result = switchProfileAndResolve(runtime.settings, name, availableModels);
+				if (!result.ok) {
+					await runtime.output(`Profile not found: ${name}`);
+					return commandConsumed();
+				}
+				if (result.unresolvedDefault) {
+					await runtime.output(
+						`Warning: profile "${name}" default model is unavailable — using automatic selection.`,
+					);
+				}
+				if (result.model) {
+					try {
+						await runtime.session.setModel(result.model);
+						if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+							runtime.session.setThinkingLevel(result.thinkingLevel);
+						}
+					} catch {
+						// Settings applied, model switch failed
+					}
+				}
+				if (result.needsReset) {
+					try {
+						await runtime.session.resetToDefaultModel?.();
+					} catch {
+						// Non-critical — settings are still applied
+					}
+				}
+				await runtime.output(`Switched to profile: ${name}`);
+				await runtime.notifyTitleChanged?.();
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+
+			if (sub === "delete") {
+				if (!name) return usage("Usage: /profiles delete <name>", runtime);
+				const ok = deleteProfile(runtime.settings, name);
+				await runtime.output(ok ? `Profile deleted: ${name}` : `Profile not found: ${name}`);
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			}
+
+			return usage("Usage: /profiles <save|switch|delete|list> [name]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const [sub, ...rest] = command.args.trim().split(/\s+/);
+			const name = rest.join(" ").trim();
+
+			runtime.ctx.editor.setText("");
+
+			if (!sub) {
+				// No args — open the interactive profile picker
+				runtime.ctx.showProfileSelector();
+				return commandConsumed();
+			}
+
+			if (sub === "list") {
+				const names = getProfileNames(runtime.ctx.settings);
+				if (names.length === 0) {
+					runtime.ctx.showStatus("No profiles saved. Use /profiles save <name> to create one.");
+				} else {
+					runtime.ctx.showStatus(`Saved profiles: ${names.join(", ")}`);
+				}
+				return commandConsumed();
+			}
+
+			if (sub === "save") {
+				if (!name) {
+					runtime.ctx.showWarning("Usage: /profiles save <name>");
+					return commandConsumed();
+				}
+				saveProfile(runtime.ctx.settings, name);
+				runtime.ctx.showStatus(`Profile saved: ${name}`);
+				return commandConsumed();
+			}
+
+			if (sub === "switch") {
+				if (!name) {
+					runtime.ctx.showWarning("Usage: /profiles switch <name>");
+					return commandConsumed();
+				}
+				const availableModels = runtime.ctx.session.getAvailableModels?.() ?? [];
+				const result = switchProfileAndResolve(runtime.ctx.settings, name, availableModels);
+				if (!result.ok) {
+					runtime.ctx.showWarning(`Profile not found: ${name}`);
+					return commandConsumed();
+				}
+				if (result.unresolvedDefault) {
+					runtime.ctx.showWarning(`Profile "${name}" default unavailable — using automatic selection`);
+				}
+				if (result.model) {
+					try {
+						await runtime.ctx.session.setModel(result.model);
+						if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
+							runtime.ctx.session.setThinkingLevel(result.thinkingLevel);
+						}
+						runtime.ctx.statusLine.invalidate();
+						runtime.ctx.updateEditorBorderColor();
+					} catch {
+						// Settings applied, model switch failed
+					}
+				}
+				if (result.needsReset) {
+					try {
+						await runtime.ctx.session.resetToDefaultModel?.();
+						runtime.ctx.statusLine.invalidate();
+						runtime.ctx.updateEditorBorderColor();
+					} catch {
+						// Non-critical — settings are still applied
+					}
+				}
+				runtime.ctx.statusLine.invalidate();
+				runtime.ctx.showStatus(`Switched to profile: ${name}`);
+				return commandConsumed();
+			}
+
+			if (sub === "delete") {
+				if (!name) {
+					runtime.ctx.showWarning("Usage: /profiles delete <name>");
+					return commandConsumed();
+				}
+				const ok = deleteProfile(runtime.ctx.settings, name);
+				runtime.ctx.showStatus(ok ? `Profile deleted: ${name}` : `Profile not found: ${name}`);
+				return commandConsumed();
+			}
+
+			runtime.ctx.showWarning("Usage: /profiles <save|switch|delete|list> [name]");
+			return commandConsumed();
 		},
 	},
 	{

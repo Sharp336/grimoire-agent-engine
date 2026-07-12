@@ -4139,6 +4139,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
+	showProfileSelector(): void {
+		this.#selectorController.showProfileSelector();
+	}
+
 	showAgentHub(options?: { requireContent?: boolean }): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}

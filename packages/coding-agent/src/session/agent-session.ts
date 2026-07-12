@@ -177,6 +177,7 @@ import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelString,
+	pickDefaultAvailableModel,
 	type ResolvedModelRoleValue,
 	resolveAdvisorRoleSelection,
 	resolveModelOverride,
@@ -9306,6 +9307,20 @@ export class AgentSession {
 		const patterns = this.settings.get("enabledModels");
 		if (!patterns || patterns.length === 0) return all;
 		return filterAvailableModelsByEnabledPatterns(all, patterns);
+	}
+
+	/**
+	 * Reset the live model to the automatic default — the first authed model
+	 * chosen by {@link pickDefaultAvailableModel}, mirroring startup resolution
+	 * when no `modelRoles.default` is set. Used when switching to a profile
+	 * that has no explicit default role.
+	 * @throws Error if no model with configured auth is available
+	 */
+	async resetToDefaultModel(): Promise<void> {
+		const candidates = this.getAvailableModels().filter(m => this.#modelRegistry.hasConfiguredAuth(m));
+		const target = pickDefaultAvailableModel(candidates);
+		if (!target) throw new Error("No model with configured credentials available for default selection");
+		await this.setModel(target, "default");
 	}
 
 	// =========================================================================
