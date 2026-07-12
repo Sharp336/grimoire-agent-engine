@@ -17491,6 +17491,114 @@
 		}
 	},
 	"electronhub": {
+		"gemma-4-31b-it:dev": {
+			"id": "gemma-4-31b-it:dev",
+			"name": "Gemma 4 31B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			}
+		},
+		"glm-5.2:dev": {
+			"id": "glm-5.2:dev",
+			"name": "GLM 5.2 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "none",
+					"low": "high",
+					"medium": "high",
+					"high": "high",
+					"xhigh": "max"
+				}
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"thinkingFormat": "zai",
+				"reasoningDisableMode": "omit",
+				"reasoningContentField": "reasoning_content"
+			}
+		},
+		"gpt-oss-120b:dev": {
+			"id": "gpt-oss-120b:dev",
+			"name": "GPT OSS 120B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			}
+		},
 		"kimi-k2.6:dev": {
 			"id": "kimi-k2.6:dev",
 			"name": "Kimi K2.6 (DevPass)",
@@ -17509,10 +17617,6 @@
 			},
 			"contextWindow": 240000,
 			"maxTokens": null,
-			"compat": {
-				"supportsStore": false,
-				"supportsDeveloperRole": false
-			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -17522,6 +17626,10 @@
 					"high",
 					"xhigh"
 				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
 			}
 		},
 		"minimax-m2.7:dev": {
@@ -17542,10 +17650,6 @@
 			},
 			"contextWindow": 180000,
 			"maxTokens": null,
-			"compat": {
-				"supportsStore": false,
-				"supportsDeveloperRole": false
-			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -17554,6 +17658,43 @@
 					"high"
 				],
 				"requiresEffort": true
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
+			}
+		},
+		"qwen3.6-27b:dev": {
+			"id": "qwen3.6-27b:dev",
+			"name": "Qwen3.6 27B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false
 			}
 		}
 	},

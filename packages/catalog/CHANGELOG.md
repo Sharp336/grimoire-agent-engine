@@ -103,7 +103,7 @@
 - Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
 ### Added
 
-- Added ElectronHub Coding Plan (DevPass) catalog support with bundled `kimi-k2.6:dev` and `minimax-m2.7:dev` models plus runtime discovery filtered to DevPass-only models.
+- Added ElectronHub Coding Plan (DevPass) catalog support with all six live `:dev` models (`kimi-k2.6:dev`, `minimax-m2.7:dev`, `gpt-oss-120b:dev`, `glm-5.2:dev`, `gemma-4-31b-it:dev`, `qwen3.6-27b:dev`) bundled statically, plus runtime discovery filtered to DevPass-only models (`:dev` suffix, `metadata.devpass_only`, or `pricing.plan === "devpass"`) and a fixture-backed contract test asserting the static seed matches a live `/v1/models` snapshot.
 
 ## [16.3.11] - 2026-07-06
 

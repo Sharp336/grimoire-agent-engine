@@ -2,6 +2,16 @@ import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import ELECTRONHUB_LIVE_DEVPASS from "./fixtures/electronhub-devpass-models.json" with { type: "json" };
+
+const DEVPASS_IDS = [
+	"kimi-k2.6:dev",
+	"minimax-m2.7:dev",
+	"gpt-oss-120b:dev",
+	"glm-5.2:dev",
+	"gemma-4-31b-it:dev",
+	"qwen3.6-27b:dev",
+] as const;
 
 function getElectronHubOptions(fetch: FetchImpl) {
 	const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === "electronhub");
@@ -12,42 +22,41 @@ function getElectronHubOptions(fetch: FetchImpl) {
 }
 
 describe("ElectronHub provider catalog", () => {
-	it("bundles DevPass models offline with zero token cost and supportsStore=false", () => {
-		const kimi = getBundledModel<"openai-completions">("electronhub", "kimi-k2.6:dev");
-		const minimax = getBundledModel<"openai-completions">("electronhub", "minimax-m2.7:dev");
-
-		expect(kimi).toBeDefined();
-		expect(minimax).toBeDefined();
-
-		expect(kimi).toMatchObject({
-			provider: "electronhub",
-			api: "openai-completions",
-			baseUrl: "https://api.electronhub.ai/v1",
-			reasoning: true,
-			input: ["text"],
-			contextWindow: 240_000,
-			maxTokens: null,
-		});
-		expect(minimax).toMatchObject({
-			provider: "electronhub",
-			api: "openai-completions",
-			baseUrl: "https://api.electronhub.ai/v1",
-			reasoning: true,
-			input: ["text"],
-			contextWindow: 180_000,
-			maxTokens: null,
-		});
-
-		// Cost is a flat-rate DevPass plan (zero marginal token cost).
-		expect(kimi.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-		expect(minimax.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-
-		// ElectronHub is OpenAI-compatible but does not support the OpenAI `store` flag.
-		expect(kimi.compat.supportsStore).toBe(false);
-		expect(minimax.compat.supportsStore).toBe(false);
+	it("bundles all six DevPass models offline with zero token cost, reasoning=true, supportsStore=false", () => {
+		for (const id of DEVPASS_IDS) {
+			const model = getBundledModel<"openai-completions">("electronhub", id);
+			expect(model).toBeDefined();
+			expect(model.provider).toBe("electronhub");
+			expect(model.api).toBe("openai-completions");
+			expect(model.baseUrl).toBe("https://api.electronhub.ai/v1");
+			expect(model.maxTokens).toBeNull();
+			// Per docs.electronhub.ai/billing/coding-plan, every DevPass model supports reasoning.
+			expect(model.reasoning).toBe(true);
+			// Flat-rate DevPass plan — zero marginal token cost.
+			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			// ElectronHub is OpenAI-compatible but does not support the OpenAI `store` flag.
+			expect(model.compat.supportsStore).toBe(false);
+		}
 	});
 
-	it("keeps only DevPass models from /v1/models discovery (filters out non-:dev + non-devpass_only)", async () => {
+	it("only bundles GLM/Z.AI thinking compat on glm-5.2:dev, not the other five DevPass models", () => {
+		const glm = getBundledModel<"openai-completions">("electronhub", "glm-5.2:dev");
+		expect(glm.compat.thinkingFormat).toBe("zai");
+		expect(glm.compat.reasoningDisableMode).toBe("omit");
+		expect(glm.compat.reasoningContentField).toBe("reasoning_content");
+
+		// "zai" is the exclusive Z.AI/GLM thinkingFormat marker in this codebase — other
+		// DevPass families get their own generic thinking defaults (e.g. gpt-oss-120b:dev's
+		// harmony-family reasoningDisableMode/reasoningContentField, which happen to reuse
+		// some of the same generic field *names* as GLM but never this value), so only
+		// assert the one signal that is exclusively GLM's.
+		for (const id of DEVPASS_IDS.filter(candidate => candidate !== "glm-5.2:dev")) {
+			const model = getBundledModel<"openai-completions">("electronhub", id);
+			expect(model.compat.thinkingFormat).not.toBe("zai");
+		}
+	});
+
+	it("keeps DevPass models from /v1/models discovery via :dev suffix, devpass_only, or pricing.plan=devpass", async () => {
 		const requestedUrls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {
 			requestedUrls.push(input instanceof Request ? input.url : String(input));
@@ -55,17 +64,23 @@ describe("ElectronHub provider catalog", () => {
 				JSON.stringify({
 					data: [
 						{ id: "kimi-k2.6:dev", name: "ElectronHub: Kimi K2.6 (DevPass)", tokens: 240_000 },
-						{ id: "minimax-m2.7:dev", name: "MiniMax M2.7 (DevPass)", tokens: 180_000 },
-						// Keep via metadata.devpass_only even without :dev suffix
+						// Keep via metadata.devpass_only even without :dev suffix.
 						{
 							id: "rollout-preview",
 							name: "ElectronHub: Preview",
 							metadata: { devpass_only: true },
 							tokens: 9_999,
 						},
-						// Must be dropped: not a DevPass record
+						// Keep via pricing.plan="devpass" even without :dev suffix or devpass_only metadata
+						// (two of the six live DevPass records omit metadata.devpass_only entirely).
+						{
+							id: "plan-only-devpass",
+							name: "ElectronHub: Plan Only",
+							pricing: { input: "0", output: "0", plan: "devpass" },
+							tokens: 100_000,
+						},
+						// Must be dropped: plain model, no DevPass signal at all.
 						{ id: "kimi-k2.6", name: "Kimi K2.6", tokens: 240_000 },
-						// Must be dropped: not a DevPass record
 						{ id: "random-model", name: "Random", metadata: { devpass_only: false }, tokens: 1 },
 					],
 				}),
@@ -80,11 +95,36 @@ describe("ElectronHub provider catalog", () => {
 		// Uses the OpenAI-compatible discovery endpoint.
 		expect(requestedUrls).toEqual(["https://api.electronhub.ai/v1/models"]);
 
-		const ids = (models ?? []).map(model => model.id);
-		expect(ids).toEqual(["kimi-k2.6:dev", "minimax-m2.7:dev", "rollout-preview"]);
+		const ids = (models ?? []).map(model => model.id).sort();
+		expect(ids).toEqual(["kimi-k2.6:dev", "plan-only-devpass", "rollout-preview"].sort());
 	});
 
-	it("maps ElectronHub discovery metadata into ModelSpec (name cleanup, tokens->contextWindow, function_call=false)", async () => {
+	it("forces reasoning=true on discovery even when upstream metadata reports reasoning=false", async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: [
+						// Models the real qwen3.6-27b:dev case: ElectronHub reports reasoning:false,
+						// but the model has been observed returning non-zero reasoning_tokens in usage.
+						{
+							id: "qwen3.6-27b:dev",
+							name: "ElectronHub: Qwen3.6 27B (DevPass)",
+							tokens: 262_000,
+							metadata: { devpass_only: false, reasoning: false, vision: true, function_call: true },
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const options = getElectronHubOptions(fetchImpl);
+		const models = (await options.fetchDynamicModels?.()) as ModelSpec<"openai-completions">[] | null | undefined;
+		const qwen = models?.find(candidate => candidate.id === "qwen3.6-27b:dev");
+		expect(qwen).toBeDefined();
+		expect(qwen?.reasoning).toBe(true);
+	});
+
+	it("maps ElectronHub discovery metadata into ModelSpec (name cleanup, tokens->contextWindow, vision->input)", async () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response(
 				JSON.stringify({
@@ -93,12 +133,14 @@ describe("ElectronHub provider catalog", () => {
 							id: "thirdparty:dev",
 							name: "ElectronHub: Custom DevPass Name",
 							tokens: 123_456,
-							metadata: {
-								devpass_only: true,
-								reasoning: true,
-								vision: true,
-								function_call: false,
-							},
+							metadata: { devpass_only: true, reasoning: true, vision: true, function_call: false },
+							pricing: { input: "0", output: "0", cache_read: "0", cache_write: "0" },
+						},
+						{
+							id: "minimax-m2.7:dev",
+							name: "ElectronHub: MiniMax M2.7 (DevPass)",
+							tokens: 180_000,
+							metadata: { devpass_only: true, reasoning: true, vision: false, function_call: true },
 							pricing: { input: "0", output: "0", cache_read: "0", cache_write: "0" },
 						},
 					],
@@ -108,14 +150,54 @@ describe("ElectronHub provider catalog", () => {
 
 		const options = getElectronHubOptions(fetchImpl);
 		const models = (await options.fetchDynamicModels?.()) as ModelSpec<"openai-completions">[] | null | undefined;
-		const model = models?.find(candidate => candidate.id === "thirdparty:dev");
 
-		expect(model).toBeDefined();
-		expect(model?.name).toBe("Custom DevPass Name");
-		expect(model?.contextWindow).toBe(123_456);
-		expect(model?.reasoning).toBe(true);
-		expect(model?.input).toEqual(["text", "image"]);
-		expect(model?.supportsTools).toBe(false);
-		expect(model?.compat?.supportsStore).toBe(false);
+		const thirdparty = models?.find(candidate => candidate.id === "thirdparty:dev");
+		expect(thirdparty).toBeDefined();
+		expect(thirdparty?.name).toBe("Custom DevPass Name");
+		expect(thirdparty?.contextWindow).toBe(123_456);
+		expect(thirdparty?.input).toEqual(["text", "image"]);
+		// metadata.function_call === false still disables tools.
+		expect(thirdparty?.supportsTools).toBe(false);
+		expect(thirdparty?.compat?.supportsStore).toBe(false);
+
+		const minimax = models?.find(candidate => candidate.id === "minimax-m2.7:dev");
+		expect(minimax).toBeDefined();
+		expect(minimax?.name).toBe("MiniMax M2.7 (DevPass)");
+		expect(minimax?.contextWindow).toBe(180_000);
+		expect(minimax?.input).toEqual(["text"]);
+		// function_call === true (not false) must not disable tools.
+		expect(minimax?.supportsTools).not.toBe(false);
+	});
+});
+
+describe("ElectronHub DevPass static seed mirrors a live /v1/models snapshot", () => {
+	// Source evidence for the static seed: a sanitized snapshot of the live
+	// `/v1/models` DevPass entries (no API key, only the fields the resolver
+	// relies on). Guards against the seed silently drifting from reality.
+	const liveEntries = ELECTRONHUB_LIVE_DEVPASS.data as Array<Record<string, unknown>>;
+
+	it("every DevPass id has a live fixture entry with :dev suffix or pricing.plan=devpass", () => {
+		const liveById = new Map(liveEntries.map(entry => [entry.id as string, entry]));
+		for (const id of DEVPASS_IDS) {
+			const entry = liveById.get(id);
+			expect(entry).toBeDefined();
+			const pricing = entry?.pricing as { plan?: string } | undefined;
+			expect(id.endsWith(":dev") || pricing?.plan === "devpass").toBe(true);
+		}
+	});
+
+	it("static seed contextWindow matches the live fixture's tokens for every DevPass model", () => {
+		const liveTokens = new Map(liveEntries.map(entry => [entry.id as string, entry.tokens as number | undefined]));
+		const seeds: Record<string, number | null> = {
+			"kimi-k2.6:dev": getBundledModel<"openai-completions">("electronhub", "kimi-k2.6:dev").contextWindow,
+			"minimax-m2.7:dev": getBundledModel<"openai-completions">("electronhub", "minimax-m2.7:dev").contextWindow,
+			"gpt-oss-120b:dev": getBundledModel<"openai-completions">("electronhub", "gpt-oss-120b:dev").contextWindow,
+			"glm-5.2:dev": getBundledModel<"openai-completions">("electronhub", "glm-5.2:dev").contextWindow,
+			"gemma-4-31b-it:dev": getBundledModel<"openai-completions">("electronhub", "gemma-4-31b-it:dev").contextWindow,
+			"qwen3.6-27b:dev": getBundledModel<"openai-completions">("electronhub", "qwen3.6-27b:dev").contextWindow,
+		};
+		for (const [id, seedContextWindow] of Object.entries(seeds)) {
+			expect(seedContextWindow).toBe(liveTokens.get(id) ?? null);
+		}
 	});
 });

@@ -1858,6 +1858,34 @@ const ELECTRONHUB_OPENAI_COMPAT = {
 	supportsDeveloperRole: false,
 } as const satisfies ModelSpec<"openai-completions">["compat"];
 
+function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completions">["compat"] | undefined) {
+	return {
+		...(base ?? {}),
+		...ELECTRONHUB_OPENAI_COMPAT,
+		...(isReasoningGlmModelId(id)
+			? {
+					thinkingFormat: "zai",
+					reasoningDisableMode: "omit",
+					reasoningContentField: "reasoning_content",
+				}
+			: {}),
+	} as const satisfies ModelSpec<"openai-completions">["compat"];
+}
+
+/**
+ * Static seed of the ElectronHub Coding Plan (DevPass) catalogue, covering
+ * all six live `:dev` models so `/login electronhub` has a usable offline
+ * catalog before dynamic discovery ever runs. `dynamicModelsAuthoritative:
+ * true` below means live `/v1/models` data replaces these at runtime — this
+ * seed only matters pre-login / pre-refresh.
+ *
+ * Context windows mirror a live `/v1/models` snapshot (see
+ * `test/fixtures/electronhub-devpass-models.json`), but ElectronHub has
+ * revised the newer three entries' (`glm-5.2:dev`, `gemma-4-31b-it:dev`,
+ * `qwen3.6-27b:dev`) advertised `tokens` value more than once within the
+ * same day during integration — treat these three as best-effort until
+ * discovery refreshes them.
+ */
 export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
 		id: "kimi-k2.6:dev",
@@ -1885,12 +1913,70 @@ export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-compl
 		maxTokens: null,
 		compat: ELECTRONHUB_OPENAI_COMPAT,
 	},
+	{
+		id: "gpt-oss-120b:dev",
+		name: "GPT OSS 120B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "glm-5.2:dev",
+		name: "GLM 5.2 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+		compat: electronHubCompatForModel("glm-5.2:dev", ELECTRONHUB_OPENAI_COMPAT),
+	},
+	{
+		id: "gemma-4-31b-it:dev",
+		name: "Gemma 4 31B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "qwen3.6-27b:dev",
+		name: "Qwen3.6 27B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
 ];
 
 function isElectronHubDevpassModel(entry: OpenAICompatibleModelRecord, id: string): boolean {
 	if (id.endsWith(":dev")) return true;
 	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
-	return metadata?.devpass_only === true;
+	if (metadata?.devpass_only === true) return true;
+	// Secondary signal: two of the six live DevPass records omit
+	// `metadata.devpass_only` entirely, so a `:dev`-less future entry could
+	// still slip past the checks above. `pricing.plan` has been populated on
+	// every DevPass record observed so far.
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	return pricing?.plan === "devpass";
 }
 
 function toElectronHubModelName(name: string): string {
@@ -1911,7 +1997,10 @@ function mapElectronHubDevpassModel(
 	return {
 		...base,
 		name: toElectronHubModelName(base.name),
-		reasoning: metadata?.reasoning === true || base.reasoning,
+		// All DevPass models support reasoning per docs.electronhub.ai/billing/coding-plan;
+		// trust that over live metadata — `qwen3.6-27b:dev` reports `reasoning: false`
+		// but has been observed returning non-zero `reasoning_tokens` in usage.
+		reasoning: true,
 		input,
 		cost: {
 			input: toNumber(pricing?.input) ?? base.cost.input,
@@ -1921,7 +2010,7 @@ function mapElectronHubDevpassModel(
 		},
 		contextWindow: toPositiveNumber(entry.tokens, base.contextWindow),
 		...(metadata?.function_call === false ? { supportsTools: false } : {}),
-		compat: { ...(base.compat ?? {}), ...ELECTRONHUB_OPENAI_COMPAT },
+		compat: electronHubCompatForModel(base.id, base.compat),
 	};
 }
 
