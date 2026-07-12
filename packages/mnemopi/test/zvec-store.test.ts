@@ -56,25 +56,11 @@ describe("zvec-config", () => {
 	});
 
 	it("respects environment overrides", () => {
-		const savedChunkSize = process.env.OMP_ZVEC_CHUNK_SIZE;
-		const savedTopK = process.env.OMP_ZVEC_TOP_K;
-		const savedEnabled = process.env.OMP_ZVEC_ENABLED;
+		const env = { ...process.env, OMP_ZVEC_CHUNK_SIZE: "200", OMP_ZVEC_TOP_K: "50", OMP_ZVEC_ENABLED: "false" };
 
-		process.env.OMP_ZVEC_CHUNK_SIZE = "200";
-		process.env.OMP_ZVEC_TOP_K = "50";
-		process.env.OMP_ZVEC_ENABLED = "false";
-
-		expect(zvecChunkSize()).toBe(200);
-		expect(zvecTopK()).toBe(50);
-		expect(zvecEnabled()).toBe(false);
-
-		// Restore
-		if (savedChunkSize !== undefined) process.env.OMP_ZVEC_CHUNK_SIZE = savedChunkSize;
-		else delete process.env.OMP_ZVEC_CHUNK_SIZE;
-		if (savedTopK !== undefined) process.env.OMP_ZVEC_TOP_K = savedTopK;
-		else delete process.env.OMP_ZVEC_TOP_K;
-		if (savedEnabled !== undefined) process.env.OMP_ZVEC_ENABLED = savedEnabled;
-		else delete process.env.OMP_ZVEC_ENABLED;
+		expect(zvecChunkSize(env)).toBe(200);
+		expect(zvecTopK(env)).toBe(50);
+		expect(zvecEnabled(env)).toBe(false);
 	});
 });
 

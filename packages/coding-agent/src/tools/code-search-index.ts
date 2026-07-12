@@ -59,20 +59,30 @@ export async function indexWorkspace(cwd: string, signal?: AbortSignal): Promise
 
 	for (const filePath of sourceFiles) {
 		throwIfAborted(signal);
-		currentFiles.add(filePath);
 
 		const file = Bun.file(filePath);
 		const exists = await file.exists();
 		if (!exists) continue;
 
 		const stat = await file.stat();
-		if (stat.size > MAX_FILE_SIZE) continue;
+		if (stat.size > MAX_FILE_SIZE) {
+			// File grew too large — remove any existing chunks.
+			if (storeFileHashes.has(filePath)) store.removeFile(filePath);
+			continue;
+		}
 
 		const buffer = Buffer.from(await file.arrayBuffer());
-		if (isBinaryContent(buffer)) continue;
+		if (isBinaryContent(buffer)) {
+			// File became binary — remove any existing chunks.
+			if (storeFileHashes.has(filePath)) store.removeFile(filePath);
+			continue;
+		}
+
+		// Only mark as current after confirming it's indexable.
+		currentFiles.add(filePath);
 
 		const content = buffer.toString("utf-8");
-		const fileHash = Bun.hash(content).toString(16);
+		const fileHash = Bun.hash(filePath + "\0" + content).toString(16);
 
 		const chunks = chunkFile(content, chunkSize, overlap);
 		const newChunkHashes = new Set(chunks.map(c => Bun.hash(c.content).toString(16)));

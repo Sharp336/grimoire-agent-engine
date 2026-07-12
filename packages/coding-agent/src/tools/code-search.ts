@@ -155,7 +155,9 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 				throw new ToolError("topK must be a positive integer.");
 			}
 
-			const { results, mode, indexEmpty } = await this.#search(query, topK, signal);
+			// When a pattern filter is provided, overfetch so the filter is reliable.
+			const searchTopK = params.pattern ? Math.max(topK * 5, 100) : topK;
+			const { results, mode, indexEmpty } = await this.#search(query, searchTopK, signal);
 
 			// Apply optional glob pattern filter.
 			let filtered = results;
@@ -163,6 +165,9 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 				const globPattern = params.pattern;
 				filtered = results.filter(r => matchesGlob(r.filePath, globPattern));
 			}
+
+			// Slice to the requested topK after filtering.
+			filtered = filtered.slice(0, topK);
 
 			const store = await this.#getStore();
 			const text = formatSearchResult(filtered, store.docCount, mode, indexEmpty);
