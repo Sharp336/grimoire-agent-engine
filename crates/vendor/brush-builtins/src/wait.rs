@@ -77,11 +77,7 @@ impl builtins::Command for WaitCommand {
 				} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
 					if let Some(job) = context.shell.jobs_mut().resolve_process_id(pid) {
 						waited_identifier = Some(pid.to_string());
-						result = if self.wait_for_terminate {
-							job.wait_for_termination().await?
-						} else {
-							job.wait().await?
-						};
+						result = job.wait_for_process(pid, self.wait_for_terminate).await?;
 					} else {
 						writeln!(
 							context.stderr(),

@@ -49,6 +49,10 @@ pub enum ErrorKind {
 	#[error("failed to send signal to process")]
 	FailedToSendSignal,
 
+	/// A process ID was not found in the selected job.
+	#[error("process {0} is not part of this job")]
+	ProcessNotFoundInJob(i32),
+
 	/// An attempt was made to assign a value to a special parameter.
 	#[error("cannot assign in this way")]
 	CannotAssignToSpecialParameter,

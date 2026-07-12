@@ -13,6 +13,7 @@ pub(crate) type JobJoinHandle = tokio::task::JoinHandle<Result<ExecutionResult, 
 pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
 const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_RETAINED_COMPLETED_JOBS: usize = 1024;
 
 /// Selects a managed job by shell job ID or child process ID.
 #[derive(Clone, Copy)]
@@ -93,6 +94,14 @@ impl JobTask {
 		}
 	}
 
+	/// Returns the process ID of an external task, if it has one.
+	const fn pid(&self) -> Option<sys::process::ProcessId> {
+		match self {
+			Self::External(process) => process.pid(),
+			Self::Internal(_) => None,
+		}
+	}
+
 	/// Polls the task for completion. Returns `Some(result)` if the task has
 	/// completed, or `None` if it is still running. The result is the execution
 	/// result of the task. Behaves in a best-effort manner; if an internal
@@ -132,7 +141,7 @@ impl JobManager {
 			}
 		}
 
-		let id = self.jobs.len() + 1;
+		let id = self.jobs.iter().map(|existing| existing.id).max().map_or(1, |max_id| max_id + 1);
 		job.id = id;
 		job.annotation = JobAnnotation::Current;
 		self.jobs.push(job);
@@ -282,6 +291,9 @@ impl JobManager {
 				}
 				if matches!(self.jobs[i].state, JobState::Done) {
 					let job = self.jobs.remove(i);
+					if job.is_wait_status_consumed() {
+						continue;
+					}
 					return Ok(Some(WaitedJob::from_job(
 						job,
 						ExecutionResult::success(),
@@ -309,9 +321,11 @@ impl JobManager {
 				let job = self.jobs.remove(i);
 				results.push((job, result));
 			} else if matches!(self.jobs[i].state, JobState::Done) {
-				// TODO(jobs): This is a workaround to remove jobs that are done but for which
-				// we don't know what happened.
-				results.push((self.jobs.remove(i), Ok(ExecutionResult::success())));
+				let job = self.jobs.remove(i);
+				if !job.is_wait_status_consumed() {
+					// TODO(jobs): This is a workaround for a done job whose status is unknown.
+					results.push((job, Ok(ExecutionResult::success())));
+				}
 			} else {
 				i += 1;
 			}
@@ -319,9 +333,9 @@ impl JobManager {
 
 		Ok(results)
 	}
-	/// Polls completed jobs while retaining them and their exit statuses for a
-	/// later `wait` by PID or job ID. This is used by hosts that need to reap
-	/// zombies without consuming shell-visible wait results.
+	/// Polls completed jobs while retaining recent exit statuses for a later
+	/// `wait` by PID or job ID. The retention limit prevents persistent hosts
+	/// that poll without waiting from growing the job table without bound.
 	pub fn reap_completed(&mut self) -> Result<(), error::Error> {
 		for job in &mut self.jobs {
 			if matches!(job.state, JobState::Done) {
@@ -331,9 +345,25 @@ impl JobManager {
 				job.completed_result = Some(result);
 			}
 		}
+
+		self.jobs.retain(|job| !job.is_wait_status_consumed());
+
+		let completed_count = self
+			.jobs
+			.iter()
+			.filter(|job| matches!(job.state, JobState::Done))
+			.count();
+		let mut completed_to_discard = completed_count.saturating_sub(MAX_RETAINED_COMPLETED_JOBS);
+		self.jobs.retain(|job| {
+			if completed_to_discard > 0 && matches!(job.state, JobState::Done) {
+				completed_to_discard -= 1;
+				false
+			} else {
+				true
+			}
+		});
 		Ok(())
 	}
-
 
 	fn sweep_completed_jobs(&mut self) -> Vec<Job> {
 		let mut completed_jobs = vec![];
@@ -404,8 +434,11 @@ pub struct Job {
 	/// If available, the process group ID of the job's processes.
 	pgid: Option<sys::process::ProcessId>,
 
-	/// The PID retained after a background job is reaped.
-	reaped_pid: Option<sys::process::ProcessId>,
+	/// Process IDs and exit statuses retained after a host-side background
+	/// reaper has consumed the child handles. One entry is kept per external
+	/// task in this job, so the storage is bounded by the owning job's
+	/// pipeline and is dropped with the job.
+	reaped_children: Vec<(sys::process::ProcessId, u8)>,
 
 	/// Exit status retained by a host-side background reaper.
 	completed_result: Option<Result<ExecutionResult, error::Error>>,
@@ -452,7 +485,7 @@ impl Job {
 			id: 0,
 			tasks: tasks.into_iter().collect(),
 			pgid: None,
-			reaped_pid: None,
+			reaped_children: Vec::new(),
 			completed_result: None,
 			annotation: JobAnnotation::None,
 			command_line,
@@ -504,13 +537,14 @@ impl Job {
 
 		tracing::debug!(target: trace_categories::JOBS, "Polling job {} for completion...", self.id);
 
-		if self.reaped_pid.is_none() {
-			self.reaped_pid = self.representative_pid();
-		}
 		while !self.tasks.is_empty() {
 			let task = &mut self.tasks[0];
+			let task_pid = task.pid();
 			match task.poll() {
 				Some(r) => {
+					if let (Some(pid), Ok(execution_result)) = (task_pid, &r) {
+						self.reaped_children.push((pid, u8::from(&execution_result.exit_code)));
+					}
 					self.tasks.remove(0);
 					result = Some(r);
 				},
@@ -537,11 +571,50 @@ impl Job {
 		self.wait_with_policy(true).await
 	}
 
+	/// Waits for the process identified by `pid`, returning that process's exact
+	/// status without draining other tasks in the same job.
+	pub async fn wait_for_process(
+		&mut self,
+		pid: i32,
+		wait_for_terminate: bool,
+	) -> Result<ExecutionResult, error::Error> {
+		if let Some(index) = self
+			.reaped_children
+			.iter()
+			.position(|(reaped_pid, _)| *reaped_pid == pid)
+		{
+			let (_, exit_code) = self.reaped_children.remove(index);
+			if self.reaped_children.is_empty() {
+				self.completed_result = None;
+			}
+			return Ok(ExecutionResult::new(exit_code));
+		}
+
+		if let Some(index) = self.tasks.iter().position(|task| task.pid() == Some(pid)) {
+			match self.tasks[index].wait(wait_for_terminate).await? {
+				JobTaskWaitResult::Completed(result) => {
+					self.tasks.remove(index);
+					if self.tasks.is_empty() {
+						self.state = JobState::Done;
+					}
+					return Ok(result);
+				},
+				JobTaskWaitResult::Stopped => {
+					self.state = JobState::Stopped;
+					return Ok(ExecutionResult::stopped());
+				},
+			}
+		}
+
+		Err(error::ErrorKind::ProcessNotFoundInJob(pid).into())
+	}
+
 	async fn wait_with_policy(
 		&mut self,
 		wait_for_terminate: bool,
 	) -> Result<ExecutionResult, error::Error> {
 		if let Some(result) = self.completed_result.take() {
+			self.reaped_children.clear();
 			self.state = JobState::Done;
 			return result;
 		}
@@ -561,6 +634,7 @@ impl Job {
 			}
 		}
 
+		self.reaped_children.clear();
 		self.state = JobState::Done;
 
 		Ok(result)
@@ -642,13 +716,21 @@ impl Job {
 
 	fn contains_process_id(&self, pid: i32) -> bool {
 		self
-			.reaped_pid
-			.is_some_and(|reaped_pid| reaped_pid == pid)
+			.reaped_children
+			.iter()
+			.any(|(reaped_pid, _)| *reaped_pid == pid)
 			|| self.tasks.iter().any(|task| match task {
 				JobTask::External(process) => process.pid().is_some_and(|process_pid| process_pid == pid),
 				JobTask::Internal(_) => false,
 			})
-		}
+	}
+
+	fn is_wait_status_consumed(&self) -> bool {
+		matches!(self.state, JobState::Done)
+			&& self.tasks.is_empty()
+			&& self.reaped_children.is_empty()
+			&& self.completed_result.is_none()
+	}
 
 	fn wait_identifier(&self) -> String {
 		self
@@ -658,9 +740,6 @@ impl Job {
 
 	/// Tries to retrieve a "representative" pid for the job.
 	pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
-		if let Some(pid) = self.reaped_pid {
-			return Some(pid);
-		}
 		for task in &self.tasks {
 			match task {
 				JobTask::External(p) => {
@@ -671,7 +750,7 @@ impl Job {
 				JobTask::Internal(_) => (),
 			}
 		}
-		None
+		self.reaped_children.first().map(|(pid, _)| *pid)
 	}
 
 	/// Tries to retrieve the process group ID (PGID) of the job.
@@ -691,5 +770,159 @@ impl Job {
 				JobTask::Internal(_) => None,
 			})
 			.collect()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#![allow(clippy::expect_used, reason = "test failures need explicit context")]
+
+	use super::*;
+
+	#[cfg(unix)]
+	fn spawn_exit_task(exit_code: u8) -> (i32, JobTask) {
+		spawn_shell_task(&format!("exit {exit_code}"))
+	}
+
+	#[cfg(unix)]
+	fn spawn_shell_task(script: &str) -> (i32, JobTask) {
+		let mut command = std::process::Command::new("/bin/sh");
+		command.arg("-c").arg(script);
+		let child = sys::process::spawn(command).expect("spawn child");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		let process = processes::ChildProcess::new(child, Some(pid), None);
+		(pid, JobTask::External(process))
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn reaper_retains_each_pipeline_child_status_for_wait_by_pid() {
+		let (first_pid, first_task) = spawn_exit_task(23);
+		let (second_pid, second_task) = spawn_exit_task(37);
+		let mut manager = JobManager::new();
+		manager.add_as_current(Job::new(
+			[first_task, second_task],
+			"first | second".into(),
+			JobState::Running,
+		));
+
+		tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				manager.reap_completed().expect("reap completed children");
+				if matches!(manager.jobs[0].state, JobState::Done) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("timed out reaping pipeline children");
+
+		assert_eq!(manager.jobs[0].representative_pid(), Some(first_pid));
+		let first_result = manager
+			.resolve_process_id(first_pid)
+			.expect("first child remains waitable")
+			.wait_for_process(first_pid, false)
+			.await
+			.expect("wait first child");
+		assert_eq!(u8::from(&first_result.exit_code), 23);
+		assert!(!manager.contains_process_id(first_pid));
+
+		let second_result = manager
+			.resolve_process_id(second_pid)
+			.expect("second child remains waitable")
+			.wait_for_process(second_pid, false)
+			.await
+			.expect("wait second child");
+		assert_eq!(u8::from(&second_result.exit_code), 37);
+		assert!(!manager.contains_process_id(second_pid));
+		let next = manager.wait_next(&[]).await.expect("check for another unwaited job");
+		assert!(next.is_none());
+		assert!(manager.jobs.is_empty());
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn representative_pid_prefers_a_remaining_live_pipeline_child() {
+		let (first_pid, first_task) = spawn_exit_task(23);
+		let (second_pid, second_task) = spawn_shell_task("sleep 30; exit 37");
+		let mut job = Job::new(
+			[first_task, second_task],
+			"first | second".into(),
+			JobState::Running,
+		);
+
+		tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				let _ = job.poll_done().expect("poll pipeline");
+				if job.reaped_children.iter().any(|(pid, _)| *pid == first_pid) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("timed out reaping first pipeline child");
+
+		assert_eq!(job.representative_pid(), Some(second_pid));
+		assert_eq!(job.process_group_id(), Some(second_pid));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn wait_for_process_waits_only_for_the_requested_active_child() {
+		let (first_pid, first_task) = spawn_exit_task(23);
+		let (second_pid, second_task) = spawn_shell_task("sleep 30; exit 37");
+		let mut job = Job::new(
+			[first_task, second_task],
+			"first | second".into(),
+			JobState::Running,
+		);
+
+		let first_result = tokio::time::timeout(
+			Duration::from_secs(5),
+			job.wait_for_process(first_pid, false),
+		)
+		.await
+		.expect("waiting for the first child must not wait for the second")
+		.expect("wait first child");
+		assert_eq!(u8::from(&first_result.exit_code), 23);
+		assert!(!job.contains_process_id(first_pid));
+		assert!(job.contains_process_id(second_pid));
+		assert!(matches!(job.state, JobState::Running));
+	}
+
+	#[test]
+	fn reaper_bounds_unconsumed_completed_job_retention_and_preserves_unique_ids() {
+		let mut manager = JobManager::new();
+		for index in 0..=MAX_RETAINED_COMPLETED_JOBS {
+			let mut job = Job::new(
+				std::iter::empty::<JobTask>(),
+				format!("completed-{index}"),
+				JobState::Done,
+			);
+			let pid = 10_000 + i32::try_from(index).expect("retained job index fits i32");
+			job.reaped_children.push((pid, 0));
+			manager.add_as_current(job);
+		}
+
+		manager.reap_completed().expect("bound completed jobs");
+		assert_eq!(manager.jobs.len(), MAX_RETAINED_COMPLETED_JOBS);
+		assert_eq!(manager.jobs.first().map(|job| job.id), Some(2));
+		assert_eq!(
+			manager.jobs.last().map(|job| job.id),
+			Some(MAX_RETAINED_COMPLETED_JOBS + 1),
+		);
+		assert!(!manager.contains_process_id(10_000));
+		assert!(manager.contains_process_id(10_001));
+
+		let next_id = manager
+			.add_as_current(Job::new(
+				std::iter::empty::<JobTask>(),
+				"next".into(),
+				JobState::Done,
+			))
+			.id;
+		assert_eq!(next_id, MAX_RETAINED_COMPLETED_JOBS + 2);
 	}
 }
