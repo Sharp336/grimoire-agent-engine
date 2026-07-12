@@ -243,6 +243,35 @@ describe("xAI Grok Build browser OAuth", () => {
 		expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
 	});
 
+	it("refreshes through the provider thunk with its stored refresh credential", async () => {
+		const provider = getProviderDefinition("xai-grok-build");
+		if (!provider?.refreshToken) throw new Error("xAI Grok Build provider must expose token refresh");
+		const { fetchMock, requests } = createBuildFlowFetch();
+		const originalFetch = globalThis.fetch;
+		const mockFetch: typeof globalThis.fetch = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => fetchMock(input, init),
+			{ preconnect: originalFetch.preconnect },
+		);
+		globalThis.fetch = mockFetch;
+
+		try {
+			const credentials = await provider.refreshToken({
+				access: "old-access",
+				refresh: "stored-build-refresh",
+				expires: 0,
+			});
+
+			expect(credentials).toMatchObject({ access: "build-access", refresh: "build-refresh" });
+			expect(Object.fromEntries(requestForm(requests.find(request => request.url === TOKEN_ENDPOINT)))).toEqual({
+				grant_type: "refresh_token",
+				client_id: CLIENT_ID,
+				refresh_token: "stored-build-refresh",
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("exchanges a trimmed pasted refresh token without starting browser callback OAuth", async () => {
 		const { fetchMock, requests } = createBuildFlowFetch({ userinfo: { sub: "pasted-account" } });
 		const onPrompt = vi.fn(async () => " \tpasted-refresh\n");

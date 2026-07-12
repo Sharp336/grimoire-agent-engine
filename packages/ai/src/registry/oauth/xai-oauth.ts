@@ -563,6 +563,7 @@ class XAIGrokBuildOAuthFlow extends OAuthCallbackFlow {
 	) {
 		super(ctrl, {
 			preferredPort: callbackPort,
+			allowPortFallback: false,
 			callbackHostname: "127.0.0.1",
 			callbackPath: "/callback",
 		});
