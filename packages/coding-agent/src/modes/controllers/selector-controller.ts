@@ -1500,7 +1500,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 			});
-			return { component: selector, focus: selector };
+			return { component: selector, focus: selector.getSelectList() };
 		});
 	}
 
