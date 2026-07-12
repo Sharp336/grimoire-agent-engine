@@ -24,7 +24,7 @@ export function saveProfile(settings: Settings, name: string): void {
 		modelRoles,
 		defaultThinkingLevel,
 	};
-	const profiles = getProfiles(settings);
+	const profiles = { ...getProfiles(settings) };
 	profiles[name] = snapshot;
 	settings.set("profiles", profiles);
 }
@@ -49,7 +49,7 @@ export function switchProfile(settings: Settings, name: string): boolean {
 
 /** Delete a named profile. Returns true if it existed. */
 export function deleteProfile(settings: Settings, name: string): boolean {
-	const profiles = getProfiles(settings);
+	const profiles = { ...getProfiles(settings) };
 	if (!(name in profiles)) return false;
 	delete profiles[name];
 	settings.set("profiles", profiles);

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -437,6 +438,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					if (resolved.model) {
 						try {
 							await runtime.session.setModel(resolved.model);
+							const thinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
+							if (thinking && thinking !== ThinkingLevel.Inherit) {
+								runtime.session.setThinkingLevel(thinking);
+							}
 						} catch {
 							// Settings still applied — user can /model manually
 						}
@@ -503,6 +508,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					if (resolved.model) {
 						try {
 							await runtime.ctx.session.setModel(resolved.model);
+							const thinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
+							if (thinking && thinking !== ThinkingLevel.Inherit) {
+								runtime.ctx.session.setThinkingLevel(thinking);
+							}
 							runtime.ctx.statusLine.invalidate();
 							runtime.ctx.updateEditorBorderColor();
 						} catch {
