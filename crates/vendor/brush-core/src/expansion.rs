@@ -1753,7 +1753,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::SpecialParameter::LastBackgroundProcessId => {
 				if let Some(job) = self.shell.jobs().current_job()
-					&& let Some(pid) = job.representative_pid()
+					&& let Some(pid) = job.waitable_pid()
 				{
 					return Expansion::from(pid.to_string());
 				}

@@ -944,8 +944,16 @@ impl Job {
 
 	fn wait_identifier(&self) -> String {
 		self
-			.representative_pid()
+			.waitable_pid()
 			.map_or_else(|| self.id.to_string(), |pid| pid.to_string())
+	}
+
+	/// Returns a PID that remains valid for shell wait lookup and `$!`
+	/// expansion. It may already be reaped and must never be used for signals.
+	pub fn waitable_pid(&self) -> Option<sys::process::ProcessId> {
+		self
+			.representative_pid()
+			.or_else(|| self.reaped_children.first().map(|(pid, _)| *pid))
 	}
 
 	/// Tries to retrieve a "representative" pid for the job.
@@ -960,7 +968,7 @@ impl Job {
 				JobTask::Internal(_) => (),
 			}
 		}
-		self.reaped_children.first().map(|(pid, _)| *pid)
+		None
 	}
 
 	/// Tries to retrieve the process group ID (PGID) of the job.
@@ -1053,7 +1061,8 @@ mod tests {
 		.await
 		.expect("timed out reaping pipeline children");
 
-		assert_eq!(manager.jobs[0].representative_pid(), Some(first_pid));
+		assert_eq!(manager.jobs[0].representative_pid(), None);
+		assert_eq!(manager.jobs[0].waitable_pid(), Some(first_pid));
 		let first_waited = manager
 			.wait_next(&[JobSelector::ProcessId(first_pid)])
 			.await
@@ -1422,7 +1431,8 @@ mod tests {
 		job.pgid = Some(12_345);
 		job.reaped_children.push((12_345, 0));
 
-		assert_eq!(job.representative_pid(), Some(12_345));
+		assert_eq!(job.representative_pid(), None);
+		assert_eq!(job.waitable_pid(), Some(12_345));
 		assert_eq!(job.process_group_id(), None);
 		assert!(job.move_to_foreground().is_err());
 		assert!(
