@@ -1,18 +1,18 @@
-import type { CodeChunk, ZVecCodeStore } from "@oh-my-pi/pi-mnemopi";
+import * as path from "node:path";
 import type * as MnemopiNs from "@oh-my-pi/pi-mnemopi";
+import type { CodeChunk, ZVecCodeStore } from "@oh-my-pi/pi-mnemopi";
 import { FileType, listWorkspace } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import * as path from "node:path";
 import { loadMnemopi } from "../mnemopi/state";
-import { throwIfAborted } from "./tool-errors";
 import {
-	SKIP_DIRECTORIES,
-	MAX_FILE_SIZE,
 	chunkFile,
 	detectLanguage,
 	isBinaryContent,
 	isIndexableFile,
+	MAX_FILE_SIZE,
+	SKIP_DIRECTORIES,
 } from "./code-search-helpers";
+import { throwIfAborted } from "./tool-errors";
 
 export interface IndexResult {
 	totalFiles: number;
@@ -82,7 +82,7 @@ export async function indexWorkspace(cwd: string, signal?: AbortSignal): Promise
 		currentFiles.add(filePath);
 
 		const content = buffer.toString("utf-8");
-		const fileHash = Bun.hash(filePath + "\0" + content).toString(16);
+		const fileHash = Bun.hash(`${filePath}\0${content}`).toString(16);
 
 		const chunks = chunkFile(content, chunkSize, overlap);
 		const newChunkHashes = new Set(chunks.map(c => Bun.hash(c.content).toString(16)));

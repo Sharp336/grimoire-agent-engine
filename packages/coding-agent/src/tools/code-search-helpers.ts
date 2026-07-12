@@ -64,27 +64,12 @@ const EXTENSION_TO_LANGUAGE: ReadonlyMap<string, string> = new Map([
 
 const INDEXABLE_EXTENSIONS: ReadonlySet<string> = new Set(EXTENSION_TO_LANGUAGE.keys());
 
-const SKIP_DIRECTORIES = new Set([
-	"node_modules",
-	".git",
-	"dist",
-	"build",
-	"target",
-	".next",
-	"out",
-	"coverage",
-]);
+const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "dist", "build", "target", ".next", "out", "coverage"]);
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const BINARY_CHECK_BYTES = 8192;
 
-export {
-	EXTENSION_TO_LANGUAGE,
-	INDEXABLE_EXTENSIONS,
-	SKIP_DIRECTORIES,
-	MAX_FILE_SIZE,
-	BINARY_CHECK_BYTES,
-};
+export { BINARY_CHECK_BYTES, EXTENSION_TO_LANGUAGE, INDEXABLE_EXTENSIONS, MAX_FILE_SIZE, SKIP_DIRECTORIES };
 
 export function detectLanguage(filePath: string): string {
 	const ext = path.extname(filePath).slice(1).toLowerCase();

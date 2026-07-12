@@ -1,8 +1,8 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type CodeChunk, ZVecCodeStore } from "@oh-my-pi/pi-mnemopi";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", () => {
 	let tempDir: string;
@@ -38,7 +38,7 @@ describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", (
 		const newContent = "function bar() { return 2; }";
 
 		// Step 1: Upsert initial chunk.
-		const oldHash = Bun.hash(filePath + "\0" + oldContent).toString(16);
+		const oldHash = Bun.hash(`${filePath}\0${oldContent}`).toString(16);
 		store.upsertChunks([makeChunk(filePath, oldContent, oldHash)]);
 		store.optimize();
 		expect(store.docCount).toBe(1);
@@ -50,7 +50,7 @@ describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", (
 
 		// Step 3: Simulate an edit — remove old chunks, then upsert new ones.
 		store.removeFile(filePath);
-		const newHash = Bun.hash(filePath + "\0" + newContent).toString(16);
+		const newHash = Bun.hash(`${filePath}\0${newContent}`).toString(16);
 		store.upsertChunks([makeChunk(filePath, newContent, newHash)]);
 		store.optimize();
 
@@ -74,7 +74,7 @@ describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", (
 		const newContent = "export function multiply(a, b) { return a * b; }";
 
 		// Index initial content.
-		const oldHash = Bun.hash(filePath + "\0" + oldContent).toString(16);
+		const oldHash = Bun.hash(`${filePath}\0${oldContent}`).toString(16);
 		store.upsertChunks([makeChunk(filePath, oldContent, oldHash)]);
 		store.optimize();
 
@@ -84,7 +84,7 @@ describe.skipIf(!ZVecCodeStore.available())("ZVecCodeStore edit-then-reindex", (
 
 		// Re-index with changed content.
 		store.removeFile(filePath);
-		const newHash = Bun.hash(filePath + "\0" + newContent).toString(16);
+		const newHash = Bun.hash(`${filePath}\0${newContent}`).toString(16);
 		store.upsertChunks([makeChunk(filePath, newContent, newHash)]);
 		store.optimize();
 

@@ -1,21 +1,21 @@
+import * as path from "node:path";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
-	available as embeddingsAvailable,
 	currentEmbeddingModel,
-	embedQuery,
 	embeddingDimFor,
+	available as embeddingsAvailable,
+	embedQuery,
 	ZVecCodeStore,
 	type ZVecSearchResult,
 	zvecCodeIndexPath,
 	zvecTopK,
 } from "@oh-my-pi/pi-mnemopi";
-import { type } from "arktype";
-import * as path from "node:path";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 import codeSearchDescription from "../prompts/tools/code-search.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { ToolError } from "./tool-errors";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
+import { ToolError } from "./tool-errors";
 
 const codeSearchSchema = type({
 	query: type("string").describe("natural language search query"),
@@ -77,12 +77,10 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 	#store: ZVecCodeStore | null = null;
 	#storePromise: Promise<ZVecCodeStore> | null = null;
 
-	constructor(private readonly session: ToolSession) {}
-
 	static createIf(session: ToolSession): CodeSearchTool | null {
 		if (!session.settings.get("tools.codeSearchEnabled")) return null;
 		if (!ZVecCodeStore.available()) return null;
-		return new CodeSearchTool(session);
+		return new CodeSearchTool();
 	}
 
 	// ─── Store lifecycle ─────────────────────────────────────────────────────
@@ -115,7 +113,11 @@ export class CodeSearchTool implements AgentTool<typeof codeSearchSchema> {
 
 	// ─── Search ─────────────────────────────────────────────────────────────
 
-	async #search(query: string, topK: number, signal?: AbortSignal): Promise<{ results: ZVecSearchResult[]; mode: "hybrid" | "fts"; indexEmpty: boolean }> {
+	async #search(
+		query: string,
+		topK: number,
+		_signal?: AbortSignal,
+	): Promise<{ results: ZVecSearchResult[]; mode: "hybrid" | "fts"; indexEmpty: boolean }> {
 		const store = await this.#getStore();
 		if (store.docCount === 0) {
 			return { results: [], mode: "fts", indexEmpty: true };
