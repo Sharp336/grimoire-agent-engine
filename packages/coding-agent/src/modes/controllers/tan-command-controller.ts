@@ -77,7 +77,10 @@ export class TanCommandController {
 		// session) rather than as a top-level sibling, so it shares the parent's
 		// artifacts in place — no copy needed.
 		const sessionDir = parentFile.slice(0, -6);
-		const settings = createSubagentSettings(this.ctx.settings);
+		const settings = createSubagentSettings(this.ctx.settings, {
+			"task.eager": this.ctx.settings.get("task.eager"),
+			"task.maxConcurrency": this.ctx.settings.get("task.maxConcurrency"),
+		});
 		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
 		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;
 		const agentRegistry = AgentRegistry.global();

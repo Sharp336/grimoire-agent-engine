@@ -46,6 +46,7 @@ function createContext(overrides?: {
 	model?: Model;
 	agentId?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
+	settings?: Settings;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
@@ -89,7 +90,7 @@ function createContext(overrides?: {
 	const ctx = {
 		session,
 		sessionManager,
-		settings: Settings.isolated({ "task.enableLsp": true }),
+		settings: overrides?.settings ?? Settings.isolated({ "task.enableLsp": true }),
 		showStatus: vi.fn(),
 		showWarning: vi.fn(),
 		showError: vi.fn(),
@@ -228,6 +229,42 @@ describe("TanCommandController", () => {
 				agentDisplayName: "tan",
 			}),
 		);
+	});
+
+	it("keeps the parent task policy when descendant policy differs", async () => {
+		const parentSettings = Settings.isolated({
+			"task.eager": "always",
+			"task.maxConcurrency": 12,
+			"task.nestedEager": "default",
+			"task.maxNestedConcurrency": 4,
+		});
+		const harness = createContext({ settings: parentSettings });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const clone = {
+			prompt: vi.fn(async () => {}),
+			waitForIdle: vi.fn(async () => {}),
+			getLastAssistantMessage: vi.fn(() => assistantText("done")),
+			abort: vi.fn(),
+			dispose: vi.fn(async () => {}),
+		};
+		const createAgentSessionSpy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue({ session: clone } as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+		await controller.start("keep parent task policy");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({
+			jobId: "job-policy",
+			signal: new AbortController().signal,
+			reportProgress: async () => {},
+		});
+
+		const tanSettings = createAgentSessionSpy.mock.calls[0]?.[0]?.settings;
+		expect(tanSettings?.get("task.eager")).toBe("always");
+		expect(tanSettings?.get("task.maxConcurrency")).toBe(12);
+		expect(tanSettings?.get("task.nestedEager")).toBe("default");
+		expect(tanSettings?.get("task.maxNestedConcurrency")).toBe(4);
 	});
 
 	it("parents the tan clone to the spawning agent, not to the clone itself", async () => {
