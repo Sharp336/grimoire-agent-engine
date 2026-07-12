@@ -56,6 +56,40 @@ describe("ElectronHub provider catalog", () => {
 		}
 	});
 
+	it("overrides qwen3.6-27b:dev onto ElectronHub's OpenAI-shaped reasoning dialect, not native Qwen enable_thinking", () => {
+		// Without an explicit override, buildOpenAICompat's id-based detection classifies
+		// any "qwen"-named id into the native Qwen dialect (top-level `enable_thinking`
+		// boolean), which ElectronHub's gateway does not honour — it expects the generic
+		// OpenAI-shaped reasoning_effort surface for every proxied model
+		// (docs.electronhub.ai/api-reference/chat/completions).
+		const qwen = getBundledModel<"openai-completions">("electronhub", "qwen3.6-27b:dev");
+		expect(qwen.compat.thinkingFormat).toBe("openai");
+		expect(qwen.compat.thinkingFormat).not.toBe("qwen");
+	});
+
+	it("applies the same OpenAI-shaped dialect override to qwen3.6-27b:dev via dynamic discovery", async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "qwen3.6-27b:dev",
+							name: "ElectronHub: Qwen3.6 27B (DevPass)",
+							tokens: 262_000,
+							metadata: { devpass_only: false, reasoning: false, vision: true, function_call: true },
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const options = getElectronHubOptions(fetchImpl);
+		const models = (await options.fetchDynamicModels?.()) as ModelSpec<"openai-completions">[] | null | undefined;
+		const qwen = models?.find(candidate => candidate.id === "qwen3.6-27b:dev");
+		expect(qwen).toBeDefined();
+		expect(qwen?.compat?.thinkingFormat).toBe("openai");
+	});
+
 	it("keeps DevPass models from /v1/models discovery via :dev suffix, devpass_only, or pricing.plan=devpass", async () => {
 		const requestedUrls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {
@@ -156,8 +190,9 @@ describe("ElectronHub provider catalog", () => {
 		expect(thirdparty?.name).toBe("Custom DevPass Name");
 		expect(thirdparty?.contextWindow).toBe(123_456);
 		expect(thirdparty?.input).toEqual(["text", "image"]);
-		// metadata.function_call === false still disables tools.
-		expect(thirdparty?.supportsTools).toBe(false);
+		// All DevPass models support function calling per docs — a stale/false
+		// function_call metadata flag must not disable tools.
+		expect(thirdparty?.supportsTools).not.toBe(false);
 		expect(thirdparty?.compat?.supportsStore).toBe(false);
 
 		const minimax = models?.find(candidate => candidate.id === "minimax-m2.7:dev");
@@ -165,7 +200,6 @@ describe("ElectronHub provider catalog", () => {
 		expect(minimax?.name).toBe("MiniMax M2.7 (DevPass)");
 		expect(minimax?.contextWindow).toBe(180_000);
 		expect(minimax?.input).toEqual(["text"]);
-		// function_call === true (not false) must not disable tools.
 		expect(minimax?.supportsTools).not.toBe(false);
 	});
 });

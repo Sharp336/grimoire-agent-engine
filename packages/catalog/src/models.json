@@ -17546,19 +17546,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
-					"xhigh"
-				],
-				"effortMap": {
-					"minimal": "none",
-					"low": "high",
-					"medium": "high",
-					"high": "high",
-					"xhigh": "max"
-				}
+					"max"
+				]
 			},
 			"compat": {
 				"supportsStore": false,
@@ -17689,12 +17679,14 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh"
 				]
 			},
 			"compat": {
 				"supportsStore": false,
-				"supportsDeveloperRole": false
+				"supportsDeveloperRole": false,
+				"thinkingFormat": "openai"
 			}
 		}
 	},

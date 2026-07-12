@@ -9,6 +9,7 @@ import {
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiModelId,
+	isQwenModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
@@ -1868,7 +1869,19 @@ function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completio
 					reasoningDisableMode: "omit",
 					reasoningContentField: "reasoning_content",
 				}
-			: {}),
+			: isQwenModelId(id)
+				? {
+						// ElectronHub is a gateway that normalizes every backend onto its
+						// own OpenAI-shaped reasoning surface (`reasoning_effort` /
+						// docs.electronhub.ai/api-reference/chat/completions), not each
+						// upstream model's native dialect. Without this override,
+						// `buildOpenAICompat`'s id-based detection classifies any
+						// "qwen"-named id into the native Qwen dialect (top-level
+						// `enable_thinking` boolean), which ElectronHub's endpoint does
+						// not honour — silently dropping user-selected effort levels.
+						thinkingFormat: "openai",
+					}
+				: {}),
 	} as const satisfies ModelSpec<"openai-completions">["compat"];
 }
 
@@ -1963,7 +1976,7 @@ export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-compl
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 262_000,
 		maxTokens: null,
-		compat: ELECTRONHUB_OPENAI_COMPAT,
+		compat: electronHubCompatForModel("qwen3.6-27b:dev", ELECTRONHUB_OPENAI_COMPAT),
 	},
 ];
 
@@ -2008,8 +2021,10 @@ function mapElectronHubDevpassModel(
 			cacheRead: toNumber(pricing?.cache_read) ?? base.cost.cacheRead,
 			cacheWrite: toNumber(pricing?.cache_write) ?? base.cost.cacheWrite,
 		},
+		// All DevPass models support function calling per docs.electronhub.ai/billing/coding-plan;
+		// trust that over live metadata rather than gating on `function_call === false`, which
+		// would let a stale/bad /v1/models record silently strip tool use from a coding agent.
 		contextWindow: toPositiveNumber(entry.tokens, base.contextWindow),
-		...(metadata?.function_call === false ? { supportsTools: false } : {}),
 		compat: electronHubCompatForModel(base.id, base.compat),
 	};
 }
