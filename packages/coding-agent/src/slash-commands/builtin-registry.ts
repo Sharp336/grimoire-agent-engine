@@ -429,6 +429,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					await runtime.output(`Profile not found: ${name}`);
 					return commandConsumed();
 				}
+				if (result.unresolvedDefault) {
+					await runtime.output(
+						`Warning: profile "${name}" default model is unavailable — using automatic selection.`,
+					);
+				}
 				if (result.model) {
 					try {
 						await runtime.session.setModel(result.model);
@@ -504,6 +509,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				if (!result.ok) {
 					runtime.ctx.showWarning(`Profile not found: ${name}`);
 					return commandConsumed();
+				}
+				if (result.unresolvedDefault) {
+					runtime.ctx.showWarning(`Profile "${name}" default unavailable — using automatic selection`);
 				}
 				if (result.model) {
 					try {

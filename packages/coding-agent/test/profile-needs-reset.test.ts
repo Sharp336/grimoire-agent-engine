@@ -103,4 +103,20 @@ describe("switchProfileAndResolve — needsReset", () => {
 		expect(resultB.needsReset).toBe(true);
 		expect(resultB.model).toBeUndefined();
 	});
+
+	test("signals unresolvedDefault when default role doesn't resolve", () => {
+		const settings = Settings.isolated();
+
+		// Save a profile with a default role that won't resolve against
+		// available models (nonexistent provider).
+		settings.setModelRole("default", "nonexistent-provider/some-model");
+		saveProfile(settings, "unresolved-profile");
+
+		const result = switchProfileAndResolve(settings, "unresolved-profile", mockModels);
+
+		expect(result.ok).toBe(true);
+		expect(result.needsReset).toBe(true);
+		expect(result.unresolvedDefault).toBe(true);
+		expect(result.model).toBeUndefined();
+	});
 });

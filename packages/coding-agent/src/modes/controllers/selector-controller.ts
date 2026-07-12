@@ -1480,6 +1480,9 @@ export class SelectorController {
 						this.ctx.showError(`Profile not found: ${name}`);
 						return;
 					}
+					if (result.unresolvedDefault) {
+						this.ctx.showWarning(`Profile "${name}" default unavailable — using automatic selection`);
+					}
 					if (result.model) {
 						try {
 							await this.ctx.session.setModel(result.model);

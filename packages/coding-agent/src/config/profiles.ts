@@ -73,6 +73,10 @@ export interface ProfileSwitchResult {
 	/** True when the profile has no explicit default role — the caller should
 	 *  reset the session to its automatic/default model. */
 	needsReset?: boolean;
+	/** True when the profile has a default role but it couldn't resolve against
+	 *  available models (provider disabled, credentials removed, typo). The
+	 *  caller should warn the user and reset to the automatic default. */
+	unresolvedDefault?: boolean;
 }
 
 /**
@@ -95,6 +99,11 @@ export function switchProfileAndResolve(
 	const resolved = resolveModelRoleValue(defaultRole, availableModels as Model[], {
 		settings,
 	});
+	if (!resolved.model) {
+		// Profile has a default role but it doesn't resolve — fall back to
+		// automatic default and warn the user.
+		return { ok: true, needsReset: true, unresolvedDefault: true };
+	}
 	return {
 		ok: true,
 		model: resolved.model,
