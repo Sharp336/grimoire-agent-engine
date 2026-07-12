@@ -47,6 +47,9 @@ export function switchProfile(settings: Settings, name: string): boolean {
 	if (profile.defaultThinkingLevel !== undefined) {
 		settings.set("defaultThinkingLevel", profile.defaultThinkingLevel);
 	}
+	// Clear any runtime model-role overrides (from --model or env) so the
+	// profile's assignments take effect instead of the override winning.
+	settings.clearOverride("modelRoles");
 	return true;
 }
 

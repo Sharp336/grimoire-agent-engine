@@ -1472,7 +1472,7 @@ export class SelectorController {
 		const names = getProfileNames(this.ctx.settings);
 		this.showSelector(done => {
 			const selector = new ProfileSelectorComponent(names, {
-				onPick: name => {
+				onPick: async name => {
 					done();
 					const availableModels = this.ctx.session.getAvailableModels?.() ?? [];
 					const result = switchProfileAndResolve(this.ctx.settings, name, availableModels);
@@ -1482,7 +1482,7 @@ export class SelectorController {
 					}
 					if (result.model) {
 						try {
-							void this.ctx.session.setModel(result.model);
+							await this.ctx.session.setModel(result.model);
 							if (result.thinkingLevel && result.thinkingLevel !== ThinkingLevel.Inherit) {
 								this.ctx.session.setThinkingLevel(result.thinkingLevel);
 							}
