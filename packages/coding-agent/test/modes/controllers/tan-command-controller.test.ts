@@ -107,6 +107,7 @@ function createContext(overrides?: {
 		model: overrides?.model ?? model,
 		asyncJobManager: { register },
 		sessionId: "parent-session",
+		agent: { promptCacheKey: undefined },
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => ["read", "bash"]),

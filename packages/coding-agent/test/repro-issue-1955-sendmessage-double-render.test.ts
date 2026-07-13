@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	ExtensionActions,
 	ExtensionCommandContextActions,
@@ -35,6 +36,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
+	resetSettingsForTest();
 	vi.restoreAllMocks();
 });
 
@@ -177,6 +179,7 @@ function countOccurrences(haystack: string, needle: string): number {
 
 describe("issue #1955 — sendMessage(display:true) during session_start", () => {
 	test("renders the custom message exactly once after the initial transcript render", async () => {
+		await Settings.init({ inMemory: true });
 		const marker = "issue-1955-marker-text";
 		const harness = createHarness();
 		await harness.controller.initHooksAndCustomTools();
@@ -210,6 +213,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 	});
 
 	test("after the initial render, sendMessage(display:true) still renders the message", async () => {
+		await Settings.init({ inMemory: true });
 		const marker = "issue-1955-late-marker";
 		const harness = createHarness();
 		await harness.controller.initHooksAndCustomTools();
