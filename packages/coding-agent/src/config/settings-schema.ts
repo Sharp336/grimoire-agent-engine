@@ -3560,6 +3560,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"imagegen.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Image Generation",
+			description: "Enable the generate_image tool for text-to-image generation and image editing",
+		},
+	},
+
 	"speechgen.enabled": {
 		type: "boolean",
 		default: false,
