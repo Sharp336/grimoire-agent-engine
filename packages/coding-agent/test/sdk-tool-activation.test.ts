@@ -278,4 +278,57 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("does not register built-in custom tools for an explicit empty tool selection", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "speechgen.enabled": true }),
+			toolNames: [],
+		});
+
+		try {
+			expect(session.getToolByName("generate_image")).toBeUndefined();
+			expect(session.getToolByName("tts")).toBeUndefined();
+			expect(session.getActiveToolNames()).not.toContain("generate_image");
+			expect(session.getActiveToolNames()).not.toContain("tts");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not register built-in custom tools omitted from an explicit tool selection", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "speechgen.enabled": true }),
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.getToolByName("generate_image")).toBeUndefined();
+			expect(session.getToolByName("tts")).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not register generate_image when its availability setting is disabled", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "generate_image.enabled": false }),
+		});
+
+		try {
+			expect(session.getToolByName("generate_image")).toBeUndefined();
+			expect(session.getActiveToolNames()).not.toContain("generate_image");
+		} finally {
+			await session.dispose();
+		}
+	});
 });

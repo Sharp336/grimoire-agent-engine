@@ -135,4 +135,14 @@ describe("settings layout", () => {
 			group: "Available Tools",
 		});
 	});
+
+	it("exposes generate_image.enabled as a boolean under Available Tools", () => {
+		const def = getSettingsForTab("tools").find(def => def.path === "generate_image.enabled");
+
+		expect(def).toMatchObject({
+			type: "boolean",
+			label: "Generate Image",
+			group: "Available Tools",
+		});
+	});
 });

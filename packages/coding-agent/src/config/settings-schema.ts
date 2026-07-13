@@ -3593,6 +3593,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"generate_image.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Generate Image",
+			description: "Enable the generate_image tool for creating and editing images",
+		},
+	},
+
 	"inspect_image.enabled": {
 		type: "boolean",
 		default: false,

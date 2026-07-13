@@ -1816,13 +1816,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
-		// Add image tools when the active model or configured image providers can generate images.
-		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-		if (imageGenTools.length > 0) {
-			customTools.push(...(imageGenTools as unknown as CustomTool[]));
+		// Image generation and speech synthesis are built-in custom tools. Unlike
+		// extension tools, they must honor an explicit built-in tool selection,
+		// including the empty selection produced by `--no-tools`.
+		const isBuiltinCustomToolRequested = (name: string): boolean =>
+			options.toolNames === undefined || options.toolNames.some(toolName => normalizeToolName(toolName) === name);
+		if (settings.get("generate_image.enabled") && isBuiltinCustomToolRequested("generate_image")) {
+			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+			if (imageGenTools.length > 0) {
+				customTools.push(...(imageGenTools as unknown as CustomTool[]));
+			}
 		}
 
-		if (settings.get("speechgen.enabled")) {
+		if (settings.get("speechgen.enabled") && isBuiltinCustomToolRequested("tts")) {
 			customTools.push(ttsTool as unknown as CustomTool);
 		}
 
