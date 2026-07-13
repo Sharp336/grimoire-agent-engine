@@ -34,6 +34,13 @@ export const BUILTIN_TOOL_NAMES = [
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
 
+/**
+ * First-party names accepted by the CLI `--tools` allowlist.
+ * `generate_image` and `tts` are registered through the SDK custom-tool path,
+ * not the `BUILTIN_TOOLS` factory map.
+ */
+export const CLI_TOOL_NAMES = [...BUILTIN_TOOL_NAMES, "generate_image", "tts"] as const;
+
 const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([
 	["search", "grep"],
 	["find", "glob"],

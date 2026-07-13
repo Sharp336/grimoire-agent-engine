@@ -4,7 +4,7 @@
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
-import { normalizeToolNames } from "../tools/builtin-names";
+import { CLI_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -95,6 +95,7 @@ export interface Args {
 const PARSE_DEPS: ParseDeps = {
 	logger,
 	parseThinking: parseCliThinkingLevel,
+	cliToolNames: CLI_TOOL_NAMES,
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { buildSpec, type CompletionSpec, generateCompletion } from "@oh-my-pi/pi-coding-agent/cli/completion-gen";
+import { CLI_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import type { CliConfig, CommandCtor } from "@oh-my-pi/pi-utils/cli";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
@@ -189,8 +190,7 @@ describe("buildSpec", () => {
 		expect(byName.get("session-dir")).toBe("dir");
 		const tools = root.flags.find(flag => flag.name === "tools");
 		if (tools?.value.kind !== "list") throw new Error("Expected --tools to use list completion");
-		expect(tools.value.values).toContain("generate_image");
-		expect(tools.value.values).toContain("tts");
+		expect(tools.value.values).toEqual(CLI_TOOL_NAMES);
 	});
 });
 

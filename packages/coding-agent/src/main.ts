@@ -1345,20 +1345,8 @@ export async function runRootCommand(
 	}
 
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
-	const warnedUnknownToolNames = new Set<string>();
 	const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 		const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
-		if (parsedArgs.tools) {
-			for (const name of parsedArgs.tools) {
-				if (!result.session.getToolByName(name) && !warnedUnknownToolNames.has(name)) {
-					warnedUnknownToolNames.add(name);
-					logger.warn("Unknown tool passed to --tools", {
-						tool: name,
-						validTools: result.session.getAllToolNames(),
-					});
-				}
-			}
-		}
 		// Kick off background model discovery only after createAgentSession finishes its parallel
 		// discovery arms; running these concurrently contends for the event loop and stretches
 		// every parallel arm by ~30ms.
