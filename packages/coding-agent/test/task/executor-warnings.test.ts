@@ -229,6 +229,24 @@ describe("subagent warning injection", () => {
 		expect(result.failure).toBeUndefined();
 	});
 
+	it("preserves plain-text fallback for an unconstrained permissive schema", () => {
+		const rawOutput = "Useful partial findings without structured output.";
+		const result = finalizeSubprocessOutput({
+			rawOutput,
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: undefined,
+			outputSchema: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.rawOutput).toBe(rawOutput);
+		expect(result.stderr).toBe("");
+		expect(result.failure).toBeUndefined();
+	});
+
 	it("assembles incremental typed yield sections on idle", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
