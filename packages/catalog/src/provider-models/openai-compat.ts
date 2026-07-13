@@ -2853,6 +2853,26 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// DaoXE multi-model multi-protocol gateway (OpenAI-compatible Chat Completions)
+// ---------------------------------------------------------------------------
+
+export interface DaoXEModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function daoxeModelManagerOptions(
+	config?: DaoXEModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		...createSimpleOpenAICompletionsOptions("daoxe", "https://daoxe.com/v1", config),
+		// Live account catalog is authoritative; models.dev seed is a bootstrap only.
+		dynamicModelsAuthoritative: true,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 15.5 CoreWeave Serverless Inference
 // ---------------------------------------------------------------------------
 
@@ -4674,6 +4694,10 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 		defaultMaxTokens: 8192,
 	}),
 
+	// --- DaoXE ---
+	openAiCompletionsDescriptor("daoxe", "daoxe", "https://daoxe.com/v1", {
+		filterModel: filterActiveToolCallModels,
+	}),
 	// --- ZenMux ---
 	openAiCompletionsDescriptor("zenmux", "zenmux", ZENMUX_OPENAI_BASE_URL, {
 		filterModel: filterActiveToolCallModels,

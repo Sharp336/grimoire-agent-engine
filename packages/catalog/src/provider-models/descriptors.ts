@@ -17,6 +17,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	daoxeModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -126,6 +127,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["DEEPSEEK_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => deepseekModelManagerOptions(config),
 		catalogDiscovery: { label: "DeepSeek" },
+	},
+	{
+		id: "daoxe",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["DAOXE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => daoxeModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "DaoXE" },
 	},
 	{
 		id: "devin",
