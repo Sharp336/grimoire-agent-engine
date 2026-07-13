@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -68,6 +69,10 @@ describe("InteractiveMode.showStatus", () => {
 		await initTheme();
 	});
 
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
 	test("coalesces immediately-sequential status messages", () => {
 		const ctx = {
 			chatContainer: new Container(),
@@ -120,7 +125,8 @@ describe("InteractiveMode.showStatus", () => {
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
 	});
 
-	test("preserves startup notifications while rendering the initial transcript", () => {
+	test("preserves startup notifications while rendering the initial transcript", async () => {
+		await Settings.init({ inMemory: true });
 		const { ctx, helpers } = createInitialRenderHarness();
 
 		helpers.showWarning("startup notification probe");
