@@ -29,6 +29,7 @@ import {
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	neuralwattModelManagerOptions,
 	novitaModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
@@ -264,6 +265,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NANO_GPT_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nanoGptModelManagerOptions(config),
 		catalogDiscovery: { label: "NanoGPT" },
+	},
+	{
+		id: "neuralwatt",
+		defaultModel: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+		envVars: ["NEURALWATT_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => neuralwattModelManagerOptions(config),
+		catalogDiscovery: { label: "Neuralwatt" },
 	},
 	{
 		id: "nvidia",

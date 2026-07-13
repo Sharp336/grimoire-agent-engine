@@ -1069,6 +1069,22 @@ export function novitaModelManagerOptions(
 	};
 }
 
+export interface NeuralwattModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function neuralwattModelManagerOptions(
+	config?: NeuralwattModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions(
+		"neuralwatt" as Parameters<typeof getBundledModels>[0],
+		"https://api.neuralwatt.com/v1",
+		config,
+	);
+}
+
 // ---------------------------------------------------------------------------
 // 6. xAI
 // ---------------------------------------------------------------------------
