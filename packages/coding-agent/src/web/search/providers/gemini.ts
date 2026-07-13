@@ -9,12 +9,16 @@
  * endpoint.
  */
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
+
+import type { ModelRegistry } from "../../../config/model-registry";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -43,6 +47,30 @@ function resolveGeminiSearchModel(configuredModel: string | undefined): string {
 const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
 type GeminiProviderId = (typeof GEMINI_PROVIDERS)[number];
 
+function resolveOAuthGeminiSearchModel(
+	modelId: string,
+	provider: GeminiProviderId,
+	modelRegistry: ModelRegistry | undefined,
+): string {
+	const runtimeModel = modelRegistry?.find(provider, modelId);
+	// `find` also resolves retired wire aliases. Only translate an exact logical
+	// model id so an explicitly configured wire id remains unchanged.
+	if (runtimeModel?.id.toLowerCase() === modelId.toLowerCase()) {
+		return resolveWireModelId(runtimeModel, undefined);
+	}
+
+	// Direct/CLI callers may not own a runtime registry. Avoid initializing the
+	// bundled catalog on the default path, whose logical and wire ids are equal.
+	if (!modelRegistry && modelId !== DEFAULT_MODEL) {
+		const bundledModel = getBundledModel(provider, modelId);
+		if (bundledModel) {
+			return resolveWireModelId(bundledModel, undefined);
+		}
+	}
+
+	return modelId;
+}
+
 interface GeminiToolParams {
 	google_search?: Record<string, unknown>;
 	code_execution?: Record<string, unknown>;
@@ -63,6 +91,7 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	fetch?: FetchImpl;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	modelRegistry?: ModelRegistry;
 }
 
 export function buildGeminiRequestTools(params: GeminiToolParams): Array<Record<string, Record<string, unknown>>> {
@@ -512,6 +541,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 	let result: GeminiSearchResult;
 
 	if (seed) {
+		const requestModel = resolveOAuthGeminiSearchModel(selectedModel, seed.provider, params.modelRegistry);
 		const isAntigravity = seed.provider === "google-antigravity";
 		result = await withOAuthAccess(
 			params.authStorage,
@@ -527,7 +557,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 						projectId: access.projectId ?? seed.projectId,
 						isAntigravity,
 					},
-					selectedModel,
+					requestModel,
 					params.query,
 					params.system_prompt,
 					params.max_output_tokens,
@@ -613,6 +643,7 @@ export class GeminiProvider extends SearchProvider {
 			sessionId: params.sessionId,
 			fetch: params.fetch,
 			geminiModel: params.geminiModel,
+			modelRegistry: params.modelRegistry,
 		});
 	}
 }

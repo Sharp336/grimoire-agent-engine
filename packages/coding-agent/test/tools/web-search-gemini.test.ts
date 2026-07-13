@@ -32,6 +32,19 @@ describe("searchGemini tools serialization", () => {
 		},
 	} as unknown as AuthStorage;
 
+	const antigravityAuthStorage = {
+		async getOAuthAccess(provider: string) {
+			if (provider !== "google-antigravity") return undefined;
+			return {
+				accessToken: "test-antigravity-access-token",
+				projectId: "test-antigravity-project",
+			};
+		},
+		hasOAuth(provider: string) {
+			return provider === "google-antigravity";
+		},
+	} as unknown as AuthStorage;
+
 	const apiKeyAuthStorage = {
 		async getOAuthAccess() {
 			return undefined;
@@ -136,6 +149,20 @@ describe("searchGemini tools serialization", () => {
 
 		expect(capturedRequest?.body).toMatchObject({
 			model: "gemini-3.5-flash",
+		});
+	});
+
+	it("resolves an Antigravity logical model id to its request model id", async () => {
+		const fetchMock = mockGeminiFetch();
+		await searchGemini({
+			...makeParams("antigravity configured"),
+			authStorage: antigravityAuthStorage,
+			geminiModel: "gemini-3.1-pro",
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "gemini-3.1-pro-low",
 		});
 	});
 

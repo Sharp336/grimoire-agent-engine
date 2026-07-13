@@ -1,4 +1,5 @@
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "../../../config/model-registry";
 import type { SearchProviderId, SearchResponse } from "../types";
 
 /**
@@ -53,6 +54,8 @@ export interface SearchParams {
 	sessionId?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	/** Runtime models used to resolve logical Gemini ids to provider wire ids. */
+	modelRegistry?: ModelRegistry;
 }
 
 /** Base class for web search providers. */
