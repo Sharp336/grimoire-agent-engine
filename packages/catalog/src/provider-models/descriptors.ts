@@ -19,6 +19,7 @@ import {
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
+	friendliModelManagerOptions,
 	githubCopilotModelManagerOptions,
 	groqModelManagerOptions,
 	huggingfaceModelManagerOptions,
@@ -147,6 +148,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["FIREWORKS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => fireworksModelManagerOptions(config),
 		catalogDiscovery: { label: "Fireworks" },
+	},
+	{
+		id: "friendli",
+		defaultModel: "zai-org/GLM-5.2",
+		envVars: ["FRIENDLI_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => friendliModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "FriendliAI" },
 	},
 	{
 		id: "github-copilot",

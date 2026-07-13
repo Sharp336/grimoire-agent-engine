@@ -1818,6 +1818,64 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.55 FriendliAI
+// ---------------------------------------------------------------------------
+
+export interface FriendliModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const FRIENDLI_DEFAULT_BASE_URL = "https://api.friendli.ai/serverless/v1";
+
+export function friendliModelManagerOptions(
+	config?: FriendliModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? FRIENDLI_DEFAULT_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("friendli");
+	return {
+		providerId: "friendli",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "friendli",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						const raw = entry as Record<string, unknown> & {
+							context_length?: unknown;
+							max_completion_tokens?: unknown;
+						};
+
+						const contextWindow = toPositiveNumber(
+							raw.context_length,
+							reference?.contextWindow ?? defaults.contextWindow,
+						);
+						const maxTokens = toPositiveNumber(
+							raw.max_completion_tokens,
+							reference?.maxTokens ?? defaults.maxTokens,
+						);
+
+						const baseModel = mapWithBundledReference(entry, defaults, reference);
+
+						return {
+							...baseModel,
+							contextWindow,
+							maxTokens,
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
 // ---------------------------------------------------------------------------
 
