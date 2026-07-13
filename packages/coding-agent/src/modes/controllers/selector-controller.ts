@@ -47,6 +47,7 @@ import {
 } from "../../slash-commands/helpers/reset-usage";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import {
+	imageGenTool,
 	isImageProviderPreference,
 	isSearchProviderId,
 	isSearchProviderPreference,
@@ -588,6 +589,27 @@ export class SelectorController {
 			case "mcp.notifications":
 				this.ctx.mcpManager?.setNotificationsEnabled(value as boolean);
 				break;
+
+			// Image-gen tool is registered unconditionally (sdk.ts); toggle its live
+			// active membership so the setting withdraws/restores it without a restart.
+			case "imagegen.enabled": {
+				const toolName = imageGenTool.name;
+				const active = this.ctx.session.getActiveToolNames();
+				let next: string[] | undefined;
+				if (value) {
+					if (this.ctx.session.getAllToolNames().includes(toolName) && !active.includes(toolName)) {
+						next = [...active, toolName];
+					}
+				} else if (active.includes(toolName)) {
+					next = active.filter(name => name !== toolName);
+				}
+				if (next) {
+					this.ctx.session.setActiveToolsByName(next).catch(err => {
+						this.ctx.showError(`Failed to update image generation tool: ${err}`);
+					});
+				}
+				break;
+			}
 
 			// All other settings are handled by the definitions (get/set on SettingsManager)
 			// No additional side effects needed

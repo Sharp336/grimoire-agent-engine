@@ -1814,13 +1814,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
-		// Add image tools when enabled and the active model or configured image providers can generate images.
-		if (settings.get("imagegen.enabled")) {
-			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-			if (imageGenTools.length > 0) {
-				customTools.push(...(imageGenTools as unknown as CustomTool[]));
-			}
+		// Always register the image tools so the `imagegen.enabled` toggle can add
+		// or withdraw them live (the registry is built once). Only their initial
+		// active membership is gated on the setting, below.
+		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+		if (imageGenTools.length > 0) {
+			customTools.push(...(imageGenTools as unknown as CustomTool[]));
 		}
+		const imageGenToolNames = new Set(imageGenTools.map(tool => tool.name));
 
 		if (settings.get("speechgen.enabled")) {
 			customTools.push(ttsTool as unknown as CustomTool);
@@ -2604,6 +2605,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			status: "running",
 		});
 		hasRegistered = true;
+
+		// Image tools are registered unconditionally (above); drop them from the
+		// initial active set when disabled so the model never sees the schema.
+		if (!settings.get("imagegen.enabled")) {
+			initialToolNames = initialToolNames.filter(name => !imageGenToolNames.has(name));
+		}
 
 		setActiveToolNames(initialToolNames);
 		const { systemPrompt } = await logger.time(

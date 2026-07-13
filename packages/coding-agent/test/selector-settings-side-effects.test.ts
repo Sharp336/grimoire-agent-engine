@@ -219,4 +219,49 @@ describe("selector setting side effects", () => {
 		expect(showModelCycleTrack).toHaveBeenCalledTimes(1);
 		expect(showError).not.toHaveBeenCalled();
 	});
+
+	it("activates the generate_image tool when imagegen.enabled turns on", () => {
+		const setActiveToolsByName = vi.fn().mockResolvedValue(undefined);
+		const controller = new SelectorController({
+			session: {
+				getActiveToolNames: () => ["read"],
+				getAllToolNames: () => ["read", "generate_image"],
+				setActiveToolsByName,
+			},
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("imagegen.enabled", true);
+
+		expect(setActiveToolsByName).toHaveBeenCalledWith(["read", "generate_image"]);
+	});
+
+	it("withdraws the generate_image tool when imagegen.enabled turns off", () => {
+		const setActiveToolsByName = vi.fn().mockResolvedValue(undefined);
+		const controller = new SelectorController({
+			session: {
+				getActiveToolNames: () => ["read", "generate_image"],
+				getAllToolNames: () => ["read", "generate_image"],
+				setActiveToolsByName,
+			},
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("imagegen.enabled", false);
+
+		expect(setActiveToolsByName).toHaveBeenCalledWith(["read"]);
+	});
+
+	it("does not activate generate_image when it is absent from the registry", () => {
+		const setActiveToolsByName = vi.fn().mockResolvedValue(undefined);
+		const controller = new SelectorController({
+			session: {
+				getActiveToolNames: () => ["read"],
+				getAllToolNames: () => ["read"],
+				setActiveToolsByName,
+			},
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("imagegen.enabled", true);
+
+		expect(setActiveToolsByName).not.toHaveBeenCalled();
+	});
 });
