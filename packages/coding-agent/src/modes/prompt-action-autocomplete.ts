@@ -249,6 +249,13 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		return this.#baseProvider.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 	}
 
+	async getForceFileSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		return this.#baseProvider.getForceFileSuggestions?.(lines, cursorLine, cursorCol) ?? null;
+	}
 	getInlineHint(lines: string[], cursorLine: number, cursorCol: number): string | null {
 		return this.#baseProvider.getInlineHint?.(lines, cursorLine, cursorCol) ?? null;
 	}

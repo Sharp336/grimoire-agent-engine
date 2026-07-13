@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed internal URL autocomplete (`agent://`, `skill://`, `rule://`, etc.) not triggering when typing inside a slash command's arguments (e.g. `/btw agent://Main`). The argument-completion early return short-circuited to `null` for commands without `getArgumentCompletions` instead of falling through to URL completion.
+- Fixed `@` file-reference and bare-path completion not triggering inside slash command arguments (e.g. `/btw @file`, `/btw src/app`), consistent with the internal-URL fix above.
 ### Added
 
 - Added display setting to toggle between collapsing or keeping compacted history inline, now applied to live session displays

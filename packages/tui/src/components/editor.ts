@@ -1855,7 +1855,22 @@ export class Editor implements Component, Focusable {
 					this.#tryTriggerAutocomplete();
 				}
 			}
-		} else {
+	} else {
+			// When transitioning from slash command name to arguments (space
+			// typed after /command), close the autocomplete popup. The debounced
+			// update would otherwise fire with stale state and show file listings
+			// from the getSuggestions fall-through. Tab bypasses
+			// autocompleteState via #tryTriggerAutocomplete, so Tab-triggered
+			// file/path completion still works.
+			if (char === " ") {
+				const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+				if (/^\s*\/\S+ $/.test(textBeforeCursor)) {
+					this.#cancelAutocomplete();
+					this.onAutocompleteUpdate?.();
+					return;
+				}
+			}
 			this.#debouncedUpdateAutocomplete();
 		}
 	}
@@ -3102,8 +3117,10 @@ export class Editor implements Component, Focusable {
 			this.#autocompleteState = "force";
 			this.onAutocompleteUpdate?.();
 		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
+			// Force file completion found nothing — fall back to regular
+			// completion (handles # prompt actions, @ references, etc.)
+			// instead of cancelling outright.
+			await this.#tryTriggerAutocomplete(true);
 		}
 	}
 

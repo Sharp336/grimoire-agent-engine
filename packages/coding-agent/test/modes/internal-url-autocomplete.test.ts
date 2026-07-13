@@ -253,6 +253,18 @@ describe("internal-url-autocomplete", () => {
 			expect(result?.items.map(i => i.value)).toEqual(["skill://humanizer"]);
 		});
 
+		it("returns @ file-reference completions inside slash-command args", async () => {
+			const provider = new PromptActionAutocompleteProvider(
+				[{ name: "btw", allowArgs: true }] as never,
+				process.cwd(),
+				[],
+			);
+			const line = "/btw what does @package.j";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			expect(result?.prefix).toBe("@package.j");
+			expect(result?.items.map(i => i.value)).toContain("@package.json");
+		});
+
 		it("still treats # tokens as literal text inside slash-command args", async () => {
 			const provider = new PromptActionAutocompleteProvider(
 				[{ name: "btw", allowArgs: true }] as never,

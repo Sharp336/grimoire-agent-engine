@@ -150,6 +150,28 @@ describe("Editor slash autocomplete acceptance", () => {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
+	it("closes slash autocomplete popup when typing space after command name", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "btw", description: "Ask a side question", allowArgs: true }], "/tmp"),
+		);
+
+		const opened = onceAutocompleteUpdate(editor);
+		editor.handleInput("/");
+		editor.handleInput("b");
+		editor.handleInput("t");
+		editor.handleInput("w");
+		await opened;
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		// Typing space transitions from command name to args — popup should
+		// close so the debounced update doesn't show file listings.
+		const closed = onceAutocompleteUpdate(editor);
+		editor.handleInput(" ");
+		await closed;
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+
 });
 class SyncSlashProvider implements AutocompleteProvider {
 	async getSuggestions(

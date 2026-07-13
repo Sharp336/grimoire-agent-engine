@@ -199,7 +199,7 @@ describe("CombinedAutocompleteProvider", () => {
 			}
 		});
 
-		it("treats @ file-reference tokens as literal text inside slash command arguments without completions", async () => {
+		it("returns @ file-reference completions inside slash command arguments without dedicated completions", async () => {
 			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-rename-args-"));
 			try {
 				fs.writeFileSync(path.join(baseDir, "copy-target.ts"), "export {};\n");
@@ -210,7 +210,45 @@ describe("CombinedAutocompleteProvider", () => {
 				const line = "/rename repro @";
 				const result = await provider.getSuggestions([line], 0, line.length);
 
+				expect(result?.prefix).toBe("@");
+				expect(result?.items.map(item => item.value)).toContain("@copy-target.ts");
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+		it("does not return file suggestions for empty slash command arguments", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-btw-empty-"));
+			try {
+				fs.writeFileSync(path.join(baseDir, "copy-target.ts"), "export {};\n");
+				const provider = new CombinedAutocompleteProvider(
+					[{ name: "btw", description: "Ask a side question", allowArgs: true }],
+					baseDir,
+				);
+				const line = "/btw ";
+				const result = await provider.getSuggestions([line], 0, line.length);
+
+				// Empty-prefix path listing is suppressed inside slash args so
+				// `/btw ` does not list every file regardless of the trigger path
+				// (typing space, backspace re-trigger, etc.).
 				expect(result).toBeNull();
+			} finally {
+				fs.rmSync(baseDir, { recursive: true, force: true });
+			}
+		});
+		it("returns path completions for path-like slash command arguments", async () => {
+			const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-btw-path-"));
+			try {
+				fs.mkdirSync(path.join(baseDir, "src"));
+				fs.writeFileSync(path.join(baseDir, "src", "app.ts"), "export {};\n");
+				const provider = new CombinedAutocompleteProvider(
+					[{ name: "btw", description: "Ask a side question", allowArgs: true }],
+					baseDir,
+				);
+				const line = "/btw src/app";
+				const result = await provider.getSuggestions([line], 0, line.length);
+
+				expect(result?.prefix).toBe("src/app");
+				expect(result?.items.map(item => item.value)).toContain("src/app.ts");
 			} finally {
 				fs.rmSync(baseDir, { recursive: true, force: true });
 			}
