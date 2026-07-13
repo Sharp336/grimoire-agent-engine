@@ -4,6 +4,7 @@ import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { prepareOutputSchema } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { type } from "arktype";
 
 // Contract: the single-spawn schema (`task.batch: false`; the exported
@@ -84,31 +85,81 @@ describe("task spawn validation", () => {
 		expect(text).toContain("Missing `task`");
 	});
 
-	it("rejects an invalid inherited strict schema before dispatching a subagent", async () => {
+	it("dispatches inherited and agent-native schemas permissively from a strict parent", async () => {
+		const inheritedSchema = {
+			type: "object",
+			properties: { inherited: { type: "boolean" } },
+			required: ["inherited"],
+		};
+		const agentSchema = {
+			type: "object",
+			properties: { native: { type: "string" } },
+			required: ["native"],
+		};
 		const session = createSession();
-		Object.assign(session, { outputSchema: false, schemaMode: "strict" });
+		Object.assign(session, {
+			outputSchema: inheritedSchema,
+			schemaMode: "strict",
+			preparedOutputSchema: prepareOutputSchema(inheritedSchema, "strict"),
+		});
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [
 				{
 					name: "task",
-					description: "Task agent",
+					description: "Inherited-schema task agent",
 					systemPrompt: "Do the task.",
 					source: "bundled",
+				},
+				{
+					name: "native",
+					description: "Agent-native schema task agent",
+					systemPrompt: "Do the task.",
+					source: "bundled",
+					output: agentSchema,
 				},
 			],
 			projectAgentsDir: null,
 		});
-		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		const dispatch = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => ({
+			index: options.index,
+			id: options.id,
+			agent: options.agent.name,
+			agentSource: options.agent.source,
+			task: options.task,
+			assignment: options.assignment,
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 0,
+			tokens: 0,
+			requests: 1,
+		}));
 		const tool = await TaskTool.create(session);
 
-		const result = await tool.execute("tool-call", { task: "classify" });
-		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		await tool.execute("inherited-schema", { task: "classify" });
+		await tool.execute("agent-native-schema", { agent: "native", task: "classify" });
 
-		expect(text).toContain("Invalid strict output schema");
-		expect(dispatch).not.toHaveBeenCalled();
+		expect(dispatch).toHaveBeenCalledTimes(2);
+		const inheritedOptions = dispatch.mock.calls[0]?.[0];
+		const nativeOptions = dispatch.mock.calls[1]?.[0];
+		if (!inheritedOptions || !nativeOptions) throw new Error("Expected both TaskTool spawns to dispatch.");
+
+		for (const [options, outputSchema] of [
+			[inheritedOptions, inheritedSchema],
+			[nativeOptions, agentSchema],
+		] as const) {
+			expect(options.schemaMode).toBe("permissive");
+			expect(options.outputSchema).toBe(outputSchema);
+			expect(options.preparedOutputSchema).toMatchObject({
+				schemaMode: "permissive",
+				outputSchema,
+			});
+			expect(options.preparedOutputSchema?.validator).toBeDefined();
+		}
 	});
 
-	it("returns cancellation before preparing an invalid inherited strict schema", async () => {
+	it("returns cancellation before preparing a child schema", async () => {
 		const session = createSession();
 		Object.assign(session, { outputSchema: false, schemaMode: "strict" });
 		const discovery = vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
@@ -132,7 +183,6 @@ describe("task spawn validation", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 
 		expect(text).toBe("Cancelled before start");
-		expect(text).not.toContain("Invalid strict output schema");
 		expect(discovery).toHaveBeenCalledTimes(discoveriesAtCreation);
 		expect(dispatch).not.toHaveBeenCalled();
 	});

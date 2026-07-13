@@ -403,13 +403,12 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
     end
   end
 
-  def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, schema_mode: nil, isolated: nil, apply: nil, merge: nil, handle: false)
+  def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, isolated: nil, apply: nil, merge: nil, handle: false)
     args = { "prompt" => prompt }
     args["agent"] = agent unless agent.nil?
     args["model"] = model unless model.nil?
     args["label"] = label unless label.nil?
     args["schema"] = schema unless schema.nil?
-    args["schemaMode"] = schema_mode unless schema_mode.nil?
     # Isolation knobs mirror the `task` tool: strict opt-in via `isolated`,
     # with `apply`/`merge` controlling the post-run patch/branch merge.
     args["isolated"] = !!isolated unless isolated.nil?

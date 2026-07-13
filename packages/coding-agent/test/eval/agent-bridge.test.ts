@@ -64,7 +64,7 @@ describe("runEvalAgent", () => {
 		expect(options?.parentAgentId).toBe("BridgeParent");
 	});
 
-	it("rejects a nested external strict reference before discovering or dispatching an agent", async () => {
+	it("rejects a nested external reference before discovering or dispatching an agent", async () => {
 		const discoverAgents = vi.spyOn(taskDiscovery, "discoverAgents");
 		const runSubprocess = vi.spyOn(taskExecutor, "runSubprocess");
 		const session = { cwd: "/tmp" } as unknown as ToolSession;
@@ -73,7 +73,6 @@ describe("runEvalAgent", () => {
 			runEvalAgent(
 				{
 					prompt: "do work",
-					schemaMode: "strict",
 					schema: {
 						$ref: "#/$defs/Result",
 						$defs: {
@@ -92,7 +91,7 @@ describe("runEvalAgent", () => {
 				},
 				{ session },
 			),
-		).rejects.toThrow("agent() received invalid strict schema: schema contains unresolved $ref after dereferencing");
+		).rejects.toThrow("agent() received invalid schema: schema contains unresolved $ref after dereferencing");
 
 		expect(discoverAgents).not.toHaveBeenCalled();
 		expect(runSubprocess).not.toHaveBeenCalled();

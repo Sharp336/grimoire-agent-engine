@@ -560,7 +560,7 @@ if "__omp_prelude_loaded__" not in globals():
             args["handle"] = True
         res = _bridge_call("__agent__", args)
         if isinstance(res, dict) and "schemaViolation" in res:
-            raise AgentSchemaViolationError(res["schemaViolation"])
+            raise AgentSchemaValidationError(res["schemaViolation"])
         text = res.get("text") if isinstance(res, dict) else res
         parsed = json.loads(text) if schema is not None else text
         if not handle:

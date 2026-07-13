@@ -16,7 +16,6 @@ import { AgentOutputManager } from "../../task/output-manager";
 import type { AgentDefinition, AgentProgress, SingleResult } from "../../task/types";
 import type { ToolSession } from "../../tools";
 import type { SchemaViolationResult } from "../../tools/output-schema-validator";
-import { ToolError } from "../../tools/tool-errors";
 import { EVAL_AGENT_MAX_DEPTH, runEvalAgent } from "../agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { IdleTimeout } from "../idle-timeout";
@@ -311,43 +310,34 @@ describe("runEvalAgent", () => {
 		expect(firstOptions.modelOverride).toEqual(["p/override"]);
 		expect(secondOptions.outputSchema).toBeUndefined();
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
+		expect(secondOptions.schemaMode).toBeUndefined();
+		expect(secondOptions.preparedOutputSchema).toBeUndefined();
 	});
 
-	it("forwards explicit strict mode and defaults omitted mode to permissive", async () => {
+	it("always prepares explicit schemas in strict mode", async () => {
 		mockAgents();
 		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		await runEvalAgent({ prompt: "strict", schema, schemaMode: "strict" }, { session: makeSession() });
-		await runEvalAgent({ prompt: "legacy", schema }, { session: makeSession() });
+		await runEvalAgent({ prompt: "structured", schema }, { session: makeSession() });
 
-		const strictOptions = runSpy.mock.calls[0]?.[0];
-		const legacyOptions = runSpy.mock.calls[1]?.[0];
-		if (!strictOptions || !legacyOptions) throw new Error("runSubprocess was not called twice");
-		expect(strictOptions.schemaMode).toBe("strict");
-		expect(strictOptions.preparedOutputSchema?.schemaMode).toBe("strict");
-		expect(legacyOptions.schemaMode).toBe("permissive");
-		expect(legacyOptions.preparedOutputSchema?.schemaMode).toBe("permissive");
+		const options = runSpy.mock.calls[0]?.[0];
+		if (!options) throw new Error("runSubprocess was not called");
+		expect(options.schemaMode).toBe("strict");
+		expect(options.preparedOutputSchema?.schemaMode).toBe("strict");
 	});
 
-	it("rejects invalid schema mode contracts before dispatching", async () => {
+	it("rejects invalid explicit schemas before dispatching", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		const session = makeSession();
 
-		await expect(runEvalAgent({ prompt: "missing", schemaMode: "strict" }, { session })).rejects.toThrow(
-			"requires schema",
+		await expect(runEvalAgent({ prompt: "invalid", schema: false }, { session: makeSession() })).rejects.toThrow(
+			"invalid schema",
 		);
-		await expect(
-			runEvalAgent({ prompt: "invalid", schema: false, schemaMode: "strict" }, { session }),
-		).rejects.toThrow("invalid strict schema");
-		await expect(
-			runEvalAgent({ prompt: "unknown", schema: { type: "object" }, schemaMode: "enforced" }, { session }),
-		).rejects.toThrow("invalid arguments");
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("preserves a valid strict structured result and exposes schema failures as typed bridge results", async () => {
+	it("preserves a valid structured result and exposes explicit-schema failures as typed bridge results", async () => {
 		mockAgents();
 		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
 		const violation: SchemaViolationResult = {
@@ -360,11 +350,8 @@ describe("runEvalAgent", () => {
 		runSpy.mockImplementationOnce(async options => singleResult(options, { output: '{"accepted":false}' }));
 		runSpy.mockImplementationOnce(async options => singleResult(options, { exitCode: 1, failure: violation }));
 
-		const success = await runEvalAgent({ prompt: "valid", schema, schemaMode: "strict" }, { session: makeSession() });
-		const failure = await runEvalAgent(
-			{ prompt: "invalid", schema, schemaMode: "strict" },
-			{ session: makeSession() },
-		);
+		const success = await runEvalAgent({ prompt: "valid", schema }, { session: makeSession() });
+		const failure = await runEvalAgent({ prompt: "invalid", schema }, { session: makeSession() });
 
 		expect(success).toEqual({
 			text: '{"accepted":false}',
@@ -377,27 +364,17 @@ describe("runEvalAgent", () => {
 		});
 	});
 
-	it("keeps schema validation failures on the generic ToolError path in permissive mode", async () => {
+	it("keeps unstructured subagent failures on the generic ToolError path", async () => {
 		mockAgents();
-		const schema = { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"] };
-		const violation: SchemaViolationResult = {
-			error: "schema_violation",
-			message: "result.data.accepted must be boolean",
-			missingRequired: [],
-			data: '{"accepted":"no"}',
-		};
 		const runSpy = vi
 			.spyOn(taskExecutor, "runSubprocess")
-			.mockImplementation(async options => singleResult(options, { exitCode: 1, failure: violation }));
+			.mockImplementation(async options => singleResult(options, { exitCode: 1, error: "subagent failed" }));
 
-		await expect(runEvalAgent({ prompt: "default", schema }, { session: makeSession() })).rejects.toBeInstanceOf(
-			ToolError,
+		await expect(runEvalAgent({ prompt: "unstructured" }, { session: makeSession() })).rejects.toThrow(
+			"subagent failed",
 		);
-		await expect(
-			runEvalAgent({ prompt: "explicit", schema, schemaMode: "permissive" }, { session: makeSession() }),
-		).rejects.toBeInstanceOf(ToolError);
 
-		expect(runSpy).toHaveBeenCalledTimes(2);
+		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("forces LSP off for bridge subagents even when task.enableLsp is on", async () => {
@@ -1104,7 +1081,7 @@ describe("runEvalAgent isolation", () => {
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const result = await runEvalAgent(
-			{ prompt: "classify", schema: { type: "object" }, schemaMode: "strict", isolated: true, handle: true },
+			{ prompt: "classify", schema: { type: "object" }, isolated: true, handle: true },
 			{ session },
 		);
 

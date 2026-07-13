@@ -105,7 +105,7 @@ describe("eval js agent() handle", () => {
 		expect("branchName" in node).toBe(false);
 	});
 
-	it("forwards strict schema mode and returns the structured value unchanged", async () => {
+	it("preserves trailing object mappings and forwards schema", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {
 			seenArgs = args as Record<string, unknown>;
@@ -116,20 +116,31 @@ describe("eval js agent() handle", () => {
 		});
 
 		const output = await (sandbox.agent as AgentHelper)("classify", {
+			agent: "task",
+			model: ["p/fast"],
+			label: "Classify",
 			schema: { type: "object" },
-			schemaMode: "strict",
+			isolated: true,
+			apply: false,
+			merge: true,
+			handle: false,
 		});
 
-		expect(seenArgs).toMatchObject({
+		expect(seenArgs).toEqual({
 			prompt: "classify",
+			agent: "task",
+			model: ["p/fast"],
+			label: "Classify",
 			schema: { type: "object" },
-			schemaMode: "strict",
+			isolated: true,
+			apply: false,
+			merge: true,
 			handle: false,
 		});
 		expect(output).toEqual({ accepted: false, zero: 0 });
 	});
 
-	it("keeps legacy positional isolation/apply/merge slots when schemaMode is appended", async () => {
+	it("keeps legacy positional isolation/apply/merge/handle slots", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const schema = { type: "object" };
 		const sandbox = loadPrelude(async (_name, args) => {
@@ -149,7 +160,7 @@ describe("eval js agent() handle", () => {
 			true,
 			false,
 			true,
-			"strict",
+			false,
 		);
 
 		expect(seenArgs).toEqual({
@@ -161,7 +172,6 @@ describe("eval js agent() handle", () => {
 			isolated: true,
 			apply: false,
 			merge: true,
-			schemaMode: "strict",
 			handle: false,
 		});
 		expect(output).toEqual({ ok: true });
@@ -181,14 +191,18 @@ describe("eval js agent() handle", () => {
 		});
 
 		await expect(
-			(sandbox.agent as AgentHelper)("classify", { schema: { type: "object" }, schemaMode: "strict", handle: true }),
+			(sandbox.agent as AgentHelper)("classify", { schema: { type: "object" }, handle: true }),
 		).rejects.toMatchObject({
 			name: "AgentSchemaViolationError",
 			code: "schema_violation",
 			message: violation.message,
 			details: violation,
 		});
-		expect(seenArgs).toMatchObject({ handle: true, schemaMode: "strict" });
+		expect(seenArgs).toEqual({
+			prompt: "classify",
+			schema: { type: "object" },
+			handle: true,
+		});
 	});
 });
 

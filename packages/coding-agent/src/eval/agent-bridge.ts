@@ -28,7 +28,7 @@ import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { type AgentDefinition, type AgentProgress, canSpawnAtDepth, type SingleResult } from "../task/types";
 import { type NestedRepoPatch, parseIsolationMode } from "../task/worktree";
 import type { ToolSession } from "../tools";
-import { prepareOutputSchema, type SchemaMode, type SchemaViolationResult } from "../tools/output-schema-validator";
+import { prepareOutputSchema, type SchemaViolationResult } from "../tools/output-schema-validator";
 import { ToolError } from "../tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -53,7 +53,6 @@ const agentArgsSchema = type({
 	"model?": "string>0|string>0[]",
 	"label?": "string",
 	"schema?": "unknown",
-	"schemaMode?": "'permissive' | 'strict'",
 	"isolated?": "boolean",
 	"apply?": "boolean",
 	"merge?": "boolean",
@@ -66,7 +65,6 @@ interface EvalAgentArgs {
 	model?: string | string[];
 	label?: string;
 	schema?: unknown;
-	schemaMode?: SchemaMode;
 	/**
 	 * Run this subagent inside an isolation worktree (copy-on-write of the
 	 * parent repo). Strict opt-in: defaults to `false` regardless of the
@@ -319,14 +317,9 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	const parsed = parseAgentArgs(args);
 	const structured = Object.hasOwn(parsed, "schema");
-	const schemaModeSupplied = Object.hasOwn(parsed, "schemaMode");
-	if (schemaModeSupplied && !structured) {
-		throw new ToolError("agent() requires schema when schemaMode is supplied.");
-	}
-	const schemaMode = parsed.schemaMode ?? "permissive";
-	const preparedOutputSchema = structured ? prepareOutputSchema(parsed.schema, schemaMode) : undefined;
-	if (schemaMode === "strict" && preparedOutputSchema?.error) {
-		throw new ToolError(`agent() received invalid strict schema: ${preparedOutputSchema.error}`);
+	const preparedOutputSchema = structured ? prepareOutputSchema(parsed.schema, "strict") : undefined;
+	if (preparedOutputSchema?.error) {
+		throw new ToolError(`agent() received invalid schema: ${preparedOutputSchema.error}`);
 	}
 	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
 	assertNotPlanMode(options.session);
@@ -416,7 +409,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		...(structured
 			? {
 					outputSchema: parsed.schema,
-					schemaMode,
+					schemaMode: "strict",
 					preparedOutputSchema,
 					outputSchemaOverridesAgent: true,
 				}
@@ -523,7 +516,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					},
 				});
 			})();
-			const strictSchemaFailure = schemaMode === "strict" && result.failure !== undefined;
+			const strictSchemaFailure = structured && result.failure !== undefined;
 			if (
 				!strictSchemaFailure &&
 				(result.failure !== undefined || result.exitCode !== 0 || result.error || result.aborted)

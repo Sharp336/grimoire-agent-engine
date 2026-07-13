@@ -63,4 +63,72 @@ nothing
 		// Frames are still present alongside the message.
 		expect(result.output).toContain("top-level scope");
 	}, 30_000);
+	it("forwards schema and isolation controls without exposing schema-mode controls", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-julia-agent-");
+		const result = await executeJulia(
+			`
+global seen_agent_args = nothing
+function __omp_call_bridge(name::String, args::Dict{String, Any})
+    @assert name == "__agent__"
+    global seen_agent_args = copy(args)
+    if args["prompt"] == "invalid"
+        return Dict{String, Any}("schemaViolation" => Dict{String, Any}(
+            "message" => "result.data.ok must be boolean",
+            "data" => "{\\"ok\\":1}"
+        ))
+    end
+    return Dict{String, Any}(
+        "text" => "{\\"ok\\":true}",
+        "details" => Dict{String, Any}("id" => "julia-agent-1", "agent" => "task")
+    )
+end
+
+node = agent(
+    "valid";
+    schema=Dict("type" => "object"),
+    isolated=true,
+    apply=false,
+    merge=true,
+    handle=true
+)
+@assert node["data"]["ok"] === true
+@assert node["handle"] == "agent://julia-agent-1"
+@assert seen_agent_args["schema"]["type"] == "object"
+@assert seen_agent_args["isolated"] === true
+@assert seen_agent_args["apply"] === false
+@assert seen_agent_args["merge"] === true
+@assert seen_agent_args["handle"] === true
+@assert !haskey(seen_agent_args, "schemaMode")
+@assert !haskey(seen_agent_args, "schema_mode")
+
+try
+    agent("invalid"; schema=Dict("type" => "object"))
+    error("expected AgentSchemaViolationError")
+catch err
+    @assert err isa AgentSchemaViolationError
+    @assert err.code == "schema_violation"
+    @assert err.details["message"] == "result.data.ok must be boolean"
+end
+
+for legacy_keyword in (:schema_mode, :schemaMode)
+    try
+        agent("legacy"; legacy_keyword => "strict")
+        error("expected unsupported legacy schema keyword")
+    catch err
+        @assert err isa MethodError
+    end
+end
+println("AGENT_FORWARDING_OK")
+`,
+			{
+				cwd: tempDir.path(),
+				sessionId: `julia-prelude-agent:${crypto.randomUUID()}`,
+				kernelOwnerId: OWNER_ID,
+				reset: true,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("AGENT_FORWARDING_OK");
+	}, 30_000);
 });

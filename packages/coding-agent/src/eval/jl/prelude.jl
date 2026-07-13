@@ -531,7 +531,7 @@ if !isdefined(Main, :AgentSchemaViolationError)
     end
 end
 
-function agent(prompt::String; agent="task", model=nothing, label=nothing, schema=nothing, schema_mode=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false, kwargs...)
+function agent(prompt::String; agent="task", model=nothing, label=nothing, schema=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false)
     args_dict = Dict{String, Any}("prompt" => prompt)
     if agent !== nothing
         args_dict["agent"] = agent
@@ -545,9 +545,6 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
     if schema !== nothing
         args_dict["schema"] = schema
     end
-    if schema_mode !== nothing
-        args_dict["schemaMode"] = schema_mode
-    end
     # Isolation knobs mirror the `task` tool: strict opt-in via `isolated`,
     # with `apply`/`merge` controlling the post-run patch/branch merge.
     if isolated !== nothing
@@ -560,9 +557,6 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
         args_dict["merge"] = Bool(merge)
     end
     handle_result = handle
-    for (k, v) in kwargs
-        args_dict[string(k)] = v
-    end
     # Tell the bridge a handle is wanted so it preserves the backing artifacts.
     if handle_result
         args_dict["handle"] = true

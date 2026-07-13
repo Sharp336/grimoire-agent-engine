@@ -96,6 +96,46 @@ describe("python prelude", () => {
 		}
 	});
 
+	it("returns unstructured agent output when schema is omitted", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({
+					ok: true,
+					value: { text: "unstructured output", details: { agent: "task", id: "py-plain" } },
+				});
+			},
+		});
+
+		try {
+			const { exitCode, stderr, stdout } = await runPrelude(
+				['result = agent("classify")', "print(result)"].join("\n"),
+				{
+					PI_TOOL_BRIDGE_URL: server.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+			expect(stdout).toBe("unstructured output\n");
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__agent__",
+					args: { prompt: "classify", agent: "task" },
+				},
+			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	it("forwards caller-supplied schemas and returns parsed structured data", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({

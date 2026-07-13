@@ -195,8 +195,9 @@
 ## [16.4.8] - 2026-07-12
 ### Added
 
-- Added opt-in strict schema enforcement for structured subagent output, with pre-dispatch schema validation, bounded correction attempts, fail-closed final assembly, and typed schema-violation errors across eval runtimes ([#5278](https://github.com/can1357/oh-my-pi/issues/5278))
+- Added fail-closed validation for caller-supplied eval subagent schemas, with pre-dispatch schema checks, bounded correction attempts, exact final assembly validation, and typed schema-violation errors across eval runtimes; task-agent native schemas remain best effort ([#5278](https://github.com/can1357/oh-my-pi/issues/5278))
 
+## [16.4.8] - 2026-07-12
 ### Fixed
 
 - Fixed compatibility of GNU-flavored shell builtins (such as stat, date, sed, mktemp, tail, find, base64, and ln) when invoked with macOS/BSD-style arguments.

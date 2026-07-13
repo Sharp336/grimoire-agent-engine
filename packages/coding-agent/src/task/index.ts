@@ -29,7 +29,7 @@ import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "tex
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
-import { type PreparedOutputSchema, prepareOutputSchema } from "../tools/output-schema-validator";
+import { type PreparedOutputSchema, prepareOutputSchema, type SchemaMode } from "../tools/output-schema-validator";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
@@ -65,6 +65,8 @@ import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { parseIsolationMode } from "./worktree";
+
+const TASK_CHILD_SCHEMA_MODE: SchemaMode = "permissive";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -589,7 +591,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	async #prepareOutputSchemas(spawnItems: TaskItem[], defaultAgent: string): Promise<PreparedOutputSchema[]> {
 		const { agents } = await discoverAgents(this.session.cwd);
-		const schemaMode = this.session.schemaMode ?? "permissive";
+		// Task agents use their own yield contracts. The parent session's strict
+		// direct-output policy must not be inherited by agent-native or handoff
+		// schemas.
+		const schemaMode = TASK_CHILD_SCHEMA_MODE;
 		const preparedBySchema = new Map<unknown, PreparedOutputSchema>();
 		return spawnItems.map(item => {
 			const agent = agents.find(candidate => candidate.name === (item.agent?.trim() || defaultAgent));
@@ -640,8 +645,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		// Match the executor's already-aborted outcome before doing any schema
-		// preparation or scheduling work. In particular, an inherited malformed
-		// strict schema must not mask the caller's cancellation.
+		// preparation or scheduling work.
 		if (signal?.aborted) {
 			return createTaskModeError("Cancelled before start");
 		}
@@ -659,13 +663,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const spawnItems = resolveSpawnItems(params);
 		const resolvedAgents = spawnItems.map(item => item.agent?.trim() || defaultAgent);
 		const preparedOutputSchemas = await this.#prepareOutputSchemas(spawnItems, defaultAgent);
-		const invalidPreparedSchema =
-			(this.session.schemaMode ?? "permissive") === "strict"
-				? preparedOutputSchemas.find(prepared => prepared.error)
-				: undefined;
-		if (invalidPreparedSchema?.error) {
-			return createTaskModeError(`Invalid strict output schema: ${invalidPreparedSchema.error}`);
-		}
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
@@ -1369,8 +1366,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		// Output schema priority: agent frontmatter > inherited parent session.
 		// The task call itself never carries a schema; workflows needing ad-hoc
-		// structured output go through eval agent(prompt, schema).
-		const schemaMode = this.session.schemaMode ?? "permissive";
+		// structured output go through eval agent(prompt, schema). Task child
+		// contracts are always permissive, even when the parent direct invocation
+		// is strict.
+		const schemaMode = TASK_CHILD_SCHEMA_MODE;
 		const outputSchema = effectiveAgent.output ?? this.session.outputSchema;
 		const matchingPreparedOutputSchema =
 			preparedOutputSchema?.schemaMode === schemaMode && Object.is(preparedOutputSchema.outputSchema, outputSchema)
@@ -1388,12 +1387,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			matchingSessionPreparedOutputSchema ??
 			prepareOutputSchema(outputSchema, schemaMode);
 		const effectiveOutputSchema = effectivePreparedOutputSchema.outputSchema;
-		if (schemaMode === "strict" && effectivePreparedOutputSchema.error) {
-			return {
-				content: [{ type: "text", text: `Invalid strict output schema: ${effectivePreparedOutputSchema.error}` }],
-				details: { projectAgentsDir, results: [], totalDurationMs: Date.now() - startTime },
-			};
-		}
 
 		let isolationContext: IsolationContext | null = null;
 		if (isIsolated) {
