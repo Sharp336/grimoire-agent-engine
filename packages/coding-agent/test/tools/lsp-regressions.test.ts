@@ -258,6 +258,78 @@ describe("lsp regressions", () => {
 		expect(clampTimeout("lsp", 1)).toBe(5);
 		expect(clampTimeout("lsp", 1000)).toBe(60);
 	});
+	it("synchronizes every LSP document after applying a symbol rename", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-sync-");
+		try {
+			const targetFile = path.join(tempDir.path(), "component.ts");
+			const targetUri = fileToUri(targetFile);
+			await Bun.write(targetFile, "export class OldComponent {}\n");
+
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { renameProvider: true } } });
+				} else if (message.method === "textDocument/rename") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							changes: {
+								[targetUri]: [
+									{
+										range: {
+											start: { line: 0, character: 13 },
+											end: { line: 0, character: 25 },
+										},
+										newText: "NewComponent",
+									},
+								],
+							},
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", config]]);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const result = await tool.execute("rename-sync", {
+				action: "rename",
+				file: targetFile,
+				line: 1,
+				symbol: "OldComponent",
+				new_name: "NewComponent",
+				timeout: 5,
+			});
+
+			expect(textResult(result)).toContain("Applied rename");
+			expect(await Bun.file(targetFile).text()).toBe("export class NewComponent {}\n");
+
+			const methods = server.received.map(message => message.method);
+			const renameIndex = methods.indexOf("textDocument/rename");
+			const changeIndex = methods.lastIndexOf("textDocument/didChange");
+			const saveIndex = methods.lastIndexOf("textDocument/didSave");
+			expect(renameIndex).toBeGreaterThanOrEqual(0);
+			expect(changeIndex).toBeGreaterThan(renameIndex);
+			expect(saveIndex).toBeGreaterThan(changeIndex);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
 
 	it("sends the LSP exit notification after shutdown completes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-shutdown-");

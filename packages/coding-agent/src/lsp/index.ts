@@ -2630,6 +2630,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const shouldApply = apply !== false;
 						if (shouldApply) {
 							const applied = await applyWorkspaceEdit(result, this.session.cwd);
+							// Workspace edits bypass open-document state. Synchronize every affected
+							// document before returning so a consecutive rename cannot reuse stale ranges.
+							const changedFiles = [...flattenWorkspaceTextEdits(result).keys()].map(uriToFile);
+							await Promise.all(
+								changedFiles.map(async changedFile => {
+									const content = await Bun.file(changedFile).text();
+									const changedFileServers = getServersForFile(config, changedFile);
+									await syncFileContent(changedFile, content, this.session.cwd, changedFileServers, signal);
+									await notifyFileSaved(changedFile, this.session.cwd, changedFileServers, signal);
+								}),
+							);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);
