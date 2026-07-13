@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Neuralwatt provider for API key login (`omp login neuralwatt`).
+
 
 ### Fixed
 

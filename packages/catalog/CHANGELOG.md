@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Neuralwatt provider to the model catalog with dynamic discovery.
+
 
 ## [16.4.3] - 2026-07-11
 
