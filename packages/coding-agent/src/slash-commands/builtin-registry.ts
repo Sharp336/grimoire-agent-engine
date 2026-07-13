@@ -25,6 +25,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
+import { loadMnemopi } from "../mnemopi/state";
 import { runPauseScreen } from "../modes/components/pause-screen";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
@@ -34,6 +35,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { indexWorkspace } from "../tools/code-search-index";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -1182,6 +1184,64 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleToolsCommand();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "code-index",
+		description: "Index the workspace for semantic code search (Zvec)",
+		inlineHint: "[rebuild]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			if (!runtime.ctx.settings.get("tools.codeSearchEnabled")) {
+				return "Code Search: disabled in settings";
+			}
+			return "Code Search: index workspace";
+		},
+		handleTui: async (_command, runtime) => {
+			const enabled = runtime.ctx.settings.get("tools.codeSearchEnabled");
+			if (!enabled) {
+				runtime.ctx.showWarning("Code search is disabled. Enable it in /settings under Tools → Available Tools.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const { ZVecCodeStore } = await loadMnemopi();
+			if (!ZVecCodeStore.available()) {
+				runtime.ctx.showWarning("Code search requires @zvec/zvec. Install it with: bun add @zvec/zvec");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Indexing workspace for code search...");
+			runtime.ctx.editor.setText("");
+			try {
+				const result = await indexWorkspace(runtime.ctx.session.sessionManager.getCwd());
+				runtime.ctx.showStatus(
+					`Code search indexed: ${result.filesIndexed} file${result.filesIndexed === 1 ? "" : "s"}, ${result.chunksIndexed} chunk${result.chunksIndexed === 1 ? "" : "s"} in ${result.duration}ms`,
+				);
+			} catch (err) {
+				runtime.ctx.showError(`Code search indexing failed: ${String(err)}`);
+			}
+		},
+		handle: async (_command, runtime) => {
+			const enabled = runtime.settings.get("tools.codeSearchEnabled");
+			if (!enabled) {
+				await runtime.output("Code search is disabled. Enable it in /settings under Tools → Available Tools.");
+				return commandConsumed();
+			}
+			const { ZVecCodeStore } = await loadMnemopi();
+			if (!ZVecCodeStore.available()) {
+				await runtime.output("Code search requires @zvec/zvec. Install it with: bun add @zvec/zvec");
+				return commandConsumed();
+			}
+			await runtime.output("Indexing workspace for code search...");
+			try {
+				const result = await indexWorkspace(runtime.cwd);
+				await runtime.output(
+					`Code search indexed: ${result.filesIndexed} file${result.filesIndexed === 1 ? "" : "s"}, ${result.chunksIndexed} chunk${result.chunksIndexed === 1 ? "" : "s"} in ${result.duration}ms`,
+				);
+			} catch (err) {
+				await runtime.output(`Code search indexing failed: ${String(err)}`);
+			}
+			return commandConsumed();
 		},
 	},
 	{

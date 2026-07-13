@@ -45,10 +45,14 @@
     "lru-cache": "catalog:"
   },
   "peerDependencies": {
+    "@zvec/zvec": ">=0.1.0",
     "fastembed": "2.1.0",
     "onnxruntime-node": "1.21.0"
   },
   "peerDependenciesMeta": {
+    "@zvec/zvec": {
+      "optional": true
+    },
     "fastembed": {
       "optional": true
     },
@@ -58,6 +62,7 @@
   },
   "devDependencies": {
     "@types/bun": "catalog:",
+    "@zvec/zvec": "catalog:",
     "fastembed": "catalog:",
     "onnxruntime-node": "catalog:"
   },

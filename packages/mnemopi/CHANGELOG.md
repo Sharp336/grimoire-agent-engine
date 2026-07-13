@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ZVecCodeStore`, a vector store wrapper for Zvec (`@zvec/zvec`) providing HNSW vector search, BM25 full-text search, and hybrid (RRF) search for code chunks.
+- Added `zvec-config.ts` with environment-configurable settings for Zvec paths, chunk sizing, and top-K defaults (`OMP_ZVEC_*` env vars).
+- Added `@zvec/zvec` as an optional peer dependency.
+
 ## [16.3.9] - 2026-07-06
 
 ### Fixed
