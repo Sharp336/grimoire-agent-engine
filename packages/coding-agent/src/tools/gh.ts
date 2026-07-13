@@ -2693,6 +2693,8 @@ export interface PrDiffFile {
 	changeType: "modified" | "added" | "deleted" | "renamed" | "binary";
 	/** Pre-image path for renames/deletes; same as `path` otherwise. */
 	oldPath?: string;
+	/** Whether GitHub's files API omitted this file's patch. */
+	patchUnavailable?: true;
 	/** Byte offset of the section's `diff --git` line in the unified diff. */
 	startOffset: number;
 	/** Byte offset of the next section (or end-of-text). */
@@ -2703,6 +2705,7 @@ export interface PrDiffPayload {
 	/** Full unified diff text as returned by `gh pr diff --color never`. */
 	unified: string;
 	files: PrDiffFile[];
+	warnings?: string[];
 }
 
 export interface PrDiffLookupOptions {
@@ -2861,6 +2864,11 @@ function isPrDiffFileHeaderLine(line: string): boolean {
 	);
 }
 
+function parsePrDiffMetadataPath(value: string): string {
+	const token = parseDiffQuotedToken(value, 0);
+	return token?.nextIndex === value.length ? token.value : value;
+}
+
 function parsePrDiffSection(section: string, startOffset: number, endOffset: number): PrDiffFile {
 	const lines = section.split("\n");
 	const header = lines[0] ?? "";
@@ -2886,11 +2894,11 @@ function parsePrDiffSection(section: string, startOffset: number, endOffset: num
 		}
 		if (line.startsWith("rename from ")) {
 			changeType = "renamed";
-			oldPath = line.slice("rename from ".length);
+			oldPath = parsePrDiffMetadataPath(line.slice("rename from ".length));
 			continue;
 		}
 		if (line.startsWith("rename to ")) {
-			newPath = line.slice("rename to ".length);
+			newPath = parsePrDiffMetadataPath(line.slice("rename to ".length));
 			continue;
 		}
 		if (line.startsWith("Binary files ") && line.endsWith(" differ")) {
@@ -2931,6 +2939,179 @@ function parsePrDiffSection(section: string, startOffset: number, endOffset: num
 	return file;
 }
 
+interface PrFilesApiEntry {
+	filename: string;
+	status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged";
+	additions: number;
+	deletions: number;
+	previous_filename?: string;
+	patch?: string;
+}
+
+const PR_FILES_PAGE_SIZE = 100;
+const PR_FILES_MAX_COUNT = 3_000;
+const OVERSIZED_DIFF_WARNING =
+	"GitHub rejected the aggregate diff as too large; reconstructed the available diff from the pull-request files API.";
+const PR_FILES_LIMIT_WARNING =
+	"GitHub's pull-request files API returns at most 3,000 files; additional changed files may be omitted.";
+const PATCH_UNAVAILABLE_MARKER = "Patch unavailable from GitHub files API; skipped by /review.";
+
+function isOversizedPrDiffError(error: unknown): boolean {
+	if (!(error instanceof Error) || !error.message.includes("HTTP 406")) return false;
+	return (
+		error.message.includes("PullRequest.diff too_large") ||
+		/diff exceeded the maximum number of lines/i.test(error.message)
+	);
+}
+
+function formatSyntheticDiffPath(path: string, prefix: "a/" | "b/" | undefined = undefined): string {
+	const value = `${prefix ?? ""}${path}`;
+	if (/^[\x21-\x7e]+$/.test(value) && !/["\\]/.test(value)) return value;
+
+	let escaped = "";
+	for (const char of value) {
+		switch (char) {
+			case "\x07":
+				escaped += "\\a";
+				break;
+			case "\b":
+				escaped += "\\b";
+				break;
+			case "\f":
+				escaped += "\\f";
+				break;
+			case "\n":
+				escaped += "\\n";
+				break;
+			case "\r":
+				escaped += "\\r";
+				break;
+			case "\t":
+				escaped += "\\t";
+				break;
+			case "\v":
+				escaped += "\\v";
+				break;
+			case "\\":
+				escaped += "\\\\";
+				break;
+			case '"':
+				escaped += '\\"';
+				break;
+			default: {
+				const code = char.charCodeAt(0);
+				escaped += code <= 0x1f || code === 0x7f ? `\\${code.toString(8).padStart(3, "0")}` : char;
+			}
+		}
+	}
+	return `"${escaped}"`;
+}
+
+function mapPrFilesApiChangeType(status: PrFilesApiEntry["status"]): PrDiffFile["changeType"] {
+	switch (status) {
+		case "added":
+			return "added";
+		case "removed":
+			return "deleted";
+		case "renamed":
+			return "renamed";
+		default:
+			return "modified";
+	}
+}
+
+function reconstructPrFilesApiDiff(entries: PrFilesApiEntry[]): string {
+	const sections = entries.map(entry => {
+		const oldPath = entry.previous_filename ?? entry.filename;
+		const section = [
+			`diff --git ${formatSyntheticDiffPath(oldPath, "a/")} ${formatSyntheticDiffPath(entry.filename, "b/")}`,
+		];
+		switch (entry.status) {
+			case "added":
+				section.push("new file mode 100644");
+				break;
+			case "removed":
+				section.push("deleted file mode 100644");
+				break;
+			case "renamed":
+				section.push(
+					`rename from ${formatSyntheticDiffPath(oldPath)}`,
+					`rename to ${formatSyntheticDiffPath(entry.filename)}`,
+				);
+				break;
+		}
+		section.push(
+			`--- ${entry.status === "added" ? "/dev/null" : formatSyntheticDiffPath(oldPath, "a/")}`,
+			`+++ ${entry.status === "removed" ? "/dev/null" : formatSyntheticDiffPath(entry.filename, "b/")}`,
+			entry.patch ? entry.patch : PATCH_UNAVAILABLE_MARKER,
+		);
+		return section.join("\n");
+	});
+	return sections.join("\n");
+}
+
+async function fetchPrFilesApiFallback(
+	cwd: string,
+	repo: string,
+	number: number,
+	signal: AbortSignal | undefined,
+): Promise<{ rendered: string; sourceUrl: undefined; payload: PrDiffPayload }> {
+	const entries: PrFilesApiEntry[] = [];
+	let page = 1;
+	let reachedLimit = false;
+	while (entries.length < PR_FILES_MAX_COUNT) {
+		const response = await git.github.json<PrFilesApiEntry[]>(
+			cwd,
+			[
+				"api",
+				"--method",
+				"GET",
+				`/repos/${repo}/pulls/${number}/files`,
+				"-F",
+				`per_page=${PR_FILES_PAGE_SIZE}`,
+				"-F",
+				`page=${page}`,
+			],
+			signal,
+			{ repoProvided: true },
+		);
+		entries.push(...response.slice(0, PR_FILES_MAX_COUNT - entries.length));
+		if (response.length < PR_FILES_PAGE_SIZE) break;
+		if (entries.length === PR_FILES_MAX_COUNT) {
+			reachedLimit = true;
+			break;
+		}
+		page += 1;
+	}
+
+	const rendered = reconstructPrFilesApiDiff(entries);
+	const parsed = parsePrUnifiedDiff(rendered);
+	const files = parsed.files.map((file, index) => {
+		const entry = entries[index];
+		if (!entry) return file;
+		const overlay: PrDiffFile = {
+			...file,
+			path: entry.filename,
+			additions: entry.additions,
+			deletions: entry.deletions,
+			changeType: mapPrFilesApiChangeType(entry.status),
+		};
+		if (entry.previous_filename && entry.previous_filename !== entry.filename) {
+			overlay.oldPath = entry.previous_filename;
+		} else {
+			delete overlay.oldPath;
+		}
+		if (!entry.patch) overlay.patchUnavailable = true;
+		return overlay;
+	});
+	const warnings = reachedLimit ? [OVERSIZED_DIFF_WARNING, PR_FILES_LIMIT_WARNING] : [OVERSIZED_DIFF_WARNING];
+	return {
+		rendered,
+		sourceUrl: undefined,
+		payload: { unified: "", files, warnings },
+	};
+}
+
 async function fetchPrDiffFresh(
 	cwd: string,
 	repo: string,
@@ -2939,7 +3120,13 @@ async function fetchPrDiffFresh(
 ): Promise<{ rendered: string; sourceUrl: string | undefined; payload: PrDiffPayload }> {
 	const args = ["pr", "diff", String(number), "--color", "never"];
 	appendRepoFlag(args, repo, String(number));
-	const text = await git.github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
+	let text: string;
+	try {
+		text = await git.github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
+	} catch (error) {
+		if (!isOversizedPrDiffError(error)) throw error;
+		return fetchPrFilesApiFallback(cwd, repo, number, signal);
+	}
 	const payload = parsePrUnifiedDiff(text);
 	// `rendered` already carries the verbatim diff; blank the payload copy so
 	// the cache row stores a potentially huge diff once instead of twice.
@@ -2969,7 +3156,7 @@ export async function getOrFetchPrDiff(options: PrDiffLookupOptions): Promise<Vi
 		rendered: lookup.rendered,
 		sourceUrl: lookup.sourceUrl,
 		// Rehydrate the unified text from `rendered` (stored once per row).
-		payload: { unified: lookup.rendered, files: lookup.payload.files },
+		payload: { unified: lookup.rendered, files: lookup.payload.files, warnings: lookup.payload.warnings },
 		status: lookup.status,
 		fetchedAt: lookup.fetchedAt,
 	};

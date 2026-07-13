@@ -51,11 +51,85 @@ interface NotifyCall {
 	type: "info" | "warning" | "error" | undefined;
 }
 
+const FALLBACK_WARNING =
+	"GitHub rejected the aggregate diff as too large; reconstructed the available diff from the pull-request files API.";
+const FALLBACK_REVIEWABLE_PATH = 'src/new "quoted"\\file.ts';
+const FALLBACK_UNAVAILABLE_PATH = "src/missing.bin";
+const FALLBACK_UNAVAILABLE_MARKER = "Patch unavailable from GitHub files API; skipped by /review.";
+const FALLBACK_REVIEWABLE_DIFF = String.raw`diff --git "a/src/old \"quoted\"\\file.ts" "b/src/new \"quoted\"\\file.ts"
+similarity index 90%
+rename from "src/old \"quoted\"\\file.ts"
+rename to "src/new \"quoted\"\\file.ts"
+--- "a/src/old \"quoted\"\\file.ts"
++++ "b/src/new \"quoted\"\\file.ts"
+@@ -1 +1 @@
+-old value
++new value`;
+const FALLBACK_UNAVAILABLE_DIFF = `diff --git a/${FALLBACK_UNAVAILABLE_PATH} b/${FALLBACK_UNAVAILABLE_PATH}
+--- a/${FALLBACK_UNAVAILABLE_PATH}
++++ b/${FALLBACK_UNAVAILABLE_PATH}
+${FALLBACK_UNAVAILABLE_MARKER}`;
+
 function makePrDiffLookup(unified: string): ViewLookupResult<PrDiffPayload> {
+	const payload = gh.parsePrUnifiedDiff(unified);
 	return {
 		rendered: unified,
 		sourceUrl: undefined,
-		payload: { unified, files: [] },
+		payload,
+		status: "fresh",
+		fetchedAt: Date.now(),
+	};
+}
+
+function makeFallbackPrDiffLookup(): ViewLookupResult<PrDiffPayload> {
+	const unified = [FALLBACK_REVIEWABLE_DIFF, FALLBACK_UNAVAILABLE_DIFF].join("\n");
+	const parsed = gh.parsePrUnifiedDiff(unified);
+	const reviewable = parsed.files[0];
+	const unavailable = parsed.files[1];
+	if (!reviewable || !unavailable) throw new Error("fallback fixture did not produce two diff files");
+
+	return {
+		rendered: unified,
+		sourceUrl: undefined,
+		payload: {
+			unified,
+			files: [
+				reviewable,
+				{
+					...unavailable,
+					additions: 17,
+					deletions: 9,
+					patchUnavailable: true,
+				},
+			],
+			warnings: [FALLBACK_WARNING],
+		},
+		status: "fresh",
+		fetchedAt: Date.now(),
+	};
+}
+
+function makeAllUnavailablePrDiffLookup(): ViewLookupResult<PrDiffPayload> {
+	const unified = FALLBACK_UNAVAILABLE_DIFF;
+	const parsed = gh.parsePrUnifiedDiff(unified);
+	const unavailable = parsed.files[0];
+	if (!unavailable) throw new Error("all-unavailable fixture did not produce a diff file");
+
+	return {
+		rendered: unified,
+		sourceUrl: undefined,
+		payload: {
+			unified,
+			files: [
+				{
+					...unavailable,
+					additions: 17,
+					deletions: 9,
+					patchUnavailable: true,
+				},
+			],
+			warnings: [FALLBACK_WARNING],
+		},
 		status: "fresh",
 		fetchedAt: Date.now(),
 	};
@@ -301,6 +375,60 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("per-file `pr://owner/repo/123/diff/<index>`");
 		expect(result!).toContain("NEVER use local `git diff`/`git show` for PR diff content");
 		expect(result!).not.toContain("MUST run `git diff`/`git show` for assigned files");
+	});
+
+	it("reviews available PR patches while excluding unavailable fallback files", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makeFallbackPrDiffLookup());
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/example/pull/77"], ctx);
+
+		expect(result).toBeDefined();
+		const promptText = result!;
+		expect(promptText).toContain(FALLBACK_REVIEWABLE_PATH);
+		expect(promptText).toContain("`src/missing.bin` (+17/-9) — patch unavailable from GitHub; skipped");
+		expect(promptText).toContain("### Retrieval Warnings");
+		expect(promptText).toContain(FALLBACK_WARNING);
+		expect(promptText).toContain("+new value");
+		expect(promptText).not.toContain(FALLBACK_UNAVAILABLE_MARKER);
+	});
+
+	it("returns the exact all-unavailable PR limitation in headless mode", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makeAllUnavailablePrDiffLookup());
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const result = await command.execute(["https://github.com/owner/example/pull/77"], ctx);
+
+		expect(result).toBe(
+			"Unable to review PR owner/example#77: GitHub rejected the aggregate diff as too large and the files API supplied no reviewable patches. Inspect pr://owner/example/77/diff for skipped files.",
+		);
+	});
+
+	it("notifies and stops with the exact all-unavailable PR limitation in UI mode", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makeAllUnavailablePrDiffLookup());
+		const notifications: NotifyCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			onNotify: call => {
+				notifications.push(call);
+			},
+		});
+
+		const result = await command.execute(["https://github.com/owner/example/pull/77"], ctx);
+
+		expect(result).toBeUndefined();
+		expect(notifications).toEqual([
+			{
+				message:
+					"Unable to review PR owner/example#77: GitHub rejected the aggregate diff as too large and the files API supplied no reviewable patches. Inspect pr://owner/example/77/diff for skipped files.",
+				type: "warning",
+			},
+		]);
 	});
 
 	it("rejects unsupported PR-like URL formats as normal instructions", async () => {

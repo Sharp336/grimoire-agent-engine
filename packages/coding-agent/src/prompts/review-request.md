@@ -21,6 +21,14 @@ _No files to review._
 {{/list}}
 {{/if}}
 
+{{#if warnings.length}}
+### Retrieval Warnings
+
+{{#list warnings prefix="- " join="\n"}}
+{{this}}
+{{/list}}
+{{/if}}
+
 ### Distribution Guidelines
 
 Use the `task` tool with `agent: "reviewer"` and a `tasks` array.

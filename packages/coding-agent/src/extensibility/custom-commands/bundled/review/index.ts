@@ -124,38 +124,18 @@ function parseDiff(diffOutput: string): DiffStats {
 	let totalAdded = 0;
 	let totalRemoved = 0;
 
-	// Split by file boundary: "diff --git a/... b/..."
-	const fileChunks = diffOutput.split(/^diff --git /m).filter(Boolean);
-
-	for (const chunk of fileChunks) {
-		// Extract file path from "a/path b/path" line
-		const headerMatch = chunk.match(/^a\/(.+?) b\/(.+)/);
-		if (!headerMatch) continue;
-
-		const path = headerMatch[2];
-
-		// Count added/removed lines (lines starting with + or - but not ++ or --)
-		let linesAdded = 0;
-		let linesRemoved = 0;
-
-		const lines = chunk.split("\n");
-		for (const line of lines) {
-			if (line.startsWith("+") && !line.startsWith("+++")) {
-				linesAdded++;
-			} else if (line.startsWith("-") && !line.startsWith("---")) {
-				linesRemoved++;
-			}
-		}
-
-		const exclusionReason = getExclusionReason(path);
+	for (const file of gh.parsePrUnifiedDiff(diffOutput).files) {
+		const linesAdded = file.additions;
+		const linesRemoved = file.deletions;
+		const exclusionReason = getExclusionReason(file.path);
 		if (exclusionReason) {
-			excluded.push({ path, reason: exclusionReason, linesAdded, linesRemoved });
+			excluded.push({ path: file.path, reason: exclusionReason, linesAdded, linesRemoved });
 		} else {
 			files.push({
-				path,
+				path: file.path,
 				linesAdded,
 				linesRemoved,
-				hunks: `diff --git ${chunk}`,
+				hunks: diffOutput.slice(file.startOffset, file.endOffset),
 			});
 			totalAdded += linesAdded;
 			totalRemoved += linesRemoved;
@@ -236,7 +216,12 @@ function buildReviewPrompt(
 	mode: string,
 	stats: DiffStats,
 	rawDiff: string,
-	options: { additionalInstructions?: string; diffInstruction?: string; contextInstruction?: string } = {},
+	options: {
+		additionalInstructions?: string;
+		diffInstruction?: string;
+		contextInstruction?: string;
+		warnings?: string[];
+	} = {},
 ): string {
 	const agentCount = getRecommendedAgentCount(stats);
 	const skipDiff = rawDiff.length > MAX_DIFF_CHARS || stats.files.length > MAX_FILES_FOR_INLINE_DIFF;
@@ -264,6 +249,7 @@ function buildReviewPrompt(
 		additionalInstructions: options.additionalInstructions,
 		diffInstruction: options.diffInstruction ?? DEFAULT_LARGE_DIFF_INSTRUCTION,
 		contextInstruction: options.contextInstruction ?? DEFAULT_CONTEXT_INSTRUCTION,
+		warnings: options.warnings ?? [],
 	});
 }
 
@@ -372,7 +358,13 @@ function buildReviewPromptFromDiff(
 	diffText: string,
 	extraInstructions: string | undefined,
 	emptyMessage: string,
-	options: { diffInstruction?: string; filteredMessage?: string; contextInstruction?: string } = {},
+	options: {
+		diffInstruction?: string;
+		filteredMessage?: string;
+		contextInstruction?: string;
+		additionalExcluded?: DiffStats["excluded"];
+		warnings?: string[];
+	} = {},
 ): string | undefined {
 	if (!diffText.trim()) {
 		if (ctx.hasUI) ctx.ui.notify(emptyMessage, "warning");
@@ -380,6 +372,7 @@ function buildReviewPromptFromDiff(
 	}
 
 	const stats = parseDiff(diffText);
+	stats.excluded.push(...(options.additionalExcluded ?? []));
 	if (stats.files.length === 0) {
 		if (ctx.hasUI)
 			ctx.ui.notify(options.filteredMessage ?? "No reviewable files (all changes filtered out)", "warning");
@@ -390,7 +383,29 @@ function buildReviewPromptFromDiff(
 		additionalInstructions: extraInstructions,
 		diffInstruction: options.diffInstruction,
 		contextInstruction: options.contextInstruction,
+		warnings: options.warnings,
 	});
+}
+
+function getReviewablePrDiff(payload: gh.PrDiffPayload): {
+	diffText: string;
+	unavailable: DiffStats["excluded"];
+} {
+	const slices: string[] = [];
+	const unavailable: DiffStats["excluded"] = [];
+	for (const file of payload.files) {
+		if (file.patchUnavailable) {
+			unavailable.push({
+				path: file.path,
+				reason: "patch unavailable from GitHub; skipped",
+				linesAdded: file.additions,
+				linesRemoved: file.deletions,
+			});
+			continue;
+		}
+		slices.push(payload.unified.slice(file.startOffset, file.endOffset));
+	}
+	return { diffText: slices.join("\n"), unavailable };
 }
 
 async function buildPrReviewPrompt(
@@ -399,10 +414,10 @@ async function buildPrReviewPrompt(
 	ref: ReviewPrRef,
 	extraInstructions: string,
 ): Promise<string | undefined> {
-	let diffText: string;
+	let payload: gh.PrDiffPayload;
 	try {
 		const lookup = await gh.getOrFetchPrDiff({ cwd: api.cwd, repo: ref.repo, number: ref.number });
-		diffText = lookup.payload.unified;
+		payload = lookup.payload;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		const failure = `Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${message}`;
@@ -413,13 +428,28 @@ async function buildPrReviewPrompt(
 		return failure;
 	}
 
+	if (payload.files.length > 0 && payload.files.every(file => file.patchUnavailable === true)) {
+		const unavailable = `Unable to review PR ${ref.repo}#${ref.number}: GitHub rejected the aggregate diff as too large and the files API supplied no reviewable patches. Inspect pr://${ref.repo}/${ref.number}/diff for skipped files.`;
+		if (ctx.hasUI) {
+			ctx.ui.notify(unavailable, "warning");
+			return undefined;
+		}
+		return unavailable;
+	}
+
+	const reviewable = getReviewablePrDiff(payload);
 	const promptText = buildReviewPromptFromDiff(
 		ctx,
 		`PR ${ref.repo}#${ref.number}`,
-		diffText,
+		reviewable.diffText,
 		extraInstructions || undefined,
 		`PR ${ref.repo}#${ref.number} has no diff content available`,
-		{ diffInstruction: buildPrLargeDiffInstruction(ref), contextInstruction: buildPrContextInstruction(ref) },
+		{
+			diffInstruction: buildPrLargeDiffInstruction(ref),
+			contextInstruction: buildPrContextInstruction(ref),
+			additionalExcluded: reviewable.unavailable,
+			warnings: payload.warnings,
+		},
 	);
 	if (promptText !== undefined || ctx.hasUI) return promptText;
 	return `Unable to review PR ${ref.repo}#${ref.number}: no diff content available.`;

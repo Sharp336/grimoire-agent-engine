@@ -128,6 +128,14 @@ interface DiffFileSpec {
 	oldName?: string;
 	binary?: boolean;
 }
+interface PrFilesApiFixtureEntry {
+	filename: string;
+	status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged";
+	additions: number;
+	deletions: number;
+	previous_filename?: string;
+	patch?: string;
+}
 
 function makePrDiff(files: DiffFileSpec[]): string {
 	return files
@@ -325,6 +333,185 @@ describe("pr://.../diff family", () => {
 		expect(resource.content).toContain("pr://owner/example/77/diff/2");
 		expect(resource.notes?.[0]).toBe("Fetched live");
 		expect(textSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls back to paginated pull-request files after an oversized aggregate diff error", async () => {
+		const oversizedError = new Error("gh: HTTP 406: PullRequest.diff too_large");
+		const textSpy = vi.spyOn(git.github, "text").mockRejectedValueOnce(oversizedError);
+		const specialName = 'src/special "quoted"\\name.ts';
+		const entries: PrFilesApiFixtureEntry[] = [
+			{
+				filename: "src/one.ts",
+				status: "modified",
+				additions: 3,
+				deletions: 1,
+				patch: "@@ -1,1 +1,3 @@\n-old line\n+new line\n+another line\n+third line",
+			},
+			{
+				filename: "src/new.ts",
+				status: "added",
+				additions: 2,
+				deletions: 0,
+				patch: "@@ -0,0 +1,2 @@\n+new line 0\n+new line 1",
+			},
+			{
+				filename: "src/renamed.ts",
+				status: "renamed",
+				additions: 1,
+				deletions: 1,
+				previous_filename: "src/original.ts",
+				patch: "@@ -1,1 +1,1 @@\n-old rename\n+new rename",
+			},
+			{
+				filename: specialName,
+				status: "modified",
+				additions: 7,
+				deletions: 2,
+				patch: "@@ -1,2 +1,2 @@\n-special old\n+special new",
+			},
+			{
+				filename: "src/unavailable.bin",
+				status: "modified",
+				additions: 4,
+				deletions: 6,
+			},
+			...Array.from(
+				{ length: 95 },
+				(_, index): PrFilesApiFixtureEntry => ({
+					filename: `src/filler-${String(index + 1).padStart(3, "0")}.ts`,
+					status: "modified",
+					additions: 0,
+					deletions: 0,
+					patch: "@@ -0,0 +0,0 @@",
+				}),
+			),
+			{
+				filename: "src/page-two.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				patch: "@@ -0,0 +1,1 @@\n+page two",
+			},
+		];
+		const pageOne = entries.slice(0, 100);
+		const pageTwo = entries.slice(100);
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const endpoint = "/repos/owner/example/pulls/77/files";
+			const pageArg = args.find(value => value.startsWith("page="));
+			if (!args.includes(endpoint) || !pageArg) {
+				throw new Error(`unexpected files API args: ${args.join(" ")}`);
+			}
+			if (pageArg === "page=1") return pageOne as never;
+			if (pageArg === "page=2") return pageTwo as never;
+			throw new Error(`unexpected files API page: ${pageArg}`);
+		});
+
+		const router = InternalUrlRouter.instance();
+		const list = await router.resolve("pr://owner/example/77/diff");
+
+		expect(list.content).toContain("# Pull Request Diff: owner/example#77 (101 files)");
+		const listingPositions = entries.map(entry => list.content.indexOf(entry.filename));
+		expect(
+			listingPositions.every(
+				(position, index) => position >= 0 && (index === 0 || position > (listingPositions[index - 1] ?? -1)),
+			),
+		).toBe(true);
+		expect(list.content).toContain("1. src/one.ts  +3 -1  [modified]");
+		expect(list.content).toContain("2. src/new.ts  +2 -0  [added]");
+		expect(list.content).toContain("3. src/renamed.ts  +1 -1  [renamed]  (renamed from src/original.ts)");
+		expect(list.content).toContain(`4. ${specialName}  +7 -2  [modified]`);
+		expect(list.content).toContain("5. src/unavailable.bin  +4 -6  [modified] (patch unavailable; skipped)");
+		const fallbackWarning =
+			"GitHub rejected the aggregate diff as too large; reconstructed the available diff from the pull-request files API.";
+		expect(list.notes).toEqual(expect.arrayContaining([fallbackWarning]));
+
+		const escapedSpecialName = specialName.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+		const expectedSpecialSection = [
+			`diff --git "a/${escapedSpecialName}" "b/${escapedSpecialName}"`,
+			`--- "a/${escapedSpecialName}"`,
+			`+++ "b/${escapedSpecialName}"`,
+			"@@ -1,2 +1,2 @@",
+			"-special old",
+			"+special new",
+		].join("\n");
+		const full = await router.resolve("pr://owner/example/77/diff/all");
+		expect(full.contentType).toBe("text/plain");
+		expect(full.content).toContain(expectedSpecialSection);
+		expect(full.content).toContain("diff --git a/src/original.ts b/src/renamed.ts");
+		expect(full.content).toContain("rename from src/original.ts");
+		expect(full.content).toContain("rename to src/renamed.ts");
+		expect(full.content).toContain("--- /dev/null");
+		expect(full.content).toContain("Patch unavailable from GitHub files API; skipped by /review.");
+		expect(full.notes?.[0]).toMatch(/^Cached:/);
+		expect(full.notes).toEqual(expect.arrayContaining([fallbackWarning]));
+
+		const slice = await router.resolve("pr://owner/example/77/diff/4");
+		expect(slice.contentType).toBe("text/plain");
+		expect(slice.content).toBe(`${expectedSpecialSection}\n`);
+		expect(slice.content).not.toContain("src/one.ts");
+		expect(slice.notes?.[0]).toMatch(/^Cached:/);
+		expect(slice.notes).toEqual(expect.arrayContaining([fallbackWarning]));
+
+		expect(textSpy).toHaveBeenCalledTimes(1);
+		expect(jsonSpy).toHaveBeenCalledTimes(2);
+		expect(jsonSpy.mock.calls.map(call => call[1])).toEqual([
+			["api", "--method", "GET", "/repos/owner/example/pulls/77/files", "-F", "per_page=100", "-F", "page=1"],
+			["api", "--method", "GET", "/repos/owner/example/pulls/77/files", "-F", "per_page=100", "-F", "page=2"],
+		]);
+	});
+
+	it("does not invoke the files API for an unrelated aggregate-diff error", async () => {
+		const textSpy = vi
+			.spyOn(git.github, "text")
+			.mockRejectedValueOnce(new Error("GitHub CLI is not authenticated. Run `gh auth login`."));
+		const jsonSpy = vi.spyOn(git.github, "json");
+
+		const router = InternalUrlRouter.instance();
+		await expect(router.resolve("pr://owner/example/77/diff")).rejects.toThrow(/GitHub CLI is not authenticated/);
+		expect(textSpy).toHaveBeenCalledTimes(1);
+		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
+	it("stops the files API fallback at 3,000 entries without requesting page 31", async () => {
+		const textSpy = vi
+			.spyOn(git.github, "text")
+			.mockRejectedValueOnce(new Error("gh: HTTP 406: PullRequest.diff too_large"));
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			const endpoint = "/repos/owner/example/pulls/77/files";
+			const pageArg = args.find(value => value.startsWith("page="));
+			if (!args.includes(endpoint) || !pageArg) {
+				throw new Error(`unexpected files API args: ${args.join(" ")}`);
+			}
+			const page = Number(pageArg.slice("page=".length));
+			if (!Number.isInteger(page) || page < 1 || page > 30) {
+				throw new Error(`unexpected files API page: ${pageArg}`);
+			}
+			return Array.from(
+				{ length: 100 },
+				(_, index): PrFilesApiFixtureEntry => ({
+					filename: `src/cap-${String((page - 1) * 100 + index + 1).padStart(4, "0")}.ts`,
+					status: "modified",
+					additions: 1,
+					deletions: 0,
+					patch: "@@ -0,0 +1,1 @@\n+line",
+				}),
+			) as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://owner/example/77/diff");
+
+		const limitWarning =
+			"GitHub's pull-request files API returns at most 3,000 files; additional changed files may be omitted.";
+		expect(resource.content).toContain("# Pull Request Diff: owner/example#77 (3000 files)");
+		expect(resource.notes).toEqual(expect.arrayContaining([limitWarning]));
+		expect(textSpy).toHaveBeenCalledTimes(1);
+		expect(jsonSpy).toHaveBeenCalledTimes(30);
+		const pages = jsonSpy.mock.calls.map(call => {
+			const pageArg = call[1].find(value => value.startsWith("page="));
+			return pageArg ? Number(pageArg.slice("page=".length)) : -1;
+		});
+		expect(pages).toEqual(Array.from({ length: 30 }, (_, index) => index + 1));
 	});
 
 	it("pr://owner/repo/<n>/diff renders an empty-file body when the PR has no changes", async () => {

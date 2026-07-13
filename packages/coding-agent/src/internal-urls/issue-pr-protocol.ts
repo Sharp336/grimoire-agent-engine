@@ -393,7 +393,8 @@ function buildSingleResource({
 function formatFileLine(idx: number, file: PrDiffFile, repo: string, prNumber: number): string {
 	const stats = file.changeType === "binary" ? "(binary)" : `+${file.additions} -${file.deletions}`;
 	const rename = file.oldPath ? `  (renamed from ${file.oldPath})` : "";
-	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}\n   pr://${repo}/${prNumber}/diff/${idx}`;
+	const unavailable = file.patchUnavailable ? " (patch unavailable; skipped)" : "";
+	return `${idx}. ${file.path}  ${stats}  [${file.changeType}]${rename}${unavailable}\n   pr://${repo}/${prNumber}/diff/${idx}`;
 }
 
 async function fetchAndRenderPrDiff(
@@ -432,6 +433,7 @@ async function fetchAndRenderPrDiff(
 			size: Buffer.byteLength(content, "utf-8"),
 			notes: [
 				freshness,
+				...(lookup.payload.warnings ?? []),
 				`Full diff for pr://${repo}/${parsed.number} (${files.length} file${files.length === 1 ? "" : "s"})`,
 			],
 		};
@@ -456,6 +458,7 @@ async function fetchAndRenderPrDiff(
 			size: Buffer.byteLength(content, "utf-8"),
 			notes: [
 				freshness,
+				...(lookup.payload.warnings ?? []),
 				`Showing file ${index}/${files.length}: ${file.path}`,
 				`Read all: pr://${repo}/${parsed.number}/diff/all`,
 			],
@@ -475,7 +478,7 @@ async function fetchAndRenderPrDiff(
 		content,
 		contentType: "text/markdown",
 		size: Buffer.byteLength(content, "utf-8"),
-		notes: [freshness, `File listing for pr://${repo}/${parsed.number}`],
+		notes: [freshness, ...(lookup.payload.warnings ?? []), `File listing for pr://${repo}/${parsed.number}`],
 	};
 }
 

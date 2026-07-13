@@ -251,6 +251,21 @@ describe("parsePrUnifiedDiff", () => {
 		expect(parsed.files[0]?.oldPath).toBeUndefined();
 	});
 
+	it("decodes C-quoted renamed paths in headers and metadata", () => {
+		const diff = [
+			'diff --git "a/src/old folder/He said \\"hi\\" \\\\path.ts" "b/src/new folder/He said \\"hi\\" \\\\path.ts"',
+			"similarity index 100%",
+			'rename from "src/old folder/He said \\"hi\\" \\\\path.ts"',
+			'rename to "src/new folder/He said \\"hi\\" \\\\path.ts"',
+		].join("\n");
+
+		const parsed = parsePrUnifiedDiff(diff);
+		expect(parsed.files).toHaveLength(1);
+		expect(parsed.files[0]?.path).toBe('src/new folder/He said "hi" \\path.ts');
+		expect(parsed.files[0]?.oldPath).toBe('src/old folder/He said "hi" \\path.ts');
+		expect(parsed.files[0]?.changeType).toBe("renamed");
+	});
+
 	it("counts hunk lines whose content starts with file-header markers", () => {
 		const diff = [
 			"diff --git a/src/headings.md b/src/headings.md",
