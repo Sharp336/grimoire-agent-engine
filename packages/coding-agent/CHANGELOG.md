@@ -45,6 +45,7 @@
 - Removed the `--prewalk-boomerang` feature and its associated configuration setting.
 - Removed the unreliable Bing and Yahoo HTML-scraping web search providers.
 - Fixed OAuth-backed Gemini web search sending logical catalog model ids directly to provider endpoints instead of resolving their wire `requestModelId`, which made custom collapsed models such as Gemini 3.1 Pro fail and fall through to another search provider
+- Fixed OAuth-backed Gemini web search sending logical catalog model ids directly to provider endpoints instead of resolving their wire `requestModelId`, which made collapsed models such as Gemini 3.1 Pro fail and fall through to another search provider; successful results now report the configured logical model instead of private deployment ids, without overriding route-native generation settings
 - Fixed `/tan` and `/fork` clones cold-missing the provider prompt cache: the per-turn supersede/useless-result prune rewrote the live context without persisting it, so file-based forks and resume rebuilt a divergent (un-pruned) prefix and re-wrote the entire cache
 - Fixed `/tan` pinning the clone's prompt-cache key to the parent's session id instead of the parent's effective cache key, dropping shard affinity when the parent was itself a fork or tan
 - Fixed inconsistent history rendering when toggling the display setting for compacted items

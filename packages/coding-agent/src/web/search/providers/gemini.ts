@@ -9,7 +9,6 @@
  * endpoint.
  */
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
-import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -47,16 +46,24 @@ function resolveGeminiSearchModel(configuredModel: string | undefined): string {
 const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
 type GeminiProviderId = (typeof GEMINI_PROVIDERS)[number];
 
+interface OAuthGeminiSearchModelRoute {
+	requestModel: string;
+	logicalModel?: string;
+}
+
 function resolveOAuthGeminiSearchModel(
 	modelId: string,
 	provider: GeminiProviderId,
 	modelRegistry: ModelRegistry | undefined,
-): string {
+): OAuthGeminiSearchModelRoute {
 	const runtimeModel = modelRegistry?.find(provider, modelId);
 	// `find` also resolves retired wire aliases. Only translate an exact logical
 	// model id so an explicitly configured wire id remains unchanged.
 	if (runtimeModel?.id.toLowerCase() === modelId.toLowerCase()) {
-		return resolveWireModelId(runtimeModel, undefined);
+		return {
+			requestModel: runtimeModel.requestModelId ?? runtimeModel.id,
+			logicalModel: runtimeModel.id,
+		};
 	}
 
 	// Direct/CLI callers may not own a runtime registry. Avoid initializing the
@@ -64,11 +71,14 @@ function resolveOAuthGeminiSearchModel(
 	if (!modelRegistry && modelId !== DEFAULT_MODEL) {
 		const bundledModel = getBundledModel(provider, modelId);
 		if (bundledModel) {
-			return resolveWireModelId(bundledModel, undefined);
+			return {
+				requestModel: bundledModel.requestModelId ?? bundledModel.id,
+				logicalModel: bundledModel.id,
+			};
 		}
 	}
 
-	return modelId;
+	return { requestModel: modelId };
 }
 
 interface GeminiToolParams {
@@ -541,7 +551,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 	let result: GeminiSearchResult;
 
 	if (seed) {
-		const requestModel = resolveOAuthGeminiSearchModel(selectedModel, seed.provider, params.modelRegistry);
+		const modelRoute = resolveOAuthGeminiSearchModel(selectedModel, seed.provider, params.modelRegistry);
 		const isAntigravity = seed.provider === "google-antigravity";
 		result = await withOAuthAccess(
 			params.authStorage,
@@ -557,7 +567,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 						projectId: access.projectId ?? seed.projectId,
 						isAntigravity,
 					},
-					requestModel,
+					modelRoute.requestModel,
 					params.query,
 					params.system_prompt,
 					params.max_output_tokens,
@@ -573,6 +583,11 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 				),
 			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
 		);
+		if (modelRoute.logicalModel) {
+			// OAuth responses may expose private deployment ids. Report the
+			// logical catalog model the user selected instead.
+			result.model = modelRoute.logicalModel;
+		}
 	} else {
 		const apiKey = await params.authStorage.getApiKey(DEVELOPER_API_PROVIDER, params.sessionId, {
 			signal: params.signal,

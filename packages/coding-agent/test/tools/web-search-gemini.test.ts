@@ -137,6 +137,7 @@ describe("searchGemini tools serialization", () => {
 			"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
 		);
 		expect(response.model).toBe("gemini-3.5-flash");
+		expect(capturedRequest?.body).not.toHaveProperty("generationConfig");
 	});
 
 	it("uses configured OAuth model in the Cloud Code request body", async () => {
@@ -152,9 +153,9 @@ describe("searchGemini tools serialization", () => {
 		});
 	});
 
-	it("resolves an Antigravity logical model id to its request model id", async () => {
+	it("routes an Antigravity logical model without exposing its request model id", async () => {
 		const fetchMock = mockGeminiFetch();
-		await searchGemini({
+		const response = await searchGemini({
 			...makeParams("antigravity configured"),
 			authStorage: antigravityAuthStorage,
 			geminiModel: "gemini-3.1-pro",
@@ -164,6 +165,23 @@ describe("searchGemini tools serialization", () => {
 		expect(capturedRequest?.body).toMatchObject({
 			model: "gemini-3.1-pro-low",
 		});
+		expect(capturedRequest?.body?.request).not.toHaveProperty("generationConfig");
+		expect(response.model).toBe("gemini-3.1-pro");
+	});
+
+	it("preserves an explicitly configured Antigravity request model id", async () => {
+		const fetchMock = mockGeminiFetch(SSE_RESPONSE.replace("gemini-2.5-flash", "gemini-3.1-pro-low"));
+		const response = await searchGemini({
+			...makeParams("antigravity wire configured"),
+			authStorage: antigravityAuthStorage,
+			geminiModel: "gemini-3.1-pro-low",
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "gemini-3.1-pro-low",
+		});
+		expect(response.model).toBe("gemini-3.1-pro-low");
 	});
 
 	it("lets GEMINI_SEARCH_MODEL override the configured Gemini model", async () => {
