@@ -3,8 +3,7 @@
  */
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@oh-my-pi/pi-ai";
-import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env, isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -19,6 +18,26 @@ import { tinyTitleClient } from "../tiny/title-client";
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_SYSTEM_PROMPT = prompt.render(titleMarkerSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
+
+const IXARA_TITLE_PREFIX = "IXA";
+
+/** Resolve the tenant prefix for a session from explicit context or the QuietCare project. */
+export function getSessionTitlePrefix(firstMessage: string, cwd?: string): string | undefined {
+	const configuredTenant = $env.OMP_TENANT?.trim().toLowerCase();
+	if (configuredTenant === "ixara") return IXARA_TITLE_PREFIX;
+
+	const projectName = cwd ? path.basename(path.resolve(cwd)).toLowerCase() : "";
+	if (projectName === "quietcare" || /\b(ixara|quietcare)\b/i.test(firstMessage)) {
+		return IXARA_TITLE_PREFIX;
+	}
+	return undefined;
+}
+
+/** Prefix automatic titles without changing the generated remainder. */
+export function prefixSessionTitle(title: string, prefix: string | undefined): string {
+	if (!prefix || title === prefix || title.startsWith(`${prefix} — `)) return title;
+	return `${prefix} — ${title}`;
+}
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;

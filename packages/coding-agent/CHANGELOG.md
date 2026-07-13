@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Automatic session titles now receive the `IXA — ` prefix when the Ixara tenant or QuietCare project is detected, while preserving the generated title remainder and explicit user renames.
+
 ## [16.1.22] - 2026-06-26
 
 ### Fixed

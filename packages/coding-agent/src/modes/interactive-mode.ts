@@ -110,7 +110,13 @@ import { vocalizer } from "../tts/vocalizer";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
-import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import {
+	getSessionTitlePrefix,
+	popTerminalTitle,
+	prefixSessionTitle,
+	pushTerminalTitle,
+	setSessionTerminalTitle,
+} from "../utils/title-generator";
 import {
 	isSearchProviderId,
 	isSearchProviderPreference,
@@ -852,6 +858,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Load initial todos
 		await this.#loadTodoList();
+
+		const titlePrefix = getSessionTitlePrefix("", this.sessionManager.getCwd());
+		const existingName = this.sessionManager.getSessionName();
+		if (titlePrefix && existingName && this.sessionManager.titleSource === "auto") {
+			const prefixedName = prefixSessionTitle(existingName, titlePrefix);
+			if (prefixedName !== existingName) {
+				await this.sessionManager.setSessionName(prefixedName, "auto");
+			}
+		}
 
 		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
 		// the initial welcome frame does not append over the previous run's scrollback.

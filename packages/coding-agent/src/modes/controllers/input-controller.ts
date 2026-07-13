@@ -31,7 +31,12 @@ import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
 import { resizeImage } from "../../utils/image-resize";
-import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import {
+	generateSessionTitle,
+	getSessionTitlePrefix,
+	prefixSessionTitle,
+	setSessionTerminalTitle,
+} from "../../utils/title-generator";
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -758,6 +763,19 @@ export class InputController {
 			// First, move any pending bash components to chat
 			this.ctx.flushPendingBashComponents();
 
+			const titlePrefix = getSessionTitlePrefix(text, this.ctx.sessionManager.getCwd());
+			const existingName = this.ctx.sessionManager.getSessionName();
+			if (titlePrefix && existingName && this.ctx.sessionManager.titleSource === "auto") {
+				const prefixedName = prefixSessionTitle(existingName, titlePrefix);
+				if (prefixedName !== existingName) {
+					const applied = await this.ctx.sessionManager.setSessionName(prefixedName, "auto");
+					if (applied) {
+						setSessionTerminalTitle(prefixedName, this.ctx.sessionManager.getCwd());
+						this.ctx.updateEditorBorderColor();
+					}
+				}
+			}
+
 			// Auto-generate a session title while the session is still unnamed.
 			// Greetings / acknowledgements / empty input carry no task, so they are
 			// skipped deterministically (no model invoked, no download-progress UI)
@@ -779,7 +797,8 @@ export class InputController {
 						// Re-check: a concurrent attempt for an earlier message may have
 						// already named the session. Don't clobber it.
 						if (title && !this.ctx.sessionManager.getSessionName()) {
-							const applied = await this.ctx.sessionManager.setSessionName(title, "auto");
+							const sessionTitle = prefixSessionTitle(title, titlePrefix);
+							const applied = await this.ctx.sessionManager.setSessionName(sessionTitle, "auto");
 							if (applied) {
 								setSessionTerminalTitle(
 									this.ctx.sessionManager.getSessionName()!,
