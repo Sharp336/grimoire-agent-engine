@@ -16,6 +16,8 @@
  */
 import type { ArgDescriptor, CliConfig, CommandCtor, FlagDescriptor } from "@oh-my-pi/pi-utils/cli";
 import { BUILTIN_TOOL_NAMES } from "../tools/builtin-names";
+import { imageGenTool } from "../tools/image-gen";
+import { ttsTool } from "../tools/tts";
 
 export type Shell = "bash" | "zsh" | "fish";
 
@@ -70,6 +72,7 @@ const MODEL_FLAGS: Record<string, true> = { model: true, smol: true, slow: true,
 const SESSION_FLAGS: Record<string, true> = { resume: true, fork: true, session: true };
 /** Flags whose value is a directory path. */
 const DIR_FLAGS: Record<string, true> = { "session-dir": true, "plugin-dir": true };
+const TOOL_COMPLETION_NAMES = [...BUILTIN_TOOL_NAMES, imageGenTool.name, ttsTool.name];
 
 function flagValue(name: string, desc: FlagDescriptor): ValueSource {
 	if (desc.kind === "boolean") return { kind: "flag" };
@@ -77,7 +80,7 @@ function flagValue(name: string, desc: FlagDescriptor): ValueSource {
 	if (MODEL_FLAGS[name]) return { kind: "models", multiple: false };
 	if (name === "models") return { kind: "models", multiple: true };
 	if (SESSION_FLAGS[name]) return { kind: "sessions" };
-	if (name === "tools") return { kind: "list", values: BUILTIN_TOOL_NAMES };
+	if (name === "tools") return { kind: "list", values: TOOL_COMPLETION_NAMES };
 	if (DIR_FLAGS[name]) return { kind: "dir" };
 	if (desc.kind === "integer") return { kind: "value" };
 	return { kind: "file" };

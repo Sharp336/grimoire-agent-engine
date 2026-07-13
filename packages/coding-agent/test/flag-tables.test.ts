@@ -54,6 +54,12 @@ describe("--tools legacy aliases", () => {
 
 		expect(result.tools).toEqual(["grep", "glob"]);
 	});
+
+	it("preserves custom and MCP tool names for runtime resolution", () => {
+		const result = parseArgs(["--tools", "generate_image,tts,mcp__github_create_issue"]);
+
+		expect(result.tools).toEqual(["generate_image", "tts", "mcp__github_create_issue"]);
+	});
 });
 
 describe("OPTIONAL_FLAGS per-flag quirks", () => {

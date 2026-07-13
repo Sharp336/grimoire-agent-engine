@@ -171,6 +171,7 @@ describe("buildSpec", () => {
 						flags: {
 							model: { kind: "string" },
 							thinking: { kind: "string", options: ["low", "high"] },
+							tools: { kind: "string" },
 							"no-tools": { kind: "boolean" },
 							"session-dir": { kind: "string" },
 						},
@@ -183,8 +184,13 @@ describe("buildSpec", () => {
 		const byName = new Map(root.flags.map(f => [f.name, f.value.kind]));
 		expect(byName.get("model")).toBe("models");
 		expect(byName.get("thinking")).toBe("enum");
+		expect(byName.get("tools")).toBe("list");
 		expect(byName.get("no-tools")).toBe("flag");
 		expect(byName.get("session-dir")).toBe("dir");
+		const tools = root.flags.find(flag => flag.name === "tools");
+		if (tools?.value.kind !== "list") throw new Error("Expected --tools to use list completion");
+		expect(tools.value.values).toContain("generate_image");
+		expect(tools.value.values).toContain("tts");
 	});
 });
 

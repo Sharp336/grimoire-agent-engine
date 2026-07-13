@@ -1819,16 +1819,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Image generation and speech synthesis are built-in custom tools. Unlike
 		// extension tools, they must honor an explicit built-in tool selection,
 		// including the empty selection produced by `--no-tools`.
-		const isBuiltinCustomToolRequested = (name: string): boolean =>
-			options.toolNames === undefined || options.toolNames.some(toolName => normalizeToolName(toolName) === name);
-		if (settings.get("generate_image.enabled") && isBuiltinCustomToolRequested("generate_image")) {
+		const explicitlyRequestedToolNames =
+			options.toolNames === undefined ? undefined : normalizeToolNames(options.toolNames);
+		const isBuiltinCustomToolRequested = (tool: { name: string }): boolean =>
+			explicitlyRequestedToolNames === undefined ||
+			explicitlyRequestedToolNames.includes(normalizeToolName(tool.name));
+		if (settings.get("generate_image.enabled")) {
 			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
 			if (imageGenTools.length > 0) {
-				customTools.push(...(imageGenTools as unknown as CustomTool[]));
+				customTools.push(...(imageGenTools.filter(isBuiltinCustomToolRequested) as unknown as CustomTool[]));
 			}
 		}
 
-		if (settings.get("speechgen.enabled") && isBuiltinCustomToolRequested("tts")) {
+		if (settings.get("speechgen.enabled") && isBuiltinCustomToolRequested(ttsTool)) {
 			customTools.push(ttsTool as unknown as CustomTool);
 		}
 
@@ -2482,7 +2485,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the

@@ -4,7 +4,7 @@
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
-import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
+import { normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -95,7 +95,6 @@ export interface Args {
 const PARSE_DEPS: ParseDeps = {
 	logger,
 	parseThinking: parseCliThinkingLevel,
-	builtinToolNames: BUILTIN_TOOL_NAMES,
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
@@ -371,21 +370,23 @@ export function getExtraHelpText(): string {
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}
 ${chalk.bold("Available Tools (default-enabled unless noted):")}
-  read          - Read file contents
-  bash          - Execute bash commands
-  edit          - Edit files with find/replace
-  write         - Write files (creates/overwrites)
-  grep          - Search file contents
-  glob          - Find files by glob pattern
-  lsp           - Language server protocol (code intelligence)
-  python        - Execute Python code (requires: ${APP_NAME} setup python)
-  notebook      - Edit Jupyter notebooks
-  inspect_image - Analyze images with a vision model
-  browser       - Browser automation (Puppeteer)
-  task          - Launch sub-agents for parallel tasks
-  todo          - Manage todo/task lists
-  web_search    - Search the web
-  ask           - Ask user questions (interactive mode only)
+  read           - Read file contents
+  bash           - Execute bash commands
+  edit           - Edit files with find/replace
+  write          - Write files (creates/overwrites)
+  grep           - Search file contents
+  glob           - Find files by glob pattern
+  lsp            - Language server protocol (code intelligence)
+  python         - Execute Python code (requires: ${APP_NAME} setup python)
+  notebook       - Edit Jupyter notebooks
+  inspect_image  - Analyze images with a vision model
+  generate_image - Create and edit images
+  tts            - Synthesize speech files (disabled by default)
+  browser        - Browser automation (Puppeteer)
+  task           - Launch sub-agents for parallel tasks
+  todo           - Manage todo/task lists
+  web_search     - Search the web
+  ask            - Ask user questions (interactive mode only)
 
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)

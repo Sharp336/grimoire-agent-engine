@@ -316,6 +316,23 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("registers built-in custom tools when explicitly selected", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "speechgen.enabled": true }),
+			toolNames: ["generate_image", "tts"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("generate_image");
+			expect(session.getActiveToolNames()).toContain("tts");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("does not register generate_image when its availability setting is disabled", async () => {
 		const tempDir = makeTempDir();
 

@@ -45,7 +45,6 @@ import type { Args } from "./args";
 export interface ParseDeps {
 	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
 	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
-	builtinToolNames: readonly string[];
 	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
 }
@@ -157,24 +156,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.models = value.split(",").map(s => s.trim());
 	},
 	"--tools": (result, value, deps) => {
-		const names = deps.normalizeToolNames(
+		// Validation happens against the completed runtime registry: custom,
+		// extension, and MCP tool names are not present in the static built-in list.
+		result.tools = deps.normalizeToolNames(
 			value
 				.split(",")
 				.map(s => s.trim())
 				.filter(Boolean),
 		);
-		const valid: string[] = [];
-		for (const name of names) {
-			if (deps.builtinToolNames.includes(name)) {
-				valid.push(name);
-			} else {
-				deps.logger.warn("Unknown tool passed to --tools", {
-					tool: name,
-					validTools: deps.builtinToolNames,
-				});
-			}
-		}
-		result.tools = valid;
 	},
 	"--thinking": (result, value, deps) => {
 		const thinking = deps.parseThinking(value);
