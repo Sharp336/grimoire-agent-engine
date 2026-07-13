@@ -3,7 +3,6 @@
  *
  * Unified types for web search responses across supported providers.
  */
-
 export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "auto",
@@ -100,6 +99,27 @@ export function isSearchProviderId(value: string): value is SearchProviderId {
 
 export function isSearchProviderPreference(value: string): value is SearchProviderId | "auto" {
 	return SEARCH_PROVIDER_PREFERENCES.includes(value as SearchProviderId | "auto");
+}
+
+export const GEMINI_SEARCH_EFFORTS = ["default", "minimal", "low", "medium", "high"] as const;
+
+export type GeminiSearchEffort = (typeof GEMINI_SEARCH_EFFORTS)[number];
+export type ExplicitGeminiSearchEffort = Exclude<GeminiSearchEffort, "default">;
+
+export const GEMINI_SEARCH_EFFORT_OPTIONS = [
+	{
+		value: "default",
+		label: "Provider default",
+		description: "Preserve the selected route's native thinking behavior",
+	},
+	{ value: "minimal", label: "Minimal", description: "Use the model's verified minimal effort" },
+	{ value: "low", label: "Low", description: "Use the model's verified low effort" },
+	{ value: "medium", label: "Medium", description: "Use the model's verified medium effort" },
+	{ value: "high", label: "High", description: "Use the model's verified high effort" },
+] as const;
+
+export function isGeminiSearchEffort(value: string): value is GeminiSearchEffort {
+	return GEMINI_SEARCH_EFFORTS.includes(value as GeminiSearchEffort);
 }
 
 /** Source returned by search (all providers) */

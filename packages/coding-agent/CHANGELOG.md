@@ -18,6 +18,14 @@
 - Redesigned Agent Hub entries into a cleaner two-line card layout showing identity, active model, reasoning level, age, and task description.
 - Added a project-scoped `launch` tool (gated by `launch.enabled`) for managing shared long-running services and debuggers, featuring readiness probes, bounded logs, PTY input, restart policies, and automatic teardown.
 - Added support for `detached` launches, allowing standalone services to survive broker shutdowns and reconnect to subsequent sessions.
+- Added `providers.webSearchGeminiEffort` (`default`, `minimal`, `low`, `medium`, `high`) and the `GEMINI_SEARCH_EFFORT` override for route-aware Gemini web-search thinking: Antigravity uses verified model-specific budgets and wire routes, Gemini CLI and the Developer API use thinking levels, `default` preserves native behavior, and unsupported or unverified selections fail before dispatch
+- Added `--downshift` / `--downshift-into <model>` / `--no-downshift`: start on a strong model, then hand off to a fast/cheap one (default the `smol` role) at the first edit/write tool call *after* the todo list has been initialized. The starting model handles all planning and todo initialization, and begins implementation, before handing off; the fast model includes a verify checklist before finishing. Enable per-user with the `downshift.enabled` setting; force it mid-session with the new `/downshift` slash command, which arms the switch.
+- Added display setting to toggle between collapsing or keeping compacted history inline, now applied to live session displays
+- Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
+- Added `@` search to the Alt+P / `/switch` picker: it lists configured Ctrl+P quick roles in matching segment colors and applies the selected role's model and thinking for the current session.
+- Redesigned Agent Hub entries as two-line cards: identity (status glyph, name, agent type, parent when nested) on the left, active model + reasoning level and age right-aligned, with the task description on its own line; dropped the redundant `sub · of Main` noise
+- Added a project-scoped `launch` tool for shared long-running services and debuggers, with readiness probes, bounded logs, PTY input, restart policies, and automatic teardown after the last omp instance exits. Gated behind the `launch.enabled` setting (default on); when disabled the tool is withdrawn and the bash prompt drops its "use launch" guidance.
+- Added `detached` `launch` starts for standalone services that survive every omp instance and broker shutdown, then reconnect to the next broker for logs and explicit stop.
 
 ### Changed
 
@@ -46,6 +54,7 @@
 - Removed the unreliable Bing and Yahoo HTML-scraping web search providers.
 - Fixed OAuth-backed Gemini web search sending logical catalog model ids directly to provider endpoints instead of resolving their wire `requestModelId`, which made custom collapsed models such as Gemini 3.1 Pro fail and fall through to another search provider
 - Fixed OAuth-backed Gemini web search sending logical catalog model ids directly to provider endpoints instead of resolving their wire `requestModelId`, which made collapsed models such as Gemini 3.1 Pro fail and fall through to another search provider; successful results now report the configured logical model instead of private deployment ids, without overriding route-native generation settings
+- Fixed OAuth-backed Gemini web search sending logical catalog model ids directly to provider endpoints instead of resolving their wire `requestModelId`, which made collapsed models such as Gemini 3.1 Pro fail and fall through to another search provider; successful results now report the configured logical model instead of private deployment ids, and default effort leaves route-native generation settings untouched
 - Fixed `/tan` and `/fork` clones cold-missing the provider prompt cache: the per-turn supersede/useless-result prune rewrote the live context without persisting it, so file-based forks and resume rebuilt a divergent (un-pruned) prefix and re-wrote the entire cache
 - Fixed `/tan` pinning the clone's prompt-cache key to the parent's session id instead of the parent's effective cache key, dropping shard affinity when the parent was itself a fork or tan
 - Fixed inconsistent history rendering when toggling the display setting for compacted items

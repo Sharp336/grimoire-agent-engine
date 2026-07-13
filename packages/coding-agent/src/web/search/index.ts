@@ -26,7 +26,7 @@ import {
 	type SearchProvider,
 } from "./provider";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
-import type { SearchProviderId, SearchResponse } from "./types";
+import type { GeminiSearchEffort, SearchProviderId, SearchResponse } from "./types";
 import { SearchProviderError } from "./types";
 
 /** Web search tool parameters schema */
@@ -168,6 +168,13 @@ async function executeSearch(
 		geminiModel = undefined;
 	}
 
+	let geminiEffort: GeminiSearchEffort | undefined;
+	try {
+		geminiEffort = settings.get("providers.webSearchGeminiEffort");
+	} catch {
+		geminiEffort = undefined;
+	}
+
 	const failures: Array<{ provider: SearchProvider; error: unknown }> = [];
 	let lastProvider = providers[0];
 	for (const provider of providers) {
@@ -186,6 +193,7 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
+				geminiEffort,
 				modelRegistry,
 			});
 

@@ -8,7 +8,12 @@
  * sibling SQLite store and never POSTs the broker sentinel to a Google token
  * endpoint.
  */
-import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, Effort, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	mapEffortToGoogleThinkingLevel,
+	requireSupportedEffort,
+	resolveWireModelId,
+} from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -19,8 +24,16 @@ import { fetchWithRetry } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../../../config/model-registry";
 
-import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
-import { SearchProviderError } from "../../../web/search/types";
+import {
+	type ExplicitGeminiSearchEffort,
+	GEMINI_SEARCH_EFFORTS,
+	type GeminiSearchEffort,
+	isGeminiSearchEffort,
+	type SearchCitation,
+	SearchProviderError,
+	type SearchResponse,
+	type SearchSource,
+} from "../../../web/search/types";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
@@ -43,42 +56,156 @@ function resolveGeminiSearchModel(configuredModel: string | undefined): string {
 	return model || DEFAULT_MODEL;
 }
 
+function resolveGeminiSearchEffort(configuredEffort: GeminiSearchEffort | undefined): GeminiSearchEffort {
+	const envEffort = Bun.env.GEMINI_SEARCH_EFFORT?.trim().toLowerCase();
+	const effort = envEffort || configuredEffort || "default";
+	if (!isGeminiSearchEffort(effort)) {
+		throw new SearchProviderError(
+			"gemini",
+			`Invalid Gemini web-search effort "${effort}". Expected one of: ${GEMINI_SEARCH_EFFORTS.join(", ")}`,
+			400,
+		);
+	}
+	return effort;
+}
+
+function toProviderEffort(effort: ExplicitGeminiSearchEffort): Effort {
+	switch (effort) {
+		case "minimal":
+			return Effort.Minimal;
+		case "low":
+			return Effort.Low;
+		case "medium":
+			return Effort.Medium;
+		case "high":
+			return Effort.High;
+	}
+}
+
 const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
 type GeminiProviderId = (typeof GEMINI_PROVIDERS)[number];
 
-interface OAuthGeminiSearchModelRoute {
+type GeminiSearchProviderId = GeminiProviderId | typeof DEVELOPER_API_PROVIDER;
+type GeminiSearchThinkingConfig =
+	| {
+			includeThoughts: false;
+			thinkingLevel: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+	  }
+	| {
+			includeThoughts: false;
+			thinkingBudget: number;
+	  };
+
+interface GeminiSearchModelRoute {
 	requestModel: string;
 	logicalModel?: string;
+	thinkingConfig?: GeminiSearchThinkingConfig;
 }
 
-function resolveOAuthGeminiSearchModel(
+function resolveGeminiSearchModelRoute(
 	modelId: string,
-	provider: GeminiProviderId,
+	provider: GeminiSearchProviderId,
 	modelRegistry: ModelRegistry | undefined,
-): OAuthGeminiSearchModelRoute {
+	effort: GeminiSearchEffort,
+): GeminiSearchModelRoute {
 	const runtimeModel = modelRegistry?.find(provider, modelId);
-	// `find` also resolves retired wire aliases. Only translate an exact logical
-	// model id so an explicitly configured wire id remains unchanged.
-	if (runtimeModel?.id.toLowerCase() === modelId.toLowerCase()) {
-		return {
-			requestModel: runtimeModel.requestModelId ?? runtimeModel.id,
-			logicalModel: runtimeModel.id,
-		};
-	}
+	// `find` also resolves retired wire aliases. Only treat an exact id as the
+	// logical model so raw wire ids remain a compatibility escape hatch.
+	let logicalModel = runtimeModel?.id.toLowerCase() === modelId.toLowerCase() ? runtimeModel : undefined;
 
 	// Direct/CLI callers may not own a runtime registry. Avoid initializing the
 	// bundled catalog on the default path, whose logical and wire ids are equal.
-	if (!modelRegistry && modelId !== DEFAULT_MODEL) {
+	if (!logicalModel && !modelRegistry && (effort !== "default" || modelId !== DEFAULT_MODEL)) {
 		const bundledModel = getBundledModel(provider, modelId);
-		if (bundledModel) {
-			return {
-				requestModel: bundledModel.requestModelId ?? bundledModel.id,
-				logicalModel: bundledModel.id,
-			};
+		if (bundledModel?.id.toLowerCase() === modelId.toLowerCase()) {
+			logicalModel = bundledModel;
 		}
 	}
 
-	return { requestModel: modelId };
+	if (effort === "default") {
+		return logicalModel
+			? {
+					requestModel: logicalModel.requestModelId ?? logicalModel.id,
+					logicalModel: logicalModel.id,
+				}
+			: { requestModel: modelId };
+	}
+
+	if (!logicalModel) {
+		const aliasMessage =
+			runtimeModel && runtimeModel.id.toLowerCase() !== modelId.toLowerCase()
+				? ` "${modelId}" is a provider wire id for logical model "${runtimeModel.id}".`
+				: "";
+		throw new SearchProviderError(
+			"gemini",
+			`Cannot set Gemini web-search effort "${effort}" for ${provider}/${modelId}.${aliasMessage} Configure a logical model with verified thinking metadata, or use effort "default".`,
+			400,
+		);
+	}
+
+	const thinking = logicalModel.thinking;
+	if (!thinking) {
+		throw new SearchProviderError(
+			"gemini",
+			`Cannot set Gemini web-search effort "${effort}" for ${provider}/${logicalModel.id}: the model has no verified thinking metadata. Use effort "default".`,
+			400,
+		);
+	}
+
+	let supportedEffort: Effort;
+	try {
+		supportedEffort = requireSupportedEffort(logicalModel, toProviderEffort(effort));
+	} catch (error) {
+		throw new SearchProviderError(
+			"gemini",
+			error instanceof Error ? error.message : `Unsupported Gemini web-search effort "${effort}"`,
+			400,
+		);
+	}
+
+	const requestModel = resolveWireModelId(logicalModel, supportedEffort);
+	if (thinking.mode === "google-level") {
+		if (provider === "google-antigravity") {
+			throw new SearchProviderError(
+				"gemini",
+				`Cannot set Gemini web-search effort "${effort}" for ${provider}/${logicalModel.id}: Antigravity requires a verified thinking-budget mapping. Use effort "default".`,
+				400,
+			);
+		}
+		return {
+			requestModel,
+			logicalModel: logicalModel.id,
+			thinkingConfig: {
+				includeThoughts: false,
+				thinkingLevel: mapEffortToGoogleThinkingLevel(supportedEffort),
+			},
+		};
+	}
+
+	if (thinking.mode === "budget") {
+		const thinkingBudget = thinking.effortBudgets?.[supportedEffort];
+		if (thinkingBudget === undefined) {
+			throw new SearchProviderError(
+				"gemini",
+				`Cannot set Gemini web-search effort "${effort}" for ${provider}/${logicalModel.id}: no verified token budget is available. Use effort "default".`,
+				400,
+			);
+		}
+		return {
+			requestModel,
+			logicalModel: logicalModel.id,
+			thinkingConfig: {
+				includeThoughts: false,
+				thinkingBudget,
+			},
+		};
+	}
+
+	throw new SearchProviderError(
+		"gemini",
+		`Cannot set Gemini web-search effort "${effort}" for ${provider}/${logicalModel.id}: thinking mode "${thinking.mode}" is not supported by Gemini search. Use effort "default".`,
+		400,
+	);
 }
 
 interface GeminiToolParams {
@@ -101,6 +228,7 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	fetch?: FetchImpl;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	geminiEffort?: GeminiSearchEffort;
 	modelRegistry?: ModelRegistry;
 }
 
@@ -342,6 +470,7 @@ async function callGeminiSearch(
 	systemPrompt: string | undefined,
 	maxOutputTokens: number | undefined,
 	temperature: number | undefined,
+	thinkingConfig: GeminiSearchThinkingConfig | undefined,
 	toolParams: GeminiToolParams,
 	fetchImpl: FetchImpl | undefined,
 	signal: AbortSignal | undefined,
@@ -400,13 +529,16 @@ async function callGeminiSearch(
 		...requestMetadata,
 	};
 
-	if (maxOutputTokens !== undefined || temperature !== undefined) {
-		const generationConfig: Record<string, number> = {};
+	if (maxOutputTokens !== undefined || temperature !== undefined || thinkingConfig !== undefined) {
+		const generationConfig: Record<string, unknown> = {};
 		if (maxOutputTokens !== undefined) {
 			generationConfig.maxOutputTokens = maxOutputTokens;
 		}
 		if (temperature !== undefined) {
 			generationConfig.temperature = temperature;
+		}
+		if (thinkingConfig !== undefined) {
+			generationConfig.thinkingConfig = thinkingConfig;
 		}
 		(requestBody.request as Record<string, unknown>).generationConfig = generationConfig;
 	}
@@ -475,6 +607,7 @@ async function callGeminiDeveloperSearch(
 	systemPrompt: string | undefined,
 	maxOutputTokens: number | undefined,
 	temperature: number | undefined,
+	thinkingConfig: GeminiSearchThinkingConfig | undefined,
 	toolParams: GeminiToolParams,
 	fetchImpl: FetchImpl | undefined,
 	signal: AbortSignal | undefined,
@@ -495,13 +628,16 @@ async function callGeminiDeveloperSearch(
 		}),
 	};
 
-	if (maxOutputTokens !== undefined || temperature !== undefined) {
-		const generationConfig: Record<string, number> = {};
+	if (maxOutputTokens !== undefined || temperature !== undefined || thinkingConfig !== undefined) {
+		const generationConfig: Record<string, unknown> = {};
 		if (maxOutputTokens !== undefined) {
 			generationConfig.maxOutputTokens = maxOutputTokens;
 		}
 		if (temperature !== undefined) {
 			generationConfig.temperature = temperature;
+		}
+		if (thinkingConfig !== undefined) {
+			generationConfig.thinkingConfig = thinkingConfig;
 		}
 		requestBody.generationConfig = generationConfig;
 	}
@@ -547,11 +683,17 @@ async function callGeminiDeveloperSearch(
  */
 export async function searchGemini(params: GeminiSearchParams): Promise<SearchResponse> {
 	const selectedModel = resolveGeminiSearchModel(params.geminiModel);
+	const selectedEffort = resolveGeminiSearchEffort(params.geminiEffort);
 	const seed = await findGeminiAuth(params.authStorage, params.sessionId, params.signal);
 	let result: GeminiSearchResult;
 
 	if (seed) {
-		const modelRoute = resolveOAuthGeminiSearchModel(selectedModel, seed.provider, params.modelRegistry);
+		const modelRoute = resolveGeminiSearchModelRoute(
+			selectedModel,
+			seed.provider,
+			params.modelRegistry,
+			selectedEffort,
+		);
 		const isAntigravity = seed.provider === "google-antigravity";
 		result = await withOAuthAccess(
 			params.authStorage,
@@ -572,6 +714,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 					params.system_prompt,
 					params.max_output_tokens,
 					params.temperature,
+					modelRoute.thinkingConfig,
 					{
 						google_search: params.google_search,
 						code_execution: params.code_execution,
@@ -597,13 +740,20 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 				"No Gemini credentials found. Set GEMINI_API_KEY, configure an API key for provider \"google\", or login with 'omp /login google-gemini-cli' / 'omp /login google-antigravity' to enable Gemini web search.",
 			);
 		}
+		const modelRoute = resolveGeminiSearchModelRoute(
+			selectedModel,
+			DEVELOPER_API_PROVIDER,
+			params.modelRegistry,
+			selectedEffort,
+		);
 		result = await callGeminiDeveloperSearch(
 			apiKey,
-			selectedModel,
+			modelRoute.requestModel,
 			params.query,
 			params.system_prompt,
 			params.max_output_tokens,
 			params.temperature,
+			modelRoute.thinkingConfig,
 			{
 				google_search: params.google_search,
 				code_execution: params.code_execution,
@@ -612,6 +762,9 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 			params.fetch,
 			params.signal,
 		);
+		if (modelRoute.logicalModel) {
+			result.model = modelRoute.logicalModel;
+		}
 	}
 
 	let sources = result.sources;
@@ -658,6 +811,7 @@ export class GeminiProvider extends SearchProvider {
 			sessionId: params.sessionId,
 			fetch: params.fetch,
 			geminiModel: params.geminiModel,
+			geminiEffort: params.geminiEffort,
 			modelRegistry: params.modelRegistry,
 		});
 	}
