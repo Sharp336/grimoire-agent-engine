@@ -268,7 +268,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "neuralwatt",
-		defaultModel: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+		defaultModel: "glm-5.2-short",
 		envVars: ["NEURALWATT_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => neuralwattModelManagerOptions(config),
 		catalogDiscovery: { label: "Neuralwatt" },
