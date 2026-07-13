@@ -90,6 +90,7 @@ function makeCtx(): {
 		showStatus: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		resetTranscript: () => ctx.chatContainer.clear(),
+		settings: Settings.isolated({ "display.collapseCompacted": true }),
 	} as unknown as InteractiveModeContext;
 
 	return { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy };
