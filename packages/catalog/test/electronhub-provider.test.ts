@@ -79,6 +79,26 @@ describe("ElectronHub provider catalog", () => {
 		expect(qwen.compat.thinkingFormat).not.toBe("qwen");
 	});
 
+	it("keeps minimax-m2.7:dev on the mandatory-reasoning floor instead of reasoning-effort-none", () => {
+		// MiniMax M2 is a reasoning-first architecture: isMinimaxM2FamilyModelId
+		// backfills thinking.requiresEffort for every host (Fireworks, native,
+		// ElectronHub alike — see model-thinking.test.ts), so Thinking Off
+		// requests never reach this model's reasoningDisableMode at all;
+		// normalizeMandatoryReasoningOptions (packages/ai/src/stream.ts) clamps
+		// disableReasoning to the ladder's lowest effort ("low") first. Confirmed
+		// live against ElectronHub's /v1/chat/completions that "none", "minimal",
+		// "low", and an omitted field all produce comparable non-trivial
+		// reasoning content for this model — the gateway does not make this
+		// architecturally mandatory-reasoning model honor "off" either, so it's
+		// deliberately NOT exempted via thinking.suppressWhenOff.
+		const minimax = getBundledModel<"openai-completions">("electronhub", "minimax-m2.7:dev");
+		expect(minimax.thinking?.requiresEffort).toBe(true);
+		expect(minimax.thinking?.suppressWhenOff).not.toBe(true);
+		// The shared reasoning-effort-none disable mode is still configured (and
+		// harmless) here — it's just structurally unreachable for this model.
+		expect(minimax.compat.reasoningDisableMode).toBe("reasoning-effort-none");
+	});
+
 	it("applies the same OpenAI-shaped dialect override to qwen3.6-27b:dev via dynamic discovery", async () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response(

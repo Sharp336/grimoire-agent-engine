@@ -1942,6 +1942,22 @@ export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-compl
 		api: "openai-completions",
 		provider: "electronhub",
 		baseUrl: ELECTRONHUB_API_BASE_URL,
+		// MiniMax M2 is a reasoning-first architecture: isMinimaxM2FamilyModelId
+		// backfills thinking.requiresEffort for every host (see model-thinking.ts
+		// and the Fireworks/native-host precedent in model-thinking.test.ts), so
+		// Thinking Off requests never reach this model's reasoningDisableMode at
+		// all — normalizeMandatoryReasoningOptions (stream.ts) clamps
+		// disableReasoning to the ladder's lowest effort ("low") before any
+		// compat-level disable encoding runs. That's intentional, not a gap left
+		// by the reasoning-effort-none change above: live-probed directly against
+		// ElectronHub's /v1/chat/completions, reasoning_effort "none", "minimal",
+		// "low", and an omitted field all produced comparable non-trivial
+		// reasoning content (roughly 200-600 chars, no measurable suppression) —
+		// the gateway does not make this architecturally mandatory-reasoning model
+		// honor "off" either. Sending "none" here would be no more effective than
+		// the existing "low" clamp, so this model is deliberately left on the
+		// shared mandatory-reasoning floor rather than exempted via
+		// thinking.suppressWhenOff.
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
