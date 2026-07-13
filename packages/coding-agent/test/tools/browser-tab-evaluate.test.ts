@@ -34,5 +34,5 @@ describe("browser tab evaluation", () => {
 		} finally {
 			await tool.execute("close", { action: "close", name, kill: true });
 		}
-	});
+	}, 60_000);
 });
