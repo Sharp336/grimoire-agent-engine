@@ -16018,7 +16018,7 @@ export class AgentSession {
 		// blowing the heap before the new session even loads (issue #3846). The
 		// error-recovery path rebuilds the context on demand from the restored
 		// state instead.
-		let previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
+		let previousSessionContext: SessionContext | undefined;
 		// switchSession replaces these arrays wholesale during load/rollback, so retaining
 		// the existing message objects is sufficient and avoids structured-clone failures for
 		// extension/custom metadata that is valid to persist but not cloneable.
