@@ -363,6 +363,11 @@ Extension runner errors are emitted separately as:
 
 `message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
 
+RPC stdout keeps `agent_end` frames below a one MiB JSONL reader ceiling. When
+the redundant terminal aggregate would exceed that bound, `messages` contains
+the newest contiguous suffix that fits and the event includes the original
+`messageCount` plus a `status` of `completed`, `failed`, or `cancelled`.
+
 ## Prompt/Queue Concurrency and Ordering
 
 This is the most important operational behavior.
