@@ -17523,6 +17523,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
@@ -17560,6 +17561,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "reasoning-effort-none",
 				"thinkingFormat": "openai",
 				"reasoningContentField": "reasoning_content",
@@ -17598,6 +17600,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "lowest-effort"
 			}
 		},
@@ -17632,6 +17635,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
@@ -17665,6 +17669,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "reasoning-effort-none"
 			}
 		},
@@ -17700,6 +17705,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
 				"reasoningDisableMode": "reasoning-effort-none",
 				"thinkingFormat": "openai"
 			}

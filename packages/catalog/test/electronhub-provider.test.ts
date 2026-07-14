@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import type { Context, FetchImpl as AiFetchImpl } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
@@ -37,7 +39,47 @@ describe("ElectronHub provider catalog", () => {
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			// ElectronHub is OpenAI-compatible but does not support the OpenAI `store` flag.
 			expect(model.compat.supportsStore).toBe(false);
+			// ElectronHub's /v1/chat/completions documents `max_tokens` as the output
+			// cap field, not the newer `max_completion_tokens` the generic OpenAI
+			// dialect defaults to outside buildOpenAICompat's useMaxTokens allowlist.
+			expect(model.compat.maxTokensField).toBe("max_tokens");
 		}
+	});
+
+	it("sends max_tokens (not max_completion_tokens) on the wire for kimi-k2.6:dev, honoring the caller's cap", async () => {
+		// kimi-k2.6:dev also carries alwaysSendMaxTokens (isKimiModel in
+		// compat/openai.ts), so it sends a max-tokens field on EVERY request, even
+		// when the caller set no cap. Live-probed against the real ElectronHub
+		// endpoint: a max_completion_tokens:5 cap was silently ignored (the model
+		// produced a full ~100-line response), while max_tokens:5 correctly capped
+		// it (finish_reason "length", completion_tokens 5) -- confirming
+		// ElectronHub only honors max_tokens, and the previously-unset
+		// maxTokensField default would have made this model's runaway-reasoning
+		// protection a silent no-op on this provider.
+		const model = getBundledModel<"openai-completions">("electronhub", "kimi-k2.6:dev");
+		let capturedBody: Record<string, unknown> = {};
+		const fetchMock: AiFetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const raw = typeof init?.body === "string" ? init.body : "{}";
+				capturedBody = JSON.parse(raw) as Record<string, unknown>;
+				return new Response("data: [DONE]\n\n", {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		};
+
+		const stream = streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock, maxTokens: 5 });
+		for await (const _ of stream) {
+			// drain until terminal event
+		}
+
+		expect(capturedBody.max_tokens).toBe(5);
+		expect(capturedBody.max_completion_tokens).toBeUndefined();
 	});
 
 	it("keeps glm-5.2:dev on ElectronHub's OpenAI-shaped reasoning_effort surface, remapping max to xhigh", () => {

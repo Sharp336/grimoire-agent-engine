@@ -1858,6 +1858,18 @@ const ELECTRONHUB_API_BASE_URL = "https://api.electronhub.ai/v1";
 const ELECTRONHUB_OPENAI_COMPAT = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
+	// ElectronHub's /v1/chat/completions documents `max_tokens` as the output
+	// cap field, not the newer `max_completion_tokens` buildOpenAICompat
+	// defaults to for hosts outside its useMaxTokens allowlist (compat/openai.ts
+	// — Mistral, Moonshot-native, Z.ai/Zhipu, Chutes, Fireworks, direct
+	// DeepSeek). Confirmed live: sending max_completion_tokens against
+	// kimi-k2.6:dev was silently ignored (100-line response despite a cap of
+	// 5), while max_tokens correctly capped it (finish_reason "length",
+	// completion_tokens 5). Without this override, kimi-k2.6:dev's
+	// alwaysSendMaxTokens (isKimiModel, compat/openai.ts) would send the wrong,
+	// silently-dropped field on every request, defeating the very runaway-
+	// reasoning protection that flag exists for.
+	maxTokensField: "max_tokens",
 	// ElectronHub's /v1/chat/completions documents reasoning_effort: "none" as
 	// the way to fully hide reasoning output — the generic "openai" dialect's
 	// default ("lowest-effort", sending the ladder's floor tier) still produces

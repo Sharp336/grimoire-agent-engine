@@ -10,6 +10,7 @@
 
 - Fixed ElectronHub DevPass reasoning dialect mapping: `glm-5.2:dev` and `qwen3.6-27b:dev` now use ElectronHub's OpenAI-shaped `reasoning_effort` surface instead of each model's native Z.ai/Qwen dialect, with `glm-5.2:dev`'s top effort tier remapped onto ElectronHub's actual top tier `xhigh`. Disabling reasoning now sends an explicit `reasoning_effort: "none"` for four of the six DevPass models instead of falling back to a reduced-effort or provider-default request. `minimax-m2.7:dev` (mandatory-reasoning architecture) and `gpt-oss-120b:dev` (Harmony's tested-safe lowest-effort disable path, matching every other GPT-OSS host in the catalog) are deliberately excluded and keep their existing lowest-effort clamp.
 - Fixed ElectronHub DevPass dynamic discovery disabling tool calling whenever a live `/v1/models` record reported stale `metadata.function_call: false`; every DevPass model supports function calling per ElectronHub's docs, so discovery no longer trusts that flag.
+- Fixed ElectronHub DevPass requests sending the unhonored `max_completion_tokens` field instead of the documented `max_tokens` output cap; ElectronHub silently ignores `max_completion_tokens` (confirmed live), which had made `kimi-k2.6:dev`'s always-send-a-cap safeguard (protecting against runaway reasoning traces) a no-op on this provider.
 
 ## [16.4.3] - 2026-07-11
 
