@@ -521,6 +521,9 @@ describe("ModelRegistry", () => {
 							supportsMultipleSystemMessages: false,
 							disableReasoningOnToolChoice: true,
 							allowsSyntheticReasoningContentForToolCalls: false,
+							includeEncryptedReasoning: false,
+							filterReasoningHistory: true,
+							replayNativeHistory: false,
 						},
 					},
 				},
@@ -623,6 +626,9 @@ describe("ModelRegistry", () => {
 				expect(getOpenAICompat(model)?.supportsMultipleSystemMessages).toBe(false);
 				expect(getOpenAICompat(model)?.disableReasoningOnToolChoice).toBe(true);
 				expect(getOpenAICompat(model)?.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+				expect(getOpenAICompat(model)?.includeEncryptedReasoning).toBe(false);
+				expect(getOpenAICompat(model)?.filterReasoningHistory).toBe(true);
+				expect(getOpenAICompat(model)?.replayNativeHistory).toBe(false);
 			}
 		});
 

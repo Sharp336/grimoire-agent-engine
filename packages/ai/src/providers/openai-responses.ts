@@ -785,7 +785,8 @@ export function buildParams(
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
 	const strictResponsesPairing = policy.tools.strictResponsesPairing;
-	const shouldReplayNativeHistory = providerSessionState?.nativeHistoryReplayWarmed ?? true;
+	const shouldReplayNativeHistory =
+		policy.compat.replayNativeHistory && (providerSessionState?.nativeHistoryReplayWarmed ?? true);
 	const messages = buildResponsesInput({
 		model,
 		context,

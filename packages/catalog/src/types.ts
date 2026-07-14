@@ -215,6 +215,8 @@ export interface OpenAICompat {
 	includeEncryptedReasoning?: boolean;
 	/** Whether replayed Responses history should strip native `type: "reasoning"` items before request encoding. Default: false. */
 	filterReasoningHistory?: boolean;
+	/** Whether Responses requests should replay provider-native history items. Default: true. */
+	replayNativeHistory?: boolean;
 	/** Optional `thinking.keep` value for Z.ai/Moonshot-style thinking params. Set false to suppress auto-detected keep. Default: auto-detected. */
 	thinkingKeep?: "all" | false;
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
@@ -469,6 +471,7 @@ export interface ResolvedOpenAISharedCompat {
 	omitReasoningEffort: boolean;
 	includeEncryptedReasoning: boolean;
 	filterReasoningHistory: boolean;
+	replayNativeHistory: boolean;
 	disableReasoningOnForcedToolChoice: boolean;
 	disableReasoningOnToolChoice: boolean;
 	supportsToolChoice: boolean;

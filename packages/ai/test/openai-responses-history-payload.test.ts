@@ -3,7 +3,11 @@ import {
 	convertCodexResponsesMessages,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import {
+	buildParams,
+	type OpenAIResponsesOptions,
+	streamOpenAIResponses,
+} from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@oh-my-pi/pi-ai/utils";
@@ -375,6 +379,67 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("falls back to unsigned assistant text when native replay is disabled", () => {
+		const model = buildModel({
+			id: "gateway-model",
+			name: "Gateway Model",
+			api: "openai-responses",
+			provider: "gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16000,
+			compat: {
+				includeEncryptedReasoning: false,
+				filterReasoningHistory: true,
+				replayNativeHistory: false,
+			},
+		} satisfies ModelSpec<"openai-responses">);
+		const priorAssistant = {
+			...makeAssistantMessage([
+				{
+					id: "msg_native",
+					type: "message",
+					status: "completed",
+					role: "assistant",
+					content: [{ type: "output_text", text: "FIRST" }],
+				},
+			]),
+			content: [
+				{
+					type: "text" as const,
+					text: "FIRST",
+					textSignature: JSON.stringify({ id: "msg_native", phase: "final_answer" }),
+				},
+			],
+		};
+		const { params } = buildParams(
+			model,
+			{
+				systemPrompt: [],
+				tools: [],
+				messages: [
+					{ role: "user", content: "first request", timestamp: Date.now() },
+					priorAssistant,
+					{ role: "user", content: "second request", timestamp: Date.now() },
+				],
+			} as Context,
+			undefined,
+			undefined,
+		);
+		const assistant = params.input?.find(
+			item => item.type === "message" && "role" in item && item.role === "assistant",
+		);
+		expect(assistant).toMatchObject({
+			type: "message",
+			role: "assistant",
+			content: [{ type: "output_text", text: "FIRST" }],
+		});
+		expect(assistant).not.toHaveProperty("id");
+		expect(params.include).toBeUndefined();
+	});
 	it("appends user-message replacement history without wiping prefix or tail", () => {
 		const middleItems = [
 			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },

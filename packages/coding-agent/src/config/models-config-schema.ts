@@ -57,6 +57,9 @@ const OpenAICompatFields = {
 	"supportsLongPromptCacheRetention?": "boolean",
 	"supportsReasoningParams?": "boolean",
 	"alwaysSendMaxTokens?": "boolean",
+	"includeEncryptedReasoning?": "boolean",
+	"filterReasoningHistory?": "boolean",
+	"replayNativeHistory?": "boolean",
 	"strictResponsesPairing?": "boolean",
 	"supportsImageDetailOriginal?": "boolean",
 	// anthropic-messages compat flags (same `compat` slot, per-api interpretation)

@@ -183,6 +183,7 @@ describe("openai-completions compatibility", () => {
 			omitReasoningEffort: false,
 			includeEncryptedReasoning: true,
 			filterReasoningHistory: false,
+			replayNativeHistory: true,
 			reasoningContentField: "reasoning_content",
 			requiresReasoningContentForToolCalls: false,
 			requiresReasoningContentForAllAssistantTurns: false,
