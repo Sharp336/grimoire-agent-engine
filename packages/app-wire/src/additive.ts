@@ -3,6 +3,7 @@ import { type DurableEntry, decodeEntry } from "./entry.js";
 import { fail } from "./errors.js";
 import {
 	boundedArray,
+	boundedBase64,
 	boundedMap,
 	boundedMetadata,
 	boundedSettings,
@@ -79,17 +80,6 @@ function known(value: unknown, path: string, values: readonly string[]): string 
 	const result = controlFree(value, path, 128);
 	if (!values.includes(result)) fail("UNKNOWN_FRAME", `unknown discriminant ${result}`, path);
 	return result;
-}
-function base64(value: unknown, path: string, max: number): string {
-	const text = boundedText(value, path, Math.ceil((max * 4) / 3) + 4);
-	if (text.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(text))
-		fail("BOUNDS", "invalid base64 payload", path);
-	try {
-		if (atob(text).length > max) fail("BOUNDS", "decoded payload exceeds protocol limit", path);
-	} catch {
-		fail("BOUNDS", "invalid base64 payload", path);
-	}
-	return text;
 }
 function httpUrl(value: unknown, path: string): string {
 	const text = controlFree(value, path, 4096);
@@ -359,7 +349,7 @@ export function decodeAgentAdditive(input: unknown): AgentAdditiveFrame {
 		if (x.data !== undefined) result.data = object(x.data, "data");
 		return result;
 	}
-	const entries = boundedArray(x.entries, "entries").map((value, i) => decodeEntry(value, `entries[${i}]`));
+	const entries = boundedArray(x.entries, "entries").map(value => decodeEntry(value));
 	for (const entry of entries)
 		if (entry.hostId !== ids.hostId || entry.sessionId !== ids.sessionId)
 			fail("INVALID_FRAME", "transcript entry belongs to another session", "entries");
@@ -438,7 +428,7 @@ export function decodeTerminalClient(input: unknown): TerminalClientFrame {
 					: (known(x.encoding, "encoding", ["utf8", "base64"]) as "utf8" | "base64"),
 			data =
 				encoding === "base64"
-					? base64(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES)
+					? boundedBase64(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES)
 					: boundedText(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES),
 			result = { ...x, type, ...ids, terminalId: tid, data } as TerminalInputFrame;
 		if (encoding !== undefined) result.encoding = encoding;
@@ -470,7 +460,7 @@ export function decodeTerminalAdditive(input: unknown): TerminalServerFrame {
 					: (known(x.encoding, "encoding", ["utf8", "base64"]) as "utf8" | "base64"),
 			data =
 				encoding === "base64"
-					? base64(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES)
+					? boundedBase64(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES)
 					: boundedText(x.data, "data", MAX_TERMINAL_OUTPUT_BYTES),
 			result = {
 				...x,
@@ -598,7 +588,7 @@ export function decodeFilesAdditive(input: unknown): FilesAdditiveFrame {
 				path,
 				content:
 					encoding === "base64"
-						? base64(x.content, "content", MAX_FILE_BYTES)
+						? boundedBase64(x.content, "content", MAX_FILE_BYTES)
 						: boundedText(x.content, "content", MAX_FILE_BYTES),
 			} as FilesReadFrame;
 		if (encoding !== undefined) result.encoding = encoding;
@@ -617,7 +607,7 @@ export function decodeFilesAdditive(input: unknown): FilesAdditiveFrame {
 				path,
 				content:
 					encoding === "base64"
-						? base64(x.content, "content", MAX_FILE_BYTES)
+						? boundedBase64(x.content, "content", MAX_FILE_BYTES)
 						: boundedText(x.content, "content", MAX_FILE_BYTES),
 				revision: revision(x.revision),
 			} as FilesWriteFrame;
@@ -877,7 +867,7 @@ export function decodePreview(input: unknown): PreviewFrame {
 			type,
 			...ids,
 			previewId: pid,
-			content: base64(x.content, "content", MAX_FILE_BYTES),
+			content: boundedBase64(x.content, "content", MAX_FILE_BYTES),
 			encoding: x.encoding,
 			mimeType: controlFree(x.mimeType, "mimeType", 128),
 		} as PreviewCaptureFrame;

@@ -3,6 +3,7 @@ import { decodeCursor } from "./cursor.js";
 import { fail } from "./errors.js";
 import {
 	boundedArray,
+	boundedBase64,
 	boundedMap,
 	boundedMetadata,
 	boundedSettings,
@@ -564,7 +565,9 @@ function decodeEntries(value: unknown): CommandResult {
 	for (const [i, v] of values.entries()) {
 		const item = boundedMap(v, `result.entries[${i}]`);
 		safeRelativePath(item.path, `result.entries[${i}].path`);
-		controlFree(item.kind, `result.entries[${i}].kind`, 32);
+		const kind = controlFree(item.kind, `result.entries[${i}].kind`, 32);
+		if (kind !== "file" && kind !== "directory" && kind !== "symlink")
+			fail("INVALID_FRAME", "unknown file entry kind", `result.entries[${i}].kind`);
 	}
 	return { ...x, entries: values };
 }
@@ -601,9 +604,7 @@ function decodeWatchResult(value: unknown): CommandResult {
 }
 function decodePreviewCaptureResult(value: unknown): CommandResult {
 	const x = result(value);
-	const content = boundedText(x.content, "result.content", MAX_FILE_BYTES);
-	if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(content) || content.length % 4 !== 0)
-		fail("INVALID_FRAME", "capture content must be base64", "result.content");
+	boundedBase64(x.content, "result.content", MAX_FILE_BYTES);
 	return x;
 }
 function decodeSettingsResult(value: unknown): CommandResult {
