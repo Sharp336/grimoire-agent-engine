@@ -75,6 +75,56 @@ export type OAuthCredential = {
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
+export interface AcquiredAuthCredential {
+	provider: string;
+	credential: AuthCredential;
+}
+
+export async function acquireAuthCredential(
+	provider: OAuthProviderId,
+	controller: OAuthController,
+): Promise<AcquiredAuthCredential | null> {
+	// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
+	// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
+	// providers the `OAuthCallbackFlow` would otherwise race this readline prompt
+	// against the HTTP callback and, when the callback wins, leave the prompt
+	// outstanding — a dirty/blocked terminal. Synthesizing the default only for
+	// paste-code providers is the authoritative gate (it covers every caller, not
+	// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
+	// honored for any provider as an escape hatch.
+	const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
+		? () =>
+				controller.onPrompt?.({ message: "Paste the authorization code (or full redirect URL):" }) ??
+				Promise.resolve("")
+		: undefined;
+	// Built-in registry first, then runtime-registered extension providers.
+	const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
+	if (!def?.login) {
+		throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
+	}
+	const storageProvider = def.storeCredentialsAs ?? provider;
+	let result: OAuthCredentials | string;
+	try {
+		result = await def.login({
+			onAuth: controller.onAuth!,
+			onProgress: controller.onProgress,
+			onPrompt: controller.onPrompt!,
+			onManualCodeInput: controller.onManualCodeInput ?? manualCodeInput,
+			signal: controller.signal,
+			fetch: controller.fetch,
+		});
+	} catch (error) {
+		if (error instanceof AIError.LoginCancelledError) return null;
+		throw error;
+	}
+	if (typeof result === "string") {
+		// Some flows (e.g. ollama) return "" to signal that no key was entered.
+		if (!result) return null;
+		return { provider: storageProvider, credential: { type: "api_key", key: result } };
+	}
+	return { provider: storageProvider, credential: { type: "oauth", ...result } };
+}
+
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
 export type AuthStorageData = Record<string, AuthCredentialEntry>;
@@ -84,6 +134,14 @@ export type AuthStorageData = Record<string, AuthCredentialEntry>;
  * first — mirrors {@link AuthStorage.getApiKey}'s resolution order.
  */
 export type CredentialOriginKind = "runtime" | "config" | "oauth" | "api_key" | "env" | "fallback";
+
+export type AuthCredentialSelectionStrategy = "sticky-session" | "least-used" | "round-robin" | "failover";
+
+export interface AuthCredentialSelectionPolicy {
+	policyKey: string;
+	eligibleCredentialIds: readonly number[];
+	strategy: AuthCredentialSelectionStrategy;
+}
 
 /**
  * Structured provenance for a provider's auth, for UI that needs a machine
@@ -241,6 +299,8 @@ export interface CheckCredentialsOptions {
 	timeoutMs?: number;
 	/** Provider → base URL override, same shape as {@link AuthStorage.fetchUsageReports}. */
 	baseUrlResolver?: (provider: Provider) => string | undefined;
+	/** Restrict stored rows probed by {@link AuthStorage.checkCredentials}. */
+	credentialIds?: readonly number[];
 	/**
 	 * Optional end-to-end probe. When provided, `checkCredentials` invokes it
 	 * for every credential where a usable bearer is available (API key, or
@@ -318,6 +378,7 @@ export interface AuthCredentialStore {
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
+	listAuthCredentialsByIds?(ids: readonly number[]): StoredAuthCredential[];
 	updateAuthCredential(id: number, credential: AuthCredential): void;
 	deleteAuthCredential(id: number, disabledCause: string): void;
 	tryDisableAuthCredentialIfMatches(
@@ -633,14 +694,13 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
 /**
  * Outcome of {@link AuthStorage.markUsageLimitReached}.
  *
- * `switched` is `true` when an unblocked same-type sibling credential is
- * available right now, so the caller can retry immediately and the next
- * `getApiKey` will hand it out. When `false`, `retryAtMs` (epoch ms) carries
- * the earliest moment any same-type sibling's temporary block expires —
- * callers should prefer waiting until then over the provider's (often
- * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
- * no sibling credentials exist at all, or when the session has no tracked
- * credential to rotate away from.
+ * With no explicit policy, `switched`/`retryAtMs` describe unblocked
+ * same-type sibling credentials, preserving the legacy cascade's retry
+ * behavior. With an explicit {@link AuthCredentialSelectionPolicy}, they
+ * describe all other currently eligible cross-type pool members; when every
+ * eligible sibling is blocked, `retryAtMs` is the earliest unblock time.
+ * `retryAtMs` is `undefined` when no sibling credentials exist at all, or
+ * when the session has no tracked credential to rotate away from.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
@@ -665,7 +725,7 @@ type UsageRequestDescriptor = {
 	baseUrl?: string;
 };
 
-type AuthApiKeyOptions = {
+export interface AuthApiKeyOptions {
 	baseUrl?: string;
 	modelId?: string;
 	/**
@@ -681,8 +741,18 @@ type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
-};
-type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential };
+	selection?: AuthCredentialSelectionPolicy;
+}
+export interface ResolvedAuthCredential {
+	apiKey: string;
+	credentialId?: number;
+	credentialType?: AuthCredential["type"];
+	source: CredentialOriginKind;
+}
+export type AuthApiKeySelectionResult =
+	| { ok: true; credential: ResolvedAuthCredential }
+	| { ok: false; reason: "no_credential" | "no_eligible_credential" | "all_eligible_blocked"; retryAtMs?: number };
+type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
 /**
  * Refreshed OAuth access plus identity metadata returned by
@@ -742,6 +812,7 @@ export interface OAuthAccountSummary {
 export interface InvalidateCredentialMatchingOptions {
 	signal?: AbortSignal;
 	sessionId?: string;
+	selection?: AuthCredentialSelectionPolicy;
 }
 
 /** Options for refreshing one stored OAuth row through durable ownership. */
@@ -1035,8 +1106,14 @@ class AuthStorageUsageCache implements UsageCache {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type StoredCredential = { id: number; credential: AuthCredential };
+type StoredSelectionCredential = StoredCredential & { index: number };
 type OAuthSelection = { credential: OAuthCredential; index: number };
 type StoredOAuthSelection = { credentialId: number; credential: OAuthCredential; index: number };
+type ResolvedOAuthSelection = { apiKey: string; credential: OAuthCredential; credentialId: number };
+type OAuthSelectionMode =
+	| { kind: "default" }
+	| { kind: "target"; credentialId: number }
+	| { kind: "live-usage"; attemptedCredentialIds: Set<number> };
 
 type OAuthCandidate = {
 	selection: OAuthSelection;
@@ -1075,7 +1152,10 @@ export class AuthStorage {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<string, Map<string, { type: AuthCredential["type"]; index: number }>> = new Map();
+	#sessionLastCredential: Map<
+		string,
+		Map<string, { type: AuthCredential["type"]; index: number; credentialId: number }>
+	> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
 	#credentialBackoff: Map<string, Map<number, number>> = new Map();
 	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
@@ -1328,6 +1408,8 @@ export class AuthStorage {
 	 */
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
+		const credentialOrderChanged =
+			current.length !== credentials.length || current.some((entry, index) => entry.id !== credentials[index]?.id);
 		if (storedCredentialArraysEqual(current, credentials)) return;
 		if (credentials.length === 0) {
 			this.#data.delete(provider);
@@ -1335,6 +1417,7 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
+		if (credentialOrderChanged) this.#resetProviderAssignments(provider);
 	}
 
 	#resolveOAuthDedupeIdentityKey(provider: string, credential: OAuthCredential): string | null {
@@ -1583,27 +1666,163 @@ export class AuthStorage {
 		}
 	}
 
+	#sessionStorageKey(provider: string, selection: AuthCredentialSelectionPolicy | undefined): string {
+		return selection ? `${provider}\0${selection.policyKey}` : provider;
+	}
+
+	#sessionCacheKey(provider: string, sessionId: string, selection: AuthCredentialSelectionPolicy | undefined): string {
+		return selection
+			? `session:sticky:${provider}:policy:${selection.policyKey}:${sessionId}`
+			: `session:sticky:${provider}:${sessionId}`;
+	}
+
+	#isCredentialIdEligible(id: number, selection: AuthCredentialSelectionPolicy | undefined): boolean {
+		return selection === undefined || selection.eligibleCredentialIds.includes(id);
+	}
+
+	#selectionRoundRobinKey(
+		provider: string,
+		type: AuthCredential["type"],
+		selection: AuthCredentialSelectionPolicy | undefined,
+	): string {
+		const providerKey = this.#getProviderTypeKey(provider, type);
+		return selection ? `${selection.policyKey}:${providerKey}` : providerKey;
+	}
+
+	#eligibleStoredCredentials<T extends AuthCredential["type"]>(
+		provider: string,
+		type: T,
+		selection: AuthCredentialSelectionPolicy | undefined,
+		filter?: (credential: AuthCredential) => boolean,
+	): { id: number; credential: Extract<AuthCredential, { type: T }>; index: number }[] {
+		const stored = this.#getStoredCredentials(provider);
+		const matches = (entry: StoredCredential, index: number) => {
+			if (entry.credential.type !== type) return undefined;
+			if (!(filter?.(entry.credential) ?? true)) return undefined;
+			return { id: entry.id, credential: entry.credential as Extract<AuthCredential, { type: T }>, index };
+		};
+		if (!selection) {
+			return stored
+				.map((entry, index) => matches(entry, index))
+				.filter(
+					(entry): entry is { id: number; credential: Extract<AuthCredential, { type: T }>; index: number } =>
+						entry !== undefined,
+				);
+		}
+		const byId = new Map<number, { entry: StoredCredential; index: number }>();
+		stored.forEach((entry, index) => {
+			byId.set(entry.id, { entry, index });
+		});
+		const credentials: { id: number; credential: Extract<AuthCredential, { type: T }>; index: number }[] = [];
+		for (const id of selection.eligibleCredentialIds) {
+			const row = byId.get(id);
+			if (!row) continue;
+			const matched = matches(row.entry, row.index);
+			if (matched) credentials.push(matched);
+		}
+		return credentials;
+	}
+
+	#findStoredSelectionCredential(provider: string, credentialId: number): StoredSelectionCredential | undefined {
+		const stored = this.#getStoredCredentials(provider);
+		const index = stored.findIndex(entry => entry.id === credentialId);
+		const entry = index >= 0 ? stored[index] : undefined;
+		return entry ? { id: entry.id, credential: entry.credential, index } : undefined;
+	}
+
+	#eligibleSelectionCredentialIds(provider: string, selection: AuthCredentialSelectionPolicy): number[] {
+		const currentIds = new Set(this.#getStoredCredentials(provider).map(entry => entry.id));
+		return selection.eligibleCredentialIds.filter(id => currentIds.has(id));
+	}
+
+	#selectionCredentialIsUnblocked(
+		provider: string,
+		row: StoredSelectionCredential,
+		blockScope: string | undefined,
+	): boolean {
+		return !this.#isCredentialBlocked(
+			provider,
+			this.#getProviderTypeKey(provider, row.credential.type),
+			row.index,
+			blockScope,
+		);
+	}
+
+	#orderedSelectionCredentialIds(
+		provider: string,
+		sessionId: string | undefined,
+		selection: AuthCredentialSelectionPolicy,
+		credentialIds: readonly number[],
+		blockScope: string | undefined,
+	): number[] {
+		if (selection.strategy === "failover" || selection.strategy === "least-used") return [...credentialIds];
+		const sticky = this.#getSessionCredential(provider, sessionId, selection);
+		if (sticky && credentialIds.includes(sticky.credentialId)) {
+			const stickyRow = this.#findStoredSelectionCredential(provider, sticky.credentialId);
+			if (
+				stickyRow &&
+				stickyRow.credential.type === sticky.type &&
+				this.#selectionCredentialIsUnblocked(provider, stickyRow, blockScope)
+			) {
+				return [sticky.credentialId, ...credentialIds.filter(id => id !== sticky.credentialId)];
+			}
+		}
+
+		const key = `${selection.policyKey}:${provider}:selected`;
+		if (selection.strategy === "round-robin") {
+			const start = this.#getNextRoundRobinIndex(key, credentialIds.length);
+			return Array.from(
+				{ length: credentialIds.length },
+				(_value, index) => credentialIds[(start + index) % credentialIds.length]!,
+			).filter((id): id is number => id !== undefined);
+		}
+		const order = this.#getCredentialOrder(key, sessionId, credentialIds.length);
+		return order.map(index => credentialIds[index]).filter((id): id is number => id !== undefined);
+	}
+
+	#selectionBlockedRetryAtMs(
+		provider: string,
+		credentialIds: readonly number[],
+		blockScope: string | undefined,
+	): number | undefined {
+		let retryAtMs: number | undefined;
+		for (const credentialId of credentialIds) {
+			const row = this.#findStoredSelectionCredential(provider, credentialId);
+			if (!row) continue;
+			const blockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				this.#getProviderTypeKey(provider, row.credential.type),
+				row.index,
+				blockScope,
+			);
+			if (blockedUntil === undefined) return undefined;
+			if (retryAtMs === undefined || blockedUntil < retryAtMs) retryAtMs = blockedUntil;
+		}
+		return retryAtMs;
+	}
+
 	/** Records which credential was used for a session (for rate-limit switching). */
 	#recordSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
 		type: AuthCredential["type"],
 		index: number,
+		selection?: AuthCredentialSelectionPolicy,
 	): void {
 		if (!sessionId) return;
-		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
-		sessionMap.set(sessionId, { type, index });
-		this.#sessionLastCredential.set(provider, sessionMap);
+		const credentialId = this.#getStoredCredentials(provider)[index]?.id;
+		if (credentialId === undefined) return;
+		const storageKey = this.#sessionStorageKey(provider, selection);
+		const sessionMap = this.#sessionLastCredential.get(storageKey) ?? new Map();
+		sessionMap.set(sessionId, { type, index, credentialId });
+		this.#sessionLastCredential.set(storageKey, sessionMap);
 
 		try {
-			const credentialId = this.#getStoredCredentials(provider)[index]?.id;
-			if (credentialId !== undefined) {
-				const cacheKey = `session:sticky:${provider}:${sessionId}`;
-				const cacheValue = JSON.stringify({ type, index, credentialId });
-				// Expires in 30 days
-				const expiresAtSec = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
-				this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
-			}
+			const cacheKey = this.#sessionCacheKey(provider, sessionId, selection);
+			const cacheValue = JSON.stringify({ type, index, credentialId });
+			// Expires in 30 days
+			const expiresAtSec = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
+			this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
 		} catch (err) {
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
@@ -1613,19 +1832,40 @@ export class AuthStorage {
 	#getSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
-	): { type: AuthCredential["type"]; index: number } | undefined {
+		selection?: AuthCredentialSelectionPolicy,
+	): { type: AuthCredential["type"]; index: number; credentialId: number } | undefined {
 		if (!sessionId) return undefined;
-		let sessionMap = this.#sessionLastCredential.get(provider);
+		const storageKey = this.#sessionStorageKey(provider, selection);
+		let sessionMap = this.#sessionLastCredential.get(storageKey);
 		if (sessionMap?.has(sessionId)) {
-			return sessionMap.get(sessionId);
+			const sessionCredential = sessionMap.get(sessionId);
+			const stored = this.#getStoredCredentials(provider);
+			const actualIndex =
+				sessionCredential !== undefined
+					? stored.findIndex(entry => entry.id === sessionCredential.credentialId)
+					: -1;
+			const actual = actualIndex >= 0 ? stored[actualIndex] : undefined;
+			if (
+				sessionCredential !== undefined &&
+				actual !== undefined &&
+				actual.credential.type === sessionCredential.type &&
+				this.#isCredentialIdEligible(actual.id, selection)
+			) {
+				return { type: sessionCredential.type, index: actualIndex, credentialId: actual.id };
+			}
+			sessionMap.delete(sessionId);
 		}
 		try {
-			const cacheKey = `session:sticky:${provider}:${sessionId}`;
+			const cacheKey = this.#sessionCacheKey(provider, sessionId, selection);
 			const raw = this.#store.getCache(cacheKey);
 			if (raw) {
 				const val = JSON.parse(raw) as { type: AuthCredential["type"]; index: number; credentialId?: number };
 
 				if (val.credentialId !== undefined) {
+					if (!this.#isCredentialIdEligible(val.credentialId, selection)) {
+						this.#store.setCache(cacheKey, "", 0);
+						return undefined;
+					}
 					const stored = this.#getStoredCredentials(provider);
 					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
 					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
@@ -1641,9 +1881,9 @@ export class AuthStorage {
 
 				if (!sessionMap) {
 					sessionMap = new Map();
-					this.#sessionLastCredential.set(provider, sessionMap);
+					this.#sessionLastCredential.set(storageKey, sessionMap);
 				}
-				const sessionVal = { type: val.type, index: val.index };
+				const sessionVal = { type: val.type, index: val.index, credentialId: val.credentialId };
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
 			}
@@ -1654,17 +1894,22 @@ export class AuthStorage {
 	}
 
 	/** Clears the last credential used by a session for a provider. */
-	#clearSessionCredential(provider: string, sessionId: string | undefined): void {
+	#clearSessionCredential(
+		provider: string,
+		sessionId: string | undefined,
+		selection?: AuthCredentialSelectionPolicy,
+	): void {
 		if (!sessionId) return;
-		const sessionMap = this.#sessionLastCredential.get(provider);
+		const storageKey = this.#sessionStorageKey(provider, selection);
+		const sessionMap = this.#sessionLastCredential.get(storageKey);
 		if (sessionMap) {
 			sessionMap.delete(sessionId);
 			if (sessionMap.size === 0) {
-				this.#sessionLastCredential.delete(provider);
+				this.#sessionLastCredential.delete(storageKey);
 			}
 		}
 		try {
-			const cacheKey = `session:sticky:${provider}:${sessionId}`;
+			const cacheKey = this.#sessionCacheKey(provider, sessionId, selection);
 			this.#store.setCache(cacheKey, "", 0);
 		} catch (err) {
 			logger.debug("Failed to clear session sticky credential from persistent store cache", { err });
@@ -1681,29 +1926,51 @@ export class AuthStorage {
 		type: T,
 		sessionId?: string,
 		filter?: (credential: AuthCredential) => boolean,
-	): { credential: Extract<AuthCredential, { type: T }>; index: number } | undefined {
-		const credentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: Extract<AuthCredential, { type: T }>; index: number } => {
-				if (entry.credential.type !== type) return false;
-				return filter?.(entry.credential) ?? true;
-			});
+		selection?: AuthCredentialSelectionPolicy,
+	): { id: number; credential: Extract<AuthCredential, { type: T }>; index: number } | undefined {
+		const credentials = this.#eligibleStoredCredentials(provider, type, selection, filter);
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, type);
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
+		const sticky = this.#getSessionCredential(provider, sessionId, selection);
+		const stickyPosition =
+			sticky?.type === type
+				? credentials.findIndex(
+						candidate =>
+							candidate.index === sticky.index &&
+							!this.#isCredentialBlocked(provider, providerKey, sticky.index),
+					)
+				: -1;
+		const shouldKeepSticky = selection?.strategy === "sticky-session" || selection?.strategy === "round-robin";
+		if (shouldKeepSticky && stickyPosition >= 0) return credentials[stickyPosition];
 
+		let order: number[];
+		if (selection?.strategy === "round-robin") {
+			const start = this.#getNextRoundRobinIndex(
+				this.#selectionRoundRobinKey(provider, type, selection),
+				credentials.length,
+			);
+			order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
+		} else if (selection?.strategy === "least-used" || selection?.strategy === "failover") {
+			order = credentials.map((_credential, index) => index);
+		} else {
+			order = this.#getCredentialOrder(
+				this.#selectionRoundRobinKey(provider, type, selection),
+				sessionId,
+				credentials.length,
+			);
+		}
+
+		const fallback = credentials[order[0]];
 		for (const idx of order) {
 			const candidate = credentials[idx];
-			if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
+			if (candidate && !this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
 				return candidate;
 			}
 		}
 
-		return fallback;
+		return selection ? undefined : fallback;
 	}
 
 	/**
@@ -1712,14 +1979,23 @@ export class AuthStorage {
 	 */
 	#resetProviderAssignments(provider: string): void {
 		for (const key of this.#providerRoundRobinIndex.keys()) {
-			if (key.startsWith(`${provider}:`)) {
+			if (key.startsWith(`${provider}:`) || key.includes(`:${provider}:`)) {
 				this.#providerRoundRobinIndex.delete(key);
 			}
 		}
-		this.#sessionLastCredential.delete(provider);
+		for (const key of this.#sessionLastCredential.keys()) {
+			if (key === provider || key.startsWith(`${provider}\0`)) {
+				this.#sessionLastCredential.delete(key);
+			}
+		}
 		for (const key of this.#credentialBackoff.keys()) {
 			if (key.startsWith(`${provider}:`)) {
 				this.#credentialBackoff.delete(key);
+			}
+		}
+		for (const key of this.#credentialBackoffProbeAfter.keys()) {
+			if (key.startsWith(`${provider}:`)) {
+				this.#credentialBackoffProbeAfter.delete(key);
 			}
 		}
 	}
@@ -2091,6 +2367,29 @@ export class AuthStorage {
 			}
 		}
 	}
+	/**
+	 * List live stored credential rows by id, preserving first requested order.
+	 */
+	listStoredCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
+		if (ids.length === 0) return [];
+		const listByIds = this.#store.listAuthCredentialsByIds;
+		if (listByIds) return listByIds.call(this.#store, ids);
+		const uniqueIds: number[] = [];
+		const seen = new Set<number>();
+		for (const id of ids) {
+			if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
+			seen.add(id);
+			uniqueIds.push(id);
+		}
+		if (uniqueIds.length === 0) return [];
+		const liveById = new Map(this.#store.listAuthCredentials().map(row => [row.id, row]));
+		const rows: StoredAuthCredential[] = [];
+		for (const id of uniqueIds) {
+			const row = liveById.get(id);
+			if (row) rows.push(row);
+		}
+		return rows;
+	}
 
 	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
 		const stored = this.#store.upsertAuthCredentialRemote
@@ -2315,51 +2614,16 @@ export class AuthStorage {
 			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
 		},
 	): Promise<void> {
-		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
-		// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
-		// providers the `OAuthCallbackFlow` would otherwise race this readline prompt
-		// against the HTTP callback and, when the callback wins, leave the prompt
-		// outstanding — a dirty/blocked terminal. Synthesizing the default only for
-		// paste-code providers is the authoritative gate (it covers every caller, not
-		// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
-		// honored for any provider as an escape hatch.
-		const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
-			? () => ctrl.onPrompt({ message: "Paste the authorization code (or full redirect URL):" })
-			: undefined;
-		// Built-in registry first, then runtime-registered extension providers.
-		const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
-		if (!def?.login) {
-			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
-		}
-		const result = await def.login({
-			onAuth: ctrl.onAuth,
-			onProgress: ctrl.onProgress,
-			onPrompt: ctrl.onPrompt,
-			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
-			signal: ctrl.signal,
-			fetch: ctrl.fetch,
-		});
-		if (typeof result === "string") {
-			// Some flows (e.g. ollama) return "" to signal that no key was entered.
-			if (!result) {
-				return;
-			}
-			const newCredential: ApiKeyCredential = { type: "api_key", key: result, source: "login" };
-			const stored = this.#store.upsertAuthCredentialRemote
-				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
-				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
-			this.#setStoredCredentials(
-				provider,
-				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-			);
-			this.#resetProviderAssignments(provider);
+		const acquired = await acquireAuthCredential(provider, ctrl);
+		if (!acquired) return;
+		if (acquired.credential.type === "api_key") {
+			await this.upsertCredentialAsync(acquired.provider, { ...acquired.credential, source: "login" });
 			return;
 		}
-		const newCredential: OAuthCredential = { type: "oauth", ...result };
 		// Use #upsertOAuthCredential to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
+		await this.#upsertOAuthCredential(acquired.provider, acquired.credential);
 	}
 
 	/**
@@ -3251,7 +3515,9 @@ export class AuthStorage {
 	 */
 	async checkCredentials(options?: CheckCredentialsOptions): Promise<CredentialHealthResult[]> {
 		options?.signal?.throwIfAborted();
-		const stored = this.#store.listAuthCredentials();
+		const stored = options?.credentialIds
+			? this.listStoredCredentialsByIds(options.credentialIds)
+			: this.#store.listAuthCredentials();
 		const resolver = this.#usageProviderResolver;
 		const timeoutMs = options?.timeoutMs ?? this.#usageRequestTimeoutMs;
 		const completionProbe = options?.completionProbe;
@@ -3411,23 +3677,34 @@ export class AuthStorage {
 	async markUsageLimitReached(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { retryAfterMs?: number; baseUrl?: string; modelId?: string; apiKey?: string; signal?: AbortSignal },
+		options?: {
+			retryAfterMs?: number;
+			baseUrl?: string;
+			modelId?: string;
+			apiKey?: string;
+			signal?: AbortSignal;
+			selection?: AuthCredentialSelectionPolicy;
+		},
 	): Promise<UsageLimitMarkResult> {
-		let sessionCredential: { type: AuthCredential["type"]; index: number } | undefined;
+		const selection = options?.selection;
+		let sessionCredential: { type: AuthCredential["type"]; index: number; credentialId: number } | undefined;
 		if (options?.apiKey) {
 			const stored = this.#getStoredCredentials(provider);
 			for (let index = 0; index < stored.length; index++) {
 				const entry = stored[index];
-				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
-					sessionCredential = { type: entry.credential.type, index };
+				if (
+					entry &&
+					this.#isCredentialIdEligible(entry.id, selection) &&
+					(await this.#credentialMatchesApiKey(entry.credential, options.apiKey))
+				) {
+					sessionCredential = { type: entry.credential.type, index, credentialId: entry.id };
 					break;
 				}
 			}
 		}
-		sessionCredential ??= this.#getSessionCredential(provider, sessionId);
+		sessionCredential ??= this.#getSessionCredential(provider, sessionId, selection);
 		if (!sessionCredential) return { switched: false };
 
-		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
@@ -3435,35 +3712,44 @@ export class AuthStorage {
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
 		if (sessionCredential.type === "oauth" && strategy) {
-			const credential = this.#getCredentialsForProvider(provider)[sessionCredential.index];
-			if (credential?.type === "oauth") {
-				const report = await this.#getUsageReport(provider, credential, options);
+			const row = this.#findStoredSelectionCredential(provider, sessionCredential.credentialId);
+			if (row?.credential.type === "oauth") {
+				const report = await this.#getUsageReport(provider, row.credential, options);
 				if (report) {
 					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
 					if (this.#isUsageLimitReached(scopedLimits)) {
 						const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
-						if (resetAtMs && resetAtMs > blockedUntil) {
-							blockedUntil = resetAtMs;
-						}
+						if (resetAtMs && resetAtMs > blockedUntil) blockedUntil = resetAtMs;
 					}
 				}
 			}
 		}
 
-		this.#markCredentialBlocked(provider, providerKey, sessionCredential.index, blockedUntil, blockScope);
+		const currentRow = this.#findStoredSelectionCredential(provider, sessionCredential.credentialId);
+		if (currentRow?.credential.type === sessionCredential.type) {
+			this.#markCredentialBlocked(
+				provider,
+				this.#getProviderTypeKey(provider, currentRow.credential.type),
+				currentRow.index,
+				blockedUntil,
+				blockScope,
+			);
+		}
 
-		const remainingCredentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
+		const remainingCredentials = this.#getStoredCredentials(provider)
+			.map((entry, index) => ({ id: entry.id, credential: entry.credential, index }))
 			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === sessionCredential.type && entry.index !== sessionCredential.index,
+				(entry): entry is { id: number; credential: AuthCredential; index: number } =>
+					this.#isCredentialIdEligible(entry.id, selection) &&
+					entry.id !== sessionCredential.credentialId &&
+					(selection !== undefined || entry.credential.type === sessionCredential.type),
 			);
 
 		let retryAtMs: number | undefined;
 		for (const candidate of remainingCredentials) {
 			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
 				provider,
-				providerKey,
+				this.#getProviderTypeKey(provider, candidate.credential.type),
 				candidate.index,
 				blockScope,
 			);
@@ -3762,21 +4048,29 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+		return this.#resolveOAuthSelectionMode(provider, sessionId, options, { kind: "default" });
+	}
+
+	async #resolveOAuthSelectionMode(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		mode: OAuthSelectionMode,
+	): Promise<ResolvedOAuthSelection | undefined> {
+		const selectionPolicy = options?.selection;
+		const credentials = this.#eligibleStoredCredentials(provider, "oauth", selectionPolicy);
 
 		if (credentials.length === 0) return undefined;
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
-		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
-		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		const checkUsage =
+			strategy !== undefined && (mode.kind === "live-usage" || credentials.length > 1 || hasPlanRequirement);
+		const sessionCredential = this.#getSessionCredential(provider, sessionId, selectionPolicy);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
@@ -3786,17 +4080,57 @@ export class AuthStorage {
 			sessionPreferredCredential !== undefined &&
 			(sessionPreferredCredential.refresh.trim().length > 0 ||
 				Date.now() + OAUTH_REFRESH_SKEW_MS < sessionPreferredCredential.expires);
-		// Skip ranking only when the session already has a working preferred credential — re-ranking
-		// mid-session causes account switches that cold-start the server-side prompt cache. New sessions
-		// (no preference) and sessions whose preferred is blocked still rank, so we pick the account
-		// with the most headroom proactively and fall back intelligently when rate-limited.
 		const sessionPreferredIsAvailable =
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
 			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScope);
-		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || hasPlanRequirement);
-		const rankingOrder = shouldRank && sessionId ? credentials.map((_credential, index) => index) : order;
-		const candidates = shouldRank
+		const shouldKeepOAuthSticky =
+			selectionPolicy === undefined ||
+			selectionPolicy.strategy === "sticky-session" ||
+			selectionPolicy.strategy === "round-robin" ||
+			selectionPolicy.strategy === "least-used";
+		let order: number[];
+		if (selectionPolicy?.strategy === "round-robin") {
+			if (sessionPreferredIsAvailable) {
+				const stickyPosition = credentials.findIndex(entry => entry.index === sessionPreferredIndex);
+				order = [
+					stickyPosition,
+					...credentials.map((_credential, index) => index).filter(index => index !== stickyPosition),
+				].filter(index => index >= 0);
+			} else {
+				const start = this.#getNextRoundRobinIndex(
+					this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
+					credentials.length,
+				);
+				order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
+			}
+		} else if (selectionPolicy?.strategy === "least-used" || selectionPolicy?.strategy === "failover") {
+			order = credentials.map((_credential, index) => index);
+		} else {
+			order = this.#getCredentialOrder(
+				this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
+				sessionId,
+				credentials.length,
+			);
+		}
+
+		// Skip ranking only when the session already has a working preferred credential — re-ranking
+		// mid-session causes account switches that cold-start the server-side prompt cache. New sessions
+		// (no preference) and sessions whose preferred is blocked still rank, so we pick the account
+		// with the most headroom proactively and fall back intelligently when rate-limited.
+		const shouldRank =
+			checkUsage &&
+			(selectionPolicy?.strategy === "least-used"
+				? !sessionPreferredIsAvailable || hasPlanRequirement
+				: selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
+					? hasPlanRequirement
+					: !sessionPreferredIsAvailable || hasPlanRequirement);
+		const rankingOrder =
+			shouldRank && sessionId && selectionPolicy?.strategy !== "least-used"
+				? credentials.map((_credential, index) => index)
+				: order;
+		const rankSessionId = selectionPolicy?.strategy === "least-used" ? undefined : sessionId;
+		let candidates = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -3804,17 +4138,19 @@ export class AuthStorage {
 					order: rankingOrder,
 					credentials,
 					options,
-					sessionId,
+					sessionId: rankSessionId,
 					strategy: strategy!,
 					rankingContext,
 					blockScope,
 				})
 			: order
 					.map(idx => credentials[idx])
-					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
+					.filter((selection): selection is { id: number; credential: OAuthCredential; index: number } =>
+						Boolean(selection),
+					)
 					.map(selection => ({ selection, usage: null, usageChecked: false }));
 
-		if (sessionPreferredIndex !== undefined && !hasPlanRequirement) {
+		if (shouldKeepOAuthSticky && sessionPreferredIndex !== undefined && !hasPlanRequirement) {
 			const sessionPreferredCandidate = candidates.findIndex(
 				candidate =>
 					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScope) &&
@@ -3829,9 +4165,15 @@ export class AuthStorage {
 		// the session-preferred credential (or the first candidate when no
 		// session preference exists yet) even if its cached token still looks
 		// valid — a peer/broker may have rotated it out from under us.
-		const forceRefreshIndex = options?.forceRefresh
-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
-			: undefined;
+		const forceRefreshIndex =
+			options?.forceRefresh && mode.kind === "target"
+				? candidates.find(
+						candidate =>
+							this.#getStoredCredentials(provider)[candidate.selection.index]?.id === mode.credentialId,
+					)?.selection.index
+				: options?.forceRefresh
+					? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+					: undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
@@ -3900,15 +4242,33 @@ export class AuthStorage {
 		const enforcePlanRequirement =
 			hasPlanRequirement &&
 			candidates.some(candidate => getOpenAICodexPlanEligibility(candidate.usage, planRequirement) === true);
+		if (mode.kind === "target") {
+			candidates = candidates.filter(
+				candidate => this.#getStoredCredentials(provider)[candidate.selection.index]?.id === mode.credentialId,
+			);
+		} else if (mode.kind === "live-usage") {
+			candidates = candidates.filter(candidate => {
+				const credentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				if (credentialId === undefined) return false;
+				if (this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScope)) return false;
+				if (candidate.usage === null) return false;
+				if (getOpenAICodexPlanEligibility(candidate.usage, planRequirement) === false) return false;
+				return true;
+			});
+		}
 
 		const passes: Array<{ allowBlocked: boolean; enforcePlanRequirement: boolean }> = [
 			{ allowBlocked: false, enforcePlanRequirement },
-			{ allowBlocked: true, enforcePlanRequirement },
 		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false });
+		if (selectionPolicy === undefined) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement });
+			if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false });
+		}
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {
+				const candidateId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				if (mode.kind === "live-usage" && candidateId !== undefined) mode.attemptedCredentialIds.add(candidateId);
 				const resolved = await this.#tryOAuthCredential(
 					provider,
 					candidate.selection,
@@ -3925,9 +4285,13 @@ export class AuthStorage {
 						strategy,
 						rankingContext,
 						blockScope,
+						allowFallback: mode.kind === "default",
 					},
 				);
-				if (resolved) return resolved;
+				if (resolved) {
+					const credentialId = resolved.credentialId ?? candidateId;
+					if (credentialId !== undefined) return { ...resolved, credentialId };
+				}
 			}
 		}
 
@@ -4208,8 +4572,8 @@ export class AuthStorage {
 					}
 				}
 			}
-			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
-			return { apiKey: result.apiKey, credential: updated };
+			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index, options?.selection);
+			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
@@ -4337,6 +4701,123 @@ export class AuthStorage {
 		return this.#fallbackResolver?.(provider) ?? undefined;
 	}
 
+	async #resolveExplicitSelectionCredentialId(
+		provider: string,
+		sessionId: string | undefined,
+		credentialId: number,
+		options: AuthApiKeyOptions & { selection: AuthCredentialSelectionPolicy },
+		blockScope: string | undefined,
+	): Promise<ResolvedAuthCredential | undefined> {
+		const row = this.#findStoredSelectionCredential(provider, credentialId);
+		if (!row) return undefined;
+		if (
+			this.#isCredentialBlocked(
+				provider,
+				this.#getProviderTypeKey(provider, row.credential.type),
+				row.index,
+				blockScope,
+			)
+		) {
+			return undefined;
+		}
+		if (row.credential.type === "api_key") {
+			const apiKey = await this.#configValueResolver(row.credential.key);
+			if (!apiKey) return undefined;
+			this.#recordSessionCredential(provider, sessionId, "api_key", row.index, options.selection);
+			return { apiKey, credentialId: row.id, credentialType: "api_key", source: "api_key" };
+		}
+		const resolved = await this.#resolveOAuthSelectionMode(provider, sessionId, options, {
+			kind: "target",
+			credentialId: row.id,
+		});
+		return resolved
+			? { apiKey: resolved.apiKey, credentialId: resolved.credentialId, credentialType: "oauth", source: "oauth" }
+			: undefined;
+	}
+
+	async #resolveApiKeyFromExplicitSelection(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions & { selection: AuthCredentialSelectionPolicy },
+	): Promise<AuthApiKeySelectionResult> {
+		const selection = options.selection;
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const blockScope = strategy?.blockScope?.({ modelId: options.modelId });
+		const attemptedCredentialIds = new Set<number>();
+		const liveCredentialIds = this.#eligibleSelectionCredentialIds(provider, selection);
+		if (liveCredentialIds.length === 0) return { ok: false, reason: "no_eligible_credential" };
+
+		const tryCredential = async (credentialId: number): Promise<ResolvedAuthCredential | undefined> => {
+			attemptedCredentialIds.add(credentialId);
+			const before = this.#findStoredSelectionCredential(provider, credentialId);
+			const resolved = await this.#resolveExplicitSelectionCredentialId(
+				provider,
+				sessionId,
+				credentialId,
+				options,
+				blockScope,
+			);
+			if (!resolved && before?.credential.type === "oauth") {
+				for (const id of this.#eligibleSelectionCredentialIds(provider, selection)) {
+					if (!liveCredentialIds.includes(id)) liveCredentialIds.push(id);
+				}
+			}
+			return resolved;
+		};
+
+		if (selection.strategy === "least-used") {
+			const sticky = this.#getSessionCredential(provider, sessionId, selection);
+			if (sticky && liveCredentialIds.includes(sticky.credentialId)) {
+				const stickyRow = this.#findStoredSelectionCredential(provider, sticky.credentialId);
+				if (
+					stickyRow &&
+					stickyRow.credential.type === sticky.type &&
+					this.#selectionCredentialIsUnblocked(provider, stickyRow, blockScope)
+				) {
+					const resolved = await tryCredential(sticky.credentialId);
+					if (resolved) return { ok: true, credential: resolved };
+				}
+			}
+			const oauthResolved = await this.#resolveOAuthSelectionMode(provider, sessionId, options, {
+				kind: "live-usage",
+				attemptedCredentialIds,
+			});
+			if (oauthResolved) {
+				return {
+					ok: true,
+					credential: {
+						apiKey: oauthResolved.apiKey,
+						credentialId: oauthResolved.credentialId,
+						credentialType: "oauth",
+						source: "oauth",
+					},
+				};
+			}
+			for (const credentialId of liveCredentialIds) {
+				if (attemptedCredentialIds.has(credentialId)) continue;
+				const resolved = await tryCredential(credentialId);
+				if (resolved) return { ok: true, credential: resolved };
+			}
+		} else {
+			for (const credentialId of this.#orderedSelectionCredentialIds(
+				provider,
+				sessionId,
+				selection,
+				liveCredentialIds,
+				blockScope,
+			)) {
+				const resolved = await tryCredential(credentialId);
+				if (resolved) return { ok: true, credential: resolved };
+			}
+		}
+
+		const remainingLiveIds = this.#eligibleSelectionCredentialIds(provider, selection);
+		if (remainingLiveIds.length === 0) return { ok: false, reason: "no_eligible_credential" };
+		const retryAtMs = this.#selectionBlockedRetryAtMs(provider, remainingLiveIds, blockScope);
+		if (retryAtMs !== undefined) return { ok: false, reason: "all_eligible_blocked", retryAtMs };
+		return { ok: false, reason: "no_eligible_credential" };
+	}
+
 	/**
 	 * Get API key for a provider.
 	 * Priority (first match wins):
@@ -4348,62 +4829,106 @@ export class AuthStorage {
 	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
 	 * 7. Fallback resolver (models.yml custom providers, last-resort)
 	 */
+	async resolveApiKeySelection(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<AuthApiKeySelectionResult> {
+		const selection = options?.selection;
+		if (!selection) {
+			// Runtime override takes highest priority
+			const runtimeKey = this.#runtimeOverrides.get(provider);
+			if (runtimeKey) {
+				return { ok: true, credential: { apiKey: runtimeKey, source: "runtime" } };
+			}
+
+			// Config override: explicit apiKey pinned in models.yml beats the broker's
+			// OAuth credentials. The user redirected a provider at a custom baseUrl
+			// (e.g. an auth-gateway) and supplied the bearer for that endpoint —
+			// honor it instead of forwarding an upstream OAuth token that the proxy
+			// won't accept.
+			const configKey = this.#configOverrides.get(provider);
+			if (configKey) {
+				return { ok: true, credential: { apiKey: configKey, source: "config" } };
+			}
+
+			const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
+			if (oauthResolved) {
+				return {
+					ok: true,
+					credential: {
+						apiKey: oauthResolved.apiKey,
+						credentialId: oauthResolved.credentialId,
+						credentialType: "oauth",
+						source: "oauth",
+					},
+				};
+			}
+
+			const loginApiKeySelection = this.#selectCredentialByType(
+				provider,
+				"api_key",
+				sessionId,
+				credential => credential.type === "api_key" && credential.source === "login",
+			);
+			if (loginApiKeySelection) {
+				this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
+				const apiKey = await this.#configValueResolver(loginApiKeySelection.credential.key);
+				if (apiKey) {
+					return {
+						ok: true,
+						credential: {
+							apiKey,
+							credentialId: loginApiKeySelection.id,
+							credentialType: "api_key",
+							source: "api_key",
+						},
+					};
+				}
+				return { ok: false, reason: "no_credential" };
+			}
+
+			if (sessionId) this.#clearSessionCredential(provider, sessionId);
+			const envKey = getEnvApiKey(provider);
+			if (envKey) return { ok: true, credential: { apiKey: envKey, source: "env" } };
+
+			const apiKeySelection = this.#selectCredentialByType(
+				provider,
+				"api_key",
+				sessionId,
+				credential => credential.type !== "api_key" || credential.source !== "login",
+			);
+			if (apiKeySelection) {
+				this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
+				const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
+				if (apiKey) {
+					return {
+						ok: true,
+						credential: {
+							apiKey,
+							credentialId: apiKeySelection.id,
+							credentialType: "api_key",
+							source: "api_key",
+						},
+					};
+				}
+				return { ok: false, reason: "no_credential" };
+			}
+
+			const fallbackKey = this.#fallbackResolver?.(provider);
+			if (fallbackKey) return { ok: true, credential: { apiKey: fallbackKey, source: "fallback" } };
+			return { ok: false, reason: "no_credential" };
+		}
+
+		return this.#resolveApiKeyFromExplicitSelection(provider, sessionId, {
+			...(options ?? {}),
+			selection,
+		});
+	}
+
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
-		// Runtime override takes highest priority
-		const runtimeKey = this.#runtimeOverrides.get(provider);
-		if (runtimeKey) {
-			return runtimeKey;
-		}
-
-		// Config override: explicit apiKey pinned in models.yml beats the broker's
-		// OAuth credentials. The user redirected a provider at a custom baseUrl
-		// (e.g. an auth-gateway) and supplied the bearer for that endpoint —
-		// honor it instead of forwarding an upstream OAuth token that the proxy
-		// won't accept.
-		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
-		}
-
-		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
-		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
-		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
-		if (oauthResolved) {
-			return oauthResolved.apiKey;
-		}
-
-		const loginApiKeySelection = this.#selectCredentialByType(
-			provider,
-			"api_key",
-			sessionId,
-			credential => credential.type === "api_key" && credential.source === "login",
-		);
-		if (loginApiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
-		}
-
-		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
-		// env/api_key/fallback, not OAuth, so clear it now so getOAuthAccountId() correctly
-		// suppresses account_uuid for this session.
-		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
-
-		const envKey = getEnvApiKey(provider);
-		if (envKey) return envKey;
-
-		const apiKeySelection = this.#selectCredentialByType(
-			provider,
-			"api_key",
-			sessionId,
-			credential => credential.type !== "api_key" || credential.source !== "login",
-		);
-		if (apiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
-		}
-
-		// Fall back to custom resolver (e.g., models.json custom providers)
-		return this.#fallbackResolver?.(provider) ?? undefined;
+		const result = await this.resolveApiKeySelection(provider, sessionId, options);
+		return result.ok ? result.credential.apiKey : undefined;
 	}
 
 	/**
@@ -4426,10 +4951,9 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccess | undefined> {
-		// Runtime / config overrides intentionally short-circuit OAuth: when the
-		// user has pinned an API key, they expect the OAuth identity to be
-		// suppressed (same contract as `getOAuthAccountId`).
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		// Runtime / config overrides intentionally short-circuit OAuth unless a
+		// credential-id selection policy explicitly restricts resolution to stored rows.
+		if (!options?.selection && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) {
 			return undefined;
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
@@ -4446,10 +4970,13 @@ export class AuthStorage {
 	}
 
 	/** Stored OAuth credentials for `provider` in stable order, paired with their full-list index and row id. */
-	#getStoredOAuthSelections(provider: string): StoredOAuthSelection[] {
+	#getStoredOAuthSelections(provider: string, selection?: AuthCredentialSelectionPolicy): StoredOAuthSelection[] {
 		return this.#getStoredCredentials(provider)
 			.map((entry, index) => ({ credentialId: entry.id, credential: entry.credential, index }))
-			.filter((entry): entry is StoredOAuthSelection => entry.credential.type === "oauth");
+			.filter(
+				(entry): entry is StoredOAuthSelection =>
+					entry.credential.type === "oauth" && this.#isCredentialIdEligible(entry.credentialId, selection),
+			);
 	}
 
 	/** Refresh one stored OAuth selection and shape it as an {@link OAuthAccessResolution}. */
@@ -4531,12 +5058,12 @@ export class AuthStorage {
 	 * exercise each stored account exactly once.
 	 */
 	async getOAuthAccesses(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (!options?.selection && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) {
 			return [];
 		}
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		return Promise.all(
-			this.#getStoredOAuthSelections(provider).map(selection =>
+			this.#getStoredOAuthSelections(provider, options?.selection).map(selection =>
 				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
 			),
 		);
@@ -4558,10 +5085,10 @@ export class AuthStorage {
 		position: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+		if (!options?.selection && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) {
 			return undefined;
 		}
-		const selection = this.#getStoredOAuthSelections(provider)[position];
+		const selection = this.#getStoredOAuthSelections(provider, options?.selection)[position];
 		if (!selection) return undefined;
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
@@ -4883,11 +5410,16 @@ export class AuthStorage {
 	): Promise<boolean> {
 		const signal = isAbortSignalOption(optionsOrSignal) ? optionsOrSignal : optionsOrSignal?.signal;
 		const sessionId = isAbortSignalOption(optionsOrSignal) ? undefined : optionsOrSignal?.sessionId;
+		const selection = isAbortSignalOption(optionsOrSignal) ? undefined : optionsOrSignal?.selection;
 		const stored = this.#getStoredCredentials(provider);
 		let matched: { id: number; type: AuthCredential["type"]; index: number } | undefined;
 		for (let index = 0; index < stored.length; index++) {
 			const entry = stored[index];
-			if (entry && (await this.#credentialMatchesApiKey(entry.credential, apiKey))) {
+			if (
+				entry &&
+				this.#isCredentialIdEligible(entry.id, selection) &&
+				(await this.#credentialMatchesApiKey(entry.credential, apiKey))
+			) {
 				matched = { id: entry.id, type: entry.credential.type, index };
 				break;
 			}
@@ -4898,7 +5430,7 @@ export class AuthStorage {
 			return false;
 		}
 
-		this.#clearSessionCredential(provider, sessionId);
+		this.#clearSessionCredential(provider, sessionId, selection);
 		this.#markCredentialBlocked(
 			provider,
 			this.#getProviderTypeKey(provider, matched.type),
@@ -4939,9 +5471,16 @@ export class AuthStorage {
 	async rotateSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { error?: unknown; modelId?: string; apiKey?: string; signal?: AbortSignal },
+		options?: {
+			error?: unknown;
+			modelId?: string;
+			apiKey?: string;
+			signal?: AbortSignal;
+			selection?: AuthCredentialSelectionPolicy;
+		},
 	): Promise<boolean> {
-		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		const selection = options?.selection;
+		const sessionCredential = this.#getSessionCredential(provider, sessionId, selection);
 		if (!sessionCredential) return false;
 
 		const error = options?.error;
@@ -4953,6 +5492,7 @@ export class AuthStorage {
 					modelId: options?.modelId,
 					apiKey: options?.apiKey,
 					signal: options?.signal,
+					selection,
 				})
 			).switched;
 		}
@@ -4960,14 +5500,15 @@ export class AuthStorage {
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting
 		// suspect hook can't reindex the answer out from under us.
-		const hasSibling = this.#getCredentialsForProvider(provider).some(
-			(credential, index) =>
-				credential.type === sessionCredential.type &&
+		const hasSibling = this.#getStoredCredentials(provider).some(
+			(entry, index) =>
+				this.#isCredentialIdEligible(entry.id, selection) &&
+				entry.credential.type === sessionCredential.type &&
 				index !== sessionCredential.index &&
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
-		this.#clearSessionCredential(provider, sessionId);
+		this.#clearSessionCredential(provider, sessionId, selection);
 		this.#markCredentialBlocked(
 			provider,
 			providerKey,
@@ -5003,17 +5544,20 @@ export class AuthStorage {
 	 * Used by web-search providers and other consumers that hold an AuthStorage
 	 * directly (no ModelRegistry in scope).
 	 */
-	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
-		const { sessionId, baseUrl, modelId } = options ?? {};
+	resolver(
+		provider: string,
+		options?: { sessionId?: string; baseUrl?: string; modelId?: string; selection?: AuthCredentialSelectionPolicy },
+	): ApiKeyResolver {
+		const { sessionId, baseUrl, modelId, selection } = options ?? {};
 		return async ({ lastChance, error, signal }) => {
 			if (error === undefined) {
-				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal });
+				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal, selection });
 			}
 			if (lastChance) {
-				await this.rotateSessionCredential(provider, sessionId, { error, modelId, signal });
-				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal });
+				await this.rotateSessionCredential(provider, sessionId, { error, modelId, signal, selection });
+				return this.getApiKey(provider, sessionId, { baseUrl, modelId, signal, selection });
 			}
-			return this.getApiKey(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+			return this.getApiKey(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal, selection });
 		};
 	}
 
@@ -5199,6 +5743,18 @@ export class AuthStorage {
 		});
 	}
 
+	async upsertCredentialAsync(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+		const stored = this.#store.upsertAuthCredentialRemote
+			? await this.#store.upsertAuthCredentialRemote(provider, credential)
+			: this.#store.upsertAuthCredentialForProvider(provider, credential);
+		this.#setStoredCredentials(
+			provider,
+			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
+		);
+		this.#resetProviderAssignments(provider);
+		return stored;
+	}
+
 	/**
 	 * Broker-server seam: list non-expired persisted blocks for snapshot entries.
 	 */
@@ -5319,6 +5875,8 @@ type SerializedCredentialRecord = {
 
 const AUTH_SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+const SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS = 500;
+const SQLITE_CLOSE_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 /**
  * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
@@ -5507,10 +6065,12 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
+	#getActiveByIdStmt: Statement;
 	#listActiveByProviderStmt: Statement;
 	#listDisabledByProviderStmt: Statement;
 	#insertStmt: Statement;
 	#updateStmt: Statement;
+	#reactivateStmt: Statement;
 	#deleteStmt: Statement;
 	#deleteIfMatchesStmt: Statement;
 	#updateIfMatchesStmt: Statement;
@@ -5547,6 +6107,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
 		);
+		this.#getActiveByIdStmt = this.#db.prepare(
+			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ? AND disabled_cause IS NULL",
+		);
 		this.#listActiveByProviderStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
 		);
@@ -5570,6 +6133,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					SELECT 1 FROM auth_credential_refresh_leases
 					WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?
 				)`,
+		);
+		this.#reactivateStmt = this.#db.prepare(
+			`UPDATE auth_credentials
+			 SET credential_type = ?, data = ?, identity_key = ?, disabled_cause = NULL, updated_at = ${SQLITE_NOW_EPOCH}
+			 WHERE id = ? AND disabled_cause IS NOT NULL`,
 		);
 		this.#deleteStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
@@ -6038,6 +6606,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return results;
 	}
 
+	listAuthCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
+		const results: StoredAuthCredential[] = [];
+		const seen = new Set<number>();
+		for (const id of ids) {
+			if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
+			seen.add(id);
+			const row = this.#getActiveByIdStmt.get(id) as AuthRow | undefined;
+			if (!row) continue;
+			const credential = deserializeCredential(row);
+			if (!credential) continue;
+			results.push(toStoredAuthCredential(row, credential));
+		}
+		return results;
+	}
+
 	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
 			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
@@ -6120,6 +6703,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 
 			if (targetId === null) {
+				const disabledRows = this.#listDisabledByProviderStmt.all(providerName) as AuthRow[];
+				for (const row of disabledRows) {
+					const disabledCredential = deserializeCredential(row);
+					const identityKey = resolveRowCredentialIdentityKey(providerName, row);
+					if (!matchesReplacementCredential(providerName, disabledCredential, identityKey, item)) continue;
+					targetId = row.id;
+					this.#reactivateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, row.id);
+					this.#deleteCredentialBlocksStmt.run(row.id);
+					break;
+				}
+			}
+
+			if (targetId === null) {
 				const row = this.#insertStmt.get(
 					providerName,
 					serialized.credentialType,
@@ -6166,11 +6762,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
+					this.#deleteCredentialBlocksStmt.run(row.id);
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);
 				if (identityKey && activeIdentityKeys.has(identityKey)) {
+					this.#deleteCredentialBlocksStmt.run(row.id);
 					this.#hardDeleteStmt.run(row.id);
 				}
 			}
@@ -6593,12 +7191,17 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#listActiveStmt.finalize();
+		this.#getActiveByIdStmt.finalize();
 		this.#listActiveByProviderStmt.finalize();
 		this.#listDisabledByProviderStmt.finalize();
 		this.#insertStmt.finalize();
 		this.#updateStmt.finalize();
+		this.#updateIfMatchesStmt.finalize();
+		this.#reactivateStmt.finalize();
 		this.#deleteStmt.finalize();
 		this.#deleteIfMatchesStmt.finalize();
+		this.#updateIfMatchesWithLeaseStmt.finalize();
+		this.#deleteIfMatchesWithLeaseStmt.finalize();
 		this.#deleteByProviderStmt.finalize();
 		this.#hardDeleteStmt.finalize();
 		this.#getCacheStmt.finalize();
@@ -6610,12 +7213,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#upsertCredentialBlockStmt.finalize();
 		this.#deleteCredentialBlocksStmt.finalize();
 		this.#deleteExpiredCredentialBlocksStmt.finalize();
+		this.#acquireCredentialRefreshLeaseStmt.finalize();
+		this.#getCredentialRefreshLeaseStmt.finalize();
+		this.#renewCredentialRefreshLeaseStmt.finalize();
+		this.#releaseCredentialRefreshLeaseStmt.finalize();
 		this.#insertUsageHistoryStmt.finalize();
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
 		this.#insertUsageCostStmt.finalize();
 		this.#listUsageCostsStmt.finalize();
+		const shouldWaitForFileClose =
+			process.platform === "win32" && this.#db.filename !== ":memory:" && SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS > 0;
 		this.#db.close();
+		if (shouldWaitForFileClose) {
+			Atomics.wait(SQLITE_CLOSE_SLEEP_BUFFER, 0, 0, SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS);
+		}
 	}
 }

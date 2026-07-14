@@ -3,11 +3,23 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, type FetchImpl, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	acquireAuthCredential,
+	type FetchImpl,
+	type OAuthCredential,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai";
 import { removeWithRetries } from "../../utils/src/temp";
 import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry/oauth";
 
 const LEGACY_TIMESTAMP = 1_700_000_000;
+
+async function removeTempDirAfterSqliteClose(target: string): Promise<void> {
+	Bun.gc(true);
+	await removeWithRetries(target);
+}
 
 function createCredential(args: { suffix: string; accountId: string; email: string }): OAuthCredential {
 	return {
@@ -118,12 +130,13 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	});
 
 	afterEach(async () => {
+		authStorage?.close();
 		store?.close();
 		store = null;
 		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
-			await removeWithRetries(tempDir);
+			await removeTempDirAfterSqliteClose(tempDir);
 			tempDir = "";
 		}
 	});
@@ -425,6 +438,49 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([disabledCause]);
 	});
 
+	it("reactivates same-identity OAuth credentials in place and clears stale blocks", async () => {
+		if (!store || !dbPath) throw new Error("test setup failed");
+
+		const original = createCredential({
+			suffix: "original",
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		});
+		store.replaceAuthCredentialsForProvider("openai-codex", [original]);
+
+		const [credential] = store.listAuthCredentials("openai-codex");
+		if (!credential) throw new Error("expected stored credential");
+
+		const blockScope = "shared";
+		const providerKey = "openai-codex:oauth";
+		store.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey,
+			blockScope,
+			blockedUntilMs: Date.now() + 60_000,
+		});
+		store.deleteAuthCredential(credential.id, "oauth refresh failed: invalid_grant");
+
+		const refreshed = createCredential({
+			suffix: "refreshed",
+			accountId: "stable-account",
+			email: "stable.user@example.com",
+		});
+		const rows = store.upsertAuthCredentialForProvider("openai-codex", refreshed);
+
+		expect(rows).toHaveLength(1);
+		const [reactivated] = rows;
+		expect(reactivated?.id).toBe(credential.id);
+		expect(reactivated?.credential.type).toBe("oauth");
+		if (reactivated?.credential.type !== "oauth") throw new Error("expected oauth credential");
+		expect(reactivated.credential.access).toBe("access-refreshed");
+		expect(reactivated.credential.refresh).toBe("refresh-refreshed");
+		expect(store.listAuthCredentials("openai-codex").map(row => row.id)).toEqual([credential.id]);
+		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([]);
+		expect(countCredentialRows(dbPath, "openai-codex")).toBe(1);
+		expect(store.getCredentialBlock(credential.id, providerKey, blockScope)).toBeUndefined();
+	});
+
 	it("creates fresh auth schema without unixepoch defaults", async () => {
 		if (!tempDir) throw new Error("test setup failed");
 
@@ -663,7 +719,101 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 	afterEach(async () => {
 		unregisterOAuthProviders("auth-storage-login-upgrade-test");
 		if (tempDir) {
-			await removeWithRetries(tempDir);
+			await removeTempDirAfterSqliteClose(tempDir);
+			tempDir = "";
+		}
+	});
+
+	it("acquires OAuth credentials for the storage provider without mutating storage", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const dbPath = path.join(tempDir, "acquire-oauth.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const authStorage = new AuthStorage(store);
+		const credentials = {
+			refresh: "acquire-refresh",
+			access: "acquire-access",
+			expires: Date.now() + 60_000,
+			email: "acquire@example.com",
+			accountId: "acct-acquire",
+		};
+
+		try {
+			await authStorage.set("unit-acquire-oauth-storage", { type: "api_key", key: "existing-key" });
+			registerOAuthProvider({
+				id: "unit-acquire-oauth",
+				name: "Unit Acquire OAuth",
+				sourceId: "auth-storage-login-upgrade-test",
+				storeCredentialsAs: "unit-acquire-oauth-storage",
+				login: async callbacks => {
+					callbacks.onAuth({ url: "https://example.com/auth" });
+					return credentials;
+				},
+			});
+
+			const result = await acquireAuthCredential("unit-acquire-oauth", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			expect(result).toEqual({
+				provider: "unit-acquire-oauth-storage",
+				credential: { type: "oauth", ...credentials },
+			});
+			expect(authStorage.listStoredCredentials("unit-acquire-oauth-storage").map(row => row.credential)).toEqual([
+				{ type: "api_key", key: "existing-key" },
+			]);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("persists OAuth login through the remote upsert hook", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const dbPath = path.join(tempDir, "remote-oauth-login.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const storeWithRemote: AuthCredentialStore = store;
+		const remoteCalls: Array<{ provider: string; credential: OAuthCredential }> = [];
+		const credentials = {
+			refresh: "remote-refresh",
+			access: "remote-access",
+			expires: Date.now() + 60_000,
+			email: "remote@example.com",
+			accountId: "acct-remote",
+		};
+		storeWithRemote.upsertAuthCredentialRemote = async (provider, credential) => {
+			if (credential.type !== "oauth") throw new Error("expected OAuth credential");
+			remoteCalls.push({ provider, credential });
+			return store.upsertAuthCredentialForProvider(provider, credential);
+		};
+		const authStorage = new AuthStorage(storeWithRemote);
+
+		try {
+			registerOAuthProvider({
+				id: "unit-remote-oauth-login",
+				name: "Unit Remote OAuth Login",
+				sourceId: "auth-storage-login-upgrade-test",
+				storeCredentialsAs: "unit-remote-oauth-storage",
+				login: async () => credentials,
+			});
+
+			await authStorage.login("unit-remote-oauth-login", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			expect(remoteCalls).toEqual([
+				{
+					provider: "unit-remote-oauth-storage",
+					credential: { type: "oauth", ...credentials },
+				},
+			]);
+			expect(authStorage.listStoredCredentials("unit-remote-oauth-storage").map(row => row.credential)).toEqual([
+				{ type: "oauth", ...credentials },
+			]);
+		} finally {
+			authStorage.close();
 		}
 	});
 
@@ -791,7 +941,7 @@ describe("AuthStorage persistent session stickiness", () => {
 	});
 
 	afterEach(async () => {
-		await removeWithRetries(tempDir);
+		await removeTempDirAfterSqliteClose(tempDir);
 	});
 
 	it("persists session-sticky credentials across AuthStorage restarts", async () => {

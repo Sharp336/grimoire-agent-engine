@@ -504,6 +504,46 @@ describe("ModelRegistry", () => {
 				expect(model.baseUrl).toBe("http://localhost:4000");
 			}
 		});
+
+		test("startup cache keeps transport override on discoverable proxy providers", () => {
+			writeRawModelsJson({
+				"xllm-gateway": {
+					baseUrl: "http://localhost:4000",
+					apiKey: "gateway-token",
+					transport: "pi-native",
+					discovery: { type: "proxy" },
+				},
+			});
+			writeModelCache(
+				"xllm-gateway",
+				Date.now(),
+				[
+					buildModel({
+						id: "gpt-5.6-sol",
+						name: "GPT-5.6 Sol",
+						provider: "xllm-gateway",
+						api: "openai-completions",
+						baseUrl: "http://localhost:4000/v1",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 100000,
+						maxTokens: 8000,
+					}),
+				],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async input => {
+					throw new Error(`Offline startup should not fetch ${String(input)}`);
+				},
+			});
+
+			expect(registry.find("xllm-gateway", "gpt-5.6-sol")?.transport).toBe("pi-native");
+		});
 	});
 
 	describe("provider compat overrides", () => {

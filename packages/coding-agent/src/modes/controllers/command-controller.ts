@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	type as arkType,
 	getEnvApiKey,
 	getProviderDetails,
 	type ProviderDetails,
@@ -10,6 +11,15 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
+import {
+	type AuthGatewaySelfUsageResponse,
+	type AuthGatewayUsageReportsResponse,
+	type AuthGatewayUsageResponse,
+	authGatewayAdminStatusResponseSchema,
+	authGatewaySelfUsageResponseSchema,
+	authGatewayUsageReportsResponseSchema,
+	authGatewayUsageResponseSchema,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
@@ -67,8 +77,112 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 	ctx.present(block);
 }
 
+function authGatewayUsageUrl(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/+$/, "");
+	return `${trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`}/usage`;
+}
+
+function authGatewayAdminStatusUrl(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/+$/, "");
+	return `${trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`}/admin/status`;
+}
+
+function formatGatewayCost(costUsd: number): string {
+	return `$${costUsd.toFixed(2)}`;
+}
+
+function formatGatewayUser(principal: AuthGatewaySelfUsageResponse["principal"]): string {
+	const idSuffix = principal.userId === null ? "" : ` #${principal.userId}`;
+	return `User: ${sanitizeText(principal.name)} (${principal.role}${idSuffix})`;
+}
+
+function formatGatewayUsageSummary(response: AuthGatewaySelfUsageResponse | AuthGatewayUsageResponse): string {
+	const usage = response.usage;
+	const lines = [theme.bold("Gateway Usage")];
+	if ("principal" in response) lines.push(formatGatewayUser(response.principal));
+	else lines.push(`User ID: #${response.usage.userId}`);
+	lines.push(
+		`Requests: ${formatNumber(usage.totals.requests)}`,
+		`Tokens: ${formatNumber(usage.totals.totalTokens)} tokens`,
+		`Cost: ${formatGatewayCost(usage.totals.costUsd)}`,
+	);
+	if (usage.byProviderModel.length > 0) {
+		lines.push("", theme.bold("By model"));
+		for (const row of usage.byProviderModel) {
+			lines.push(
+				`${row.provider}/${row.model}: ${formatNumber(row.requests)} requests, ${formatNumber(row.totalTokens)} tokens, ${formatGatewayCost(row.costUsd)}`,
+			);
+		}
+	}
+	return lines.join("\n");
+}
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
+
+	async #fetchGatewayStatusPrincipal(
+		baseUrl: string,
+		token: string,
+	): Promise<AuthGatewaySelfUsageResponse["principal"] | undefined> {
+		let response: Response;
+		try {
+			response = await fetch(authGatewayAdminStatusUrl(baseUrl), {
+				headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+			});
+		} catch {
+			return undefined;
+		}
+		if (!response.ok) return undefined;
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			return undefined;
+		}
+		const status = authGatewayAdminStatusResponseSchema(payload);
+		if (status instanceof arkType.errors) return undefined;
+		return status.status.principal;
+	}
+
+	async #fetchGatewayUsageFallback(): Promise<
+		AuthGatewaySelfUsageResponse | AuthGatewayUsageResponse | AuthGatewayUsageReportsResponse | null
+	> {
+		const model = this.ctx.session.model;
+		if (model?.transport !== "pi-native" || !model.baseUrl) return null;
+		const token = await this.ctx.session.modelRegistry.authStorage.getApiKey(
+			model.provider,
+			this.ctx.session.sessionId,
+			{
+				baseUrl: model.baseUrl,
+				modelId: model.id,
+			},
+		);
+		if (!token) return null;
+		let response: Response;
+		try {
+			response = await fetch(authGatewayUsageUrl(model.baseUrl), {
+				headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+			});
+		} catch {
+			return null;
+		}
+		if (!response.ok) return null;
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			return null;
+		}
+		const selfUsage = authGatewaySelfUsageResponseSchema(payload);
+		if (!(selfUsage instanceof arkType.errors)) return selfUsage;
+		const usageOnly = authGatewayUsageResponseSchema(payload);
+		if (!(usageOnly instanceof arkType.errors)) {
+			const principal = await this.#fetchGatewayStatusPrincipal(model.baseUrl, token);
+			return principal?.userId === usageOnly.usage.userId ? { ...usageOnly, principal } : usageOnly;
+		}
+		const usageReports = authGatewayUsageReportsResponseSchema(payload);
+		if (usageReports instanceof arkType.errors) return null;
+		return usageReports;
+	}
 
 	openInBrowser(urlOrPath: string): void {
 		openPath(urlOrPath);
@@ -456,14 +570,14 @@ export class CommandController {
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		let usageReports = reports ?? null;
+		let gatewayUsageUser: string | undefined;
 		if (!usageReports) {
-			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
-			if (!provider.fetchUsageReports) {
+			if (typeof this.ctx.session.fetchUsageReports !== "function") {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
-				usageReports = await provider.fetchUsageReports();
+				usageReports = await this.ctx.session.fetchUsageReports();
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
 				return;
@@ -471,8 +585,19 @@ export class CommandController {
 		}
 
 		if (!usageReports || usageReports.length === 0) {
-			this.ctx.showWarning("No usage data available.");
-			return;
+			const gatewayUsage = await this.#fetchGatewayUsageFallback();
+			if (gatewayUsage) {
+				if ("usage" in gatewayUsage) {
+					this.ctx.present([new Spacer(1), new Text(formatGatewayUsageSummary(gatewayUsage), 1, 0)]);
+					return;
+				}
+				if (gatewayUsage.principal) gatewayUsageUser = formatGatewayUser(gatewayUsage.principal);
+				usageReports = gatewayUsage.reports;
+			}
+			if (!usageReports || usageReports.length === 0) {
+				this.ctx.showWarning("No usage data available.");
+				return;
+			}
 		}
 
 		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
@@ -486,6 +611,10 @@ export class CommandController {
 		const output = renderUsageReports(usageReports, theme, Date.now(), availableWidth, provider =>
 			provider === currentProvider ? activeAccount : undefined,
 		);
+		if (gatewayUsageUser) {
+			this.ctx.present([new Spacer(1), new Text(gatewayUsageUser, 1, 0), new Spacer(1), new Text(output, 1, 0)]);
+			return;
+		}
 		this.ctx.present([new Spacer(1), new Text(output, 1, 0)]);
 	}
 

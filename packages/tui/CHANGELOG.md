@@ -49,6 +49,9 @@
 
 - Improved row alignment and spacing for `align`, `gather`, and `array` environments
 - Updated matrix environments to render as baseline-aligned grids with stretched brackets
+### Changed
+
+- Added masked rendering and secure clearing support to `Input` so secret prompts can hide values while clearing undo, kill-ring, and paste buffers.
 
 ## [16.4.0] - 2026-07-10
 

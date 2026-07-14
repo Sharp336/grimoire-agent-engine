@@ -4,7 +4,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
-import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthCredentialSelectionPolicy,
+	type AuthCredentialStore,
+	AuthStorage,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
@@ -1448,6 +1453,50 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.getApiKey("openai-codex", undefined, { modelId });
 		expect(apiKey).toBe("api-acct-paid");
+	});
+
+	test("explicit failover skips a plan-ineligible OAuth member using full-pool eligibility", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-free", "free@example.com") },
+			{ type: "oauth", ...createCredential("acct-paid", "paid@example.com") },
+		]);
+		const [freeRow, paidRow] = store.listAuthCredentials("openai-codex");
+		if (!freeRow || !paidRow) throw new Error("expected oauth rows");
+		usageByAccount.set(
+			"acct-free",
+			createCodexUsageReport({
+				accountId: "acct-free",
+				primary: { usedFraction: 0.01, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.01, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+				metadata: { planType: "free", email: "free@example.com" },
+			}),
+		);
+		usageByAccount.set(
+			"acct-paid",
+			createCodexUsageReport({
+				accountId: "acct-paid",
+				primary: { usedFraction: 0.8, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.8, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+				metadata: { planType: "plus", email: "paid@example.com" },
+			}),
+		);
+		const selected: AuthCredentialSelectionPolicy = {
+			policyKey: "codex-full-pool-plan",
+			eligibleCredentialIds: [freeRow.id, paidRow.id],
+			strategy: "failover",
+		};
+
+		await expect(
+			authStorage.resolveApiKeySelection("openai-codex", "codex-full-pool-plan", {
+				modelId: "gpt-5.6-sol",
+				selection: selected,
+			}),
+		).resolves.toEqual({
+			ok: true,
+			credential: { apiKey: "api-acct-paid", credentialId: paidRow.id, credentialType: "oauth", source: "oauth" },
+		});
 	});
 
 	test.each([

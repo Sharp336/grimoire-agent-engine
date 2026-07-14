@@ -1144,15 +1144,19 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
+			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
+			const normalizedModels = this.#normalizeDiscoverableModels(
+				providerConfig,
+				this.#applyProviderCompat(
+					providerConfig.compat,
+					cache.models.map(model => buildModel(model)),
+				),
+			);
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
-				this.#normalizeDiscoverableModels(
-					providerConfig,
-					this.#applyProviderCompat(
-						providerConfig.compat,
-						cache.models.map(model => buildModel(model)),
-					),
-				),
+				providerOverride
+					? normalizedModels.map(model => this.#applyProviderTransportOverride(model, providerOverride))
+					: normalizedModels,
 			);
 			cachedModels.push(...models);
 			this.#providerDiscoveryStates.set(providerConfig.provider, {

@@ -23,6 +23,7 @@ function createContext() {
 		hideThinkingBlock: false,
 		setWorkingMessage: vi.fn(),
 		clearPinnedError: vi.fn(),
+		showError: vi.fn(),
 		loadingAnimation: undefined,
 		retryLoader: undefined,
 		streamingComponent: undefined,
@@ -50,6 +51,29 @@ function createContext() {
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const STALE_AGENT_END_WITH_ERROR = {
+	type: "agent_end",
+	messages: [
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "No eligible credential is available for this request",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		},
+	],
+} as unknown as AgentSessionEvent;
 
 describe("EventController superseded agent_end", () => {
 	beforeAll(async () => {
@@ -85,11 +109,12 @@ describe("EventController superseded agent_end", () => {
 		// The interrupted turn's agent_end finally propagates. Because the agent is
 		// already streaming the resumed turn, it must not tear down the live loader —
 		// otherwise "Working…" vanishes while the agent keeps running.
-		await controller.handleEvent(AGENT_END);
+		await controller.handleEvent(STALE_AGENT_END_WITH_ERROR);
 
 		expect(loader.stop).not.toHaveBeenCalled();
 		expect(ctx.loadingAnimation).toBeDefined();
 		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
+		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
 	it("tears the loader down on the live turn's own final agent_end", async () => {

@@ -7,6 +7,7 @@ import type {
 	ServiceTier,
 	TokenTaskBudget,
 } from "../types";
+import type { AuthGatewayAccessStore } from "./access-store";
 
 /**
  * Wire types for the omp auth-gateway.
@@ -139,6 +140,8 @@ export interface AuthGatewayServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
 	bearerTokens: string[];
+	/** Optional access-control, management, and audit store for managed gateway users. */
+	accessStore?: AuthGatewayAccessStore;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }

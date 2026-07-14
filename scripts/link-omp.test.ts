@@ -32,6 +32,13 @@ function runLinkScript(env: NodeJS.ProcessEnv) {
 	});
 }
 
+function expectInstalledWrapper(wrapperPath: string) {
+	expect(fs.readFileSync(wrapperPath, "utf8")).toBe(fs.readFileSync(targetWrapper, "utf8"));
+	if (fs.lstatSync(wrapperPath).isSymbolicLink()) {
+		expect(fs.readlinkSync(wrapperPath)).toBe(targetWrapper);
+	}
+}
+
 afterEach(() => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
@@ -66,7 +73,7 @@ describe("scripts/link-omp.sh", () => {
 
 		expect(result.status).toBe(0);
 		expect(result.stderr).toBe("");
-		expect(fs.readlinkSync(path.join(bunInstall, "bin", "omp"))).toBe(targetWrapper);
+		expectInstalledWrapper(path.join(bunInstall, "bin", "omp"));
 	});
 
 	it("uses bun pm -g bin when it succeeds", () => {
@@ -93,7 +100,7 @@ describe("scripts/link-omp.sh", () => {
 
 		expect(result.status).toBe(0);
 		expect(result.stderr).toBe("");
-		expect(fs.readlinkSync(path.join(globalBin, "omp"))).toBe(targetWrapper);
+		expectInstalledWrapper(path.join(globalBin, "omp"));
 		expect(fs.existsSync(path.join(dir, "unused-bun-install", "bin", "omp"))).toBe(false);
 	});
 });

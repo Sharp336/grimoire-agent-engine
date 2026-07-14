@@ -44,11 +44,14 @@ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
+import { GatewayProfileSettingsComponent, type GatewayProfileSettingsContext } from "./auth-gateway/profile-settings";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
+
+type TabId = SettingTab | "gateway" | "plugins";
 
 /**
  * A submenu component for selecting from a list of options.
@@ -346,14 +349,17 @@ function settingsSidebarWidth(): number {
 }
 
 function getSettingsTabs(): Tab[] {
-	return [
-		...SETTING_TABS.map(id => {
-			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
-		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
-	];
+	const tabs: Tab[] = [];
+	for (const id of SETTING_TABS) {
+		const meta = TAB_METADATA[id];
+		const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+		tabs.push({ id, label: `${icon} ${meta.label}`, short: icon });
+		if (id === "providers") {
+			tabs.push({ id: "gateway", label: `${theme.icon.host} Gateway`, short: theme.icon.host });
+		}
+	}
+	tabs.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package });
+	return tabs;
 }
 
 /**
@@ -377,6 +383,8 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** User-scoped auth-gateway connection profile editor context. */
+	gatewayProfiles: GatewayProfileSettingsContext;
 }
 
 /** Status line settings subset for preview */
@@ -414,8 +422,9 @@ export class SettingsSelectorComponent implements Component {
 	#currentList: SettingsList | null = null;
 	#searchList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
-	#currentTabId: SettingTab | "plugins" = "appearance";
-	#preSearchTabId: SettingTab | "plugins" = "appearance";
+	#gatewayComponent: GatewayProfileSettingsComponent | null = null;
+	#currentTabId: TabId = "appearance";
+	#preSearchTabId: TabId = "appearance";
 	#searchQuery = "";
 	/** Single-line editor backing the search banner (cursor, word ops, paste). */
 	#searchInput = new Input();
@@ -440,7 +449,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#tabBar = new TabBar("", getSettingsTabs(), getTabBarTheme());
 		this.#tabBar.showHint = false;
 		this.#tabBar.onTabChange = () => {
-			const tabId = this.#tabBar.getActiveTab().id as SettingTab | "plugins";
+			const tabId = this.#tabBar.getActiveTab().id as TabId;
 			if (this.#searchList) {
 				// While searching, tabs act as jump targets into the result list.
 				const firstId = this.#searchFirstMatch.get(tabId);
@@ -459,6 +468,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList?.invalidate();
 		this.#searchList?.invalidate();
 		this.#pluginComponent?.invalidate();
+		this.#gatewayComponent?.invalidate();
 	}
 
 	/** Swap the active content (per-tab list, search list, or plugins). */
@@ -466,14 +476,17 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList = null;
 		this.#searchList = null;
 		this.#pluginComponent = null;
+		this.#gatewayComponent = null;
 		build();
 	}
 
-	#switchToTab(tabId: SettingTab | "plugins"): void {
+	#switchToTab(tabId: TabId): void {
 		this.#currentTabId = tabId;
 		this.#setContent(() => {
 			if (tabId === "plugins") {
 				this.#showPluginsTab();
+			} else if (tabId === "gateway") {
+				this.#showGatewayTab();
 			} else {
 				this.#showSettingsTab(tabId);
 			}
@@ -484,7 +497,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.#searchList) {
 			return "Enter to change · Tab to jump tabs · Esc to exit search";
 		}
-		if (this.#currentTabId === "plugins") {
+		if (this.#currentTabId === "plugins" || this.#currentTabId === "gateway") {
 			return "Tab to switch tabs · Esc to close";
 		}
 		if (this.#currentList?.sectionFocused) {
@@ -533,6 +546,8 @@ export class SettingsSelectorComponent implements Component {
 			contentLines = list.render(innerWidth);
 		} else if (this.#pluginComponent) {
 			contentLines = this.#pluginComponent.render(innerWidth);
+		} else if (this.#gatewayComponent) {
+			contentLines = this.#gatewayComponent.render(innerWidth);
 		} else {
 			contentLines = [];
 		}
@@ -726,7 +741,7 @@ export class SettingsSelectorComponent implements Component {
 		if (!this.#searchList) return;
 		const selected = jumpToSelection ? this.#searchList.getSelectedItem() : undefined;
 		const selectedDef = selected ? getSettingDef(selected.id as SettingPath) : undefined;
-		const targetTab: SettingTab | "plugins" = selectedDef?.tab ?? this.#preSearchTabId;
+		const targetTab: TabId = selectedDef?.tab ?? this.#preSearchTabId;
 
 		this.#searchQuery = "";
 		this.#searchFirstMatch.clear();
@@ -757,7 +772,7 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
 			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
-		// Plugins hosts its own UI; it is not part of the schema-backed search.
+		empty.push({ id: "gateway", label: `${theme.icon.host} Gateway`, short: theme.icon.host, muted: true });
 		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
 		return [...matched, ...empty];
 	}
@@ -1137,7 +1152,7 @@ export class SettingsSelectorComponent implements Component {
 
 	/** Re-evaluate condition gates against the current settings and refresh the active list. */
 	#refreshCurrentTabItems(defs: SettingDef[]): void {
-		if (this.#currentTabId === "plugins" || !this.#currentList) return;
+		if (this.#currentTabId === "plugins" || this.#currentTabId === "gateway" || !this.#currentList) return;
 		this.#currentList.setItems(this.#buildItemsForDefs(defs));
 	}
 
@@ -1173,6 +1188,12 @@ export class SettingsSelectorComponent implements Component {
 		});
 	}
 
+	#showGatewayTab(): void {
+		this.#gatewayComponent = new GatewayProfileSettingsComponent(this.context.gatewayProfiles, {
+			onCancel: () => this.callbacks.onCancel(),
+		});
+	}
+
 	handleInput(data: string): void {
 		// SGR mouse reports (the fullscreen overlay enables tracking).
 		if (data.startsWith("\x1b[<")) {
@@ -1200,6 +1221,11 @@ export class SettingsSelectorComponent implements Component {
 			return;
 		}
 
+		if (this.#gatewayComponent?.ownsInput()) {
+			this.#gatewayComponent.handleInput(data);
+			return;
+		}
+
 		// Tab toggles keyboard focus between section headings and setting rows
 		// (fast section hopping); tabs without sections keep Tab switching tabs.
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
@@ -1217,7 +1243,7 @@ export class SettingsSelectorComponent implements Component {
 
 		// Printable characters start a search across every settings tab. The
 		// plugins tab keeps its own local filtering instead.
-		if (this.#currentTabId !== "plugins") {
+		if (this.#currentTabId !== "plugins" && this.#currentTabId !== "gateway") {
 			const printable = extractPrintableText(data);
 			if (printable !== undefined && printable.trim().length > 0) {
 				this.#startSearch(printable);
@@ -1229,6 +1255,8 @@ export class SettingsSelectorComponent implements Component {
 			this.#currentList.handleInput(data);
 		} else if (this.#pluginComponent) {
 			this.#pluginComponent.handleInput(data);
+		} else if (this.#gatewayComponent) {
+			this.#gatewayComponent.handleInput(data);
 		}
 	}
 

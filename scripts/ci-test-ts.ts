@@ -24,12 +24,21 @@ interface TestCommand {
 	command: string[];
 }
 
+interface TestPlan {
+	commands: TestCommand[];
+	matchedCodingAgentTestFiles: string[];
+}
+
 type CodingAgentTestPartition = Record<CodingAgentBucket, string[]>;
 
 const repoRoot = path.join(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
-const requestedMode = args.find(arg => !arg.startsWith("--")) ?? "all";
+const modeArg = args.find(arg => !arg.startsWith("--"));
+const requestedMode = modeArg ?? "all";
+const requestedCodingAgentTestFiles = args
+	.filter(arg => !arg.startsWith("--") && arg !== modeArg)
+	.map(normalizeCodingAgentTestFilter);
 // `--only-failures` is Bun's output filter — it hides passing tests within each
 // chunk, keeping the log terse, and is the default here (CI and the root
 // `test:ts` aggregate append it). It does NOT skip tests or share any
@@ -111,15 +120,15 @@ const nativeAndIntegrationPackages = [
 // and is outside every CI TS bucket.
 const localOnlyWorkspacePackages = ["packages/mnemopi", "python/robomp/web"];
 
-// Repo-level script tests. CI's `workspace` bucket only runs the merge gates:
-// the concurrency regression (the GHA-config guard) and the .d.ts extension
-// rewrite (guards published-type resolution; hermetic temp-dir suite). A local
-// full run also exercises the release-notes and link-omp tests. (A
-// `ci-test-ts.test.ts` entry used to sit here but the file never existed — bun
-// silently ignores unmatched filters when at least one other filter matches.)
+// Repo-level script tests. CI's `workspace` bucket runs the merge gates:
+// the concurrency regression (the GHA-config guard), the requested-filter
+// planner regression, and the .d.ts extension rewrite (guards published-type
+// resolution; hermetic temp-dir suite). A local full run also exercises the
+// release-notes and link-omp tests.
 const repoScriptTests = [
 	"scripts/ci-concurrency.test.ts",
 	"scripts/ci-build-native.test.ts",
+	"scripts/ci-test-ts.test.ts",
 	"scripts/ci-release-notes.test.ts",
 	"scripts/fix-dts-extensions.test.ts",
 	"scripts/link-omp.test.ts",
@@ -215,6 +224,24 @@ function shellQuote(value: string): string {
 		return value;
 	}
 	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function normalizeCodingAgentTestFilter(value: string): string {
+	return value
+		.replaceAll("\\", "/")
+		.replace(/^\.\//, "")
+		.replace(/^packages\/coding-agent\//, "");
+}
+
+function testPlan(commands: TestCommand[], matchedCodingAgentTestFiles: string[] = []): TestPlan {
+	return { commands, matchedCodingAgentTestFiles };
+}
+
+function mergeTestPlans(...plans: TestPlan[]): TestPlan {
+	return {
+		commands: plans.flatMap(plan => plan.commands),
+		matchedCodingAgentTestFiles: [...new Set(plans.flatMap(plan => plan.matchedCodingAgentTestFiles))],
+	};
 }
 
 function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
@@ -318,10 +345,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> 
 	return codingAgentTestPartitionPromise;
 }
 
-async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
+async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestPlan> {
 	const partition = await getCodingAgentTestPartition();
-	const testFiles = partition[bucket];
+	const allTestFiles = partition[bucket];
+	const testFiles =
+		requestedCodingAgentTestFiles.length === 0
+			? allTestFiles
+			: allTestFiles.filter(testFile => {
+					const normalized = normalizeCodingAgentTestFilter(testFile);
+					return requestedCodingAgentTestFiles.some(requested => requested === normalized);
+				});
 	if (testFiles.length === 0) {
+		if (requestedCodingAgentTestFiles.length > 0) return testPlan([]);
 		throw new Error(`No coding-agent ${bucket} tests matched`);
 	}
 	const plan = codingAgentBucketPlans[bucket];
@@ -337,13 +372,13 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 			command: ["bun", "test", `--parallel=${plan.parallel}`, ...onlyFailuresArgs, ...chunk],
 		});
 	}
-	return commands;
+	return testPlan(commands, testFiles.map(normalizeCodingAgentTestFilter));
 }
 
-async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
+async function commandsForMode(mode: Mode): Promise<TestPlan> {
 	switch (mode) {
 		case "workspace":
-			return [
+			return testPlan([
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)),
 				{
 					label: "scripts",
@@ -355,12 +390,13 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 						...onlyFailuresArgs,
 						"scripts/ci-concurrency.test.ts",
 						"scripts/ci-build-native.test.ts",
+						"scripts/ci-test-ts.test.ts",
 						"scripts/fix-dts-extensions.test.ts",
 					],
 				},
-			];
+			]);
 		case "native":
-			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { smol: true }));
+			return testPlan(nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { smol: true })));
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":
@@ -370,40 +406,46 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		case "coding-agent-native":
 			return await codingAgentTestCommands("native");
 		case "coding-agent-heavy":
-			return [
-				...(await codingAgentTestCommands("singleton")),
-				...(await codingAgentTestCommands("ui")),
-				...(await codingAgentTestCommands("runtime")),
-				...(await codingAgentTestCommands("native")),
-			];
+			return mergeTestPlans(
+				await codingAgentTestCommands("singleton"),
+				await codingAgentTestCommands("ui"),
+				await codingAgentTestCommands("runtime"),
+				await codingAgentTestCommands("native"),
+			);
 		case "all":
-			return [
-				...(await commandsForMode("workspace")),
-				...(await commandsForMode("native")),
-				...(await commandsForMode("coding-agent-heavy")),
-			];
+			return mergeTestPlans(
+				await commandsForMode("workspace"),
+				await commandsForMode("native"),
+				await commandsForMode("coding-agent-heavy"),
+			);
 		// `local-ts` is the full local TypeScript run that root `bun run test:ts`
 		// drives: every package the old `--workspaces` fan-out covered (the CI
 		// `all` set PLUS mnemopi and robomp-web, which CI omits) and every repo
 		// script test, routed through this one quiet runner so the whole suite
 		// shares one progress stream and one failure report.
 		case "local-ts":
-			return [
-				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
-				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
-				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
-				...(await commandsForMode("coding-agent-heavy")),
-				{
-					label: "scripts",
-					cwd: ".",
-					command: ["bun", "test", "--parallel=4", ...onlyFailuresArgs, ...repoScriptTests],
-				},
-			];
+			return mergeTestPlans(
+				testPlan([
+					...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
+					...nativeAndIntegrationPackages.map(pkg =>
+						workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs }),
+					),
+					...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+				]),
+				await commandsForMode("coding-agent-heavy"),
+				testPlan([
+					{
+						label: "scripts",
+						cwd: ".",
+						command: ["bun", "test", "--parallel=4", ...onlyFailuresArgs, ...repoScriptTests],
+					},
+				]),
+			);
 		// `local` is what root `bun run test` drives: the full TS suite plus the
 		// Rust task, so a single invocation reports TS and Rust together. The Rust
 		// command self-skips when no Rust-affecting files changed (see run-rs-task).
 		case "local":
-			return [...(await commandsForMode("local-ts")), rustTestCommand()];
+			return mergeTestPlans(await commandsForMode("local-ts"), testPlan([rustTestCommand()]));
 	}
 }
 
@@ -824,7 +866,14 @@ if (import.meta.main) {
 		);
 	}
 
-	const testCommands = await commandsForMode(requestedMode as Mode);
+	const plan = await commandsForMode(requestedMode as Mode);
+	const unmatchedCodingAgentTestFiles = requestedCodingAgentTestFiles.filter(
+		requested => !plan.matchedCodingAgentTestFiles.includes(requested),
+	);
+	if (unmatchedCodingAgentTestFiles.length > 0) {
+		throw new Error(`No coding-agent tests matched requested filter(s): ${unmatchedCodingAgentTestFiles.join(", ")}`);
+	}
+	const testCommands = plan.commands;
 	// Outside CI, fan the independent chunk processes out across cores; CI keeps the
 	// sequential, fail-fast path so each memory-capped runner job stays bounded.
 	if (!isDryRun && !isCI() && testCommands.length > 1) {

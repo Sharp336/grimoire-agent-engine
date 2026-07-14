@@ -494,6 +494,14 @@ export function getAgentDir(): string {
 	return dirs.agentDir;
 }
 
+export function getAuthGatewayProfilesPath(): string {
+	return path.join(getAgentDir(), "auth-gateways.json");
+}
+
+export function getAuthGatewayTokensDir(): string {
+	return path.join(getAgentDir(), "auth-gateway-tokens");
+}
+
 /** Get the project-local config directory (.omp). */
 export function getProjectAgentDir(cwd: string = getProjectDir()): string {
 	return path.join(cwd, CONFIG_DIR_NAME);

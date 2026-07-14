@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-rotate-oauth";
@@ -54,7 +55,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		}
 	});
 
-	function registerProvider(onRefresh?: () => void): void {
+	function registerProvider(onRefresh?: (credentials: OAuthCredentials) => void): void {
 		registerOAuthProvider({
 			id: PROVIDER,
 			name: "Rotate Unit",
@@ -63,7 +64,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				return { access: "login", refresh: "login", expires: farExpiry() };
 			},
 			async refreshToken(credentials) {
-				onRefresh?.();
+				onRefresh?.(credentials);
 				return {
 					...credentials,
 					access: "minted-access",
@@ -98,6 +99,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		// The re-minted credential is persisted, so the next plain resolve sees it.
 		const after = await authStorage.getApiKey(PROVIDER, "s-after");
 		expect(after).toBe("minted-access");
+	});
+
+	test("explicit selection force-refreshes the sticky OAuth member without advancing order", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const refreshedAccesses: string[] = [];
+		registerProvider(credentials => {
+			refreshedAccesses.push(credentials.access);
+		});
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry() },
+		]);
+		const [firstRow, secondRow] = store?.listAuthCredentials(PROVIDER) ?? [];
+		if (!firstRow || !secondRow) throw new Error("expected oauth rows");
+		const selection = {
+			policyKey: "selected-refresh-pool",
+			eligibleCredentialIds: [firstRow.id, secondRow.id],
+			strategy: "round-robin" as const,
+		};
+
+		await expect(
+			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh", { selection }),
+		).resolves.toMatchObject({
+			ok: true,
+			credential: { apiKey: "acc-A", credentialId: firstRow.id, credentialType: "oauth" },
+		});
+		await expect(
+			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh", { forceRefresh: true, selection }),
+		).resolves.toMatchObject({
+			ok: true,
+			credential: { apiKey: "minted-access", credentialId: firstRow.id, credentialType: "oauth" },
+		});
+		expect(refreshedAccesses).toEqual(["acc-A"]);
+		await expect(
+			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh-next", { selection }),
+		).resolves.toMatchObject({
+			ok: true,
+			credential: { apiKey: "acc-B", credentialId: secondRow.id, credentialType: "oauth" },
+		});
 	});
 
 	test("rotateSessionCredential(401) blocks + clears the sticky and rotates to a sibling", async () => {
