@@ -17,5 +17,10 @@ export const IMAGE_UPLOAD_CHUNK_BYTES = 256 * 1024;
 export const IMAGE_UPLOAD_CHUNK_BASE64_BYTES = Math.ceil(IMAGE_UPLOAD_CHUNK_BYTES / 3) * 4;
 export const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 export const PROMPT_IMAGE_MAX_COUNT = 8;
+/** Raw bytes returned by one transcript-image read command. */
+export const TRANSCRIPT_IMAGE_CHUNK_BYTES = 256 * 1024;
+export const TRANSCRIPT_IMAGE_CHUNK_BASE64_BYTES = Math.ceil(TRANSCRIPT_IMAGE_CHUNK_BYTES / 3) * 4;
+export const TRANSCRIPT_IMAGE_MAX_BYTES = IMAGE_UPLOAD_MAX_BYTES;
+export const TRANSCRIPT_IMAGE_MAX_COUNT = 64;
 export const MAX_SAVED_CURSORS = 128;
 export const MAX_EPOCH_BYTES = 128;

@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import type { AppserverHandle } from "@oh-my-pi/appserver";
 import { createAppserver, defaultSocketPath } from "@oh-my-pi/appserver";
-import { postmortem } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, postmortem } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { PluginManager } from "../extensibility/plugins/manager";
@@ -155,6 +155,7 @@ async function defaultCreateAppserver(): Promise<AppserverHandle> {
 		projectRootForProject: runtime.projectRootForProject,
 		lockCheck: runtime.lockCheck,
 		lockReclaim: runtime.lockReclaim,
+		transcriptImageRoot: getBlobsDir(),
 	});
 }
 

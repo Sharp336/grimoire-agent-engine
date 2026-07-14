@@ -6,7 +6,7 @@ import { DESKTOP_CATALOG_COMMANDS, type DurableEntry, hostId, projectId, session
 import { completeAttachOutput, prepareAttachOutput } from "../src/attach-output.ts";
 import { IdempotencyStore } from "../src/idempotency.ts";
 import { SessionProjection } from "../src/projection.ts";
-import { appserverSupportedCapabilities, createAppserver } from "../src/server.ts";
+import { appserverSupportedCapabilities, appserverSupportedFeatures, createAppserver } from "../src/server.ts";
 import { SubagentProjection } from "../src/subagent-projection.ts";
 import type { ChildHandle, RpcChildFactory, SessionAuthority, SessionDiscovery, SessionRecord } from "../src/types.ts";
 
@@ -175,6 +175,14 @@ describe("idempotency", () => {
 	});
 });
 describe("appserver lifecycle", () => {
+	test("advertises transcript image reads only with an explicit blob root", () => {
+		expect(appserverSupportedFeatures({})).not.toContain("transcript.images");
+		expect(appserverSupportedFeatures({ transcriptImageRoot: "/tmp/omp-blobs" })).toContain("transcript.images");
+		expect(
+			appserverSupportedFeatures({ supportedFeatures: ["transcript.images"], transcriptImageRoot: undefined }),
+		).not.toContain("transcript.images");
+	});
+
 	test("advertises sessions.manage only when a session authority is installed", () => {
 		const authority: SessionAuthority = {
 			create: async cwd => ({ sessionId: sessionId("created"), path: "/tmp/created.jsonl", cwd, entries: [] }),

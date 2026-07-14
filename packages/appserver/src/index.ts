@@ -6,4 +6,5 @@ export * from "./operations/index";
 export * from "./projection";
 export * from "./rpc-child";
 export * from "./server";
+export * from "./transcript-image-reader";
 export * from "./types";

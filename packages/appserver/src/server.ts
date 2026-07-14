@@ -23,6 +23,7 @@ import {
 	requiredCapability,
 	type ServerFrame,
 	type SessionId,
+	type SessionImageReadArguments,
 	type SessionRef,
 	type SessionStateResult,
 	utf8ByteLength,
@@ -65,6 +66,7 @@ import { SessionProjection } from "./projection";
 import { BunRpcChildFactory, RpcChildSupervisor } from "./rpc-child";
 import { SubagentProjection } from "./subagent-projection";
 import { asAppWireEvent, TranscriptEventTranslator } from "./transcript-events";
+import { TranscriptImageError, TranscriptImageReader } from "./transcript-image-reader";
 import type {
 	AppserverHandle,
 	AppserverOptions,
@@ -86,6 +88,7 @@ const ARCHIVED_SESSION_COMMANDS = new Set([
 	"session.archive",
 	"session.restore",
 	"session.delete",
+	"session.image.read",
 	"files.read",
 	"files.list",
 	"files.diff",
@@ -363,11 +366,12 @@ async function publishInitialOwnerExclusive(paths: OwnerPaths, record: OwnerReco
 	return handle;
 }
 export function appserverSupportedFeatures(
-	options: Pick<AppserverOptions, "operationsAuthority" | "supportedFeatures">,
+	options: Pick<AppserverOptions, "operationsAuthority" | "supportedFeatures" | "transcriptImageRoot">,
 ): string[] {
 	const unsupportedAdditiveFeatures = new Set(["host.watch", "session.watch"]);
 	const implementedFeatures = new Set<string>(["resume", "prompt.images"]);
 	const authority = options.operationsAuthority;
+	if (options.transcriptImageRoot) implementedFeatures.add("transcript.images");
 	if (authority?.catalogGet) implementedFeatures.add("catalog.metadata");
 	if (authority?.settingsRead) implementedFeatures.add("settings.metadata");
 	if (authority?.termOpen && authority.terminalInput && authority.terminalResize && authority.terminalClose)
@@ -402,6 +406,7 @@ export class LocalAppserver implements AppserverHandle {
 	#operations?: DesktopOperationDispatcher;
 	#factory: RpcChildFactory;
 	#imageUploads: ImageUploadStore;
+	#transcriptImages?: TranscriptImageReader;
 	#lockCheck: LockCheckHook;
 	#lockReclaim?: LockReclaimHook;
 	#ringSize: number;
@@ -470,6 +475,9 @@ export class LocalAppserver implements AppserverHandle {
 		this.#projectRootForProject = options.projectRootForProject;
 		this.#discovery = options.discovery ?? options.sessionAuthority ?? { list: async () => [] };
 		this.#imageUploads = new ImageUploadStore({ root: `${this.socketPath}.images` });
+		this.#transcriptImages = options.transcriptImageRoot
+			? new TranscriptImageReader({ root: options.transcriptImageRoot })
+			: undefined;
 		this.#factory = options.childFactory ?? new BunRpcChildFactory(undefined, this.#imageUploads.root);
 		this.#lockCheck = options.lockCheck ?? (() => undefined);
 		this.#lockReclaim = options.lockReclaim;
@@ -694,6 +702,7 @@ export class LocalAppserver implements AppserverHandle {
 			await this.#ownerHandle?.close();
 			this.#ownerHandle = undefined;
 		} finally {
+			this.#transcriptImages?.clear();
 			try {
 				await this.#imageUploads.stop();
 			} finally {
@@ -972,32 +981,43 @@ export class LocalAppserver implements AppserverHandle {
 					message: "session is not indexed",
 				}),
 			};
-		const idempotency =
-			ws && IMAGE_UPLOAD_COMMANDS.has(command.command) ? this.#connectionIdempotency.get(ws) : this.#idempotency;
-		if (!idempotency)
+		// Read chunks can be hundreds of KiB. They are safe to recompute, so never
+		// retain their response bodies in the completed-command cache.
+		const bypassOutcomeCache = command.command === "session.image.read";
+		const idempotency = bypassOutcomeCache
+			? undefined
+			: ws && IMAGE_UPLOAD_COMMANDS.has(command.command)
+				? this.#connectionIdempotency.get(ws)
+				: this.#idempotency;
+		if (!bypassOutcomeCache && !idempotency)
 			return {
 				frame: response(this.hostId, command, false, undefined, {
 					code: "connection_closed",
 					message: "image upload connection is closed",
 				}),
 			};
-		const check = idempotency.begin(command.commandId, command);
-		if (check.kind === "replay")
-			return {
-				frame: { ...check.outcome.frame, requestId: command.requestId } as ServerFrame,
-				unknown: check.outcome.unknown,
-			};
-		if (check.kind === "pending") {
-			const outcome = await check.outcome;
-			return { frame: { ...outcome.frame, requestId: command.requestId } as ServerFrame, unknown: outcome.unknown };
+		if (idempotency) {
+			const check = idempotency.begin(command.commandId, command);
+			if (check.kind === "replay")
+				return {
+					frame: { ...check.outcome.frame, requestId: command.requestId } as ServerFrame,
+					unknown: check.outcome.unknown,
+				};
+			if (check.kind === "pending") {
+				const outcome = await check.outcome;
+				return {
+					frame: { ...outcome.frame, requestId: command.requestId } as ServerFrame,
+					unknown: outcome.unknown,
+				};
+			}
+			if (check.kind === "conflict")
+				return {
+					frame: response(this.hostId, command, false, undefined, {
+						code: "idempotency_conflict",
+						message: "commandId was already used with another payload",
+					}),
+				};
 		}
-		if (check.kind === "conflict")
-			return {
-				frame: response(this.hostId, command, false, undefined, {
-					code: "idempotency_conflict",
-					message: "commandId was already used with another payload",
-				}),
-			};
 		const invalidArgs = argumentError(command);
 		if (invalidArgs)
 			return this.#finish(
@@ -1113,6 +1133,25 @@ export class LocalAppserver implements AppserverHandle {
 					frame: response(this.hostId, command, true, { attached: true, cursor: attachOutput.baseline }),
 					attachOutput,
 				};
+			} else if (command.command === "session.image.read") {
+				if (!ws || !this.#attached.get(ws)?.has(command.sessionId!))
+					throw new TranscriptImageError("session_not_attached", "session must be attached before reading images");
+				if (!this.#transcriptImages)
+					throw new TranscriptImageError("image_not_found", "transcript image reading is unavailable");
+				const args = decodeCommandArguments(command.command, command.args) as unknown as SessionImageReadArguments;
+				const metadata = projection!.transcriptImage(args.entryId, args.sha256);
+				if (!metadata)
+					throw new TranscriptImageError(
+						"image_not_found",
+						"transcript entry does not contain the requested image",
+					);
+				const result = await this.#transcriptImages.read(
+					metadata.sha256,
+					metadata.mimeType,
+					args.offset,
+					controller.signal,
+				);
+				outcome = { frame: response(this.hostId, command, true, result) };
 			} else if (command.command === "session.image.begin") {
 				if (!ws) throw new ImageUploadError("image_invalid", "image upload requires a live connection");
 				if (controller.signal.aborted)
@@ -1368,7 +1407,8 @@ export class LocalAppserver implements AppserverHandle {
 				!this.#closedSessions.has(command.sessionId!)
 			)
 				this.#updateStatus(command.sessionId!, "idle");
-			const imageError = error instanceof ImageUploadError ? error : undefined;
+			const imageError =
+				error instanceof ImageUploadError || error instanceof TranscriptImageError ? error : undefined;
 			const operation =
 				this.#operations &&
 				ws &&
@@ -1786,7 +1826,8 @@ export class LocalAppserver implements AppserverHandle {
 			this.#lifecycleMutations.delete(sessionId);
 		}
 	}
-	#finish(command: CommandFrame, outcome: CommandOutcome, idempotency: IdempotencyStore): CommandOutcome {
+	#finish(command: CommandFrame, outcome: CommandOutcome, idempotency: IdempotencyStore | undefined): CommandOutcome {
+		if (!idempotency) return outcome;
 		const cached: CommandOutcome = { ...outcome };
 		delete cached.attachOutput;
 		idempotency.complete(command.commandId, command, cached);

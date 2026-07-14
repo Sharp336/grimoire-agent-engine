@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { MAX_ARRAY_ITEMS, parseBounded } from "@oh-my-pi/app-wire";
 import {
 	boundedRpcSessionEvent,
@@ -208,6 +209,42 @@ describe("RPC durable session-entry frames", () => {
 		expect(projected.inlineImageDataOmitted).toBe(true);
 		expect(imagePayloads(projected)).toEqual(["", ""]);
 		expect(imagePayloads(durable)).toEqual([imageData, imageData]);
+	});
+
+	test("managed image omission carries a verified blob digest while stock RPC stays untouched", () => {
+		const bytes = Buffer.concat([
+			Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+			Buffer.alloc(1_024, 0x4a),
+		]);
+		const data = bytes.toString("base64");
+		const digest = createHash("sha256").update(bytes).digest("hex");
+		const frame = {
+			type: "session_entry",
+			entry: {
+				type: "message",
+				id: "digest-entry",
+				parentId: null,
+				timestamp: "2026-07-14T12:00:00.000Z",
+				message: {
+					role: "user",
+					content: [
+						{
+							type: "image",
+							mimeType: "image/png",
+							data,
+							appImageSha256: "f".repeat(64),
+						},
+					],
+				},
+			},
+		};
+		expect(rpcTransportFrame(frame, false)).toBe(frame);
+		const projected = rpcTransportFrame(frame, true) as Record<string, unknown>;
+		const entry = projected.entry as Record<string, unknown>;
+		const message = entry.message as Record<string, unknown>;
+		const image = (message.content as Array<Record<string, unknown>>)[0]!;
+		expect(image).toMatchObject({ type: "image", mimeType: "image/png", data: "", appImageSha256: digest });
+		expect((frame.entry.message.content[0] as Record<string, unknown>).appImageSha256 as string).toBe("f".repeat(64));
 	});
 
 	test("appserver transport also bounds image-bearing lifecycle events", () => {

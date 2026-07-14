@@ -11,6 +11,8 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import {
 	MAX_ARRAY_ITEMS,
 	MAX_INPUT_BYTES,
@@ -19,6 +21,8 @@ import {
 	MAX_MAP_KEYS,
 	MAX_STRING_BYTES,
 	parseBounded,
+	TRANSCRIPT_IMAGE_MAX_BYTES,
+	TRANSCRIPT_IMAGE_MIME_TYPES,
 	utf8ByteLength,
 } from "@oh-my-pi/app-wire";
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
@@ -39,6 +43,7 @@ import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { BLOB_EXTERNALIZE_THRESHOLD } from "../../session/session-persistence";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import type { EventBus } from "../../utils/event-bus";
@@ -130,9 +135,30 @@ export type RpcTransportFrame<T extends object = object> = T & {
 	transportOmissionReasons?: string[];
 };
 
+const RPC_TRANSCRIPT_IMAGE_DIGEST_KEY = "appImageSha256";
+
 interface RpcImageProjection {
 	value: unknown;
 	omitted: boolean;
+}
+
+function transcriptImageDigest(data: string, mimeType: unknown): string | undefined {
+	if (
+		data.length < BLOB_EXTERNALIZE_THRESHOLD ||
+		data.length > Math.ceil(TRANSCRIPT_IMAGE_MAX_BYTES / 3) * 4 ||
+		!(TRANSCRIPT_IMAGE_MIME_TYPES as readonly unknown[]).includes(mimeType) ||
+		data.length % 4 !== 0 ||
+		!/^[A-Za-z0-9+/]*={0,2}$/u.test(data)
+	)
+		return undefined;
+	const decoded = Buffer.from(data, "base64");
+	if (
+		decoded.byteLength === 0 ||
+		decoded.byteLength > TRANSCRIPT_IMAGE_MAX_BYTES ||
+		decoded.toString("base64") !== data
+	)
+		return undefined;
+	return createHash("sha256").update(decoded).digest("hex");
 }
 
 function omitInlineImageData(value: unknown): RpcImageProjection {
@@ -150,12 +176,23 @@ function omitInlineImageData(value: unknown): RpcImageProjection {
 	}
 	if (!isRecord(value)) return { value, omitted: false };
 	if (value.type === "image" && typeof value.data === "string" && value.data.length > 0) {
-		return { value: { ...value, data: "" }, omitted: true };
+		const projected: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(value)) {
+			if (key === RPC_TRANSCRIPT_IMAGE_DIGEST_KEY) continue;
+			projected[key] = key === "data" ? "" : item;
+		}
+		const digest = transcriptImageDigest(value.data, value.mimeType);
+		if (digest) projected[RPC_TRANSCRIPT_IMAGE_DIGEST_KEY] = digest;
+		return { value: projected, omitted: true };
 	}
 
 	let omitted = false;
 	const projected: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) {
+		if (key === RPC_TRANSCRIPT_IMAGE_DIGEST_KEY) {
+			omitted = true;
+			continue;
+		}
 		const result = omitInlineImageData(item);
 		omitted ||= result.omitted;
 		projected[key] = result.value;
@@ -174,6 +211,7 @@ const RPC_TRANSPORT_OMITTED = "[transport data omitted]";
 const RPC_TRANSPORT_TRUNCATED = "… [transport data truncated]";
 const RPC_TRANSPORT_MARKER_KEYS = new Set([
 	"inlineImageDataOmitted",
+	RPC_TRANSCRIPT_IMAGE_DIGEST_KEY,
 	"transportDataOmitted",
 	"transportOmissionReasons",
 ]);
@@ -329,8 +367,12 @@ function projectRpcTransportValue(value: unknown, state: RpcProjectionState, dep
 		if (source.type === "image" && typeof source.data === "string" && source.data.length > 0) {
 			state.omissions.add("inline_image_data");
 			const image: Record<string, unknown> = {};
-			for (const [key, item] of Object.entries(source))
+			for (const [key, item] of Object.entries(source)) {
+				if (key === RPC_TRANSCRIPT_IMAGE_DIGEST_KEY) continue;
 				image[key] = key === "data" ? "" : projectRpcTransportValue(item, state, depth + 1, `${path}.${key}`);
+			}
+			const digest = transcriptImageDigest(source.data, source.mimeType);
+			if (digest) image[RPC_TRANSCRIPT_IMAGE_DIGEST_KEY] = digest;
 			return image;
 		}
 
