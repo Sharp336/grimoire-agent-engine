@@ -10,7 +10,7 @@ import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import type { FileEntry } from "../../session/session-entries";
+import type { FileEntry, SessionEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type {
 	AgentProgress,
@@ -32,6 +32,9 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "retry" }
+	| { id?: string; type: "pause" }
+	| { id?: string; type: "resume" }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -42,15 +45,22 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
-
-	// Model
-	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_model";
+			selector?: string;
+			role?: string;
+			provider?: string;
+			modelId?: string;
+			persist?: boolean;
+	  }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
 
 	// Thinking
-	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel | "auto" }
 	| { id?: string; type: "cycle_thinking_level" }
+	| { id?: string; type: "set_fast"; enabled: boolean }
 
 	// Queue modes
 	| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
@@ -89,17 +99,19 @@ export type RpcCommand =
 // ============================================================================
 // RPC State
 // ============================================================================
-
 export interface RpcSessionState {
 	model?: Model;
-	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
+	thinkingLevel: ThinkingLevel | "auto" | undefined;
+	fast: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
+	isPaused?: boolean;
 	followUpMode: "all" | "one-at-a-time";
 	interruptMode: "immediate" | "wait";
 	sessionFile?: string;
 	sessionId: string;
+	queuedMessages: { steering: string[]; followUp: string[] };
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
 	messageCount: number;
@@ -126,17 +138,35 @@ export interface RpcAvailableCommandsUpdateFrame {
 	commands: RpcAvailableSlashCommand[];
 }
 
-export interface RpcPromptResultFrame {
-	type: "prompt_result";
-	id?: string;
-	agentInvoked: boolean;
-}
+export type RpcPromptResultFrame =
+	| {
+			type: "prompt_result";
+			id?: string;
+			agentInvoked: boolean;
+			error?: never;
+	  }
+	| {
+			type: "prompt_result";
+			id?: string;
+			agentInvoked?: never;
+			error: string;
+	  };
 
 export interface RpcHandoffResult {
 	savedPath?: string;
 }
 
 export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
+export type RpcSubagentStatus = AgentProgress["status"] | "idle" | "parked";
+export interface RpcSubagentLifecyclePayload extends Omit<SubagentLifecyclePayload, "status"> {
+	status: RpcSubagentStatus;
+	task?: string;
+	lastUpdate?: number;
+	resumable?: boolean;
+}
+export interface RpcSubagentProgressPayload extends SubagentProgressPayload {
+	resumable?: boolean;
+}
 
 export interface RpcSubagentSnapshot {
 	id: string;
@@ -144,13 +174,14 @@ export interface RpcSubagentSnapshot {
 	agent: string;
 	agentSource: AgentProgress["agentSource"];
 	description?: string;
-	status: AgentProgress["status"];
+	status: RpcSubagentStatus;
 	task?: string;
 	assignment?: string;
 	sessionFile?: string;
 	lastUpdate: number;
 	progress?: AgentProgress;
 	parentToolCallId?: string;
+	resumable?: boolean;
 }
 
 export interface RpcSubagentMessagesResult {
@@ -174,6 +205,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
+	| { id?: string; type: "response"; command: "retry"; success: true; data: { retried: boolean } }
+	| { id?: string; type: "response"; command: "pause"; success: true; data: { paused: boolean; changed: boolean } }
+	| { id?: string; type: "response"; command: "resume"; success: true; data: { paused: boolean; resumed: boolean } }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 
 	// State
@@ -235,6 +269,7 @@ export type RpcResponse =
 
 	// Thinking
 	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }
+	| { id?: string; type: "response"; command: "set_fast"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -302,14 +337,19 @@ export type RpcResponse =
 // Subagent Events (stdout)
 // ============================================================================
 
+export interface RpcSessionEntryFrame {
+	type: "session_entry";
+	entry: SessionEntry;
+}
+
 export interface RpcSubagentLifecycleFrame {
 	type: "subagent_lifecycle";
-	payload: SubagentLifecyclePayload;
+	payload: RpcSubagentLifecyclePayload;
 }
 
 export interface RpcSubagentProgressFrame {
 	type: "subagent_progress";
-	payload: SubagentProgressPayload;
+	payload: RpcSubagentProgressPayload;
 }
 
 export interface RpcSubagentEventFrame {
@@ -319,7 +359,7 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSessionEntryFrame | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

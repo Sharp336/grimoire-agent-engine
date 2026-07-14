@@ -1,0 +1,18 @@
+{
+  "name": "@oh-my-pi/appserver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent local omp appserver over Unix WebSocket",
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": { ".": { "types": "./src/index.ts", "import": "./src/index.ts" }, "./*": { "types": "./src/*.ts", "import": "./src/*.ts" } },
+  "scripts": {
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "test": "bun test test/*.test.ts"
+  },
+  "dependencies": { "@oh-my-pi/app-wire": "workspace:*", "@oh-my-pi/pi-natives": "catalog:" },
+  "engines": { "bun": ">=1.3.14" }
+}

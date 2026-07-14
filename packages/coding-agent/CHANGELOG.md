@@ -88,6 +88,32 @@
 - Fixed Pyright LSP semantic requests hanging during startup.
 - Fixed Codex web search requests for GPT-5.6 Responses-Lite models.
 - Fixed custom model/provider configuration discovery to correctly load ~/.omp/agent/models.yaml when models.yml is absent.
+### Added
+
+- Added desktop appserver controls for session model, thinking level, and fast mode, with live settings, model-role, and task-agent catalog metadata.
+- Added desktop session archive, restore, and delete backed by private profile metadata and crash-recoverable same-filesystem tombstones.
+
+### Changed
+
+- Appserver now admits one unresolved `session.prompt` per session and returns `session_busy` before a second prompt reaches the RPC child; active clients can use `session.steer` or `session.followUp` to add work to the running agent.
+- Bounded completed appserver command outcomes to a five-minute replay window and a 1,024-entry least-recently-used cache. Replays do not extend expiry, and pending commands are never evicted.
+- Session-scoped Bash and Python execution now read output limits from the active session settings instead of process-global defaults.
+
+### Fixed
+
+- Fixed image-bearing appserver sessions losing their RPC child when inline image payloads made a lifecycle or durable-entry notification exceed the one MiB line ceiling. Managed children now omit only redundant image bytes from their internal stdout notifications and mark the frame, while the full images remain unchanged in OMP's session and model context.
+- Fixed large appserver turns losing their terminal event when the redundant aggregate `agent_end` exceeded the RPC child's line or bounded-JSON structural limits. RPC now keeps a valid newest-message suffix with the original count and terminal status after durable entries; reader failures reap their child; crashes remain closed until child exit, then become restartable without a state probe; confirmed close settles transient state, waits for child exit, and is idempotent; and the desktop catalog exposes that close command.
+- Fixed the desktop catalog omitting implemented session creation and lifecycle commands, which caused catalog-driven clients to hide working create, rename, archive, restore, and delete controls.
+- Fixed RPC mode exiting on process termination, extension shutdown, or stdin EOF without disposing its session, which left a fresh writer lock behind and caused appserver lifecycle operations to report `session_locked` after quiescing an idle child.
+- Fixed appserver sessions briefly returning to idle at intermediate turn boundaries during tool-driven runs; the active prompt now remains owned until final `agent.end`, a correlated local-only result or failure, successful cancellation, closure, or child termination.
+- Fixed RPC prompt failures emitting a second response with an already-settled request id, which caused strict child supervisors to terminate otherwise healthy sessions. Late failures now use an exact-ID asynchronous `prompt_result` frame, which appserver surfaces as a sanitized `turn.error` without allowing stale results to settle newer work.
+- Fixed `session.attach` acknowledgement and replay races by preparing output before success, catching up from its baseline, rebuilding cached delivery after revalidating session existence, and bounding large snapshots and replays so desktop clients remain connected.
+- Fixed compiled appserver welcome frames reporting placeholder `local` identities instead of the owning OMP and appserver versions and build kinds.
+- Fixed active or locked sessions disappearing from observational session lists while keeping writable resume selection lock-safe.
+- Fixed one malformed or crash-truncated transcript entry hiding an otherwise valid session from appserver discovery.
+- Fixed explicit session rewrites and stale-lock takeover failures retaining lock ownership after the write or cleanup failed.
+- Fixed appserver discovery counting nested advisor and subagent transcripts as main sessions.
+- Fixed desktop session lifecycle races by fencing mutations before asynchronous work, refusing active or queued sessions, closing owned terminals and RPC children before removal, and keeping host-wide session indexes in sync with external transcript changes.
 
 ## [16.5.0] - 2026-07-13
 

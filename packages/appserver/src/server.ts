@@ -1,0 +1,2261 @@
+import { createHash, randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import {
+	COMMAND_DESCRIPTORS,
+	type CommandFrame,
+	type ConfirmationChallenge,
+	type ConfirmFrame,
+	decodeClientFrame,
+	decodeCursor,
+	decodeSessionPromptArguments,
+	decodeSessionStateResult,
+	type HelloFrame,
+	type HostId,
+	parseBounded,
+	projectId,
+	type ResultFrame,
+	requiredCapability,
+	type ServerFrame,
+	type SessionId,
+	type SessionRef,
+	type SessionStateResult,
+	utf8ByteLength,
+} from "@oh-my-pi/app-wire";
+import { AdvisoryLock, Process as NativeProcess } from "@oh-my-pi/pi-natives";
+import { completeAttachOutput, prepareAttachOutput } from "./attach-output";
+import { AppserverCommandHandlers } from "./command-handler";
+import {
+	compareSessionRecords,
+	fallbackSessionTitle,
+	projectNameFromCwd,
+	SessionEntryProjector,
+	stableProjectId,
+} from "./discovery";
+import { IdempotencyStore } from "./idempotency";
+import { createEpoch, createHostId, defaultSocketPath, loadPersistentHostId, unixSocketActive } from "./identity";
+import {
+	commandFeature,
+	DesktopOperationDispatcher,
+	type OperationContext,
+	operationCapabilities,
+} from "./operations/dispatcher";
+import {
+	ensureSecureSocketDirectory,
+	markerIdentity,
+	type OwnerPaths,
+	type OwnerRecord,
+	ownerPaths,
+	readOwnerMarkerSnapshot,
+	readPublicTarget,
+	readStrictOwner,
+	type StrictOwnerRead,
+	sameIdentity,
+	sameOwnerMarkerSnapshot,
+	unlinkIfExists,
+} from "./ownership";
+import { SessionProjection } from "./projection";
+import { BunRpcChildFactory, RpcChildSupervisor } from "./rpc-child";
+import { SubagentProjection } from "./subagent-projection";
+import { asAppWireEvent, TranscriptEventTranslator } from "./transcript-events";
+import type {
+	AppserverHandle,
+	AppserverOptions,
+	ChildHandle,
+	Clock,
+	CommandOutcome,
+	ConnectionTransport,
+	LockCheckHook,
+	LockReclaimHook,
+	RpcChildFactory,
+	SessionAuthority,
+	SessionDiscovery,
+	SessionRecord,
+} from "./types";
+
+const clock: Clock = { now: () => new Date() };
+const ARCHIVED_SESSION_COMMANDS = new Set([
+	"session.attach",
+	"session.archive",
+	"session.restore",
+	"session.delete",
+	"files.read",
+	"files.list",
+	"files.diff",
+	"review.read",
+]);
+const SESSION_LIFECYCLE_COMMANDS = new Set(["session.close", "session.archive", "session.restore", "session.delete"]);
+const DIRECT_SESSION_RPC_COMMANDS: ReadonlySet<string> = new Set([
+	"session.retry",
+	"session.pause",
+	"session.resume",
+	"session.compact",
+	"session.rename",
+	"session.model.set",
+	"session.thinking.set",
+	"session.fast.set",
+]);
+const SESSION_CANCEL_COMMAND = "session.cancel";
+export const MALFORMED_OWNER_RECOVERY_AFTER_MS = 2_000;
+
+function queuedLifecycleWork(liveState: Record<string, unknown> | undefined): boolean {
+	if (!liveState) return false;
+	if (typeof liveState.queuedMessageCount === "number" && liveState.queuedMessageCount > 0) return true;
+	const queued = liveState.queuedMessages;
+	if (!queued || typeof queued !== "object" || Array.isArray(queued)) return false;
+	return Object.values(queued).some(value => Array.isArray(value) && value.length > 0);
+}
+function response(
+	hostId: HostId,
+	command: CommandFrame,
+	ok: boolean,
+	result?: unknown,
+	error?: { code: string; message: string; details?: Record<string, unknown> },
+): ResultFrame {
+	return {
+		v: "omp-app/1",
+		type: "response",
+		requestId: command.requestId,
+		commandId: command.commandId,
+		command: command.command,
+		hostId,
+		sessionId: command.sessionId,
+		ok,
+		...(ok ? { result } : { error }),
+	} as ResultFrame;
+}
+function argumentError(command: CommandFrame): string | undefined {
+	const args = command.args;
+	if (!args || typeof args !== "object" || Array.isArray(args)) return "args must be an object";
+	const keys = Object.keys(args);
+	if (command.command === "session.prompt") {
+		try {
+			decodeSessionPromptArguments(args);
+			return undefined;
+		} catch {
+			return "prompt arguments are invalid";
+		}
+	}
+	if (command.command === "session.attach") {
+		if (keys.length === 0) return undefined;
+		if (keys.length === 1 && keys[0] === "cursor") {
+			try {
+				decodeCursor(args.cursor);
+				return undefined;
+			} catch {
+				return "attach cursor is invalid";
+			}
+		}
+		return "attach accepts only an optional cursor";
+	}
+	if (command.command === "session.create") {
+		if (keys.some(key => key !== "projectId" && key !== "title")) return "create accepts only projectId and title";
+		if (typeof args.projectId !== "string" || args.projectId.length === 0 || utf8ByteLength(args.projectId) > 256)
+			return "create projectId must be a bounded non-empty UTF-8 string";
+		if (
+			args.title !== undefined &&
+			(typeof args.title !== "string" || args.title.length === 0 || utf8ByteLength(args.title) > 512)
+		)
+			return "create title must be a bounded non-empty UTF-8 string";
+		return undefined;
+	}
+	// Operation argument shapes are validated by decodeCommand and the typed
+	// authority. Host/session list remain explicitly empty for compatibility
+	// with their legacy broad argument decoders.
+	if (command.command !== "host.list" && command.command !== "session.list") return undefined;
+	if (keys.length !== 0) return "command does not accept args";
+	return undefined;
+}
+function safeSessionState(value: unknown): SessionStateResult {
+	const raw =
+		value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+	if (!raw) throw new Error("rpc state is not an object");
+	const model =
+		raw.model && typeof raw.model === "object" && !Array.isArray(raw.model)
+			? (raw.model as Record<string, unknown>)
+			: undefined;
+	const context =
+		raw.contextUsage && typeof raw.contextUsage === "object" && !Array.isArray(raw.contextUsage)
+			? (raw.contextUsage as Record<string, unknown>)
+			: undefined;
+	const queued =
+		raw.queuedMessages && typeof raw.queuedMessages === "object" && !Array.isArray(raw.queuedMessages)
+			? (raw.queuedMessages as Record<string, unknown>)
+			: undefined;
+	const state = {
+		isStreaming: raw.isStreaming,
+		isCompacting: raw.isCompacting,
+		isPaused: raw.isPaused === true,
+		messageCount: raw.messageCount,
+		queuedMessageCount: raw.queuedMessageCount,
+		steeringMode: raw.steeringMode,
+		followUpMode: raw.followUpMode,
+		interruptMode: raw.interruptMode,
+		...(model
+			? {
+					model: {
+						id: model.id,
+						provider: model.provider,
+						...(typeof model.name === "string" ? { displayName: model.name } : {}),
+						...(typeof model.selector === "string"
+							? { selector: model.selector }
+							: typeof raw.modelSelector === "string"
+								? { selector: raw.modelSelector }
+								: {}),
+						...(typeof model.role === "string"
+							? { role: model.role }
+							: typeof raw.modelRole === "string"
+								? { role: raw.modelRole }
+								: {}),
+					},
+				}
+			: {}),
+		...(raw.thinkingLevel === undefined ? {} : { thinking: raw.thinkingLevel }),
+		...(typeof raw.fast === "boolean" ? { fast: raw.fast } : {}),
+		...(raw.sessionName === undefined ? {} : { sessionName: raw.sessionName }),
+		...(context
+			? { contextUsage: { used: context.used ?? context.tokens, limit: context.limit ?? context.contextWindow } }
+			: {}),
+		...(queued ? { queuedMessages: { steering: queued.steering, followUp: queued.followUp } } : {}),
+	};
+	return decodeSessionStateResult(state);
+}
+function childBoolean(value: unknown, key: string): boolean {
+	const record =
+		value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+	if (!record || typeof record[key] !== "boolean") throw new Error("rpc child result is malformed");
+	return record[key] as boolean;
+}
+function childAgentInvoked(value: unknown): boolean | undefined {
+	const record =
+		value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+	const data =
+		record?.data && typeof record.data === "object" && !Array.isArray(record.data)
+			? (record.data as Record<string, unknown>)
+			: undefined;
+	return typeof data?.agentInvoked === "boolean" ? data.agentInvoked : undefined;
+}
+type AppWs = ConnectionTransport;
+type LocalWs = Bun.ServerWebSocket<ServerWebSocketData>;
+interface RunIdentity {
+	paths: OwnerPaths;
+	record: OwnerRecord;
+	marker: { device: number; inode: number };
+}
+interface SessionLifecycleFailure {
+	code: string;
+	message: string;
+	details?: Record<string, unknown>;
+}
+function isCommittedLifecycleFailure(error: unknown): boolean {
+	if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+	const candidate = error as Record<string, unknown>;
+	return (
+		candidate.committed === true &&
+		(candidate.operation === "archive" || candidate.operation === "restore" || candidate.operation === "delete")
+	);
+}
+interface PromptLifecycle {
+	requestId: string;
+	internalId?: string;
+}
+function isErrno(error: unknown, code: string): boolean {
+	return (error as NodeJS.ErrnoException).code === code;
+}
+function processStartMarker(pid: number): string | undefined {
+	try {
+		const nativeProcess = NativeProcess.fromPid(pid);
+		if (!nativeProcess) return undefined;
+		const marker = nativeProcess.startMarker;
+		return typeof marker === "string" && marker.length > 0 ? marker : undefined;
+	} catch {
+		return undefined;
+	}
+}
+function processMarkerSource(marker: string): string | undefined {
+	const separator = marker.indexOf(":");
+	return separator > 0 ? marker.slice(0, separator) : undefined;
+}
+function ownerProcessIsAlive(record: Pick<OwnerRecord, "pid" | "processStartMarker">): boolean {
+	try {
+		const nativeProcess = NativeProcess.fromPid(record.pid);
+		if (nativeProcess) {
+			const observedMarker = nativeProcess.startMarker;
+			const recordedSource = processMarkerSource(record.processStartMarker);
+			const observedSource = processMarkerSource(observedMarker);
+			// A comparable native marker mismatch definitively proves PID reuse.
+			// Incompatible marker representations are observation ambiguity, not
+			// evidence that a live owner is stale.
+			if (recordedSource && recordedSource === observedSource) return observedMarker === record.processStartMarker;
+		}
+		process.kill(record.pid, 0);
+		// The PID exists but its native creation marker is unavailable. Preserve
+		// the owner rather than guessing that an active process is stale.
+		return true;
+	} catch (error) {
+		return !isErrno(error, "ESRCH");
+	}
+}
+async function statIdentity(path: string): Promise<{ device: number; inode: number } | undefined> {
+	try {
+		const info = await fs.lstat(path);
+		return { device: Number(info.dev), inode: Number(info.ino) };
+	} catch (error) {
+		if (isErrno(error, "ENOENT")) return undefined;
+		throw error;
+	}
+}
+async function publishSymlink(paths: OwnerPaths): Promise<void> {
+	await fs.symlink(paths.backingName, paths.publicPath);
+	const published = await readPublicTarget(paths.publicPath);
+	if (published.target !== paths.backingName)
+		throw new Error("appserver public symlink target changed during publish");
+}
+async function publishOwnerAtomic(
+	paths: OwnerPaths,
+	record: OwnerRecord,
+	claimed: { device: number; inode: number },
+): Promise<{ device: number; inode: number }> {
+	const temp = path.join(paths.directory, `.appserver-owner-${record.ownerId}.tmp`);
+	const handle = await fs.open(temp, "wx", 0o600);
+	try {
+		await handle.write(`${JSON.stringify(record)}\n`, 0);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	try {
+		const current = await statIdentity(paths.ownerPath);
+		if (!current || current.device !== claimed.device || current.inode !== claimed.inode)
+			throw new Error("appserver owner marker changed during startup");
+		await fs.rename(temp, paths.ownerPath);
+	} catch (error) {
+		await unlinkIfExists(temp);
+		throw error;
+	}
+	const final = await statIdentity(paths.ownerPath);
+	if (!final) throw new Error("appserver owner marker disappeared during startup");
+	return final;
+}
+async function publishInitialOwnerExclusive(paths: OwnerPaths, record: OwnerRecord): Promise<fs.FileHandle> {
+	const temp = path.join(paths.directory, `.appserver-owner-${record.ownerId}.claim.tmp`);
+	const handle = await fs.open(temp, "wx", 0o600);
+	try {
+		await handle.write(`${JSON.stringify(record)}\n`, 0);
+		await handle.sync();
+		// A hard link publishes the already-complete inode and fails with EEXIST
+		// rather than replacing a concurrent owner.
+		await fs.link(temp, paths.ownerPath);
+	} catch (error) {
+		await handle.close();
+		await unlinkIfExists(temp);
+		throw error;
+	}
+	await unlinkIfExists(temp);
+	return handle;
+}
+export function appserverSupportedFeatures(
+	options: Pick<AppserverOptions, "operationsAuthority" | "supportedFeatures">,
+): string[] {
+	const unsupportedAdditiveFeatures = new Set(["host.watch", "session.watch"]);
+	const implementedFeatures = new Set<string>(["resume"]);
+	const authority = options.operationsAuthority;
+	if (authority?.catalogGet) implementedFeatures.add("catalog.metadata");
+	if (authority?.settingsRead) implementedFeatures.add("settings.metadata");
+	if (authority?.termOpen && authority.terminalInput && authority.terminalResize && authority.terminalClose)
+		implementedFeatures.add("terminal.io");
+	if (authority?.filesList) implementedFeatures.add("files.list");
+	if (authority?.filesDiff) implementedFeatures.add("files.diff");
+	if (authority?.previewLaunch && authority.previewState && authority.previewNavigate && authority.previewCapture)
+		implementedFeatures.add("preview.control");
+	return [...(options.supportedFeatures ?? implementedFeatures)].filter(
+		feature => implementedFeatures.has(feature) && !unsupportedAdditiveFeatures.has(feature),
+	);
+}
+export function appserverSupportedCapabilities(
+	options: Pick<AppserverOptions, "operationsAuthority" | "sessionAuthority" | "supportedCapabilities">,
+): string[] {
+	const implemented = new Set([
+		"sessions.read",
+		"sessions.prompt",
+		"sessions.control",
+		...operationCapabilities(options.operationsAuthority),
+	]);
+	if (options.sessionAuthority) implemented.add("sessions.manage");
+	return [...(options.supportedCapabilities ?? implemented)];
+}
+export class LocalAppserver implements AppserverHandle {
+	hostId: HostId;
+	readonly epoch: string;
+	readonly socketPath: string;
+	#clock: Clock;
+	#discovery: SessionDiscovery;
+	#authority?: SessionAuthority;
+	#operations?: DesktopOperationDispatcher;
+	#factory: RpcChildFactory;
+	#lockCheck: LockCheckHook;
+	#lockReclaim?: LockReclaimHook;
+	#ringSize: number;
+	#lifecycleQuiesceTimeoutMs: number;
+	#handlers = new AppserverCommandHandlers();
+	#challenges = new Map<string, { command: CommandFrame; ws: AppWs; expiresAt: number; hash: string }>();
+	#records = new Map<SessionId, SessionRecord>();
+	#createdPending = new Map<SessionId, { record: SessionRecord; refreshesRemaining: number }>();
+	#projections = new Map<SessionId, SessionProjection>();
+	#supervisors = new Map<SessionId, RpcChildSupervisor>();
+	#promptLifecycles = new Map<SessionId, PromptLifecycle>();
+	#stateRefreshGenerations = new Map<SessionId, number>();
+	#sessionRefreshGeneration = 0;
+	#acceptedSessionRefreshGeneration = 0;
+	#sessionRefreshApplyTail: Promise<void> = Promise.resolve();
+	#transcripts = new Map<SessionId, TranscriptEventTranslator>();
+	#subagents = new Map<SessionId, SubagentProjection>();
+	#startPromises = new Map<SessionId, Promise<RpcChildSupervisor>>();
+	#lifecycleMutations = new Set<SessionId>();
+	#inflightSessionOperations = new Map<SessionId, number>();
+	#closedSessions = new Set<SessionId>();
+	#idempotency = new IdempotencyStore();
+	#server?: Bun.Server<ServerWebSocketData>;
+	#clients = new Set<AppWs>();
+	#hello = new Set<AppWs>();
+	#clientCapabilities = new Map<AppWs, Set<string>>();
+	#attached = new Map<AppWs, Set<SessionId>>();
+	#deviceIds = new Map<AppWs, string>();
+	#abortControllers = new Map<AppWs, Set<AbortController>>();
+	#outboundTails = new Map<AppWs, Promise<void>>();
+	#localTransports = new Map<LocalWs, AppWs>();
+	#started = false;
+	#stopping = false;
+	#hostProvided: boolean;
+	#ownerLock = false;
+	#ownerId?: string;
+	#ownerPaths?: OwnerPaths;
+	#ownerHandle?: fs.FileHandle;
+	#ownershipGuard?: AdvisoryLock;
+	#runIdentity?: RunIdentity;
+	#partialBacking?: { path: string; identity: { device: number; inode: number } };
+	#partialMarker?: { device: number; inode: number };
+	#ompVersion: string;
+	#ompBuild: string;
+	#appserverVersion: string;
+	#appserverBuild: string;
+	#supportedFeatures: Set<string>;
+	#supportedCapabilities: Set<string>;
+	#projectRootForProject?: AppserverOptions["projectRootForProject"];
+	constructor(options: AppserverOptions = {}) {
+		this.#hostProvided = Boolean(options.hostId);
+		this.hostId = options.hostId ?? createHostId();
+		this.epoch = createEpoch(options.epoch);
+		this.socketPath = options.socketPath ?? defaultSocketPath();
+		this.#clock = options.clock ?? clock;
+		this.#authority = options.sessionAuthority;
+		this.#operations = options.operationsAuthority
+			? new DesktopOperationDispatcher(options.operationsAuthority, undefined, (frame, owner) => {
+					for (const ws of this.#clients)
+						if (ws.connectionId === owner.connectionId && ws.deviceId === owner.deviceId)
+							void this.#sendFrame(ws, frame as ServerFrame);
+				})
+			: undefined;
+		this.#projectRootForProject = options.projectRootForProject;
+		this.#discovery = options.discovery ?? options.sessionAuthority ?? { list: async () => [] };
+		this.#factory = options.childFactory ?? new BunRpcChildFactory();
+		this.#lockCheck = options.lockCheck ?? (() => undefined);
+		this.#lockReclaim = options.lockReclaim;
+		this.#ringSize = options.ringSize ?? 256;
+		this.#lifecycleQuiesceTimeoutMs = options.lifecycleQuiesceTimeoutMs ?? 2_000;
+		if (
+			!Number.isSafeInteger(this.#lifecycleQuiesceTimeoutMs) ||
+			this.#lifecycleQuiesceTimeoutMs <= 0 ||
+			this.#lifecycleQuiesceTimeoutMs > 60_000
+		)
+			throw new Error("lifecycleQuiesceTimeoutMs must be between 1 and 60000");
+		this.#ompVersion = options.ompVersion ?? "local";
+		this.#ompBuild = options.ompBuild ?? "local";
+		this.#appserverVersion = options.appserverVersion ?? "0.1.0";
+		this.#appserverBuild = options.appserverBuild ?? "local";
+		this.#supportedFeatures = new Set(appserverSupportedFeatures(options));
+		const requested = appserverSupportedCapabilities(options);
+		const implemented = new Set([
+			"sessions.read",
+			"sessions.prompt",
+			"sessions.control",
+			...operationCapabilities(options.operationsAuthority),
+		]);
+		if (this.#authority) implemented.add("sessions.manage");
+		if (requested.some(capability => !implemented.has(capability)))
+			throw new Error("unsupported capability has no handler");
+		this.#supportedCapabilities = new Set(requested);
+		this.#handlers.register("session.create", command => this.#handleCreate(command));
+		this.#handlers.register("session.close", command => this.#handleClose(command));
+		this.#handlers.register("session.archive", command => this.#handleArchive(command));
+		this.#handlers.register("session.restore", command => this.#handleRestore(command));
+		this.#handlers.register("session.delete", command => this.#handleDelete(command));
+	}
+	hasDesktopSessionCommandHandler(command: string): boolean {
+		return (
+			this.#handlers.has(command) || DIRECT_SESSION_RPC_COMMANDS.has(command) || command === SESSION_CANCEL_COMMAND
+		);
+	}
+	async start(): Promise<void> {
+		if (this.#started) return;
+		this.#stopping = false;
+		this.#closedSessions.clear();
+		await ensureSecureSocketDirectory(this.socketPath);
+		const ownershipGuard = AdvisoryLock.tryAcquire(`${this.socketPath}.guard`);
+		if (!ownershipGuard) throw new Error(`appserver socket ownership guard is busy: ${this.socketPath}`);
+		this.#ownershipGuard = ownershipGuard;
+		try {
+			const ownerId = randomUUID();
+			const paths = ownerPaths(this.socketPath, ownerId);
+			const currentProcessStartMarker = processStartMarker(process.pid);
+			if (!currentProcessStartMarker) throw new Error("unable to determine appserver process start marker");
+			const initial: OwnerRecord = {
+				version: 3,
+				ownerId,
+				pid: process.pid,
+				processStartMarker: currentProcessStartMarker,
+				backingName: paths.backingName,
+				device: 0,
+				inode: 0,
+			};
+			let ownerHandle: fs.FileHandle | undefined;
+			for (let attempt = 0; attempt < 4 && !ownerHandle; attempt++) {
+				try {
+					ownerHandle = await publishInitialOwnerExclusive(paths, initial);
+				} catch (error) {
+					if (!isErrno(error, "EEXIST")) throw error;
+					let existing: StrictOwnerRead;
+					try {
+						existing = await readStrictOwner(paths.ownerPath);
+					} catch {
+						await this.#recoverMalformedOwner(paths.ownerPath);
+						continue;
+					}
+					if (ownerProcessIsAlive(existing.record))
+						throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+					await this.#recoverStale(
+						ownerPaths(this.socketPath, existing.record.ownerId),
+						existing.record,
+						existing.stat,
+					);
+				}
+			}
+			if (!ownerHandle) throw new Error(`appserver socket ownership changed repeatedly: ${this.socketPath}`);
+			this.#ownerHandle = ownerHandle;
+			this.#ownerLock = true;
+			this.#ownerId = ownerId;
+			this.#ownerPaths = paths;
+			if (!this.#hostProvided) this.hostId = await loadPersistentHostId();
+			this.#records.clear();
+			this.#projections.clear();
+			await this.#loadSessions();
+			await this.#preparePublic(paths);
+			this.#server = Bun.serve<ServerWebSocketData>({
+				unix: paths.backingPath,
+				fetch: (request, server) => this.#fetch(request, server),
+				websocket: {
+					maxPayloadLength: 1024 * 1024,
+					backpressureLimit: 1024 * 1024,
+					closeOnBackpressureLimit: true,
+					open: ws => {
+						const transport = this.#createLocalTransport(ws);
+						this.#localTransports.set(ws, transport);
+						this.#clients.add(transport);
+						this.#clientCapabilities.set(transport, new Set());
+						this.#attached.set(transport, new Set());
+						this.#deviceIds.set(transport, transport.deviceId);
+						this.#abortControllers.set(transport, new Set());
+					},
+					message: (ws, message) => {
+						const transport = this.#localTransports.get(ws);
+						if (transport) void this.#message(transport, message);
+					},
+					close: ws => {
+						const transport = this.#localTransports.get(ws);
+						if (transport) void this.#disconnectClient(transport);
+					},
+				},
+			});
+			await fs.chmod(paths.backingPath, 0o600);
+			if (this.#stopping) throw new Error("appserver is stopping");
+			const backing = await fs.stat(paths.backingPath);
+			const record: OwnerRecord = {
+				version: 3,
+				ownerId,
+				pid: process.pid,
+				processStartMarker: currentProcessStartMarker,
+				backingName: paths.backingName,
+				device: Number(backing.dev),
+				inode: Number(backing.ino),
+			};
+			this.#partialBacking = {
+				path: paths.backingPath,
+				identity: { device: Number(backing.dev), inode: Number(backing.ino) },
+			};
+			const claimed = await markerIdentity(ownerHandle);
+			const finalMarker = await publishOwnerAtomic(paths, record, claimed);
+			this.#partialMarker = finalMarker;
+			const currentRecord = await readStrictOwner(paths.ownerPath);
+			if (
+				currentRecord.record.ownerId !== ownerId ||
+				currentRecord.record.pid !== record.pid ||
+				currentRecord.record.processStartMarker !== record.processStartMarker ||
+				currentRecord.record.backingName !== record.backingName ||
+				!sameIdentity(currentRecord.record, record)
+			)
+				throw new Error("appserver owner marker changed during startup");
+			await publishSymlink(paths);
+			if (this.#stopping) throw new Error("appserver is stopping");
+			this.#runIdentity = { paths, record, marker: finalMarker };
+			this.#started = true;
+		} catch (error) {
+			try {
+				await this.#cleanupPartial();
+			} finally {
+				this.#ownershipGuard?.release();
+				this.#ownershipGuard = undefined;
+			}
+			throw error;
+		}
+	}
+	async stop(): Promise<void> {
+		if (
+			!this.#started &&
+			!this.#server &&
+			!this.#ownerLock &&
+			!this.#ownershipGuard &&
+			this.#startPromises.size === 0
+		)
+			return;
+		this.#stopping = true;
+		try {
+			await Promise.all(
+				[...this.#clients].map(async ws => {
+					for (const controller of this.#abortControllers.get(ws) ?? []) controller.abort();
+					await this.#disconnectClient(ws);
+					ws.close(1001, "server stopping");
+				}),
+			);
+			const server = this.#server;
+			this.#server = undefined;
+			let displaced: string | undefined;
+			if (this.#runIdentity) {
+				const current = await statIdentity(this.#runIdentity.paths.backingPath);
+				if (current && !sameIdentity(current, this.#runIdentity.record)) {
+					displaced = path.join(
+						this.#runIdentity.paths.directory,
+						`.appserver-displaced-${this.#runIdentity.record.ownerId}-${randomUUID()}`,
+					);
+					await fs.rename(this.#runIdentity.paths.backingPath, displaced);
+				}
+			}
+			server?.stop(true);
+			if (displaced) {
+				try {
+					await fs.rename(displaced, this.#runIdentity?.paths.backingPath ?? "");
+				} catch (error) {
+					process.emitWarning(error instanceof Error ? error.message : String(error));
+				}
+			}
+			await Promise.allSettled([...this.#startPromises.values()]);
+			this.#startPromises.clear();
+			const unquiesced: SessionId[] = [];
+			for (const sessionId of [...this.#supervisors.keys()])
+				if (!(await this.#quiesceSupervisor(sessionId))) unquiesced.push(sessionId);
+			if (unquiesced.length > 0) throw new Error(`appserver RPC children did not stop: ${unquiesced.join(", ")}`);
+			this.#promptLifecycles.clear();
+			this.#stateRefreshGenerations.clear();
+			this.#transcripts.clear();
+			this.#subagents.clear();
+			this.#started = false;
+			const identity = this.#runIdentity;
+			if (identity) await this.#cleanupOwned(identity);
+			else await this.#cleanupPartial();
+			this.#runIdentity = undefined;
+			this.#ownerLock = false;
+			this.#ownerId = undefined;
+			this.#ownerPaths = undefined;
+			await this.#ownerHandle?.close();
+			this.#ownerHandle = undefined;
+		} finally {
+			// The native lock spans the entire lifetime, including teardown. Always
+			// relinquish it after teardown has been attempted so a cleanup exception
+			// cannot permanently brick this socket path in the current process.
+			this.#ownershipGuard?.release();
+			this.#ownershipGuard = undefined;
+		}
+	}
+	async #recoverMalformedOwner(ownerPath: string): Promise<void> {
+		const snapshot = await readOwnerMarkerSnapshot(ownerPath);
+		const age = this.#clock.now().getTime() - snapshot.mtimeMs;
+		if (!Number.isFinite(age) || age < MALFORMED_OWNER_RECOVERY_AFTER_MS)
+			throw new Error("malformed appserver owner marker is too fresh to recover");
+		await this.#assertMalformedRecoveryHasNoPublicSocket();
+
+		const claimPath = path.join(path.dirname(ownerPath), `.appserver-owner-recovery-${randomUUID()}`);
+		try {
+			// Moving the marker itself is the exclusive recovery claim. A second
+			// contender sees ENOENT or a newly published, complete owner.
+			await fs.rename(ownerPath, claimPath);
+		} catch (error) {
+			if (isErrno(error, "ENOENT")) return;
+			throw error;
+		}
+
+		try {
+			const claimed = await readOwnerMarkerSnapshot(claimPath);
+			if (!sameOwnerMarkerSnapshot(snapshot, claimed))
+				throw new Error("appserver owner marker changed during recovery claim");
+			await this.#assertMalformedRecoveryHasNoPublicSocket();
+			const final = await readOwnerMarkerSnapshot(claimPath);
+			if (!sameOwnerMarkerSnapshot(claimed, final))
+				throw new Error("appserver owner marker changed after recovery claim");
+			await fs.unlink(claimPath);
+		} catch (error) {
+			// Restore only when no contender has already published a complete owner.
+			// A private leftover claim cannot block a later startup.
+			try {
+				await fs.link(claimPath, ownerPath);
+				await fs.unlink(claimPath);
+			} catch (restoreError) {
+				if (!isErrno(restoreError, "EEXIST") && !isErrno(restoreError, "ENOENT"))
+					process.emitWarning(restoreError instanceof Error ? restoreError.message : String(restoreError));
+			}
+			throw error;
+		}
+	}
+	async #assertMalformedRecoveryHasNoPublicSocket(): Promise<void> {
+		try {
+			await fs.lstat(this.socketPath);
+			throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) throw error;
+		}
+	}
+	async #recoverStale(
+		paths: OwnerPaths,
+		record: OwnerRecord,
+		markerStat: { dev: number; ino: number },
+	): Promise<void> {
+		if (record.backingName !== paths.backingName)
+			throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+		try {
+			const publicStat = await fs.lstat(paths.publicPath);
+			if (!publicStat.isSymbolicLink()) throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+			const target = await fs.readlink(paths.publicPath);
+			if (target !== paths.backingName) throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+			const backing = await statIdentity(paths.backingPath);
+			if (backing && !sameIdentity(backing, record))
+				throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+			const latest = await fs.lstat(paths.publicPath);
+			const latestTarget = await fs.readlink(paths.publicPath);
+			const latestBacking = await statIdentity(paths.backingPath);
+			if (
+				latest.dev !== publicStat.dev ||
+				latest.ino !== publicStat.ino ||
+				!latest.isSymbolicLink() ||
+				latestTarget !== paths.backingName ||
+				(latestBacking && !sameIdentity(latestBacking, record))
+			)
+				throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+			await fs.unlink(paths.publicPath);
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) throw error;
+		}
+		const backing = await statIdentity(paths.backingPath);
+		if (backing) {
+			const initialClaim = record.device === 0 && record.inode === 0;
+			if ((!initialClaim && !sameIdentity(backing, record)) || (await unixSocketActive(paths.backingPath)))
+				throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+			await fs.unlink(paths.backingPath);
+		}
+		const current = await statIdentity(paths.ownerPath);
+		if (!current || current.device !== Number(markerStat.dev) || current.inode !== Number(markerStat.ino))
+			throw new Error(`appserver socket has another owner: ${this.socketPath}`);
+		await fs.unlink(paths.ownerPath);
+	}
+	async #preparePublic(paths: OwnerPaths): Promise<void> {
+		try {
+			const info = await fs.lstat(paths.publicPath);
+			throw new Error(
+				`${info.isSocket() ? "refusing existing public socket" : "refusing non-socket public path"}: ${paths.publicPath}`,
+			);
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) throw error;
+		}
+	}
+	async #cleanupPartial(): Promise<void> {
+		const paths = this.#ownerPaths;
+		const marker = this.#partialMarker ?? (this.#ownerHandle ? await markerIdentity(this.#ownerHandle) : undefined);
+		this.#server?.stop(true);
+		this.#server = undefined;
+		if (paths) {
+			const publicInfo = await statIdentity(paths.publicPath);
+			if (publicInfo) {
+				try {
+					const target = await readPublicTarget(paths.publicPath);
+					const latest = await fs.lstat(paths.publicPath);
+					const latestTarget = await fs.readlink(paths.publicPath);
+					const backing = await statIdentity(paths.backingPath);
+					if (
+						latest.dev === publicInfo.device &&
+						latest.ino === publicInfo.inode &&
+						latest.isSymbolicLink() &&
+						latestTarget === paths.backingName &&
+						(!backing || (this.#partialBacking && sameIdentity(backing, this.#partialBacking.identity)))
+					)
+						await fs.unlink(paths.publicPath);
+					else if (target.target !== paths.backingName)
+						process.emitWarning(`appserver socket ownership conflict; preserving ${paths.publicPath}`);
+				} catch (error) {
+					if (!isErrno(error, "ENOENT"))
+						process.emitWarning(error instanceof Error ? error.message : String(error));
+				}
+			}
+			const backing = await statIdentity(paths.backingPath);
+			if (backing && this.#partialBacking && sameIdentity(backing, this.#partialBacking.identity)) {
+				const latestBacking = await statIdentity(paths.backingPath);
+				if (latestBacking && sameIdentity(latestBacking, backing)) await fs.unlink(paths.backingPath);
+			}
+			if (marker) {
+				const current = await statIdentity(paths.ownerPath);
+				const latest = await statIdentity(paths.ownerPath);
+				if (
+					current &&
+					latest &&
+					current.device === marker.device &&
+					current.inode === marker.inode &&
+					latest.device === current.device &&
+					latest.inode === current.inode
+				)
+					await fs.unlink(paths.ownerPath);
+			}
+		}
+		if (this.#ownerHandle) {
+			await this.#ownerHandle.close();
+			this.#ownerHandle = undefined;
+		}
+		this.#ownerLock = false;
+		this.#ownerId = undefined;
+		this.#ownerPaths = undefined;
+		this.#partialBacking = undefined;
+		this.#partialMarker = undefined;
+	}
+	async #cleanupOwned(identity: RunIdentity): Promise<void> {
+		const { paths, record, marker } = identity;
+		const markerNow = await statIdentity(paths.ownerPath);
+		let conflict = !markerNow || markerNow.device !== marker.device || markerNow.inode !== marker.inode;
+		try {
+			const markerValue = await readStrictOwner(paths.ownerPath);
+			if (
+				markerValue.record.ownerId !== record.ownerId ||
+				markerValue.record.pid !== record.pid ||
+				markerValue.record.processStartMarker !== record.processStartMarker ||
+				markerValue.record.backingName !== record.backingName ||
+				!sameIdentity(markerValue.record, record)
+			)
+				conflict = true;
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) conflict = true;
+		}
+		let publicStat: { device: number; inode: number } | undefined;
+		try {
+			publicStat = (await readPublicTarget(paths.publicPath)).stat;
+			if ((await readPublicTarget(paths.publicPath)).target !== record.backingName) conflict = true;
+		} catch (error) {
+			if (!isErrno(error, "ENOENT")) conflict = true;
+		}
+		const backing = await statIdentity(paths.backingPath);
+		if (backing && !sameIdentity(backing, record)) conflict = true;
+		if (conflict) {
+			process.emitWarning(`appserver socket ownership conflict; preserving ${paths.publicPath}`);
+			return;
+		}
+		if (publicStat) {
+			const check = await statIdentity(paths.publicPath);
+			if (!check || check.device !== publicStat.device || check.inode !== publicStat.inode) {
+				process.emitWarning(`appserver socket ownership conflict; preserving ${paths.publicPath}`);
+				return;
+			}
+			await fs.unlink(paths.publicPath);
+		}
+		const markerCheck = await statIdentity(paths.ownerPath);
+		if (markerCheck && markerCheck.device === marker.device && markerCheck.inode === marker.inode)
+			await fs.unlink(paths.ownerPath);
+		const backingCheck = await statIdentity(paths.backingPath);
+		if (backingCheck && sameIdentity(backingCheck, record)) await fs.unlink(paths.backingPath);
+	}
+	snapshot(sessionId: SessionId) {
+		return this.#projections.get(sessionId)?.value;
+	}
+	replay(sessionId: SessionId, cursor: { epoch: string; seq: number }): ServerFrame[] {
+		return this.#projections.get(sessionId)?.replay(cursor) ?? [];
+	}
+	childFor(sessionId: SessionId): ChildHandle | undefined {
+		return this.#supervisors.get(sessionId)?.child();
+	}
+	async #command(command: CommandFrame, ws?: AppWs, approved = false): Promise<CommandOutcome> {
+		if (command.hostId !== this.hostId)
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "host_mismatch",
+					message: "command targets another host",
+				}),
+			};
+		const capabilities = ws ? this.#clientCapabilities.get(ws) : undefined;
+		const descriptor = COMMAND_DESCRIPTORS[command.command];
+		if (!descriptor)
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "unsupported",
+					message: "unknown command",
+				}),
+			};
+		const requiredFeature = commandFeature(command.command);
+		if (requiredFeature)
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "UNSUPPORTED_FEATURE",
+					message: "command requires an unavailable negotiated feature",
+					details: { feature: requiredFeature },
+				}),
+			};
+		if (descriptor.confirmation === "challenge" && !approved)
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "confirmation_invalid",
+					message: "command requires a consumed confirmation",
+				}),
+			};
+		const required = requiredCapability(command.command);
+		if (capabilities && required && !capabilities.has(required))
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "capability_denied",
+					message: "client capability was not granted",
+				}),
+			};
+		if (command.command === "host.list" || command.command === "session.list") await this.#refreshSessions();
+		const projection = command.sessionId ? this.#projections.get(command.sessionId) : undefined;
+		// Attach output is connection-scoped and rebuilt on every delivery. A
+		// cached success cannot attach a session that has since been deleted.
+		if (command.command === "session.attach" && !projection)
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "unknown_session",
+					message: "session is not indexed",
+				}),
+			};
+		const check = this.#idempotency.begin(command.commandId, command);
+		if (check.kind === "replay")
+			return {
+				frame: { ...check.outcome.frame, requestId: command.requestId } as ServerFrame,
+				unknown: check.outcome.unknown,
+			};
+		if (check.kind === "pending") {
+			const outcome = await check.outcome;
+			return { frame: { ...outcome.frame, requestId: command.requestId } as ServerFrame, unknown: outcome.unknown };
+		}
+		if (check.kind === "conflict")
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "idempotency_conflict",
+					message: "commandId was already used with another payload",
+				}),
+			};
+		const invalidArgs = argumentError(command);
+		if (invalidArgs)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, { code: "invalid_frame", message: invalidArgs }),
+			});
+		if (descriptor.revision === "required" && command.expectedRevision === undefined)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "stale_revision",
+					message: "expectedRevision is required",
+				}),
+			});
+		if (descriptor.revision === "none" && command.expectedRevision !== undefined)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "stale_revision",
+					message: "expectedRevision is forbidden",
+				}),
+			});
+		if (descriptor.scope === "session" && !projection)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "unknown_session",
+					message: "session is not indexed",
+				}),
+			});
+		if (
+			descriptor.revisionOwner === "session" &&
+			command.expectedRevision !== undefined &&
+			projection &&
+			command.expectedRevision !== projection.value.revision
+		)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "stale_revision",
+					message: "session revision is stale",
+					details: { expectedRevision: command.expectedRevision, actualRevision: projection.value.revision },
+				}),
+			});
+		if (
+			command.sessionId &&
+			this.#sessionArchived(command.sessionId) &&
+			!ARCHIVED_SESSION_COMMANDS.has(command.command)
+		)
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "session_archived",
+					message: "archived sessions are read-only; restore the session to continue work",
+				}),
+			});
+		const trackSessionOperation = Boolean(command.sessionId && !SESSION_LIFECYCLE_COMMANDS.has(command.command));
+		if (trackSessionOperation && !this.#beginSessionOperation(command.sessionId!))
+			return this.#finish(command, {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "session_busy",
+					message: "session lifecycle mutation is in progress",
+				}),
+			});
+		const controller = new AbortController();
+		if (ws) this.#abortControllers.get(ws)?.add(controller);
+		let outcome: CommandOutcome;
+		let promptLifecycle: PromptLifecycle | undefined;
+		try {
+			const registered = await this.#handlers.dispatch(command);
+			if (registered) outcome = registered;
+			else if (command.command === "host.list" || command.command === "session.list")
+				outcome = {
+					frame: response(this.hostId, command, true, {
+						cursor: { epoch: this.epoch, seq: 0 },
+						...this.#sessionListResult(),
+					}),
+				};
+			else if (command.command === "session.attach") {
+				const cursor = command.args.cursor;
+				const attachOutput = prepareAttachOutput(
+					projection!,
+					cursor === undefined ? undefined : decodeCursor(cursor),
+				);
+				outcome = {
+					frame: response(this.hostId, command, true, { attached: true, cursor: attachOutput.baseline }),
+					attachOutput,
+				};
+			} else if (command.command === "session.state.get") {
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				const state = await this.#refreshState(
+					command.sessionId!,
+					supervisor,
+					command.requestId,
+					false,
+					controller.signal,
+				);
+				outcome = { frame: response(this.hostId, command, true, state) };
+			} else if (command.command === "session.steer" || command.command === "session.followUp") {
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				const type = command.command === "session.steer" ? "steer" : "follow_up";
+				const result = await supervisor.call(
+					{ type, message: command.args.message },
+					command.requestId,
+					controller.signal,
+				);
+				outcome = {
+					frame: response(
+						this.hostId,
+						command,
+						result.success,
+						{ accepted: result.success },
+						result.success ? undefined : { code: "child_error", message: "session command failed" },
+					),
+				};
+				this.#scheduleStateRefresh(command.sessionId!, supervisor, command.requestId);
+			} else if (command.command === "session.ui.respond") {
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				const requestId = command.args.requestId;
+				if (typeof requestId !== "string") throw new Error("UI request ID is invalid");
+				const transcript = this.#transcripts.get(command.sessionId!);
+				if (!transcript) throw new Error("session transcript translator is unavailable");
+				const pendingUi = transcript.pendingUiRequest(requestId);
+				if (!pendingUi) throw new Error("UI request is no longer pending");
+				let payload: { value?: string; confirmed?: boolean; cancelled?: true };
+				if (command.args.cancelled === true) payload = { cancelled: true };
+				else if (pendingUi.kind === "ask" && typeof command.args.value === "string")
+					payload = { value: command.args.value };
+				else if (pendingUi.kind === "approval" && typeof command.args.confirmed === "boolean")
+					payload = { confirmed: command.args.confirmed };
+				else throw new Error("UI response kind does not match the pending request");
+				await supervisor.respondUi(requestId, payload);
+				const resolved = transcript.resolveUiRequest(requestId);
+				if (resolved) this.#broadcast(command.sessionId!, projection!.appendEvent(asAppWireEvent(resolved)));
+				outcome = { frame: response(this.hostId, command, true, { accepted: true }) };
+			} else if (DIRECT_SESSION_RPC_COMMANDS.has(command.command)) {
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				const type =
+					command.command === "session.retry"
+						? "retry"
+						: command.command === "session.pause"
+							? "pause"
+							: command.command === "session.resume"
+								? "resume"
+								: command.command === "session.compact"
+									? "compact"
+									: command.command === "session.rename"
+										? "set_session_name"
+										: command.command === "session.model.set"
+											? "set_model"
+											: command.command === "session.thinking.set"
+												? "set_thinking_level"
+												: "set_fast";
+				const args =
+					command.command === "session.compact"
+						? { customInstructions: command.args.instructions }
+						: command.command === "session.rename"
+							? { name: command.args.name }
+							: command.command === "session.model.set"
+								? {
+										selector: command.args.selector,
+										role: command.args.role,
+										persist: command.args.persistence === "settings",
+									}
+								: command.command === "session.thinking.set"
+									? { level: command.args.level }
+									: command.command === "session.fast.set"
+										? { enabled: command.args.enabled }
+										: {};
+				const result = await supervisor.call({ type, ...args }, command.requestId, controller.signal);
+				if (!result.success)
+					outcome = {
+						frame: response(this.hostId, command, false, undefined, {
+							code: "child_error",
+							message: "session command failed",
+						}),
+					};
+				else {
+					const childData = "data" in result ? result.data : undefined;
+					const data =
+						command.command === "session.retry"
+							? { retried: childBoolean(childData, "retried") }
+							: command.command === "session.pause"
+								? { paused: childBoolean(childData, "paused"), changed: childBoolean(childData, "changed") }
+								: command.command === "session.resume"
+									? { resumed: childBoolean(childData, "resumed"), paused: childBoolean(childData, "paused") }
+									: command.command === "session.compact"
+										? { compacted: true }
+										: command.command === "session.rename"
+											? { renamed: true }
+											: { accepted: true };
+					if (
+						command.command === "session.model.set" ||
+						command.command === "session.thinking.set" ||
+						command.command === "session.fast.set"
+					)
+						await this.#refreshState(command.sessionId!, supervisor, command.requestId);
+					outcome = { frame: response(this.hostId, command, true, data) };
+				}
+				if (
+					command.command !== "session.model.set" &&
+					command.command !== "session.thinking.set" &&
+					command.command !== "session.fast.set"
+				)
+					this.#scheduleStateRefresh(command.sessionId!, supervisor, command.requestId);
+			} else if (command.command === "session.prompt") {
+				if (this.#closedSessions.has(command.sessionId!)) throw new Error("session is closed");
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				if (this.#promptLifecycles.has(command.sessionId!)) {
+					outcome = {
+						frame: response(this.hostId, command, false, undefined, {
+							code: "session_busy",
+							message: "another prompt is still running; use steer or follow-up",
+						}),
+					};
+				} else {
+					const lifecycle: PromptLifecycle = { requestId: command.requestId };
+					promptLifecycle = lifecycle;
+					this.#promptLifecycles.set(command.sessionId!, lifecycle);
+					this.#updateStatus(command.sessionId!, "active");
+					const result = await supervisor.prompt(
+						command.requestId,
+						decodeSessionPromptArguments(command.args).message,
+						controller.signal,
+						internalId => {
+							if (this.#promptLifecycles.get(command.sessionId!) === lifecycle)
+								lifecycle.internalId = internalId;
+						},
+					);
+					if (!result.success || childAgentInvoked(result) === false) {
+						if (this.#releasePromptLifecycle(command.sessionId!, lifecycle))
+							this.#updateStatus(command.sessionId!, "idle");
+					}
+					outcome = {
+						frame: response(
+							this.hostId,
+							command,
+							result.success,
+							{ accepted: result.success },
+							result.success ? undefined : { code: "child_error", message: "session command failed" },
+						),
+					};
+					this.#scheduleStateRefresh(command.sessionId!, supervisor, command.requestId, true);
+				}
+			} else if (command.command === SESSION_CANCEL_COMMAND) {
+				const supervisor = await this.#ensureSupervisor(command.sessionId!);
+				const cancelledLifecycle = this.#promptLifecycles.get(command.sessionId!);
+				const result = await supervisor.cancel(command.requestId);
+				if (result.success && this.#releasePromptLifecycle(command.sessionId!, cancelledLifecycle))
+					this.#updateStatus(command.sessionId!, "idle");
+				outcome = {
+					frame: response(
+						this.hostId,
+						command,
+						result.success,
+						{ cancelled: result.success },
+						result.success ? undefined : { code: "child_error", message: "session command failed" },
+					),
+				};
+			} else if (this.#operations && ws) {
+				const context: OperationContext = {
+					hostId: this.hostId,
+					sessionId: command.sessionId,
+					deviceId: ws.deviceId,
+					connectionId: ws.connectionId,
+					capabilities: (capabilities ?? new Set()) as OperationContext["capabilities"],
+					currentRevision: projection?.value.revision,
+					expectedRevision: command.expectedRevision,
+					abortSignal: controller.signal,
+				};
+				const result = await this.#operations.dispatch(command, context);
+				outcome = { frame: response(this.hostId, command, true, result) };
+			} else
+				outcome = {
+					frame: response(this.hostId, command, false, undefined, {
+						code: "unsupported",
+						message: "command is unsupported",
+					}),
+				};
+		} catch (error) {
+			if (
+				command.command === "session.prompt" &&
+				this.#releasePromptLifecycle(command.sessionId!, promptLifecycle) &&
+				!this.#closedSessions.has(command.sessionId!)
+			)
+				this.#updateStatus(command.sessionId!, "idle");
+			const operation =
+				this.#operations &&
+				ws &&
+				![
+					"session.create",
+					"session.close",
+					"session.prompt",
+					"session.cancel",
+					"session.attach",
+					"session.list",
+					"host.list",
+				].includes(command.command);
+			const code =
+				command.command === "session.ui.respond"
+					? "ui_request_invalid"
+					: operation && error && typeof error === "object" && "code" in error && typeof error.code === "string"
+						? error.code
+						: "outcome_unknown";
+			outcome = {
+				frame: response(this.hostId, command, false, undefined, {
+					code,
+					message: operation ? "operation failed" : "command failed",
+				}),
+				unknown: !operation,
+			};
+		} finally {
+			if (ws) this.#abortControllers.get(ws)?.delete(controller);
+			if (trackSessionOperation) this.#endSessionOperation(command.sessionId!);
+		}
+		return this.#finish(command, outcome);
+	}
+	async #createSession(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+		if (!this.#authority) throw new Error("session creation is unavailable");
+		if (!this.#projectRootForProject) throw new Error("session project resolver is unavailable");
+		const requestedProjectId = args.projectId;
+		if (typeof requestedProjectId !== "string") throw new Error("session projectId is invalid");
+		const requestedCwd = await this.#projectRootForProject(projectId(requestedProjectId));
+		if (typeof requestedCwd !== "string" || !requestedCwd.startsWith("/"))
+			throw new Error("project resolver returned an invalid local root");
+		const title = typeof args.title === "string" ? args.title : undefined;
+		const created = await this.#authority.create(requestedCwd, title);
+		const timestamp = this.#clock.now().toISOString();
+		const record: SessionRecord = {
+			sessionId: created.sessionId,
+			path: created.path,
+			cwd: created.cwd,
+			projectId: stableProjectId(created.cwd),
+			projectName: projectNameFromCwd(created.cwd),
+			title: created.title ?? "Session",
+			updatedAt: timestamp,
+			status: "idle",
+			entries: created.entries,
+		};
+		this.#records.set(record.sessionId, record);
+		this.#projections.set(record.sessionId, new SessionProjection(this.hostId, record, this.epoch, this.#ringSize));
+		this.#createdPending.set(record.sessionId, { record, refreshesRemaining: 1 });
+		return { sessionId: record.sessionId };
+	}
+	async #handleCreate(command: CommandFrame): Promise<CommandOutcome> {
+		const created = await this.#createSession(command.args);
+		const projection = this.#projections.get(created.sessionId as SessionId)!;
+		await this.#broadcastIndex(projection.indexUpsert());
+		return {
+			frame: response(this.hostId, command, true, {
+				session: projection.value.ref,
+			}),
+		};
+	}
+	async #handleClose(command: CommandFrame): Promise<CommandOutcome> {
+		const sessionId = command.sessionId!;
+		if (this.#lifecycleMutations.has(sessionId))
+			return this.#lifecycleBusyOutcome(command, "session lifecycle mutation is already in progress");
+		this.#lifecycleMutations.add(sessionId);
+		let supervisor: RpcChildSupervisor | undefined;
+		let alreadyExplicitlyClosed = false;
+		try {
+			const projection = this.#projections.get(sessionId)!;
+			alreadyExplicitlyClosed = this.#closedSessions.has(sessionId) && projection.value.ref.status === "closed";
+			this.#closedSessions.add(sessionId);
+			const pending = this.#startPromises.get(sessionId);
+			if (pending) await pending.catch(() => undefined);
+			supervisor = this.#supervisors.get(sessionId);
+			if (!(await this.#quiesceSupervisor(sessionId))) {
+				if (!alreadyExplicitlyClosed) {
+					this.#closedSessions.delete(sessionId);
+					if (supervisor) this.#markSupervisorCrashed(sessionId, supervisor);
+				}
+				return this.#lifecycleBusyOutcome(command, "session runtime did not stop cleanly");
+			}
+			this.#promptLifecycles.delete(sessionId);
+			this.#stateRefreshGenerations.delete(sessionId);
+			this.#transcripts.delete(sessionId);
+			this.#subagents.delete(sessionId);
+			if (alreadyExplicitlyClosed)
+				return { frame: response(this.hostId, command, true, { closed: true, sessionId }) };
+			this.#updateStatus(sessionId, "closed");
+			this.#broadcast(sessionId, projection.appendEvent({ type: "session_closed" }));
+			return { frame: response(this.hostId, command, true, { closed: true, sessionId }) };
+		} catch (error) {
+			if (!alreadyExplicitlyClosed) {
+				this.#closedSessions.delete(sessionId);
+				if (supervisor) this.#markSupervisorCrashed(sessionId, supervisor);
+			}
+			throw error;
+		} finally {
+			this.#lifecycleMutations.delete(sessionId);
+		}
+	}
+	async #deletePreflight(
+		command: CommandFrame,
+		ignoreLifecycleFence = false,
+	): Promise<SessionLifecycleFailure | undefined> {
+		const sessionId = command.sessionId;
+		if (!sessionId) return { code: "unknown_session", message: "session is not indexed" };
+		if (!this.#authority) return { code: "unsupported", message: "session lifecycle management is unavailable" };
+		const revisionFailure = this.#lifecycleRevisionFailure(command);
+		if (revisionFailure) return revisionFailure;
+		const record = this.#records.get(sessionId);
+		if (!record) return { code: "unknown_session", message: "session is not indexed" };
+		if (this.#sessionLifecycleBusy(sessionId, ignoreLifecycleFence))
+			return { code: "session_busy", message: "session has active or pending work" };
+		if (!this.#supervisors.has(sessionId)) {
+			try {
+				await this.#lockCheck(record);
+			} catch {
+				return { code: "session_locked", message: "session is locked by another process" };
+			}
+		}
+		return undefined;
+	}
+	#sessionArchived(sessionId: SessionId): boolean {
+		return Boolean(
+			this.#records.get(sessionId)?.archivedAt || this.#projections.get(sessionId)?.value.ref.archivedAt,
+		);
+	}
+	#beginSessionOperation(sessionId: SessionId): boolean {
+		if (this.#lifecycleMutations.has(sessionId)) return false;
+		this.#inflightSessionOperations.set(sessionId, (this.#inflightSessionOperations.get(sessionId) ?? 0) + 1);
+		return true;
+	}
+	#endSessionOperation(sessionId: SessionId): void {
+		const count = this.#inflightSessionOperations.get(sessionId) ?? 0;
+		if (count <= 1) this.#inflightSessionOperations.delete(sessionId);
+		else this.#inflightSessionOperations.set(sessionId, count - 1);
+	}
+	#sessionLifecycleBusy(sessionId: SessionId, ignoreLifecycleFence = false): boolean {
+		const ref = this.#projections.get(sessionId)?.value.ref;
+		const liveState = ref?.liveState;
+		return (
+			(!ignoreLifecycleFence && this.#lifecycleMutations.has(sessionId)) ||
+			(this.#inflightSessionOperations.get(sessionId) ?? 0) > 0 ||
+			this.#startPromises.has(sessionId) ||
+			this.#supervisors.get(sessionId)?.hasPendingCalls() === true ||
+			this.#promptLifecycles.has(sessionId) ||
+			(this.#transcripts.get(sessionId)?.pendingUiRequests().length ?? 0) > 0 ||
+			ref?.status === "active" ||
+			ref?.pendingApproval === true ||
+			ref?.pendingUserInput === true ||
+			liveState?.isStreaming === true ||
+			liveState?.isCompacting === true ||
+			liveState?.pendingApproval === true ||
+			liveState?.pendingUserInput === true ||
+			queuedLifecycleWork(liveState)
+		);
+	}
+	#lifecycleRevisionFailure(command: CommandFrame): SessionLifecycleFailure | undefined {
+		const projection = command.sessionId ? this.#projections.get(command.sessionId) : undefined;
+		if (!projection) return { code: "unknown_session", message: "session is not indexed" };
+		if (command.expectedRevision === undefined)
+			return { code: "stale_revision", message: "expectedRevision is required" };
+		if (command.expectedRevision === projection.value.revision) return undefined;
+		return {
+			code: "stale_revision",
+			message: "session revision is stale",
+			details: { expectedRevision: command.expectedRevision, actualRevision: projection.value.revision },
+		};
+	}
+	#lifecycleBusyOutcome(command: CommandFrame, message: string): CommandOutcome {
+		return { frame: response(this.hostId, command, false, undefined, { code: "session_busy", message }) };
+	}
+	#lifecycleFailureOutcome(command: CommandFrame, failure: SessionLifecycleFailure): CommandOutcome {
+		return { frame: response(this.hostId, command, false, undefined, failure) };
+	}
+	async #childExitedWithinLifecycleTimeout(child: ChildHandle): Promise<boolean> {
+		return Promise.race([
+			child.exited.then(() => true).catch(() => false),
+			Bun.sleep(this.#lifecycleQuiesceTimeoutMs).then(() => false),
+		]);
+	}
+	async #quiesceSupervisor(sessionId: SessionId): Promise<boolean> {
+		const supervisor = this.#supervisors.get(sessionId);
+		if (!supervisor) {
+			this.#stateRefreshGenerations.delete(sessionId);
+			return true;
+		}
+		const child = supervisor.child();
+		if (!child) return false;
+		supervisor.stop("SIGTERM");
+		if (!(await this.#childExitedWithinLifecycleTimeout(child))) {
+			// A lifecycle mutation may proceed only after the process itself exits,
+			// not merely after the supervisor has rejected its pending RPC calls.
+			supervisor.stop("SIGKILL");
+			if (!(await this.#childExitedWithinLifecycleTimeout(child))) return false;
+		}
+		if (!(await this.#reclaimExitedChildLock(sessionId, child))) return false;
+		const current = this.#supervisors.get(sessionId);
+		if (current && current !== supervisor) return false;
+		this.#supervisors.delete(sessionId);
+		this.#promptLifecycles.delete(sessionId);
+		this.#stateRefreshGenerations.delete(sessionId);
+		this.#transcripts.delete(sessionId);
+		this.#subagents.delete(sessionId);
+		return true;
+	}
+	async #reclaimExitedChildLock(sessionId: SessionId, child: ChildHandle): Promise<boolean> {
+		if (!this.#lockReclaim || child.pid === undefined) return true;
+		const record = this.#records.get(sessionId);
+		if (!record) return false;
+		try {
+			await this.#lockReclaim(record, child.pid);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	#releaseSupervisorAfterExit(sessionId: SessionId, supervisor: RpcChildSupervisor): void {
+		const release = () => {
+			if (this.#supervisors.get(sessionId) !== supervisor) return;
+			this.#supervisors.delete(sessionId);
+			if (this.#stopping || this.#closedSessions.has(sessionId)) return;
+			const restartable = this.#projections.get(sessionId)?.markRuntimeRestartable();
+			if (restartable) this.#broadcast(sessionId, restartable);
+		};
+		const child = supervisor.child();
+		if (child) void child.exited.then(release, release);
+		else release();
+	}
+	#markSupervisorCrashed(sessionId: SessionId, supervisor: RpcChildSupervisor): void {
+		if (this.#supervisors.get(sessionId) !== supervisor) return;
+		this.#advanceStateRefreshGeneration(sessionId);
+		this.#promptLifecycles.delete(sessionId);
+		const crashed = this.#projections.get(sessionId)?.markRuntimeCrashed();
+		if (crashed) this.#broadcast(sessionId, crashed);
+		this.#stateRefreshGenerations.delete(sessionId);
+		this.#transcripts.delete(sessionId);
+		this.#subagents.delete(sessionId);
+		this.#releaseSupervisorAfterExit(sessionId, supervisor);
+	}
+	async #quiesceSessionRuntime(sessionId: SessionId): Promise<boolean> {
+		if (this.#operations?.hasOpenTerminals(sessionId)) {
+			const controller = new AbortController();
+			let timer: NodeJS.Timeout | undefined;
+			try {
+				const timeout = Promise.withResolvers<false>();
+				timer = setTimeout(() => {
+					controller.abort();
+					timeout.resolve(false);
+				}, this.#lifecycleQuiesceTimeoutMs);
+				const closed = await Promise.race([
+					this.#operations
+						.closeSessionTerminals(sessionId, controller.signal)
+						.then(() => true)
+						.catch(() => false),
+					timeout.promise,
+				]);
+				if (!closed) return false;
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		}
+		return this.#quiesceSupervisor(sessionId);
+	}
+	async #reconcileCommittedLifecycleFailure(sessionId: SessionId, error: unknown): Promise<void> {
+		if (!isCommittedLifecycleFailure(error)) return;
+		try {
+			await this.#refreshSessions(sessionId);
+		} catch {
+			// Preserve the lifecycle failure that carries the committed-state signal.
+			// A later session list refresh will retry the same durable reconciliation.
+		}
+	}
+	async #handleArchive(command: CommandFrame): Promise<CommandOutcome> {
+		const sessionId = command.sessionId!;
+		if (this.#lifecycleMutations.has(sessionId))
+			return this.#lifecycleBusyOutcome(command, "session lifecycle mutation is already in progress");
+		this.#lifecycleMutations.add(sessionId);
+		try {
+			if (!this.#authority)
+				return this.#lifecycleFailureOutcome(command, {
+					code: "unsupported",
+					message: "session lifecycle management is unavailable",
+				});
+			const revisionFailure = this.#lifecycleRevisionFailure(command);
+			if (revisionFailure) return this.#lifecycleFailureOutcome(command, revisionFailure);
+			const projection = this.#projections.get(sessionId)!;
+			const record = this.#records.get(sessionId)!;
+			if (record.archivedAt) return { frame: response(this.hostId, command, true, { archived: true }) };
+			if (this.#sessionLifecycleBusy(sessionId, true))
+				return this.#lifecycleBusyOutcome(command, "sessions with active or pending work cannot be archived");
+			if (!(await this.#quiesceSessionRuntime(sessionId)))
+				return this.#lifecycleBusyOutcome(command, "session runtime did not stop cleanly");
+			try {
+				await this.#lockCheck(record);
+			} catch {
+				return {
+					frame: response(this.hostId, command, false, undefined, {
+						code: "session_locked",
+						message: "session is locked by another process",
+					}),
+				};
+			}
+			const archivedAt = this.#clock.now().toISOString();
+			await this.#authority.archive(record, archivedAt);
+			record.archivedAt = archivedAt;
+			await this.#broadcastAttachedOrdered(
+				sessionId,
+				projection.appendEvent({ type: "session_archived", archivedAt }),
+			);
+			const delta = projection.updateArchivedAt(archivedAt);
+			if (delta) await this.#broadcastIndex(delta);
+			return { frame: response(this.hostId, command, true, { archived: true }) };
+		} catch (error) {
+			await this.#reconcileCommittedLifecycleFailure(sessionId, error);
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "session_lifecycle_failed",
+					message: "session archive failed",
+				}),
+			};
+		} finally {
+			this.#lifecycleMutations.delete(sessionId);
+		}
+	}
+	async #handleRestore(command: CommandFrame): Promise<CommandOutcome> {
+		const sessionId = command.sessionId!;
+		if (this.#lifecycleMutations.has(sessionId))
+			return this.#lifecycleBusyOutcome(command, "session lifecycle mutation is already in progress");
+		this.#lifecycleMutations.add(sessionId);
+		try {
+			if (!this.#authority)
+				return this.#lifecycleFailureOutcome(command, {
+					code: "unsupported",
+					message: "session lifecycle management is unavailable",
+				});
+			const revisionFailure = this.#lifecycleRevisionFailure(command);
+			if (revisionFailure) return this.#lifecycleFailureOutcome(command, revisionFailure);
+			const projection = this.#projections.get(sessionId)!;
+			const record = this.#records.get(sessionId)!;
+			if (!record.archivedAt) return { frame: response(this.hostId, command, true, { restored: true }) };
+			await this.#authority.restore(record);
+			delete record.archivedAt;
+			await this.#broadcastAttachedOrdered(sessionId, projection.appendEvent({ type: "session_restored" }));
+			const delta = projection.updateArchivedAt();
+			if (delta) await this.#broadcastIndex(delta);
+			return { frame: response(this.hostId, command, true, { restored: true }) };
+		} catch (error) {
+			await this.#reconcileCommittedLifecycleFailure(sessionId, error);
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "session_lifecycle_failed",
+					message: "session restore failed",
+				}),
+			};
+		} finally {
+			this.#lifecycleMutations.delete(sessionId);
+		}
+	}
+	async #handleDelete(command: CommandFrame): Promise<CommandOutcome> {
+		const sessionId = command.sessionId!;
+		if (this.#lifecycleMutations.has(sessionId))
+			return this.#lifecycleBusyOutcome(command, "session lifecycle mutation is already in progress");
+		this.#lifecycleMutations.add(sessionId);
+		try {
+			const projection = this.#projections.get(sessionId);
+			const record = this.#records.get(sessionId);
+			if (!projection || !record)
+				return this.#lifecycleFailureOutcome(command, {
+					code: "unknown_session",
+					message: "session is not indexed",
+				});
+			const guarded = await this.#deletePreflight(command, true);
+			if (guarded && guarded.code !== "session_busy") return this.#lifecycleFailureOutcome(command, guarded);
+			if (guarded)
+				return this.#lifecycleBusyOutcome(command, "session became busy while deletion was being confirmed");
+			if (!(await this.#quiesceSessionRuntime(sessionId)))
+				return this.#lifecycleBusyOutcome(command, "session runtime did not stop cleanly");
+			const finalGuard = await this.#deletePreflight(command, true);
+			if (finalGuard) return this.#lifecycleFailureOutcome(command, finalGuard);
+			await this.#authority!.delete(record);
+			await this.#broadcastAttachedOrdered(sessionId, projection.appendEvent({ type: "session_deleted" }));
+			await this.#broadcastIndex(projection.remove());
+			this.#records.delete(sessionId);
+			this.#projections.delete(sessionId);
+			this.#closedSessions.delete(sessionId);
+			this.#promptLifecycles.delete(sessionId);
+			this.#stateRefreshGenerations.delete(sessionId);
+			this.#transcripts.delete(sessionId);
+			this.#subagents.delete(sessionId);
+			for (const sessions of this.#attached.values()) sessions.delete(sessionId);
+			return { frame: response(this.hostId, command, true, { deleted: true }) };
+		} catch (error) {
+			await this.#reconcileCommittedLifecycleFailure(sessionId, error);
+			return {
+				frame: response(this.hostId, command, false, undefined, {
+					code: "session_lifecycle_failed",
+					message: "session deletion failed",
+				}),
+			};
+		} finally {
+			this.#lifecycleMutations.delete(sessionId);
+		}
+	}
+	#finish(command: CommandFrame, outcome: CommandOutcome): CommandOutcome {
+		const cached: CommandOutcome = { ...outcome };
+		delete cached.attachOutput;
+		this.#idempotency.complete(command.commandId, command, cached);
+		return outcome;
+	}
+	#releasePromptLifecycle(sessionId: SessionId, lifecycle?: PromptLifecycle): boolean {
+		if (!lifecycle || this.#promptLifecycles.get(sessionId) !== lifecycle) return false;
+		this.#promptLifecycles.delete(sessionId);
+		this.#advanceStateRefreshGeneration(sessionId);
+		return true;
+	}
+	#advanceStateRefreshGeneration(sessionId: SessionId): number {
+		const generation = (this.#stateRefreshGenerations.get(sessionId) ?? 0) + 1;
+		this.#stateRefreshGenerations.set(sessionId, generation);
+		return generation;
+	}
+	#updateStatus(sessionId: SessionId, status: SessionRef["status"]): void {
+		const frame = this.#projections.get(sessionId)?.updateStatus(status);
+		if (frame) this.#broadcast(sessionId, frame);
+	}
+	async #refreshState(
+		sessionId: SessionId,
+		supervisor: RpcChildSupervisor,
+		requestId: string,
+		preserveProjectedStatus = false,
+		signal?: AbortSignal,
+	): Promise<SessionStateResult> {
+		const generation = this.#advanceStateRefreshGeneration(sessionId);
+		const result = await supervisor.call({ type: "get_state" }, `${requestId}:state`, signal);
+		if (!result.success || !("data" in result)) throw new Error("rpc state query failed");
+		const state = safeSessionState(result.data);
+		const projection = this.#projections.get(sessionId);
+		if (!projection) throw new Error("unknown session");
+		if (this.#stateRefreshGenerations.get(sessionId) !== generation) return state;
+		const statusOverride = preserveProjectedStatus
+			? projection.value.ref.status
+			: this.#promptLifecycles.has(sessionId)
+				? "active"
+				: undefined;
+		const frame = projection.updateState(state, statusOverride, !this.#closedSessions.has(sessionId));
+		if (frame) await this.#broadcastIndex(frame);
+		return state;
+	}
+	#scheduleStateRefresh(
+		sessionId: SessionId,
+		supervisor: RpcChildSupervisor,
+		requestId: string,
+		preserveProjectedStatus = false,
+	): void {
+		void this.#refreshState(sessionId, supervisor, requestId, preserveProjectedStatus).catch(() => undefined);
+	}
+	async #ensureSupervisor(sessionId: SessionId): Promise<RpcChildSupervisor> {
+		if (this.#stopping) throw new Error("appserver is stopping");
+		if (this.#closedSessions.has(sessionId)) throw new Error("session is closed");
+		if (this.#lifecycleMutations.has(sessionId)) throw new Error("session lifecycle mutation is in progress");
+		if (this.#sessionArchived(sessionId)) throw new Error("session is archived");
+		const existing = this.#supervisors.get(sessionId);
+		if (existing) return existing;
+		const pending = this.#startPromises.get(sessionId);
+		if (pending) return pending;
+		const start = Promise.resolve().then(() => this.#startSupervisor(sessionId));
+		this.#startPromises.set(sessionId, start);
+		try {
+			return await start;
+		} finally {
+			this.#startPromises.delete(sessionId);
+		}
+	}
+	async #startSupervisor(sessionId: SessionId): Promise<RpcChildSupervisor> {
+		const existing = this.#supervisors.get(sessionId);
+		if (existing) return existing;
+		if (this.#stopping || this.#closedSessions.has(sessionId)) throw new Error("session is closed");
+		if (this.#lifecycleMutations.has(sessionId)) throw new Error("session lifecycle mutation is in progress");
+		const record = this.#records.get(sessionId);
+		if (!record) throw new Error("unknown session");
+		if (this.#sessionArchived(sessionId)) throw new Error("session is archived");
+		await this.#lockCheck(record);
+		if (this.#stopping || this.#closedSessions.has(sessionId)) throw new Error("session is closed");
+		if (this.#lifecycleMutations.has(sessionId) || this.#sessionArchived(sessionId))
+			throw new Error("session lifecycle changed while starting");
+		const projection = this.#projections.get(sessionId)!;
+		const transcript = new TranscriptEventTranslator();
+		transcript.observeKnownEntries(projection.value.entries);
+		this.#transcripts.set(sessionId, transcript);
+		const subagents = new SubagentProjection(this.hostId, sessionId);
+		this.#subagents.set(sessionId, subagents);
+		const projector = new SessionEntryProjector(this.hostId, sessionId, "live", projection.value.entries);
+		const supervisor = new RpcChildSupervisor(
+			this.#factory,
+			record,
+			{
+				entry: frame => {
+					const value: unknown = frame.entry;
+					const raw =
+						value && typeof value === "object" && !Array.isArray(value)
+							? (value as Record<string, unknown>)
+							: undefined;
+					if (!raw) return;
+					const entries = projector.project(raw);
+					const settlementEvents = transcript.observeSessionEntry(raw, entries);
+					for (const entry of entries) {
+						const output = projection.appendEntry(entry);
+						if (output) this.#broadcast(sessionId, output);
+					}
+					const projectedTitle =
+						projector.titleChange ??
+						(projection.value.ref.title === "Session" || projection.value.ref.title === "Untitled"
+							? fallbackSessionTitle(projector.firstUserText)
+							: undefined);
+					if (projectedTitle) {
+						record.title = projectedTitle;
+						const output = projection.updateTitle(projectedTitle);
+						if (output) this.#broadcast(sessionId, output);
+					}
+					for (const event of settlementEvents)
+						this.#broadcast(sessionId, projection.appendEvent(asAppWireEvent(event)));
+				},
+				event: frame => {
+					const agentFrame = subagents.applyFrame(frame);
+					if (agentFrame) this.#broadcast(sessionId, agentFrame);
+					if (frame.type === "agent_end") this.#advanceStateRefreshGeneration(sessionId);
+					const promptLifecycle = this.#promptLifecycles.get(sessionId);
+					const terminalPromptResult =
+						frame.type === "prompt_result" && (frame.agentInvoked === false || typeof frame.error === "string");
+					const currentPromptResult =
+						terminalPromptResult && typeof frame.id === "string" && promptLifecycle?.internalId === frame.id;
+					for (const event of transcript.translate(frame, { currentPromptResult })) {
+						this.#broadcast(sessionId, projection.appendEvent(asAppWireEvent(event)));
+						if (event.type === "turn.start" || event.type === "agent.start")
+							this.#updateStatus(sessionId, "active");
+						else if (event.type === "agent.end") {
+							this.#releasePromptLifecycle(sessionId, this.#promptLifecycles.get(sessionId));
+							this.#updateStatus(sessionId, "idle");
+						}
+					}
+					if (currentPromptResult) {
+						if (this.#releasePromptLifecycle(sessionId, promptLifecycle)) this.#updateStatus(sessionId, "idle");
+					}
+				},
+				crashed: () => {
+					this.#markSupervisorCrashed(sessionId, supervisor);
+				},
+			},
+			this.#factory.argv(record.path),
+		);
+		this.#supervisors.set(sessionId, supervisor);
+		try {
+			await supervisor.start();
+			return supervisor;
+		} catch (error) {
+			this.#supervisors.delete(sessionId);
+			this.#promptLifecycles.delete(sessionId);
+			this.#transcripts.delete(sessionId);
+			this.#subagents.delete(sessionId);
+			supervisor.stop();
+			throw error;
+		}
+	}
+	async #message(ws: AppWs, raw: string | Uint8Array): Promise<void> {
+		try {
+			if (typeof raw !== "string") throw new Error("binary websocket frames are not supported");
+			const frame = decodeClientFrame(parseBounded(raw));
+			if (frame.type === "hello") {
+				if (this.#hello.has(ws)) throw new Error("hello already received");
+				this.#hello.add(ws);
+				await this.#handleHello(ws, frame);
+				return;
+			}
+			if (!this.#hello.has(ws)) throw new Error("hello required before commands");
+			if (frame.type === "ping") {
+				await this.#sendFrame(ws, {
+					v: "omp-app/1",
+					type: "pong",
+					nonce: frame.nonce,
+					timestamp: this.#clock.now().toISOString(),
+				});
+				return;
+			}
+			if (frame.type === "confirm") {
+				await this.#sendFrame(ws, (await this.#confirm(ws, frame)).frame);
+				return;
+			}
+			if (frame.type === "terminal.input" || frame.type === "terminal.resize" || frame.type === "terminal.close") {
+				if (!this.#operations) {
+					await this.#sendFrame(ws, {
+						v: "omp-app/1",
+						type: "error",
+						code: "unsupported",
+						message: "terminal operations are unsupported",
+					});
+					return;
+				}
+				const session = this.#projections.get(frame.sessionId);
+				if (this.#sessionArchived(frame.sessionId) && frame.type !== "terminal.close") {
+					await this.#sendFrame(ws, {
+						v: "omp-app/1",
+						type: "error",
+						code: "SESSION_ARCHIVED",
+						message: "archived sessions are read-only",
+					});
+					return;
+				}
+				if (!this.#beginSessionOperation(frame.sessionId)) {
+					await this.#sendFrame(ws, {
+						v: "omp-app/1",
+						type: "error",
+						code: "SESSION_BUSY",
+						message: "session lifecycle mutation is in progress",
+					});
+					return;
+				}
+				const controller = new AbortController();
+				this.#abortControllers.get(ws)?.add(controller);
+				try {
+					await this.#operations.routeTerminal(frame, {
+						hostId: this.hostId,
+						sessionId: frame.sessionId,
+						deviceId: ws.deviceId,
+						connectionId: ws.connectionId,
+						capabilities: (this.#clientCapabilities.get(ws) ?? new Set()) as OperationContext["capabilities"],
+						currentRevision: session?.value.revision,
+						abortSignal: controller.signal,
+					});
+				} catch (error) {
+					const rawCode =
+						error && typeof error === "object" && "code" in error && typeof error.code === "string"
+							? error.code.toUpperCase()
+							: "OPERATION_FAILED";
+					const code = new Set([
+						"FORBIDDEN",
+						"NOT_FOUND",
+						"STALE_REVISION",
+						"UNSUPPORTED",
+						"ABORTED",
+						"CONFLICT",
+						"OPERATION_FAILED",
+					]).has(rawCode)
+						? rawCode
+						: "OPERATION_FAILED";
+					await this.#sendFrame(ws, { v: "omp-app/1", type: "error", code, message: "terminal operation failed" });
+				} finally {
+					this.#abortControllers.get(ws)?.delete(controller);
+					this.#endSessionOperation(frame.sessionId);
+				}
+				return;
+			}
+			if (frame.type !== "command") {
+				await this.#sendFrame(ws, {
+					v: "omp-app/1",
+					type: "error",
+					code: "unsupported",
+					message: "frame is not supported",
+				});
+				return;
+			}
+			const descriptor = COMMAND_DESCRIPTORS[frame.command];
+			if (descriptor?.confirmation === "challenge") {
+				if (frame.confirmationId !== undefined) {
+					await this.#sendFrame(
+						ws,
+						response(this.hostId, frame, false, undefined, {
+							code: "confirmation_invalid",
+							message: "command confirmation must be approved through a confirm frame",
+						}),
+					);
+					return;
+				}
+				if (frame.command === "session.delete") {
+					const failure = await this.#deletePreflight(frame);
+					if (failure) {
+						await this.#sendFrame(ws, response(this.hostId, frame, false, undefined, failure));
+						return;
+					}
+				}
+				await this.#sendFrame(ws, this.#challenge(ws, frame));
+				return;
+			}
+			const outcome = await this.#command(frame, ws);
+			const outputFrames = [outcome.frame];
+			if (
+				frame.command === "session.attach" &&
+				frame.sessionId &&
+				outcome.frame.type === "response" &&
+				outcome.frame.ok
+			) {
+				const attached = this.#attached.get(ws);
+				const projection = this.#projections.get(frame.sessionId);
+				if (!attached || !projection) throw new Error("attach output is incomplete");
+				const cursor = frame.args.cursor;
+				const prepared =
+					outcome.attachOutput ??
+					prepareAttachOutput(projection, cursor === undefined ? undefined : decodeCursor(cursor));
+				// A replayed command outcome carries the baseline from its first
+				// delivery, while its bulk attach output is deliberately rebuilt.
+				// Keep the acknowledgement cursor aligned with the freshly prepared
+				// snapshot/replay that immediately follows it.
+				outputFrames[0] = response(this.hostId, frame, true, {
+					attached: true,
+					cursor: prepared.baseline,
+				});
+				attached.add(frame.sessionId);
+				try {
+					outputFrames.push(...completeAttachOutput(prepared, projection, this.#subagents.get(frame.sessionId)));
+				} catch (error) {
+					attached.delete(frame.sessionId);
+					throw error;
+				}
+			}
+			await Promise.all(outputFrames.map(output => this.#sendFrame(ws, output)));
+		} catch {
+			await this.#sendFrame(ws, { v: "omp-app/1", type: "error", code: "invalid_frame", message: "invalid frame" });
+			ws.close(1008, "invalid frame");
+		}
+	}
+	#challenge(ws: AppWs, command: CommandFrame): ConfirmationChallenge {
+		const hash = createHash("sha256")
+			.update(JSON.stringify({ ...command, confirmationId: undefined }))
+			.digest("hex");
+		const confirmationId = randomUUID() as never;
+		const expiresAt = Date.now() + 60_000;
+		this.#challenges.set(String(confirmationId), { command, ws, expiresAt, hash });
+		return {
+			v: "omp-app/1",
+			type: "confirmation",
+			confirmationId,
+			commandId: command.commandId,
+			hostId: this.hostId,
+			sessionId: command.sessionId,
+			commandHash: hash,
+			revision: (command.expectedRevision ??
+				this.#projections.get(command.sessionId!)?.value.revision ??
+				"host") as never,
+			expiresAt: new Date(expiresAt).toISOString(),
+			summary: command.command,
+		};
+	}
+	async #confirm(ws: AppWs, frame: ConfirmFrame): Promise<CommandOutcome> {
+		const pending = this.#challenges.get(String(frame.confirmationId));
+		if (
+			!pending ||
+			pending.ws !== ws ||
+			pending.expiresAt < Date.now() ||
+			pending.command.commandId !== frame.commandId ||
+			pending.command.hostId !== frame.hostId ||
+			pending.command.sessionId !== frame.sessionId
+		)
+			return {
+				frame: response(
+					this.hostId,
+					{
+						...(pending?.command ?? frame),
+						requestId: frame.requestId,
+						commandId: frame.commandId,
+						hostId: this.hostId,
+					} as CommandFrame,
+					false,
+					undefined,
+					{ code: "confirmation_invalid", message: "confirmation is invalid or expired" },
+				),
+			};
+		this.#challenges.delete(String(frame.confirmationId));
+		if (frame.decision === "deny")
+			return {
+				frame: response(this.hostId, pending.command, false, undefined, {
+					code: "confirmation_denied",
+					message: "command was denied",
+				}),
+			};
+		return this.#command({ ...pending.command, confirmationId: frame.confirmationId }, ws, true);
+	}
+	async #disconnectClient(ws: AppWs): Promise<void> {
+		if (!this.#clients.has(ws)) return;
+		const controllers = this.#abortControllers.get(ws);
+		for (const controller of controllers ?? []) controller.abort();
+		if (this.#operations) {
+			const contextBase = {
+				hostId: this.hostId,
+				deviceId: ws.deviceId,
+				capabilities: (this.#clientCapabilities.get(ws) ?? new Set()) as OperationContext["capabilities"],
+				abortSignal: AbortSignal.abort(),
+			};
+			try {
+				await this.#operations.disconnectConnection(ws.connectionId, contextBase);
+			} catch {
+				/* owner cleanup is best effort; registry always releases */
+			}
+		}
+		this.#clients.delete(ws);
+		this.#hello.delete(ws);
+		this.#clientCapabilities.delete(ws);
+		this.#attached.delete(ws);
+		this.#deviceIds.delete(ws);
+		this.#abortControllers.delete(ws);
+		for (const [socket, transport] of this.#localTransports)
+			if (transport === ws) this.#localTransports.delete(socket);
+	}
+	async #handleHello(ws: AppWs, frame: HelloFrame): Promise<void> {
+		if (frame.authentication !== undefined)
+			throw new Error("device authentication is not accepted on local transport");
+		const requestedCapabilities = new Set(frame.capabilities?.client ?? this.#supportedCapabilities);
+		const grantedCapabilities = [...this.#supportedCapabilities].filter(capability =>
+			requestedCapabilities.has(capability),
+		);
+		this.#clientCapabilities.set(ws, new Set(grantedCapabilities));
+		const welcome = {
+			v: "omp-app/1",
+			type: "welcome",
+			selectedProtocol: "omp-app/1",
+			hostId: this.hostId,
+			ompVersion: this.#ompVersion,
+			ompBuild: this.#ompBuild,
+			appserverVersion: this.#appserverVersion,
+			appserverBuild: this.#appserverBuild,
+			epoch: this.epoch,
+			grantedCapabilities,
+			grantedFeatures: frame.requestedFeatures.filter(feature => this.#supportedFeatures.has(feature)),
+			negotiatedLimits: { maxPayloadLength: 1024 * 1024, ringSize: this.#ringSize },
+			authentication: "local",
+			resumed: frame.savedCursors.some(
+				cursor => cursor.hostId === this.hostId && cursor.cursor.epoch === this.epoch,
+			),
+		};
+		await this.#sendFrame(ws, welcome as ServerFrame);
+		await this.#sendFrame(ws, this.#sessionsFrame());
+	}
+	#createLocalTransport(ws: LocalWs): AppWs {
+		let closed = false;
+		const transport: AppWs = {
+			connectionId: randomUUID(),
+			deviceId: randomUUID(),
+			send: text => {
+				if (closed) return false;
+				try {
+					const result = ws.send(text);
+					return typeof result === "number" ? result > 0 : true;
+				} catch {
+					return false;
+				}
+			},
+			close: (code, reason) => {
+				if (closed) return;
+				closed = true;
+				try {
+					ws.close(code, reason);
+				} catch {}
+			},
+		};
+		return transport;
+	}
+	async #sendFrame(transport: AppWs, frame: ServerFrame): Promise<boolean> {
+		const previous = this.#outboundTails.get(transport) ?? Promise.resolve();
+		const send = previous.then(() => this.#sendFrameNow(transport, frame));
+		const tail = send.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.#outboundTails.set(transport, tail);
+		try {
+			return await send;
+		} finally {
+			if (this.#outboundTails.get(transport) === tail) this.#outboundTails.delete(transport);
+		}
+	}
+	async #sendFrameNow(transport: AppWs, frame: ServerFrame): Promise<boolean> {
+		return transport.send(JSON.stringify(frame));
+	}
+	async #loadSessions(): Promise<void> {
+		const records = await this.#discovery.list();
+		records.sort(compareSessionRecords);
+		for (const record of records) {
+			if (this.#records.has(record.sessionId)) throw new Error(`duplicate session id: ${record.sessionId}`);
+			this.#records.set(record.sessionId, record);
+			this.#projections.set(
+				record.sessionId,
+				new SessionProjection(this.hostId, record, this.epoch, this.#ringSize),
+			);
+		}
+	}
+	async #refreshSessions(reconcileLifecycleSession?: SessionId): Promise<void> {
+		const generation = ++this.#sessionRefreshGeneration;
+		const discovered = await this.#discovery.list();
+		const apply = this.#sessionRefreshApplyTail.then(async () => {
+			if (generation < this.#acceptedSessionRefreshGeneration) return;
+			this.#acceptedSessionRefreshGeneration = generation;
+			await this.#applySessionRefresh(discovered, reconcileLifecycleSession);
+		});
+		this.#sessionRefreshApplyTail = apply.catch(() => undefined);
+		await apply;
+	}
+	async #applySessionRefresh(discovered: SessionRecord[], reconcileLifecycleSession?: SessionId): Promise<void> {
+		const discoveredIds = new Set(discovered.map(record => record.sessionId));
+		for (const record of discovered) {
+			this.#records.set(record.sessionId, record);
+			this.#createdPending.delete(record.sessionId);
+			const projection = this.#projections.get(record.sessionId);
+			if (!projection) {
+				const inserted = new SessionProjection(this.hostId, record, this.epoch, this.#ringSize);
+				this.#projections.set(record.sessionId, inserted);
+				await this.#broadcastIndex(inserted.indexUpsert());
+			} else {
+				const output = projection.reconcileRecord(record);
+				if (output) await this.#broadcastIndex(output);
+			}
+		}
+		for (const [sessionId, pending] of this.#createdPending) {
+			if (discoveredIds.has(sessionId)) {
+				this.#createdPending.delete(sessionId);
+				continue;
+			}
+			if (sessionId === reconcileLifecycleSession) {
+				this.#createdPending.delete(sessionId);
+				continue;
+			}
+			if (pending.refreshesRemaining > 0) pending.refreshesRemaining -= 1;
+			else {
+				this.#createdPending.delete(sessionId);
+				const projection = this.#projections.get(sessionId);
+				if (projection) await this.#broadcastIndex(projection.remove());
+				this.#records.delete(sessionId);
+				this.#projections.delete(sessionId);
+				this.#stateRefreshGenerations.delete(sessionId);
+			}
+		}
+		for (const sessionId of [...this.#records.keys()]) {
+			if (discoveredIds.has(sessionId) || this.#createdPending.has(sessionId)) continue;
+			const ownsLifecycleFence = !this.#lifecycleMutations.has(sessionId);
+			if (!ownsLifecycleFence && sessionId !== reconcileLifecycleSession) continue;
+			if (ownsLifecycleFence) this.#lifecycleMutations.add(sessionId);
+			try {
+				if (!(await this.#quiesceSessionRuntime(sessionId))) continue;
+				const projection = this.#projections.get(sessionId);
+				if (projection) await this.#broadcastIndex(projection.remove());
+				this.#records.delete(sessionId);
+				this.#projections.delete(sessionId);
+				this.#closedSessions.delete(sessionId);
+				this.#promptLifecycles.delete(sessionId);
+				this.#stateRefreshGenerations.delete(sessionId);
+				this.#transcripts.delete(sessionId);
+				this.#subagents.delete(sessionId);
+				for (const sessions of this.#attached.values()) sessions.delete(sessionId);
+			} finally {
+				if (ownsLifecycleFence) this.#lifecycleMutations.delete(sessionId);
+			}
+		}
+	}
+	#sessionListResult(): { sessions: SessionRef[]; totalCount: number; truncated: boolean } {
+		const sessions = [...this.#projections.values()].map(value => value.value.ref);
+		sessions.sort((a, b) => {
+			if (a.updatedAt < b.updatedAt) return 1;
+			if (a.updatedAt > b.updatedAt) return -1;
+			if (a.sessionId < b.sessionId) return -1;
+			if (a.sessionId > b.sessionId) return 1;
+			return 0;
+		});
+		const totalCount = sessions.length;
+		return { sessions: sessions.slice(0, 1000), totalCount, truncated: totalCount > 1000 };
+	}
+	#sessionsFrame(): ServerFrame {
+		return {
+			v: "omp-app/1",
+			type: "sessions",
+			hostId: this.hostId,
+			cursor: { epoch: this.epoch, seq: 0 },
+			...this.#sessionListResult(),
+		};
+	}
+	#broadcast(sessionId: SessionId, frame: ServerFrame): void {
+		if (frame.type === "session.delta") {
+			void this.#broadcastIndex(frame);
+			return;
+		}
+		for (const [client, sessions] of this.#attached) if (sessions.has(sessionId)) void this.#sendFrame(client, frame);
+	}
+	async #broadcastAttachedOrdered(sessionId: SessionId, frame: ServerFrame): Promise<void> {
+		for (const [client, sessions] of this.#attached)
+			if (sessions.has(sessionId)) await this.#sendFrame(client, frame);
+	}
+	async #broadcastIndex(frame: ServerFrame): Promise<void> {
+		for (const client of this.#clients) {
+			if (!this.#hello.has(client) || !this.#clientCapabilities.get(client)?.has("sessions.read")) continue;
+			await this.#sendFrame(client, frame);
+		}
+	}
+	async #fetch(request: Request, server: Bun.Server<ServerWebSocketData>): Promise<Response | undefined> {
+		const url = new URL(request.url);
+		if (url.pathname === "/health" && request.method === "GET")
+			return Response.json({ ok: true, hostId: this.hostId, epoch: this.epoch });
+		if (
+			url.pathname !== "/ws" ||
+			request.method !== "GET" ||
+			request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+		)
+			return new Response("Not Found", { status: 404 });
+		if (server.upgrade(request, { data: { socket: {} } })) return undefined;
+		return new Response("Upgrade Required", { status: 426 });
+	}
+}
+interface ServerWebSocketData {
+	socket: Record<string, never>;
+}
+export function createAppserver(options: AppserverOptions = {}): LocalAppserver {
+	return new LocalAppserver(options);
+}

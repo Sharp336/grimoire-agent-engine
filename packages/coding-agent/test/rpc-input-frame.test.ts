@@ -317,6 +317,7 @@ describe("RpcInputDispatcher", () => {
 					success: true,
 					data: {
 						thinkingLevel: undefined,
+						fast: false,
 						isStreaming: false,
 						isCompacting: false,
 						steeringMode: "all",
@@ -326,6 +327,7 @@ describe("RpcInputDispatcher", () => {
 						autoCompactionEnabled: false,
 						messageCount: 0,
 						queuedMessageCount: 0,
+						queuedMessages: { steering: [], followUp: [] },
 						todoPhases: [],
 					},
 				};

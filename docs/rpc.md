@@ -45,9 +45,10 @@ There is no envelope beyond the object shape itself.
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
+9. Prompt lifecycle hints for accepted prompts that later resolve locally (`{ type: "prompt_result", id?, agentInvoked }`) or fail (`{ type: "prompt_result", id?, error }`)
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Durable session-entry notifications (`session_entry`)
 
 ### Inbound frame categories (stdin)
 
@@ -55,6 +56,31 @@ There is no envelope beyond the object shape itself.
 2. `RpcExtensionUIResponse` (`{ type: "extension_ui_response", ... }`)
 3. Host tool updates/results (`host_tool_update`, `host_tool_result`)
 4. Host URI results (`host_uri_result`)
+
+### Durable session-entry notifications
+
+Each exact durable append is emitted once on stdout as an additive frame:
+
+```json
+{
+  "type": "session_entry",
+  "entry": {
+    "type": "message",
+    "id": "entry-id",
+    "parentId": "parent-entry-id",
+    "timestamp": "2026-07-11T12:00:00.000Z",
+    "message": { "role": "user", "content": "..." }
+  }
+}
+```
+
+`entry` is the typed `SessionEntry` object, including its exact `id`, `parentId`, and `timestamp`; standard RPC output preserves all entry-specific fields. The JSONL session transcript remains the durable authority for replay and recovery. `session_entry` is a live notification only, not a replacement for reading JSONL.
+
+The local appserver starts its managed RPC children with `OMP_APP_RPC_INLINE_IMAGE_DATA=omit`. In that internal transport only, image-block payloads and standalone image data URLs are omitted recursively from stdout frames and the frame receives `inlineImageDataOmitted: true`. This keeps one-line control notifications bounded without resizing, rewriting, or removing the image persisted in the session or sent to the model. Clients that need image display should resolve an attachment/blob reference instead of relying on inline base64 in a control frame.
+
+The coding-agent appserver exposes validated `settings.read` and `settings.write` with global persistence only. Setting catalog metadata therefore advertises only the `global` scope, and requests for session-scoped settings are rejected. The protocol's `config.write` device capability is shared by `settings.write`; it does not mean the separate `config.write` command is routed by this authority.
+
+This frame is additive: older RPC consumers may ignore unknown outbound `type` values and continue handling existing responses/events unchanged.
 
 ## Request/Response Correlation
 
@@ -67,9 +93,9 @@ Important edge behavior from runtime:
 
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
 - Parse/handler exceptions in the input loop emit `command: "parse"` with `id: undefined`.
-- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
+- Every command emits at most one `response` for its id. A `prompt` or `abort_and_prompt` failure before acceptance uses that response. After a success acknowledgement, an asynchronous failure is emitted as `prompt_result` with the original id and an `error` string, never as a second response.
 - `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
-- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
+- `abort_and_prompt` does not emit `data.agentInvoked`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or a `prompt_result` error.
 
 ## Command Schema (canonical)
 
@@ -184,6 +210,14 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 ```json
 { "type": "prompt_result", "id": "req_1", "agentInvoked": false }
 ```
+
+If that accepted prompt later rejects, the same asynchronous channel carries the failure. It is not a second command response:
+
+```json
+{ "type": "prompt_result", "id": "req_1", "error": "No API key found for provider" }
+```
+
+Hosts that track prompt lifecycles must assign a unique `id` to each prompt and settle only the unresolved lifecycle whose ID exactly matches `prompt_result.id`. A missing, unmatched, or stale ID may still be shown as non-terminal diagnostic output, but it must not settle another prompt or close its active turn.
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
 
@@ -363,13 +397,27 @@ Extension runner errors are emitted separately as:
 
 `message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
 
+RPC stdout frames remain below the host's 1 MiB line ceiling and satisfy the
+app-wire bounded-JSON structural limits for depth, collection size, and total
+nodes. When an `agent_end` aggregate would exceed any of those limits,
+`messages` contains the newest contiguous suffix that fits and the event adds
+the original `messageCount` plus a terminal `status` of `completed`, `failed`,
+or `cancelled`. Durable messages still arrive individually as `session_entry`
+frames before this terminal event.
+
+When an appserver RPC child crashes, the session is projected as `closed` with
+`liveState.runtimeCrashed: true` while that child is being reaped. Only after it
+exits does the projection become restartable `idle`; the next prompt can then
+spawn a fresh child, and successful activity clears the crash marker. An
+explicit `session.close` remains `closed` and does not become restartable.
+
 ## Prompt/Queue Concurrency and Ordering
 
 This is the most important operational behavior.
 
 ### Immediate ack vs completion
 
-`prompt` and `abort_and_prompt` are **acknowledged immediately**:
+`prompt` and `abort_and_prompt` acknowledge accepted work without waiting for run completion. A failure before acceptance uses the command's single failure response. A successful acknowledgement has this shape:
 
 ```json
 { "id": "req_1", "type": "response", "command": "prompt", "success": true }
@@ -378,8 +426,10 @@ This is the most important operational behavior.
 That means:
 
 - command acceptance != run completion
-- agent turns complete via `agent_end`
+- `turn_end` closes one agent-loop iteration and may be followed by another `turn_start`; it is not prompt completion or an idle boundary
+- agent-backed prompts complete via the final `agent_end`
 - local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+- late prompt failures complete via `prompt_result.error`, never a second `response` with the settled command id
 
 ### While streaming
 

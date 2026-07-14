@@ -10,9 +10,21 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+
+import {
+	MAX_ARRAY_ITEMS,
+	MAX_INPUT_BYTES,
+	MAX_JSON_DEPTH,
+	MAX_JSON_NODES,
+	MAX_MAP_KEYS,
+	MAX_STRING_BYTES,
+	parseBounded,
+	utf8ByteLength,
+} from "@oh-my-pi/app-wire";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, postmortem, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -25,7 +37,7 @@ import {
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
-import type { AgentSession } from "../../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -33,6 +45,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { registerRpcSessionTeardown } from "./rpc-session-teardown";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -46,7 +59,9 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcPromptResultFrame,
 	RpcResponse,
+	RpcSessionEntryFrame,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
@@ -92,6 +107,486 @@ type RpcOutput = (
 		| RpcHostUriCancelRequest
 		| object,
 ) => void;
+type RpcSessionEntryManager = Pick<AgentSession["sessionManager"], "subscribeEntryAppended">;
+
+/** Leave one maximum-sized app-wire string of headroom below the supervisor's line ceiling. */
+export const RPC_AGENT_END_MAX_BYTES = MAX_INPUT_BYTES - MAX_STRING_BYTES;
+
+const rpcTextEncoder = new TextEncoder();
+
+export const RPC_INLINE_IMAGE_DATA_ENV = "OMP_APP_RPC_INLINE_IMAGE_DATA";
+
+export type RpcTransportFrame<T extends object = object> = T & {
+	/** The full image bytes remain in the OMP transcript but were omitted from this JSONL notification. */
+	inlineImageDataOmitted?: true;
+	/** Some non-routing data was projected to keep this internal notification within app-wire bounds. */
+	transportDataOmitted?: true;
+	/** Coarse, bounded reasons for transport-only projection. */
+	transportOmissionReasons?: string[];
+};
+
+interface RpcImageProjection {
+	value: unknown;
+	omitted: boolean;
+}
+
+function omitInlineImageData(value: unknown): RpcImageProjection {
+	if (typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
+		return { value: "[inline image data omitted]", omitted: true };
+	}
+	if (Array.isArray(value)) {
+		let omitted = false;
+		const items = value.map(item => {
+			const projected = omitInlineImageData(item);
+			omitted ||= projected.omitted;
+			return projected.value;
+		});
+		return omitted ? { value: items, omitted } : { value, omitted };
+	}
+	if (!isRecord(value)) return { value, omitted: false };
+	if (value.type === "image" && typeof value.data === "string" && value.data.length > 0) {
+		return { value: { ...value, data: "" }, omitted: true };
+	}
+
+	let omitted = false;
+	const projected: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) {
+		const result = omitInlineImageData(item);
+		omitted ||= result.omitted;
+		projected[key] = result.value;
+	}
+	return omitted ? { value: projected, omitted } : { value, omitted };
+}
+
+const RPC_TRANSPORT_MAX_ARRAY_ITEMS = Math.min(MAX_ARRAY_ITEMS - 1, 900);
+const RPC_TRANSPORT_MAX_MAP_KEYS = Math.min(MAX_MAP_KEYS - 4, 450);
+const RPC_TRANSPORT_MAX_DEPTH = Math.min(MAX_JSON_DEPTH - 4, 28);
+const RPC_TRANSPORT_MAX_NODES = Math.min(MAX_JSON_NODES - 1_000, 10_000);
+const RPC_TRANSPORT_STRING_CONTENT_BYTES = 550_000;
+const RPC_TRANSPORT_STRING_BYTES = Math.min(MAX_STRING_BYTES - 256, 60_000);
+const RPC_TRANSPORT_KEY_BYTES = 1_024;
+const RPC_TRANSPORT_OMITTED = "[transport data omitted]";
+const RPC_TRANSPORT_TRUNCATED = "… [transport data truncated]";
+const RPC_TRANSPORT_MARKER_KEYS = new Set([
+	"inlineImageDataOmitted",
+	"transportDataOmitted",
+	"transportOmissionReasons",
+]);
+const RPC_TRANSPORT_ENVELOPE_KEYS = [
+	"type",
+	"id",
+	"requestId",
+	"commandId",
+	"command",
+	"toolCallId",
+	"toolName",
+	"sessionId",
+	"agentId",
+	"parentId",
+	"status",
+	"success",
+	"isError",
+] as const;
+
+interface RpcProjectionState {
+	contentBytes: number;
+	nodes: number;
+	omissions: Set<string>;
+	ancestors: WeakSet<object>;
+}
+
+function sanitizedUnicode(value: string, state: RpcProjectionState): string {
+	let result = "";
+	let changed = false;
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				result += value[index]! + value[index + 1]!;
+				index++;
+			} else {
+				result += "�";
+				changed = true;
+			}
+		} else if (code >= 0xdc00 && code <= 0xdfff) {
+			result += "�";
+			changed = true;
+		} else result += value[index]!;
+	}
+	if (changed) state.omissions.add("invalid_unicode_replaced");
+	return result;
+}
+
+function encodedStringContentBytes(value: string): number {
+	const encoded = JSON.stringify(value);
+	return rpcTextEncoder.encode(encoded.slice(1, -1)).byteLength;
+}
+
+function truncateProjectedString(value: string, state: RpcProjectionState): string {
+	const safe = sanitizedUnicode(value, state);
+	const available = Math.max(0, RPC_TRANSPORT_STRING_CONTENT_BYTES - state.contentBytes);
+	const fullUtf8Bytes = utf8ByteLength(safe);
+	const fullEncodedBytes = encodedStringContentBytes(safe);
+	if (
+		fullUtf8Bytes <= RPC_TRANSPORT_STRING_BYTES &&
+		fullEncodedBytes <= available &&
+		fullEncodedBytes <= RPC_TRANSPORT_STRING_BYTES
+	) {
+		state.contentBytes += fullEncodedBytes;
+		return safe;
+	}
+
+	state.omissions.add("oversized_string");
+	const suffixUtf8 = utf8ByteLength(RPC_TRANSPORT_TRUNCATED);
+	const suffixEncoded = encodedStringContentBytes(RPC_TRANSPORT_TRUNCATED);
+	const utf8Limit = Math.max(0, RPC_TRANSPORT_STRING_BYTES - suffixUtf8);
+	const encodedLimit = Math.max(0, Math.min(available, RPC_TRANSPORT_STRING_BYTES) - suffixEncoded);
+	if (utf8Limit === 0 || encodedLimit === 0) return RPC_TRANSPORT_OMITTED;
+
+	let prefix = "";
+	let prefixUtf8 = 0;
+	let prefixEncoded = 0;
+	for (const character of safe) {
+		const characterUtf8 = utf8ByteLength(character);
+		const characterEncoded = encodedStringContentBytes(character);
+		if (prefixUtf8 + characterUtf8 > utf8Limit || prefixEncoded + characterEncoded > encodedLimit) break;
+		prefix += character;
+		prefixUtf8 += characterUtf8;
+		prefixEncoded += characterEncoded;
+	}
+	const result = `${prefix}${RPC_TRANSPORT_TRUNCATED}`;
+	state.contentBytes += encodedStringContentBytes(result);
+	return result;
+}
+
+function projectedObjectKey(key: string, state: RpcProjectionState): string {
+	const safe = sanitizedUnicode(key, state);
+	if (utf8ByteLength(safe) <= RPC_TRANSPORT_KEY_BYTES) {
+		state.contentBytes += encodedStringContentBytes(safe);
+		return safe;
+	}
+	state.omissions.add("oversized_map_key");
+	let result = "";
+	for (const character of safe) {
+		if (utf8ByteLength(result + character) > RPC_TRANSPORT_KEY_BYTES - 16) break;
+		result += character;
+	}
+	result += "…[truncated]";
+	state.contentBytes += encodedStringContentBytes(result);
+	return result;
+}
+
+function transportProjectionMarker(state: RpcProjectionState, reason: string): string {
+	state.omissions.add(reason);
+	return RPC_TRANSPORT_OMITTED;
+}
+
+function projectRpcTransportValue(value: unknown, state: RpcProjectionState, depth: number, path: string): unknown {
+	state.nodes++;
+	if (state.nodes > RPC_TRANSPORT_MAX_NODES) return transportProjectionMarker(state, "json_node_limit");
+	if (depth > RPC_TRANSPORT_MAX_DEPTH) return transportProjectionMarker(state, "json_depth_limit");
+	if (typeof value === "string") {
+		if (/^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
+			state.omissions.add("inline_image_data");
+			return "[inline image data omitted]";
+		}
+		return truncateProjectedString(value, state);
+	}
+	if (value === null || typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		if (Number.isFinite(value)) return value;
+		return transportProjectionMarker(state, "non_finite_number");
+	}
+	if (typeof value === "bigint") {
+		state.omissions.add("non_json_value");
+		return truncateProjectedString(value.toString(), state);
+	}
+	if (typeof value !== "object") return transportProjectionMarker(state, "non_json_value");
+	if (state.ancestors.has(value)) return transportProjectionMarker(state, "cyclic_value");
+	state.ancestors.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const limit = Math.min(value.length, RPC_TRANSPORT_MAX_ARRAY_ITEMS);
+			if (limit < value.length) state.omissions.add("array_items");
+			const result: unknown[] = [];
+			for (let index = 0; index < limit; index++) {
+				if (state.nodes >= RPC_TRANSPORT_MAX_NODES) {
+					state.omissions.add("json_node_limit");
+					break;
+				}
+				result.push(projectRpcTransportValue(value[index], state, depth + 1, `${path}[${index}]`));
+			}
+			return result;
+		}
+
+		const source = value as Record<string, unknown>;
+		if (source.type === "image" && typeof source.data === "string" && source.data.length > 0) {
+			state.omissions.add("inline_image_data");
+			const image: Record<string, unknown> = {};
+			for (const [key, item] of Object.entries(source))
+				image[key] = key === "data" ? "" : projectRpcTransportValue(item, state, depth + 1, `${path}.${key}`);
+			return image;
+		}
+
+		const entries = Object.entries(source);
+		const ordered =
+			depth === 0
+				? [
+						...RPC_TRANSPORT_ENVELOPE_KEYS.flatMap(key =>
+							Object.hasOwn(source, key) ? ([[key, source[key]]] as Array<[string, unknown]>) : [],
+						),
+						...entries.filter(([key]) => !RPC_TRANSPORT_ENVELOPE_KEYS.includes(key as never)),
+					]
+				: entries;
+		const result: Record<string, unknown> = {};
+		let kept = 0;
+		for (const [rawKey, item] of ordered) {
+			if (RPC_TRANSPORT_MARKER_KEYS.has(rawKey)) continue;
+			if (kept >= RPC_TRANSPORT_MAX_MAP_KEYS || state.nodes >= RPC_TRANSPORT_MAX_NODES) {
+				state.omissions.add(kept >= RPC_TRANSPORT_MAX_MAP_KEYS ? "map_keys" : "json_node_limit");
+				break;
+			}
+			const key = projectedObjectKey(rawKey, state);
+			if (Object.hasOwn(result, key)) {
+				state.omissions.add("map_key_collision");
+				continue;
+			}
+			if (rawKey === "rawContent" || rawKey === "payload") {
+				result[key] = transportProjectionMarker(state, rawKey === "rawContent" ? "raw_content" : "payload");
+			} else result[key] = projectRpcTransportValue(item, state, depth + 1, `${path}.${rawKey}`);
+			kept++;
+		}
+		return result;
+	} finally {
+		state.ancestors.delete(value);
+	}
+}
+
+function withRpcTransportOmissions<T extends object>(value: T, state: RpcProjectionState): RpcTransportFrame<T> {
+	const reasons = [...state.omissions].sort().slice(0, 32);
+	if (reasons.length === 0) return value;
+	return {
+		...value,
+		...(state.omissions.has("inline_image_data") ? { inlineImageDataOmitted: true as const } : {}),
+		transportDataOmitted: true,
+		transportOmissionReasons: reasons,
+	};
+}
+
+function minimalRpcTransportFrame<T extends object>(frame: T, state: RpcProjectionState): RpcTransportFrame<T> {
+	state.omissions.add("frame_projection");
+	const source = frame as Record<string, unknown>;
+	const minimal: Record<string, unknown> = {};
+	const minimalState: RpcProjectionState = {
+		contentBytes: 0,
+		nodes: 0,
+		omissions: state.omissions,
+		ancestors: new WeakSet(),
+	};
+	for (const key of RPC_TRANSPORT_ENVELOPE_KEYS) {
+		if (!Object.hasOwn(source, key)) continue;
+		minimal[key] = projectRpcTransportValue(source[key], minimalState, 1, `frame.${key}`);
+	}
+	if (typeof minimal.type !== "string") minimal.type = "transport_projection";
+	return withRpcTransportOmissions(minimal as T, minimalState);
+}
+
+/**
+ * Prepare an internal appserver child frame without copying embedded image bytes
+ * onto stdout. The original event/entry remains untouched and SessionManager has
+ * already persisted it before a durable-entry notification is emitted.
+ */
+export function rpcTransportFrame<T extends object>(
+	frame: T,
+	managedAppserverTransport: boolean,
+): RpcTransportFrame<T> {
+	if (!managedAppserverTransport) return frame;
+	if (isBoundedRpcFrame(frame)) {
+		const projected = omitInlineImageData(frame);
+		if (!projected.omitted) return frame;
+		const candidate = { ...(projected.value as T), inlineImageDataOmitted: true as const };
+		if (isBoundedRpcFrame(candidate)) return candidate;
+	}
+
+	const state: RpcProjectionState = {
+		contentBytes: 0,
+		nodes: 0,
+		omissions: new Set(),
+		ancestors: new WeakSet(),
+	};
+	const projected = projectRpcTransportValue(frame, state, 0, "frame");
+	if (projected && typeof projected === "object" && !Array.isArray(projected)) {
+		const candidate = withRpcTransportOmissions(projected as T, state);
+		if (isBoundedRpcFrame(candidate)) return candidate;
+	}
+	const minimal = minimalRpcTransportFrame(frame, state);
+	if (isBoundedRpcFrame(minimal)) return minimal;
+	return {
+		type: "transport_projection",
+		transportDataOmitted: true,
+		transportOmissionReasons: ["frame_projection"],
+	} as unknown as RpcTransportFrame<T>;
+}
+
+type RpcAgentEndStatus = "completed" | "failed" | "cancelled";
+
+function serializedJsonBytes(value: object): number | undefined {
+	try {
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined) return undefined;
+		return rpcTextEncoder.encode(encoded).byteLength;
+	} catch {
+		return undefined;
+	}
+}
+
+function isBoundedRpcFrame(value: object): boolean {
+	let encoded: string | undefined;
+	try {
+		encoded = JSON.stringify(value);
+	} catch {
+		return false;
+	}
+	if (encoded === undefined || rpcTextEncoder.encode(encoded).byteLength > RPC_AGENT_END_MAX_BYTES) return false;
+	try {
+		parseBounded(encoded);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function rpcAgentEndStatus(messages: Extract<AgentSessionEvent, { type: "agent_end" }>["messages"]): RpcAgentEndStatus {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") continue;
+		if ("stopReason" in message && message.stopReason === "error") return "failed";
+		if ("stopReason" in message && message.stopReason === "aborted") return "cancelled";
+		return "completed";
+	}
+	return "completed";
+}
+
+/**
+ * Keep RPC terminal events below the appserver's one-line transport ceiling.
+ *
+ * Every durable message has already crossed this channel as a `session_entry`.
+ * `agent_end.messages` is a redundant run aggregate, so retain the newest
+ * contiguous suffix that fits while preserving the terminal event itself.
+ */
+export function boundedRpcSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
+	if (event.type !== "agent_end" || isBoundedRpcFrame(event)) return event;
+
+	const terminal = {
+		messageCount: event.messages.length,
+		status: rpcAgentEndStatus(event.messages),
+	};
+	const empty = { ...event, messages: [], ...terminal };
+	const minimal = { type: "agent_end" as const, messages: [], ...terminal };
+	const emptyEvent = isBoundedRpcFrame(empty) ? empty : minimal;
+	let bytes = serializedJsonBytes(emptyEvent);
+	if (bytes === undefined) return minimal;
+
+	let maxSuffixLength = 0;
+	for (let index = event.messages.length - 1; index >= 0 && maxSuffixLength < MAX_ARRAY_ITEMS; index--) {
+		const messageBytes = serializedJsonBytes(event.messages[index]!);
+		if (messageBytes === undefined) break;
+		const separatorBytes = maxSuffixLength === 0 ? 0 : 1;
+		if (bytes + separatorBytes + messageBytes > RPC_AGENT_END_MAX_BYTES) break;
+		bytes += separatorBytes + messageBytes;
+		maxSuffixLength++;
+	}
+
+	let low = 0;
+	let high = maxSuffixLength;
+	while (low < high) {
+		const candidateLength = Math.ceil((low + high) / 2);
+		const candidate = { ...event, messages: event.messages.slice(-candidateLength), ...terminal };
+		if (isBoundedRpcFrame(candidate)) low = candidateLength;
+		else high = candidateLength - 1;
+	}
+	return low === 0 ? emptyEvent : { ...event, messages: event.messages.slice(-low), ...terminal };
+}
+
+export interface RpcSessionEntrySubscription {
+	bind(sessionManager: RpcSessionEntryManager): void;
+	unbind(): void;
+	switchTo(sessionManager: RpcSessionEntryManager): void;
+	dispose(): void;
+}
+
+export const RPC_SESSION_ENTRIES_ENV = "OMP_APP_RPC_SESSION_ENTRIES";
+
+/**
+ * Route durable session appends through the RPC output writer.
+ *
+ * Binding a new manager first detaches the old manager, so switching sessions
+ * cannot leave a stale transcript listener behind. A writer failure also
+ * detaches the listener before rethrowing; SessionManager isolates that error
+ * from persistence and other subscribers.
+ */
+export function createRpcSessionEntrySubscription(
+	output: (frame: RpcSessionEntryFrame) => void,
+	enabled = true,
+): RpcSessionEntrySubscription {
+	if (!enabled) {
+		return {
+			bind() {},
+			unbind() {},
+			switchTo() {},
+			dispose() {},
+		};
+	}
+	let boundManager: RpcSessionEntryManager | undefined;
+	let unsubscribe: (() => void) | undefined;
+	let disposed = false;
+
+	const detach = () => {
+		const cleanup = unsubscribe;
+		unsubscribe = undefined;
+		boundManager = undefined;
+		cleanup?.();
+	};
+
+	const bind = (sessionManager: RpcSessionEntryManager) => {
+		if (disposed) return;
+		if (boundManager === sessionManager && unsubscribe) return;
+		detach();
+		try {
+			unsubscribe = sessionManager.subscribeEntryAppended(entry => {
+				if (disposed) return;
+				try {
+					output({ type: "session_entry", entry });
+				} catch (error) {
+					disposed = true;
+					detach();
+					throw error;
+				}
+			});
+			boundManager = sessionManager;
+		} catch (error) {
+			detach();
+			throw error;
+		}
+	};
+
+	return {
+		bind,
+		unbind() {
+			if (!disposed) detach();
+		},
+		switchTo(sessionManager) {
+			if (disposed) return;
+			detach();
+			bind(sessionManager);
+		},
+		dispose() {
+			disposed = true;
+			detach();
+		},
+	};
+}
 
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
@@ -135,8 +630,7 @@ export async function tryRunRpcSkillCommand(
 export function reportLocalOnlyPromptResult(input: {
 	id: string | undefined;
 	prompt: Promise<boolean>;
-	output: (obj: object) => void;
-	onError: (error: Error) => void;
+	output: (obj: RpcPromptResultFrame) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
 }): void {
@@ -149,7 +643,11 @@ export function reportLocalOnlyPromptResult(input: {
 			}
 		})
 		.catch(error => {
-			input.onError(error instanceof Error ? error : new Error(String(error)));
+			input.output({
+				type: "prompt_result",
+				id: input.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		});
 }
 
@@ -228,8 +726,7 @@ export class RpcExtensionUserMessageTracker {
 export function watchAndReportLocalOnlyPromptResult(input: {
 	id: string | undefined;
 	startPrompt: () => Promise<boolean>;
-	output: (obj: object) => void;
-	onError: (error: Error) => void;
+	output: (obj: RpcPromptResultFrame) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 }): void {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
@@ -237,7 +734,6 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 		id: input.id,
 		prompt: trackedPrompt.prompt,
 		output: input.output,
-		onError: input.onError,
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
 	});
@@ -613,10 +1109,15 @@ export async function runRpcMode(
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
 
-	process.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+	const omitInlineImages = process.env[RPC_INLINE_IMAGE_DATA_ENV] === "omit";
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		process.stdout.write(`${JSON.stringify(obj)}\n`);
+		process.stdout.write(`${JSON.stringify(rpcTransportFrame(obj, omitInlineImages))}\n`);
 	};
+	const sessionEntrySubscription = createRpcSessionEntrySubscription(
+		output,
+		process.env[RPC_SESSION_ENTRIES_ENV] === "1",
+	);
+	sessionEntrySubscription.bind(session.sessionManager);
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(
@@ -639,7 +1140,26 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
-	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const requestedSubagentSubscription = process.env.OMP_APP_SUBAGENT_SUBSCRIPTION;
+	const initialSubagentSubscription = isSubagentSubscriptionLevel(requestedSubagentSubscription)
+		? requestedSubagentSubscription
+		: "off";
+	const subagentRegistry = eventBus
+		? new RpcSubagentRegistry(eventBus, output, initialSubagentSubscription)
+		: undefined;
+	const sessionTeardown = registerRpcSessionTeardown({
+		beginDispose: () => session.beginDispose(),
+		cleanupProtocol: () => {
+			sessionEntrySubscription.dispose();
+			hostToolBridge.close("RPC session shut down before host tool execution completed");
+			hostUriBridge.clear("RPC session shut down before host URI request completed");
+			subagentRegistry?.dispose();
+		},
+		disposeSession: reason => session.dispose(reason === undefined ? {} : { reason }),
+	});
+	// Readiness guarantees the parent can safely terminate this child: the
+	// postmortem callback that releases the session lock is already armed.
+	output({ type: "ready" });
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -648,10 +1168,16 @@ export async function runRpcMode(
 	 * Extension UI context that uses the RPC protocol.
 	 */
 	class RpcExtensionUIContext implements ExtensionUIContext {
+		#pendingRequests: Map<string, PendingExtensionRequest>;
+		#output: (obj: RpcResponse | RpcExtensionUIRequest | object) => void;
+
 		constructor(
-			private pendingRequests: Map<string, PendingExtensionRequest>,
-			private output: (obj: RpcResponse | RpcExtensionUIRequest | object) => void,
-		) {}
+			pendingRequests: Map<string, PendingExtensionRequest>,
+			outputWriter: (obj: RpcResponse | RpcExtensionUIRequest | object) => void,
+		) {
+			this.#pendingRequests = pendingRequests;
+			this.#output = outputWriter;
+		}
 
 		/** Helper for dialog methods with signal/timeout support */
 		#createDialogPromise<T>(
@@ -669,7 +1195,7 @@ export async function runRpcMode(
 			const cleanup = () => {
 				if (timeoutId) clearTimeout(timeoutId);
 				opts?.signal?.removeEventListener("abort", onAbort);
-				this.pendingRequests.delete(id);
+				this.#pendingRequests.delete(id);
 			};
 
 			const onAbort = () => {
@@ -686,14 +1212,14 @@ export async function runRpcMode(
 				}, opts.timeout);
 			}
 
-			this.pendingRequests.set(id, {
+			this.#pendingRequests.set(id, {
 				resolve: (response: RpcExtensionUIResponse) => {
 					cleanup();
 					resolve(parseResponse(response));
 				},
 				reject,
 			});
-			this.output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+			this.#output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 			return promise;
 		}
 
@@ -751,7 +1277,7 @@ export async function runRpcMode(
 
 		notify(message: string, type?: "info" | "warning" | "error"): void {
 			// Fire and forget - no response needed
-			this.output({
+			this.#output({
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "notify",
@@ -762,7 +1288,7 @@ export async function runRpcMode(
 
 		setStatus(key: string, text: string | undefined): void {
 			// Fire and forget - no response needed
-			this.output({
+			this.#output({
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "setStatus",
@@ -778,7 +1304,7 @@ export async function runRpcMode(
 		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
 			// Only support string arrays in RPC mode - factory functions are ignored
 			if (content === undefined || Array.isArray(content)) {
-				this.output({
+				this.#output({
 					type: "extension_ui_request",
 					id: Snowflake.next() as string,
 					method: "setWidget",
@@ -801,7 +1327,7 @@ export async function runRpcMode(
 		setTitle(title: string): void {
 			// Title updates are low-value noise for most RPC hosts; opt in via PI_RPC_EMIT_TITLE=1.
 			if (!emitRpcTitles) return;
-			this.output({
+			this.#output({
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "setTitle",
@@ -821,7 +1347,7 @@ export async function runRpcMode(
 
 		setEditorText(text: string): void {
 			// Fire and forget - host can implement editor control
-			this.output({
+			this.#output({
 				type: "extension_ui_request",
 				id: Snowflake.next() as string,
 				method: "set_editor_text",
@@ -841,7 +1367,7 @@ export async function runRpcMode(
 			dialogOptions?: ExtensionUIDialogOptions,
 			editorOptions?: { promptStyle?: boolean },
 		): Promise<string | undefined> {
-			return requestRpcEditor(this.pendingRequests, this.output, title, prefill, dialogOptions, editorOptions);
+			return requestRpcEditor(this.#pendingRequests, this.#output, title, prefill, dialogOptions, editorOptions);
 		}
 
 		addAutocompleteProvider(): void {
@@ -885,26 +1411,31 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
-	// Set up extensions with RPC-based UI context
-	await initializeExtensions(session, {
-		reportSendError: (action, err) => {
-			output(error(undefined, action, err.message));
-		},
-		reportRuntimeError: err => {
-			output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
-		},
-		onShutdown: () => {
-			shutdownState.requested = true;
-		},
-		trackAgentInvokingMessage: task => {
-			extensionUserMessageTracker.trackAgentMessageTask(task);
-		},
-		uiContext: rpcUiContext,
-	});
+	// Set up extensions with RPC-based UI context.
+	try {
+		await initializeExtensions(session, {
+			reportSendError: (action, err) => {
+				output(error(undefined, action, err.message));
+			},
+			reportRuntimeError: err => {
+				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
+			},
+			onShutdown: () => {
+				shutdownState.requested = true;
+			},
+			trackAgentInvokingMessage: task => {
+				extensionUserMessageTracker.trackAgentMessageTask(task);
+			},
+			uiContext: rpcUiContext,
+		});
+	} catch (error) {
+		sessionEntrySubscription.dispose();
+		throw error;
+	}
 
 	// Output all agent events as JSON
 	session.subscribe(event => {
-		output(event);
+		output(boundedRpcSessionEvent(event));
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
@@ -960,7 +1491,6 @@ export async function runRpcMode(
 							id,
 							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
 							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
 						});
 						return success(id, "prompt");
@@ -979,7 +1509,6 @@ export async function runRpcMode(
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
 					extensionUserMessageTracker,
 				});
 				return success(id, "prompt");
@@ -999,33 +1528,66 @@ export async function runRpcMode(
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
+			case "retry": {
+				const retried = await session.retry();
+				return success(id, "retry", { retried });
+			}
+
+			case "pause": {
+				const changed = agentPauseGate.pause();
+				return success(id, "pause", { paused: agentPauseGate.paused, changed });
+			}
+
+			case "resume": {
+				const resumed = agentPauseGate.resume() !== undefined;
+				return success(id, "resume", { paused: agentPauseGate.paused, resumed });
+			}
 
 			case "abort_and_prompt": {
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
+				session.prompt(command.message, { images: command.images }).catch(promptError =>
+					output({
+						type: "prompt_result",
+						id,
+						error: promptError instanceof Error ? promptError.message : String(promptError),
+					}),
+				);
 				return success(id, "abort_and_prompt");
 			}
 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
-				return success(id, result.type, result.data);
+				try {
+					const result = await handleRpcSessionChange(session, command, subagentRegistry);
+					sessionEntrySubscription.bind(session.sessionManager);
+					if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+					return success(id, result.type, result.data);
+				} catch (error) {
+					try {
+						sessionEntrySubscription.bind(session.sessionManager);
+					} catch {
+						sessionEntrySubscription.dispose();
+					}
+					throw error;
+				}
 			}
 
-			// =================================================================
-			// State
-			// =================================================================
-
 			case "get_state": {
+				const queued = session.getQueuedMessages();
 				const state: RpcSessionState = {
-					model: session.model,
-					thinkingLevel: session.thinkingLevel,
+					model: session.model
+						? {
+								...session.model,
+								...(session.configuredModelSelector() ? { selector: session.configuredModelSelector() } : {}),
+								...(session.configuredModelRole() ? { role: session.configuredModelRole() } : {}),
+							}
+						: undefined,
+					thinkingLevel: session.configuredThinkingLevel(),
+					fast: session.isFastModeEnabled(),
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
+					isPaused: agentPauseGate.paused,
 					steeringMode: session.steeringMode,
 					followUpMode: session.followUpMode,
 					interruptMode: session.interruptMode,
@@ -1035,6 +1597,10 @@ export async function runRpcMode(
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					queuedMessageCount: session.queuedMessageCount,
+					queuedMessages: {
+						steering: queued.steering.slice(0, 128).map(text => text.slice(0, 65_536)),
+						followUp: queued.followUp.slice(0, 128).map(text => text.slice(0, 65_536)),
+					},
 					todoPhases: session.getTodoPhases(),
 					systemPrompt: session.systemPrompt,
 					dumpTools: session.agent.state.tools.map(tool => ({
@@ -1096,13 +1662,10 @@ export async function runRpcMode(
 			}
 
 			case "get_subagent_messages": {
-				if (!subagentRegistry) {
-					return error(id, "get_subagent_messages", "Subagent event bus is unavailable");
-				}
+				if (!subagentRegistry) return error(id, "get_subagent_messages", "Subagent event bus is unavailable");
 				try {
-					if (command.fromByte !== undefined && !Number.isFinite(command.fromByte)) {
+					if (command.fromByte !== undefined && !Number.isFinite(command.fromByte))
 						return error(id, "get_subagent_messages", "fromByte must be a finite number");
-					}
 					const sessionFile = subagentRegistry.resolveSessionFile(command);
 					const transcript = await readRpcSubagentTranscript(sessionFile, command.fromByte);
 					return success(id, "get_subagent_messages", transcript);
@@ -1111,18 +1674,28 @@ export async function runRpcMode(
 				}
 			}
 
-			// =================================================================
-			// Model
-			// =================================================================
-
 			case "set_model": {
-				const models = session.getAvailableModels();
-				const model = models.find(m => m.provider === command.provider && m.id === command.modelId);
-				if (!model) {
-					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
+				try {
+					const hasSelector =
+						command.selector !== undefined || (command.provider !== undefined && command.modelId !== undefined);
+					const hasRole = command.role !== undefined;
+					if (hasSelector === hasRole) throw new Error("provide exactly one selector or role");
+					if (command.selector === undefined && !hasRole) {
+						await session.setModelSelector({
+							selector: `${command.provider}/${command.modelId}`,
+							persist: command.persist,
+						});
+					} else {
+						await session.setModelSelector({
+							selector: command.selector,
+							role: command.role,
+							persist: command.persist,
+						});
+					}
+					return success(id, "set_model", session.model);
+				} catch (caught) {
+					return error(id, "set_model", caught instanceof Error ? caught.message : String(caught));
 				}
-				await session.setModel(model);
-				return success(id, "set_model", model);
 			}
 
 			case "cycle_model": {
@@ -1143,8 +1716,18 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "set_thinking_level": {
-				session.setThinkingLevel(command.level);
-				return success(id, "set_thinking_level");
+				try {
+					session.setThinkingLevelValidated(command.level);
+					return success(id, "set_thinking_level");
+				} catch (caught) {
+					return error(id, "set_thinking_level", caught instanceof Error ? caught.message : String(caught));
+				}
+			}
+
+			case "set_fast": {
+				if (!session.setFastMode(command.enabled))
+					return error(id, "set_fast", "Fast mode is unsupported for the current model");
+				return success(id, "set_fast", { enabled: session.isFastModeEnabled() });
 			}
 
 			case "cycle_thinking_level": {
@@ -1346,10 +1929,8 @@ export async function runRpcMode(
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
 		performShutdown: async () => {
-			if (session.extensionRunner?.hasHandlers("session_shutdown")) {
-				await session.extensionRunner.emit({ type: "session_shutdown" });
-			}
-			process.exit(0);
+			await sessionTeardown.shutdown();
+			await postmortem.quit(0);
 		},
 	});
 
@@ -1383,6 +1964,8 @@ export async function runRpcMode(
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
-	subagentRegistry?.dispose();
+	// stdin closed — release the session lock before the RPC process exits.
+	await sessionTeardown.shutdown();
+	await postmortem.quit(0);
 	process.exit(0);
 }

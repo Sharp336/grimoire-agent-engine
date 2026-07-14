@@ -57,6 +57,19 @@ export * from "./settings-schema";
 export interface RawSettings {
 	[key: string]: unknown;
 }
+export interface SettingsLayerValue {
+	present: boolean;
+	value?: unknown;
+}
+export interface SettingsDesktopSnapshot {
+	path: SettingPath;
+	global: SettingsLayerValue;
+	project: SettingsLayerValue;
+	configOverlay: SettingsLayerValue;
+	override: SettingsLayerValue;
+	effective: unknown;
+	source: "override" | "configOverlay" | "project" | "global" | "default";
+}
 
 export interface SettingsOptions {
 	/** Current working directory for project settings discovery */
@@ -109,6 +122,15 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
+}
+function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
+	let current: RawSettings = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const child = current[segments[i]];
+		if (!child || typeof child !== "object" || Array.isArray(child)) return;
+		current = child as RawSettings;
+	}
+	delete current[segments[segments.length - 1]];
 }
 
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
@@ -251,7 +273,6 @@ export class Settings {
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
-
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
 
@@ -351,6 +372,61 @@ export class Settings {
 	// Core API
 	// ─────────────────────────────────────────────────────────────────────────
 
+	/**
+	 * Safe, redacted-boundary snapshot of all setting layers for desktop CAS/rollback.
+	 */
+	getDesktopSnapshot(path: SettingPath): SettingsDesktopSnapshot {
+		const segments = SETTING_PATH_SEGMENTS[path];
+		const layer = (raw: RawSettings): SettingsLayerValue => {
+			const value = getByPath(raw, segments);
+			return value === undefined ? { present: false } : { present: true, value: structuredClone(value) };
+		};
+		const global = layer(this.#global);
+		const project = layer(this.#project);
+		const configOverlay = layer(this.#configOverlay);
+		const override = layer(this.#overrides);
+		let source: SettingsDesktopSnapshot["source"] = "default";
+		if (override.present) source = "override";
+		else if (configOverlay.present) source = "configOverlay";
+		else if (project.present) source = "project";
+		else if (global.present) source = "global";
+		return { path, global, project, configOverlay, override, effective: structuredClone(this.get(path)), source };
+	}
+
+	/**
+	 * Delete one global key exactly, preserving inherited project/override values.
+	 */
+	clearGlobal(path: SettingPath): void {
+		const prev = this.get(path);
+		deleteByPath(this.#global, SETTING_PATH_SEGMENTS[path]);
+		this.#modified.add(path);
+		this.#rebuildMerged();
+		this.#queueSave();
+		const hook = SETTING_HOOKS[path];
+		if (hook) hook(this.get(path), prev);
+		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+	}
+
+	/** Restore a previously captured desktop snapshot exactly. */
+	restoreDesktopSnapshot(snapshot: SettingsDesktopSnapshot): void {
+		const segments = SETTING_PATH_SEGMENTS[snapshot.path];
+		const previous = this.get(snapshot.path);
+		const restore = (target: RawSettings, layer: SettingsLayerValue): void => {
+			if (layer.present) setByPath(target, [...segments], structuredClone(layer.value));
+			else deleteByPath(target, segments);
+		};
+		restore(this.#global, snapshot.global);
+		this.#modified.add(snapshot.path);
+		restore(this.#project, snapshot.project);
+		restore(this.#configOverlay, snapshot.configOverlay);
+		restore(this.#overrides, snapshot.override);
+		this.#rebuildMerged();
+		const next = this.get(snapshot.path);
+		this.#queueSave();
+		const hook = SETTING_HOOKS[snapshot.path];
+		if (hook) hook(next, previous);
+		this.#fireEffectiveSettingChanged(snapshot.path, next, previous);
+	}
 	/**
 	 * Get a setting value (sync).
 	 * Returns the merged value from global + project + overrides, or the default.
@@ -1350,7 +1426,8 @@ export class Settings {
 				for (const modPath of modifiedPaths) {
 					const segments = modPath.split(".");
 					const value = getByPath(this.#global, segments);
-					setByPath(current, segments, value);
+					if (value === undefined) deleteByPath(current, segments);
+					else setByPath(current, segments, value);
 				}
 
 				// Update our global with any external changes we preserved

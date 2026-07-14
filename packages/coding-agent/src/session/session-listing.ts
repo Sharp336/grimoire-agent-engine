@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message, TextContent } from "@oh-my-pi/pi-ai";
 import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { inspectSessionLock, type SessionLockInspection } from "./session-lock";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 
@@ -573,7 +574,7 @@ export async function findMostRecentSession(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<string | null> {
 	const sessions = await scanSessionDir(sessionDir, storage, false);
-	return sessions[0]?.path ?? null;
+	return sessions.find(isWritableResumeCandidate)?.path ?? null;
 }
 
 /** Get recent sessions for display in the welcome screen. */
@@ -622,6 +623,21 @@ function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions
 	return "listFilesSync" in value;
 }
 
+function isWritableResumeCandidate(session: SessionInfo): boolean {
+	let inspection: SessionLockInspection;
+	try {
+		inspection = inspectSessionLock(session.path);
+	} catch {
+		// A lock inspection I/O failure is fail-closed for writable resume.
+		return false;
+	}
+	return (
+		inspection.status !== "live" &&
+		inspection.status !== "suspect" &&
+		(inspection.status !== "malformed" || inspection.stealable)
+	);
+}
+
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -633,7 +649,9 @@ export async function resolveResumableSession(
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const localMatch = localSessions.find(
+		session => sessionMatchesResumeArg(session, sessionArg) && isWritableResumeCandidate(session),
+	);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -643,7 +661,9 @@ export async function resolveResumableSession(
 	}
 
 	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = globalSessions.find(
+		session => sessionMatchesResumeArg(session, sessionArg) && isWritableResumeCandidate(session),
+	);
 	if (!globalMatch) {
 		return undefined;
 	}
