@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added `/clear` as an alias for `/new` so that typing `/clear` starts a new session instead of fuzzy-matching to `/autoresearch` ([#5349](https://github.com/can1357/oh-my-pi/issues/5349)).
+
 ## [16.5.0] - 2026-07-13
 
 ### Breaking Changes
