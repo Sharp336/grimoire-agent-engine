@@ -21,6 +21,17 @@ export interface PluginFeature {
 	commands?: string[];
 }
 
+export interface PluginLifecycle {
+	/** Module exporting `uninstall(ctx)`, called before the package is removed. */
+	uninstall?: string;
+}
+
+export interface PluginUninstallContext {
+	cwd: string;
+	agentDir: string;
+	pluginPath: string;
+}
+
 /**
  * Plugin manifest from package.json omp or pi field.
  */
@@ -40,6 +51,9 @@ export interface PluginManifest {
 	extensions?: string[];
 	/** Command files (relative paths from package root) */
 	commands?: string[];
+
+	/** Optional lifecycle hook modules. */
+	lifecycle?: PluginLifecycle;
 
 	/** Feature definitions for selective installation */
 	features?: Record<string, PluginFeature>;

@@ -1,7 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
+	getAgentDir,
 	getPluginsDir,
 	getPluginsLockfile,
 	getPluginsNodeModules,
@@ -27,6 +29,7 @@ import type {
 	PluginManifest,
 	PluginRuntimeConfig,
 	PluginSettingSchema,
+	PluginUninstallContext,
 	ProjectPluginOverrides,
 } from "./types";
 
@@ -111,6 +114,14 @@ interface PluginPackageSnapshot {
 
 interface RuntimePackageJson {
 	name?: unknown;
+}
+
+interface PluginLifecycleModule {
+	uninstall?: (ctx: PluginUninstallContext) => Promise<void> | void;
+}
+
+function isPluginLifecycleModule(value: unknown): value is PluginLifecycleModule {
+	return value !== null && typeof value === "object" && "uninstall" in value;
 }
 // =============================================================================
 // Plugin Manager
@@ -625,12 +636,42 @@ export class PluginManager {
 		}
 	}
 
+	async #runUninstallHook(name: string): Promise<void> {
+		const pluginPath = path.join(getPluginsNodeModules(), name);
+		const packageJsonPath = path.join(pluginPath, "package.json");
+		let pluginPkg: { omp?: PluginManifest; pi?: PluginManifest };
+		try {
+			pluginPkg = await Bun.file(packageJsonPath).json();
+		} catch (err) {
+			if (isEnoent(err)) return;
+			throw err;
+		}
+
+		const hook = (pluginPkg.omp || pluginPkg.pi)?.lifecycle?.uninstall;
+		if (!hook) return;
+		if (path.isAbsolute(hook)) throw new Error(`Plugin uninstall hook for ${name} must be relative`);
+
+		const hookPath = path.resolve(pluginPath, hook);
+		const relativeHookPath = path.relative(pluginPath, hookPath);
+		if (relativeHookPath.startsWith("..") || path.isAbsolute(relativeHookPath)) {
+			throw new Error(`Plugin uninstall hook for ${name} must stay inside the plugin package`);
+		}
+
+		// Plugin hook paths come from the installed package manifest, so static import cannot name them.
+		const module = await import(pathToFileURL(hookPath).href);
+		if (!isPluginLifecycleModule(module) || typeof module.uninstall !== "function") {
+			throw new Error(`Plugin uninstall hook for ${name} must export uninstall(ctx)`);
+		}
+		await module.uninstall({ cwd: this.#cwd, agentDir: getAgentDir(), pluginPath });
+	}
+
 	/**
 	 * Uninstall a plugin.
 	 */
 	async uninstall(name: string): Promise<void> {
 		validatePackageName(name);
 		await this.#ensurePackageJson();
+		await this.#runUninstallHook(name);
 
 		const proc = Bun.spawn(["bun", "uninstall", name], {
 			cwd: getPluginsDir(),
