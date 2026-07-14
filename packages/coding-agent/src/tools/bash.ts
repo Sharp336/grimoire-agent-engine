@@ -27,6 +27,7 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
+import { DynamicTimeoutResolver } from "./dynamic-timeout";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import {
@@ -397,6 +398,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		return prompt.render(bashDescription, {
 			asyncEnabled: this.#asyncEnabled,
 			autoBackgroundEnabled: this.#autoBackgroundEnabled,
+			dynamicTimeoutEnabled: this.#dynamicTimeoutEnabled,
 			autoBackgroundThresholdSeconds: Math.max(0, Math.floor(this.#autoBackgroundThresholdMs / 1000)),
 			hasAstGrep: isToolActive("ast_grep", this.session.settings.get("astGrep.enabled")),
 			hasAstEdit: isToolActive("ast_edit", this.session.settings.get("astEdit.enabled")),
@@ -420,6 +422,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	readonly #asyncEnabled: boolean;
 	readonly #autoBackgroundEnabled: boolean;
 	readonly #autoBackgroundThresholdMs: number;
+	readonly #dynamicTimeoutEnabled: boolean;
+	readonly #dynamicTimeoutResolver = new DynamicTimeoutResolver();
 
 	constructor(private readonly session: ToolSession) {
 		this.#asyncEnabled = this.session.settings.get("async.enabled");
@@ -430,6 +434,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				this.session.settings.get("bash.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 			),
 		);
+		this.#dynamicTimeoutEnabled = this.session.settings.get("bash.dynamicTimeout.enabled");
 		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
 	}
 
@@ -704,7 +709,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		{
 			command: rawCommand,
 			env: rawEnv,
-			timeout: rawTimeout = 300,
+			timeout: rawTimeout,
 			cwd,
 
 			async: asyncRequested = false,
@@ -801,11 +806,31 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// must still cancel the call or job, but OMP does not impose a deadline.
 		const requestedTimeoutSec = rawTimeout;
 		const timeoutDisabled = requestedTimeoutSec === 0;
-		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec);
-		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
+		let effectiveTimeoutSec = requestedTimeoutSec;
 		const pendingNotices: string[] = [];
-		if (timeoutSec !== undefined) {
-			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec);
+		// When the LLM omits the timeout and dynamic timeouts are enabled, compute
+		// a per-command-signature timeout from recent wall-time history. Timeouts
+		// scale with confidence — conservative with few samples, aggressive with a
+		// full history window.
+		if (requestedTimeoutSec === undefined && this.#dynamicTimeoutEnabled && !timeoutDisabled) {
+			const dynamic = this.#dynamicTimeoutResolver.resolve(
+				command,
+				this.session.settings.get("bash.dynamicTimeout.multiplier"),
+				this.session.settings.get("bash.dynamicTimeout.minTimeout"),
+				this.session.settings.get("bash.dynamicTimeout.maxTimeout"),
+				TOOL_TIMEOUTS.bash.default,
+			);
+			if (dynamic !== undefined) {
+				effectiveTimeoutSec = dynamic.timeoutSec;
+				pendingNotices.push(
+					`Dynamic timeout: ${dynamic.timeoutSec}s (based on ${dynamic.sampleCount} recent "${dynamic.signature}" samples, p90=${Math.round(dynamic.p90Ms / 1000)}s)`,
+				);
+			}
+		}
+		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", effectiveTimeoutSec);
+		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
+		if (timeoutSec !== undefined && effectiveTimeoutSec !== undefined) {
+			const timeoutClampNotice = formatTimeoutClampNotice(effectiveTimeoutSec, timeoutSec);
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
@@ -991,6 +1016,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 								outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
 								outputBytes: current.output.length,
 							};
+							if (this.#dynamicTimeoutEnabled) {
+								this.#dynamicTimeoutResolver.record(command, performance.now() - bridgeWallTimeStart);
+							}
 							return this.#buildCompletedResult(timedOutResult, timeoutSec, {
 								requestedTimeoutSec,
 								notices: pendingNotices,
@@ -1052,6 +1080,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
+				if (this.#dynamicTimeoutEnabled) {
+					this.#dynamicTimeoutResolver.record(command, performance.now() - bridgeWallTimeStart);
+				}
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
@@ -1100,6 +1131,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
+		if (this.#dynamicTimeoutEnabled) {
+			this.#dynamicTimeoutResolver.record(command, wallTimeMs);
+		}
 		if (result.cancelled) {
 			const out = normalizeResultOutput(result);
 			// PTY output carries no cancel/timeout notice of its own; annotate so

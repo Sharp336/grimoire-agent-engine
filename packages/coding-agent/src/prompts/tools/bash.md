@@ -56,6 +56,9 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 
 - `timeout` is seconds; nonzero values are clamped to `1..3600` and the process is killed on elapse. Set `timeout: 0` only for finite commands whose completion is cancellation-owned.
 - `async: true` defers only reporting; it does NOT extend a nonzero timeout.
+{{#if dynamicTimeoutEnabled}}
+- When you don't specify a `timeout`, OMP dynamically computes one from recent execution history for the same command type. Quick commands that consistently finish fast get shorter timeouts; commands that consistently take longer get extended timeouts. Only set `timeout` explicitly when you need to override the dynamic prediction.
+{{/if}}
 {{#if hasLaunch}}- Need a service, watcher, debugger, REPL, or later stdin? MUST use `launch`. NEVER use `cmd &`, `nohup`, or async bash as a process supervisor.{{else}}- Need a long-running process or >3600s run? Use an external process supervisor; avoid detached shell jobs you cannot later observe or stop.{{/if}}
 {{/if}}
 {{#if autoBackgroundEnabled}}
