@@ -2547,7 +2547,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const parentOwnedToolNames = new Set(["todo"]);
 			const filteredSubagentTools = subagentToolNames.filter(name => !parentOwnedToolNames.has(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
-				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
+				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools, { explicit: false }));
 			}
 
 			session.sessionManager.appendSessionInit({
@@ -2603,7 +2603,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						getActiveTools: () => session.getActiveToolNames(),
 						getAllTools: () => session.getAllToolNames(),
 						setActiveTools: (toolNames: string[]) =>
-							session.setActiveToolsByName(toolNames.filter(name => !parentOwnedToolNames.has(name))),
+							session.setActiveToolsByName(
+								toolNames.filter(name => !parentOwnedToolNames.has(name)),
+								{
+									explicit: true,
+								},
+							),
 						getCommands: () => getSessionSlashCommands(session),
 						setModel: model => runExtensionSetModel(session, model),
 						getThinkingLevel: () => session.thinkingLevel,

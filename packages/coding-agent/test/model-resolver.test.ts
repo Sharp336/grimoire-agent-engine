@@ -495,6 +495,18 @@ describe("parseModelPattern", () => {
 			expect(result.warning).toBeUndefined();
 		});
 
+		test("max suffix parsing is not captured by a fuzzy literal max model", () => {
+			const fuzzyLiteralMax = {
+				...mockMaxSuffixModels[1],
+				id: "coding-router-preview:max",
+				name: "NanoGPT Coding Router Preview Max",
+			};
+			const result = parseModelPattern("nanogpt/coding-router:max", [mockMaxSuffixModels[0], fuzzyLiteralMax]);
+			expect(result.model?.id).toBe("coding-router");
+			expect(result.thinkingLevel).toBe(Effort.Max);
+			expect(result.explicitThinkingLevel).toBe(true);
+		});
+
 		test("literal model ids ending in auto win over the auto sentinel alias", () => {
 			const result = parseModelPattern("example/runtime:auto", mockAutoSuffixModels);
 			expect(result.model?.id).toBe("runtime:auto");
@@ -517,6 +529,38 @@ describe("parseModelPattern", () => {
 			expect(result.thinkingLevel).toBeUndefined();
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toBeUndefined();
+		});
+
+		test("ultra suffix parsing is not captured by a fuzzy literal ultra model", () => {
+			const fuzzyLiteralUltra = {
+				...mockUltraSuffixModels[1],
+				id: "coding-router-preview:ultra",
+				name: "NanoGPT Coding Router Preview Ultra",
+			};
+			const result = parseModelPattern("nanogpt/coding-router:ultra", [mockUltraSuffixModels[0], fuzzyLiteralUltra]);
+			expect(result.model?.id).toBe("coding-router");
+			expect(result.thinkingLevel).toBe(ThinkingLevel.Ultra);
+			expect(result.explicitThinkingLevel).toBe(true);
+		});
+
+		test("stacked selectors resolve their exact inner literal before fuzzy suffix models", () => {
+			const fuzzyUltra = {
+				...mockUltraSuffixModels[1],
+				id: "coding-router-max-preview:ultra",
+			};
+			const ultraResult = parseModelPattern("nanogpt/coding-router:max:ultra", [mockMaxSuffixModels[1], fuzzyUltra]);
+			expect(ultraResult.model?.id).toBe("coding-router:max");
+			expect(ultraResult.thinkingLevel).toBe(ThinkingLevel.Ultra);
+			expect(ultraResult.explicitThinkingLevel).toBe(true);
+
+			const fuzzyMax = {
+				...mockMaxSuffixModels[1],
+				id: "coding-router-ultra-preview:max",
+			};
+			const maxResult = parseModelPattern("nanogpt/coding-router:ultra:max", [mockUltraSuffixModels[1], fuzzyMax]);
+			expect(maxResult.model?.id).toBe("coding-router:ultra");
+			expect(maxResult.thinkingLevel).toBe(Effort.Max);
+			expect(maxResult.explicitThinkingLevel).toBe(true);
 		});
 	});
 
@@ -1140,6 +1184,12 @@ describe("resolveCliModel", () => {
 				getAll: () => [defaultBedrockModel],
 			},
 		});
+		const bareMaxLiteralResult = resolveCliModel({
+			cliModel: `${profileArn}:max`,
+			modelRegistry: {
+				getAll: () => [defaultBedrockModel],
+			},
+		});
 
 		expect(baseResult.error).toBeUndefined();
 		expect(baseResult.model?.provider).toBe("amazon-bedrock");
@@ -1154,6 +1204,9 @@ describe("resolveCliModel", () => {
 		expect(offResult.error).toBeUndefined();
 		expect(offResult.model?.id).toBe(profileArn);
 		expect(offResult.thinkingLevel).toBe("off");
+		expect(bareMaxLiteralResult.error).toBeUndefined();
+		expect(bareMaxLiteralResult.model?.id).toBe(`${profileArn}:max`);
+		expect(bareMaxLiteralResult.thinkingLevel).toBeUndefined();
 	});
 
 	test("returns a clear error when there are no models", () => {

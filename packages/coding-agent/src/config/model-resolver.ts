@@ -636,6 +636,24 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 	}
 	return undefined;
 }
+
+function matchExactModel(
+	modelPattern: string,
+	availableModels: Model<Api>[],
+	context: ModelPreferenceContext,
+): Model<Api> | undefined {
+	const exactRefMatch = findExactModelReferenceMatch(modelPattern, availableModels);
+	if (exactRefMatch) {
+		return exactRefMatch;
+	}
+
+	const lowerPattern = modelPattern.toLowerCase();
+	const exactMatches = availableModels.filter(model => model.id.toLowerCase() === lowerPattern);
+	if (exactMatches.length > 0) {
+		return pickPreferredModel(exactMatches, context);
+	}
+	return resolveBedrockInferenceProfileModelId(modelPattern, availableModels);
+}
 /**
  * The single model-matching engine. Tries, in order:
  * 1. exact `provider/id` reference (variant-alias and OpenRouter routed/date
@@ -651,25 +669,11 @@ function matchModel(
 	availableModels: Model<Api>[],
 	context: ModelPreferenceContext,
 ): Model<Api> | undefined {
-	const exactRefMatch = findExactModelReferenceMatch(modelPattern, availableModels);
-	if (exactRefMatch) {
-		return exactRefMatch;
+	const exactMatch = matchExactModel(modelPattern, availableModels, context);
+	if (exactMatch) {
+		return exactMatch;
 	}
-
-	// Exact ID match (case-insensitive) — this must happen before provider-scoped
-	// fuzzy matching so raw IDs that contain slashes (for example OpenRouter model
-	// IDs like "openai/gpt-4o:extended") still resolve as IDs instead of being
-	// misread as a provider-qualified selector.
 	const lowerPattern = modelPattern.toLowerCase();
-	const exactMatches = availableModels.filter(m => m.id.toLowerCase() === lowerPattern);
-	if (exactMatches.length > 0) {
-		return pickPreferredModel(exactMatches, context);
-	}
-
-	const bedrockInferenceProfile = resolveBedrockInferenceProfileModelId(modelPattern, availableModels);
-	if (bedrockInferenceProfile) {
-		return bedrockInferenceProfile;
-	}
 
 	// Retired effort-tier variant ids (bare, no provider prefix) resolve to
 	// their collapsed logical model; models from the providers whose table
@@ -788,15 +792,15 @@ function parseModelPatternWithContext(
 	context: ModelPreferenceContext,
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
-	// Try exact match first
-	const exactMatch = matchModel(pattern, availableModels, context);
+	// Literal references win over selector parsing, but fuzzy matches must not:
+	// `base:ultra` still means model `base` at Ultra even when an unrelated
+	// `base-preview:ultra` model happens to satisfy the fuzzy matcher.
+	const exactMatch = matchExactModel(pattern, availableModels, context);
 	if (exactMatch) {
 		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
-	// No match - try stripping a valid thinking suffix and recursing. Guarded
-	// suffixes are accepted only after the full pattern failed, so literal model
-	// IDs ending in `:max` / `:ultra` keep winning over the thinking suffix.
+	// No literal match - try stripping a valid thinking suffix and recursing.
 	const { base, level } = splitThinkingSuffix(pattern, -1, GUARDED_THINKING_SUFFIX_OPTIONS);
 	if (level) {
 		const result = parseModelPatternWithContext(base, availableModels, context, options);
@@ -811,6 +815,13 @@ function parseModelPatternWithContext(
 			};
 		}
 		return result;
+	}
+
+	// No thinking suffix matched, so the normal fuzzy/alias engine may resolve
+	// the complete pattern.
+	const fuzzyMatch = matchModel(pattern, availableModels, context);
+	if (fuzzyMatch) {
+		return { model: fuzzyMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
 	const lastColonIndex = pattern.lastIndexOf(":");

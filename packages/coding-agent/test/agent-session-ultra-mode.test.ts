@@ -7,6 +7,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -35,6 +36,9 @@ type Harness = {
 	releaseFirstResponse?: () => void;
 	waitForTaskActivation?: () => Promise<void>;
 	releaseTaskActivation?: () => void;
+	holdNextTaskRemoval?: () => void;
+	waitForTaskRemoval?: () => Promise<void>;
+	releaseTaskRemoval?: () => void;
 };
 
 function isTextContentBlock(value: unknown): value is TextContent {
@@ -175,11 +179,15 @@ describe("AgentSession Ultra mode orchestration", () => {
 			holdTaskActivation?: boolean;
 			requestedToolNames?: ReadonlySet<string>;
 			taskBuiltIn?: boolean;
+			extensionRunner?: ExtensionRunner;
 		} = {},
 	): Promise<Harness> {
 		let releaseFirstResponse: (() => void) | undefined;
 		const taskActivationStarted = Promise.withResolvers<void>();
 		const taskActivationRelease = Promise.withResolvers<void>();
+		let holdNextTaskRemoval = false;
+		const taskRemovalStarted = Promise.withResolvers<void>();
+		const taskRemovalRelease = Promise.withResolvers<void>();
 		const observedCalls: ObservedPromptCall[] = [];
 		const waiters: Array<{
 			predicate: (call: ObservedPromptCall) => boolean;
@@ -264,10 +272,16 @@ describe("AgentSession Ultra mode orchestration", () => {
 			],
 			thinkingLevel: options.thinkingLevel,
 			agentKind: options.agentKind,
+			extensionRunner: options.extensionRunner,
 			rebuildSystemPrompt: async toolNames => {
 				if (options.holdTaskActivation && toolNames.includes("task")) {
 					taskActivationStarted.resolve();
 					await taskActivationRelease.promise;
+				}
+				if (holdNextTaskRemoval && !toolNames.includes("task")) {
+					holdNextTaskRemoval = false;
+					taskRemovalStarted.resolve();
+					await taskRemovalRelease.promise;
 				}
 				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
 			},
@@ -291,6 +305,11 @@ describe("AgentSession Ultra mode orchestration", () => {
 			releaseFirstResponse: () => releaseFirstResponse?.(),
 			waitForTaskActivation: () => taskActivationStarted.promise,
 			releaseTaskActivation: () => taskActivationRelease.resolve(),
+			holdNextTaskRemoval: () => {
+				holdNextTaskRemoval = true;
+			},
+			waitForTaskRemoval: () => taskRemovalStarted.promise,
+			releaseTaskRemoval: () => taskRemovalRelease.resolve(),
 		};
 		harnesses.push(harness);
 		return harness;
@@ -758,7 +777,7 @@ describe("AgentSession Ultra mode orchestration", () => {
 			thinkingLevel: ThinkingLevel.Ultra,
 		});
 
-		await session.setActiveToolsByName(["read"]);
+		await session.setActiveToolsByName(["read"], { explicit: true });
 		await session.prompt("continue without delegation");
 
 		expect(observedCalls[0]?.toolNames).not.toContain("task");
@@ -769,7 +788,23 @@ describe("AgentSession Ultra mode orchestration", () => {
 		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(0);
 	});
 
-	it("does not treat internal active-tool reconciliation as an explicit task exclusion", async () => {
+	it("treats direct active-tool updates as explicit by default", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+
+		await session.setActiveToolsByName(["read"]);
+		await session.prompt("honor the public task exclusion");
+
+		expect(observedCalls[0]?.toolNames).not.toContain("task");
+		expect(observedCalls[0]?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
+			false,
+		);
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
+		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(0);
+	});
+
+	it("does not treat an explicitly internal active-tool update as a task exclusion", async () => {
 		const { session, observedCalls } = await createHarness({
 			thinkingLevel: ThinkingLevel.Ultra,
 		});
@@ -790,7 +825,7 @@ describe("AgentSession Ultra mode orchestration", () => {
 			thinkingLevel: ThinkingLevel.Ultra,
 		});
 
-		await session.setActiveToolsByName(["read"]);
+		await session.setActiveToolsByName(["read"], { explicit: true });
 		await session.setActiveToolsByName(["read", "task"], { explicit: false });
 		expect(session.getActiveToolNames()).toContain("task");
 
@@ -802,14 +837,14 @@ describe("AgentSession Ultra mode orchestration", () => {
 		);
 	});
 
-	it("preserves explicit runtime task exclusions across logical session round trips", async () => {
+	it("does not resurrect explicit runtime task exclusions after a new-session round trip", async () => {
 		const { session, observedCalls } = await createHarness({
 			thinkingLevel: Effort.High,
 			persisted: true,
 		});
 		session.setThinkingLevel(ThinkingLevel.Ultra);
 
-		await session.setActiveToolsByName(["read"]);
+		await session.setActiveToolsByName(["read"], { explicit: true });
 		await session.prompt("work in session A without delegation");
 		const sessionAFile = session.sessionFile;
 		expect(sessionAFile).toBeDefined();
@@ -817,19 +852,354 @@ describe("AgentSession Ultra mode orchestration", () => {
 
 		await session.newSession();
 		session.setThinkingLevel(ThinkingLevel.Ultra);
-		await session.setActiveToolsByName(["read", "task"]);
+		await session.setActiveToolsByName(["read", "task"], { explicit: false });
 		await session.prompt("allow delegation in session B");
 		expect(observedCalls.at(-1)?.toolNames).toContain("task");
 
 		expect(await session.switchSession(sessionAFile!)).toBe(true);
 		expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Ultra);
-		await session.prompt("return to session A without delegation");
+		await session.prompt("return to session A with delegation available");
 
 		const returnedCall = observedCalls.at(-1);
-		expect(returnedCall?.toolNames).not.toContain("task");
+		expect(returnedCall?.toolNames).toContain("task");
 		expect(returnedCall?.messageTexts.some(text => text.includes("meaningfully improves speed or quality"))).toBe(
-			false,
+			true,
 		);
+	});
+
+	it("ignores an in-flight exclusion after a successful A-B-A session round trip", async () => {
+		const { session, observedCalls, holdNextTaskRemoval, waitForTaskRemoval, releaseTaskRemoval } =
+			await createHarness({
+				thinkingLevel: ThinkingLevel.Ultra,
+				persisted: true,
+				activeTask: true,
+			});
+		const sessionAFile = session.sessionFile;
+		expect(sessionAFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.newSession()).toBe(true);
+		const sessionBFile = session.sessionFile;
+		expect(sessionBFile).toBeDefined();
+		await session.sessionManager.flush();
+		expect(await session.switchSession(sessionAFile!)).toBe(true);
+
+		holdNextTaskRemoval?.();
+		const staleExclusion = session.setActiveToolsByName(["read"], { explicit: true });
+		await waitForTaskRemoval?.();
+
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		let switchStarted = false;
+		const switchSpy = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async sessionPath => {
+			switchStarted = true;
+			await setSessionFile(sessionPath);
+		});
+		try {
+			const switchToB = session.switchSession(sessionBFile!);
+			const switchStartedBeforeRelease = switchStarted;
+			releaseTaskRemoval?.();
+			await staleExclusion;
+			const switchedToB = await switchToB;
+			const switchedBackToA = await session.switchSession(sessionAFile!);
+
+			expect(switchStartedBeforeRelease).toBe(false);
+			expect(switchedToB).toBe(true);
+			expect(switchedBackToA).toBe(true);
+		} finally {
+			releaseTaskRemoval?.();
+			switchSpy.mockRestore();
+		}
+
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("allow delegation after the round trip");
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+	});
+
+	it("drops an exclusion that finishes after newSession advances the logical-session epoch", async () => {
+		const { session, observedCalls, holdNextTaskRemoval, waitForTaskRemoval, releaseTaskRemoval } =
+			await createHarness({
+				thinkingLevel: ThinkingLevel.Ultra,
+				persisted: true,
+				activeTask: true,
+			});
+		const sessionAFile = session.sessionFile;
+		const sessionAId = session.sessionId;
+		expect(sessionAFile).toBeDefined();
+		expect(sessionAId).toBeDefined();
+		await session.sessionManager.flush();
+
+		holdNextTaskRemoval?.();
+		const staleExclusion = session.setActiveToolsByName(["read"], { explicit: true });
+		await waitForTaskRemoval?.();
+		try {
+			expect(await session.newSession()).toBe(true);
+			expect(session.sessionId).not.toBe(sessionAId);
+			const switchBackToA = session.switchSession(sessionAFile!);
+
+			releaseTaskRemoval?.();
+			await staleExclusion;
+			expect(await switchBackToA).toBe(true);
+		} finally {
+			releaseTaskRemoval?.();
+		}
+
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("allow delegation after returning to the reused session id");
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+	});
+
+	it("lets a session_switch hook make an explicit active-tool update", async () => {
+		let hookedSession: AgentSession | undefined;
+		let hookCalls = 0;
+		const extensionRunner = {
+			hasHandlers: vi.fn(() => false),
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === "session_switch") {
+					hookCalls++;
+					await hookedSession?.setActiveToolsByName(["read"], { explicit: true });
+				}
+				return undefined;
+			}),
+		} as unknown as ExtensionRunner;
+		const source = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+			activeTask: true,
+			extensionRunner,
+		});
+		hookedSession = source.session;
+		const target = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+			activeTask: true,
+		});
+		const targetFile = target.session.sessionFile;
+		expect(targetFile).toBeDefined();
+		await source.sessionManager.flush();
+		await target.sessionManager.flush();
+
+		expect(await source.session.switchSession(targetFile!)).toBe(true);
+		expect(hookCalls).toBe(1);
+		expect(source.session.getActiveToolNames()).not.toContain("task");
+	});
+
+	it("clears an explicit runtime task exclusion when starting a new session", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+		});
+
+		await session.setActiveToolsByName(["read"], { explicit: true });
+		expect(await session.newSession()).toBe(true);
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("allow delegation in the new session");
+
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
+	});
+
+	it("does not resurrect explicit runtime task exclusions after switching away and back", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: Effort.High,
+			persisted: true,
+		});
+		const sessionAFile = session.sessionFile;
+		expect(sessionAFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.newSession()).toBe(true);
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.setActiveToolsByName(["read"], { explicit: true });
+		await session.prompt("work in session B without delegation");
+		const sessionBFile = session.sessionFile;
+		expect(sessionBFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionAFile!)).toBe(true);
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.prompt("allow delegation in session A");
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+
+		expect(await session.switchSession(sessionBFile!)).toBe(true);
+		await session.prompt("return to session B with delegation available");
+		expect(observedCalls.at(-1)?.toolNames).toContain("task");
+	});
+
+	it("preserves the current exclusion when a different-session switch rolls back", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: Effort.High,
+			persisted: true,
+		});
+		const sessionAFile = session.sessionFile;
+		expect(sessionAFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.newSession()).toBe(true);
+		const sessionBFile = session.sessionFile;
+		expect(sessionBFile).toBeDefined();
+		await session.sessionManager.flush();
+		expect(await session.switchSession(sessionAFile!)).toBe(true);
+
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+		await session.setActiveToolsByName(["read"], { explicit: true });
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		const failedSwitch = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async sessionPath => {
+			await setSessionFile(sessionPath);
+			throw new Error("simulated switch failure");
+		});
+		try {
+			await expect(session.switchSession(sessionBFile!)).rejects.toThrow("simulated switch failure");
+		} finally {
+			failedSwitch.mockRestore();
+		}
+
+		expect(session.sessionFile).toBe(sessionAFile);
+		await session.prompt("continue without delegation after rollback");
+		expect(observedCalls.at(-1)?.toolNames).not.toContain("task");
+	});
+
+	it("does not leak the tool-intent gate when a switch fails before target loading", async () => {
+		const source = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+			activeTask: true,
+		});
+		const target = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+			activeTask: true,
+		});
+		const targetFile = target.session.sessionFile;
+		expect(targetFile).toBeDefined();
+		await source.sessionManager.flush();
+		await target.sessionManager.flush();
+
+		const flushFailure = vi
+			.spyOn(source.sessionManager, "flush")
+			.mockRejectedValueOnce(new Error("simulated pre-load flush failure"));
+		try {
+			await expect(source.session.switchSession(targetFile!)).rejects.toThrow("simulated pre-load flush failure");
+		} finally {
+			flushFailure.mockRestore();
+		}
+
+		await source.session.setActiveToolsByName(["read"], { explicit: true });
+		expect(source.session.getActiveToolNames()).not.toContain("task");
+	});
+
+	it("applies an explicit update after a failed switch rolls back", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: Effort.High,
+			persisted: true,
+			activeTask: true,
+		});
+		const sessionAFile = session.sessionFile;
+		expect(sessionAFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.newSession()).toBe(true);
+		const sessionBFile = session.sessionFile;
+		expect(sessionBFile).toBeDefined();
+		await session.sessionManager.flush();
+		expect(await session.switchSession(sessionAFile!)).toBe(true);
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+
+		const switchStarted = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		const failedSwitch = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async sessionPath => {
+			switchStarted.resolve();
+			await releaseSwitch.promise;
+			await setSessionFile(sessionPath);
+			throw new Error("simulated delayed switch failure");
+		});
+		try {
+			const switching = session.switchSession(sessionBFile!);
+			await switchStarted.promise;
+
+			const explicitUpdate = session.setActiveToolsByName(["read"], { explicit: true });
+			const updateAppliedBeforeRollback = !session.getActiveToolNames().includes("task");
+			releaseSwitch.resolve();
+
+			await expect(switching).rejects.toThrow("simulated delayed switch failure");
+			await explicitUpdate;
+			expect(updateAppliedBeforeRollback).toBe(false);
+		} finally {
+			failedSwitch.mockRestore();
+		}
+
+		expect(session.sessionFile).toBe(sessionAFile);
+		await session.prompt("honor the update after rollback");
+		expect(observedCalls.at(-1)?.toolNames).not.toContain("task");
+	});
+
+	it("serializes an explicit update with a failing same-session reload", async () => {
+		const { session } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+			activeTask: true,
+		});
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		const reloadStarted = Promise.withResolvers<void>();
+		const releaseReload = Promise.withResolvers<void>();
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		const failedReload = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async sessionPath => {
+			reloadStarted.resolve();
+			await releaseReload.promise;
+			await setSessionFile(sessionPath);
+			throw new Error("simulated delayed reload failure");
+		});
+		try {
+			const reloading = session.reload();
+			await reloadStarted.promise;
+			const explicitUpdate = session.setActiveToolsByName(["read"], { explicit: true });
+			for (let i = 0; i < 4; i++) await Promise.resolve();
+			const updateAppliedBeforeRollback = !session.getActiveToolNames().includes("task");
+			releaseReload.resolve();
+
+			await expect(reloading).rejects.toThrow("simulated delayed reload failure");
+			await explicitUpdate;
+			expect(updateAppliedBeforeRollback).toBe(false);
+		} finally {
+			releaseReload.resolve();
+			failedReload.mockRestore();
+		}
+
+		expect(session.sessionFile).toBe(sessionFile);
+		expect(session.getActiveToolNames()).not.toContain("task");
+	});
+
+	it("preserves an explicit runtime task exclusion across same-session reloads", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+		});
+
+		await session.setActiveToolsByName(["read"], { explicit: true });
+		await session.reload();
+		await session.prompt("continue without delegation after reload");
+
+		expect(observedCalls.at(-1)?.toolNames).not.toContain("task");
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
+	});
+
+	it("preserves an explicit runtime task exclusion across fresh provider sessions", async () => {
+		const { session, observedCalls } = await createHarness({
+			thinkingLevel: ThinkingLevel.Ultra,
+			persisted: true,
+		});
+		const sessionFile = session.sessionFile;
+
+		await session.setActiveToolsByName(["read"], { explicit: true });
+		expect(session.freshSession()).toBeDefined();
+		expect(session.sessionFile).toBe(sessionFile);
+		await session.prompt("continue without delegation in a fresh provider session");
+
+		expect(observedCalls.at(-1)?.toolNames).not.toContain("task");
+		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(0);
 	});
 
 	it("preserves an explicit runtime task exclusion until task is re-enabled", async () => {
@@ -841,7 +1211,7 @@ describe("AgentSession Ultra mode orchestration", () => {
 		await session.prompt("start with proactive delegation");
 		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
 
-		await session.setActiveToolsByName(["read"]);
+		await session.setActiveToolsByName(["read"], { explicit: true });
 		await session.prompt("continue without delegation");
 
 		expect(observedCalls[1]?.toolNames).not.toContain("task");
@@ -849,7 +1219,7 @@ describe("AgentSession Ultra mode orchestration", () => {
 		expect(customEntries(session, ULTRA_CONTEXT_TYPE)).toHaveLength(1);
 		expect(customEntries(session, ULTRA_RESET_TYPE)).toHaveLength(1);
 
-		await session.setActiveToolsByName(["read", "task"]);
+		await session.setActiveToolsByName(["read", "task"], { explicit: true });
 		await session.prompt("resume proactive delegation");
 
 		expect(observedCalls[2]?.toolNames).toContain("task");

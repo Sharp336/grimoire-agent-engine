@@ -1965,8 +1965,14 @@ export class AgentSession {
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
-	/** Logical sessions where a public active-tool update explicitly removed `task`. */
-	#runtimeTaskExclusionSessionIds = new Set<string>();
+	/** Current logical session whose explicit active-tool update removed `task`. */
+	#runtimeTaskExclusionSessionId: string | undefined;
+	/** Monotonic logical-session generation; never restored across rollback. */
+	#runtimeTaskExclusionEpoch = 0;
+	/** Last logical session synchronized into the agent. */
+	#runtimeTaskExclusionLogicalSessionId: string | undefined;
+	/** Serializes explicit tool intent with session switches. */
+	#runtimeTaskExclusionGate: Promise<void> = Promise.resolve();
 	#baseSystemPrompt: string[];
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
 	/**
@@ -2420,7 +2426,7 @@ export class AgentSession {
 		const previousTools = this.getActiveToolNames();
 		const augmentations = ["resolve"];
 		if (this.hasBuiltInTool("write")) augmentations.push("write");
-		await this.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
+		await this.setActiveToolsByName([...new Set([...previousTools, ...augmentations])], { explicit: false });
 		this.#planYoloPreviousTools = previousTools;
 		this.setPlanModeState({
 			enabled: true,
@@ -2456,7 +2462,7 @@ export class AgentSession {
 				});
 				const previousTools = this.#planYoloPreviousTools;
 				if (previousTools) {
-					await this.setActiveToolsByName(previousTools);
+					await this.setActiveToolsByName(previousTools, { explicit: false });
 				}
 				this.setStandingResolveHandler(null);
 				this.setPlanModeState(undefined);
@@ -6197,6 +6203,15 @@ export class AgentSession {
 	 * needing to re-call `#syncAgentSessionId()` on every such event.
 	 */
 	#syncAgentSessionId(sessionId?: string): void {
+		const logicalSessionId = sessionId ?? this.sessionManager.getSessionId();
+		if (
+			this.#runtimeTaskExclusionLogicalSessionId !== undefined &&
+			this.#runtimeTaskExclusionLogicalSessionId !== logicalSessionId
+		) {
+			this.#runtimeTaskExclusionEpoch++;
+			this.#runtimeTaskExclusionSessionId = undefined;
+		}
+		this.#runtimeTaskExclusionLogicalSessionId = logicalSessionId;
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) =>
@@ -7087,22 +7102,49 @@ export class AgentSession {
 	}
 
 	/**
+	 * Serialize explicit active-tool intent with session switches and reloads.
+	 * Internal reconciliation bypasses this gate with `explicit: false`.
+	 */
+	async #acquireRuntimeTaskExclusionGate(): Promise<() => void> {
+		const previous = this.#runtimeTaskExclusionGate;
+		let releaseGate!: () => void;
+		this.#runtimeTaskExclusionGate = new Promise<void>(resolve => {
+			releaseGate = resolve;
+		});
+		await previous;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			releaseGate();
+		};
+	}
+
+	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect before the next model call.
-	 * Additive internal reconciliation can pass `explicit: false` to preserve that intent.
+	 * Public calls are explicit by default. Internal reconciliation must opt out
+	 * with `explicit: false` so it cannot create or clear user task-exclusion intent.
 	 */
 	async setActiveToolsByName(toolNames: string[], options?: { explicit?: boolean }): Promise<void> {
 		const normalizedToolNames = normalizeToolNames(toolNames);
-		const explicitSessionId = options?.explicit === false ? undefined : this.sessionManager.getSessionId();
-		await this.#applyActiveToolsByName(normalizedToolNames);
-		if (explicitSessionId !== undefined) {
-			if (normalizedToolNames.includes("task")) {
-				this.#runtimeTaskExclusionSessionIds.delete(explicitSessionId);
-			} else {
-				this.#runtimeTaskExclusionSessionIds.add(explicitSessionId);
+		const explicit = options?.explicit !== false;
+		const releaseGate = explicit ? await this.#acquireRuntimeTaskExclusionGate() : undefined;
+		try {
+			const explicitSessionId = explicit ? this.sessionManager.getSessionId() : undefined;
+			const explicitEpoch = this.#runtimeTaskExclusionEpoch;
+			await this.#applyActiveToolsByName(normalizedToolNames);
+			if (
+				explicitSessionId !== undefined &&
+				explicitSessionId === this.sessionManager.getSessionId() &&
+				explicitEpoch === this.#runtimeTaskExclusionEpoch
+			) {
+				this.#runtimeTaskExclusionSessionId = normalizedToolNames.includes("task") ? undefined : explicitSessionId;
 			}
+		} finally {
+			releaseGate?.();
 		}
 	}
 
@@ -12110,9 +12152,13 @@ export class AgentSession {
 		});
 	}
 
+	#hasRuntimeTaskExclusion(): boolean {
+		return this.#runtimeTaskExclusionSessionId === this.sessionManager.getSessionId();
+	}
+
 	#implicitUltraTaskAllowed(): boolean {
 		if (this.#requestedToolNames !== undefined && !this.#requestedToolNames.has("task")) return false;
-		return !this.#runtimeTaskExclusionSessionIds.has(this.sessionManager.getSessionId());
+		return !this.#hasRuntimeTaskExclusion();
 	}
 
 	#resolveImplicitUltraModeDecision(): UltraModeDecision {
@@ -12220,7 +12266,7 @@ export class AgentSession {
 		suppressActiveReassertion?: boolean;
 	}): Promise<CustomMessage[]> {
 		const lastStatus = this.#lastUltraModeContextStatusFromBranch();
-		if (this.#runtimeTaskExclusionSessionIds.has(this.sessionManager.getSessionId())) {
+		if (this.#hasRuntimeTaskExclusion()) {
 			const activeToolNames = this.getActiveToolNames();
 			if (activeToolNames.includes("task")) {
 				await this.#applyActiveToolsByName(
@@ -15956,13 +16002,14 @@ export class AgentSession {
 				return false;
 			}
 		}
+		let releaseRuntimeTaskExclusionGate: (() => void) | undefined;
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
+		let previousSessionState = this.sessionManager.captureState();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
 		// different-session switch is a pure waste — and on huge pre-fix sessions
@@ -15971,7 +16018,7 @@ export class AgentSession {
 		// blowing the heap before the new session even loads (issue #3846). The
 		// error-recovery path rebuilds the context on demand from the restored
 		// state instead.
-		const previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
+		let previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
 		// switchSession replaces these arrays wholesale during load/rollback, so retaining
 		// the existing message objects is sufficient and avoids structured-clone failures for
 		// extension/custom metadata that is valid to persist but not cloneable.
@@ -15985,14 +16032,15 @@ export class AgentSession {
 		const previousAutoThinking = this.#autoThinking;
 		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		const previousServiceTierByFamily = this.#serviceTierByFamily;
-		const previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
-		const previousTools = [...this.agent.state.tools];
-		const previousBaseSystemPrompt = this.#baseSystemPrompt;
-		const previousSystemPrompt = this.agent.state.systemPrompt;
-		const previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
+		let previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+		let previousTools = [...this.agent.state.tools];
+		let previousBaseSystemPrompt = this.#baseSystemPrompt;
+		let previousSystemPrompt = this.agent.state.systemPrompt;
+		let previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
-		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
-		const previousFallbackSelectedMCPToolNames = previousSessionFile
+		let previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		let previousRuntimeTaskExclusionSessionId = this.#runtimeTaskExclusionSessionId;
+		let previousFallbackSelectedMCPToolNames = previousSessionFile
 			? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
 			: undefined;
 
@@ -16010,6 +16058,21 @@ export class AgentSession {
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		try {
+			releaseRuntimeTaskExclusionGate = await this.#acquireRuntimeTaskExclusionGate();
+			// Explicit updates may have completed while abort/flush ran. Refresh every
+			// tool-related rollback snapshot only after the gate has drained them.
+			previousSessionState = this.sessionManager.captureState();
+			previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
+			previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+			previousTools = [...this.agent.state.tools];
+			previousBaseSystemPrompt = this.#baseSystemPrompt;
+			previousSystemPrompt = this.agent.state.systemPrompt;
+			previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
+			previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+			previousRuntimeTaskExclusionSessionId = this.#runtimeTaskExclusionSessionId;
+			previousFallbackSelectedMCPToolNames = previousSessionFile
+				? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
+				: undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
@@ -16028,13 +16091,21 @@ export class AgentSession {
 			await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
 			this.#rehydrateCheckpointRewindState();
 
-			// Emit session_switch event to hooks
-			if (this.#extensionRunner) {
-				await this.#extensionRunner.emit({
-					type: "session_switch",
-					reason: "resume",
-					previousSessionFile,
-				});
+			// Session-switch hooks may make explicit active-tool updates. Temporarily
+			// release the gate after target adoption, then drain those updates before
+			// continuing so rollback can still restore the source atomically.
+			releaseRuntimeTaskExclusionGate?.();
+			releaseRuntimeTaskExclusionGate = undefined;
+			try {
+				if (this.#extensionRunner) {
+					await this.#extensionRunner.emit({
+						type: "session_switch",
+						reason: "resume",
+						previousSessionFile,
+					});
+				}
+			} finally {
+				releaseRuntimeTaskExclusionGate = await this.#acquireRuntimeTaskExclusionGate();
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
@@ -16151,6 +16222,7 @@ export class AgentSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId);
+			this.#runtimeTaskExclusionSessionId = previousRuntimeTaskExclusionSessionId;
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
 			let restoreMcpError: unknown;
@@ -16202,6 +16274,8 @@ export class AgentSession {
 				throw restoreMcpError;
 			}
 			throw error;
+		} finally {
+			releaseRuntimeTaskExclusionGate?.();
 		}
 	}
 
