@@ -48,6 +48,8 @@ import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { registerRpcSessionTeardown } from "./rpc-session-teardown";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcAgentEndStatus,
+	RpcAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -430,8 +432,6 @@ export function rpcTransportFrame<T extends object>(
 	} as unknown as RpcTransportFrame<T>;
 }
 
-type RpcAgentEndStatus = "completed" | "failed" | "cancelled";
-
 function serializedJsonBytes(value: object): number | undefined {
 	try {
 		const encoded = JSON.stringify(value);
@@ -476,7 +476,7 @@ function rpcAgentEndStatus(messages: Extract<AgentSessionEvent, { type: "agent_e
  * `agent_end.messages` is a redundant run aggregate, so retain the newest
  * contiguous suffix that fits while preserving the terminal event itself.
  */
-export function boundedRpcSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
+export function boundedRpcSessionEvent(event: AgentSessionEvent): RpcAgentSessionEvent {
 	if (event.type !== "agent_end" || isBoundedRpcFrame(event)) return event;
 
 	const terminal = {
