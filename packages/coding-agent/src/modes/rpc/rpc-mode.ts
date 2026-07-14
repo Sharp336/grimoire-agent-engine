@@ -48,6 +48,7 @@ import type {
 	RpcHostUriResult,
 	RpcResponse,
 	RpcSessionState,
+	RpcSubagentFrame,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
@@ -154,6 +155,14 @@ export function boundedRpcSessionEvent(event: AgentSessionEvent): AgentSessionEv
 	}
 
 	return low === 0 ? fallback : { ...event, messages: event.messages.slice(-low), ...terminal };
+}
+
+/** Apply the same terminal-frame bound to nested streamed subagent events. */
+export function boundedRpcSubagentFrame(frame: RpcSubagentFrame): RpcSubagentFrame {
+	if (frame.type !== "subagent_event") return frame;
+	const event = boundedRpcSessionEvent(frame.payload.event);
+	if (event === frame.payload.event) return frame;
+	return { ...frame, payload: { ...frame.payload, event } };
 }
 
 export type RpcSessionChangeCommand = Extract<
@@ -702,7 +711,9 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
-	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const subagentRegistry = eventBus
+		? new RpcSubagentRegistry(eventBus, frame => output(boundedRpcSubagentFrame(frame)))
+		: undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };

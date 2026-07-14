@@ -62,6 +62,7 @@
 - Fixed `--reasoning-slide-plan` silently ending the run with no code written when the model answered with a text-only reply.
 - Fixed launch tool rendering issues, including stacked pending headers and confusing start/wait results when readiness timed out.
 - Fixed the in-process `stat` and other GNU-flavored shell builtins (such as `date`, `sed`, `mktemp`, `tail`, `find`, `base64`, and `ln`) mangling or failing on macOS/BSD-style invocations.
+- Fixed long RPC turns emitting an oversized terminal `agent_end` JSONL frame by retaining the newest message suffix that fits and preserving the original message count and completion status.
 
 ## [16.5.1] - 2026-07-14
 
@@ -88,9 +89,6 @@
 - Fixed Pyright LSP semantic requests hanging during startup.
 - Fixed Codex web search requests for GPT-5.6 Responses-Lite models.
 - Fixed custom model/provider configuration discovery to correctly load ~/.omp/agent/models.yaml when models.yml is absent.
-### Fixed
-
-- Fixed long RPC turns emitting an oversized terminal `agent_end` JSONL frame by retaining the newest message suffix that fits and preserving the original message count and completion status.
 
 ## [16.5.0] - 2026-07-13
 
