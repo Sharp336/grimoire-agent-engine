@@ -1,0 +1,117 @@
+{
+	"object": "list",
+	"data": [
+		{
+			"id": "kimi-k2.6:dev",
+			"name": "MoonshotAI: Kimi K2.6 (DevPass)",
+			"object": "model",
+			"tokens": 240000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": false,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": true,
+				"devpass_only": true
+			}
+		},
+		{
+			"id": "minimax-m2.7:dev",
+			"name": "MiniMax: MiniMax M2.7 (DevPass)",
+			"object": "model",
+			"tokens": 180000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": false,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": true,
+				"devpass_only": true
+			}
+		},
+		{
+			"id": "gpt-oss-120b:dev",
+			"name": "OpenAI: GPT OSS 120B (DevPass)",
+			"object": "model",
+			"tokens": 128000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": false,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": true,
+				"devpass_only": true
+			}
+		},
+		{
+			"id": "glm-5.2:dev",
+			"name": "ZhipuAI: GLM 5.2 (DevPass)",
+			"object": "model",
+			"tokens": 200000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": false,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": true,
+				"devpass_only": true
+			}
+		},
+		{
+			"id": "gemma-4-31b-it:dev",
+			"name": "Google: Gemma 4 31B (DevPass)",
+			"object": "model",
+			"tokens": 200000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": true,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": true
+			}
+		},
+		{
+			"id": "qwen3.6-27b:dev",
+			"name": "Alibaba: Qwen3.6 27B (DevPass)",
+			"object": "model",
+			"tokens": 262000,
+			"pricing": {
+				"type": "per_million_tokens",
+				"input": 0,
+				"output": 0,
+				"plan": "devpass"
+			},
+			"metadata": {
+				"vision": true,
+				"function_call": true,
+				"web_search": false,
+				"reasoning": false
+			}
+		}
+	]
+}

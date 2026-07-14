@@ -9,6 +9,8 @@ import {
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiModelId,
+	isOpenAIGptOssModelId,
+	isQwenModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
@@ -1843,7 +1845,289 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.7 Wafer Serverless
+// 7.7 ElectronHub Coding Plan (DevPass)
+// ---------------------------------------------------------------------------
+
+export interface ElectronHubModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const ELECTRONHUB_API_BASE_URL = "https://api.electronhub.ai/v1";
+const ELECTRONHUB_OPENAI_COMPAT = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	// ElectronHub's /v1/chat/completions documents `max_tokens` as the output
+	// cap field, not the newer `max_completion_tokens` buildOpenAICompat
+	// defaults to for hosts outside its useMaxTokens allowlist (compat/openai.ts
+	// — Mistral, Moonshot-native, Z.ai/Zhipu, Chutes, Fireworks, direct
+	// DeepSeek). Confirmed live: sending max_completion_tokens against
+	// kimi-k2.6:dev was silently ignored (100-line response despite a cap of
+	// 5), while max_tokens correctly capped it (finish_reason "length",
+	// completion_tokens 5). Without this override, kimi-k2.6:dev's
+	// alwaysSendMaxTokens (isKimiModel, compat/openai.ts) would send the wrong,
+	// silently-dropped field on every request, defeating the very runaway-
+	// reasoning protection that flag exists for.
+	maxTokensField: "max_tokens",
+	// ElectronHub's /v1/chat/completions documents reasoning_effort: "none" as
+	// the way to fully hide reasoning output — the generic "openai" dialect's
+	// default ("lowest-effort", sending the ladder's floor tier) still produces
+	// some reasoning, and simply omitting the field falls back to ElectronHub's
+	// own server-side default rather than honoring the caller's disable choice.
+	reasoningDisableMode: "reasoning-effort-none",
+} as const satisfies ModelSpec<"openai-completions">["compat"];
+
+function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completions">["compat"] | undefined) {
+	return {
+		...(base ?? {}),
+		...ELECTRONHUB_OPENAI_COMPAT,
+		...(isReasoningGlmModelId(id)
+			? {
+					// ElectronHub's /v1/chat/completions documents a flat, OpenAI-shaped
+					// reasoning_effort enum (none/minimal/low/medium/high/xhigh) for every
+					// proxied model — not Z.ai's native two-tier high/max scale. Staying on
+					// thinkingFormat "zai" restricts the exposed ladder to high/max (see
+					// getModelDefinedEfforts in model-thinking.ts) and lets the unsupported
+					// "max" value reach the wire. Use the generic OpenAI dialect instead —
+					// it already resolves to the correct five-tier ladder — and remap that
+					// ladder's top "max" tier onto ElectronHub's actual top tier "xhigh"
+					// before it reaches the wire.
+					thinkingFormat: "openai",
+					reasoningContentField: "reasoning_content",
+					reasoningEffortMap: { [Effort.Max]: "xhigh" },
+					// Moving off thinkingFormat "zai" also drops its reasoning_content
+					// continuation replay (openai-completions.ts only fires that branch
+					// when thinkingFormat === "zai"). ElectronHub is exactly the documented
+					// "custom proxy setup" escape hatch for this flag (see the
+					// PROXY_OPENAI_COMPAT_PROVIDERS comment in compat/openai.ts): opt back
+					// into replaying prior-turn reasoning_content on continuation turns so
+					// GLM's cross-turn behavior is unchanged by the dialect switch.
+					replayReasoningContent: true,
+				}
+			: isQwenModelId(id)
+				? {
+						// ElectronHub is a gateway that normalizes every backend onto its
+						// own OpenAI-shaped reasoning surface (`reasoning_effort` /
+						// docs.electronhub.ai/api-reference/chat/completions), not each
+						// upstream model's native dialect. Without this override,
+						// `buildOpenAICompat`'s id-based detection classifies any
+						// "qwen"-named id into the native Qwen dialect (top-level
+						// `enable_thinking` boolean), which ElectronHub's endpoint does
+						// not honour — silently dropping user-selected effort levels.
+						thinkingFormat: "openai",
+					}
+				: isOpenAIGptOssModelId(id)
+					? {
+							// GPT-OSS's Harmony reasoning format only accepts low/medium/high
+							// for reasoning_effort and rejects minimal/xhigh/none on its
+							// native hosts (see isOpenAIGptOssModelId in identity/family.ts,
+							// and the issue #2315 regression coverage in
+							// packages/ai/test/issue-2315-repro.test.ts, which locks every
+							// other GPT-OSS host onto the "low" floor instead of "none" —
+							// built from a real prior production failure). ElectronHub's
+							// gateway did not reject reasoning_effort:"none" when live-probed
+							// directly, but that's weaker evidence than an established
+							// cross-provider regression test: keep this one model on the
+							// tested-safe "lowest-effort" disable path rather than opting into
+							// the shared reasoning-effort-none mode, so a future gateway-side
+							// validation tightening can't reintroduce #2315.
+							reasoningDisableMode: "lowest-effort",
+						}
+					: {}),
+	} as const satisfies ModelSpec<"openai-completions">["compat"];
+}
+
+/**
+ * Static seed of the ElectronHub Coding Plan (DevPass) catalogue, covering
+ * all six live `:dev` models so `/login electronhub` has a usable offline
+ * catalog before dynamic discovery ever runs. `dynamicModelsAuthoritative:
+ * true` below means live `/v1/models` data replaces these at runtime — this
+ * seed only matters pre-login / pre-refresh.
+ *
+ * Context windows mirror a live `/v1/models` snapshot (see
+ * `test/fixtures/electronhub-devpass-models.json`), but ElectronHub has
+ * revised the newer three entries' (`glm-5.2:dev`, `gemma-4-31b-it:dev`,
+ * `qwen3.6-27b:dev`) advertised `tokens` value more than once within the
+ * same day during integration — treat these three as best-effort until
+ * discovery refreshes them.
+ */
+export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "kimi-k2.6:dev",
+		name: "Kimi K2.6 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 240_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "minimax-m2.7:dev",
+		name: "MiniMax M2.7 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		// MiniMax M2 is a reasoning-first architecture: isMinimaxM2FamilyModelId
+		// backfills thinking.requiresEffort for every host (see model-thinking.ts
+		// and the Fireworks/native-host precedent in model-thinking.test.ts), so
+		// Thinking Off requests never reach this model's reasoningDisableMode at
+		// all — normalizeMandatoryReasoningOptions (stream.ts) clamps
+		// disableReasoning to the ladder's lowest effort ("low") before any
+		// compat-level disable encoding runs. That's intentional, not a gap left
+		// by the reasoning-effort-none change above: live-probed directly against
+		// ElectronHub's /v1/chat/completions, reasoning_effort "none", "minimal",
+		// "low", and an omitted field all produced comparable non-trivial
+		// reasoning content (roughly 200-600 chars, no measurable suppression) —
+		// the gateway does not make this architecturally mandatory-reasoning model
+		// honor "off" either. Sending "none" here would be no more effective than
+		// the existing "low" clamp, so this model is deliberately left on the
+		// shared mandatory-reasoning floor rather than exempted via
+		// thinking.suppressWhenOff.
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 180_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "gpt-oss-120b:dev",
+		name: "GPT OSS 120B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: null,
+		compat: electronHubCompatForModel("gpt-oss-120b:dev", ELECTRONHUB_OPENAI_COMPAT),
+	},
+	{
+		id: "glm-5.2:dev",
+		name: "GLM 5.2 (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+		compat: electronHubCompatForModel("glm-5.2:dev", ELECTRONHUB_OPENAI_COMPAT),
+	},
+	{
+		id: "gemma-4-31b-it:dev",
+		name: "Gemma 4 31B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+		compat: ELECTRONHUB_OPENAI_COMPAT,
+	},
+	{
+		id: "qwen3.6-27b:dev",
+		name: "Qwen3.6 27B (DevPass)",
+		api: "openai-completions",
+		provider: "electronhub",
+		baseUrl: ELECTRONHUB_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_000,
+		maxTokens: null,
+		compat: electronHubCompatForModel("qwen3.6-27b:dev", ELECTRONHUB_OPENAI_COMPAT),
+	},
+];
+
+function isElectronHubDevpassModel(entry: OpenAICompatibleModelRecord, id: string): boolean {
+	if (id.endsWith(":dev")) return true;
+	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+	if (metadata?.devpass_only === true) return true;
+	// Secondary signal: two of the six live DevPass records omit
+	// `metadata.devpass_only` entirely, so a `:dev`-less future entry could
+	// still slip past the checks above. `pricing.plan` has been populated on
+	// every DevPass record observed so far.
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	return pricing?.plan === "devpass";
+}
+
+function toElectronHubModelName(name: string): string {
+	const separator = name.indexOf(": ");
+	return separator > 0 ? name.slice(separator + 2) : name;
+}
+
+function mapElectronHubDevpassModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const base = mapWithBundledReference(entry, defaults, reference);
+	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	const input: ("text" | "image")[] =
+		metadata?.vision === true ? ["text", "image"] : metadata?.vision === false ? ["text"] : base.input;
+	return {
+		...base,
+		name: toElectronHubModelName(base.name),
+		// All DevPass models support reasoning per docs.electronhub.ai/billing/coding-plan;
+		// trust that over live metadata — `qwen3.6-27b:dev` reports `reasoning: false`
+		// but has been observed returning non-zero `reasoning_tokens` in usage.
+		reasoning: true,
+		input,
+		cost: {
+			input: toNumber(pricing?.input) ?? base.cost.input,
+			output: toNumber(pricing?.output) ?? base.cost.output,
+			cacheRead: toNumber(pricing?.cache_read) ?? base.cost.cacheRead,
+			cacheWrite: toNumber(pricing?.cache_write) ?? base.cost.cacheWrite,
+		},
+		// All DevPass models support function calling per docs.electronhub.ai/billing/coding-plan;
+		// trust that over live metadata rather than gating on `function_call === false`, which
+		// would let a stale/bad /v1/models record silently strip tool use from a coding agent.
+		contextWindow: toPositiveNumber(entry.tokens, base.contextWindow),
+		compat: electronHubCompatForModel(base.id, base.compat),
+	};
+}
+
+export function electronHubModelManagerOptions(
+	config?: ElectronHubModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? ELECTRONHUB_API_BASE_URL;
+	return {
+		providerId: "electronhub",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "electronhub",
+					baseUrl,
+					apiKey,
+					filterModel: (entry, model) => isElectronHubDevpassModel(entry, model.id),
+					mapModel: (entry, defaults) =>
+						mapElectronHubDevpassModel(
+							entry,
+							defaults,
+							ELECTRONHUB_DEVPASS_STATIC_MODELS.find(model => model.id === defaults.id),
+						),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 7.8 Wafer Serverless
 // ---------------------------------------------------------------------------
 
 export interface WaferModelManagerConfig {

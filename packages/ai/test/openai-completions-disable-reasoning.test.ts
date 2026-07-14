@@ -100,6 +100,40 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		expect(payload.reasoning).toBeUndefined();
 	});
 
+	it("sends an explicit reasoning_effort: none for gateways using the reasoning-effort-none disable mode", async () => {
+		// ElectronHub's /v1/chat/completions documents reasoning_effort: "none" as its
+		// own distinct wire value (below "minimal") for fully hiding reasoning output.
+		// Neither the generic "lowest-effort" disable mode (sends the ladder floor,
+		// e.g. "minimal") nor "omit" (drops the field, falling back to the gateway's
+		// own default) honor that — this dedicated mode must send "none" explicitly.
+		const model = buildModel({
+			id: "reasoning-effort-none-gateway",
+			name: "Reasoning Effort None Gateway",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://gateway.example.com/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			},
+			compat: {
+				thinkingFormat: "openai",
+				supportsReasoningParams: true,
+				supportsReasoningEffort: true,
+				reasoningDisableMode: "reasoning-effort-none",
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const payload = await captureDisableReasoningPayload(model);
+		expect(payload.reasoning_effort).toBe("none");
+		expect(payload.reasoning).toBeUndefined();
+	});
+
 	// Additional requested tests for applyChatCompletionsReasoningParams dialect / behavior verification
 	it("sets OpenRouter thinking disabled when disableReasoning: true", async () => {
 		const model = buildModel({

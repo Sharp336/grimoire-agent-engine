@@ -860,6 +860,13 @@ function encodeChatCompletionsDisabledReasoning(
 				enabled: false,
 			};
 			break;
+		case "reasoning-effort-none":
+			// Distinct from the `default` branch below: gateways that document
+			// "none" as its own reasoning_effort wire value (e.g. ElectronHub)
+			// need it sent explicitly — omitting the field falls back to the
+			// gateway's own default, which is not necessarily "no reasoning".
+			params.reasoning_effort = "none";
+			break;
 		default:
 			delete params.reasoning;
 			break;

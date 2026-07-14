@@ -17490,6 +17490,227 @@
 			"maxTokens": 64000
 		}
 	},
+	"electronhub": {
+		"gemma-4-31b-it:dev": {
+			"id": "gemma-4-31b-it:dev",
+			"name": "Gemma 4 31B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "reasoning-effort-none"
+			}
+		},
+		"glm-5.2:dev": {
+			"id": "glm-5.2:dev",
+			"name": "GLM 5.2 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"max"
+				],
+				"effortMap": {
+					"max": "xhigh"
+				}
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "reasoning-effort-none",
+				"thinkingFormat": "openai",
+				"reasoningContentField": "reasoning_content",
+				"reasoningEffortMap": {
+					"max": "xhigh"
+				},
+				"replayReasoningContent": true
+			}
+		},
+		"gpt-oss-120b:dev": {
+			"id": "gpt-oss-120b:dev",
+			"name": "GPT OSS 120B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "lowest-effort"
+			}
+		},
+		"kimi-k2.6:dev": {
+			"id": "kimi-k2.6:dev",
+			"name": "Kimi K2.6 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 240000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "reasoning-effort-none"
+			}
+		},
+		"minimax-m2.7:dev": {
+			"id": "minimax-m2.7:dev",
+			"name": "MiniMax M2.7 (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 180000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				],
+				"requiresEffort": true
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "reasoning-effort-none"
+			}
+		},
+		"qwen3.6-27b:dev": {
+			"id": "qwen3.6-27b:dev",
+			"name": "Qwen3.6 27B (DevPass)",
+			"api": "openai-completions",
+			"provider": "electronhub",
+			"baseUrl": "https://api.electronhub.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"maxTokensField": "max_tokens",
+				"reasoningDisableMode": "reasoning-effort-none",
+				"thinkingFormat": "openai"
+			}
+		}
+	},
 	"firepass": {
 		"kimi-k2.6-turbo": {
 			"id": "kimi-k2.6-turbo",

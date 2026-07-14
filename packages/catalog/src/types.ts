@@ -156,7 +156,16 @@ export type OpenAIReasoningDisableMode =
 	| "openrouter-enabled-false"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
-	| "qwen-template-false";
+	| "qwen-template-false"
+	// Sends an explicit top-level `reasoning_effort: "none"` (distinct from
+	// "omit", which drops the field, and "lowest-effort", which sends the
+	// ladder's lowest tier). For gateways whose OpenAI-shaped dialect
+	// documents "none" as its own wire value for fully hiding reasoning
+	// output — e.g. ElectronHub's `/v1/chat/completions` reasoning_effort
+	// enum (none/minimal/low/medium/high/xhigh) — sending the lowest tier
+	// still produces some reasoning, and omitting the field falls back to
+	// the gateway's own default rather than honoring the caller's disable.
+	| "reasoning-effort-none";
 
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
 
