@@ -46,7 +46,7 @@ const OpenAICompatFields = {
 	"supportsForcedToolChoice?": "boolean",
 	"disableReasoningOnForcedToolChoice?": "boolean",
 	"disableReasoningOnToolChoice?": "boolean",
-	"thinkingFormat?": '"openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template"',
+	"thinkingFormat?": '"openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template" | "sglang-strict"',
 	"openRouterRouting?": OpenRouterRoutingSchema,
 	"vercelGatewayRouting?": VercelGatewayRoutingSchema,
 	"extraBody?": { "[string]": "unknown" },
@@ -94,6 +94,7 @@ const ModelThinkingSchema = type({
 	"efforts?": EffortSchema.array(),
 	"defaultLevel?": EffortSchema,
 	"effortMap?": ReasoningEffortMapSchema,
+	"effortBudgets?": { "[string]": "number" },
 	"supportsDisplay?": "boolean",
 	// Legacy range vocabulary (pre-efforts configs).
 	"minLevel?": EffortSchema,

@@ -610,7 +610,23 @@ export function applyOpenAIExtraBody<P extends object>(
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
-	Object.assign(params, extraBody);
+	// Shallow-assign all extraBody fields EXCEPT known nested objects,
+	// then deep-merge those so dynamic per-request values injected by
+	// applyChatCompletionsCompatPolicy (custom_params.thinking_budget,
+	// chat_template_kwargs.enable_thinking) take precedence over static
+	// extraBody values.
+	const nestedKeys = ["custom_params", "chat_template_kwargs"] as const;
+	const shallow: Record<string, unknown> = {};
+	const p = params as Record<string, unknown>;
+	for (const [k, v] of Object.entries(extraBody)) {
+		if (nestedKeys.includes(k as (typeof nestedKeys)[number]) && typeof v === "object" && v !== null) {
+			// Deep-merge: static extraBody first, then dynamic params win.
+			p[k] = { ...(v as Record<string, unknown>), ...(typeof p[k] === "object" && p[k] !== null ? p[k] : {}) };
+		} else {
+			shallow[k] = v;
+		}
+	}
+	Object.assign(params, shallow);
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
 		if (shaped.reasoning_effort !== undefined) {
@@ -638,6 +654,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
+	custom_params?: { thinking_budget?: number; [key: string]: unknown };
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
 };
@@ -682,6 +699,7 @@ export interface OpenAICompatPolicy {
 		dialect: ResolvedOpenAISharedCompat["thinkingFormat"];
 		disableMode: OpenAIReasoningDisableMode;
 		omitReasoningEffort: boolean;
+		effortBudget?: number;
 		includeEncryptedReasoning: boolean;
 		filterReasoningHistory: boolean;
 		requiresReasoningContentForToolCalls: boolean;
@@ -804,6 +822,10 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 			supportsParams: compat.supportsReasoningParams,
 			requestedEffort,
 			wireEffort,
+			effortBudget:
+				enabled && requestedEffort !== undefined
+					? model.thinking?.effortBudgets?.[requestedEffort as Effort]
+					: undefined,
 			enabled,
 			disabled,
 			disableReason: disableReason ?? (disabledWithoutRequest || disabledByNoneEffort ? "not-requested" : undefined),
@@ -853,6 +875,9 @@ function encodeChatCompletionsDisabledReasoning(
 			params.enable_thinking = false;
 			break;
 		case "qwen-template-false":
+			params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: false };
+			break;
+		case "sglang-template-false":
 			params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: false };
 			break;
 		case "openrouter-enabled-false":
@@ -940,6 +965,16 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 					(params as typeof params & { reasoning?: { effort?: string } }).reasoning = {
 						effort: reasoning.wireEffort,
 					};
+				}
+				break;
+			case "sglang-template-false":
+				// SGLang strict thinking: inject custom_params.thinking_budget
+				// from the model's effortBudgets (resolved by internal effort
+				// level, not wireEffort). Merge with existing custom_params to
+				// preserve unrelated fields. Requires SGLang
+				// --enable-strict-thinking server-side.
+				if (reasoning.effortBudget !== undefined) {
+					params.custom_params = { ...params.custom_params, thinking_budget: reasoning.effortBudget };
 				}
 				break;
 			default:

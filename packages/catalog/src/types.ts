@@ -148,7 +148,7 @@ export interface Usage {
 	};
 }
 
-export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template";
+export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template" | "sglang-strict";
 
 export type OpenAIReasoningDisableMode =
 	| "omit"
@@ -156,7 +156,8 @@ export type OpenAIReasoningDisableMode =
 	| "openrouter-enabled-false"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
-	| "qwen-template-false";
+	| "qwen-template-false"
+	| "sglang-template-false";
 
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
 
@@ -205,7 +206,7 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" | "disabled" } (also used by Moonshot Kimi), "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
+	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" | "disabled" } (also used by Moonshot Kimi), "qwen" uses top-level enable_thinking, "qwen-chat-template" uses chat_template_kwargs.enable_thinking, and "sglang-strict" uses custom_params.thinking_budget from the model's effortBudgets (requires SGLang --enable-strict-thinking). Default: "openai". */
 	thinkingFormat?: OpenAIReasoningFormat;
 	/** Request-time disable encoding for the selected reasoning/thinking format. Default: derived from `thinkingFormat`. */
 	reasoningDisableMode?: OpenAIReasoningDisableMode;
