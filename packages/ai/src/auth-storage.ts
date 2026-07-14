@@ -829,6 +829,11 @@ const OPENAI_CODEX_PAID_PLAN_TOKENS: Record<string, true> = {
 	enterprise: true,
 	edu: true,
 	education: true,
+	// ChatGPT Edu seats report `k12` (alongside the broader edu tokens above).
+	// They are paid educational tiers with access to paid models — without this
+	// they classify as "unknown" and the plan filter excludes healthy k12
+	// accounts, funneling every request to a lone exhausted paid account.
+	k12: true,
 	teacher: true,
 	teachers: true,
 	health: true,
