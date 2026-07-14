@@ -63,6 +63,7 @@ import type {
 	RpcResponse,
 	RpcSessionEntryFrame,
 	RpcSessionState,
+	RpcSubagentFrame,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
@@ -507,6 +508,14 @@ export function boundedRpcSessionEvent(event: AgentSessionEvent): AgentSessionEv
 		else high = candidateLength - 1;
 	}
 	return low === 0 ? emptyEvent : { ...event, messages: event.messages.slice(-low), ...terminal };
+}
+
+/** Apply the same terminal-frame bound to nested streamed subagent events. */
+export function boundedRpcSubagentFrame(frame: RpcSubagentFrame): RpcSubagentFrame {
+	if (frame.type !== "subagent_event") return frame;
+	const event = boundedRpcSessionEvent(frame.payload.event);
+	if (event === frame.payload.event) return frame;
+	return { ...frame, payload: { ...frame.payload, event } };
 }
 
 export interface RpcSessionEntrySubscription {
@@ -1145,7 +1154,7 @@ export async function runRpcMode(
 		? requestedSubagentSubscription
 		: "off";
 	const subagentRegistry = eventBus
-		? new RpcSubagentRegistry(eventBus, output, initialSubagentSubscription)
+		? new RpcSubagentRegistry(eventBus, frame => output(boundedRpcSubagentFrame(frame)), initialSubagentSubscription)
 		: undefined;
 	const sessionTeardown = registerRpcSessionTeardown({
 		beginDispose: () => session.beginDispose(),
