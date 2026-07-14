@@ -589,8 +589,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return this.session.settings.get("task.batch");
 	}
 
-	async #prepareOutputSchemas(spawnItems: TaskItem[], defaultAgent: string): Promise<PreparedOutputSchema[]> {
-		const { agents } = await discoverAgents(this.session.cwd);
+	#prepareOutputSchemas(spawnItems: TaskItem[], defaultAgent: string): PreparedOutputSchema[] {
+		// Match the create-time snapshot used to choose blocking/async dispatch.
+		// #runSpawn rechecks a prepared schema against its fresh agent discovery.
+		const agents = this.#discoveredAgents;
 		// Task agents use their own yield contracts. The parent session's strict
 		// direct-output policy must not be inherited by agent-native or handoff
 		// schemas.
@@ -662,7 +664,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const spawnItems = resolveSpawnItems(params);
 		const resolvedAgents = spawnItems.map(item => item.agent?.trim() || defaultAgent);
-		const preparedOutputSchemas = await this.#prepareOutputSchemas(spawnItems, defaultAgent);
+		const preparedOutputSchemas = this.#prepareOutputSchemas(spawnItems, defaultAgent);
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
