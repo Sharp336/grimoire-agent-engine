@@ -12,5 +12,10 @@ export const MAX_JSON_NODES = 20_000;
 export const MAX_CAPABILITIES = 128;
 export const MAX_TERMINAL_OUTPUT_BYTES = 256_000;
 export const MAX_FILE_BYTES = 768 * 1024;
+/** Raw bytes carried by one base64 image-upload command. */
+export const IMAGE_UPLOAD_CHUNK_BYTES = 256 * 1024;
+export const IMAGE_UPLOAD_CHUNK_BASE64_BYTES = Math.ceil(IMAGE_UPLOAD_CHUNK_BYTES / 3) * 4;
+export const IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+export const PROMPT_IMAGE_MAX_COUNT = 8;
 export const MAX_SAVED_CURSORS = 128;
 export const MAX_EPOCH_BYTES = 128;

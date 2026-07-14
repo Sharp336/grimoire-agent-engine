@@ -45,6 +45,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { resolveRpcPromptImages } from "./rpc-prompt-images";
 import { registerRpcSessionTeardown } from "./rpc-session-teardown";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -69,6 +70,7 @@ import type {
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
+export { RPC_APP_IMAGE_ROOT_ENV, resolveRpcPromptImages } from "./rpc-prompt-images";
 // Re-export types for consumers
 export type * from "./rpc-types";
 
@@ -1475,6 +1477,9 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				// The appserver receives this response only after managed image bytes
+				// have been opened, validated, and converted to native ImageContent.
+				const promptImages = await resolveRpcPromptImages(command.images, command.appImageRefs);
 				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
@@ -1498,7 +1503,7 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () => session.prompt(builtinResult.prompt, { images: promptImages }),
 							output,
 							extensionUserMessageTracker,
 						});
@@ -1514,7 +1519,7 @@ export async function runRpcMode(
 					id,
 					startPrompt: () =>
 						session.prompt(command.message, {
-							images: command.images,
+							images: promptImages,
 							streamingBehavior: command.streamingBehavior,
 						}),
 					output,

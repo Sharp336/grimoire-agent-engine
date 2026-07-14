@@ -49,6 +49,7 @@ export const ADDITIVE_FEATURES = [
 	"session.delta",
 	"controller.lease",
 	"prompt.lease",
+	"prompt.images",
 	"agent.lifecycle",
 	"agent.progress",
 	"agent.event",
