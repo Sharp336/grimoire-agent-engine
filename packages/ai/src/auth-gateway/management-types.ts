@@ -1,8 +1,10 @@
 import type { AuthCredential } from "../auth-storage";
+import type { Api } from "../types";
+import type { UsageReport } from "../usage";
 import type {
-	AuthGatewayAclEffect,
-	AuthGatewayAclKind,
+	AuthGatewayAclBatchResult,
 	AuthGatewayAclRule,
+	AuthGatewayAclRuleInput,
 	AuthGatewayAuditEvent,
 	AuthGatewayPool,
 	AuthGatewayPoolStrategy,
@@ -11,6 +13,7 @@ import type {
 	AuthGatewayToken,
 	AuthGatewayUsageSummary,
 	AuthGatewayUser,
+	AuthGatewayUserPoolBinding,
 } from "./access-control";
 
 export interface AuthGatewayAdminStatus {
@@ -54,7 +57,7 @@ export interface AuthGatewayUserDetails {
 	user: AuthGatewayUser;
 	tokens: AuthGatewayToken[];
 	acl: AuthGatewayAclRule[];
-	pools: AuthGatewayPool[];
+	poolBindings: AuthGatewayUserPoolBinding[];
 }
 
 export interface CreateUserInput {
@@ -71,16 +74,14 @@ export interface UpdateUserInput {
 	enabled?: boolean;
 }
 
-export interface AddAclRuleInput {
-	effect: AuthGatewayAclEffect;
-	kind: AuthGatewayAclKind;
-	pattern: string;
+export type AddAclRuleInput = AuthGatewayAclRuleInput;
+
+export interface AddAclRulesInput {
+	rules: AddAclRuleInput[];
 }
 
 export interface CreatePoolInput {
 	name: string;
-	provider: string;
-	model?: string;
 	strategy?: AuthGatewayPoolStrategy;
 }
 
@@ -91,6 +92,16 @@ export interface UpdatePoolInput {
 
 export interface SetPoolCredentialOrderInput {
 	credentialIds: number[];
+}
+
+export interface SetUserPoolOrderInput {
+	poolIds: number[];
+}
+
+export interface AuthGatewayModelSummary {
+	id: string;
+	provider: string;
+	api: Api;
 }
 
 export interface AuthGatewayAdminStatusResponse {
@@ -120,15 +131,30 @@ export interface AuthGatewayAclRuleResponse {
 }
 
 export interface AuthGatewayUserPoolsResponse {
-	pools: AuthGatewayPool[];
+	bindings: AuthGatewayUserPoolBinding[];
 }
 
 export interface AuthGatewayPoolBindResponse {
+	binding: AuthGatewayUserPoolBinding;
 	created: boolean;
+}
+
+export interface AuthGatewayAclBatchResponse {
+	results: AuthGatewayAclBatchResult[];
 }
 
 export interface AuthGatewayUsageResponse {
 	usage: AuthGatewayUsageSummary;
+}
+
+export interface AuthGatewaySelfUsageResponse extends AuthGatewayUsageResponse {
+	principal: Pick<AuthGatewayPrincipal, "kind" | "userId" | "name" | "role" | "tokenId">;
+}
+
+export interface AuthGatewayUsageReportsResponse {
+	generatedAt: number;
+	reports: UsageReport[];
+	principal?: Pick<AuthGatewayPrincipal, "kind" | "userId" | "name" | "role" | "tokenId">;
 }
 
 export interface AuthGatewayPoolsResponse {

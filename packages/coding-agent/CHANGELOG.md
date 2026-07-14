@@ -5,6 +5,8 @@
 ### Changed
 
 - Improved auth-gateway console login, ACL, and filter interactions with provider/rule pickers, clickable authorization links, and Escape-to-clear filters.
+- Improved auth-gateway user, ACL, and pool administration with guided forms, catalog-backed suggestions, reliable back navigation, and rule deletion feedback.
+- Changed `/usage` gateway fallback output to show the current auth-gateway user before usage totals.
 
 ### Added
 
@@ -12,7 +14,10 @@
 
 ### Fixed
 
+- Fixed pre-stream model and gateway failures appearing as empty turns in the interactive TUI.
+- Fixed `/usage` showing "No usage data available" for auth-gateway fallback responses, including admin/static provider reports and legacy gateway usage totals with user IDs, and rounded gateway costs to two decimal places.
 - Fixed auth-gateway CLI output and validation so non-JSON managed-user token creation and rotation print the one-time bearer value, surplus positionals are rejected before side effects, and human `user show` exposes redacted token, ACL, and pool identifiers needed by operator commands.
+- Fixed `/gateway` retries retaining stale error, health, cancellation, and copy state from earlier attempts across account login, resource refreshes, mutations, connection switching, token dialogs, and gateway profile actions.
 
 ## [16.4.0] - 2026-07-10
 

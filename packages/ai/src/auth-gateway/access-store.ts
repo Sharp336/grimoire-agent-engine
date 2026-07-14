@@ -3,15 +3,16 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	AuthGatewayAccessError,
+	type AuthGatewayAclBatchResult,
 	type AuthGatewayAclEffect,
 	type AuthGatewayAclKind,
 	type AuthGatewayAclRule,
+	type AuthGatewayAclRuleInput,
 	type AuthGatewayAuditEvent,
 	type AuthGatewayAuditOutcome,
 	type AuthGatewayIssuedToken,
 	type AuthGatewayPool,
 	type AuthGatewayPoolMember,
-	type AuthGatewayPoolSelection,
 	type AuthGatewayPoolStrategy,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRole,
@@ -19,16 +20,16 @@ import {
 	type AuthGatewayToken,
 	type AuthGatewayUsageSummary,
 	type AuthGatewayUser,
+	type AuthGatewayUserPoolBinding,
 	normalizeAuthGatewayAclRule,
 	normalizeAuthGatewayName,
-	normalizeAuthGatewayPoolModel,
 	normalizeAuthGatewayPoolStrategy,
 	normalizeAuthGatewayRef,
 	normalizeAuthGatewayRole,
 } from "./access-control";
 import { timingSafeEqual } from "./http";
 
-const ACCESS_SCHEMA_VERSION = 1;
+const ACCESS_SCHEMA_VERSION = 2;
 const DUMMY_TOKEN_DIGEST = new Uint8Array(32);
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 const TOKEN_PREFIX = "omp_gw_";
@@ -64,22 +65,11 @@ export interface AuthGatewayAccessStore {
 	addUserToken(userId: number, label?: string): AuthGatewayIssuedToken;
 	rotateUserTokens(userId: number, label?: string): AuthGatewayIssuedToken;
 	revokeUserToken(userId: number, tokenId: number): boolean;
+	addAclRule(userId: number, input: AuthGatewayAclRuleInput): AuthGatewayAclBatchResult;
 	listAclRules(userId: number): AuthGatewayAclRule[];
-	addAclRule(
-		userId: number,
-		input: {
-			effect: AuthGatewayAclEffect;
-			kind: AuthGatewayAclKind;
-			pattern: string;
-		},
-	): { rule: AuthGatewayAclRule; created: boolean };
+	addAclRules(userId: number, inputs: readonly AuthGatewayAclRuleInput[]): AuthGatewayAclBatchResult[];
 	deleteAclRule(userId: number, ruleId: number): boolean;
-	createPool(input: {
-		name: string;
-		provider: string;
-		model?: string;
-		strategy?: AuthGatewayPoolStrategy;
-	}): AuthGatewayPool;
+	createPool(input: { name: string; strategy?: AuthGatewayPoolStrategy }): AuthGatewayPool;
 	listPools(): AuthGatewayPool[];
 	getPool(ref: number | string): AuthGatewayPool | undefined;
 	updatePool(ref: number | string, patch: { name?: string; strategy?: AuthGatewayPoolStrategy }): AuthGatewayPool;
@@ -88,10 +78,10 @@ export interface AuthGatewayAccessStore {
 	removePoolCredential(poolId: number, credentialId: number): boolean;
 	setPoolCredentialOrder(poolId: number, credentialIds: readonly number[]): AuthGatewayPool;
 	listCredentialPools(credentialId: number): AuthGatewayPool[];
-	bindUserPool(userId: number, poolId: number): { created: boolean };
+	bindUserPool(userId: number, poolId: number): { binding: AuthGatewayUserPoolBinding; created: boolean };
 	unbindUserPool(userId: number, poolId: number): boolean;
-	listUserPools(userId: number): AuthGatewayPool[];
-	resolveUserPoolSelection(userId: number, provider: string, qualifiedModel: string): AuthGatewayPoolSelection | null;
+	listUserPoolBindings(userId: number): AuthGatewayUserPoolBinding[];
+	setUserPoolOrder(userId: number, poolIds: readonly number[]): AuthGatewayUserPoolBinding[];
 	listPoolUsers(poolId: number): AuthGatewayUser[];
 	recordAudit(input: Omit<AuthGatewayAuditEvent, "id">): AuthGatewayAuditEvent;
 	listAudit(query?: { userId?: number; limit?: number; before?: number }): {
@@ -108,6 +98,21 @@ interface LastInsertRow {
 
 interface CountRow {
 	count: number;
+}
+
+interface SchemaVersionRow {
+	version: number;
+}
+
+interface ForeignKeyCheckRow {
+	table: string;
+	rowid: number;
+	parent: string;
+	fkid: number;
+}
+
+interface MaxIdRow {
+	id: number | null;
 }
 
 interface UserRow {
@@ -152,8 +157,6 @@ interface AclRuleRow {
 interface PoolRow {
 	id: number;
 	name: string;
-	provider: string;
-	model: string | null;
 	strategy: AuthGatewayPoolStrategy;
 	created_at: number;
 	updated_at: number;
@@ -165,13 +168,10 @@ interface PoolWithMemberRow extends PoolRow {
 	member_created_at: number | null;
 }
 
-interface PoolSelectionRow {
+interface UserPoolBindingRow {
 	pool_id: number;
-	provider: string;
-	model: string | null;
-	strategy: AuthGatewayPoolStrategy;
-	credential_id: number | null;
-	position: number | null;
+	position: number;
+	created_at: number;
 }
 
 interface PoolMemberRow {
@@ -226,11 +226,6 @@ interface UsageSeriesRow {
 	requests: number;
 	total_tokens: number | null;
 	cost_usd: number | null;
-}
-
-interface BindingScopeRow {
-	provider: string;
-	model_key: string;
 }
 
 export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
@@ -467,24 +462,36 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return rows.map(mapAclRule);
 	}
 
-	addAclRule(
-		userId: number,
-		input: {
-			effect: AuthGatewayAclEffect;
-			kind: AuthGatewayAclKind;
-			pattern: string;
-		},
-	): { rule: AuthGatewayAclRule; created: boolean } {
+	addAclRule(userId: number, input: AuthGatewayAclRuleInput): AuthGatewayAclBatchResult {
+		const [result] = this.addAclRules(userId, [input]);
+		if (!result) throw new AuthGatewayAccessError("not_found", "created ACL rule was not found");
+		return result;
+	}
+
+	addAclRules(userId: number, inputs: readonly AuthGatewayAclRuleInput[]): AuthGatewayAclBatchResult[] {
 		this.#requireUser(userId);
-		const rule = normalizeAuthGatewayAclRule(input);
-		const existing = this.#findAclRule(userId, rule.effect, rule.kind, rule.pattern);
-		if (existing) return { rule: existing, created: false };
-		this.#db
-			.prepare("INSERT INTO gateway_acl_rules(user_id, effect, kind, pattern, created_at) VALUES (?, ?, ?, ?, ?)")
-			.run(userId, rule.effect, rule.kind, rule.pattern, Date.now());
-		const created = this.#findAclRule(userId, rule.effect, rule.kind, rule.pattern);
-		if (!created) throw new AuthGatewayAccessError("not_found", "created ACL rule was not found");
-		return { rule: created, created: true };
+		const rules = inputs.map(input => normalizeAuthGatewayAclRule(input));
+		return this.#mapConflict(() =>
+			this.#withImmediateTransaction(() => {
+				const results: AuthGatewayAclBatchResult[] = [];
+				for (const rule of rules) {
+					const existing = this.#findAclRule(userId, rule.effect, rule.kind, rule.pattern);
+					if (existing) {
+						results.push({ rule: existing, created: false });
+						continue;
+					}
+					this.#db
+						.prepare(
+							"INSERT INTO gateway_acl_rules(user_id, effect, kind, pattern, created_at) VALUES (?, ?, ?, ?, ?)",
+						)
+						.run(userId, rule.effect, rule.kind, rule.pattern, Date.now());
+					const created = this.#findAclRule(userId, rule.effect, rule.kind, rule.pattern);
+					if (!created) throw new AuthGatewayAccessError("not_found", "created ACL rule was not found");
+					results.push({ rule: created, created: true });
+				}
+				return results;
+			}),
+		);
 	}
 
 	deleteAclRule(userId: number, ruleId: number): boolean {
@@ -493,25 +500,14 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return result.changes > 0;
 	}
 
-	createPool(input: {
-		name: string;
-		provider: string;
-		model?: string;
-		strategy?: AuthGatewayPoolStrategy;
-	}): AuthGatewayPool {
+	createPool(input: { name: string; strategy?: AuthGatewayPoolStrategy }): AuthGatewayPool {
 		const name = normalizeAuthGatewayName(input.name, "pool name");
-		const provider = input.provider.trim();
-		if (!provider || provider.includes("*"))
-			throw new AuthGatewayAccessError("invalid_request", "provider is required");
-		const model = normalizeAuthGatewayPoolModel(provider, input.model);
 		const strategy = normalizeAuthGatewayPoolStrategy(input.strategy);
 		const now = Date.now();
 		return this.#mapConflict(() => {
 			this.#db
-				.prepare(
-					"INSERT INTO gateway_pools(name, provider, model, strategy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-				)
-				.run(name, provider, model, strategy, now, now);
+				.prepare("INSERT INTO gateway_pools(name, strategy, created_at, updated_at) VALUES (?, ?, ?, ?)")
+				.run(name, strategy, now, now);
 			return this.#requirePool(this.#lastInsertId());
 		});
 	}
@@ -661,7 +657,7 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return this.#mapPoolsWithMembers(rows);
 	}
 
-	bindUserPool(userId: number, poolId: number): { created: boolean } {
+	bindUserPool(userId: number, poolId: number): { binding: AuthGatewayUserPoolBinding; created: boolean } {
 		return this.#mapConflict(() =>
 			this.#withImmediateTransaction(() => {
 				const user = this.#getUserById(userId);
@@ -669,16 +665,19 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				if (user.role === "admin") {
 					throw new AuthGatewayAccessError("invalid_request", "admin users cannot be bound to gateway pools");
 				}
-				const pool = this.#getPoolRowById(poolId);
-				if (!pool) throw new AuthGatewayAccessError("not_found", "pool not found");
-				const existing = this.#db
-					.prepare("SELECT provider, model_key FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
-					.get(userId, poolId) as BindingScopeRow | undefined;
-				if (existing) return { created: false };
+				if (!this.#getPoolRowById(poolId)) throw new AuthGatewayAccessError("not_found", "pool not found");
+				const existing = this.#getUserPoolBindingRow(userId, poolId);
+				if (existing) return { binding: this.#mapUserPoolBinding(existing), created: false };
+				const maxRow = this.#db
+					.prepare("SELECT MAX(position) AS count FROM gateway_user_pools WHERE user_id = ?")
+					.get(userId) as CountRow | undefined;
+				const nextPosition = maxRow?.count == null ? 0 : maxRow.count + 1;
 				this.#db
-					.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, provider, model_key) VALUES (?, ?, ?, ?)")
-					.run(userId, poolId, pool.provider, pool.model ?? "");
-				return { created: true };
+					.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, position, created_at) VALUES (?, ?, ?, ?)")
+					.run(userId, poolId, nextPosition, Date.now());
+				const created = this.#getUserPoolBindingRow(userId, poolId);
+				if (!created) throw new AuthGatewayAccessError("not_found", "created user pool binding was not found");
+				return { binding: this.#mapUserPoolBinding(created), created: true };
 			}),
 		);
 	}
@@ -686,70 +685,59 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 	unbindUserPool(userId: number, poolId: number): boolean {
 		this.#requireUser(userId);
 		this.#requirePool(poolId);
-		const result = this.#db
-			.prepare("DELETE FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
-			.run(userId, poolId);
-		return result.changes > 0;
+		return this.#withImmediateTransaction(() => {
+			const result = this.#db
+				.prepare("DELETE FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
+				.run(userId, poolId);
+			if (result.changes === 0) return false;
+			this.#renumberUserPoolBindings(userId);
+			return true;
+		});
 	}
 
-	listUserPools(userId: number): AuthGatewayPool[] {
+	listUserPoolBindings(userId: number): AuthGatewayUserPoolBinding[] {
 		this.#requireUser(userId);
 		const rows = this.#db
 			.prepare(
-				`SELECT
-					p.*,
-					pc.credential_id,
-					pc.position,
-					pc.created_at AS member_created_at
-				FROM gateway_user_pools up
-				INNER JOIN gateway_pools p ON p.id = up.pool_id
-				LEFT JOIN gateway_pool_credentials pc ON pc.pool_id = p.id
-				WHERE up.user_id = ?
-				ORDER BY CASE WHEN p.model IS NULL THEN 1 ELSE 0 END, p.id ASC, pc.position ASC, pc.credential_id ASC`,
+				"SELECT pool_id, position, created_at FROM gateway_user_pools WHERE user_id = ? ORDER BY position ASC, pool_id ASC",
 			)
-			.all(userId) as PoolWithMemberRow[];
-		return this.#mapPoolsWithMembers(rows);
+			.all(userId) as UserPoolBindingRow[];
+		return rows.map(row => this.#mapUserPoolBinding(row));
 	}
 
-	resolveUserPoolSelection(userId: number, provider: string, qualifiedModel: string): AuthGatewayPoolSelection | null {
+	setUserPoolOrder(userId: number, poolIds: readonly number[]): AuthGatewayUserPoolBinding[] {
 		this.#requireUser(userId);
-		const rows = this.#db
-			.prepare(
-				`WITH selected_binding AS (
-					SELECT pool_id
-					FROM gateway_user_pools
-					WHERE user_id = ?
-					  AND provider = ?
-					  AND model_key IN (?, '')
-					ORDER BY CASE WHEN model_key = ? THEN 0 ELSE 1 END
-					LIMIT 1
+		return this.#withImmediateTransaction(() => {
+			const rows = this.#db
+				.prepare(
+					"SELECT pool_id, position, created_at FROM gateway_user_pools WHERE user_id = ? ORDER BY position ASC, pool_id ASC",
 				)
-				SELECT
-					p.id AS pool_id,
-					p.provider,
-					p.model,
-					p.strategy,
-					pc.credential_id,
-					pc.position
-				FROM selected_binding b
-				INNER JOIN gateway_pools p ON p.id = b.pool_id
-				LEFT JOIN gateway_pool_credentials pc ON pc.pool_id = p.id
-				ORDER BY pc.position ASC, pc.credential_id ASC`,
-			)
-			.all(userId, provider, qualifiedModel, qualifiedModel) as PoolSelectionRow[];
-		const first = rows[0];
-		if (!first) return null;
-		const credentialIds: number[] = [];
-		for (const row of rows) {
-			if (row.credential_id !== null) credentialIds.push(row.credential_id);
-		}
-		return {
-			poolId: first.pool_id,
-			provider: first.provider,
-			qualifiedModel: first.model,
-			strategy: first.strategy,
-			credentialIds,
-		};
+				.all(userId) as UserPoolBindingRow[];
+			const error = new AuthGatewayAccessError(
+				"invalid_request",
+				"pool order must include every current user pool exactly once",
+			);
+			if (poolIds.length !== rows.length) throw error;
+			const currentIds = new Set(rows.map(row => row.pool_id));
+			const requestedIds = new Set<number>();
+			for (const poolId of poolIds) {
+				if (!Number.isSafeInteger(poolId) || poolId <= 0) throw error;
+				if (requestedIds.has(poolId)) throw error;
+				requestedIds.add(poolId);
+				if (!currentIds.has(poolId)) throw error;
+			}
+			for (let index = 0; index < rows.length; index++) {
+				this.#db
+					.prepare("UPDATE gateway_user_pools SET position = ? WHERE user_id = ? AND pool_id = ?")
+					.run(-(index + 1), userId, rows[index]!.pool_id);
+			}
+			for (let position = 0; position < poolIds.length; position++) {
+				this.#db
+					.prepare("UPDATE gateway_user_pools SET position = ? WHERE user_id = ? AND pool_id = ?")
+					.run(position, userId, poolIds[position]!);
+			}
+			return this.listUserPoolBindings(userId);
+		});
 	}
 
 	listPoolUsers(poolId: number): AuthGatewayUser[] {
@@ -901,7 +889,36 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
 			);
-			INSERT OR IGNORE INTO auth_gateway_schema_version(id, version) VALUES (1, ${ACCESS_SCHEMA_VERSION});
+		`);
+		const row = this.#db.prepare("SELECT version FROM auth_gateway_schema_version WHERE id = 1").get() as
+			| SchemaVersionRow
+			| undefined;
+		if (!row) {
+			if (this.#hasGatewayTables()) throw new Error("Auth gateway schema version is missing");
+			this.#db
+				.prepare("INSERT INTO auth_gateway_schema_version(id, version) VALUES (1, ?)")
+				.run(ACCESS_SCHEMA_VERSION);
+			this.#applyV2Schema();
+			return;
+		}
+		if (row.version !== 1 && row.version !== ACCESS_SCHEMA_VERSION) {
+			throw new Error(`Unsupported auth gateway schema version: ${row.version}`);
+		}
+		if (row.version === 1) this.#migrateSchemaV1ToV2();
+		this.#applyV2Schema();
+	}
+
+	#hasGatewayTables(): boolean {
+		const row = this.#db
+			.prepare(
+				"SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name LIKE 'gateway\\_%' ESCAPE '\\'",
+			)
+			.get() as CountRow | undefined;
+		return (row?.count ?? 0) > 0;
+	}
+
+	#applyV2Schema(): void {
+		this.#db.run(`
 			CREATE TABLE IF NOT EXISTS gateway_users (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[a-z]' AND name NOT GLOB '*[^a-z0-9_-]*'),
@@ -938,8 +955,6 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 			CREATE TABLE IF NOT EXISTS gateway_pools (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[a-z]' AND name NOT GLOB '*[^a-z0-9_-]*'),
-				provider TEXT NOT NULL,
-				model TEXT,
 				strategy TEXT NOT NULL CHECK (strategy IN ('sticky-session', 'least-used', 'round-robin', 'failover')),
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL
@@ -956,11 +971,12 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 			CREATE TABLE IF NOT EXISTS gateway_user_pools (
 				user_id INTEGER NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
 				pool_id INTEGER NOT NULL REFERENCES gateway_pools(id) ON DELETE CASCADE,
-				provider TEXT NOT NULL,
-				model_key TEXT NOT NULL,
+				position INTEGER NOT NULL,
+				created_at INTEGER NOT NULL,
 				PRIMARY KEY(user_id, pool_id),
-				UNIQUE(user_id, provider, model_key)
+				UNIQUE(user_id, position)
 			);
+			CREATE INDEX IF NOT EXISTS idx_gateway_user_pools_pool_id ON gateway_user_pools(pool_id);
 			CREATE TABLE IF NOT EXISTS gateway_audit_events (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				request_id TEXT NOT NULL,
@@ -990,6 +1006,86 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 			CREATE INDEX IF NOT EXISTS idx_gateway_audit_user_id ON gateway_audit_events(user_id, id DESC);
 			CREATE INDEX IF NOT EXISTS idx_gateway_audit_provider_model_time ON gateway_audit_events(resolved_provider, resolved_model, started_at DESC);
 		`);
+	}
+
+	#migrateSchemaV1ToV2(): void {
+		this.#db.run("PRAGMA foreign_keys=OFF");
+		try {
+			this.#withImmediateTransaction(() => {
+				const duplicate = this.#db
+					.prepare(
+						`SELECT COUNT(*) AS count
+						FROM (
+							SELECT user_id, pool_id
+							FROM gateway_user_pools
+							GROUP BY user_id, pool_id
+							HAVING COUNT(*) > 1
+						)`,
+					)
+					.get() as CountRow | undefined;
+				if ((duplicate?.count ?? 0) > 0) {
+					throw new Error("duplicate user pool bindings cannot be migrated");
+				}
+				const migrationCreatedAt = Date.now();
+				this.#db.run(`
+					CREATE TABLE gateway_pools_v2 (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[a-z]' AND name NOT GLOB '*[^a-z0-9_-]*'),
+						strategy TEXT NOT NULL CHECK (strategy IN ('sticky-session', 'least-used', 'round-robin', 'failover')),
+						created_at INTEGER NOT NULL,
+						updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE gateway_pool_credentials_v2 (
+						pool_id INTEGER NOT NULL REFERENCES gateway_pools(id) ON DELETE CASCADE,
+						credential_id INTEGER NOT NULL,
+						position INTEGER NOT NULL,
+						created_at INTEGER NOT NULL,
+						PRIMARY KEY(pool_id, credential_id),
+						UNIQUE(pool_id, position)
+					);
+					CREATE TABLE gateway_user_pools_v2 (
+						user_id INTEGER NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+						pool_id INTEGER NOT NULL REFERENCES gateway_pools(id) ON DELETE CASCADE,
+						position INTEGER NOT NULL,
+						created_at INTEGER NOT NULL,
+						PRIMARY KEY(user_id, pool_id),
+						UNIQUE(user_id, position)
+					);
+					INSERT INTO gateway_pools_v2(id, name, strategy, created_at, updated_at)
+						SELECT id, name, strategy, created_at, updated_at FROM gateway_pools ORDER BY id ASC;
+					INSERT INTO gateway_pool_credentials_v2(pool_id, credential_id, position, created_at)
+						SELECT pool_id, credential_id, position, created_at FROM gateway_pool_credentials ORDER BY pool_id ASC, position ASC;
+				`);
+				this.#db
+					.prepare(
+						`INSERT INTO gateway_user_pools_v2(user_id, pool_id, position, created_at)
+						SELECT user_id, pool_id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY pool_id ASC) - 1, ?
+						FROM gateway_user_pools
+						ORDER BY user_id ASC, pool_id ASC`,
+					)
+					.run(migrationCreatedAt);
+				this.#db.run(`
+					DROP TABLE gateway_user_pools;
+					DROP TABLE gateway_pool_credentials;
+					DROP TABLE gateway_pools;
+					ALTER TABLE gateway_pools_v2 RENAME TO gateway_pools;
+					ALTER TABLE gateway_pool_credentials_v2 RENAME TO gateway_pool_credentials;
+					ALTER TABLE gateway_user_pools_v2 RENAME TO gateway_user_pools;
+					DELETE FROM sqlite_sequence WHERE name = 'gateway_pools';
+				`);
+				const maxPool = this.#db.prepare("SELECT MAX(id) AS id FROM gateway_pools").get() as MaxIdRow | undefined;
+				if (maxPool?.id != null) {
+					this.#db.prepare("INSERT INTO sqlite_sequence(name, seq) VALUES ('gateway_pools', ?)").run(maxPool.id);
+				}
+				this.#db
+					.prepare("UPDATE auth_gateway_schema_version SET version = ? WHERE id = 1")
+					.run(ACCESS_SCHEMA_VERSION);
+				const foreignKeyRows = this.#db.prepare("PRAGMA foreign_key_check").all() as ForeignKeyCheckRow[];
+				if (foreignKeyRows.length > 0) throw new Error("auth gateway migration failed foreign key check");
+			});
+		} finally {
+			this.#db.run("PRAGMA foreign_keys=ON");
+		}
 	}
 
 	#findTokenPrincipal(publicId: string): TokenPrincipalRow | undefined {
@@ -1088,8 +1184,6 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 		return {
 			id: row.id,
 			name: row.name,
-			provider: row.provider,
-			model: row.model,
 			strategy: row.strategy,
 			createdAt: row.created_at,
 			updatedAt: row.updated_at,
@@ -1105,8 +1199,6 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 				pool = {
 					id: row.id,
 					name: row.name,
-					provider: row.provider,
-					model: row.model,
 					strategy: row.strategy,
 					createdAt: row.created_at,
 					updatedAt: row.updated_at,
@@ -1123,6 +1215,34 @@ export class SqliteAuthGatewayAccessStore implements AuthGatewayAccessStore {
 			}
 		}
 		return [...pools.values()];
+	}
+
+	#getUserPoolBindingRow(userId: number, poolId: number): UserPoolBindingRow | undefined {
+		return this.#db
+			.prepare("SELECT pool_id, position, created_at FROM gateway_user_pools WHERE user_id = ? AND pool_id = ?")
+			.get(userId, poolId) as UserPoolBindingRow | undefined;
+	}
+
+	#mapUserPoolBinding(row: UserPoolBindingRow): AuthGatewayUserPoolBinding {
+		return {
+			poolId: row.pool_id,
+			position: row.position,
+			createdAt: row.created_at,
+			pool: this.#requirePool(row.pool_id),
+		};
+	}
+
+	#renumberUserPoolBindings(userId: number): void {
+		const rows = this.#db
+			.prepare(
+				"SELECT pool_id, position, created_at FROM gateway_user_pools WHERE user_id = ? ORDER BY position ASC, pool_id ASC",
+			)
+			.all(userId) as UserPoolBindingRow[];
+		for (let position = 0; position < rows.length; position++) {
+			this.#db
+				.prepare("UPDATE gateway_user_pools SET position = ? WHERE user_id = ? AND pool_id = ?")
+				.run(position, userId, rows[position]!.pool_id);
+		}
 	}
 
 	#requireAudit(id: number): AuthGatewayAuditEvent {

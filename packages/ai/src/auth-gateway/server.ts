@@ -19,6 +19,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthCredentialSelectionPolicy, AuthStorage, ResolvedAuthCredential } from "../auth-storage";
@@ -44,7 +45,6 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
 	type AuthGatewayAuditOutcome,
-	type AuthGatewayPool,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRouteFamily,
 	evaluateAuthGatewayAccess,
@@ -455,6 +455,14 @@ function qualifiedModelId(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
+function resolveGatewayModel(opts: AuthGatewayBootOptions, id: string): Model<Api> | undefined {
+	const direct = opts.resolveModel(id);
+	if (direct) return direct;
+	const slash = id.indexOf("/");
+	if (slash <= 0 || slash === id.length - 1) return undefined;
+	return opts.resolveModel(id.slice(slash + 1));
+}
+
 function isManagedRegular(
 	principal: AuthGatewayPrincipal,
 ): principal is AuthGatewayPrincipal & { kind: "managed"; id: number; userId: number } {
@@ -480,6 +488,17 @@ function poolFailureResponse(
 
 function credentialIdsForProvider(storage: AuthStorage, provider: string): Set<number> {
 	return new Set(storage.listStoredCredentials(provider).map(row => row.id));
+}
+
+const BUNDLED_MODEL_PROVIDERS = new Set<string>(getBundledProviders());
+
+function gatewayPoolScope(poolId: number, provider: string): string {
+	return `gateway-pool:${poolId}:${provider}`;
+}
+
+function bundledCatalogModelsForProvider(provider: string): readonly Model<Api>[] {
+	if (!BUNDLED_MODEL_PROVIDERS.has(provider)) return [];
+	return getBundledModels(provider as GeneratedProvider);
 }
 
 async function resolveGatewayCredential(
@@ -771,7 +790,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	const model = resolveGatewayModel(bootOpts, modelId);
 	if (!model) {
 		if (isManagedRegular(principal)) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
@@ -796,6 +815,7 @@ async function handleFormatEndpoint(
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	let selection: AuthCredentialSelectionPolicy | undefined;
+	let credentialSessionScope = "default";
 	if (isManagedRegular(principal) && bootOpts.accessStore) {
 		const rules = bootOpts.accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayAccess(principal, rules, {
@@ -807,18 +827,14 @@ async function handleFormatEndpoint(
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = bootOpts.accessStore.resolveUserPoolSelection(
-			principal.userId,
-			model.provider,
-			qualifiedModelId(model),
-		);
-		if (!poolSelection) {
+		const poolBindings = bootOpts.accessStore.listUserPoolBindings(principal.userId);
+		if (poolBindings.length === 0) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
 		const liveIds = credentialIdsForProvider(bootOpts.storage, model.provider);
-		const eligibleCredentialIds = poolSelection.credentialIds.filter(id => liveIds.has(id));
-		if (eligibleCredentialIds.length === 0) {
+		const poolSelection = resolveAuthGatewayPoolSelection(poolBindings, liveIds);
+		if (!poolSelection) {
 			audit?.record("no_eligible_credential", 503, zeroUsage(), "no_eligible_credential");
 			return poolFailureResponse(
 				route,
@@ -827,16 +843,17 @@ async function handleFormatEndpoint(
 				"No eligible credential is available for this request",
 			);
 		}
+		credentialSessionScope = gatewayPoolScope(poolSelection.poolId, model.provider);
 		selection = {
-			policyKey: `gateway-pool:${poolSelection.poolId}`,
-			eligibleCredentialIds,
+			policyKey: credentialSessionScope,
+			eligibleCredentialIds: poolSelection.credentialIds,
 			strategy: poolSelection.strategy,
 		};
 	}
 
 	const requestSessionId = parsed.options.promptCacheKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	const storageSessionId = isManagedRegular(principal)
-		? `gateway:${principal.id}:${selection?.policyKey.slice("gateway-pool:".length) ?? "default"}:${requestSessionId}`
+		? `gateway:${principal.id}:${credentialSessionScope}:${requestSessionId}`
 		: requestSessionId;
 	parsed.options.promptCacheKey ??= requestSessionId;
 
@@ -1125,7 +1142,7 @@ async function handlePiNative(
 	}
 
 	const route = { module: piNative as unknown as FormatModule, label: "pi-native" };
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = resolveGatewayModel(bootOpts, parsed.modelId);
 	if (!model) {
 		if (isManagedRegular(principal) && bootOpts.accessStore) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
@@ -1139,7 +1156,7 @@ async function handlePiNative(
 	parsed.options.sessionId ??= requestSessionId;
 
 	let selection: AuthCredentialSelectionPolicy | undefined;
-	let poolId: number | null = null;
+	let credentialSessionScope = "default";
 	const exhaustion: PoolExhaustionState = {};
 	if (isManagedRegular(principal) && bootOpts.accessStore) {
 		const rules = bootOpts.accessStore.listAclRules(principal.userId);
@@ -1152,18 +1169,14 @@ async function handlePiNative(
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
-		const poolSelection = bootOpts.accessStore.resolveUserPoolSelection(
-			principal.userId,
-			model.provider,
-			qualifiedModelId(model),
-		);
-		if (!poolSelection) {
+		const poolBindings = bootOpts.accessStore.listUserPoolBindings(principal.userId);
+		if (poolBindings.length === 0) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
 		}
 		const liveIds = credentialIdsForProvider(bootOpts.storage, model.provider);
-		const eligibleCredentialIds = poolSelection.credentialIds.filter(id => liveIds.has(id));
-		if (eligibleCredentialIds.length === 0) {
+		const poolSelection = resolveAuthGatewayPoolSelection(poolBindings, liveIds);
+		if (!poolSelection) {
 			audit?.record("no_eligible_credential", 503, zeroUsage(), "no_eligible_credential");
 			return poolFailureResponse(
 				route,
@@ -1172,16 +1185,16 @@ async function handlePiNative(
 				"No eligible credential is available for this request",
 			);
 		}
-		poolId = poolSelection.poolId;
+		credentialSessionScope = gatewayPoolScope(poolSelection.poolId, model.provider);
 		selection = {
-			policyKey: `gateway-pool:${poolSelection.poolId}`,
-			eligibleCredentialIds,
+			policyKey: credentialSessionScope,
+			eligibleCredentialIds: poolSelection.credentialIds,
 			strategy: poolSelection.strategy,
 		};
 	}
 
 	const credentialSessionId = isManagedRegular(principal)
-		? `gateway:${principal.id}:${poolId ?? "default"}:${requestSessionId}`
+		? `gateway:${principal.id}:${credentialSessionScope}:${requestSessionId}`
 		: requestSessionId;
 	let credential: GatewayCredentialResolution | undefined;
 	try {
@@ -1437,11 +1450,30 @@ async function handleUsage(
 			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
 		const since = readUsageSince(req);
 		if (since instanceof Response) return since;
-		return json(200, { usage: accessStore.getUserUsage(principal.userId, since) });
+		return json(200, {
+			usage: accessStore.getUserUsage(principal.userId, since),
+			principal: {
+				kind: principal.kind,
+				userId: principal.userId,
+				name: principal.name,
+				role: principal.role,
+				tokenId: principal.tokenId,
+			},
+		});
 	}
 	const reports = (await storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
 	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
-	return json(200, { generatedAt: Date.now(), reports: trimmed });
+	return json(200, {
+		generatedAt: Date.now(),
+		principal: {
+			kind: principal.kind,
+			userId: principal.userId,
+			name: principal.name,
+			role: principal.role,
+			tokenId: principal.tokenId,
+		},
+		reports: trimmed,
+	});
 }
 
 function readUsageSince(req: Request): number | Response {
@@ -1470,26 +1502,41 @@ async function handleCredentialsCheck(
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "check", true);
 		if (!access.allowed)
 			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
-		const allowedPools: AuthGatewayPool[] = [];
+		const poolBindings = accessStore.listUserPoolBindings(principal.userId);
+		if (poolBindings.length === 0)
+			return json(403, { error: { type: "permission_error", message: "Access denied by gateway policy" } });
+
 		const candidateIds: number[] = [];
-		for (const pool of accessStore.listUserPools(principal.userId)) {
-			const poolAccess = evaluateAuthGatewayAccess(principal, rules, {
-				route: "check",
-				provider: pool.provider,
-				...(pool.model ? { qualifiedModel: pool.model } : {}),
-			});
-			if (!poolAccess.allowed) continue;
-			allowedPools.push(pool);
-			for (const member of pool.members) candidateIds.push(member.credentialId);
+		for (const binding of poolBindings) {
+			for (const member of binding.pool.members) candidateIds.push(member.credentialId);
 		}
-		const liveById = new Map(storage.listStoredCredentialsByIds(candidateIds).map(row => [row.id, row]));
+		const liveIdsByProvider = new Map<string, Set<number>>();
+		for (const row of storage.listStoredCredentialsByIds(candidateIds)) {
+			const ids = liveIdsByProvider.get(row.provider) ?? new Set<number>();
+			ids.add(row.id);
+			liveIdsByProvider.set(row.provider, ids);
+		}
+
 		const eligible = new Set<number>();
-		for (const pool of allowedPools) {
-			for (const member of pool.members) {
-				const live = liveById.get(member.credentialId);
-				if (live?.provider === pool.provider) eligible.add(member.credentialId);
-			}
+		for (const [provider, liveIds] of liveIdsByProvider) {
+			const catalogModels = bundledCatalogModelsForProvider(provider);
+			const providerAccess =
+				catalogModels.length > 0
+					? catalogModels.some(
+							model =>
+								evaluateAuthGatewayAccess(principal, rules, {
+									route: "check",
+									provider,
+									qualifiedModel: qualifiedModelId(model),
+								}).allowed,
+						)
+					: evaluateAuthGatewayAccess(principal, rules, { route: "check", provider }).allowed;
+			if (!providerAccess) continue;
+			const poolSelection = resolveAuthGatewayPoolSelection(poolBindings, liveIds);
+			if (!poolSelection) continue;
+			for (const credentialId of poolSelection.credentialIds) eligible.add(credentialId);
 		}
+
 		const credentials = await storage.checkCredentials({ signal, credentialIds: [...eligible] });
 		const filtered = credentials
 			.slice()
@@ -1526,7 +1573,7 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 	let filtered = list;
 	if (isManagedRegular(principal) && opts.accessStore) {
 		const rules = opts.accessStore.listAclRules(principal.userId);
-		const pools = opts.accessStore.listUserPools(principal.userId);
+		const poolBindings = opts.accessStore.listUserPoolBindings(principal.userId);
 		const liveIdsByProvider = new Map<string, Set<number>>();
 		const liveIdsForProvider = (provider: string): Set<number> => {
 			let liveIds = liveIdsByProvider.get(provider);
@@ -1544,18 +1591,22 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 				qualifiedModel: qualified,
 			});
 			if (!access.allowed) return false;
-			const pool = resolveAuthGatewayPoolSelection(pools, model.provider, qualified);
-			if (!pool) return false;
-			const liveIds = liveIdsForProvider(model.provider);
-			return pool.credentialIds.some(id => liveIds.has(id));
+			return resolveAuthGatewayPoolSelection(poolBindings, liveIdsForProvider(model.provider)) !== null;
 		});
 	}
-	const data = filtered.map(model => ({
-		id: model.id,
-		object: "model" as const,
-		owned_by: model.provider,
-		api: model.api,
-	}));
+	const seenIds = new Set<string>();
+	const data: Array<{ id: string; object: "model"; owned_by: string; api: Api }> = [];
+	for (const model of filtered) {
+		const id = qualifiedModelId(model);
+		if (seenIds.has(id)) continue;
+		seenIds.add(id);
+		data.push({
+			id,
+			object: "model" as const,
+			owned_by: model.provider,
+			api: model.api,
+		});
+	}
 	return json(200, { object: "list", data });
 }
 

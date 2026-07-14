@@ -184,6 +184,93 @@ describe("GatewayProfileSettingsComponent", () => {
 		expect(rendered).toContain("* prod");
 	});
 
+	it("clears a failed connection test as soon as the retry begins", async () => {
+		const component = new GatewayProfileSettingsComponent(context());
+		await flushProfileSettings();
+		await createFileConnection(component, "prod", "https://gateway.example.com/omp", SECRET);
+		nextStatusError = new Error("status failed");
+
+		component.handleInput("t");
+		await waitUntil(
+			() => statusCalls === 1 && text(component).includes("status failed"),
+			() => text(component),
+		);
+		expect(text(component)).toContain("status failed");
+
+		nextStatusError = undefined;
+		component.handleInput("t");
+
+		expect(text(component)).not.toContain("status failed");
+		await waitUntil(
+			() => statusCalls === 2 && text(component).includes("Connection ok: test-version"),
+			() => text(component),
+		);
+		expect(text(component)).toContain("Connection ok: test-version");
+	});
+
+	it("does not render list-level errors inside create edit or delete flows", async () => {
+		for (const entry of [
+			{ key: "a", title: "Add connection" },
+			{ key: "e", title: "Edit prod" },
+			{ key: "d", title: "Delete prod" },
+		]) {
+			const store = openStore();
+			await store.upsert(
+				{ name: "prod", url: "https://gateway.example.com", tokenSource: { type: "file" } },
+				SECRET,
+			);
+			const component = new GatewayProfileSettingsComponent(context(store));
+			await flushProfileSettings();
+			await waitUntil(
+				() => !text(component).includes("Loading gateway profiles..."),
+				() => text(component),
+			);
+			spyOn(store, "setActive").mockImplementation(async () => {
+				throw new Error("set active failed");
+			});
+			component.handleInput("s");
+			await waitUntil(
+				() => text(component).includes("set active failed"),
+				() => text(component),
+			);
+
+			component.handleInput(entry.key);
+
+			const rendered = text(component);
+			expect(rendered).toContain(entry.title);
+			expect(rendered).not.toContain("set active failed");
+			mock.restore();
+		}
+	});
+
+	it("clears a wrong delete confirmation while a valid retry is pending", async () => {
+		const store = openStore();
+		await store.upsert({ name: "prod", url: "https://gateway.example.com", tokenSource: { type: "file" } }, SECRET);
+		const component = new GatewayProfileSettingsComponent(context(store));
+		await flushProfileSettings();
+		const deleteGate = Promise.withResolvers<void>();
+		const originalDelete = store.delete.bind(store);
+		const deleteSpy = spyOn(store, "delete").mockImplementation(async name => {
+			await deleteGate.promise;
+			return await originalDelete(name);
+		});
+		component.handleInput("d");
+		typeAndSubmit(component, "wrong");
+		expect(text(component)).toContain("Connection name did not match");
+		component.handleInput("\x15");
+		typeAndSubmit(component, "prod");
+
+		expect(text(component)).toContain("Deleting...");
+		expect(text(component)).not.toContain("Connection name did not match");
+		expect(deleteSpy).toHaveBeenCalledWith("prod");
+		deleteGate.resolve();
+		await waitUntil(
+			() =>
+				!text(component).includes("Deleting...") && text(component).includes("No gateway connections configured."),
+			() => text(component),
+		);
+	});
+
 	it("preserves the managed token file when editing file-backed metadata with a blank token field", async () => {
 		const store = openStore();
 		const component = new GatewayProfileSettingsComponent(context(store));

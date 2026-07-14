@@ -24,7 +24,6 @@ import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
-const ORIGINAL_EXIT_CODE = process.exitCode;
 
 function captureStdout(): () => string {
 	let captured = "";
@@ -193,6 +192,11 @@ const SURPLUS_POSITIONAL_CASES: readonly SurplusPositionalCase[] = [
 		name: "user create alice bob",
 		argv: ["user", "create", "alice", "bob"],
 		message: "Unexpected positional argument(s) for auth-gateway user create: bob",
+	},
+	{
+		name: "user reorder-pools alice 1,2 extra",
+		argv: ["user", "reorder-pools", "alice", "1,2", "extra"],
+		message: "Unexpected positional argument(s) for auth-gateway user reorder-pools: extra",
 	},
 	{
 		name: "pool list primary",
@@ -525,7 +529,7 @@ describe("auth-gateway CLI access management", () => {
 
 	afterEach(async () => {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
-		process.exitCode = ORIGINAL_EXIT_CODE;
+		process.exitCode = 0;
 		if (originalTokenContent === null) {
 			await fs.rm(tokenFile, { force: true }).catch(() => undefined);
 		} else {
@@ -543,12 +547,21 @@ describe("auth-gateway CLI access management", () => {
 		if (agentDir) await removeWithRetries(agentDir);
 	});
 
-	test("exposes management command examples", () => {
+	test("exposes neutral pool and ACL-specific management command help", () => {
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway user create"))).toBe(true);
+		expect(
+			AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool create primary --strategy=")),
+		).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool add-account"))).toBe(true);
+		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway user reorder-pools"))).toBe(
+			true,
+		);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway audit list"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("auth-gateway pool rename"))).toBe(true);
 		expect(AuthGatewayCommand.examples.some(example => example.includes("--before="))).toBe(true);
+		expect(AuthGatewayCommand.flags.provider.description).toBe("Provider id for ACL");
+		expect(AuthGatewayCommand.flags.model.description).toBe("Model id for ACL");
+		expect(AuthGatewayCommand.examples.join("\n")).not.toContain("pool create primary --provider=");
 	});
 
 	test("rejects surplus positionals from direct dispatch before file side effects", async () => {
@@ -634,8 +647,6 @@ describe("auth-gateway CLI access management", () => {
 		const aclRuleId = Number(allow.rule.id);
 		const pool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
 			poolCommand("create", "primary", undefined, {
-				provider: "anthropic",
-				model: "claude-3-5-sonnet",
 				strategy: "failover",
 			}),
 			deps,
@@ -651,8 +662,8 @@ describe("auth-gateway CLI access management", () => {
 		expect(shown).toContain(`${tokenId}\t${publicId}\tinitial operator label\t-\t-\n`);
 		expect(shown).toContain("acl:\nid\teffect\tkind\tpattern\n");
 		expect(shown).toContain(`${aclRuleId}\tallow\tprovider\tanthropic\n`);
-		expect(shown).toContain("pools:\nid\tname\tprovider\tmodel\tstrategy\taccounts\n");
-		expect(shown).toContain(`${poolId}\tprimary\tanthropic\tanthropic/claude-3-5-sonnet\tfailover\t42\n`);
+		expect(shown).toContain("pools:\nposition\tpool\tname\tstrategy\taccounts\n");
+		expect(shown).toContain(`0\t${poolId}\tprimary\tfailover\t42\n`);
 		expect(shown).not.toContain(rawToken);
 		expect(shown).not.toContain("omp_gw_");
 		expect(shown).not.toContain("token_hash");
@@ -762,15 +773,13 @@ describe("auth-gateway CLI access management", () => {
 		const user = await expectJsonCommand<{ user: Record<string, unknown> }>(userCommand("create", "pooluser"), deps);
 		const pool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
 			poolCommand("create", "primary", undefined, {
-				provider: "anthropic",
-				model: "claude-3-5-sonnet",
 				strategy: "round-robin",
 			}),
 			deps,
 		);
 		const poolId = pool.pool.id as number;
 		await expectJsonCommand(poolCommand("add-account", "primary", "42"), deps);
-		await expectJsonCommand(poolCommand("add-account", "primary", "43"), deps);
+		await expectJsonCommand(poolCommand("add-account", "primary", "7"), deps);
 		await expectJsonCommand(userCommand("set-pool", String(user.user.id), "primary"), deps);
 
 		const renamed = await expectJsonCommand<{ pool: Record<string, unknown> }>(
@@ -780,20 +789,18 @@ describe("auth-gateway CLI access management", () => {
 		expect(renamed.pool).toMatchObject({
 			id: poolId,
 			name: "primary-renamed",
-			provider: "anthropic",
-			model: "anthropic/claude-3-5-sonnet",
 			strategy: "round-robin",
 			members: [
 				{ credentialId: 42, position: 0 },
-				{ credentialId: 43, position: 1 },
+				{ credentialId: 7, position: 1 },
 			],
 		});
-		const shownUser = await expectJsonCommand<{ pools: Array<Record<string, unknown>> }>(
+		const shownUser = await expectJsonCommand<{ poolBindings: Array<Record<string, unknown>> }>(
 			userCommand("show", "pooluser"),
 			deps,
 		);
-		expect(shownUser.pools).toHaveLength(1);
-		expect(shownUser.pools[0]).toMatchObject({ id: poolId, name: "primary-renamed" });
+		expect(shownUser.poolBindings).toHaveLength(1);
+		expect(shownUser.poolBindings[0]).toMatchObject({ poolId, pool: { id: poolId, name: "primary-renamed" } });
 		await expectCommandError(poolCommand("show", "primary"), deps, "pool not found");
 		await expectCommandError(poolCommand("rename", "primary-renamed"), deps, "Missing new pool name");
 
@@ -811,7 +818,7 @@ describe("auth-gateway CLI access management", () => {
 			name: "primary-human",
 			members: [
 				{ credentialId: 42, position: 0 },
-				{ credentialId: 43, position: 1 },
+				{ credentialId: 7, position: 1 },
 			],
 		});
 	});
@@ -881,9 +888,9 @@ describe("auth-gateway CLI access management", () => {
 			user: Record<string, unknown>;
 			tokens: Array<Record<string, unknown>>;
 			acl: unknown[];
-			pools: unknown[];
+			poolBindings: unknown[];
 		}>(userCommand("show", "alice"), deps);
-		expectExactKeys(shown, ["user", "tokens", "acl", "pools"]);
+		expectExactKeys(shown, ["user", "tokens", "acl", "poolBindings"]);
 		expectExactKeys(shown.tokens[0]!, ["id", "userId", "publicId", "label", "createdAt", "lastUsedAt", "revokedAt"]);
 		expect(JSON.stringify(shown)).not.toContain(initialTokenValue);
 		expect(JSON.stringify(shown)).not.toContain("token_hash");
@@ -989,25 +996,25 @@ describe("auth-gateway CLI access management", () => {
 		);
 		expect(deletedAcl).toEqual({ deleted: true, ruleId: deniedRuleId });
 
-		await expectCommandError(poolCommand("create", "missingprovider"), deps, "--provider is required");
 		await expectCommandError(
-			poolCommand("create", "blankprovider", undefined, { provider: "   " }),
+			poolCommand("create", "oldprovider", undefined, { provider: "anthropic" }),
 			deps,
-			"--provider is required",
+			"Unsupported option(s) for auth-gateway pool create: --provider",
+		);
+		await expectCommandError(
+			poolCommand("create", "oldmodel", undefined, { model: "anthropic/claude-3-5-sonnet" }),
+			deps,
+			"Unsupported option(s) for auth-gateway pool create: --model",
 		);
 		const pool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
 			poolCommand("create", "primary", undefined, {
-				provider: "anthropic",
-				model: "claude-3-5-sonnet",
 				strategy: "round-robin",
 			}),
 			deps,
 		);
-		expectExactKeys(pool.pool, ["id", "name", "provider", "model", "strategy", "createdAt", "updatedAt", "members"]);
+		expectExactKeys(pool.pool, ["id", "name", "strategy", "createdAt", "updatedAt", "members"]);
 		expect(pool.pool).toMatchObject({
 			name: "primary",
-			provider: "anthropic",
-			model: "anthropic/claude-3-5-sonnet",
 			strategy: "round-robin",
 			members: [],
 		});
@@ -1017,11 +1024,6 @@ describe("auth-gateway CLI access management", () => {
 			poolCommand("add-account", "primary", "99"),
 			deps,
 			"credential id 99 was not found in broker snapshot",
-		);
-		await expectCommandError(
-			poolCommand("add-account", "primary", "7"),
-			deps,
-			"credential id 7 belongs to provider openai, not anthropic",
 		);
 		const member = await expectJsonCommand<{ pool: Record<string, unknown>; created: boolean }>(
 			poolCommand("add-account", "primary", "42"),
@@ -1034,17 +1036,17 @@ describe("auth-gateway CLI access management", () => {
 		expect(JSON.stringify(member)).not.toContain("api_key");
 		expect(JSON.stringify(member)).not.toContain("oauth");
 
-		const secondMember = await expectJsonCommand<{ pool: Record<string, unknown>; created: boolean }>(
-			poolCommand("add-account", "primary", "43"),
+		const mixedProviderMember = await expectJsonCommand<{ pool: Record<string, unknown>; created: boolean }>(
+			poolCommand("add-account", "primary", "7"),
 			deps,
 		);
-		expect(secondMember).toMatchObject({
+		expect(mixedProviderMember).toMatchObject({
 			created: true,
 			pool: {
 				id: poolId,
 				members: [
 					{ credentialId: 42, position: 0 },
-					{ credentialId: 43, position: 1 },
+					{ credentialId: 7, position: 1 },
 				],
 			},
 		});
@@ -1056,31 +1058,79 @@ describe("auth-gateway CLI access management", () => {
 		const poolList = await expectJsonCommand<{ pools: Array<Record<string, unknown>> }>(poolCommand("list"), deps);
 		expect(poolList.pools).toHaveLength(1);
 		expect(poolList.pools[0]).toMatchObject({ id: poolId, name: "primary" });
+		const humanPoolList = await expectHumanCommand(poolCommand("list", undefined, undefined, { json: false }), deps);
+		expect(humanPoolList).toBe(`id\tname\tstrategy\taccounts\n${poolId}\tprimary\tfailover\t2 accounts\n`);
 		const poolShow = await expectJsonCommand<{ pool: Record<string, unknown> }>(poolCommand("show", "primary"), deps);
 		expect(poolShow.pool).toMatchObject({
 			id: poolId,
 			members: [
 				{ credentialId: 42, position: 0 },
-				{ credentialId: 43, position: 1 },
+				{ credentialId: 7, position: 1 },
 			],
 		});
+		const humanPoolShow = await expectHumanCommand(poolCommand("show", "primary", undefined, { json: false }), deps);
+		expect(humanPoolShow).toBe(`pool primary (#${poolId}) strategy=failover accounts=42,7\n`);
 
+		const fallbackPool = await expectJsonCommand<{ pool: Record<string, unknown> }>(
+			poolCommand("create", "fallback", undefined, { strategy: "least-used" }),
+			deps,
+		);
+		const fallbackPoolId = fallbackPool.pool.id as number;
+		await expectJsonCommand(poolCommand("add-account", "fallback", "43"), deps);
 		const setPool = await expectJsonCommand<{
 			created: boolean;
 			user: Record<string, unknown>;
 			pool: Record<string, unknown>;
+			binding: Record<string, unknown>;
 		}>(userCommand("set-pool", "alice", "primary"), deps);
 		expect(setPool).toMatchObject({
 			created: true,
 			user: { id: aliceId, name: "alice" },
 			pool: { id: poolId, name: "primary" },
+			binding: { poolId, position: 0 },
 		});
-		const shownWithPool = await expectJsonCommand<{ pools: Array<Record<string, unknown>> }>(
+		const fallbackBinding = await expectJsonCommand<{
+			created: boolean;
+			binding: Record<string, unknown>;
+		}>(userCommand("set-pool", "alice", "fallback"), deps);
+		expect(fallbackBinding).toMatchObject({ created: true, binding: { poolId: fallbackPoolId, position: 1 } });
+		const shownWithPool = await expectJsonCommand<{ poolBindings: Array<Record<string, unknown>> }>(
 			userCommand("show", "alice"),
 			deps,
 		);
-		expect(shownWithPool.pools).toHaveLength(1);
-		expect(shownWithPool.pools[0]).toMatchObject({ id: poolId, name: "primary" });
+		expect(shownWithPool.poolBindings).toHaveLength(2);
+		expect(shownWithPool.poolBindings.map(binding => [binding.poolId, binding.position])).toEqual([
+			[poolId, 0],
+			[fallbackPoolId, 1],
+		]);
+		await expectCommandError(
+			userCommand("reorder-pools", "alice", `${poolId},,${fallbackPoolId}`),
+			deps,
+			"pool order must be comma-separated positive pool ids",
+		);
+		await expectCommandError(
+			userCommand("reorder-pools", "alice", `${poolId},${poolId}`),
+			deps,
+			"pool order must not contain duplicate pool ids",
+		);
+		const reordered = await expectJsonCommand<{
+			user: Record<string, unknown>;
+			bindings: Array<Record<string, unknown>>;
+		}>(userCommand("reorder-pools", "alice", `${fallbackPoolId},${poolId}`), deps);
+		expect(reordered).toMatchObject({
+			user: { id: aliceId, name: "alice" },
+			bindings: [
+				{ poolId: fallbackPoolId, position: 0, pool: { name: "fallback", strategy: "least-used" } },
+				{ poolId, position: 1, pool: { name: "primary", strategy: "failover" } },
+			],
+		});
+		const humanReordered = await expectHumanCommand(
+			userCommand("reorder-pools", "alice", `${poolId},${fallbackPoolId}`, { json: false }),
+			deps,
+		);
+		expect(humanReordered).toBe(
+			`position\tpool\tname\tstrategy\taccounts\n0\t${poolId}\tprimary\tfailover\t42,7\n1\t${fallbackPoolId}\tfallback\tleast-used\t43\n`,
+		);
 		const unsetPool = await expectJsonCommand<{
 			removed: true;
 			user: Record<string, unknown>;
@@ -1096,7 +1146,7 @@ describe("auth-gateway CLI access management", () => {
 		expect(removedMember).toMatchObject({
 			removed: true,
 			credentialId: 42,
-			pool: { id: poolId, members: [{ credentialId: 43, position: 0 }] },
+			pool: { id: poolId, members: [{ credentialId: 7, position: 0 }] },
 		});
 
 		const auditEvent = await withStore(dbPath, store =>
@@ -1183,7 +1233,7 @@ describe("auth-gateway CLI access management", () => {
 			accessDb: dbPath,
 			managedUserCount: 2,
 			activeManagedTokenCount: 1,
-			poolCount: 1,
+			poolCount: 2,
 			credentialCount: 3,
 		});
 		expect(status).toHaveProperty("ready");

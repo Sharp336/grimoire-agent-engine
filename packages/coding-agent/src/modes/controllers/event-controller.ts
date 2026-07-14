@@ -32,7 +32,7 @@ import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { interruptHint } from "../shared";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
-import { assistantUsageIsBilled } from "../utils/transcript-render-helpers";
+import { assistantUsageIsBilled, resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
 
@@ -85,6 +85,7 @@ export class EventController {
 	// restored when the banner clears at the next `agent_start` (see
 	// #handleMessageEnd / #handleAgentStart).
 	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
+	#terminalErrorPresented = false;
 	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#retrySupersededAssistantQueue: AssistantMessageComponent[] = [];
 	#idleCompactionTimer?: NodeJS.Timeout;
@@ -366,6 +367,7 @@ export class EventController {
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
 		this.#lastIntent = undefined;
+		this.#terminalErrorPresented = false;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#resetReadGroup();
@@ -861,10 +863,13 @@ export class EventController {
 			// above the editor so it survives transcript scroll. Cleared at the next
 			// turn's agent_start. Suppress the transcript's inline `Error: …` line for
 			// the same message while pinned so the error isn't rendered twice.
-			if (event.message.stopReason === "error" && event.message.errorMessage && !isSilentAbort(event.message)) {
-				this.#lastAssistantComponent?.setErrorPinned(true);
-				this.#pinnedErrorComponent = this.#lastAssistantComponent;
-				this.ctx.showPinnedError(event.message.errorMessage);
+			if (event.message.stopReason === "error" && !isSilentAbort(event.message)) {
+				this.#terminalErrorPresented = true;
+				if (event.message.errorMessage) {
+					this.#lastAssistantComponent?.setErrorPinned(true);
+					this.#pinnedErrorComponent = this.#lastAssistantComponent;
+					this.ctx.showPinnedError(event.message.errorMessage);
+				}
 			}
 			this.ctx.statusLine.invalidate();
 			this.ctx.ui.requestRender();
@@ -1060,7 +1065,20 @@ export class EventController {
 			}
 		}
 	}
-	async #handleAgentEnd(_event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+	#agentEndErrorMessage(event: Extract<AgentSessionEvent, { type: "agent_end" }>): string | undefined {
+		const messages = event.messages ?? [];
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message?.role !== "assistant") continue;
+			if (message.stopReason !== "error") continue;
+			if (isSilentAbort(message)) continue;
+			const presentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
+			return presentation.kind === "full" ? presentation.text : undefined;
+		}
+		return undefined;
+	}
+
+	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		// A superseded agent_end: the agent is already streaming a fresh turn, so
 		// this event belongs to a turn that has already been replaced. The session
 		// dispatches to listeners fire-and-forget across an async extension-emit hop
@@ -1072,7 +1090,13 @@ export class EventController {
 		// then). Mirrors the collab guest's !isStreaming loader reconciler.
 		if (this.ctx.session.isStreaming) return;
 
+		const fallback = this.#terminalErrorPresented ? undefined : this.#agentEndErrorMessage(event);
 		await this.#finishAgentEnd();
+		if (fallback !== undefined) {
+			const sanitizedFallback = previewLine(fallback, TRUNCATE_LENGTHS.LINE) || "Unknown error";
+			this.#terminalErrorPresented = true;
+			this.ctx.showError(sanitizedFallback);
+		}
 	}
 
 	async #finishAgentEnd(): Promise<void> {
@@ -1309,6 +1333,7 @@ export class EventController {
 			this.#clearRetrySupersededAssistantComponents();
 		} else {
 			this.#clearRetrySupersededAssistantComponents();
+			this.#terminalErrorPresented = true;
 			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}
 		this.#ensureWorkingLoaderWhileStreaming();

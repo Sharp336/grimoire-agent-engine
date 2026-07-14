@@ -1,14 +1,18 @@
 import { describe, expect, test, vi } from "bun:test";
 import {
 	AUTH_GATEWAY_TRANSPORT_ERROR,
+	type AuthGatewayAclBatchResult,
+	type AuthGatewayAclRule,
 	AuthGatewayAdminClient,
 	AuthGatewayAdminClientError,
 	type AuthGatewayAdminClientOptions,
 	type AuthGatewayAdminStatus,
 	type AuthGatewayAuditEvent,
 	type AuthGatewayCredentialSummary,
+	type AuthGatewayModelSummary,
 	type AuthGatewayPool,
 	type AuthGatewayUser,
+	type AuthGatewayUserPoolBinding,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 
 type TestFetchHandler = (
@@ -101,12 +105,37 @@ const userFixture: AuthGatewayUser = {
 const poolFixture: AuthGatewayPool = {
 	id: 11,
 	name: "primary",
-	provider: "mock",
-	model: null,
 	strategy: "round-robin",
 	createdAt: 3,
 	updatedAt: 4,
 	members: [],
+};
+
+const userPoolBindingFixture: AuthGatewayUserPoolBinding = {
+	poolId: 11,
+	position: 0,
+	createdAt: 5,
+	pool: poolFixture,
+};
+
+const aclRuleFixture: AuthGatewayAclRule = {
+	id: 29,
+	userId: 7,
+	effect: "allow",
+	kind: "route",
+	pattern: "chat",
+	createdAt: 30,
+};
+
+const aclBatchResultFixture: AuthGatewayAclBatchResult = {
+	rule: aclRuleFixture,
+	created: true,
+};
+
+const modelSummaryFixture: AuthGatewayModelSummary = {
+	id: "model-a",
+	provider: "mock",
+	api: "mock",
 };
 
 const credentialSummaryFixture: AuthGatewayCredentialSummary = {
@@ -217,6 +246,47 @@ describe("AuthGatewayAdminClient", () => {
 		try {
 			const client = new AuthGatewayAdminClient({ url: server.url, token: "admin-token" });
 			await expect(client.listUsers()).rejects.toMatchObject({ status: 200, code: "invalid_response" });
+		} finally {
+			server.server.stop(true);
+		}
+	});
+
+	test("rejects malformed neutral pool and ordered binding response schemas", async () => {
+		const server = startRecordingServer((_req, record) => {
+			if (record.path === "/v1/pools") {
+				return jsonResponse(200, { pools: [{ ...poolFixture, provider: "mock" }] });
+			}
+			if (record.path === "/v1/users/7") {
+				return jsonResponse(200, {
+					user: userFixture,
+					tokens: [],
+					acl: [],
+					poolBindings: [{ ...userPoolBindingFixture, position: "0" }],
+				});
+			}
+			if (record.path === "/v1/users/7/pools") {
+				return jsonResponse(200, {
+					bindings: [
+						{
+							...userPoolBindingFixture,
+							pool: {
+								...poolFixture,
+								members: [{ credentialId: 13, position: "0", createdAt: 6 }],
+							},
+						},
+					],
+				});
+			}
+			return jsonResponse(404, { error: { code: "not_found", message: record.path } });
+		});
+		try {
+			const client = new AuthGatewayAdminClient({ url: server.url, token: "admin-token" });
+			await expect(client.listPools()).rejects.toMatchObject({ status: 200, code: "invalid_response" });
+			await expect(client.getUser(7)).rejects.toMatchObject({ status: 200, code: "invalid_response" });
+			await expect(client.setUserPoolOrder(7, [11])).rejects.toMatchObject({
+				status: 200,
+				code: "invalid_response",
+			});
 		} finally {
 			server.server.stop(true);
 		}
@@ -448,8 +518,20 @@ describe("AuthGatewayAdminClient", () => {
 		}
 	});
 
-	test("covers pool and credential response envelopes used by the remote console", async () => {
+	test("covers model, ACL batch, pool binding, and credential response envelopes used by the remote console", async () => {
 		const server = startRecordingServer((_req, record) => {
+			if (record.path === "/v1/users/7/pools" && record.method === "PATCH") {
+				return jsonResponse(200, { bindings: [userPoolBindingFixture] });
+			}
+			if (record.path === "/v1/users/7/acl/batch" && record.method === "POST") {
+				return jsonResponse(201, { results: [aclBatchResultFixture] });
+			}
+			if (record.path === "/v1/models") {
+				return jsonResponse(200, {
+					object: "list",
+					data: [{ id: "model-a", object: "model", owned_by: "mock", api: "mock" }],
+				});
+			}
 			if (record.path === "/v1/pools/11/members" && record.method === "PATCH")
 				return jsonResponse(200, { pool: poolFixture });
 			if (record.path === "/v1/pools/11/users") return jsonResponse(200, { users: [userFixture] });
@@ -460,10 +542,21 @@ describe("AuthGatewayAdminClient", () => {
 		});
 		try {
 			const client = new AuthGatewayAdminClient({ url: server.url, token: "admin-token" });
+			expect(await client.setUserPoolOrder(7, [11])).toEqual([userPoolBindingFixture]);
+			expect(
+				await client.addAclRules(7, {
+					rules: [{ effect: "allow", kind: "route", pattern: "chat" }],
+				}),
+			).toEqual([aclBatchResultFixture]);
+			expect(await client.listModels()).toEqual([modelSummaryFixture]);
 			expect(await client.setPoolCredentialOrder(11, [13])).toEqual(poolFixture);
 			expect(await client.listPoolUsers(11)).toEqual([userFixture]);
 			expect(await client.refreshCredential(13)).toEqual(credentialSummaryFixture);
-			expect(JSON.parse(server.records[0]?.body ?? "{}")).toEqual({ credentialIds: [13] });
+			expect(JSON.parse(server.records[0]?.body ?? "{}")).toEqual({ poolIds: [11] });
+			expect(JSON.parse(server.records[1]?.body ?? "{}")).toEqual({
+				rules: [{ effect: "allow", kind: "route", pattern: "chat" }],
+			});
+			expect(JSON.parse(server.records[3]?.body ?? "{}")).toEqual({ credentialIds: [13] });
 		} finally {
 			server.server.stop(true);
 		}

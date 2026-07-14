@@ -78,6 +78,9 @@ export class AuthGatewayAccountLoginController {
 		this.#pendingPrompt?.resolve("");
 		this.#pendingPrompt = null;
 		this.#state.prompt = null;
+		this.#state.authUrl = null;
+		this.#state.launchUrl = null;
+		this.#state.instructions = null;
 		this.#state.progress = [];
 	}
 

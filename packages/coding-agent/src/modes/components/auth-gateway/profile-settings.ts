@@ -179,15 +179,20 @@ export class GatewayProfileSettingsComponent implements Component, Focusable {
 		return this.#profiles.find(profile => profile.name === selected.value) ?? null;
 	}
 
-	#startCreate(): void {
+	#clearFeedback(): void {
+		this.#error = null;
 		this.#notice = null;
+	}
+
+	#startCreate(): void {
+		this.#clearFeedback();
 		this.#form = this.#newForm("create", null);
 	}
 
 	#startEdit(): void {
 		const selected = this.#selectedProfile();
 		if (!selected) return;
-		this.#notice = null;
+		this.#clearFeedback();
 		this.#form = this.#newForm("edit", selected);
 	}
 
@@ -327,6 +332,7 @@ export class GatewayProfileSettingsComponent implements Component, Focusable {
 	#startDelete(): void {
 		const selected = this.#selectedProfile();
 		if (!selected) return;
+		this.#clearFeedback();
 		const input = new Input();
 		input.focused = this.focused;
 		input.setUseTerminalCursor(this.#useTerminalCursor);
@@ -344,12 +350,14 @@ export class GatewayProfileSettingsComponent implements Component, Focusable {
 	async #confirmDelete(value: string): Promise<void> {
 		const state = this.#deleteState;
 		if (!state || state.busy) return;
+		state.error = null;
 		if (value !== state.name) {
 			state.error = "Connection name did not match";
 			this.context.requestRender();
 			return;
 		}
 		state.busy = true;
+		this.context.requestRender();
 		try {
 			await this.context.profileStore.delete(state.name);
 			state.input.clear();
@@ -366,6 +374,7 @@ export class GatewayProfileSettingsComponent implements Component, Focusable {
 	async #setActive(): Promise<void> {
 		const selected = this.#selectedProfile();
 		if (!selected) return;
+		this.#clearFeedback();
 		try {
 			await this.context.profileStore.setActive(selected.name);
 			this.#notice = `Active connection: ${sanitizeText(selected.name)}`;
@@ -379,10 +388,11 @@ export class GatewayProfileSettingsComponent implements Component, Focusable {
 	async #testSelected(): Promise<void> {
 		const selected = this.#selectedProfile();
 		if (!selected) return;
+		this.#clearFeedback();
 		try {
 			await this.#testConnection(selected.name);
 		} catch (error) {
-			this.#notice = errorText(error);
+			this.#error = errorText(error);
 		}
 		this.context.requestRender();
 	}

@@ -1,5 +1,6 @@
 import { type } from "arktype";
 import { credentialUploadRequestSchema } from "../auth-broker/wire-schemas";
+import { usageReportSchema } from "../usage";
 
 export const authGatewayRoleSchema = type("'user' | 'admin'");
 export const authGatewayAclEffectSchema = type("'allow' | 'deny'");
@@ -65,12 +66,18 @@ export const authGatewayPoolSchema = type({
 	"+": "reject",
 	id: "number.integer",
 	name: "string",
-	provider: "string",
-	model: "string | null",
 	strategy: authGatewayPoolStrategySchema,
 	createdAt: "number",
 	updatedAt: "number",
 	members: authGatewayPoolMemberSchema.array(),
+});
+
+export const authGatewayUserPoolBindingSchema = type({
+	"+": "reject",
+	poolId: "number.integer",
+	position: "number.integer",
+	createdAt: "number",
+	pool: authGatewayPoolSchema,
 });
 
 export const authGatewayPrincipalSummarySchema = type({
@@ -192,11 +199,14 @@ export const addAclRuleInputSchema = type({
 	pattern: "string",
 });
 
+export const addAclRulesInputSchema = type({
+	"+": "reject",
+	rules: addAclRuleInputSchema.array(),
+});
+
 export const createPoolInputSchema = type({
 	"+": "reject",
 	name: "string",
-	provider: "string",
-	"model?": "string",
 	"strategy?": authGatewayPoolStrategySchema,
 });
 
@@ -221,6 +231,11 @@ export const bindUserPoolInputSchema = type({
 	poolId: "number.integer",
 });
 
+export const setUserPoolOrderInputSchema = type({
+	"+": "reject",
+	poolIds: "number.integer[]",
+});
+
 export const authGatewayAdminStatusResponseSchema = type({
 	"+": "reject",
 	status: authGatewayAdminStatusSchema,
@@ -241,7 +256,7 @@ export const authGatewayUserDetailsResponseSchema = type({
 	user: authGatewayUserSchema,
 	tokens: authGatewayTokenSchema.array(),
 	acl: authGatewayAclRuleSchema.array(),
-	pools: authGatewayPoolSchema.array(),
+	poolBindings: authGatewayUserPoolBindingSchema.array(),
 });
 
 export const authGatewayTokenResponseSchema = type({
@@ -259,19 +274,42 @@ export const authGatewayAclRuleResponseSchema = type({
 	rule: authGatewayAclRuleSchema,
 });
 
+export const authGatewayAclBatchResponseSchema = type({
+	"+": "reject",
+	results: type({
+		"+": "reject",
+		rule: authGatewayAclRuleSchema,
+		created: "boolean",
+	}).array(),
+});
+
 export const authGatewayUserPoolsResponseSchema = type({
 	"+": "reject",
-	pools: authGatewayPoolSchema.array(),
+	bindings: authGatewayUserPoolBindingSchema.array(),
 });
 
 export const authGatewayPoolBindResponseSchema = type({
 	"+": "reject",
+	binding: authGatewayUserPoolBindingSchema,
 	created: "boolean",
 });
 
 export const authGatewayUsageResponseSchema = type({
 	"+": "reject",
 	usage: authGatewayUsageSummarySchema,
+});
+
+export const authGatewaySelfUsageResponseSchema = type({
+	"+": "reject",
+	usage: authGatewayUsageSummarySchema,
+	principal: authGatewayPrincipalSummarySchema,
+});
+
+export const authGatewayUsageReportsResponseSchema = type({
+	"+": "reject",
+	generatedAt: "number",
+	"principal?": authGatewayPrincipalSummarySchema,
+	reports: usageReportSchema.array(),
 });
 
 export const authGatewayPoolsResponseSchema = type({

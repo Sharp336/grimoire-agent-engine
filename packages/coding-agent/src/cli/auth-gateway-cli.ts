@@ -34,6 +34,7 @@ import {
 	type AuthGatewayRole,
 	type AuthGatewayToken,
 	type AuthGatewayUser,
+	type AuthGatewayUserPoolBinding,
 	DEFAULT_AUTH_GATEWAY_BIND,
 	SqliteAuthGatewayAccessStore,
 	startAuthGateway,
@@ -111,6 +112,7 @@ const USER_POSITIONAL_COUNTS: Record<string, number> = {
 	"acl-delete": 4,
 	"set-pool": 4,
 	"unset-pool": 4,
+	"reorder-pools": 4,
 };
 
 const POOL_POSITIONAL_COUNTS: Record<string, number> = {
@@ -542,11 +544,29 @@ function formatHumanCell(value: string): string {
 	return value.replaceAll("\t", " ").replace(/[\r\n]/g, " ");
 }
 
+function formatBindingAccounts(binding: AuthGatewayUserPoolBinding): string {
+	const credentialIds = binding.pool.members.map(member => String(member.credentialId));
+	return credentialIds.length > 0 ? credentialIds.join(",") : "-";
+}
+
+function formatUserPoolBindingsHuman(bindings: readonly AuthGatewayUserPoolBinding[]): string {
+	const rows = bindings.map(binding =>
+		[
+			String(binding.position),
+			String(binding.poolId),
+			formatHumanCell(binding.pool.name),
+			formatHumanCell(binding.pool.strategy),
+			formatHumanCell(formatBindingAccounts(binding)),
+		].join("\t"),
+	);
+	return `position\tpool\tname\tstrategy\taccounts\n${rows.join("\n")}${rows.length ? "\n" : ""}`;
+}
+
 function formatUserShowHuman(value: {
 	user: AuthGatewayUser;
 	tokens: AuthGatewayToken[];
 	acl: AuthGatewayAclRule[];
-	pools: AuthGatewayPool[];
+	poolBindings: AuthGatewayUserPoolBinding[];
 }): string {
 	const lines = [
 		`user ${formatHumanCell(value.user.name)} (#${value.user.id}) ${formatHumanCell(
@@ -574,19 +594,7 @@ function formatUserShowHuman(value: {
 			].join("\t"),
 		),
 		"pools:",
-		"id\tname\tprovider\tmodel\tstrategy\taccounts",
-		...value.pools.map(pool =>
-			[
-				String(pool.id),
-				formatHumanCell(pool.name),
-				formatHumanCell(pool.provider),
-				formatHumanCell(pool.model ?? "*"),
-				formatHumanCell(pool.strategy),
-				formatHumanCell(
-					pool.members.length > 0 ? pool.members.map(member => String(member.credentialId)).join(",") : "-",
-				),
-			].join("\t"),
-		),
+		formatUserPoolBindingsHuman(value.poolBindings).trimEnd(),
 	];
 	return `${lines.join("\n")}\n`;
 }
@@ -707,6 +715,21 @@ function parseStrategy(value: string | undefined): AuthGatewayPoolStrategy | und
 	return value;
 }
 
+function parsePoolIdList(value: string): number[] {
+	const parts = value.split(",");
+	const poolIds = parts.map(part => {
+		const trimmed = part.trim();
+		if (trimmed.length === 0) throw new Error("pool order must be comma-separated positive pool ids");
+		const parsed = Number(trimmed);
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			throw new Error("pool order must be comma-separated positive pool ids");
+		}
+		return parsed;
+	});
+	if (new Set(poolIds).size !== poolIds.length) throw new Error("pool order must not contain duplicate pool ids");
+	return poolIds;
+}
+
 function resolveAclScope(flags: AuthGatewayCommandArgs["flags"]): { kind: AuthGatewayAclKind; pattern: string } {
 	const entries: Array<[AuthGatewayAclKind, string | undefined]> = [
 		["provider", flags.provider],
@@ -770,7 +793,7 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				user,
 				tokens: store.listUserTokens(user.id),
 				acl: store.listAclRules(user.id),
-				pools: store.listUserPools(user.id),
+				poolBindings: store.listUserPoolBindings(user.id),
 			};
 			writeCommandOutput(flags, value, formatUserShowHuman(value));
 			return;
@@ -854,7 +877,7 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				const result = store.bindUserPool(user.id, pool.id);
 				writeCommandOutput(
 					flags,
-					{ created: result.created, user: { id: user.id, name: user.name }, pool },
+					{ created: result.created, user: { id: user.id, name: user.name }, pool, binding: result.binding },
 					`${result.created ? "bound" : "kept"} pool ${pool.name} (#${pool.id}) for ${user.name}\n`,
 				);
 				return;
@@ -864,6 +887,16 @@ async function runUserCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 				flags,
 				{ removed: true, user: { id: user.id, name: user.name }, pool },
 				`unbound pool ${pool.name} (#${pool.id}) from ${user.name}\n`,
+			);
+			return;
+		}
+		if (subaction === "reorder-pools") {
+			const poolIds = parsePoolIdList(requireValue(cmd, "pool id list"));
+			const bindings = store.setUserPoolOrder(user.id, poolIds);
+			writeCommandOutput(
+				flags,
+				{ user: { id: user.id, name: user.name }, bindings },
+				formatUserPoolBindingsHuman(bindings),
 			);
 			return;
 		}
@@ -885,41 +918,37 @@ async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 	const flags = cmd.flags;
 	await withAccessStore(deps, async store => {
 		if (subaction === "create") {
-			const provider = flags.provider?.trim();
-			if (!provider) throw new Error("--provider is required");
+			const unsupported = [
+				flags.provider !== undefined ? "--provider" : null,
+				flags.model !== undefined ? "--model" : null,
+			].filter((flag): flag is string => flag !== null);
+			if (unsupported.length > 0) {
+				throw new Error(`Unsupported option(s) for auth-gateway pool create: ${unsupported.join(", ")}`);
+			}
 			const pool = store.createPool({
 				name: requireTarget(cmd, "pool name"),
-				provider,
-				model: flags.model,
 				strategy: parseStrategy(flags.strategy),
 			});
-			writeCommandOutput(
-				flags,
-				{ pool },
-				`created pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy}\n`,
-			);
+			writeCommandOutput(flags, { pool }, `created pool ${pool.name} (#${pool.id}) strategy=${pool.strategy}\n`);
 			return;
 		}
 		if (subaction === "list") {
 			const pools = store.listPools();
+			const rows = pools.map(pool => `${pool.id}\t${pool.name}\t${pool.strategy}\t${pool.members.length} accounts`);
 			writeCommandOutput(
 				flags,
 				{ pools },
-				pools
-					.map(
-						pool =>
-							`${pool.id}\t${pool.name}\t${pool.provider}\t${pool.model ?? "*"}\t${pool.strategy}\t${pool.members.length} accounts`,
-					)
-					.join("\n") + (pools.length ? "\n" : ""),
+				`id\tname\tstrategy\taccounts\n${rows.join("\n")}${rows.length ? "\n" : ""}`,
 			);
 			return;
 		}
 		const pool = resolvePool(store, requireTarget(cmd, "pool name or id"));
 		if (subaction === "show") {
+			const accounts = pool.members.map(member => member.credentialId).join(",");
 			writeCommandOutput(
 				flags,
 				{ pool },
-				`pool ${pool.name} (#${pool.id}) provider=${pool.provider} model=${pool.model ?? "*"} strategy=${pool.strategy} accounts=${pool.members.map(member => member.credentialId).join(",")}\n`,
+				`pool ${pool.name} (#${pool.id}) strategy=${pool.strategy} accounts=${accounts}\n`,
 			);
 			return;
 		}
@@ -952,16 +981,11 @@ async function runPoolCommand(cmd: AuthGatewayCommandArgs, deps?: AuthGatewayCom
 			const credentials = await loadBrokerCredentials(deps);
 			const credential = credentials.find(entry => entry.id === credentialId);
 			if (!credential) throw new Error(`credential id ${credentialId} was not found in broker snapshot`);
-			if (credential.provider !== pool.provider) {
-				throw new Error(
-					`credential id ${credentialId} belongs to provider ${credential.provider}, not ${pool.provider}`,
-				);
-			}
 			const result = store.addPoolCredential(pool.id, credentialId);
 			writeCommandOutput(
 				flags,
 				result,
-				`${result.created ? "added" : "kept"} credential #${credentialId} in pool ${pool.name} (#${pool.id})\n`,
+				`${result.created ? "added" : "kept"} credential #${credentialId} (${credential.provider}) in pool ${pool.name} (#${pool.id})\n`,
 			);
 			return;
 		}

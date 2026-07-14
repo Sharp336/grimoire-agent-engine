@@ -6,6 +6,13 @@
 
 - Added gateway principals, provider/model/route ACL enforcement, scoped credential-pool selection, request audit attribution, admin HTTP management APIs, a typed remote admin client, redacted account lifecycle routes, and atomic pool-member ordering for shared auth-gateway deployments ([#5098](https://github.com/can1357/oh-my-pi/issues/5098)).
 
+### Changed
+
+- Made auth-gateway pools provider-neutral account groups with ordered user fallback and atomic ACL route batches.
+- Changed auth-gateway `/v1/models` to expose one provider-qualified entry per model, collapsing bare/qualified resolver aliases.
+- Changed managed auth-gateway `/v1/usage` responses to include the authenticated principal for self-usage clients.
+- Changed auth-gateway provider-report `/v1/usage` responses to include the authenticated principal when available.
+
 ### Fixed
 
 - Fixed auth-gateway credential pools to honor cross-type member order, retry eligible mixed members, preserve least-used session affinity, keep stable pool bindings across same-identity re-login, make duplicate pool-member addition race-idempotent, keep pi-native audit and terminal-auth errors consistent with other gateway formats, reduce token/pool/scoped-credential hot-path work, filter managed usage by since, and avoid repeated model/audit scans.

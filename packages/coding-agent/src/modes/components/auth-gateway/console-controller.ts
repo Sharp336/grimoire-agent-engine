@@ -1,4 +1,5 @@
 import type {
+	AddAclRuleInput,
 	AuthGatewayAclEffect,
 	AuthGatewayAclKind,
 	AuthGatewayAdminClient,
@@ -6,10 +7,15 @@ import type {
 	AuthGatewayAuditEvent,
 	AuthGatewayCredentialSummary,
 	AuthGatewayIssuedTokenValue,
+	AuthGatewayModelSummary,
 	AuthGatewayPool,
 	AuthGatewayUsageSummary,
 	AuthGatewayUser,
 	AuthGatewayUserDetails,
+	CreatePoolInput,
+	CreateUserInput,
+	UpdatePoolInput,
+	UpdateUserInput,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
 
@@ -18,6 +24,8 @@ export const POLL_ERROR_BACKOFF_MS = [3_000, 6_000, 12_000, 30_000] as const;
 export type AuthGatewayConsoleTab = "overview" | "users" | "pools" | "accounts" | "audit";
 
 type ResourceStatus = "idle" | "loading" | "ready" | "error";
+
+export type AuthGatewayErrorBannerSource = "visible-load" | "transient";
 
 interface ResourceState<T> {
 	data: T;
@@ -32,10 +40,12 @@ export interface AuthGatewayConsoleState {
 	connectionName: string;
 	health: "Connected" | "Stale" | "Error";
 	errorBanner: string | null;
+	errorBannerSource: AuthGatewayErrorBannerSource | null;
 	busyAction: string | null;
 	modalOpen: boolean;
 	selected: Record<AuthGatewayConsoleTab, number>;
 	selectedPoolMemberIndex: number;
+	selectedUserPoolBindingIndex: number;
 	filter: string;
 	overview: ResourceState<AuthGatewayAdminStatus | null>;
 	users: ResourceState<AuthGatewayUser[]>;
@@ -62,19 +72,7 @@ export interface AuthGatewayConsoleControllerOptions {
 }
 
 type LoadReason = "manual" | "poll" | "mutation" | "switch";
-
-const POOL_STRATEGIES: Record<AuthGatewayPool["strategy"], true> = {
-	"sticky-session": true,
-	"least-used": true,
-	"round-robin": true,
-	failover: true,
-};
-
-function parsePoolStrategy(value: string): AuthGatewayPool["strategy"] | null | undefined {
-	if (!value) return undefined;
-	if (Object.hasOwn(POOL_STRATEGIES, value)) return value as AuthGatewayPool["strategy"];
-	return null;
-}
+type VisibleLoadOutcome = "ready" | "partial-error";
 
 function emptyResource<T>(data: T): ResourceState<T> {
 	return { data, status: "idle", error: null, stale: false, lastUpdatedAt: null };
@@ -114,10 +112,12 @@ export class AuthGatewayConsoleController {
 			connectionName: options.connection.profile.name,
 			health: "Connected",
 			errorBanner: null,
+			errorBannerSource: null,
 			busyAction: null,
 			modalOpen: false,
 			selected: { overview: 0, users: 0, pools: 0, accounts: 0, audit: 0 },
 			selectedPoolMemberIndex: 0,
+			selectedUserPoolBindingIndex: 0,
 			filter: "",
 			overview: emptyResource<AuthGatewayAdminStatus | null>(null),
 			users: emptyResource<AuthGatewayUser[]>([]),
@@ -163,10 +163,12 @@ export class AuthGatewayConsoleController {
 			...this.#state,
 			health: "Connected",
 			errorBanner: null,
+			errorBannerSource: null,
 			busyAction: null,
 			modalOpen: false,
 			oneTimeToken: null,
 			selectedPoolMemberIndex: 0,
+			selectedUserPoolBindingIndex: 0,
 			overview: emptyResource<AuthGatewayAdminStatus | null>(null),
 			users: emptyResource<AuthGatewayUser[]>([]),
 			userDetails: {},
@@ -207,19 +209,21 @@ export class AuthGatewayConsoleController {
 		this.#state.activeTab = tab;
 		this.#state.filter = "";
 		this.#state.errorBanner = null;
+		this.#state.errorBannerSource = null;
 		await this.refresh("switch");
 	}
 
-	async refresh(reason: LoadReason = "manual"): Promise<void> {
-		if (this.#closed) return;
+	async refresh(reason: LoadReason = "manual"): Promise<boolean> {
+		if (this.#closed) return false;
 		if (reason === "manual") this.#errorBackoffIndex = 0;
-		await this.#loadVisible(reason);
+		return await this.#loadVisible(reason);
 	}
 
 	selectNext(): void {
 		const items = this.#visibleItemsLength();
 		const tab = this.#state.activeTab;
 		this.#state.selected[tab] = Math.min(Math.max(0, items - 1), this.#state.selected[tab] + 1);
+		if (tab === "users") this.#state.selectedUserPoolBindingIndex = 0;
 		void this.#loadSelectedDetail(tab);
 		this.#requestRender();
 	}
@@ -227,6 +231,7 @@ export class AuthGatewayConsoleController {
 	selectPrevious(): void {
 		const tab = this.#state.activeTab;
 		this.#state.selected[tab] = Math.max(0, this.#state.selected[tab] - 1);
+		if (tab === "users") this.#state.selectedUserPoolBindingIndex = 0;
 		void this.#loadSelectedDetail(tab);
 		this.#requestRender();
 	}
@@ -234,6 +239,7 @@ export class AuthGatewayConsoleController {
 	setFilter(value: string): void {
 		this.#state.filter = value;
 		this.#state.selected[this.#state.activeTab] = 0;
+		if (this.#state.activeTab === "users") this.#state.selectedUserPoolBindingIndex = 0;
 		this.#requestRender();
 	}
 
@@ -302,10 +308,17 @@ export class AuthGatewayConsoleController {
 		}
 	}
 
-	setErrorBanner(message: string, options?: { preserveHealth?: boolean }): void {
+	clearTransientBanner(): void {
+		if (this.#closed || this.#state.errorBannerSource !== "transient") return;
+		this.#state.errorBanner = null;
+		this.#state.errorBannerSource = null;
+		this.#requestRender();
+	}
+
+	setTransientBanner(message: string): void {
 		if (this.#closed) return;
 		this.#state.errorBanner = message;
-		if (!options?.preserveHealth) this.#state.health = "Error";
+		this.#state.errorBannerSource = "transient";
 		this.#requestRender();
 	}
 
@@ -353,43 +366,24 @@ export class AuthGatewayConsoleController {
 		);
 	}
 
-	async createUserFromInput(value: string): Promise<boolean> {
-		const [name, description, owner, role] = splitFields(value);
-		if (!name) return false;
+	async createUser(input: CreateUserInput): Promise<boolean> {
 		return await this.#mutateIssuedToken(
 			"create-user",
 			async signal => {
-				const result = await this.#client.createUser(
-					{
-						name,
-						...(description ? { description } : {}),
-						...(owner ? { owner } : {}),
-						...(role === "admin" || role === "user" ? { role } : {}),
-					},
-					signal,
-				);
+				const result = await this.#client.createUser(input, signal);
 				return result.token;
 			},
 			"users",
 		);
 	}
 
-	async updateSelectedUserFromInput(value: string): Promise<boolean> {
+	async updateSelectedUser(input: UpdateUserInput): Promise<boolean> {
 		const selected = this.selectedUser();
-		const [description, owner, role] = splitFields(value);
 		if (!selected) return false;
 		return await this.#mutate(
 			"edit-user",
 			async signal => {
-				await this.#client.updateUser(
-					selected.id,
-					{
-						description: description || null,
-						owner: owner || null,
-						...(role === "admin" || role === "user" ? { role } : {}),
-					},
-					signal,
-				);
+				await this.#client.updateUser(selected.id, input, signal);
 			},
 			"users",
 		);
@@ -462,6 +456,59 @@ export class AuthGatewayConsoleController {
 		);
 	}
 
+	async addSelectedUserAclRules(rules: AddAclRuleInput[]): Promise<boolean> {
+		const selected = this.selectedUser();
+		if (!selected || rules.length === 0) return false;
+		return await this.#mutate(
+			"add-acl",
+			async signal => {
+				await this.#client.addAclRules(selected.id, { rules }, signal);
+			},
+			"users",
+		);
+	}
+
+	async loadAclSuggestions(): Promise<{ providers: string[]; models: AuthGatewayModelSummary[] } | null> {
+		if (this.#state.busyAction) return null;
+		this.clearTransientBanner();
+		const abort = new AbortController();
+		try {
+			const [credentials, models] = await Promise.all([
+				this.#client.listCredentials(abort.signal),
+				this.#client.listModels(abort.signal),
+			]);
+			const providers = [...new Set(credentials.map(credential => credential.provider))].sort((left, right) =>
+				left.localeCompare(right),
+			);
+			const sortedModels = [...models].sort((left, right) => {
+				const providerOrder = left.provider.localeCompare(right.provider);
+				return providerOrder === 0 ? left.id.localeCompare(right.id) : providerOrder;
+			});
+			return { providers, models: sortedModels };
+		} catch (error) {
+			this.setTransientBanner(this.#formatMutationError(error));
+			return null;
+		}
+	}
+
+	async loadSelectedUserDetails(): Promise<AuthGatewayUserDetails | null> {
+		const selected = this.selectedUser();
+		if (!selected) return null;
+		const existing = this.#state.userDetails[selected.id];
+		if (existing) return existing;
+		const abort = new AbortController();
+		const generation = this.#generation;
+		this.clearTransientBanner();
+		try {
+			await this.#loadSelectedUserDetail(abort.signal, generation);
+			return this.#state.userDetails[selected.id] ?? null;
+		} catch (error) {
+			if (!this.#isCurrent(generation, abort.signal)) return null;
+			this.setTransientBanner(this.#formatMutationError(error));
+			return null;
+		}
+	}
+
 	async deleteSelectedUserAcl(ruleId: number): Promise<boolean> {
 		const selected = this.selectedUser();
 		if (!selected || !Number.isInteger(ruleId)) return false;
@@ -496,6 +543,86 @@ export class AuthGatewayConsoleController {
 			},
 			"users",
 		);
+	}
+
+	async loadPoolChoices(): Promise<AuthGatewayPool[] | null> {
+		if (this.#state.busyAction) return null;
+		this.clearTransientBanner();
+		const abort = new AbortController();
+		try {
+			return await this.#client.listPools(abort.signal);
+		} catch (error) {
+			this.setTransientBanner(this.#formatMutationError(error));
+			return null;
+		}
+	}
+
+	async loadCredentialChoices(): Promise<AuthGatewayCredentialSummary[] | null> {
+		if (this.#state.busyAction) return null;
+		this.clearTransientBanner();
+		const abort = new AbortController();
+		try {
+			return await this.#client.listCredentials(abort.signal);
+		} catch (error) {
+			this.setTransientBanner(this.#formatMutationError(error));
+			return null;
+		}
+	}
+
+	async setSelectedUserPoolOrder(poolIds: readonly number[]): Promise<boolean> {
+		const selected = this.selectedUser();
+		if (!selected || poolIds.length === 0) return false;
+		if (this.#state.busyAction) return false;
+		this.#abortVisibleLoads();
+		this.clearTransientBanner();
+		this.#state.busyAction = "reorder-user-pools";
+		this.#requestRender();
+		const generation = this.#generation;
+		const abort = new AbortController();
+		this.#mutationAbort = abort;
+		try {
+			const bindings = await this.#client.setUserPoolOrder(selected.id, poolIds, abort.signal);
+			if (!this.#isCurrent(generation, abort.signal)) return false;
+			const current = this.#state.userDetails[selected.id];
+			if (current) this.#state.userDetails[selected.id] = { ...current, poolBindings: bindings };
+			this.#clampSelectedUserPoolBinding();
+			return true;
+		} catch (error) {
+			if (!this.#isCurrent(generation, abort.signal)) return false;
+			this.setTransientBanner(this.#formatMutationError(error));
+			return false;
+		} finally {
+			if (this.#mutationAbort === abort) this.#mutationAbort = null;
+			if (this.#isCurrent(generation, abort.signal)) {
+				this.#state.busyAction = null;
+				this.#requestRender();
+			}
+		}
+	}
+
+	async moveSelectedUserPoolBinding(delta: -1 | 1): Promise<boolean> {
+		const selected = this.selectedUser();
+		const bindings = selected ? (this.#state.userDetails[selected.id]?.poolBindings ?? []) : [];
+		const ordered = [...bindings].sort((left, right) => left.position - right.position);
+		const currentIndex = this.#state.selectedUserPoolBindingIndex;
+		const nextIndex = currentIndex + delta;
+		if (currentIndex < 0 || nextIndex < 0 || currentIndex >= ordered.length || nextIndex >= ordered.length)
+			return false;
+		const order = ordered.map(binding => binding.poolId);
+		const [moved] = order.splice(currentIndex, 1);
+		if (moved === undefined) return false;
+		order.splice(nextIndex, 0, moved);
+		this.#state.selectedUserPoolBindingIndex = nextIndex;
+		const ok = await this.setSelectedUserPoolOrder(order);
+		if (!ok) this.#state.selectedUserPoolBindingIndex = currentIndex;
+		return ok;
+	}
+
+	selectUserPoolBinding(index: number): void {
+		const selected = this.selectedUser();
+		const max = Math.max(0, (selected ? (this.#state.userDetails[selected.id]?.poolBindings.length ?? 1) : 1) - 1);
+		this.#state.selectedUserPoolBindingIndex = Math.max(0, Math.min(index, max));
+		this.#requestRender();
 	}
 
 	async rotateSelectedUserTokens(confirmation: string): Promise<boolean> {
@@ -540,45 +667,23 @@ export class AuthGatewayConsoleController {
 		}
 	}
 
-	async createPoolFromInput(value: string): Promise<boolean> {
-		const [name, provider, model, strategy] = splitFields(value);
-		if (!name || !provider) return false;
-		const parsedStrategy = parsePoolStrategy(strategy);
-		if (parsedStrategy === null) return false;
+	async createPool(input: CreatePoolInput): Promise<boolean> {
 		return await this.#mutate(
 			"create-pool",
 			async signal => {
-				await this.#client.createPool(
-					{
-						name,
-						provider,
-						...(model ? { model } : {}),
-						...(parsedStrategy ? { strategy: parsedStrategy } : {}),
-					},
-					signal,
-				);
+				await this.#client.createPool(input, signal);
 			},
 			"pools",
 		);
 	}
 
-	async updateSelectedPoolFromInput(value: string): Promise<boolean> {
+	async updateSelectedPool(input: UpdatePoolInput): Promise<boolean> {
 		const selected = this.selectedPool();
-		const [name, strategy] = splitFields(value);
 		if (!selected) return false;
-		const parsedStrategy = parsePoolStrategy(strategy);
-		if (parsedStrategy === null) return false;
 		return await this.#mutate(
 			"edit-pool",
 			async signal => {
-				await this.#client.updatePool(
-					selected.id,
-					{
-						...(name ? { name } : {}),
-						...(parsedStrategy ? { strategy: parsedStrategy } : {}),
-					},
-					signal,
-				);
+				await this.#client.updatePool(selected.id, input, signal);
 			},
 			"pools",
 		);
@@ -632,13 +737,15 @@ export class AuthGatewayConsoleController {
 		const [moved] = order.splice(currentIndex, 1);
 		if (moved === undefined) return false;
 		order.splice(nextIndex, 0, moved);
-		return await this.#mutate(
+		const ok = await this.#mutate(
 			"reorder-pool",
 			async signal => {
 				await this.#client.setPoolCredentialOrder(selected.id, order, signal);
 			},
 			"pools",
 		);
+		if (ok) this.#state.selectedPoolMemberIndex = nextIndex;
+		return ok;
 	}
 
 	selectPoolMember(index: number): void {
@@ -720,11 +827,7 @@ export class AuthGatewayConsoleController {
 	}
 
 	filteredPools(): AuthGatewayPool[] {
-		return filterRows(
-			this.#state.pools.data,
-			this.#state.filter,
-			pool => `${pool.name} ${pool.provider} ${pool.model ?? ""} ${pool.strategy}`,
-		);
+		return filterRows(this.#state.pools.data, this.#state.filter, pool => `${pool.name} ${pool.strategy}`);
 	}
 
 	filteredCredentials(): AuthGatewayCredentialSummary[] {
@@ -753,26 +856,35 @@ export class AuthGatewayConsoleController {
 		return 1;
 	}
 
-	async #loadVisible(reason: LoadReason): Promise<void> {
-		if (this.#inFlight || this.#closed || this.#shouldPausePolling(reason)) return;
+	async #loadVisible(reason: LoadReason): Promise<boolean> {
+		if (this.#inFlight || this.#closed || this.#shouldPausePolling(reason)) return false;
 		this.#inFlight = true;
 		this.#clearPollTimer();
+		this.#state.errorBanner = null;
+		this.#state.errorBannerSource = null;
 		const generation = this.#generation;
 		const abort = new AbortController();
 		this.#activeAbort = abort;
 		try {
-			await this.#loadTab(this.#state.activeTab, abort.signal, reason);
-			if (!this.#isCurrent(generation, abort.signal)) return;
-			this.#state.health = "Connected";
-			this.#state.errorBanner = null;
+			const outcome = await this.#loadTab(this.#state.activeTab, abort.signal, reason);
+			if (!this.#isCurrent(generation, abort.signal)) return false;
+			if (outcome === "ready") {
+				this.#state.health = "Connected";
+				this.#state.errorBanner = null;
+				this.#state.errorBannerSource = null;
+			} else {
+				this.#state.health = "Error";
+			}
 			this.#errorBackoffIndex = 0;
 			this.#schedulePoll(ACTIVE_POLL_MS);
+			return true;
 		} catch (error) {
-			if (!this.#isCurrent(generation, abort.signal)) return;
-			this.#markVisibleError(errorText(error));
+			if (!this.#isCurrent(generation, abort.signal)) return false;
+			this.#markVisibleError(reason === "mutation" ? this.#formatMutationError(error) : errorText(error));
 			const delay = POLL_ERROR_BACKOFF_MS[Math.min(this.#errorBackoffIndex, POLL_ERROR_BACKOFF_MS.length - 1)];
 			this.#errorBackoffIndex++;
 			this.#schedulePoll(delay);
+			return false;
 		} finally {
 			if (this.#activeAbort === abort) {
 				this.#activeAbort = null;
@@ -782,45 +894,71 @@ export class AuthGatewayConsoleController {
 		}
 	}
 
-	async #loadTab(tab: AuthGatewayConsoleTab, signal: AbortSignal, reason: LoadReason): Promise<void> {
+	async #loadTab(tab: AuthGatewayConsoleTab, signal: AbortSignal, reason: LoadReason): Promise<VisibleLoadOutcome> {
 		if (tab === "overview") {
 			this.#state.overview.status = reason === "poll" && this.#state.overview.data ? "ready" : "loading";
 			const status = await this.#client.status(signal);
-			if (signal.aborted || this.#closed) return;
+			if (signal.aborted || this.#closed) return "ready";
 			this.#state.overview = { data: status, status: "ready", error: null, stale: false, lastUpdatedAt: nowMs() };
-			return;
+			return "ready";
 		}
 		if (tab === "users") {
 			this.#state.users.status = reason === "poll" && this.#state.users.data.length > 0 ? "ready" : "loading";
 			const users = await this.#client.listUsers(signal);
-			if (signal.aborted || this.#closed) return;
+			if (signal.aborted || this.#closed) return "ready";
 			this.#state.users = { data: users, status: "ready", error: null, stale: false, lastUpdatedAt: nowMs() };
 			this.#state.userDetails = {};
 			this.#state.userUsage = {};
 			this.#clampSelection("users", users.length);
+			this.#clampSelectedUserPoolBinding();
 			await this.#loadSelectedUserDetail(signal);
-			return;
+			return "ready";
 		}
 		if (tab === "pools") {
 			this.#state.pools.status = reason === "poll" && this.#state.pools.data.length > 0 ? "ready" : "loading";
-			const pools = await this.#client.listPools(signal);
-			if (signal.aborted || this.#closed) return;
+			const [pools, credentialsResult] = await Promise.all([
+				this.#client.listPools(signal),
+				this.#client.listCredentials(signal).then(
+					credentials => ({ ok: true as const, credentials }),
+					error => ({ ok: false as const, error }),
+				),
+			]);
+			if (signal.aborted || this.#closed) return "ready";
 			this.#state.pools = { data: pools, status: "ready", error: null, stale: false, lastUpdatedAt: nowMs() };
+			if (credentialsResult.ok) {
+				this.#state.accounts = {
+					data: credentialsResult.credentials,
+					status: "ready",
+					error: null,
+					stale: false,
+					lastUpdatedAt: nowMs(),
+				};
+			} else {
+				this.#state.errorBanner = this.#formatMutationError(credentialsResult.error);
+				this.#state.errorBannerSource = "visible-load";
+				this.#state.accounts = {
+					...this.#state.accounts,
+					status: this.#state.accounts.data.length > 0 ? "ready" : "error",
+					error: this.#state.errorBanner,
+					stale: this.#state.accounts.data.length > 0,
+				};
+			}
 			this.#state.poolUsers = {};
 			this.#clampSelection("pools", pools.length);
 			this.#state.selectedPoolMemberIndex = 0;
 			await this.#loadSelectedPoolUsers(signal);
-			return;
+			return credentialsResult.ok ? "ready" : "partial-error";
 		}
 		if (tab === "accounts") {
 			this.#state.accounts.status = reason === "poll" && this.#state.accounts.data.length > 0 ? "ready" : "loading";
 			const accounts = await this.#client.listCredentials(signal);
-			if (signal.aborted || this.#closed) return;
+			if (signal.aborted || this.#closed) return "ready";
 			this.#state.accounts = { data: accounts, status: "ready", error: null, stale: false, lastUpdatedAt: nowMs() };
 			this.#clampSelection("accounts", accounts.length);
-			return;
+			return "ready";
 		}
 		await this.#loadAuditPage(undefined, reason, signal, this.#generation);
+		return "ready";
 	}
 
 	async #loadSelectedDetail(tab: AuthGatewayConsoleTab): Promise<void> {
@@ -840,7 +978,10 @@ export class AuthGatewayConsoleController {
 
 	async #loadSelectedUserDetail(signal: AbortSignal, generation = this.#generation): Promise<void> {
 		const selected = this.selectedUser();
-		if (!selected || this.#state.userDetails[selected.id]) return;
+		if (!selected || this.#state.userDetails[selected.id]) {
+			this.#clampSelectedUserPoolBinding();
+			return;
+		}
 		const [details, usage] = await Promise.all([
 			this.#client.getUser(selected.id, signal),
 			this.#client.getUserUsage(selected.id, undefined, signal),
@@ -848,6 +989,7 @@ export class AuthGatewayConsoleController {
 		if (!this.#isCurrent(generation, signal)) return;
 		this.#state.userDetails[selected.id] = details;
 		this.#state.userUsage[selected.id] = usage;
+		this.#clampSelectedUserPoolBinding();
 	}
 
 	async #loadSelectedPoolUsers(signal: AbortSignal, generation = this.#generation): Promise<void> {
@@ -895,6 +1037,7 @@ export class AuthGatewayConsoleController {
 	): Promise<boolean> {
 		if (this.#state.busyAction) return false;
 		this.#abortVisibleLoads();
+		this.clearTransientBanner();
 		this.#state.busyAction = action;
 		this.#state.oneTimeToken = null;
 		this.#requestRender();
@@ -915,8 +1058,7 @@ export class AuthGatewayConsoleController {
 		} catch (error) {
 			if (!this.#isCurrent(generation, abort.signal)) return false;
 			this.#state.oneTimeToken = null;
-			this.#state.errorBanner = formatMutationError(error);
-			this.#state.health = "Error";
+			this.setTransientBanner(this.#formatMutationError(error));
 			return false;
 		} finally {
 			if (this.#mutationAbort === abort) this.#mutationAbort = null;
@@ -935,6 +1077,7 @@ export class AuthGatewayConsoleController {
 	): Promise<boolean> {
 		if (this.#state.busyAction) return false;
 		this.#abortVisibleLoads();
+		this.clearTransientBanner();
 		this.#state.busyAction = action;
 		this.#requestRender();
 		const generation = this.#generation;
@@ -953,8 +1096,7 @@ export class AuthGatewayConsoleController {
 			return this.#isCurrent(generation, abort.signal);
 		} catch (error) {
 			if (!this.#isCurrent(generation, abort.signal)) return false;
-			this.#state.errorBanner = formatMutationError(error);
-			this.#state.health = "Error";
+			this.setTransientBanner(this.#formatMutationError(error));
 			return false;
 		} finally {
 			if (this.#mutationAbort === abort) this.#mutationAbort = null;
@@ -979,6 +1121,7 @@ export class AuthGatewayConsoleController {
 
 	#markVisibleError(message: string): void {
 		this.#state.errorBanner = message;
+		this.#state.errorBannerSource = "visible-load";
 		this.#state.health = this.#hasSnapshot(this.#state.activeTab) ? "Stale" : "Error";
 		const tab = this.#state.activeTab;
 		const resource = this.#resourceFor(tab);
@@ -993,6 +1136,14 @@ export class AuthGatewayConsoleController {
 		if (tab === "pools") return this.#state.pools.data.length > 0;
 		if (tab === "accounts") return this.#state.accounts.data.length > 0;
 		return this.#state.audit.data.length > 0;
+	}
+	#clampSelectedUserPoolBinding(): void {
+		const selected = this.selectedUser();
+		const count = selected ? (this.#state.userDetails[selected.id]?.poolBindings.length ?? 0) : 0;
+		this.#state.selectedUserPoolBindingIndex = Math.max(
+			0,
+			Math.min(this.#state.selectedUserPoolBindingIndex, Math.max(0, count - 1)),
+		);
 	}
 
 	#resourceFor(tab: AuthGatewayConsoleTab): ResourceState<unknown> {
@@ -1043,6 +1194,10 @@ export class AuthGatewayConsoleController {
 	#clampSelection(tab: AuthGatewayConsoleTab, length: number): void {
 		this.#state.selected[tab] = Math.max(0, Math.min(this.#state.selected[tab], Math.max(0, length - 1)));
 	}
+
+	#formatMutationError(error: unknown): string {
+		return formatMutationError(error, [this.#connection.token]);
+	}
 }
 
 function filterRows<T>(rows: T[], query: string, toText: (row: T) => string): T[] {
@@ -1051,14 +1206,16 @@ function filterRows<T>(rows: T[], query: string, toText: (row: T) => string): T[
 	return rows.filter(row => toText(row).toLowerCase().includes(needle));
 }
 
-function splitFields(value: string): string[] {
-	return value.split("|").map(item => item.trim());
-}
-
-function formatMutationError(error: unknown): string {
-	const maybeError = error as Partial<Error> & { details?: { pools?: Array<{ name: string }> } };
+function formatMutationError(error: unknown, secrets: readonly string[] = []): string {
+	const maybeError = error as Partial<Error> & { code?: string; details?: { pools?: Array<{ name: string }> } };
 	const pools = maybeError.details?.pools;
-	if (Array.isArray(pools) && pools.length > 0)
-		return `${maybeError.message ?? "Credential is in use"}: ${pools.map(pool => pool.name).join(", ")}`;
-	return errorText(error);
+	const raw =
+		Array.isArray(pools) && pools.length > 0
+			? `${maybeError.message ?? "Credential is in use"}: ${pools.map(pool => pool.name).join(", ")}`
+			: `${maybeError.code && maybeError.message && !maybeError.message.includes(maybeError.code) ? `${maybeError.code}: ` : ""}${errorText(error)}`;
+	let message = raw;
+	for (const secret of secrets) {
+		if (secret) message = message.split(secret).join("[redacted]");
+	}
+	return message;
 }

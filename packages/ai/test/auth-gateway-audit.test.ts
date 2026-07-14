@@ -84,7 +84,7 @@ describe("auth-gateway audit", () => {
 		const [apiKeyRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!apiKeyRow) throw new Error("expected credential row");
 		const user = harness.accessStore.createUser({ name: "audited" });
-		const pool = harness.accessStore.createPool({ name: "auditpool", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "auditpool" });
 		harness.accessStore.addPoolCredential(pool.id, apiKeyRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 
@@ -204,7 +204,7 @@ describe("auth-gateway audit", () => {
 		const [row] = harness.credentialStore.listAuthCredentials("mock");
 		if (!row) throw new Error("expected credential row");
 		const user = harness.accessStore.createUser({ name: "usagefilter" });
-		const pool = harness.accessStore.createPool({ name: "usagefilterpool", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "usagefilterpool" });
 		harness.accessStore.addPoolCredential(pool.id, row.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 		for (const [requestId, startedAt, totalTokens] of [
@@ -242,6 +242,13 @@ describe("auth-gateway audit", () => {
 		let body = expectObject(await readJson(response));
 		let usage = expectObject(body.usage);
 		expect(usage.since).toBe(0);
+		expect(body.principal).toEqual({
+			kind: "managed",
+			userId: user.user.id,
+			name: "usagefilter",
+			role: "user",
+			tokenId: user.token.id,
+		});
 
 		response = await fetch(`${harness.handle.url}/v1/usage?since=1500`, {
 			headers: jsonHeaders(user.token.value),
@@ -269,6 +276,25 @@ describe("auth-gateway audit", () => {
 		}
 	});
 
+	test("returns the authenticated admin principal with provider usage reports", async () => {
+		harness = await createGatewayHarness({ credentials: testCredentials() });
+		const admin = harness.accessStore.createUser({ name: "usageadmin", role: "admin" });
+
+		const response = await fetch(`${harness.handle.url}/v1/usage`, { headers: jsonHeaders(admin.token.value) });
+
+		expect(response.status).toBe(200);
+		const body = expectObject(await readJson(response));
+		expect(body.principal).toEqual({
+			kind: "managed",
+			userId: admin.user.id,
+			name: "usageadmin",
+			role: "admin",
+			tokenId: admin.token.id,
+		});
+		expect(body.reports).toBeArray();
+		expect(body).not.toHaveProperty("usage");
+	});
+
 	test("returns scoped usage summaries, redacted credential checks, and newest-first audit pagination", async () => {
 		harness = await createGatewayHarness({
 			credentials: [
@@ -279,7 +305,7 @@ describe("auth-gateway audit", () => {
 		const [, oauthRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!oauthRow) throw new Error("expected second credential row");
 		const user = harness.accessStore.createUser({ name: "summaryuser" });
-		const pool = harness.accessStore.createPool({ name: "summarypool", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "summarypool" });
 		harness.accessStore.addPoolCredential(pool.id, oauthRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 
@@ -336,7 +362,7 @@ describe("auth-gateway audit", () => {
 		if (!staleRow) throw new Error("expected stale candidate row");
 		harness.storage.upsertCredential("other-provider", { type: "api_key", key: "unrelated-live-secret" });
 		const user = harness.accessStore.createUser({ name: "stalecheckuser" });
-		const pool = harness.accessStore.createPool({ name: "stalecheckpool", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "stalecheckpool" });
 		harness.accessStore.addPoolCredential(pool.id, staleRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 		expect(harness.storage.disableCredentialById(staleRow.id, "disabled by test")).toBe(true);

@@ -1,12 +1,16 @@
 import type { ClipboardImage } from "@oh-my-pi/pi-natives";
 import * as native from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { copyToClipboard as copyToClipboardShared, logger } from "@oh-my-pi/pi-utils";
+
+export async function copyToClipboard(text: string): Promise<void> {
+	await copyToClipboardShared(text);
+}
 
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
  *
- * `readTextFromClipboard`, `readMacFileUrlsFromClipboard`, and the Termux copy
- * path all shell out to CLI clipboard tools. The synchronous `execSync` API
+ * `readTextFromClipboard` and `readMacFileUrlsFromClipboard` shell out to CLI
+ * clipboard tools. The synchronous `execSync` API
  * parks the render loop until the child exits or the timeout fires, so a hung
  * clipboard daemon freezes the TUI for the full 2000ms budget (#4235). This
  * helper mirrors the previous semantics — read stdout as UTF-8, throw on
@@ -102,61 +106,6 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 	} catch (error) {
 		logger.warn("clipboard: failed to read macOS file URLs", { error: String(error) });
 		return [];
-	}
-}
-
-/**
- * Copy text to the system clipboard.
- *
- * Emits OSC 52 first when running in a real terminal (works over SSH/mosh),
- * then attempts native clipboard copy as best-effort for local sessions.
- * On Termux, tries `termux-clipboard-set` before native.
- *
- * @param text - UTF-8 text to place on the clipboard.
- */
-export async function copyToClipboard(text: string): Promise<void> {
-	if (process.stdout.isTTY) {
-		const onError = (err: unknown) => {
-			process.stdout.off("error", onError);
-			// Prevent unhandled 'error' from crashing the process when stdout is a closed pipe.
-			if ((err as NodeJS.ErrnoException | null | undefined)?.code === "EPIPE") {
-				return;
-			}
-		};
-		try {
-			const encoded = Buffer.from(text).toString("base64");
-			const osc52 = `\x1b]52;c;${encoded}\x07`;
-			process.stdout.on("error", onError);
-			process.stdout.write(osc52, err => {
-				process.stdout.off("error", onError);
-				// If stdout is closed (e.g. piped to a process that exits early),
-				// ignore EPIPE and proceed with native clipboard best-effort.
-				if ((err as NodeJS.ErrnoException | null | undefined)?.code === "EPIPE") {
-					return;
-				}
-			});
-		} catch (err) {
-			process.stdout.off("error", onError);
-			if ((err as NodeJS.ErrnoException | null | undefined)?.code !== "EPIPE") {
-				// Ignore all write failures (OSC 52 is best-effort).
-			}
-		}
-	}
-
-	// Also try native tools (best effort for local sessions)
-	try {
-		if (process.env.TERMUX_VERSION) {
-			try {
-				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
-				return;
-			} catch {
-				// Fall through to native
-			}
-		}
-
-		await native.copyToClipboard(text);
-	} catch {
-		// Ignore — clipboard copy is best-effort
 	}
 }
 

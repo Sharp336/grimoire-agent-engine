@@ -1,5 +1,5 @@
 import type { AuthGatewayIssuedTokenValue } from "@oh-my-pi/pi-ai/auth-gateway";
-import { copyToClipboard } from "../../../utils/clipboard";
+import { copyToClipboard } from "@oh-my-pi/pi-utils";
 
 export interface AuthGatewayOneTimeTokenDialog {
 	id: number;
@@ -20,6 +20,7 @@ export function closeOneTimeTokenDialog(dialog: AuthGatewayOneTimeTokenDialog): 
 export async function copyOneTimeTokenDialogValue(dialog: AuthGatewayOneTimeTokenDialog): Promise<void> {
 	const value = dialog.value;
 	if (value.length === 0) return;
+	dialog.copied = false;
 	await copyToClipboard(value);
 	dialog.copied = true;
 }

@@ -10,9 +10,7 @@ import type {
 import {
 	AUTH_GATEWAY_POOL_STRATEGIES,
 	AuthGatewayAccessError,
-	type AuthGatewayAclEffect,
-	type AuthGatewayAclKind,
-	type AuthGatewayPool,
+	type AuthGatewayAclRuleInput,
 	type AuthGatewayPoolStrategy,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRole,
@@ -29,8 +27,10 @@ const USER_CREATE_FIELDS: Record<string, true> = { name: true, description: true
 const USER_PATCH_FIELDS: Record<string, true> = { description: true, owner: true, role: true, enabled: true };
 const TOKEN_CREATE_FIELDS: Record<string, true> = { label: true };
 const ACL_CREATE_FIELDS: Record<string, true> = { effect: true, kind: true, pattern: true };
+const ACL_BATCH_FIELDS: Record<string, true> = { rules: true };
 const POOL_BIND_FIELDS: Record<string, true> = { poolId: true };
-const POOL_CREATE_FIELDS: Record<string, true> = { name: true, provider: true, model: true, strategy: true };
+const USER_POOL_ORDER_FIELDS: Record<string, true> = { poolIds: true };
+const POOL_CREATE_FIELDS: Record<string, true> = { name: true, strategy: true };
 const POOL_PATCH_FIELDS: Record<string, true> = { name: true, strategy: true };
 const POOL_MEMBER_FIELDS: Record<string, true> = { credentialId: true };
 const POOL_MEMBER_ORDER_FIELDS: Record<string, true> = { credentialIds: true };
@@ -174,7 +174,7 @@ async function handleUsers(req: Request, parts: string[], store: AuthGatewayAcce
 				user,
 				tokens: store.listUserTokens(userId),
 				acl: store.listAclRules(userId),
-				pools: store.listUserPools(userId),
+				poolBindings: store.listUserPoolBindings(userId),
 			});
 		}
 		if (req.method === "PATCH") {
@@ -236,19 +236,16 @@ async function handleUserAcl(
 	if (parts.length === 0 && req.method === "GET") return json(200, { acl: store.listAclRules(userId) });
 	if (parts.length === 0 && req.method === "POST") {
 		const body = await readObjectBody(req, ACL_CREATE_FIELDS);
-		const effect = body.effect;
-		const kind = body.kind;
-		const pattern = requiredString(body, "pattern");
-		if (effect !== "allow" && effect !== "deny")
-			throw new ManagementHttpError(400, "invalid_request", "ACL effect must be allow or deny");
-		if (kind !== "provider" && kind !== "model" && kind !== "route")
-			throw new ManagementHttpError(400, "invalid_request", "ACL kind must be provider, model, or route");
-		const result = store.addAclRule(userId, {
-			effect: effect as AuthGatewayAclEffect,
-			kind: kind as AuthGatewayAclKind,
-			pattern,
-		});
+		const [input] = aclRuleInputs([body]);
+		if (!input) throw new ManagementHttpError(400, "invalid_request", "ACL rule is required");
+		const result = store.addAclRule(userId, input);
 		return json(result.created ? 201 : 200, { rule: result.rule });
+	}
+	if (parts.length === 1 && parts[0] === "batch" && req.method === "POST") {
+		const body = await readObjectBody(req, ACL_BATCH_FIELDS);
+		const rules = aclRulesField(body);
+		const results = store.addAclRules(userId, rules);
+		return json(results.some(result => result.created) ? 201 : 200, { results });
 	}
 	if (parts.length === 1 && req.method === "DELETE") {
 		const ruleId = positiveId(parts[0] ?? "", "rule id");
@@ -264,11 +261,15 @@ async function handleUserPools(
 	store: AuthGatewayAccessStore,
 	userId: number,
 ): Promise<Response> {
-	if (parts.length === 0 && req.method === "GET") return json(200, { pools: store.listUserPools(userId) });
+	if (parts.length === 0 && req.method === "GET") return json(200, { bindings: store.listUserPoolBindings(userId) });
 	if (parts.length === 0 && req.method === "POST") {
 		const body = await readObjectBody(req, POOL_BIND_FIELDS);
 		const result = store.bindUserPool(userId, numericField(body, "poolId"));
 		return json(result.created ? 201 : 200, result);
+	}
+	if (parts.length === 0 && req.method === "PATCH") {
+		const body = await readObjectBody(req, USER_POOL_ORDER_FIELDS);
+		return json(200, { bindings: store.setUserPoolOrder(userId, numericArrayField(body, "poolIds")) });
 	}
 	if (parts.length === 1 && req.method === "DELETE") {
 		const poolId = positiveId(parts[0] ?? "", "pool id");
@@ -292,8 +293,6 @@ async function handlePools(
 			return json(201, {
 				pool: store.createPool({
 					name: requiredString(body, "name"),
-					provider: requiredString(body, "provider"),
-					model: optionalString(body, "model"),
 					strategy: optionalStrategy(body.strategy),
 				}),
 			});
@@ -339,7 +338,7 @@ async function handlePoolMembers(
 		const credentialId = numericField(body, "credentialId");
 		const pool = store.getPool(poolId);
 		if (!pool) throw new ManagementHttpError(404, "not_found", "pool not found");
-		requireLiveCredentialsForPool(storage, pool, [credentialId]);
+		requireLiveCredentialsForPool(storage, [credentialId]);
 		const result = store.addPoolCredential(poolId, credentialId);
 		return json(result.created ? 201 : 200, { pool: result.pool });
 	}
@@ -348,7 +347,7 @@ async function handlePoolMembers(
 		const pool = store.getPool(poolId);
 		if (!pool) throw new ManagementHttpError(404, "not_found", "pool not found");
 		const credentialIds = numericArrayField(body, "credentialIds");
-		requireLiveCredentialsForPool(storage, pool, credentialIds);
+		requireLiveCredentialsForPool(storage, credentialIds);
 		return json(200, { pool: store.setPoolCredentialOrder(poolId, credentialIds) });
 	}
 	if (parts.length === 1 && req.method === "DELETE") {
@@ -372,21 +371,12 @@ function handleAudit(req: Request, store: AuthGatewayAccessStore): Response {
 	return json(200, store.listAudit({ userId, limit, before }));
 }
 
-function requireLiveCredentialsForPool(
-	storage: AuthStorage,
-	pool: AuthGatewayPool,
-	credentialIds: readonly number[],
-): void {
+function requireLiveCredentialsForPool(storage: AuthStorage, credentialIds: readonly number[]): void {
 	const rows = storage.listStoredCredentialsByIds(credentialIds);
 	const byId = new Map(rows.map(row => [row.id, row]));
 	for (const credentialId of credentialIds) {
-		const row = byId.get(credentialId);
-		if (!row || row.provider !== pool.provider) {
-			throw new ManagementHttpError(
-				400,
-				"invalid_request",
-				"credential must be an active credential for the pool provider",
-			);
+		if (!byId.has(credentialId)) {
+			throw new ManagementHttpError(400, "invalid_request", "credential must be active");
 		}
 	}
 }
@@ -443,6 +433,33 @@ function validateObjectBody(parsed: unknown, allowedFields: Record<string, true>
 		if (!allowedFields[key]) throw new ManagementHttpError(400, "invalid_request", `Unknown field: ${key}`);
 	}
 	return body;
+}
+
+function aclRulesField(body: Record<string, unknown>): AuthGatewayAclRuleInput[] {
+	const value = body.rules;
+	if (!Array.isArray(value)) throw new ManagementHttpError(400, "invalid_request", "rules must be an array");
+	if (value.length < 1 || value.length > 64) {
+		throw new ManagementHttpError(400, "invalid_request", "ACL batch must contain 1 to 64 rules");
+	}
+	return aclRuleInputs(value);
+}
+
+function aclRuleInputs(values: readonly unknown[]): AuthGatewayAclRuleInput[] {
+	const rules: AuthGatewayAclRuleInput[] = [];
+	for (const value of values) {
+		const body = validateObjectBody(value, ACL_CREATE_FIELDS);
+		const effect = body.effect;
+		const kind = body.kind;
+		const pattern = requiredString(body, "pattern");
+		if (effect !== "allow" && effect !== "deny") {
+			throw new ManagementHttpError(400, "invalid_request", "ACL effect must be allow or deny");
+		}
+		if (kind !== "provider" && kind !== "model" && kind !== "route") {
+			throw new ManagementHttpError(400, "invalid_request", "ACL kind must be provider, model, or route");
+		}
+		rules.push({ effect, kind, pattern });
+	}
+	return rules;
 }
 
 function requiredString(body: Record<string, unknown>, field: string): string {

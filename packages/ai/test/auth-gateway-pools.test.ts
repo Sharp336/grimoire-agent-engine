@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import type { AuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -19,7 +19,7 @@ const OAUTH_SOURCE = "auth-gateway-pools-test";
 const THROWING_API = "auth-gateway-pools-throwing-api";
 
 function throwingTerminalModel(message: string): MockModel {
-	const model = createMockModel({ provider: "mock", id: "model-a" });
+	const model = createMockModel({ id: "model-a" });
 	Object.defineProperty(model, "api", { value: THROWING_API });
 	registerCustomApi(
 		THROWING_API,
@@ -96,6 +96,33 @@ async function collectStreamText(response: Response): Promise<string> {
 	return out + decoder.decode();
 }
 
+async function addProviderCredential(
+	harness: GatewayHarness,
+	provider: string,
+	key: string,
+): Promise<{ id: number; provider: string }> {
+	const [row] = harness.credentialStore.upsertAuthCredentialForProvider(provider, { type: "api_key", key });
+	if (!row) throw new Error(`expected ${provider} credential row`);
+	await harness.storage.reload();
+	return row;
+}
+
+function grantProviderAccess(
+	harness: GatewayHarness,
+	userId: number,
+	poolId: number,
+	provider: string,
+	modelPattern = `${provider}/*`,
+): void {
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "route", pattern: "chat" });
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "route", pattern: "pi-native" });
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "route", pattern: "models" });
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "route", pattern: "check" });
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "provider", pattern: provider });
+	harness.accessStore.addAclRule(userId, { effect: "allow", kind: "model", pattern: modelPattern });
+	harness.accessStore.bindUserPool(userId, poolId);
+}
+
 describe("auth-gateway credential pools", () => {
 	let harness: GatewayHarness | undefined;
 
@@ -105,43 +132,97 @@ describe("auth-gateway credential pools", () => {
 		harness = undefined;
 	});
 
-	test("prefers exact model pools over provider-wide pools and passes the scoped policy to AuthStorage", async () => {
-		const modelA = createMockModel({
-			provider: "mock",
+	test("routes mixed-provider pools through the first bound pool with a live request-provider member", async () => {
+		const seen: string[] = [];
+		const anthropicModel = createMockModel({
+			provider: "anthropic",
+			id: "claude-test",
+			handler: (_ctx, opts) => {
+				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
+				seen.push(`anthropic:${key}`);
+				return { content: [`used:${key}`] };
+			},
+		});
+		const openaiModel = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			handler: (_ctx, opts) => {
+				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
+				seen.push(`openai:${key}`);
+				return { content: [`used:${key}`] };
+			},
+		});
+		harness = await createGatewayHarness({ models: [anthropicModel, openaiModel], credentials: [] });
+		const anthropicRow = await addProviderCredential(harness, "anthropic", "anthropic-in-pool");
+		const openaiRow = await addProviderCredential(harness, "openai", "openai-in-pool");
+		await addProviderCredential(harness, "anthropic", "anthropic-outside-pool");
+		const user = harness.accessStore.createUser({ name: "mixedpooluser" });
+		const pool = harness.accessStore.createPool({ name: "mixedpool" });
+		harness.accessStore.addPoolCredential(pool.id, openaiRow.id);
+		harness.accessStore.addPoolCredential(pool.id, anthropicRow.id);
+		grantProviderAccess(harness, user.user.id, pool.id, "*", "*");
+
+		let response = await postChat(harness.handle.url, user.token.value, "claude-test");
+		expect(response.status).toBe(200);
+		expect(await responseText(response)).toBe("used:anthropic-in-pool");
+		response = await postChat(harness.handle.url, user.token.value, "gpt-test");
+		expect(response.status).toBe(200);
+		expect(await responseText(response)).toBe("used:openai-in-pool");
+		expect(seen).toEqual(["anthropic:anthropic-in-pool", "openai:openai-in-pool"]);
+	});
+
+	test("reordering bound pools changes the same-provider winner without excluding shared accounts", async () => {
+		const model = createMockModel({
 			id: "model-a",
 			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
 		});
-		const modelB = createMockModel({
-			provider: "mock",
-			id: "model-b",
-			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
-		});
-		harness = await createGatewayHarness({ models: [modelA, modelB], credentials: seededCredentials() });
-		const [keyA, keyB] = harness.credentialStore.listAuthCredentials("mock");
-		if (!keyA || !keyB) throw new Error("expected credential rows");
-		const user = harness.accessStore.createUser({ name: "pooluser" });
-		const providerPool = harness.accessStore.createPool({ name: "providerpool", provider: "mock" });
-		const exactPool = harness.accessStore.createPool({ name: "exactpool", provider: "mock", model: "model-a" });
-		harness.accessStore.addPoolCredential(providerPool.id, keyB.id);
-		harness.accessStore.addPoolCredential(exactPool.id, keyA.id);
-		harness.accessStore.addAclRule(user.user.id, { effect: "allow", kind: "route", pattern: "chat" });
-		harness.accessStore.addAclRule(user.user.id, { effect: "allow", kind: "provider", pattern: "mock" });
-		harness.accessStore.addAclRule(user.user.id, { effect: "allow", kind: "model", pattern: "mock/*" });
-		harness.accessStore.bindUserPool(user.user.id, providerPool.id);
-		harness.accessStore.bindUserPool(user.user.id, exactPool.id);
+		harness = await createGatewayHarness({ models: [model], credentials: seededCredentials() });
+		const [shared, firstOnly, secondFirst] = harness.credentialStore.listAuthCredentials("mock");
+		if (!shared || !firstOnly || !secondFirst) throw new Error("expected credential rows");
+		const user = harness.accessStore.createUser({ name: "poolorderuser" });
+		const firstPool = harness.accessStore.createPool({ name: "firstpool", strategy: "failover" });
+		const secondPool = harness.accessStore.createPool({ name: "secondpool", strategy: "failover" });
+		harness.accessStore.addPoolCredential(firstPool.id, shared.id);
+		harness.accessStore.addPoolCredential(firstPool.id, firstOnly.id);
+		harness.accessStore.addPoolCredential(secondPool.id, secondFirst.id);
+		harness.accessStore.addPoolCredential(secondPool.id, shared.id);
+		grantProviderAccess(harness, user.user.id, firstPool.id, "mock");
+		harness.accessStore.bindUserPool(user.user.id, secondPool.id);
 
 		let response = await postChat(harness.handle.url, user.token.value, "model-a");
 		expect(response.status).toBe(200);
 		expect(await responseText(response)).toBe("used:key-a");
-		response = await postChat(harness.handle.url, user.token.value, "model-b");
+		harness.accessStore.setUserPoolOrder(user.user.id, [secondPool.id, firstPool.id]);
+		response = await postChat(harness.handle.url, user.token.value, "model-a");
 		expect(response.status).toBe(200);
-		expect(await responseText(response)).toBe("used:key-b");
+		expect(await responseText(response)).toBe("used:outside-key");
+	});
+
+	test("falls through an earlier bound pool with no request-provider account", async () => {
+		const anthropicModel = createMockModel({
+			provider: "anthropic",
+			id: "claude-test",
+			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		});
+		harness = await createGatewayHarness({ models: [anthropicModel], credentials: [] });
+		const openaiRow = await addProviderCredential(harness, "openai", "openai-only");
+		const anthropicRow = await addProviderCredential(harness, "anthropic", "anthropic-fallback");
+		const user = harness.accessStore.createUser({ name: "fallbackuser" });
+		const firstPool = harness.accessStore.createPool({ name: "openaiholding" });
+		const secondPool = harness.accessStore.createPool({ name: "anthropicholding" });
+		harness.accessStore.addPoolCredential(firstPool.id, openaiRow.id);
+		harness.accessStore.addPoolCredential(secondPool.id, anthropicRow.id);
+		grantProviderAccess(harness, user.user.id, firstPool.id, "anthropic");
+		harness.accessStore.bindUserPool(user.user.id, secondPool.id);
+
+		const response = await postChat(harness.handle.url, user.token.value, "claude-test");
+		expect(response.status).toBe(200);
+		expect(await responseText(response)).toBe("used:anthropic-fallback");
 	});
 
 	test("round-robin pools advance in member order across new sessions", async () => {
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -155,7 +236,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "roundrobin" });
 		const pool = harness.accessStore.createPool({
 			name: "roundrobinpool",
-			provider: "mock",
 			strategy: "round-robin",
 		});
 		harness.accessStore.addPoolCredential(pool.id, keyA.id);
@@ -182,7 +262,6 @@ describe("auth-gateway credential pools", () => {
 		registerMockOAuthProvider();
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -197,7 +276,7 @@ describe("auth-gateway credential pools", () => {
 		const [oauthRow, apiRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 		const user = harness.accessStore.createUser({ name: "mixedrr" });
-		const pool = harness.accessStore.createPool({ name: "mixedrrpool", provider: "mock", strategy: "round-robin" });
+		const pool = harness.accessStore.createPool({ name: "mixedrrpool", strategy: "round-robin" });
 		harness.accessStore.addPoolCredential(pool.id, apiRow.id);
 		harness.accessStore.addPoolCredential(pool.id, oauthRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -218,11 +297,42 @@ describe("auth-gateway credential pools", () => {
 		expect(seenKeys).toEqual(["api-b", "oauth-a", "api-b"]);
 	});
 
+	test("round-robin policy keys include provider inside one mixed-provider pool", async () => {
+		const anthropicModel = createMockModel({
+			provider: "anthropic",
+			id: "claude-test",
+			handler: () => ({ content: ["anthropic"] }),
+		});
+		const openaiModel = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			handler: () => ({ content: ["openai"] }),
+		});
+		harness = await createGatewayHarness({ models: [anthropicModel, openaiModel], credentials: [] });
+		const anthropicRow = await addProviderCredential(harness, "anthropic", "anthropic-rr");
+		const openaiRow = await addProviderCredential(harness, "openai", "openai-rr");
+		const user = harness.accessStore.createUser({ name: "rrscope" });
+		const pool = harness.accessStore.createPool({ name: "rrscopepool", strategy: "round-robin" });
+		harness.accessStore.addPoolCredential(pool.id, anthropicRow.id);
+		harness.accessStore.addPoolCredential(pool.id, openaiRow.id);
+		grantProviderAccess(harness, user.user.id, pool.id, "*", "*");
+		const resolveSelection = spyOn(harness.storage, "resolveApiKeySelection");
+		try {
+			let response = await postChat(harness.handle.url, user.token.value, "claude-test");
+			expect(response.status).toBe(200);
+			response = await postChat(harness.handle.url, user.token.value, "gpt-test");
+			expect(response.status).toBe(200);
+			const policyKeys = resolveSelection.mock.calls.map(call => call[2]?.selection?.policyKey);
+			expect(policyKeys).toEqual([`gateway-pool:${pool.id}:anthropic`, `gateway-pool:${pool.id}:openai`]);
+		} finally {
+			resolveSelection.mockRestore();
+		}
+	});
+
 	test("same-identity OAuth re-login keeps existing pool member usable", async () => {
 		registerMockOAuthProvider();
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -242,7 +352,7 @@ describe("auth-gateway credential pools", () => {
 		const [row] = harness.credentialStore.listAuthCredentials("mock");
 		if (!row) throw new Error("expected oauth row");
 		const user = harness.accessStore.createUser({ name: "sameidentity" });
-		const pool = harness.accessStore.createPool({ name: "sameidentitypool", provider: "mock", strategy: "failover" });
+		const pool = harness.accessStore.createPool({ name: "sameidentitypool", strategy: "failover" });
 		harness.accessStore.addPoolCredential(pool.id, row.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 
@@ -266,7 +376,6 @@ describe("auth-gateway credential pools", () => {
 	test("sticky-session pools reuse the same member for the same prompt cache key", async () => {
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -278,7 +387,7 @@ describe("auth-gateway credential pools", () => {
 		const [keyA, keyB] = harness.credentialStore.listAuthCredentials("mock");
 		if (!keyA || !keyB) throw new Error("expected credential rows");
 		const user = harness.accessStore.createUser({ name: "stickyuser" });
-		const pool = harness.accessStore.createPool({ name: "stickypool", provider: "mock", strategy: "sticky-session" });
+		const pool = harness.accessStore.createPool({ name: "stickypool", strategy: "sticky-session" });
 		harness.accessStore.addPoolCredential(pool.id, keyA.id);
 		harness.accessStore.addPoolCredential(pool.id, keyB.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -300,10 +409,47 @@ describe("auth-gateway credential pools", () => {
 		expect(seenKeys[1]).toBe(seenKeys[0]);
 	});
 
+	test("sticky-session credential session scope is stable for the same pool and provider", async () => {
+		const model = createMockModel({
+			provider: "anthropic",
+			id: "claude-test",
+			handler: (_ctx, opts) => ({ content: [`used:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		});
+		harness = await createGatewayHarness({ models: [model], credentials: [] });
+		const keyA = await addProviderCredential(harness, "anthropic", "sticky-a");
+		const keyB = await addProviderCredential(harness, "anthropic", "sticky-b");
+		const user = harness.accessStore.createUser({ name: "stickyscope" });
+		const pool = harness.accessStore.createPool({ name: "stickyscopepool", strategy: "sticky-session" });
+		harness.accessStore.addPoolCredential(pool.id, keyA.id);
+		harness.accessStore.addPoolCredential(pool.id, keyB.id);
+		grantProviderAccess(harness, user.user.id, pool.id, "anthropic");
+		const resolveSelection = spyOn(harness.storage, "resolveApiKeySelection");
+		try {
+			for (let index = 0; index < 2; index += 1) {
+				const response = await fetch(`${harness.handle.url}/v1/chat/completions`, {
+					method: "POST",
+					headers: jsonHeaders(user.token.value),
+					body: JSON.stringify({
+						model: "claude-test",
+						messages: [{ role: "user", content: "hello" }],
+						prompt_cache_key: "same-provider-session",
+					}),
+				});
+				expect(response.status).toBe(200);
+			}
+			const sessionIds = resolveSelection.mock.calls.map(call => call[1]);
+			expect(sessionIds).toEqual([
+				`gateway:${user.user.id}:gateway-pool:${pool.id}:anthropic:same-provider-session`,
+				`gateway:${user.user.id}:gateway-pool:${pool.id}:anthropic:same-provider-session`,
+			]);
+		} finally {
+			resolveSelection.mockRestore();
+		}
+	});
+
 	test("least-used API-key pools keep configured order when no usage signal exists", async () => {
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -315,7 +461,7 @@ describe("auth-gateway credential pools", () => {
 		const [keyA, keyB] = harness.credentialStore.listAuthCredentials("mock");
 		if (!keyA || !keyB) throw new Error("expected credential rows");
 		const user = harness.accessStore.createUser({ name: "leastapi" });
-		const pool = harness.accessStore.createPool({ name: "leastapipool", provider: "mock", strategy: "least-used" });
+		const pool = harness.accessStore.createPool({ name: "leastapipool", strategy: "least-used" });
 		harness.accessStore.addPoolCredential(pool.id, keyA.id);
 		harness.accessStore.addPoolCredential(pool.id, keyB.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -339,7 +485,6 @@ describe("auth-gateway credential pools", () => {
 	test("failover pools use configured order and switch only after block", async () => {
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -356,7 +501,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "failoverorder" });
 		const pool = harness.accessStore.createPool({
 			name: "failoverorderpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, keyA.id);
@@ -382,7 +526,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("does not retry outside the pool and rewrites exhausted pools to rate-limit errors", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -399,7 +542,7 @@ describe("auth-gateway credential pools", () => {
 		const [keyA, keyB, outside] = harness.credentialStore.listAuthCredentials("mock");
 		if (!keyA || !keyB || !outside) throw new Error("expected credential rows");
 		const user = harness.accessStore.createUser({ name: "failoveruser" });
-		const pool = harness.accessStore.createPool({ name: "failoverpool", provider: "mock", strategy: "failover" });
+		const pool = harness.accessStore.createPool({ name: "failoverpool", strategy: "failover" });
 		harness.accessStore.addPoolCredential(pool.id, keyA.id);
 		harness.accessStore.addPoolCredential(pool.id, keyB.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -411,7 +554,6 @@ describe("auth-gateway credential pools", () => {
 		const exhaustedUser = harness.accessStore.createUser({ name: "exhausted" });
 		const exhaustedPool = harness.accessStore.createPool({
 			name: "exhaustedpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(exhaustedPool.id, keyA.id);
@@ -426,7 +568,6 @@ describe("auth-gateway credential pools", () => {
 		const piUser = harness.accessStore.createUser({ name: "piexhausted" });
 		const piPool = harness.accessStore.createPool({
 			name: "piexhaustedpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(piPool.id, keyA.id);
@@ -443,7 +584,6 @@ describe("auth-gateway credential pools", () => {
 		registerMockOAuthProvider();
 		const seenKeys: string[] = [];
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: (_ctx, opts) => {
 				const key = typeof opts?.apiKey === "string" ? opts.apiKey : "none";
@@ -461,7 +601,7 @@ describe("auth-gateway credential pools", () => {
 		const [oauthRow, apiRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 		const user = harness.accessStore.createUser({ name: "mixedlimit" });
-		const pool = harness.accessStore.createPool({ name: "mixedlimitpool", provider: "mock", strategy: "failover" });
+		const pool = harness.accessStore.createPool({ name: "mixedlimitpool", strategy: "failover" });
 		harness.accessStore.addPoolCredential(pool.id, oauthRow.id);
 		harness.accessStore.addPoolCredential(pool.id, apiRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
@@ -474,14 +614,12 @@ describe("auth-gateway credential pools", () => {
 
 	test("legacy retry failures keep their upstream error", async () => {
 		const usageModel = createMockModel({
-			provider: "mock",
 			id: "usage-model",
 			handler: () => ({
 				throw: Object.assign(new Error("usage limit reached: legacy-usage-sentinel"), { status: 429 }),
 			}),
 		});
 		const authModel = createMockModel({
-			provider: "mock",
 			id: "auth-model",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key legacy-auth-sentinel"), { status: 401 }),
@@ -510,7 +648,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("explicit invalidation with no remaining member is 503", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key selected-sentinel"), { status: 401 }),
@@ -525,7 +662,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "selectedinvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "selectedinvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -553,7 +689,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "throwninvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "throwninvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -580,7 +715,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("pi-native non-streaming terminal auth failures exhaust managed pools", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key pi-native-selected-sentinel"), { status: 401 }),
@@ -595,7 +729,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "pinativeinvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "pinativeinvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -621,7 +754,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("stream audit distinguishes no eligible credential from usage limit", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key selected-stream-sentinel"), { status: 401 }),
@@ -636,7 +768,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "streaminvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "streaminvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -664,7 +795,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "rejectedstreaminvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "rejectedstreaminvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -685,7 +815,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("pi-native streaming terminal auth failures emit managed pool exhaustion events", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key pi-native-stream-selected-sentinel"), {
@@ -702,7 +831,6 @@ describe("auth-gateway credential pools", () => {
 		const user = harness.accessStore.createUser({ name: "pinativestreaminvalid" });
 		const pool = harness.accessStore.createPool({
 			name: "pinativestreaminvalidpool",
-			provider: "mock",
 			strategy: "failover",
 		});
 		harness.accessStore.addPoolCredential(pool.id, row.id);
@@ -730,7 +858,6 @@ describe("auth-gateway credential pools", () => {
 
 	test("legacy pi-native terminal auth failures keep their upstream error", async () => {
 		const model = createMockModel({
-			provider: "mock",
 			id: "model-a",
 			handler: () => ({
 				throw: Object.assign(new Error("401 invalid_api_key legacy-pi-native-sentinel"), { status: 401 }),
@@ -750,7 +877,7 @@ describe("auth-gateway credential pools", () => {
 	test("returns 503 when a bound pool has no live provider-matching members", async () => {
 		harness = await createGatewayHarness({ credentials: [{ type: "api_key", key: "other" }] });
 		const user = harness.accessStore.createUser({ name: "emptylive" });
-		const pool = harness.accessStore.createPool({ name: "emptypool", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "emptypool" });
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 		const response = await postChat(harness.handle.url, user.token.value);
 		expect(response.status).toBe(503);

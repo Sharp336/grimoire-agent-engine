@@ -27,6 +27,25 @@ interface PoolCredentialRow {
 	created_at: number;
 }
 
+interface TableColumnRow {
+	name: string;
+}
+
+interface UserPoolBindingRow {
+	user_id: number;
+	pool_id: number;
+	position: number;
+	created_at: number;
+}
+
+interface PoolRecordRow {
+	id: number;
+	name: string;
+	strategy: string;
+	created_at: number;
+	updated_at: number;
+}
+
 function readSchemaVersion(dbPath: string): number | null {
 	const db = new Database(dbPath, { readonly: true });
 	try {
@@ -70,6 +89,176 @@ function indexExists(dbPath: string, indexName: string): boolean {
 			| CountRow
 			| undefined;
 		return row != null;
+	} finally {
+		db.close();
+	}
+}
+
+function tableColumns(dbPath: string, table: string): string[] {
+	if (!/^[a-z_]+$/.test(table)) throw new Error(`unsafe table name ${table}`);
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return (db.prepare(`PRAGMA table_info(${table})`).all() as TableColumnRow[]).map(row => row.name);
+	} finally {
+		db.close();
+	}
+}
+
+function readUserPoolBindingRows(dbPath: string, userId: number): UserPoolBindingRow[] {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return db
+			.prepare(
+				"SELECT user_id, pool_id, position, created_at FROM gateway_user_pools WHERE user_id = ? ORDER BY position ASC",
+			)
+			.all(userId) as UserPoolBindingRow[];
+	} finally {
+		db.close();
+	}
+}
+
+function readPoolRecord(dbPath: string, poolId: number): PoolRecordRow | undefined {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return db
+			.prepare("SELECT id, name, strategy, created_at, updated_at FROM gateway_pools WHERE id = ?")
+			.get(poolId) as PoolRecordRow | undefined;
+	} finally {
+		db.close();
+	}
+}
+
+function createV1Fixture(dbPath: string, options: { duplicateUserPoolBinding?: boolean } = {}): void {
+	const db = new Database(dbPath);
+	try {
+		db.run("PRAGMA foreign_keys=OFF");
+		db.run(`
+			CREATE TABLE auth_gateway_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_gateway_schema_version(id, version) VALUES (1, 1);
+			CREATE TABLE gateway_users (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[a-z]' AND name NOT GLOB '*[^a-z0-9_-]*'),
+				description TEXT,
+				owner TEXT,
+				role TEXT NOT NULL CHECK (role IN ('user', 'admin')),
+				enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				last_used_at INTEGER
+			);
+			CREATE TABLE gateway_user_tokens (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+				public_id TEXT NOT NULL UNIQUE,
+				token_hash BLOB NOT NULL,
+				label TEXT,
+				created_at INTEGER NOT NULL,
+				last_used_at INTEGER,
+				revoked_at INTEGER
+			);
+			CREATE TABLE gateway_acl_rules (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+				effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+				kind TEXT NOT NULL CHECK (kind IN ('provider', 'model', 'route')),
+				pattern TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				UNIQUE(user_id, effect, kind, pattern)
+			);
+			CREATE TABLE gateway_pools (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(name) BETWEEN 1 AND 64 AND substr(name, 1, 1) GLOB '[a-z]' AND name NOT GLOB '*[^a-z0-9_-]*'),
+				provider TEXT NOT NULL,
+				model TEXT,
+				strategy TEXT NOT NULL CHECK (strategy IN ('sticky-session', 'least-used', 'round-robin', 'failover')),
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE TABLE gateway_pool_credentials (
+				pool_id INTEGER NOT NULL REFERENCES gateway_pools(id) ON DELETE CASCADE,
+				credential_id INTEGER NOT NULL,
+				position INTEGER NOT NULL,
+				created_at INTEGER NOT NULL,
+				PRIMARY KEY(pool_id, credential_id),
+				UNIQUE(pool_id, position)
+			);
+			CREATE TABLE gateway_user_pools (
+				user_id INTEGER NOT NULL,
+				pool_id INTEGER NOT NULL,
+				provider TEXT NOT NULL,
+				model_key TEXT NOT NULL
+			);
+			CREATE TABLE gateway_audit_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				request_id TEXT NOT NULL,
+				started_at INTEGER NOT NULL,
+				completed_at INTEGER NOT NULL,
+				user_id INTEGER,
+				user_name TEXT,
+				token_id INTEGER,
+				method TEXT NOT NULL,
+				path TEXT NOT NULL,
+				route_family TEXT NOT NULL,
+				requested_model TEXT,
+				resolved_provider TEXT,
+				resolved_model TEXT,
+				credential_id INTEGER,
+				outcome TEXT NOT NULL,
+				status_code INTEGER NOT NULL,
+				input_tokens INTEGER NOT NULL,
+				output_tokens INTEGER NOT NULL,
+				cache_read_tokens INTEGER NOT NULL,
+				cache_write_tokens INTEGER NOT NULL,
+				total_tokens INTEGER NOT NULL,
+				cost_usd REAL NOT NULL,
+				error_code TEXT
+			);
+		`);
+		db.prepare(
+			"INSERT INTO gateway_users(id, name, role, enabled, created_at, updated_at) VALUES (?, ?, 'user', 1, ?, ?)",
+		).run(7, "migrated", 100, 101);
+		for (const [id, name, provider, model, strategy, createdAt, updatedAt] of [
+			[2, "exact", "anthropic", "anthropic/claude-3-5-sonnet", "failover", 200, 201],
+			[5, "wide", "openai", null, "round-robin", 500, 501],
+			[9, "unused", "mock", null, "least-used", 900, 901],
+		] as const) {
+			db.prepare(
+				"INSERT INTO gateway_pools(id, name, provider, model, strategy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			).run(id, name, provider, model, strategy, createdAt, updatedAt);
+		}
+		for (const [poolId, credentialId, position, createdAt] of [
+			[2, 101, 0, 2_001],
+			[2, 201, 1, 2_002],
+			[5, 301, 0, 5_001],
+			[5, 101, 1, 5_002],
+			[9, 401, 0, 9_001],
+		] as const) {
+			db.prepare(
+				"INSERT INTO gateway_pool_credentials(pool_id, credential_id, position, created_at) VALUES (?, ?, ?, ?)",
+			).run(poolId, credentialId, position, createdAt);
+		}
+		for (const [userId, poolId, provider, modelKey] of [
+			[7, 5, "openai", ""],
+			[7, 2, "anthropic", "anthropic/claude-3-5-sonnet"],
+		] as const) {
+			db.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, provider, model_key) VALUES (?, ?, ?, ?)").run(
+				userId,
+				poolId,
+				provider,
+				modelKey,
+			);
+		}
+		if (options.duplicateUserPoolBinding) {
+			db.prepare("INSERT INTO gateway_user_pools(user_id, pool_id, provider, model_key) VALUES (?, ?, ?, ?)").run(
+				7,
+				2,
+				"anthropic",
+				"",
+			);
+		}
 	} finally {
 		db.close();
 	}
@@ -141,7 +330,7 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		expect(alice.token.value).toMatch(/^omp_gw_[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}$/);
 		expect(bob.token.value).toMatch(/^omp_gw_[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}$/);
 		expect(alice.token.value).not.toBe(bob.token.value);
-		expect(readSchemaVersion(dbPath)).toBe(1);
+		expect(readSchemaVersion(dbPath)).toBe(2);
 		expect(store.counts()).toEqual({ users: 2, activeTokens: 2, pools: 0 });
 
 		const listedAlice = store.listUsers().find(user => user.id === alice.user.id);
@@ -215,21 +404,25 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		expect(store.authenticateToken(disabled.token.value)).toBeNull();
 	});
 
-	test("recreates the additive audit cursor index when reopening a v1 database", async () => {
+	test("recreates additive indexes when reopening a v2 database", async () => {
 		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(true);
+		expect(indexExists(dbPath, "idx_gateway_user_pools_pool_id")).toBe(true);
 		store.close();
-		expect(readSchemaVersion(dbPath)).toBe(1);
+		expect(readSchemaVersion(dbPath)).toBe(2);
 		const db = new Database(dbPath);
 		try {
 			db.run("DROP INDEX IF EXISTS idx_gateway_audit_user_id");
+			db.run("DROP INDEX IF EXISTS idx_gateway_user_pools_pool_id");
 		} finally {
 			db.close();
 		}
 		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(false);
-		expect(readSchemaVersion(dbPath)).toBe(1);
+		expect(indexExists(dbPath, "idx_gateway_user_pools_pool_id")).toBe(false);
+		expect(readSchemaVersion(dbPath)).toBe(2);
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
 		expect(indexExists(dbPath, "idx_gateway_audit_user_id")).toBe(true);
-		expect(readSchemaVersion(dbPath)).toBe(1);
+		expect(indexExists(dbPath, "idx_gateway_user_pools_pool_id")).toBe(true);
+		expect(readSchemaVersion(dbPath)).toBe(2);
 	});
 
 	test("isolates token add revoke rotate disable and delete per user", () => {
@@ -316,7 +509,7 @@ describe("SqliteAuthGatewayAccessStore", () => {
 			expect(() =>
 				db
 					.prepare(
-						"INSERT INTO gateway_pools(name, provider, strategy, created_at, updated_at) VALUES (?, 'anthropic', 'failover', 1, 1)",
+						"INSERT INTO gateway_pools(name, strategy, created_at, updated_at) VALUES (?, 'failover', 1, 1)",
 					)
 					.run("1bad"),
 			).toThrow();
@@ -406,115 +599,155 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		);
 	});
 
-	test("binds deterministic provider and model pools with ordered members across reopen", async () => {
+	test("creates neutral pools and appends removes reorders user bindings", async () => {
 		const alice = store.createUser({ name: "alice" });
-		const providerPool = store.createPool({
-			name: "anthropic-default",
-			provider: "anthropic",
+		const fallback = store.createPool({ name: "fallback", strategy: "round-robin" });
+		const primary = store.createPool({ name: "primary", strategy: "failover" });
+
+		expect(fallback).toEqual({
+			id: fallback.id,
+			name: "fallback",
 			strategy: "round-robin",
+			createdAt: fallback.createdAt,
+			updatedAt: fallback.updatedAt,
+			members: [],
 		});
-		const modelPool = store.createPool({
-			name: "sonnet",
-			provider: "anthropic",
-			model: "claude-3-5-sonnet",
-			strategy: "failover",
+		expect(tableColumns(dbPath, "gateway_pools")).not.toContain("provider");
+		expect(tableColumns(dbPath, "gateway_pools")).not.toContain("model");
+		expect(tableColumns(dbPath, "gateway_user_pools")).toEqual(["user_id", "pool_id", "position", "created_at"]);
+
+		store.addPoolCredential(primary.id, 30);
+		store.addPoolCredential(primary.id, 20);
+		store.addPoolCredential(fallback.id, 20);
+		store.addPoolCredential(fallback.id, 10);
+
+		const firstBind = store.bindUserPool(alice.user.id, primary.id);
+		expect(firstBind.created).toBe(true);
+		expect(firstBind.binding).toMatchObject({ poolId: primary.id, position: 0 });
+		expect(firstBind.binding.pool.members.map(member => member.credentialId)).toEqual([30, 20]);
+		expect(store.bindUserPool(alice.user.id, primary.id)).toMatchObject({
+			created: false,
+			binding: { poolId: primary.id, position: 0 },
+		});
+		expect(store.bindUserPool(alice.user.id, fallback.id)).toMatchObject({
+			created: true,
+			binding: { poolId: fallback.id, position: 1 },
 		});
 
-		store.addPoolCredential(providerPool.id, 20);
-		store.addPoolCredential(providerPool.id, 10);
-		store.addPoolCredential(providerPool.id, 20);
-		store.addPoolCredential(modelPool.id, 30);
-		expect(store.getPool(providerPool.id)?.members.map(member => member.credentialId)).toEqual([20, 10]);
-		expect(store.bindUserPool(alice.user.id, providerPool.id)).toEqual({ created: true });
-		expect(store.bindUserPool(alice.user.id, providerPool.id)).toEqual({ created: false });
-		expect(store.bindUserPool(alice.user.id, modelPool.id)).toEqual({ created: true });
-		expect(() =>
-			store.bindUserPool(alice.user.id, store.createPool({ name: "anthropic-other", provider: "anthropic" }).id),
-		).toThrow(AuthGatewayAccessError);
-
-		const pools = store.listUserPools(alice.user.id);
-		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-haiku")?.credentialIds).toEqual([
-			20, 10,
+		let bindings = store.listUserPoolBindings(alice.user.id);
+		expect(bindings.map(binding => [binding.poolId, binding.position])).toEqual([
+			[primary.id, 0],
+			[fallback.id, 1],
 		]);
-		expect(resolveAuthGatewayPoolSelection(pools, "anthropic", "anthropic/claude-3-5-sonnet")?.credentialIds).toEqual(
-			[30],
-		);
-		expect(resolveAuthGatewayPoolSelection(pools, "openai", "openai/gpt-4o")).toBeNull();
+		expect(resolveAuthGatewayPoolSelection(bindings, [10])?.credentialIds).toEqual([10]);
+		expect(resolveAuthGatewayPoolSelection(bindings, [20, 10])?.credentialIds).toEqual([20]);
+		expect(resolveAuthGatewayPoolSelection(bindings, [999])).toBeNull();
 
-		expect(store.removePoolCredential(providerPool.id, 20)).toBe(true);
-		expect(store.getPool(providerPool.id)?.members).toMatchObject([{ credentialId: 10, position: 0 }]);
-		expect(() => store.updatePool(providerPool.id, { name: "sonnet" })).toThrow(AuthGatewayAccessError);
+		const reordered = store.setUserPoolOrder(alice.user.id, [fallback.id, primary.id]);
+		expect(reordered.map(binding => [binding.poolId, binding.position])).toEqual([
+			[fallback.id, 0],
+			[primary.id, 1],
+		]);
+		bindings = store.listUserPoolBindings(alice.user.id);
+		expect(resolveAuthGatewayPoolSelection(bindings, [20, 30])?.poolId).toBe(fallback.id);
+		expect(resolveAuthGatewayPoolSelection(bindings, [20, 30])?.credentialIds).toEqual([20]);
+
+		for (const poolIds of [
+			[fallback.id, fallback.id],
+			[fallback.id],
+			[fallback.id, primary.id, 999],
+			[fallback.id, 0],
+		]) {
+			expect(() => store.setUserPoolOrder(alice.user.id, poolIds)).toThrow(
+				"pool order must include every current user pool exactly once",
+			);
+		}
+		expect(store.listUserPoolBindings(alice.user.id).map(binding => binding.poolId)).toEqual([
+			fallback.id,
+			primary.id,
+		]);
+
+		expect(store.unbindUserPool(alice.user.id, fallback.id)).toBe(true);
+		expect(store.unbindUserPool(alice.user.id, fallback.id)).toBe(false);
+		expect(store.listUserPoolBindings(alice.user.id).map(binding => [binding.poolId, binding.position])).toEqual([
+			[primary.id, 0],
+		]);
 
 		const admin = store.createUser({ name: "admin", role: "admin" });
-		expect(() => store.bindUserPool(admin.user.id, providerPool.id)).toThrow(AuthGatewayAccessError);
-		store.updateUser(alice.user.id, { role: "admin" });
-		expect(store.listUserPools(alice.user.id)).toHaveLength(2);
-		store.updateUser(alice.user.id, { role: "user" });
-		expect(store.listUserPools(alice.user.id)).toHaveLength(2);
+		expect(() => store.bindUserPool(admin.user.id, primary.id)).toThrow(AuthGatewayAccessError);
 
 		store.close();
 		store = await SqliteAuthGatewayAccessStore.open(dbPath);
-		expect(store.getPool("anthropic-default")?.members.map(member => member.credentialId)).toEqual([10]);
-		expect(
-			resolveAuthGatewayPoolSelection(store.listUserPools(alice.user.id), "anthropic", "anthropic/claude-3-5-sonnet")
-				?.poolId,
-		).toBe(modelPool.id);
+		expect(store.listUserPoolBindings(alice.user.id).map(binding => [binding.poolId, binding.position])).toEqual([
+			[primary.id, 0],
+		]);
 	});
 
-	test("resolves the winning user pool selection with ordered members", () => {
-		const alice = store.createUser({ name: "selection" });
-		const providerPool = store.createPool({
-			name: "anthropic-wide",
-			provider: "anthropic",
-			strategy: "round-robin",
-		});
-		const exactPool = store.createPool({
-			name: "anthropic-sonnet",
-			provider: "anthropic",
-			model: "claude-3-5-sonnet",
-			strategy: "failover",
-		});
-		const emptyExactPool = store.createPool({
-			name: "openai-gpt4o",
-			provider: "openai",
-			model: "gpt-4o",
-			strategy: "least-used",
-		});
+	test("migrates v1 scoped pools into neutral pools and ordered bindings", async () => {
+		store.close();
+		dbPath = path.join(tempDir, "v1.db");
+		createV1Fixture(dbPath);
+		vi.useFakeTimers();
+		setSystemTime(7_000);
 
-		store.addPoolCredential(providerPool.id, 20);
-		store.addPoolCredential(providerPool.id, 10);
-		store.addPoolCredential(exactPool.id, 30);
-		store.addPoolCredential(exactPool.id, 25);
-		store.bindUserPool(alice.user.id, providerPool.id);
-		store.bindUserPool(alice.user.id, exactPool.id);
-		store.bindUserPool(alice.user.id, emptyExactPool.id);
+		store = await SqliteAuthGatewayAccessStore.open(dbPath);
 
-		expect(store.resolveUserPoolSelection(alice.user.id, "anthropic", "anthropic/claude-3-5-sonnet")).toEqual({
-			poolId: exactPool.id,
-			provider: "anthropic",
-			qualifiedModel: "anthropic/claude-3-5-sonnet",
+		expect(readSchemaVersion(dbPath)).toBe(2);
+		expect(tableColumns(dbPath, "gateway_pools")).toEqual(["id", "name", "strategy", "created_at", "updated_at"]);
+		expect(tableColumns(dbPath, "gateway_user_pools")).toEqual(["user_id", "pool_id", "position", "created_at"]);
+		expect(readPoolRecord(dbPath, 2)).toEqual({
+			id: 2,
+			name: "exact",
 			strategy: "failover",
-			credentialIds: [30, 25],
+			created_at: 200,
+			updated_at: 201,
 		});
-		expect(store.resolveUserPoolSelection(alice.user.id, "anthropic", "anthropic/claude-3-haiku")).toEqual({
-			poolId: providerPool.id,
-			provider: "anthropic",
-			qualifiedModel: null,
-			strategy: "round-robin",
-			credentialIds: [20, 10],
-		});
-		expect(store.resolveUserPoolSelection(alice.user.id, "openai", "openai/gpt-4o")).toEqual({
-			poolId: emptyExactPool.id,
-			provider: "openai",
-			qualifiedModel: "openai/gpt-4o",
-			strategy: "least-used",
-			credentialIds: [],
-		});
-		expect(store.resolveUserPoolSelection(alice.user.id, "mock", "mock/model-a")).toBeNull();
+		expect(readPoolCredentialRows(dbPath, 2)).toEqual([
+			{ credential_id: 101, position: 0, created_at: 2_001 },
+			{ credential_id: 201, position: 1, created_at: 2_002 },
+		]);
+		expect(readPoolCredentialRows(dbPath, 5)).toEqual([
+			{ credential_id: 301, position: 0, created_at: 5_001 },
+			{ credential_id: 101, position: 1, created_at: 5_002 },
+		]);
+		expect(readUserPoolBindingRows(dbPath, 7)).toEqual([
+			{ user_id: 7, pool_id: 2, position: 0, created_at: 7_000 },
+			{ user_id: 7, pool_id: 5, position: 1, created_at: 7_000 },
+		]);
+		expect(
+			store.listUserPoolBindings(7).map(binding => [binding.poolId, binding.position, binding.pool.name]),
+		).toEqual([
+			[2, 0, "exact"],
+			[5, 1, "wide"],
+		]);
+		expect(store.listCredentialPools(101).map(pool => pool.id)).toEqual([2, 5]);
+
+		const created = store.createPool({ name: "after-migration" });
+		expect(created.id).toBeGreaterThan(9);
+		const appended = store.bindUserPool(7, created.id);
+		expect(appended.binding.position).toBe(2);
+		expect(store.listUserPoolBindings(7).map(binding => [binding.poolId, binding.position])).toEqual([
+			[2, 0],
+			[5, 1],
+			[created.id, 2],
+		]);
+	});
+
+	test("rejects malformed v1 fixtures with duplicate user pool bindings without migrating", async () => {
+		store.close();
+		dbPath = path.join(tempDir, "duplicate-v1.db");
+		createV1Fixture(dbPath, { duplicateUserPoolBinding: true });
+
+		await expect(SqliteAuthGatewayAccessStore.open(dbPath)).rejects.toThrow(
+			"duplicate user pool bindings cannot be migrated",
+		);
+		expect(readSchemaVersion(dbPath)).toBe(1);
+		expect(tableColumns(dbPath, "gateway_pools")).toContain("provider");
+		store = await SqliteAuthGatewayAccessStore.open(path.join(tempDir, "replacement.db"));
 	});
 
 	test("treats a duplicate pool-member insert at the SQLite boundary as idempotent", async () => {
-		const pool = store.createPool({ name: "primary", provider: "anthropic" });
+		const pool = store.createPool({ name: "primary" });
 		const triggerDb = new Database(dbPath);
 		try {
 			triggerDb.run(`
@@ -550,23 +783,20 @@ describe("SqliteAuthGatewayAccessStore", () => {
 		}
 	});
 
-	test("concurrent duplicate scope binds create one row and one conflict", async () => {
+	test("concurrent appends preserve ordered user pool bindings", async () => {
 		const alice = store.createUser({ name: "alice" });
-		const firstPool = store.createPool({ name: "primary", provider: "anthropic" });
-		const secondPool = store.createPool({ name: "secondary", provider: "anthropic" });
+		const firstPool = store.createPool({ name: "primary" });
+		const secondPool = store.createPool({ name: "secondary" });
 		const secondStore = await SqliteAuthGatewayAccessStore.open(dbPath);
 		try {
 			const attempts = await Promise.allSettled([
 				Promise.resolve().then(() => store.bindUserPool(alice.user.id, firstPool.id)),
 				Promise.resolve().then(() => secondStore.bindUserPool(alice.user.id, secondPool.id)),
 			]);
-			const fulfilled = attempts.filter(result => result.status === "fulfilled");
-			const rejected = attempts.filter(result => result.status === "rejected");
-			expect(fulfilled).toHaveLength(1);
-			expect(rejected).toHaveLength(1);
-			const reason = rejected[0]?.status === "rejected" ? rejected[0].reason : undefined;
-			assertAccessError(reason, "conflict");
-			expect(store.listUserPools(alice.user.id)).toHaveLength(1);
+			expect(attempts.every(result => result.status === "fulfilled")).toBe(true);
+			const bindings = store.listUserPoolBindings(alice.user.id);
+			expect(bindings.map(binding => binding.position)).toEqual([0, 1]);
+			expect(new Set(bindings.map(binding => binding.poolId))).toEqual(new Set([firstPool.id, secondPool.id]));
 		} finally {
 			secondStore.close();
 		}
@@ -704,7 +934,7 @@ describe("SqliteAuthGatewayAccessStore", () => {
 	});
 
 	test("reorders pool credentials as an exact atomic permutation and preserves member timestamps", () => {
-		const pool = store.createPool({ name: "ordered", provider: "anthropic" });
+		const pool = store.createPool({ name: "ordered" });
 		store.addPoolCredential(pool.id, 10);
 		store.addPoolCredential(pool.id, 20);
 		store.addPoolCredential(pool.id, 30);
@@ -741,9 +971,9 @@ describe("SqliteAuthGatewayAccessStore", () => {
 	});
 
 	test("lists credential pools by pool id without consulting credential storage", () => {
-		const first = store.createPool({ name: "first", provider: "anthropic" });
-		const second = store.createPool({ name: "second", provider: "anthropic" });
-		const unrelated = store.createPool({ name: "unrelated", provider: "mock" });
+		const first = store.createPool({ name: "first" });
+		const second = store.createPool({ name: "second" });
+		const unrelated = store.createPool({ name: "unrelated" });
 		store.addPoolCredential(second.id, 42);
 		store.addPoolCredential(first.id, 42);
 		store.addPoolCredential(unrelated.id, 7);

@@ -47,6 +47,7 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 	await storage.reload();
 	const accessStore = await SqliteAuthGatewayAccessStore.open(path.join(tempDir, "access.db"));
 	const models = new Map<string, MockModel>();
+	const modelById = new Map<string, MockModel>();
 	for (const model of options.models ?? [
 		createMockModel({
 			provider: "mock",
@@ -55,14 +56,16 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 		}),
 	]) {
 		models.set(model.id, model);
+		modelById.set(`${model.provider}/${model.id}`, model);
+		if (!modelById.has(model.id)) modelById.set(model.id, model);
 	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: options.bearerTokens ?? ["legacy-token"],
 		accessStore,
 		storage,
-		resolveModel: id => models.get(id)?.model as Model<Api> | undefined,
-		listModels: () => Array.from(models.values()).map(model => model.model),
+		resolveModel: id => modelById.get(id)?.model as Model<Api> | undefined,
+		listModels: () => Array.from(modelById.values()).map(model => model.model),
 	});
 	return { tempDir, credentialStore, storage, accessStore, models, handle };
 }

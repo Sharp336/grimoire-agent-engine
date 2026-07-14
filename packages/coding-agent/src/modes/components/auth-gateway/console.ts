@@ -1,9 +1,22 @@
 import type {
+	AddAclRuleInput,
 	AuthGatewayAclEffect,
 	AuthGatewayAclKind,
 	AuthGatewayAclRule,
 	AuthGatewayAdminClient,
 	AuthGatewayCredentialSummary,
+	AuthGatewayPool,
+	AuthGatewayPoolStrategy,
+	AuthGatewayUserPoolBinding,
+	CreatePoolInput,
+	CreateUserInput,
+	UpdatePoolInput,
+	UpdateUserInput,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	AUTH_GATEWAY_ACL_ROUTES,
+	AUTH_GATEWAY_BASIC_ROUTES,
+	AUTH_GATEWAY_POOL_STRATEGIES,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { Component, Focusable, SelectItem, SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 import {
@@ -27,7 +40,6 @@ import {
 	type AuthGatewayAccountLoginPromptState,
 	uploadAcquiredAuthGatewayCredential,
 } from "./account-login";
-import { AuthGatewayChoiceDialog } from "./choice-dialog";
 import { AuthGatewayConsoleController, type AuthGatewayConsoleTab } from "./console-controller";
 import {
 	type AuthGatewayOneTimeTokenDialog,
@@ -35,6 +47,7 @@ import {
 	copyOneTimeTokenDialogValue,
 	createOneTimeTokenDialog,
 } from "./dialogs";
+import { AuthGatewayFlowDialog, type AuthGatewayFlowStep } from "./flow-dialog";
 
 export interface AuthGatewayConsoleHost {
 	ui: TUI;
@@ -54,21 +67,12 @@ type PromptKind =
 	| "filter"
 	| "audit-user-filter"
 	| "usage-since"
-	| "create-user"
-	| "edit-user"
 	| "toggle-user"
 	| "delete-user"
 	| "create-token"
 	| "revoke-token"
 	| "rotate-user"
-	| "add-acl-pattern"
-	| "bind-pool"
-	| "unbind-pool"
-	| "create-pool"
-	| "edit-pool"
 	| "delete-pool"
-	| "add-pool-account"
-	| "remove-pool-account"
 	| "remove-account"
 	| "api-key-provider"
 	| "api-key-value"
@@ -80,9 +84,8 @@ interface PromptState {
 	value: string;
 	masked: boolean;
 	error: string | null;
+	busy: string | null;
 	provider?: string;
-	aclEffect?: AuthGatewayAclEffect;
-	aclKind?: AuthGatewayAclKind;
 }
 
 const TABS: Array<{ id: AuthGatewayConsoleTab; label: string; short: string }> = [
@@ -95,6 +98,16 @@ const TABS: Array<{ id: AuthGatewayConsoleTab; label: string; short: string }> =
 
 const FOOTER_PREFIX = "1-5 tabs · ↑/↓ select · / filter · r refresh · ? help";
 const LEADING_SGR_MOUSE_EVENT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]/;
+const NAME_HELP = "Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.";
+const DESCRIPTION_HELP = "Human-readable purpose; blank leaves it unset.";
+const OWNER_HELP = "Operator or team responsible for this user; blank leaves it unset.";
+const NAME_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+const STRATEGY_DESCRIPTIONS: Record<AuthGatewayPoolStrategy, string> = {
+	"sticky-session": "sticky-session keeps an eligible session account",
+	"least-used": "least-used ranks live OAuth usage for new/replacement sessions",
+	"round-robin": "round-robin assigns new sessions per pool/provider",
+	failover: "failover follows member order and advances on block/auth/usage failure",
+};
 
 export class AuthGatewayConsole implements Component, Focusable {
 	focused = false;
@@ -112,7 +125,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#oneTimeDialog: AuthGatewayOneTimeTokenDialog | null = null;
 	#accountLogin: AuthGatewayAccountLoginController | null = null;
 	#loginProviderSelector: OAuthSelectorComponent | null = null;
-	#choiceDialog: AuthGatewayChoiceDialog | null = null;
+	#flowDialog: AuthGatewayFlowDialog | null = null;
 	#loginGeneration = 0;
 	#disposed = false;
 	#tabRowStart = 0;
@@ -122,7 +135,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#listItemBodyLineCount = 0;
 	#listItemBodyColumnEnd = 0;
 	#loginProviderBodyLineStart = 0;
-	#choiceDialogBodyLineStart = 0;
+	#flowDialogBodyLineStart = 0;
 	#useTerminalCursor = false;
 
 	constructor(options: AuthGatewayConsoleOptions) {
@@ -155,7 +168,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#accountLogin = null;
 		this.#loginProviderSelector?.stopValidation();
 		this.#loginProviderSelector = null;
-		this.#choiceDialog = null;
+		this.#flowDialog = null;
 		this.controller.close();
 		if (this.#oneTimeDialog) closeOneTimeTokenDialog(this.#oneTimeDialog);
 		this.#oneTimeDialog = null;
@@ -204,9 +217,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			else this.#loginProviderSelector.handleInput(data);
 			return;
 		}
-		if (this.#choiceDialog) {
+		if (this.#flowDialog) {
 			if (isMouseInput) this.#handleMouse(data);
-			else this.#choiceDialog.handleInput(data);
+			else this.#flowDialog.handleInput(data);
 			return;
 		}
 		if (this.#accountLogin?.state.prompt) {
@@ -255,20 +268,23 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#handleAction(data);
 			return;
 		}
+		if (this.#isTabActionKey(data)) {
+			this.#handleAction(data);
+			return;
+		}
 		if (this.#tabBar.handleInput(data)) return;
 		if (data === "?") {
 			this.#help = true;
 			return;
 		}
 		if (data === "/") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: this.controller.state.activeTab === "audit" ? "filter" : "filter",
 				label: "Filter: ",
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "r") {
@@ -295,17 +311,24 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#handleAction(data);
 	}
 
+	#isTabActionKey(data: string): boolean {
+		const tab = this.controller.state.activeTab;
+		if (tab === "users") return "cetdTvRUaxbu[]+-".includes(data);
+		if (tab === "pools") return "cedax[]+-".includes(data);
+		if (tab === "audit") return "unp".includes(data);
+		return false;
+	}
+
 	#handleAction(data: string): void {
 		const tab = this.controller.state.activeTab;
 		if (tab === "overview" && data === "s") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "switch-connection",
 				label: "Connection name: ",
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 
@@ -322,14 +345,13 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (tab === "audit" && data === "u") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "audit-user-filter",
 				label: "Audit user id (blank clears): ",
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (tab === "audit" && data === "n") {
@@ -344,26 +366,12 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#handleUserAction(data: string): void {
 		const selected = this.controller.selectedUser();
 		if (data === "c") {
-			this.#prompt = {
-				kind: "create-user",
-				label: "Create user name|description|owner|role: ",
-				value: "",
-				masked: false,
-				error: null,
-			};
-			this.controller.setModalOpen(true);
+			this.#openCreateUserFlow();
 			return;
 		}
 		if (!selected) return;
 		if (data === "e") {
-			this.#prompt = {
-				kind: "edit-user",
-				label: "Edit description|owner|role: ",
-				value: "",
-				masked: false,
-				error: null,
-			};
-			this.controller.setModalOpen(true);
+			this.#openEditUserFlow();
 			return;
 		}
 		if (data === "t") {
@@ -371,19 +379,18 @@ export class AuthGatewayConsole implements Component, Focusable {
 			const confirmation = warning
 				? ` ${warning}. Type disconnect ${sanitizeCell(selected.name)}: `
 				: "Type y to toggle: ";
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "toggle-user",
 				label: `${selected.enabled ? "Disable" : "Enable"} user.${confirmation}`,
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "d") {
 			const warning = this.controller.currentUserDisconnectWarning();
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "delete-user",
 				label: warning
 					? `${warning}. Type disconnect ${sanitizeCell(selected.name)} to delete: `
@@ -391,18 +398,16 @@ export class AuthGatewayConsole implements Component, Focusable {
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "T") {
-			this.#prompt = { kind: "create-token", label: "Token label: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			this.#openPrompt({ kind: "create-token", label: "Token label: ", value: "", masked: false, error: null });
 			return;
 		}
 		if (data === "v") {
 			const warning = this.controller.currentTokenDisconnectWarning();
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "revoke-token",
 				label: warning
 					? `${warning.message}. Current token ${warning.tokenId} requires ${sanitizeCell(warning.publicId)}. Token id|confirmation: `
@@ -410,30 +415,27 @@ export class AuthGatewayConsole implements Component, Focusable {
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "R") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "rotate-user",
 				label: `Type rotate ${sanitizeCell(selected.name)}: `,
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "U") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "usage-since",
 				label: "Usage since timestamp (blank for all): ",
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "a") {
@@ -445,66 +447,57 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (data === "b") {
-			this.#prompt = { kind: "bind-pool", label: "Pool id to bind: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			void this.#openBindPoolPicker();
 			return;
 		}
 		if (data === "u") {
-			this.#prompt = { kind: "unbind-pool", label: "Pool id|y to unbind: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			void this.#openUnbindPoolPicker();
+			return;
+		}
+		if (data === "]") {
+			this.controller.selectUserPoolBinding(this.controller.state.selectedUserPoolBindingIndex + 1);
+			return;
+		}
+		if (data === "[") {
+			this.controller.selectUserPoolBinding(this.controller.state.selectedUserPoolBindingIndex - 1);
+			return;
+		}
+		if (data === "+") {
+			void this.controller.moveSelectedUserPoolBinding(1);
+			return;
+		}
+		if (data === "-") {
+			void this.controller.moveSelectedUserPoolBinding(-1);
 		}
 	}
 
 	#handlePoolAction(data: string): void {
 		const selected = this.controller.selectedPool();
 		if (data === "c") {
-			this.#prompt = {
-				kind: "create-pool",
-				label: "Create pool name|provider|model|strategy: ",
-				value: "",
-				masked: false,
-				error: null,
-			};
-			this.controller.setModalOpen(true);
+			this.#openCreatePoolFlow();
 			return;
 		}
 		if (!selected) return;
 		if (data === "e") {
-			this.#prompt = { kind: "edit-pool", label: "Edit name|strategy: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			this.#openEditPoolFlow();
 			return;
 		}
 		if (data === "d") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "delete-pool",
 				label: `Type ${sanitizeCell(selected.name)} to delete: `,
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "a") {
-			this.#prompt = {
-				kind: "add-pool-account",
-				label: "Credential id to add: ",
-				value: "",
-				masked: false,
-				error: null,
-			};
-			this.controller.setModalOpen(true);
+			void this.#openAddPoolAccountPicker();
 			return;
 		}
 		if (data === "x") {
-			this.#prompt = {
-				kind: "remove-pool-account",
-				label: "Credential id|y to remove: ",
-				value: "",
-				masked: false,
-				error: null,
-			};
-			this.controller.setModalOpen(true);
+			void this.#openRemovePoolAccountPicker();
 			return;
 		}
 		if (data === "]") {
@@ -528,22 +521,21 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (data === "d") {
 			const selected = this.controller.selectedCredential();
 			if (!selected) return;
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "remove-account",
 				label: `Type ${selected.id} to remove: `,
 				value: "",
 				masked: false,
 				error: null,
-			};
-			this.controller.setModalOpen(true);
+			});
 			return;
 		}
 		if (data === "c") {
 			const identifiers = this.controller.copySelectedCredentialIdentifiers();
 			if (!identifiers) return;
 			void copyToClipboard(identifiers)
-				.then(() => this.controller.setErrorBanner("Copied account identifiers"))
-				.catch(error => this.controller.setErrorBanner(error instanceof Error ? error.message : String(error)));
+				.then(() => this.controller.setTransientBanner("Copied account identifiers"))
+				.catch(error => this.controller.setTransientBanner(error instanceof Error ? error.message : String(error)));
 			return;
 		}
 		if (data === "o") {
@@ -558,11 +550,11 @@ export class AuthGatewayConsole implements Component, Focusable {
 	}
 
 	#startApiKeyPrompt(): void {
-		this.#prompt = { kind: "api-key-provider", label: "Provider id: ", value: "", masked: false, error: null };
-		this.controller.setModalOpen(true);
+		this.#openPrompt({ kind: "api-key-provider", label: "Provider id: ", value: "", masked: false, error: null });
 	}
 
 	#openLoginProviderSelector(): void {
+		this.controller.clearTransientBanner();
 		this.#loginProviderSelector?.stopValidation();
 		this.#loginProviderSelector = new OAuthSelectorComponent(
 			"login",
@@ -582,104 +574,862 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.controller.setModalOpen(true);
 	}
 
-	#openAclEffectDialog(): void {
-		const items: SelectItem[] = [
-			{ value: "allow", label: "Allow", description: "Permit matching requests" },
-			{ value: "deny", label: "Deny", description: "Block matching requests" },
-		];
-		this.#choiceDialog = new AuthGatewayChoiceDialog(
-			"Add ACL effect",
-			items,
-			value => this.#openAclKindDialog(value as AuthGatewayAclEffect),
-			() => {
-				this.#choiceDialog = null;
+	#createFlowDialog(): AuthGatewayFlowDialog {
+		this.controller.clearTransientBanner();
+		this.#flowDialog?.close();
+		const dialog = new AuthGatewayFlowDialog({
+			onClose: () => {
+				this.#flowDialog = null;
 				this.controller.setModalOpen(false);
 			},
-		);
+			requestRender: () => {
+				if (!this.#disposed) this.#host.ui.requestRender();
+			},
+		});
+		this.#flowDialog = dialog;
+		this.controller.setModalOpen(true);
+		return dialog;
+	}
+
+	#handoffFlowToOneTimeToken(): void {
+		this.#oneTimeDialog = this.controller.state.oneTimeToken
+			? createOneTimeTokenDialog(this.controller.state.oneTimeToken)
+			: null;
+		this.#flowDialog = null;
 		this.controller.setModalOpen(true);
 	}
 
-	#openAclKindDialog(effect: AuthGatewayAclEffect): void {
-		const items: SelectItem[] = [
-			{ value: "provider", label: "Provider", description: "Match provider ids" },
-			{ value: "model", label: "Model", description: "Match model selectors" },
-			{ value: "route", label: "Route", description: "Match gateway route families" },
-		];
-		this.#choiceDialog = new AuthGatewayChoiceDialog(
-			"Add ACL kind",
-			items,
-			value => {
-				this.#choiceDialog = null;
-				this.#prompt = {
-					kind: "add-acl-pattern",
-					label: "ACL pattern: ",
-					value: "",
-					masked: false,
-					error: null,
-					aclEffect: effect,
-					aclKind: value as AuthGatewayAclKind,
-				};
-				this.controller.setModalOpen(true);
-			},
-			() => this.#openAclEffectDialog(),
+	#openCreateUserFlow(): void {
+		const dialog = this.#createFlowDialog();
+		const draft: CreateUserInput = { name: "", role: "user" };
+		dialog.push(
+			this.#userNameStep("Create user name", "", value => {
+				draft.name = value.trim();
+				dialog.push(
+					this.#userDescriptionStep("Create user description", "", value => {
+						const description = value.trim();
+						if (description) draft.description = description;
+						else delete draft.description;
+						dialog.push(
+							this.#userOwnerStep("Create user owner", "", value => {
+								const owner = value.trim();
+								if (owner) draft.owner = owner;
+								else delete draft.owner;
+								dialog.push(
+									this.#userRoleStep("Create user role", null, role => {
+										draft.role = role;
+										dialog.push(this.#reviewCreateUserStep(draft));
+									}),
+								);
+							}),
+						);
+					}),
+				);
+			}),
 		);
-		this.controller.setModalOpen(true);
+	}
+
+	#openEditUserFlow(): void {
+		const selected = this.controller.selectedUser();
+		if (!selected) return;
+		const dialog = this.#createFlowDialog();
+		const draft: UpdateUserInput = {
+			description: selected.description,
+			owner: selected.owner,
+			role: selected.role,
+		};
+		dialog.push(
+			this.#userDescriptionStep("Edit user description", selected.description ?? "", value => {
+				draft.description = value.trim() || null;
+				dialog.push(
+					this.#userOwnerStep("Edit user owner", selected.owner ?? "", owner => {
+						draft.owner = owner.trim() || null;
+						dialog.push(
+							this.#userRoleStep("Edit user role", selected.role, role => {
+								draft.role = role;
+								dialog.push(this.#reviewEditUserStep(draft));
+							}),
+						);
+					}),
+				);
+			}),
+		);
+	}
+
+	#userNameStep(title: string, value: string, onSubmit: (value: string) => void): AuthGatewayFlowStep {
+		return {
+			id: title.toLowerCase().replaceAll(" ", "-"),
+			kind: "input",
+			title,
+			label: "Name: ",
+			value,
+			help: [NAME_HELP],
+			validate: input => {
+				const trimmed = input.trim();
+				if (!trimmed) return "Name is required";
+				return NAME_PATTERN.test(trimmed) ? null : NAME_HELP;
+			},
+			onSubmit,
+		};
+	}
+
+	#userDescriptionStep(title: string, value: string, onSubmit: (value: string) => void): AuthGatewayFlowStep {
+		return {
+			id: title.toLowerCase().replaceAll(" ", "-"),
+			kind: "input",
+			title,
+			label: "Description: ",
+			value,
+			help: [DESCRIPTION_HELP],
+			onSubmit,
+		};
+	}
+
+	#userOwnerStep(title: string, value: string, onSubmit: (value: string) => void): AuthGatewayFlowStep {
+		return {
+			id: title.toLowerCase().replaceAll(" ", "-"),
+			kind: "input",
+			title,
+			label: "Owner: ",
+			value,
+			help: [OWNER_HELP],
+			onSubmit,
+		};
+	}
+
+	#userRoleStep(
+		title: string,
+		current: "user" | "admin" | null,
+		onSelect: (role: "user" | "admin") => void,
+	): AuthGatewayFlowStep {
+		return {
+			id: title.toLowerCase().replaceAll(" ", "-"),
+			kind: "choice",
+			title,
+			items: [
+				{ value: "user", label: "User", description: "ACLs and ordered pool bindings apply" },
+				{ value: "admin", label: "Admin", description: "Bypasses ACLs and cannot bind pools" },
+			],
+			help: current ? [`Current role: ${current}`] : ["Choose the user's management role."],
+			initialValue: current ?? undefined,
+			onSelect: value => onSelect(value === "admin" ? "admin" : "user"),
+		};
+	}
+
+	#reviewCreateUserStep(input: CreateUserInput): AuthGatewayFlowStep {
+		return {
+			id: "review-create-user",
+			kind: "choice",
+			title: "Review user",
+			items: [
+				{ value: "save", label: "Save user", description: "Create user and show one-time token" },
+				{ value: "back", label: "Back", description: "Return to role" },
+			],
+			help: this.#userReviewHelp(input),
+			onSelect: (value, dialog) => {
+				if (value === "back") {
+					dialog.pop();
+					return;
+				}
+				void this.#submitCreateUser(dialog, input);
+			},
+		};
+	}
+
+	#reviewEditUserStep(input: UpdateUserInput): AuthGatewayFlowStep {
+		return {
+			id: "review-edit-user",
+			kind: "choice",
+			title: "Review user",
+			items: [
+				{ value: "save", label: "Save changes", description: "Update selected user" },
+				{ value: "back", label: "Back", description: "Return to role" },
+			],
+			help: [
+				`Description: ${sanitizeCell(input.description ?? "-")}`,
+				`Owner: ${sanitizeCell(input.owner ?? "-")}`,
+				`Role: ${input.role ?? "user"}`,
+			],
+			onSelect: (value, dialog) => {
+				if (value === "back") {
+					dialog.pop();
+					return;
+				}
+				void this.#submitEditUser(dialog, input);
+			},
+		};
+	}
+
+	#userReviewHelp(input: CreateUserInput): string[] {
+		return [
+			`Name: ${sanitizeCell(input.name)}`,
+			`Description: ${sanitizeCell(input.description ?? "-")}`,
+			`Owner: ${sanitizeCell(input.owner ?? "-")}`,
+			`Role: ${input.role ?? "user"}`,
+		];
+	}
+
+	async #submitCreateUser(dialog: AuthGatewayFlowDialog, input: CreateUserInput): Promise<void> {
+		dialog.setBusy("Saving user…");
+		const ok = await this.controller.createUser({ ...input });
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to create user");
+			return;
+		}
+		this.#handoffFlowToOneTimeToken();
+	}
+
+	async #submitEditUser(dialog: AuthGatewayFlowDialog, input: UpdateUserInput): Promise<void> {
+		dialog.setBusy("Saving user…");
+		const ok = await this.controller.updateSelectedUser({ ...input });
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to update user");
+			return;
+		}
+		dialog.close();
+	}
+
+	#openCreatePoolFlow(): void {
+		const dialog = this.#createFlowDialog();
+		const draft: CreatePoolInput = { name: "" };
+		dialog.push(
+			this.#poolNameStep("Create pool name", "", value => {
+				draft.name = value.trim();
+				dialog.push(
+					this.#poolStrategyStep("Pool strategy", null, strategy => {
+						draft.strategy = strategy;
+						dialog.push(this.#reviewCreatePoolStep(draft));
+					}),
+				);
+			}),
+		);
+	}
+
+	#openEditPoolFlow(): void {
+		const selected = this.controller.selectedPool();
+		if (!selected) return;
+		const dialog = this.#createFlowDialog();
+		const draft: UpdatePoolInput = { name: selected.name, strategy: selected.strategy };
+		dialog.push(
+			this.#poolNameStep("Edit pool name", selected.name, value => {
+				draft.name = value.trim();
+				dialog.push(
+					this.#poolStrategyStep("Pool strategy", selected.strategy, strategy => {
+						draft.strategy = strategy;
+						dialog.push(this.#reviewEditPoolStep(draft));
+					}),
+				);
+			}),
+		);
+	}
+
+	#poolNameStep(title: string, value: string, onSubmit: (value: string) => void): AuthGatewayFlowStep {
+		return {
+			id: title.toLowerCase().replaceAll(" ", "-"),
+			kind: "input",
+			title,
+			label: "Name: ",
+			value,
+			help: [NAME_HELP],
+			validate: input => {
+				const trimmed = input.trim();
+				if (!trimmed) return "Name is required";
+				return NAME_PATTERN.test(trimmed) ? null : NAME_HELP;
+			},
+			onSubmit,
+		};
+	}
+
+	#poolStrategyStep(
+		title: string,
+		current: AuthGatewayPoolStrategy | null,
+		onSelect: (strategy: AuthGatewayPoolStrategy) => void,
+	): AuthGatewayFlowStep {
+		return {
+			id: "pool-strategy",
+			kind: "choice",
+			title,
+			items: AUTH_GATEWAY_POOL_STRATEGIES.map(strategy => ({
+				value: strategy,
+				label: strategy,
+				description: STRATEGY_DESCRIPTIONS[strategy],
+			})),
+			help: current ? [`Current strategy: ${current}`] : ["Choose how accounts are selected for this pool."],
+			initialValue: current ?? undefined,
+			onSelect: value => onSelect(value as AuthGatewayPoolStrategy),
+		};
+	}
+
+	#reviewCreatePoolStep(input: CreatePoolInput): AuthGatewayFlowStep {
+		return {
+			id: "review-create-pool",
+			kind: "choice",
+			title: "Review pool",
+			items: [
+				{ value: "save", label: "Save pool", description: "Create pool" },
+				{ value: "back", label: "Back", description: "Return to strategy" },
+			],
+			help: this.#poolReviewHelp(input),
+			onSelect: (value, dialog) => {
+				if (value === "back") {
+					dialog.pop();
+					return;
+				}
+				void this.#submitCreatePool(dialog, input);
+			},
+		};
+	}
+
+	#reviewEditPoolStep(input: UpdatePoolInput): AuthGatewayFlowStep {
+		return {
+			id: "review-edit-pool",
+			kind: "choice",
+			title: "Review pool",
+			items: [
+				{ value: "save", label: "Save pool", description: "Update selected pool" },
+				{ value: "back", label: "Back", description: "Return to strategy" },
+			],
+			help: this.#poolReviewHelp(input),
+			onSelect: (value, dialog) => {
+				if (value === "back") {
+					dialog.pop();
+					return;
+				}
+				void this.#submitEditPool(dialog, input);
+			},
+		};
+	}
+
+	#poolReviewHelp(input: CreatePoolInput | UpdatePoolInput): string[] {
+		return [`Name: ${sanitizeCell(input.name ?? "-")}`, `Strategy: ${input.strategy ?? "round-robin"}`];
+	}
+
+	async #submitCreatePool(dialog: AuthGatewayFlowDialog, input: CreatePoolInput): Promise<void> {
+		dialog.setBusy("Saving pool…");
+		const ok = await this.controller.createPool({ ...input });
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to create pool");
+			return;
+		}
+		dialog.close();
+	}
+
+	async #submitEditPool(dialog: AuthGatewayFlowDialog, input: UpdatePoolInput): Promise<void> {
+		dialog.setBusy("Saving pool…");
+		const ok = await this.controller.updateSelectedPool({ ...input });
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to update pool");
+			return;
+		}
+		dialog.close();
+	}
+
+	async #openBindPoolPicker(): Promise<void> {
+		const selected = this.controller.selectedUser();
+		if (!selected) return;
+		const dialog = this.#createFlowDialog();
+		dialog.push(this.#loadingChoiceStep("Bind pool", "Loading pools…"));
+		const [details, pools] = await Promise.all([
+			this.controller.loadSelectedUserDetails(),
+			this.controller.loadPoolChoices(),
+		]);
+		if (!details || !pools) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to load pools");
+			return;
+		}
+		const bound = new Set(details.poolBindings.map(binding => binding.poolId));
+		const available = pools.filter(pool => !bound.has(pool.id));
+		if (available.length === 0) {
+			dialog.close();
+			this.controller.setTransientBanner("No pools available to bind");
+			return;
+		}
+		dialog.replace(this.#bindPoolPickerStep(available));
+	}
+
+	#bindPoolPickerStep(pools: readonly AuthGatewayPool[]): AuthGatewayFlowStep {
+		return {
+			id: "bind-pool",
+			kind: "choice",
+			title: "Bind pool",
+			items: pools.map(pool => ({
+				value: String(pool.id),
+				label: sanitizeCell(pool.name),
+				description: `${pool.strategy} · ${pool.members.length} accounts`,
+			})),
+			help: ["Choose a pool to append to this user's ordered bindings."],
+			onSelect: (value, dialog) => {
+				void this.#bindPool(Number(value), dialog);
+			},
+		};
+	}
+
+	async #bindPool(poolId: number, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy("Binding pool…");
+		const ok = await this.controller.bindSelectedUserPool(poolId);
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to bind pool");
+			return;
+		}
+		dialog.close();
+	}
+
+	async #openUnbindPoolPicker(): Promise<void> {
+		const dialog = this.#createFlowDialog();
+		dialog.push(this.#loadingChoiceStep("Unbind pool", "Loading user pools…"));
+		const details = await this.controller.loadSelectedUserDetails();
+		if (!details) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to load user pools");
+			return;
+		}
+		const bindings = [...details.poolBindings].sort((left, right) => left.position - right.position);
+		if (bindings.length === 0) {
+			dialog.close();
+			this.controller.setTransientBanner("No pools are bound to this user");
+			return;
+		}
+		dialog.replace(this.#unbindPoolPickerStep(bindings));
+	}
+
+	#unbindPoolPickerStep(bindings: readonly AuthGatewayUserPoolBinding[]): AuthGatewayFlowStep {
+		return {
+			id: "unbind-pool",
+			kind: "choice",
+			title: "Unbind pool",
+			items: bindings.map(binding => ({
+				value: String(binding.poolId),
+				label: sanitizeCell(binding.pool.name),
+				description: `${binding.position + 1}. ${binding.pool.strategy} · ${binding.pool.members.length} accounts`,
+			})),
+			help: ["Choose a bound pool to remove."],
+			onSelect: (value, dialog) => {
+				const binding = bindings.find(item => item.poolId === Number(value));
+				if (binding) dialog.push(this.#unbindPoolConfirmStep(binding));
+			},
+		};
+	}
+
+	#unbindPoolConfirmStep(binding: AuthGatewayUserPoolBinding): AuthGatewayFlowStep {
+		return {
+			id: `unbind-pool-${binding.poolId}`,
+			kind: "choice",
+			title: `Unbind ${sanitizeCell(binding.pool.name)}?`,
+			items: [
+				{ value: "no", label: "No", description: "Keep this binding" },
+				{ value: "yes", label: "Yes", description: "Remove this binding" },
+			],
+			help: [`${binding.position + 1}. ${binding.pool.name} · ${binding.pool.strategy}`],
+			onSelect: (value, dialog) => {
+				if (value !== "yes") {
+					dialog.pop();
+					return;
+				}
+				void this.#unbindPool(binding, dialog);
+			},
+		};
+	}
+
+	async #unbindPool(binding: AuthGatewayUserPoolBinding, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy("Unbinding pool…");
+		const ok = await this.controller.unbindSelectedUserPool(binding.poolId, "y");
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to unbind pool");
+			return;
+		}
+		dialog.close();
+	}
+
+	async #openAddPoolAccountPicker(): Promise<void> {
+		const selected = this.controller.selectedPool();
+		if (!selected) return;
+		const dialog = this.#createFlowDialog();
+		dialog.push(this.#loadingChoiceStep("Add pool account", "Loading accounts…"));
+		const credentials = await this.controller.loadCredentialChoices();
+		if (!credentials) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to load accounts");
+			return;
+		}
+		const memberIds = new Set(selected.members.map(member => member.credentialId));
+		const available = credentials.filter(credential => !memberIds.has(credential.id));
+		if (available.length === 0) {
+			dialog.close();
+			this.controller.setTransientBanner("No accounts available to add");
+			return;
+		}
+		dialog.replace(this.#addPoolAccountPickerStep(available));
+	}
+
+	#addPoolAccountPickerStep(credentials: readonly AuthGatewayCredentialSummary[]): AuthGatewayFlowStep {
+		return {
+			id: "add-pool-account",
+			kind: "choice",
+			title: "Add pool account",
+			items: credentials.map(credential => ({
+				value: String(credential.id),
+				label: accountSummary(credential),
+				description: credentialIdentity(credential),
+			})),
+			help: ["Choose a redacted live account to add."],
+			onSelect: (value, dialog) => {
+				void this.#addPoolAccount(Number(value), dialog);
+			},
+		};
+	}
+
+	async #addPoolAccount(credentialId: number, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy("Adding pool account…");
+		const ok = await this.controller.addSelectedPoolCredential(credentialId);
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to add pool account");
+			return;
+		}
+		dialog.close();
+	}
+
+	async #openRemovePoolAccountPicker(): Promise<void> {
+		const selected = this.controller.selectedPool();
+		if (!selected) return;
+		const dialog = this.#createFlowDialog();
+		const members = [...selected.members].sort((left, right) => left.position - right.position);
+		if (members.length === 0) {
+			dialog.close();
+			this.controller.setTransientBanner("No accounts are in this pool");
+			return;
+		}
+		dialog.push(this.#removePoolAccountPickerStep(members.map(member => member.credentialId)));
+	}
+
+	#removePoolAccountPickerStep(credentialIds: readonly number[]): AuthGatewayFlowStep {
+		return {
+			id: "remove-pool-account",
+			kind: "choice",
+			title: "Remove pool account",
+			items: credentialIds.map(credentialId => {
+				const credential = this.#credentialById(credentialId);
+				return {
+					value: String(credentialId),
+					label: credential ? accountSummary(credential) : `#${credentialId} · unavailable`,
+					description: credential ? credentialIdentity(credential) : "Stored member has no live broker row",
+				};
+			}),
+			help: ["Choose an account to remove from this pool."],
+			onSelect: (value, dialog) => {
+				dialog.push(this.#removePoolAccountConfirmStep(Number(value)));
+			},
+		};
+	}
+
+	#removePoolAccountConfirmStep(credentialId: number): AuthGatewayFlowStep {
+		const credential = this.#credentialById(credentialId);
+		const label = credential ? accountSummary(credential) : `#${credentialId} · unavailable`;
+		return {
+			id: `remove-pool-account-${credentialId}`,
+			kind: "choice",
+			title: `Remove pool account #${credentialId}?`,
+			items: [
+				{ value: "no", label: "No", description: "Keep this account" },
+				{ value: "yes", label: "Yes", description: "Remove this account" },
+			],
+			help: [label],
+			onSelect: (value, dialog) => {
+				if (value !== "yes") {
+					dialog.pop();
+					return;
+				}
+				void this.#removePoolAccount(credentialId, dialog);
+			},
+		};
+	}
+
+	async #removePoolAccount(credentialId: number, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy(`Removing pool account #${credentialId}…`);
+		const ok = await this.controller.removeSelectedPoolCredential(credentialId, "y");
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to remove pool account");
+			return;
+		}
+		dialog.close();
+	}
+
+	#credentialById(credentialId: number): AuthGatewayCredentialSummary | null {
+		return this.controller.state.accounts.data.find(credential => credential.id === credentialId) ?? null;
+	}
+
+	#loadingChoiceStep(title: string, label: string): AuthGatewayFlowStep {
+		return {
+			id: `${title.toLowerCase().replaceAll(" ", "-")}-loading`,
+			kind: "choice",
+			title,
+			items: [{ value: "loading", label }],
+			help: [label],
+			onSelect: () => {},
+		};
+	}
+
+	#openAclEffectDialog(): void {
+		const dialog = this.#createFlowDialog();
+		dialog.push(this.#aclEffectStep());
+	}
+
+	#aclEffectStep(): AuthGatewayFlowStep {
+		return {
+			id: "acl-effect",
+			kind: "choice",
+			title: "Add ACL effect",
+			items: [
+				{ value: "allow", label: "Allow", description: "Permit matching requests" },
+				{ value: "deny", label: "Deny", description: "Block matching requests" },
+			],
+			help: ["Choose whether matching requests are allowed or denied."],
+			onSelect: (value, dialog) => dialog.push(this.#aclKindStep(value as AuthGatewayAclEffect)),
+		};
+	}
+
+	#aclKindStep(effect: AuthGatewayAclEffect): AuthGatewayFlowStep {
+		return {
+			id: "acl-kind",
+			kind: "choice",
+			title: "Add ACL kind",
+			items: [
+				{ value: "provider", label: "Provider", description: "Match provider ids" },
+				{ value: "model", label: "Model", description: "Match provider/model selectors" },
+				{ value: "route", label: "Route", description: "Match gateway route families" },
+			],
+			help: ["Choose what this ACL rule matches."],
+			onSelect: (value, dialog) => {
+				void this.#openAclPatternStep(effect, value as AuthGatewayAclKind, dialog);
+			},
+		};
+	}
+
+	async #openAclPatternStep(
+		effect: AuthGatewayAclEffect,
+		kind: AuthGatewayAclKind,
+		dialog: AuthGatewayFlowDialog,
+	): Promise<void> {
+		if (kind === "route") {
+			dialog.push(this.#aclRoutePatternStep(effect));
+			return;
+		}
+		dialog.setBusy("Loading ACL suggestions…");
+		const suggestions = await this.controller.loadAclSuggestions();
+		dialog.setBusy(null);
+		if (!suggestions) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to load ACL suggestions");
+			return;
+		}
+		dialog.push(this.#aclCatalogPatternStep(effect, kind, suggestions));
+	}
+
+	#aclCatalogPatternStep(
+		effect: AuthGatewayAclEffect,
+		kind: "provider" | "model",
+		suggestions: { providers: string[]; models: { id: string; provider: string }[] },
+	): AuthGatewayFlowStep {
+		const items = kind === "provider" ? this.#providerAclItems(suggestions) : this.#modelAclItems(suggestions);
+		return {
+			id: `acl-${kind}-pattern`,
+			kind: "choice",
+			title: `Add ACL ${kind} pattern`,
+			items,
+			help:
+				kind === "provider"
+					? ["Choose a provider id, wildcard, or custom pattern."]
+					: ["Choose a provider wildcard, exact model, or custom pattern."],
+			onSelect: (value, dialog) => {
+				if (value === "__custom") {
+					dialog.push(this.#aclCustomPatternStep(effect, kind));
+					return;
+				}
+				void this.#submitAclRules(dialog, [{ effect, kind, pattern: value }]);
+			},
+		};
+	}
+
+	#providerAclItems(suggestions: { providers: string[]; models: { provider: string }[] }): SelectItem[] {
+		const providers = new Set<string>(suggestions.providers);
+		for (const model of suggestions.models) providers.add(model.provider);
+		return [
+			{ value: "*", label: "*", description: "Match every provider" },
+			...[...providers].sort().map(provider => ({
+				value: provider,
+				label: provider,
+				description: "Provider id",
+			})),
+			{ value: "__custom", label: "Custom pattern…", description: "Type a provider pattern" },
+		];
+	}
+
+	#modelAclItems(suggestions: { models: { id: string; provider: string }[] }): SelectItem[] {
+		const providers = [...new Set(suggestions.models.map(model => model.provider))].sort();
+		const exact = suggestions.models
+			.map(model => `${model.provider}/${model.id}`)
+			.sort((left, right) => left.localeCompare(right));
+		return [
+			{ value: "*", label: "*", description: "Match every model" },
+			...providers.map(provider => ({
+				value: `${provider}/*`,
+				label: `${provider}/*`,
+				description: "Provider model wildcard",
+			})),
+			...exact.map(pattern => ({ value: pattern, label: pattern, description: "Exact model" })),
+			{ value: "__custom", label: "Custom pattern…", description: "Type a model pattern" },
+		];
+	}
+
+	#aclRoutePatternStep(effect: AuthGatewayAclEffect): AuthGatewayFlowStep {
+		return {
+			id: "acl-route-pattern",
+			kind: "choice",
+			title: "Add ACL route pattern",
+			items: [
+				{
+					value: "__basic",
+					label: "Basic routes",
+					description: AUTH_GATEWAY_BASIC_ROUTES.join(", "),
+				},
+				{ value: "*", label: "All routes (*)", description: "Match every route" },
+				...AUTH_GATEWAY_ACL_ROUTES.map(route => ({ value: route, label: route, description: "Route family" })),
+			],
+			help: ["Choose a canonical route family."],
+			onSelect: (value, dialog) => {
+				const rules =
+					value === "__basic"
+						? AUTH_GATEWAY_BASIC_ROUTES.map(pattern => ({ effect, kind: "route" as const, pattern }))
+						: [{ effect, kind: "route" as const, pattern: value }];
+				void this.#submitAclRules(dialog, rules);
+			},
+		};
+	}
+
+	#aclCustomPatternStep(effect: AuthGatewayAclEffect, kind: "provider" | "model"): AuthGatewayFlowStep {
+		return {
+			id: `acl-${kind}-custom`,
+			kind: "input",
+			title: `Add ACL ${kind} pattern`,
+			label: `ACL ${kind} pattern: `,
+			value: "",
+			help: ["Enter a pattern accepted by the auth gateway."],
+			validate: value => (value.trim() ? null : "ACL pattern is required"),
+			onSubmit: (value, dialog) => {
+				void this.#submitAclRules(dialog, [{ effect, kind, pattern: value.trim() }]);
+			},
+		};
+	}
+
+	async #submitAclRules(dialog: AuthGatewayFlowDialog, rules: AddAclRuleInput[]): Promise<void> {
+		dialog.setBusy("Adding ACL rules…");
+		const ok = await this.controller.addSelectedUserAclRules(rules);
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Invalid ACL input");
+			return;
+		}
+		dialog.close();
 	}
 
 	#openDeleteAclRulePicker(): void {
 		const selected = this.controller.selectedUser();
-		if (!selected) return;
-		const details = this.controller.state.userDetails[selected.id];
+		const details = selected ? this.controller.state.userDetails[selected.id] : null;
+		if (details) {
+			const dialog = this.#createFlowDialog();
+			if (details.acl.length === 0) {
+				dialog.close();
+				this.controller.setTransientBanner("No ACL rules to delete");
+				return;
+			}
+			dialog.push(this.#deleteAclRulePickerStep(details.acl));
+			return;
+		}
+		void this.#openDeleteAclRulePickerAsync();
+	}
+
+	async #openDeleteAclRulePickerAsync(): Promise<void> {
+		const dialog = this.#createFlowDialog();
+		dialog.push(this.#deleteAclRulePickerStep([]));
+		dialog.setBusy("Loading ACL rules…");
+		const details = await this.controller.loadSelectedUserDetails();
+		dialog.setBusy(null);
 		if (!details) {
-			this.controller.setErrorBanner("ACL rules are still loading", { preserveHealth: true });
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to load ACL rules");
 			return;
 		}
 		if (details.acl.length === 0) {
-			this.controller.setErrorBanner("No ACL rules to delete", { preserveHealth: true });
+			dialog.close();
+			this.controller.setTransientBanner("No ACL rules to delete");
 			return;
 		}
-		const rules = details.acl;
-		const items: SelectItem[] = rules.map(rule => ({
-			value: String(rule.id),
-			label: `#${rule.id}`,
-			description: `${rule.effect} ${rule.kind} ${rule.pattern}`,
-		}));
-		this.#choiceDialog = new AuthGatewayChoiceDialog(
-			"Delete ACL rule",
-			items,
-			value => {
-				const ruleId = Number(value);
-				const rule = rules.find(candidate => candidate.id === ruleId);
-				if (rule) this.#openDeleteAclConfirm(rule);
-			},
-			() => {
-				this.#choiceDialog = null;
-				this.controller.setModalOpen(false);
-			},
-		);
-		this.controller.setModalOpen(true);
+		dialog.replace(this.#deleteAclRulePickerStep(details.acl));
 	}
 
-	#openDeleteAclConfirm(rule: AuthGatewayAclRule): void {
-		const items: SelectItem[] = [
-			{ value: "yes", label: "Yes", description: "Delete this ACL rule" },
-			{ value: "no", label: "No", description: "Keep this ACL rule" },
-		];
-		this.#choiceDialog = new AuthGatewayChoiceDialog(
-			`Delete ACL rule #${rule.id}?`,
-			items,
-			value => {
-				if (value === "yes") {
-					this.#choiceDialog = null;
-					this.controller.setModalOpen(false);
-					void this.controller.deleteSelectedUserAcl(rule.id);
+	#deleteAclRulePickerStep(rules: readonly AuthGatewayAclRule[]): AuthGatewayFlowStep {
+		return {
+			id: "delete-acl-picker",
+			kind: "choice",
+			title: "Delete ACL rule",
+			items: rules.map(rule => ({
+				value: String(rule.id),
+				label: `#${rule.id}`,
+				description: `${rule.effect} ${rule.kind} ${rule.pattern}`,
+			})),
+			help: ["Choose an ACL rule to delete."],
+			onSelect: (value, dialog) => {
+				const ruleId = Number(value);
+				const rule = rules.find(candidate => candidate.id === ruleId);
+				if (rule) dialog.push(this.#deleteAclConfirmStep(rule));
+			},
+		};
+	}
+
+	#deleteAclConfirmStep(rule: AuthGatewayAclRule): AuthGatewayFlowStep {
+		return {
+			id: `delete-acl-${rule.id}`,
+			kind: "choice",
+			title: `Delete ACL rule #${rule.id}?`,
+			items: [
+				{ value: "no", label: "No", description: "Keep this ACL rule" },
+				{ value: "yes", label: "Yes", description: "Delete this ACL rule" },
+			],
+			help: [`${rule.effect} ${rule.kind} ${rule.pattern}`],
+			onSelect: (value, dialog) => {
+				if (value !== "yes") {
+					dialog.pop();
 					return;
 				}
-				this.#openDeleteAclRulePicker();
+				void this.#deleteAclRule(rule, dialog);
 			},
-			() => this.#openDeleteAclRulePicker(),
-		);
-		this.controller.setModalOpen(true);
+		};
+	}
+
+	async #deleteAclRule(rule: AuthGatewayAclRule, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy(`Deleting ACL rule #${rule.id}…`);
+		const ok = await this.controller.deleteSelectedUserAcl(rule.id);
+		dialog.setBusy(null);
+		if (!ok) {
+			dialog.setError(this.controller.state.errorBanner ?? "Failed to delete ACL rule");
+			return;
+		}
+		if (this.controller.state.errorBannerSource === "visible-load") {
+			dialog.close();
+			return;
+		}
+		const selected = this.controller.selectedUser();
+		const rules = selected ? (this.controller.state.userDetails[selected.id]?.acl ?? []) : [];
+		if (rules.length === 0) {
+			dialog.close();
+			this.controller.setTransientBanner(`Deleted ACL rule #${rule.id}`);
+			return;
+		}
+		dialog.pop();
+		dialog.replace(this.#deleteAclRulePickerStep(rules));
 	}
 
 	#cancelAccountLogin(): void {
@@ -693,7 +1443,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#mode = "list";
 		this.#loginProviderSelector?.stopValidation();
 		this.#loginProviderSelector = null;
-		this.#choiceDialog = null;
+		this.#flowDialog?.close();
 		this.#clearPrompt();
 		await this.controller.switchTab(tab);
 	}
@@ -701,9 +1451,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#handlePromptInput(data: string): void {
 		const prompt = this.#prompt;
 		if (!prompt) return;
+		if (prompt.busy) return;
 		if (data === "\x1b") {
-			if (prompt.kind === "add-acl-pattern" && prompt.aclEffect) this.#openAclKindDialog(prompt.aclEffect);
-			else this.#clearPrompt();
+			this.#clearPrompt();
 			return;
 		}
 		if (data === "\x03") {
@@ -728,6 +1478,8 @@ export class AuthGatewayConsole implements Component, Focusable {
 	}
 
 	async #submitPrompt(prompt: PromptState): Promise<void> {
+		if (prompt.busy) return;
+		prompt.error = null;
 		if (prompt.kind === "filter") {
 			if (this.controller.state.activeTab === "audit") this.controller.setAuditTextFilter(prompt.value);
 			else this.controller.setFilter(prompt.value);
@@ -738,6 +1490,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 			const value = prompt.value.trim();
 			if (value === "") {
 				await this.controller.setAuditUserFilter(null);
+				if (this.#prompt !== prompt) return;
 				this.#clearPrompt();
 				return;
 			}
@@ -747,6 +1500,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 				return;
 			}
 			await this.controller.setAuditUserFilter(userId);
+			if (this.#prompt !== prompt) return;
 			this.#clearPrompt();
 			return;
 		}
@@ -757,37 +1511,28 @@ export class AuthGatewayConsole implements Component, Focusable {
 				return;
 			}
 			prompt.value = "";
-			this.#prompt = null;
-			await this.#switchConnection(name);
+			prompt.busy = "Switching connection…";
+			if (!this.#disposed) this.#host.ui.requestRender();
+			const error = await this.#switchConnection(name);
+			if (this.#prompt !== prompt) return;
+			if (error === null) {
+				this.#clearPrompt();
+				return;
+			}
+			prompt.busy = null;
+			prompt.error = error;
+			prompt.value = "";
+			this.controller.setModalOpen(true);
+			if (!this.#disposed) this.#host.ui.requestRender();
 			return;
 		}
 		if (prompt.kind === "usage-since") {
 			const value = prompt.value.trim();
 			const since = value === "" ? undefined : Number(value);
 			const ok = await this.controller.reloadSelectedUserUsage(since);
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
 				prompt.error = "Invalid usage timestamp";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "create-user") {
-			const ok = await this.controller.createUserFromInput(prompt.value);
-			if (!ok) {
-				prompt.error = "Invalid user input";
-				return;
-			}
-			this.#oneTimeDialog = this.controller.state.oneTimeToken
-				? createOneTimeTokenDialog(this.controller.state.oneTimeToken)
-				: null;
-			this.#prompt = null;
-			return;
-		}
-		if (prompt.kind === "edit-user") {
-			const ok = await this.controller.updateSelectedUserFromInput(prompt.value);
-			if (!ok) {
-				prompt.error = "Invalid user input";
 				return;
 			}
 			this.#clearPrompt();
@@ -796,6 +1541,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (prompt.kind === "toggle-user") {
 			const selected = this.controller.selectedUser();
 			const ok = selected ? await this.controller.setSelectedUserEnabled(!selected.enabled, prompt.value) : false;
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
 				prompt.error = "Confirmation did not match";
 				return;
@@ -805,6 +1551,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		}
 		if (prompt.kind === "delete-user") {
 			const ok = await this.controller.deleteSelectedUser(prompt.value);
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
 				prompt.error = "Confirmation did not match";
 				return;
@@ -813,9 +1560,13 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (prompt.kind === "create-token") {
+			prompt.busy = "Creating token…";
 			const ok = await this.controller.createSelectedUserToken(prompt.value.trim());
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
-				prompt.error = "No selected user";
+				prompt.error = this.controller.state.errorBanner ?? "No selected user";
+				prompt.busy = null;
+				this.controller.clearTransientBanner();
 				return;
 			}
 			this.#oneTimeDialog = this.controller.state.oneTimeToken
@@ -827,6 +1578,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (prompt.kind === "revoke-token") {
 			const [tokenId, confirmation] = prompt.value.split("|").map(item => item.trim());
 			const ok = await this.controller.revokeSelectedUserToken(Number(tokenId), confirmation ?? "");
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
 				prompt.error = "Confirmation did not match";
 				return;
@@ -835,9 +1587,13 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (prompt.kind === "rotate-user") {
+			prompt.busy = "Rotating tokens…";
 			const ok = await this.controller.rotateSelectedUserTokens(prompt.value);
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
-				prompt.error = "Confirmation did not match";
+				prompt.error = this.controller.state.errorBanner ?? "Confirmation did not match";
+				prompt.busy = null;
+				this.controller.clearTransientBanner();
 				return;
 			}
 			this.#oneTimeDialog = this.controller.state.oneTimeToken
@@ -846,80 +1602,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#prompt = null;
 			return;
 		}
-		if (prompt.kind === "add-acl-pattern") {
-			const effect = prompt.aclEffect;
-			const kind = prompt.aclKind;
-			const pattern = prompt.value.trim();
-			if (!pattern) {
-				prompt.error = "ACL pattern is required";
-				return;
-			}
-			const ok = effect && kind ? await this.controller.addSelectedUserAcl({ effect, kind, pattern }) : false;
-			if (!ok) {
-				prompt.error = this.controller.state.errorBanner ?? "Invalid ACL input";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "bind-pool") {
-			const ok = await this.controller.bindSelectedUserPool(Number(prompt.value.trim()));
-			if (!ok) {
-				prompt.error = "Invalid pool id";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "unbind-pool") {
-			const [poolId, confirmation] = prompt.value.split("|").map(item => item.trim());
-			const ok = await this.controller.unbindSelectedUserPool(Number(poolId), confirmation ?? "");
-			if (!ok) {
-				prompt.error = "Confirmation did not match";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "create-pool") {
-			const ok = await this.controller.createPoolFromInput(prompt.value);
-			if (!ok) {
-				prompt.error = "Invalid pool input";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "edit-pool") {
-			const ok = await this.controller.updateSelectedPoolFromInput(prompt.value);
-			if (!ok) {
-				prompt.error = "Invalid pool input";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
 		if (prompt.kind === "delete-pool") {
 			const ok = await this.controller.deleteSelectedPool(prompt.value);
-			if (!ok) {
-				prompt.error = "Confirmation did not match";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "add-pool-account") {
-			const ok = await this.controller.addSelectedPoolCredential(Number(prompt.value.trim()));
-			if (!ok) {
-				prompt.error = "Invalid credential id";
-				return;
-			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "remove-pool-account") {
-			const [credentialId, confirmation] = prompt.value.split("|").map(item => item.trim());
-			const ok = await this.controller.removeSelectedPoolCredential(Number(credentialId), confirmation ?? "");
+			if (this.#prompt !== prompt) return;
 			if (!ok) {
 				prompt.error = "Confirmation did not match";
 				return;
@@ -929,19 +1614,20 @@ export class AuthGatewayConsole implements Component, Focusable {
 		}
 		if (prompt.kind === "remove-account") {
 			const ok = await this.controller.removeSelectedCredential(prompt.value);
+			if (this.#prompt !== prompt) return;
 			if (!ok) prompt.error = this.controller.state.errorBanner ?? "Confirmation did not match";
 			else this.#clearPrompt();
 			return;
 		}
 		if (prompt.kind === "api-key-provider") {
-			this.#prompt = {
+			this.#openPrompt({
 				kind: "api-key-value",
 				label: "API key: ",
 				value: "",
 				masked: true,
 				error: null,
 				provider: prompt.value.trim(),
-			};
+			});
 			return;
 		}
 		if (prompt.kind === "api-key-value") {
@@ -949,9 +1635,16 @@ export class AuthGatewayConsole implements Component, Focusable {
 			const key = prompt.value;
 			prompt.value = "";
 			await this.controller.uploadApiKey(provider, key);
+			if (this.#prompt !== prompt) return;
 			this.#clearPrompt();
 			return;
 		}
+	}
+
+	#openPrompt(prompt: Omit<PromptState, "busy">): void {
+		this.controller.clearTransientBanner();
+		this.#prompt = { ...prompt, busy: null };
+		this.controller.setModalOpen(true);
 	}
 
 	#clearPrompt(): void {
@@ -980,7 +1673,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (this.#disposed || generation !== this.#loginGeneration || this.#accountLogin !== login) return;
 		this.#accountLogin = null;
 		if (result.ok) await this.controller.refresh();
-		else this.controller.setErrorBanner(result.message);
+		else this.controller.setTransientBanner(result.message);
 		this.controller.setModalOpen(false);
 	}
 
@@ -998,20 +1691,20 @@ export class AuthGatewayConsole implements Component, Focusable {
 		});
 	}
 
-	async #switchConnection(name: string): Promise<void> {
+	async #switchConnection(name: string): Promise<string | null> {
 		let nextConnection: ResolvedAuthGatewayConnection | null = null;
 		try {
 			nextConnection = await this.#profileStore.resolve(name);
-			if (this.#disposed) return;
+			if (this.#disposed) return null;
 			const nextClient = this.#createClient(nextConnection);
 			await nextClient.status(new AbortController().signal);
-			if (this.#disposed) return;
+			if (this.#disposed) return null;
 			this.#loginGeneration++;
 			this.#accountLogin?.abort();
 			this.#accountLogin = null;
 			this.#loginProviderSelector?.stopValidation();
 			this.#loginProviderSelector = null;
-			this.#choiceDialog = null;
+			this.#flowDialog?.close();
 			this.controller.close();
 			this.#connection = nextConnection;
 			this.#client = nextClient;
@@ -1019,13 +1712,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#mode = "list";
 			this.#help = false;
 			await this.controller.start();
+			return null;
 		} catch (error) {
-			if (!this.#disposed) {
-				this.controller.setErrorBanner(this.#switchConnectionError(error, nextConnection), {
-					preserveHealth: true,
-				});
-				this.controller.setModalOpen(false);
-			}
+			return this.#disposed ? null : this.#switchConnectionError(error, nextConnection);
 		}
 	}
 
@@ -1058,9 +1747,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#loginProviderSelector.routeMouse(event, line, innerCol);
 			return;
 		}
-		if (this.#choiceDialog) {
-			const line = event.row - this.#bodyRowStart - this.#choiceDialogBodyLineStart;
-			this.#choiceDialog.routeMouse(event, line, innerCol);
+		if (this.#flowDialog) {
+			const line = event.row - this.#bodyRowStart - this.#flowDialogBodyLineStart;
+			this.#flowDialog.routeMouse(event, line, innerCol);
 			return;
 		}
 		const tabLine = event.row - this.#tabRowStart;
@@ -1108,7 +1797,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#listItemBodyLineCount = 0;
 		this.#listItemBodyColumnEnd = 0;
 		this.#loginProviderBodyLineStart = 0;
-		this.#choiceDialogBodyLineStart = 0;
+		this.#flowDialogBodyLineStart = 0;
 		const state = this.controller.state;
 		lines.push(this.#statusLine(width));
 		if (state.errorBanner) lines.push(...wrapFreeform(state.errorBanner, width, "error"));
@@ -1118,9 +1807,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#loginProviderBodyLineStart = lines.length;
 			return fitRows([...lines, ...this.#loginProviderSelector.render(width)], rows, width);
 		}
-		if (this.#choiceDialog) {
-			this.#choiceDialogBodyLineStart = lines.length;
-			return fitRows([...lines, ...this.#choiceDialog.render(width)], rows, width);
+		if (this.#flowDialog) {
+			this.#flowDialogBodyLineStart = lines.length;
+			return fitRows([...lines, ...this.#flowDialog.render(width)], rows, width);
 		}
 		if (this.#prompt) return fitRows([...lines, ...this.#promptLines(width)], rows, width);
 		if (this.#accountLogin) return fitRows([...lines, ...this.#accountLoginLines(width)], rows, width);
@@ -1237,7 +1926,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 			...pools.map((item, index) =>
 				selectedLine(
 					index === this.controller.state.selected.pools,
-					`${item.name} · ${item.provider}/${item.model ?? "all"} · ${item.strategy}`,
+					`${item.name} · ${item.strategy} · ${item.members.length} accounts`,
 					width,
 				),
 			),
@@ -1299,8 +1988,17 @@ export class AuthGatewayConsole implements Component, Focusable {
 			`ACL rules: ${details?.acl.length ?? 0}`,
 			...(details?.acl.map(item => `  acl ${item.id} · ${item.effect} ${item.kind} ${sanitizeCell(item.pattern)}`) ??
 				[]),
-			`Pools: ${details?.pools.length ?? 0}`,
-			...(details?.pools.map(item => `  pool ${item.id} · ${sanitizeCell(item.name)}`) ?? []),
+			`Pools: ${details?.poolBindings.length ?? 0}`,
+			...(details?.poolBindings
+				.slice()
+				.sort((left, right) => left.position - right.position)
+				.map((binding, index) =>
+					selectedLine(
+						index === this.controller.state.selectedUserPoolBindingIndex,
+						`${binding.position + 1}. ${sanitizeCell(binding.pool.name)} · ${binding.pool.strategy} · ${binding.pool.members.length} accounts`,
+						width,
+					),
+				) ?? []),
 			`Usage requests: ${usage?.totals.requests ?? 0}`,
 		];
 		return lines.map(line => truncateToWidth(line, width));
@@ -1314,20 +2012,15 @@ export class AuthGatewayConsole implements Component, Focusable {
 		const lines = [
 			theme.bold("Details"),
 			`Name: ${sanitizeCell(selected.name)}`,
-			`Provider: ${sanitizeCell(selected.provider)}`,
-			`Model: ${sanitizeCell(selected.model ?? "all")}`,
 			`Strategy: ${selected.strategy}`,
-			"Create a replacement pool to change provider or model",
 			"Accounts:",
 			...(members.length === 0
 				? ["  none"]
-				: members.map((member, index) =>
-						selectedLine(
-							index === this.controller.state.selectedPoolMemberIndex,
-							`${member.credentialId} · position ${member.position}`,
-							width,
-						),
-					)),
+				: members.map((member, index) => {
+						const credential = this.#credentialById(member.credentialId);
+						const label = credential ? accountSummary(credential) : `#${member.credentialId} · unavailable`;
+						return selectedLine(index === this.controller.state.selectedPoolMemberIndex, label, width);
+					})),
 			`Bound users: ${users.map(item => sanitizeCell(item.name)).join(", ") || "none"}`,
 			theme.fg("dim", "[/] select account · +/- move selected account"),
 		];
@@ -1369,8 +2062,8 @@ export class AuthGatewayConsole implements Component, Focusable {
 		return [
 			theme.bold("Help"),
 			"Overview: status, principal, counts, switch connection, refresh",
-			"Users: c create, e edit, t enable/disable, U usage since, T token, v revoke token, a/x ACL, b/u pools, d delete, R rotate",
-			"Pools: c create, e edit, d delete, a add account, x remove account, [/] select account, +/- reorder",
+			"Users: c guided create, e guided edit, t enable/disable, U usage since, T token, v revoke token, a/x ACL, b/u pool pickers, [/] select pool, +/- reorder pools, d delete, R rotate",
+			"Pools: c guided create, e guided edit, d delete, a add account picker, x remove account picker, [/] select account, +/- reorder",
 			"Accounts: redacted list, c copy identifiers, local login, masked API-key add, OAuth refresh, remove",
 			"Audit: newest-first pages, user filter, text filter, detail inspector",
 			"Destructive actions require typed confirmation or y/N; self-disconnect uses disconnect <name>.",
@@ -1380,6 +2073,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#promptLines(width: number): string[] {
 		const prompt = this.#prompt;
 		if (!prompt) return [];
+		if (prompt.busy) return [prompt.busy].map(line => truncateToWidth(line, width));
 		const value = prompt.masked ? "•".repeat([...prompt.value].length) : sanitizeCell(prompt.value);
 		const cursor = this.focused && this.#useTerminalCursor ? "\x1b_pi:c\x07" : "";
 		const lines = [
@@ -1466,8 +2160,11 @@ function printablePromptInput(data: string): string {
 }
 
 function accountSummary(account: AuthGatewayCredentialSummary): string {
-	const identity = account.email ?? account.accountId ?? account.identityKey ?? `#${account.id}`;
-	return `${account.id} · ${account.provider} · ${account.type} · ${identity}`;
+	return `#${account.id} · ${account.provider} · ${account.type} · ${credentialIdentity(account)}`;
+}
+
+function credentialIdentity(account: AuthGatewayCredentialSummary): string {
+	return account.email ?? account.accountId ?? account.identityKey ?? "No non-secret identity";
 }
 
 function selectedLine(selected: boolean, text: string, width: number): string {

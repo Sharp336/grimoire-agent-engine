@@ -40,16 +40,13 @@ describe("auth-gateway management HTTP", () => {
 	});
 
 	test("requires an authenticated admin principal and rejects invalid management input", async () => {
-		harness = await createGatewayHarness({ bearerTokens: [] });
-		let response = await requestJson(harness.handle.url, "GET", "/v1/users", undefined);
-		expect(response.status).toBe(403);
-		expect(await readJson(response)).toEqual({
-			error: { code: "management_auth_required", message: "Management routes require an authenticated admin token" },
-		});
-		await closeGatewayHarness(harness);
-
 		harness = await createGatewayHarness();
+		let response = await requestJson(harness.handle.url, "GET", "/v1/users", undefined);
+		expect(response.status).toBe(401);
+		expect(await readJson(response)).toEqual({ error: { code: "unauthorized", message: "Unauthorized" } });
+
 		const regular = harness.accessStore.createUser({ name: "regular" });
+		const admin = harness.accessStore.createUser({ name: "inputadmin", role: "admin" });
 		response = await requestJson(harness.handle.url, "GET", "/v1/users", regular.token.value);
 		expect(response.status).toBe(403);
 		expect(await readJson(response)).toEqual({
@@ -58,13 +55,13 @@ describe("auth-gateway management HTTP", () => {
 
 		response = await fetch(`${harness.handle.url}/v1/users`, {
 			method: "POST",
-			headers: jsonHeaders("legacy-token"),
+			headers: jsonHeaders(admin.token.value),
 			body: "{",
 		});
 		expect(response.status).toBe(400);
 		expect(await readJson(response)).toEqual({ error: { code: "invalid_request", message: "Malformed JSON body" } });
 
-		response = await requestJson(harness.handle.url, "POST", "/v1/users", "legacy-token", {
+		response = await requestJson(harness.handle.url, "POST", "/v1/users", admin.token.value, {
 			name: "valid",
 			unexpected: true,
 		});
@@ -94,6 +91,7 @@ describe("auth-gateway management HTTP", () => {
 		expect(body.tokens).toBeArray();
 		expect(JSON.stringify(body.tokens)).not.toContain(String(firstToken.value));
 
+		expect(body.poolBindings).toEqual([]);
 		response = await requestJson(harness.handle.url, "PATCH", `/v1/users/${userId}`, "legacy-token", {
 			enabled: false,
 			role: "user",
@@ -149,23 +147,106 @@ describe("auth-gateway management HTTP", () => {
 		expect(response.status).toBe(404);
 	});
 
-	test("implements pool CRUD and validates live credential/provider pool members", async () => {
+	test("adds ACL batches atomically and reports request-order created flags", async () => {
+		harness = await createGatewayHarness();
+		const createdUser = harness.accessStore.createUser({ name: "batchuser" });
+		const userId = createdUser.user.id;
+
+		let response = await requestJson(harness.handle.url, "POST", `/v1/users/${userId}/acl/batch`, "legacy-token", {
+			rules: [],
+		});
+		expect(response.status).toBe(400);
+		expect(await readJson(response)).toEqual({
+			error: { code: "invalid_request", message: "ACL batch must contain 1 to 64 rules" },
+		});
+
+		response = await requestJson(harness.handle.url, "POST", `/v1/users/${userId}/acl/batch`, "legacy-token", {
+			rules: Array.from({ length: 65 }, () => ({ effect: "allow", kind: "route", pattern: "chat" })),
+		});
+		expect(response.status).toBe(400);
+		expect(await readJson(response)).toEqual({
+			error: { code: "invalid_request", message: "ACL batch must contain 1 to 64 rules" },
+		});
+
+		harness.accessStore.addAclRule(userId, { effect: "allow", kind: "route", pattern: "chat" });
+		const beforeInvalid = harness.accessStore.listAclRules(userId);
+		response = await requestJson(harness.handle.url, "POST", `/v1/users/${userId}/acl/batch`, "legacy-token", {
+			rules: [
+				{ effect: "allow", kind: "provider", pattern: "new-provider" },
+				{ effect: "allow", kind: "route", pattern: "not-a-route" },
+			],
+		});
+		expect(response.status).toBe(400);
+		expect(harness.accessStore.listAclRules(userId)).toEqual(beforeInvalid);
+
+		response = await requestJson(harness.handle.url, "POST", `/v1/users/${userId}/acl/batch`, "legacy-token", {
+			rules: [
+				{ effect: "allow", kind: "route", pattern: " chat " },
+				{ effect: "allow", kind: "provider", pattern: "mock" },
+				{ effect: "allow", kind: "provider", pattern: "mock" },
+				{ effect: "allow", kind: "route", pattern: " models " },
+			],
+		});
+		expect(response.status).toBe(201);
+		let body = expectObject(await readJson(response));
+		const results = body.results;
+		expect(results).toBeArray();
+		expect(results).toMatchObject([
+			{ created: false, rule: { effect: "allow", kind: "route", pattern: "chat" } },
+			{ created: true, rule: { effect: "allow", kind: "provider", pattern: "mock" } },
+			{ created: false, rule: { effect: "allow", kind: "provider", pattern: "mock" } },
+			{ created: true, rule: { effect: "allow", kind: "route", pattern: "models" } },
+		]);
+		const resultRows = results as Array<{ rule: { id: number } }>;
+		expect(resultRows[1]?.rule.id).toBe(resultRows[2]?.rule.id);
+
+		response = await requestJson(harness.handle.url, "POST", `/v1/users/${userId}/acl/batch`, "legacy-token", {
+			rules: [
+				{ effect: "allow", kind: "route", pattern: "chat" },
+				{ effect: "allow", kind: "provider", pattern: "mock" },
+				{ effect: "allow", kind: "route", pattern: "models" },
+			],
+		});
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(body.results).toMatchObject([{ created: false }, { created: false }, { created: false }]);
+	});
+
+	test("implements neutral pool CRUD, mixed-provider members, and ordered user bindings over HTTP", async () => {
 		harness = await createGatewayHarness({ credentials: [{ type: "api_key", key: "mock-key" }] });
 		const [credential] = harness.credentialStore.listAuthCredentials("mock");
-		if (!credential) throw new Error("expected credential row");
+		const [otherProviderCredential] = harness.credentialStore.upsertAuthCredentialForProvider("other", {
+			type: "api_key",
+			key: "other-key",
+		});
+		if (!credential || !otherProviderCredential) throw new Error("expected credential rows");
 
 		let response = await requestJson(harness.handle.url, "POST", "/v1/pools", "legacy-token", {
 			name: "mainpool",
-			provider: "mock",
-			model: "model-a",
 			strategy: "round-robin",
 		});
 		expect(response.status).toBe(201);
-		const body = expectObject(await readJson(response));
-		const poolId = Number(expectObject(body.pool).id);
+		let body = expectObject(await readJson(response));
+		const pool = expectObject(body.pool);
+		expect(pool).not.toHaveProperty("provider");
+		expect(pool).not.toHaveProperty("model");
+		const poolId = Number(pool.id);
+		response = await requestJson(harness.handle.url, "POST", "/v1/pools", "legacy-token", {
+			name: "legacyprovider",
+			provider: "mock",
+		});
+		expect(response.status).toBe(400);
+		expect(await readJson(response)).toEqual({
+			error: { code: "invalid_request", message: "Unknown field: provider" },
+		});
+		response = await requestJson(harness.handle.url, "POST", "/v1/pools", "legacy-token", {
+			name: "legacymodel",
+			model: "model-a",
+		});
+		expect(response.status).toBe(400);
+		expect(await readJson(response)).toEqual({ error: { code: "invalid_request", message: "Unknown field: model" } });
 		response = await requestJson(harness.handle.url, "POST", "/v1/pools", "legacy-token", {
 			name: "mainpool",
-			provider: "mock",
 		});
 		expect(response.status).toBe(409);
 
@@ -189,26 +270,64 @@ describe("auth-gateway management HTTP", () => {
 		});
 		expect(response.status).toBe(200);
 		response = await requestJson(harness.handle.url, "POST", `/v1/pools/${poolId}/members`, "legacy-token", {
+			credentialId: otherProviderCredential.id,
+		});
+		expect(response.status).toBe(201);
+		response = await requestJson(harness.handle.url, "PATCH", `/v1/pools/${poolId}/members`, "legacy-token", {
+			credentialIds: [otherProviderCredential.id, credential.id],
+		});
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(expectObject(body.pool).members).toMatchObject([
+			{ credentialId: otherProviderCredential.id, position: 0 },
+			{ credentialId: credential.id, position: 1 },
+		]);
+		response = await requestJson(harness.handle.url, "POST", `/v1/pools/${poolId}/members`, "legacy-token", {
 			credentialId: 999999,
 		});
 		expect(response.status).toBe(400);
-		response = await requestJson(
-			harness.handle.url,
-			"DELETE",
-			`/v1/pools/${poolId}/members/${credential.id}`,
-			"legacy-token",
-		);
-		expect(response.status).toBe(204);
+		expect(await readJson(response)).toEqual({
+			error: { code: "invalid_request", message: "credential must be active" },
+		});
 
+		const secondPoolResponse = await requestJson(harness.handle.url, "POST", "/v1/pools", "legacy-token", {
+			name: "secondpool",
+		});
+		expect(secondPoolResponse.status).toBe(201);
+		const secondPoolId = Number(expectObject(expectObject(await readJson(secondPoolResponse)).pool).id);
 		const user = harness.accessStore.createUser({ name: "bindinguser" });
 		response = await requestJson(harness.handle.url, "POST", `/v1/users/${user.user.id}/pools`, "legacy-token", {
 			poolId,
 		});
 		expect(response.status).toBe(201);
+		body = expectObject(await readJson(response));
+		expect(body).toMatchObject({ created: true, binding: { poolId, position: 0 } });
 		response = await requestJson(harness.handle.url, "POST", `/v1/users/${user.user.id}/pools`, "legacy-token", {
 			poolId,
 		});
 		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(body).toMatchObject({ created: false, binding: { poolId, position: 0 } });
+		response = await requestJson(harness.handle.url, "POST", `/v1/users/${user.user.id}/pools`, "legacy-token", {
+			poolId: secondPoolId,
+		});
+		expect(response.status).toBe(201);
+		response = await requestJson(harness.handle.url, "GET", `/v1/users/${user.user.id}/pools`, "legacy-token");
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(body.bindings).toMatchObject([
+			{ poolId, position: 0 },
+			{ poolId: secondPoolId, position: 1 },
+		]);
+		response = await requestJson(harness.handle.url, "PATCH", `/v1/users/${user.user.id}/pools`, "legacy-token", {
+			poolIds: [secondPoolId, poolId],
+		});
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(body.bindings).toMatchObject([
+			{ poolId: secondPoolId, position: 0 },
+			{ poolId, position: 1 },
+		]);
 		response = await requestJson(
 			harness.handle.url,
 			"DELETE",
@@ -217,6 +336,13 @@ describe("auth-gateway management HTTP", () => {
 		);
 		expect(response.status).toBe(204);
 
+		response = await requestJson(
+			harness.handle.url,
+			"DELETE",
+			`/v1/pools/${poolId}/members/${credential.id}`,
+			"legacy-token",
+		);
+		expect(response.status).toBe(204);
 		response = await requestJson(harness.handle.url, "DELETE", `/v1/pools/${poolId}`, "legacy-token");
 		expect(response.status).toBe(204);
 		response = await requestJson(harness.handle.url, "GET", `/v1/pools/${poolId}`, "legacy-token");
@@ -377,7 +503,7 @@ describe("auth-gateway management HTTP", () => {
 		expect(response.status).toBe(404);
 		expect(await readJson(response)).toEqual({ error: { code: "not_found", message: "credential not found" } });
 
-		const pool = harness.accessStore.createPool({ name: "protected", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "protected" });
 		harness.accessStore.addPoolCredential(pool.id, apiKeyRow.id);
 		response = await requestJson(
 			harness.handle.url,
@@ -429,7 +555,7 @@ describe("auth-gateway management HTTP", () => {
 		const rows = harness.credentialStore.listAuthCredentials("mock");
 		const [first, second, third] = rows;
 		if (!first || !second || !third) throw new Error("expected credential rows");
-		const pool = harness.accessStore.createPool({ name: "ordered", provider: "mock" });
+		const pool = harness.accessStore.createPool({ name: "ordered" });
 		harness.accessStore.addPoolCredential(pool.id, first.id);
 		harness.accessStore.addPoolCredential(pool.id, second.id);
 		harness.accessStore.addPoolCredential(pool.id, third.id);
@@ -471,12 +597,13 @@ describe("auth-gateway management HTTP", () => {
 		response = await requestJson(harness.handle.url, "PATCH", `/v1/pools/${pool.id}/members`, admin.token.value, {
 			credentialIds: [third.id, first.id, second.id, otherProviderRow.id],
 		});
-		expect(response.status).toBe(400);
-		expect(harness.accessStore.getPool(pool.id)?.members.map(memberRow => memberRow.credentialId)).toEqual([
-			third.id,
-			first.id,
-			second.id,
-			otherProviderRow.id,
+		expect(response.status).toBe(200);
+		body = expectObject(await readJson(response));
+		expect(expectObject(body.pool).members).toMatchObject([
+			{ credentialId: third.id, position: 0 },
+			{ credentialId: first.id, position: 1 },
+			{ credentialId: second.id, position: 2 },
+			{ credentialId: otherProviderRow.id, position: 3 },
 		]);
 
 		response = await requestJson(harness.handle.url, "POST", `/v1/users/${member.user.id}/pools`, admin.token.value, {

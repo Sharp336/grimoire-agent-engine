@@ -1,9 +1,18 @@
 import { type } from "arktype";
 import { credentialUploadRequestSchema } from "../auth-broker/wire-schemas";
 import type { AuthCredential } from "../auth-storage";
-import type { AuthGatewayAclRule, AuthGatewayPool, AuthGatewayUsageSummary, AuthGatewayUser } from "./access-control";
+import type { Api } from "../types";
+import type {
+	AuthGatewayAclBatchResult,
+	AuthGatewayAclRule,
+	AuthGatewayPool,
+	AuthGatewayUsageSummary,
+	AuthGatewayUser,
+	AuthGatewayUserPoolBinding,
+} from "./access-control";
 import { normalizeAuthGatewayAdminUrl } from "./admin-url";
 import {
+	authGatewayAclBatchResponseSchema,
 	authGatewayAclRuleResponseSchema,
 	authGatewayAdminStatusResponseSchema,
 	authGatewayAuditPageResponseSchema,
@@ -18,12 +27,15 @@ import {
 	authGatewayTokenResponseSchema,
 	authGatewayUsageResponseSchema,
 	authGatewayUserDetailsResponseSchema,
+	authGatewayUserPoolsResponseSchema,
 	authGatewayUserResponseSchema,
 	authGatewayUserSchema,
 	authGatewayUsersResponseSchema,
 } from "./management-schemas";
 import type {
 	AddAclRuleInput,
+	AddAclRulesInput,
+	AuthGatewayAclBatchResponse,
 	AuthGatewayAdminStatus,
 	AuthGatewayAdminStatusResponse,
 	AuthGatewayAuditPage,
@@ -33,6 +45,7 @@ import type {
 	AuthGatewayCredentialsResponse,
 	AuthGatewayCredentialUploadRequest,
 	AuthGatewayIssuedTokenValue,
+	AuthGatewayModelSummary,
 	AuthGatewayPoolBindResponse,
 	AuthGatewayPoolResponse,
 	AuthGatewayPoolsResponse,
@@ -41,6 +54,7 @@ import type {
 	AuthGatewayUsageResponse,
 	AuthGatewayUserDetails,
 	AuthGatewayUserDetailsResponse,
+	AuthGatewayUserPoolsResponse,
 	AuthGatewayUserResponse,
 	AuthGatewayUsersResponse,
 	CreatePoolInput,
@@ -63,6 +77,27 @@ interface AuthGatewayAdminRequestContext {
 	timeoutPromise: Promise<never>;
 }
 
+interface AuthGatewayModelListWireResponse {
+	object: "list";
+	data: Array<{
+		id: string;
+		object: "model";
+		owned_by: string;
+		api: Api;
+	}>;
+}
+
+const authGatewayModelListWireResponseSchema = type({
+	"+": "reject",
+	object: "'list'",
+	data: type({
+		"+": "reject",
+		id: "string",
+		object: "'model'",
+		owned_by: "string",
+		api: "string",
+	}).array(),
+});
 const authGatewayCreateUserResponseSchema = type({
 	"+": "reject",
 	user: authGatewayUserSchema,
@@ -212,6 +247,21 @@ export class AuthGatewayAdminClient {
 		).rule;
 	}
 
+	async addAclRules(
+		userId: number,
+		input: AddAclRulesInput,
+		signal?: AbortSignal,
+	): Promise<AuthGatewayAclBatchResult[]> {
+		return (
+			await this.#requestJson<AuthGatewayAclBatchResponse>(
+				"POST",
+				`/v1/users/${userId}/acl/batch`,
+				authGatewayAclBatchResponseSchema,
+				{ body: input, signal },
+			)
+		).results;
+	}
+
 	async deleteAclRule(userId: number, ruleId: number, signal?: AbortSignal): Promise<void> {
 		await this.#requestVoid("DELETE", `/v1/users/${userId}/acl/${ruleId}`, signal);
 	}
@@ -229,6 +279,21 @@ export class AuthGatewayAdminClient {
 
 	async unbindUserPool(userId: number, poolId: number, signal?: AbortSignal): Promise<void> {
 		await this.#requestVoid("DELETE", `/v1/users/${userId}/pools/${poolId}`, signal);
+	}
+
+	async setUserPoolOrder(
+		userId: number,
+		poolIds: readonly number[],
+		signal?: AbortSignal,
+	): Promise<AuthGatewayUserPoolBinding[]> {
+		return (
+			await this.#requestJson<AuthGatewayUserPoolsResponse>(
+				"PATCH",
+				`/v1/users/${userId}/pools`,
+				authGatewayUserPoolsResponseSchema,
+				{ body: { poolIds: [...poolIds] }, signal },
+			)
+		).bindings;
 	}
 
 	async getUserUsage(userId: number, since?: number, signal?: AbortSignal): Promise<AuthGatewayUsageSummary> {
@@ -326,6 +391,19 @@ export class AuthGatewayAdminClient {
 		).users;
 	}
 
+	async listModels(signal?: AbortSignal): Promise<AuthGatewayModelSummary[]> {
+		const response = await this.#requestJson<AuthGatewayModelListWireResponse>(
+			"GET",
+			"/v1/models",
+			authGatewayModelListWireResponseSchema,
+			{ signal },
+		);
+		return response.data.map(model => ({
+			id: model.id,
+			provider: model.owned_by,
+			api: model.api,
+		}));
+	}
 	async listCredentials(signal?: AbortSignal): Promise<AuthGatewayCredentialSummary[]> {
 		return (
 			await this.#requestJson<AuthGatewayCredentialsResponse>(

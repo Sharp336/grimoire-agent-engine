@@ -7,6 +7,13 @@ export const AUTH_GATEWAY_ACL_ROUTES = [
 	"usage",
 	"check",
 ] as const;
+export const AUTH_GATEWAY_BASIC_ROUTES = [
+	"chat",
+	"messages",
+	"responses",
+	"pi-native",
+	"models",
+] as const satisfies readonly AuthGatewayAclRoute[];
 export type AuthGatewayAclRoute = (typeof AUTH_GATEWAY_ACL_ROUTES)[number];
 export type AuthGatewayRouteFamily = AuthGatewayAclRoute | "management" | "unknown";
 export type AuthGatewayRole = "user" | "admin";
@@ -62,6 +69,17 @@ export interface AuthGatewayAclRule {
 	createdAt: number;
 }
 
+export interface AuthGatewayAclRuleInput {
+	effect: AuthGatewayAclEffect;
+	kind: AuthGatewayAclKind;
+	pattern: string;
+}
+
+export interface AuthGatewayAclBatchResult {
+	rule: AuthGatewayAclRule;
+	created: boolean;
+}
+
 export interface AuthGatewayPoolMember {
 	credentialId: number;
 	position: number;
@@ -71,12 +89,17 @@ export interface AuthGatewayPoolMember {
 export interface AuthGatewayPool {
 	id: number;
 	name: string;
-	provider: string;
-	model: string | null;
 	strategy: AuthGatewayPoolStrategy;
 	createdAt: number;
 	updatedAt: number;
 	members: AuthGatewayPoolMember[];
+}
+
+export interface AuthGatewayUserPoolBinding {
+	poolId: number;
+	position: number;
+	createdAt: number;
+	pool: AuthGatewayPool;
 }
 
 export interface AuthGatewayPrincipal {
@@ -100,8 +123,6 @@ export type AuthGatewayAccessDecision =
 
 export interface AuthGatewayPoolSelection {
 	poolId: number;
-	provider: string;
-	qualifiedModel: string | null;
 	strategy: AuthGatewayPoolStrategy;
 	credentialIds: number[];
 }
@@ -247,12 +268,6 @@ export function normalizeAuthGatewayAclRule(input: {
 	return { effect, kind, pattern: normalizeRoutePattern(pattern) };
 }
 
-export function normalizeAuthGatewayPoolModel(provider: string, model: string | undefined): string | null {
-	if (model === undefined || model.trim() === "") return null;
-	const value = model.trim();
-	return value.startsWith(`${provider}/`) ? value : `${provider}/${value}`;
-}
-
 export function evaluateAuthGatewayRouteAccess(
 	principal: AuthGatewayPrincipal,
 	rules: readonly AuthGatewayAclRule[],
@@ -328,23 +343,23 @@ export function evaluateAuthGatewayAccess(
 }
 
 export function resolveAuthGatewayPoolSelection(
-	pools: readonly AuthGatewayPool[],
-	provider: string,
-	qualifiedModel: string,
+	bindings: readonly AuthGatewayUserPoolBinding[],
+	eligibleCredentialIds: ReadonlySet<number> | readonly number[],
 ): AuthGatewayPoolSelection | null {
-	const exact = pools.find(pool => pool.provider === provider && pool.model === qualifiedModel);
-	const providerWide = pools.find(pool => pool.provider === provider && pool.model === null);
-	const pool = exact ?? providerWide;
-	if (!pool) return null;
-	return {
-		poolId: pool.id,
-		provider: pool.provider,
-		qualifiedModel: pool.model,
-		strategy: pool.strategy,
-		credentialIds: [...pool.members]
+	const eligible = new Set(eligibleCredentialIds);
+	for (const binding of [...bindings].sort((left, right) => left.position - right.position)) {
+		const credentialIds = [...binding.pool.members]
 			.sort((left, right) => left.position - right.position)
-			.map(member => member.credentialId),
-	};
+			.map(member => member.credentialId)
+			.filter(credentialId => eligible.has(credentialId));
+		if (credentialIds.length === 0) continue;
+		return {
+			poolId: binding.poolId,
+			strategy: binding.pool.strategy,
+			credentialIds,
+		};
+	}
+	return null;
 }
 
 function normalizeProviderPattern(pattern: string): string {

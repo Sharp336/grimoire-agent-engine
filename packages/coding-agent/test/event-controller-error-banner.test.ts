@@ -64,6 +64,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		applyRetryRecovery: vi.fn(),
 	};
 	const showPinnedError = vi.fn();
+	const showError = vi.fn();
 	const clearPinnedError = vi.fn();
 	const statusContainer = {
 		clear: vi.fn(),
@@ -105,16 +106,18 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,
-		editor: {},
+		editor: { getText: () => "" },
+		sessionManager: { getSessionName: () => "test-session" },
 		streamingComponent: streamingMessage ? streamingComponent : undefined,
 		streamingMessage,
 		chatContainer,
 		proseOnlyThinking: true,
 		pendingTools: new Map(),
 		flushCompactionQueue: vi.fn(async () => {}),
+		flushPendingModelSwitch: vi.fn(async () => {}),
 		showPinnedError,
 		clearPinnedError,
-		showError: vi.fn(),
+		showError,
 		showStatus: vi.fn(),
 		noteDisplayableThinkingContent,
 		get hasDisplayableThinkingContent() {
@@ -132,7 +135,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
-	return { controller, ctx, showPinnedError, clearPinnedError, streamingComponent, componentCalls };
+	return { controller, ctx, showPinnedError, clearPinnedError, showError, streamingComponent, componentCalls };
 }
 
 describe("EventController error banner", () => {
@@ -151,6 +154,44 @@ describe("EventController error banner", () => {
 		// The same error is mirrored in the banner, so the transcript's inline
 		// `Error: …` line is suppressed to avoid a duplicate render.
 		expect(streamingComponent.setErrorPinned).toHaveBeenCalledWith(true);
+	});
+
+	it("surfaces an agent-end-only provider error", async () => {
+		const errorMessage = "No eligible credential is available for this request";
+		const message = makeAssistantMessage({
+			content: [{ type: "text", text: "" }],
+			stopReason: "error",
+			errorMessage,
+		});
+		const { controller, showError, showPinnedError } = createFixture();
+
+		await controller.handleEvent({ type: "agent_end", messages: [message] } as Extract<
+			AgentSessionEvent,
+			{ type: "agent_end" }
+		>);
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledWith(errorMessage);
+		expect(showPinnedError).not.toHaveBeenCalled();
+	});
+
+	it("does not duplicate an agent-end error already pinned by message-end", async () => {
+		const errorMessage = "Output blocked by content filtering policy";
+		const message = makeAssistantMessage({ stopReason: "error", errorMessage });
+		const { controller, showError, showPinnedError } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({ type: "agent_end", messages: [message] } as Extract<
+			AgentSessionEvent,
+			{ type: "agent_end" }
+		>);
+
+		expect(showPinnedError).toHaveBeenCalledTimes(1);
+		expect(showPinnedError).toHaveBeenCalledWith(errorMessage);
+		expect(showError).not.toHaveBeenCalled();
 	});
 
 	it("restores the transcript inline error when the next turn starts", async () => {

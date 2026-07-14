@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { stripVTControlCharacters } from "node:util";
 import { type AuthCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -13,13 +12,21 @@ import type {
 	AuthGatewayAuditEvent,
 	AuthGatewayCredentialSummary,
 	AuthGatewayIssuedTokenValue,
+	AuthGatewayModelSummary,
 	AuthGatewayPool,
 	AuthGatewayToken,
 	AuthGatewayUsageSummary,
 	AuthGatewayUser,
 	AuthGatewayUserDetails,
+	AuthGatewayUserPoolBinding,
+	CreatePoolInput,
+	CreateUserInput,
+	UpdatePoolInput,
+	UpdateUserInput,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import {
+	AUTH_GATEWAY_ACL_ROUTES,
+	AUTH_GATEWAY_BASIC_ROUTES,
 	AuthGatewayAdminClient,
 	AuthGatewayAdminClientError,
 	SqliteAuthGatewayAccessStore,
@@ -45,10 +52,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/console-controller";
 import {
 	closeOneTimeTokenDialog,
+	copyOneTimeTokenDialogValue,
 	createOneTimeTokenDialog,
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/dialogs";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import * as clipboard from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -68,8 +77,6 @@ function deferred<T>(): Deferred<T> {
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	return { promise, resolve, reject };
 }
-
-type FakePoolStrategy = AuthGatewayPool["strategy"];
 
 function user(id: number, name: string, role: "user" | "admin" = "user"): AuthGatewayUser {
 	return {
@@ -112,8 +119,6 @@ function pool(id: number, name: string, credentialIds: number[] = []): AuthGatew
 	return {
 		id,
 		name,
-		provider: "openai",
-		model: "gpt-test",
 		strategy: "round-robin",
 		createdAt: NOW - 20_000,
 		updatedAt: NOW - 1_000,
@@ -122,6 +127,15 @@ function pool(id: number, name: string, credentialIds: number[] = []): AuthGatew
 			position,
 			createdAt: NOW - 9_000 + position,
 		})),
+	};
+}
+
+function poolBinding(poolValue: AuthGatewayPool, position: number): AuthGatewayUserPoolBinding {
+	return {
+		poolId: poolValue.id,
+		position,
+		createdAt: NOW - 7_000 + position,
+		pool: poolValue,
 	};
 }
 
@@ -142,6 +156,10 @@ function credential(
 		apiEndpoint: null,
 		expiresAt: null,
 	};
+}
+
+function modelSummary(id: string, provider = "openai"): AuthGatewayModelSummary {
+	return { id, provider, api: "openai" };
 }
 
 function auditEvent(id: number, beforeOffset = 0): AuthGatewayAuditEvent {
@@ -205,10 +223,10 @@ class FakeGatewayClient {
 	listPoolUsersCalls: number[] = [];
 	listCredentialsCalls = 0;
 	listAuditQueries: Array<{ userId?: number; limit?: number; before?: number }> = [];
-	createUserCalls: Array<{ name: string; description?: string; owner?: string; role?: "user" | "admin" }> = [];
+	createUserCalls: CreateUserInput[] = [];
 	updateUserCalls: Array<{
 		userId: number;
-		input: { description?: string | null; owner?: string | null; role?: "user" | "admin"; enabled?: boolean };
+		input: UpdateUserInput;
 	}> = [];
 	deleteUserCalls: number[] = [];
 	addUserTokenCalls: Array<{ userId: number; label?: string }> = [];
@@ -218,11 +236,17 @@ class FakeGatewayClient {
 		userId: number;
 		input: { effect: "allow" | "deny"; kind: "route" | "model" | "provider"; pattern: string };
 	}> = [];
+	addAclRulesCalls: Array<{
+		userId: number;
+		rules: Array<{ effect: "allow" | "deny"; kind: "route" | "model" | "provider"; pattern: string }>;
+	}> = [];
+	listModelsCalls = 0;
 	deleteAclRuleCalls: Array<{ userId: number; ruleId: number }> = [];
 	bindUserPoolCalls: Array<{ userId: number; poolId: number }> = [];
 	unbindUserPoolCalls: Array<{ userId: number; poolId: number }> = [];
-	createPoolCalls: Array<{ name: string; provider: string; model?: string; strategy?: FakePoolStrategy }> = [];
-	updatePoolCalls: Array<{ poolId: number; input: { name?: string; strategy?: FakePoolStrategy } }> = [];
+	setUserPoolOrderCalls: Array<{ userId: number; poolIds: number[] }> = [];
+	createPoolCalls: CreatePoolInput[] = [];
+	updatePoolCalls: Array<{ poolId: number; input: UpdatePoolInput }> = [];
 	deletePoolCalls: number[] = [];
 	addPoolCredentialCalls: Array<{ poolId: number; credentialId: number }> = [];
 	removePoolCredentialCalls: Array<{ poolId: number; credentialId: number }> = [];
@@ -238,6 +262,7 @@ class FakeGatewayClient {
 	users: AuthGatewayUser[] = [user(1, "alice", "admin"), user(2, "bob")];
 	pools: AuthGatewayPool[] = [pool(10, "primary", [11, 12])];
 	credentials: AuthGatewayCredentialSummary[] = [credential(11), credential(12, "openai", "api_key")];
+	userPoolIds = new Map<number, number[]>([[1, [10]]]);
 	tokens = new Map<number, AuthGatewayToken[]>([[1, [token(77, 1, "tok-current")]]]);
 	acl = new Map<number, AuthGatewayAclRule[]>([[1, [aclRule(301, 1)]]]);
 	auditPages = new Map<number | undefined, { events: AuthGatewayAuditEvent[]; nextBefore: number | null }>([
@@ -245,9 +270,21 @@ class FakeGatewayClient {
 		[50, { events: [auditEvent(3, 50)], nextBefore: null }],
 	]);
 	credentialListQueue: Deferred<AuthGatewayCredentialSummary[]>[] = [];
+	addAclRulesQueue: Deferred<Array<{ rule: AuthGatewayAclRule; created: boolean }>>[] = [];
+	addUserTokenQueue: Deferred<AuthGatewayIssuedTokenValue>[] = [];
+	rotateUserTokenQueue: Deferred<AuthGatewayIssuedTokenValue>[] = [];
+	models: AuthGatewayModelSummary[] = [modelSummary("gpt-test")];
+	modelListQueue: Deferred<AuthGatewayModelSummary[]>[] = [];
+	deleteAclRuleQueue: Deferred<void>[] = [];
 	auditQueue = new Map<number | undefined, Deferred<{ events: AuthGatewayAuditEvent[]; nextBefore: number | null }>>();
 	nextStatusError: Error | null = null;
 	nextUsersError: Error | null = null;
+	nextAclDeleteError: Error | null = null;
+	nextBindUserPoolError: Error | null = null;
+	nextUnbindUserPoolError: Error | null = null;
+	nextSetUserPoolOrderError: Error | null = null;
+	nextAddPoolCredentialError: Error | null = null;
+	nextRemovePoolCredentialError: Error | null = null;
 	nextCredentialRemoveError: Error | null = null;
 	nextCredentialRefreshError: Error | null = null;
 	abortedSignals: AbortSignal[] = [];
@@ -288,7 +325,12 @@ class FakeGatewayClient {
 			user: found,
 			tokens: this.tokens.get(userId) ?? [],
 			acl: this.acl.get(userId) ?? [],
-			pools: this.pools.slice(0, 1),
+			poolBindings:
+				this.userPoolIds
+					.get(userId)
+					?.map(poolId => this.pools.find(item => item.id === poolId))
+					.filter((item): item is AuthGatewayPool => item !== undefined)
+					.map((item, index) => poolBinding(item, index)) ?? [],
 		};
 	}
 
@@ -299,7 +341,7 @@ class FakeGatewayClient {
 	}
 
 	async createUser(
-		input: { name: string; description?: string; owner?: string; role?: "user" | "admin" },
+		input: CreateUserInput,
 		signal?: AbortSignal,
 	): Promise<{ user: AuthGatewayUser; token: AuthGatewayIssuedTokenValue }> {
 		this.createUserCalls.push(input);
@@ -311,11 +353,7 @@ class FakeGatewayClient {
 		return { user: created, token: { id: 900, value: SECRET_TOKEN, label: null } };
 	}
 
-	async updateUser(
-		userId: number,
-		input: { description?: string | null; owner?: string | null; role?: "user" | "admin"; enabled?: boolean },
-		signal?: AbortSignal,
-	): Promise<AuthGatewayUser> {
+	async updateUser(userId: number, input: UpdateUserInput, signal?: AbortSignal): Promise<AuthGatewayUser> {
 		this.updateUserCalls.push({ userId, input });
 		if (signal) this.abortedSignals.push(signal);
 		const existing = this.users.find(item => item.id === userId) ?? user(userId, `user-${userId}`);
@@ -335,6 +373,8 @@ class FakeGatewayClient {
 	async addUserToken(userId: number, label?: string, signal?: AbortSignal): Promise<AuthGatewayIssuedTokenValue> {
 		this.addUserTokenCalls.push({ userId, label });
 		if (signal) this.abortedSignals.push(signal);
+		const queued = this.addUserTokenQueue.shift();
+		if (queued) return await queued.promise;
 		return { id: 501, value: SECRET_TOKEN, label: label ?? null };
 	}
 
@@ -350,6 +390,8 @@ class FakeGatewayClient {
 	async rotateUserTokens(userId: number, _label?: string, signal?: AbortSignal): Promise<AuthGatewayIssuedTokenValue> {
 		this.rotateUserCalls.push(userId);
 		if (signal) this.abortedSignals.push(signal);
+		const queued = this.rotateUserTokenQueue.shift();
+		if (queued) return await queued.promise;
 		return { id: 500, value: SECRET_TOKEN, label: null };
 	}
 
@@ -365,9 +407,46 @@ class FakeGatewayClient {
 		return created;
 	}
 
+	async addAclRules(
+		userId: number,
+		input: { rules: Array<{ effect: "allow" | "deny"; kind: "route" | "model" | "provider"; pattern: string }> },
+		signal?: AbortSignal,
+	): Promise<Array<{ rule: AuthGatewayAclRule; created: boolean }>> {
+		this.addAclRulesCalls.push({ userId, rules: input.rules.map(rule => ({ ...rule })) });
+		if (signal) this.abortedSignals.push(signal);
+		const queued = this.addAclRulesQueue.shift();
+		if (queued) return await queued.promise;
+		const results: Array<{ rule: AuthGatewayAclRule; created: boolean }> = [];
+		for (const rule of input.rules) {
+			const existing = (this.acl.get(userId) ?? []).find(
+				item => item.effect === rule.effect && item.kind === rule.kind && item.pattern === rule.pattern,
+			);
+			if (existing) {
+				results.push({ rule: existing, created: false });
+				continue;
+			}
+			const created = {
+				id: 800 + this.addAclRulesCalls.length * 10 + results.length,
+				userId,
+				...rule,
+				createdAt: NOW,
+			};
+			this.acl.set(userId, [...(this.acl.get(userId) ?? []), created]);
+			results.push({ rule: created, created: true });
+		}
+		return results;
+	}
+
 	async deleteAclRule(userId: number, ruleId: number, signal?: AbortSignal): Promise<void> {
 		this.deleteAclRuleCalls.push({ userId, ruleId });
 		if (signal) this.abortedSignals.push(signal);
+		const queued = this.deleteAclRuleQueue.shift();
+		if (queued) await queued.promise;
+		if (this.nextAclDeleteError) {
+			const error = this.nextAclDeleteError;
+			this.nextAclDeleteError = null;
+			throw error;
+		}
 		this.acl.set(
 			userId,
 			(this.acl.get(userId) ?? []).filter(item => item.id !== ruleId),
@@ -377,35 +456,61 @@ class FakeGatewayClient {
 	async bindUserPool(userId: number, poolId: number, signal?: AbortSignal): Promise<boolean> {
 		this.bindUserPoolCalls.push({ userId, poolId });
 		if (signal) this.abortedSignals.push(signal);
+		if (this.nextBindUserPoolError) {
+			const error = this.nextBindUserPoolError;
+			this.nextBindUserPoolError = null;
+			throw error;
+		}
+		this.userPoolIds.set(userId, [...(this.userPoolIds.get(userId) ?? []), poolId]);
 		return true;
 	}
 
 	async unbindUserPool(userId: number, poolId: number, signal?: AbortSignal): Promise<void> {
 		this.unbindUserPoolCalls.push({ userId, poolId });
 		if (signal) this.abortedSignals.push(signal);
+		if (this.nextUnbindUserPoolError) {
+			const error = this.nextUnbindUserPoolError;
+			this.nextUnbindUserPoolError = null;
+			throw error;
+		}
+		this.userPoolIds.set(
+			userId,
+			(this.userPoolIds.get(userId) ?? []).filter(id => id !== poolId),
+		);
 	}
 
-	async createPool(
-		input: { name: string; provider: string; model?: string; strategy?: FakePoolStrategy },
+	async setUserPoolOrder(
+		userId: number,
+		poolIds: readonly number[],
 		signal?: AbortSignal,
-	): Promise<AuthGatewayPool> {
+	): Promise<AuthGatewayUserPoolBinding[]> {
+		this.setUserPoolOrderCalls.push({ userId, poolIds: [...poolIds] });
+		if (signal) this.abortedSignals.push(signal);
+		if (this.nextSetUserPoolOrderError) {
+			const error = this.nextSetUserPoolOrderError;
+			this.nextSetUserPoolOrderError = null;
+			throw error;
+		}
+		this.userPoolIds.set(userId, [...poolIds]);
+		const bindings = poolIds
+			.map(poolId => this.pools.find(item => item.id === poolId))
+			.filter((item): item is AuthGatewayPool => item !== undefined)
+			.map((item, index) => poolBinding(item, index));
+		return bindings;
+	}
+
+	async createPool(input: CreatePoolInput, signal?: AbortSignal): Promise<AuthGatewayPool> {
 		this.createPoolCalls.push(input);
 		if (signal) this.abortedSignals.push(signal);
 		const created = {
 			...pool(200 + this.createPoolCalls.length, input.name, []),
-			provider: input.provider,
-			model: input.model ?? null,
 			strategy: input.strategy ?? "round-robin",
 		};
 		this.pools = [...this.pools, created];
 		return created;
 	}
 
-	async updatePool(
-		poolId: number,
-		input: { name?: string; strategy?: FakePoolStrategy },
-		signal?: AbortSignal,
-	): Promise<AuthGatewayPool> {
+	async updatePool(poolId: number, input: UpdatePoolInput, signal?: AbortSignal): Promise<AuthGatewayPool> {
 		this.updatePoolCalls.push({ poolId, input });
 		if (signal) this.abortedSignals.push(signal);
 		const existing = this.pools.find(item => item.id === poolId) ?? pool(poolId, `pool-${poolId}`);
@@ -434,18 +539,32 @@ class FakeGatewayClient {
 	async addPoolCredential(poolId: number, credentialId: number, signal?: AbortSignal): Promise<AuthGatewayPool> {
 		this.addPoolCredentialCalls.push({ poolId, credentialId });
 		if (signal) this.abortedSignals.push(signal);
+		if (this.nextAddPoolCredentialError) {
+			const error = this.nextAddPoolCredentialError;
+			this.nextAddPoolCredentialError = null;
+			throw error;
+		}
 		const existing = this.pools.find(item => item.id === poolId) ?? pool(poolId, `pool-${poolId}`);
 		const nextOrder = [...existing.members.map(member => member.credentialId), credentialId];
-		this.pools = this.pools.map(item => (item.id === poolId ? pool(item.id, item.name, nextOrder) : item));
+		this.pools = this.pools.map(item =>
+			item.id === poolId ? { ...item, members: pool(item.id, item.name, nextOrder).members } : item,
+		);
 		return this.pools.find(item => item.id === poolId)!;
 	}
 
 	async removePoolCredential(poolId: number, credentialId: number, signal?: AbortSignal): Promise<void> {
 		this.removePoolCredentialCalls.push({ poolId, credentialId });
 		if (signal) this.abortedSignals.push(signal);
+		if (this.nextRemovePoolCredentialError) {
+			const error = this.nextRemovePoolCredentialError;
+			this.nextRemovePoolCredentialError = null;
+			throw error;
+		}
 		const existing = this.pools.find(item => item.id === poolId) ?? pool(poolId, `pool-${poolId}`);
 		const nextOrder = existing.members.map(member => member.credentialId).filter(id => id !== credentialId);
-		this.pools = this.pools.map(item => (item.id === poolId ? pool(item.id, item.name, nextOrder) : item));
+		this.pools = this.pools.map(item =>
+			item.id === poolId ? { ...item, members: pool(item.id, item.name, nextOrder).members } : item,
+		);
 	}
 
 	async setPoolCredentialOrder(poolId: number, credentialIds: readonly number[]): Promise<AuthGatewayPool> {
@@ -460,6 +579,14 @@ class FakeGatewayClient {
 		const queued = this.credentialListQueue.shift();
 		if (queued) return await queued.promise;
 		return this.credentials;
+	}
+
+	async listModels(signal?: AbortSignal): Promise<AuthGatewayModelSummary[]> {
+		this.listModelsCalls++;
+		if (signal) this.abortedSignals.push(signal);
+		const queued = this.modelListQueue.shift();
+		if (queued) return await queued.promise;
+		return this.models;
 	}
 
 	async removeCredential(credentialId: number): Promise<void> {
@@ -646,9 +773,9 @@ describe("AuthGatewayConsoleController", () => {
 		await ctl.switchTab("pools");
 		expect(fake.listPoolsCalls).toBe(1);
 		expect(fake.listPoolUsersCalls).toEqual([10]);
-		expect(fake.listCredentialsCalls).toBe(0);
-		await ctl.switchTab("accounts");
 		expect(fake.listCredentialsCalls).toBe(1);
+		await ctl.switchTab("accounts");
+		expect(fake.listCredentialsCalls).toBe(2);
 		ctl.close();
 	});
 
@@ -690,6 +817,112 @@ describe("AuthGatewayConsoleController", () => {
 		await advanceTimers(POLL_ERROR_BACKOFF_MS[3]);
 		expect(ctl.state.overview.stale).toBe(false);
 		expect(ctl.state.errorBanner).toBeNull();
+		ctl.close();
+	});
+
+	it("clears failed visible-load health after a successful retry", async () => {
+		const ctl = controller();
+		await ctl.start();
+		fake.nextUsersError = new Error("users temporarily unavailable");
+
+		await ctl.switchTab("users");
+
+		expect(ctl.state.health).toBe("Error");
+		expect(ctl.state.errorBanner).toContain("users temporarily unavailable");
+		expect(ctl.state.errorBannerSource).toBe("visible-load");
+		expect(ctl.state.users.status).toBe("error");
+		expect(ctl.state.users.data).toEqual([]);
+
+		fake.users = [user(9, "carol")];
+		await ctl.refresh();
+
+		expect(ctl.state.health).toBe("Connected");
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		expect(ctl.state.users.status).toBe("ready");
+		expect(ctl.state.users.error).toBeNull();
+		expect(ctl.state.users.stale).toBe(false);
+		expect(ctl.state.users.data.map(item => item.name)).toEqual(["carol"]);
+		ctl.close();
+	});
+
+	it("clears credential refresh feedback as soon as the retry starts", async () => {
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("accounts");
+		fake.nextCredentialRefreshError = new Error("credential refresh failed");
+
+		expect(await ctl.refreshSelectedCredential()).toBe(false);
+		expect(ctl.state.errorBanner).toContain("credential refresh failed");
+		expect(ctl.state.errorBannerSource).toBe("transient");
+		expect(ctl.state.health).toBe("Connected");
+
+		const retrying = ctl.refreshSelectedCredential();
+		expect(ctl.state.busyAction).toBe("refresh-credential");
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+
+		expect(await retrying).toBe(true);
+		expect(ctl.state.health).toBe("Connected");
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		expect(ctl.state.accounts.status).toBe("ready");
+		ctl.close();
+	});
+
+	it("clears pools auxiliary credential failures after a complete retry", async () => {
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("pools");
+		const failingCredentials = deferred<AuthGatewayCredentialSummary[]>();
+		fake.credentialListQueue.push(failingCredentials);
+
+		const partial = ctl.refresh();
+		failingCredentials.reject(new Error("credential list unavailable"));
+		expect(await partial).toBe(true);
+
+		expect(ctl.state.health).toBe("Error");
+		expect(ctl.state.errorBanner).toContain("credential list unavailable");
+		expect(ctl.state.errorBannerSource).toBe("visible-load");
+		expect(ctl.state.accounts.error).toContain("credential list unavailable");
+		expect(ctl.state.accounts.stale).toBe(true);
+
+		fake.credentials = [credential(21, "anthropic")];
+		await ctl.refresh();
+
+		expect(ctl.state.health).toBe("Connected");
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		expect(ctl.state.accounts.error).toBeNull();
+		expect(ctl.state.accounts.stale).toBe(false);
+		expect(ctl.state.accounts.data.map(item => item.id)).toEqual([21]);
+		ctl.close();
+	});
+
+	it("retries ACL suggestion loading without changing resource health", async () => {
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("users");
+		const failingModels = deferred<AuthGatewayModelSummary[]>();
+		fake.modelListQueue.push(failingModels);
+
+		const failedSuggestions = ctl.loadAclSuggestions();
+		failingModels.reject(new Error("suggestion helper unavailable"));
+
+		expect(await failedSuggestions).toBeNull();
+		expect(ctl.state.health).toBe("Connected");
+		expect(ctl.state.errorBanner).toContain("suggestion helper unavailable");
+		expect(ctl.state.errorBannerSource).toBe("transient");
+
+		const retrying = ctl.loadAclSuggestions();
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		const suggestions = await retrying;
+
+		expect(ctl.state.health).toBe("Connected");
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		expect(suggestions?.providers).toContain("openai");
 		ctl.close();
 	});
 
@@ -758,7 +991,7 @@ describe("AuthGatewayConsoleController", () => {
 		expect(fake.getUserCalls).toEqual([1, 2]);
 		await ctl.switchTab("accounts");
 		expect(fake.abortedSignals.some(signal => signal.aborted)).toBe(true);
-		pendingDetail.resolve({ user: user(2, "bob"), tokens: [], acl: [], pools: [] });
+		pendingDetail.resolve({ user: user(2, "bob"), tokens: [], acl: [], poolBindings: [] });
 		await flushAsync();
 		expect(ctl.state.userDetails[2]).toBeUndefined();
 		ctl.close();
@@ -768,10 +1001,10 @@ describe("AuthGatewayConsoleController", () => {
 		const ctl = controller();
 		await ctl.start();
 		await ctl.switchTab("users");
-		expect(await ctl.createUserFromInput("carol|desc|owner|admin")).toBe(true);
+		expect(await ctl.createUser({ name: "carol", description: "desc", owner: "owner", role: "admin" })).toBe(true);
 		expect(fake.createUserCalls).toEqual([{ name: "carol", description: "desc", owner: "owner", role: "admin" }]);
 		expect(fake.listUsersCalls).toBe(2);
-		expect(await ctl.updateSelectedUserFromInput("new desc|new owner|user")).toBe(true);
+		expect(await ctl.updateSelectedUser({ description: "new desc", owner: "new owner", role: "user" })).toBe(true);
 		expect(fake.updateUserCalls.at(-1)).toEqual({
 			userId: 1,
 			input: { description: "new desc", owner: "new owner", role: "user" },
@@ -798,6 +1031,23 @@ describe("AuthGatewayConsoleController", () => {
 		expect(fake.bindUserPoolCalls).toEqual([{ userId: 2, poolId: 10 }]);
 		expect(await ctl.unbindSelectedUserPool(10, "y")).toBe(true);
 		expect(fake.unbindUserPoolCalls).toEqual([{ userId: 2, poolId: 10 }]);
+		ctl.close();
+	});
+
+	it("keeps successful mutations complete when their post-refresh hits a visible outage", async () => {
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("users");
+		ctl.selectNext();
+		await flushAsync();
+		fake.nextUsersError = new Error("post-mutation users outage");
+
+		expect(await ctl.setSelectedUserEnabled(false, "y")).toBe(true);
+
+		expect(fake.updateUserCalls.at(-1)).toEqual({ userId: 2, input: { enabled: false } });
+		expect(ctl.state.health).toBe("Stale");
+		expect(ctl.state.errorBanner).toContain("post-mutation users outage");
+		expect(ctl.state.errorBannerSource).toBe("visible-load");
 		ctl.close();
 	});
 
@@ -835,16 +1085,14 @@ describe("AuthGatewayConsoleController", () => {
 		expect(closes).toContain("closed-disable");
 	});
 
-	it("supports full pool lifecycle mutations and reorders the selected member", async () => {
+	it("supports full typed pool lifecycle mutations and reorders the selected member", async () => {
 		const ctl = controller();
 		await ctl.start();
 		await ctl.switchTab("pools");
-		expect(await ctl.createPoolFromInput("backup|anthropic|claude|failover")).toBe(true);
-		expect(fake.createPoolCalls).toEqual([
-			{ name: "backup", provider: "anthropic", model: "claude", strategy: "failover" },
-		]);
+		expect(await ctl.createPool({ name: "backup", strategy: "failover" })).toBe(true);
+		expect(fake.createPoolCalls).toEqual([{ name: "backup", strategy: "failover" }]);
 		expect(fake.listPoolsCalls).toBe(2);
-		expect(await ctl.updateSelectedPoolFromInput("primary-renamed|failover")).toBe(true);
+		expect(await ctl.updateSelectedPool({ name: "primary-renamed", strategy: "failover" })).toBe(true);
 		expect(fake.updatePoolCalls.at(-1)).toEqual({
 			poolId: 10,
 			input: { name: "primary-renamed", strategy: "failover" },
@@ -861,28 +1109,17 @@ describe("AuthGatewayConsoleController", () => {
 		ctl.close();
 	});
 
-	it("passes least-used pool strategy and rejects invalid non-empty strategies", async () => {
+	it("passes least-used pool strategy through typed controller methods", async () => {
 		const ctl = controller();
 		await ctl.start();
 		await ctl.switchTab("pools");
-		expect(await ctl.createPoolFromInput("least|openai|gpt-test|least-used")).toBe(true);
-		expect(fake.createPoolCalls.at(-1)).toEqual({
-			name: "least",
-			provider: "openai",
-			model: "gpt-test",
-			strategy: "least-used",
-		});
-		expect(await ctl.updateSelectedPoolFromInput("primary-least|least-used")).toBe(true);
+		expect(await ctl.createPool({ name: "least", strategy: "least-used" })).toBe(true);
+		expect(fake.createPoolCalls.at(-1)).toEqual({ name: "least", strategy: "least-used" });
+		expect(await ctl.updateSelectedPool({ name: "primary-least", strategy: "least-used" })).toBe(true);
 		expect(fake.updatePoolCalls.at(-1)).toEqual({
 			poolId: 10,
 			input: { name: "primary-least", strategy: "least-used" },
 		});
-		const createCalls = fake.createPoolCalls.length;
-		expect(await ctl.createPoolFromInput("invalid|openai|gpt-test|bogus")).toBe(false);
-		expect(fake.createPoolCalls).toHaveLength(createCalls);
-		const updateCalls = fake.updatePoolCalls.length;
-		expect(await ctl.updateSelectedPoolFromInput("still-primary|bogus")).toBe(false);
-		expect(fake.updatePoolCalls).toHaveLength(updateCalls);
 		ctl.close();
 	});
 
@@ -973,6 +1210,12 @@ describe("AuthGatewayConsole", () => {
 		});
 	}
 
+	function clickRenderedLine(component: AuthGatewayConsole, text: string, col = 4): void {
+		const rowIndex = component.render(120).findIndex(line => Bun.stripANSI(line).includes(text));
+		expect(rowIndex).toBeGreaterThanOrEqual(0);
+		component.handleInput(`\x1b[<0;${col};${rowIndex + 1}M`);
+	}
+
 	it("renders five sanitized tabs with overview, list/detail, empty, loading, error, and stale states", async () => {
 		const component = makeConsole();
 		await component.ready;
@@ -1003,6 +1246,40 @@ describe("AuthGatewayConsole", () => {
 		component.handleInput("r");
 		await flushAsync();
 		expect(plain(component, 120)).toContain("No users found");
+		component.dispose?.();
+	});
+
+	it("preserves visible outage banners for dialogs but clears transient retry feedback", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		fake.nextUsersError = new Error("visible users outage");
+		component.handleInput("r");
+		await flushAsync();
+
+		expect(component.controller.state.health).toBe("Stale");
+		expect(plain(component, 120)).toContain("visible users outage");
+
+		component.handleInput("/");
+		expect(plain(component, 120)).toContain("visible users outage");
+		component.handleInput("\x1b");
+		component.handleInput("c");
+		expect(plain(component, 120)).toContain("visible users outage");
+		component.handleInput("\x1b");
+
+		component.handleInput("4");
+		await flushAsync();
+		fake.nextCredentialRefreshError = new Error("oauth refresh failed");
+		component.handleInput("o");
+		await flushAsync();
+		expect(component.controller.state.health).toBe("Connected");
+		expect(plain(component, 120)).toContain("oauth refresh failed");
+
+		component.handleInput("l");
+
+		expect(plain(component, 120)).not.toContain("oauth refresh failed");
+		expect(component.controller.state.health).toBe("Connected");
 		component.dispose?.();
 	});
 
@@ -1055,23 +1332,24 @@ describe("AuthGatewayConsole", () => {
 		expect(component.controller.state.health).toBe("Connected");
 		expect(component.controller.state.overview.status).toBe("ready");
 		expect(component.controller.state.overview.data).toBe(originalOverview);
-		expect(component.controller.state.errorBanner).toContain("401 unauthorized");
-		expect(component.controller.state.modalOpen).toBe(false);
+		expect(component.controller.state.errorBanner).toBeNull();
+		expect(component.controller.state.modalOpen).toBe(true);
 		expect(JSON.stringify(component.controller.state)).not.toContain(badSwitchToken);
 		const rendered = plain(component, 120);
 		expect(rendered).toContain("prod");
 		expect(rendered).toContain("401 unauthorized");
+		expect(rendered).toContain("Connection name:");
 		expect(rendered).not.toContain("broken");
 		expect(rendered).not.toContain(badSwitchToken);
 		expect(rendered).not.toContain("managed-token");
 		expect(rendered).not.toContain("\r");
 		expect(rendered).not.toContain("\t");
 		await advanceTimers(ACTIVE_POLL_MS);
-		expect(prodClient.statusCalls).toBe(2);
+		expect(prodClient.statusCalls).toBe(1);
 		component.dispose?.();
 	});
 
-	it("blocks keyboard and mouse input while an Overview switch probe is pending and clears modal state", async () => {
+	it("blocks keyboard and mouse input while an Overview switch probe is pending", async () => {
 		const resolvedStaging: ResolvedAuthGatewayConnection = {
 			profile: { name: "staging", url: "https://staging.example.com/omp", tokenSource: { type: "file" } },
 			token: "staging-token-never-render",
@@ -1100,6 +1378,7 @@ describe("AuthGatewayConsole", () => {
 		await flushAsync();
 		expect(component.controller.state.modalOpen).toBe(true);
 		expect(stagingClient.statusCalls).toBe(1);
+		expect(plain(component, 120)).toContain("Switching connection…");
 
 		component.render(120);
 		component.handleInput("2");
@@ -1122,25 +1401,34 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
-	it("keeps keyboard and mouse input gated until a failed Overview switch probe clears modal state", async () => {
+	it("keeps a failed Overview switch prompt open for a corrected retry", async () => {
 		const resolvedBroken: ResolvedAuthGatewayConnection = {
 			profile: { name: "broken", url: "https://broken.example.com/omp", tokenSource: { type: "file" } },
 			token: "broken-token-never-render",
 		};
+		const resolvedStaging: ResolvedAuthGatewayConnection = {
+			profile: { name: "staging", url: "https://staging.example.com/omp", tokenSource: { type: "file" } },
+			token: "staging-token-never-render",
+		};
 		const switchStore = {
-			async resolve(): Promise<ResolvedAuthGatewayConnection> {
-				return resolvedBroken;
+			async resolve(name?: string): Promise<ResolvedAuthGatewayConnection> {
+				return name === "staging" ? resolvedStaging : resolvedBroken;
 			},
 		};
 		const prodClient = fake;
 		const brokenClient = new FakeGatewayClient();
+		const stagingClient = new FakeGatewayClient();
+		stagingClient.statusResponse = { ...STATUS, version: "staging-version" };
 		const pendingStatus = deferred<AuthGatewayAdminStatus>();
 		brokenClient.statusQueue.push(pendingStatus);
 		const component = new AuthGatewayConsole({
 			connection,
 			profileStore: switchStore as unknown as AuthGatewayProfileStore,
-			createClient: resolved =>
-				(resolved.profile.name === "broken" ? brokenClient : prodClient) as unknown as AuthGatewayAdminClient,
+			createClient: resolved => {
+				if (resolved.profile.name === "broken") return brokenClient as unknown as AuthGatewayAdminClient;
+				if (resolved.profile.name === "staging") return stagingClient as unknown as AuthGatewayAdminClient;
+				return prodClient as unknown as AuthGatewayAdminClient;
+			},
 			host: { ui: new TUI(new VirtualTerminal(120, 32)), openInBrowser: () => {}, close: () => {} },
 		});
 		await component.ready;
@@ -1162,8 +1450,19 @@ describe("AuthGatewayConsole", () => {
 		await flushAsync();
 		await flushAsync();
 		expect(component.controller.state.connectionName).toBe("prod");
+		expect(component.controller.state.modalOpen).toBe(true);
+		expect(component.controller.state.errorBanner).toBeNull();
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("probe failed");
+		expect(rendered).toContain("Connection name:");
+
+		typeAndSubmit(component, "staging");
+		await flushAsync();
+		await flushAsync();
+		rendered = plain(component, 120);
+		expect(component.controller.state.connectionName).toBe("staging");
 		expect(component.controller.state.modalOpen).toBe(false);
-		expect(component.controller.state.errorBanner).toContain("probe failed");
+		expect(rendered).not.toContain("probe failed");
 		component.dispose?.();
 	});
 
@@ -1483,19 +1782,51 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
+	it("keeps submitted one-time-token prompts busy until the token result appears", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		const createToken = deferred<AuthGatewayIssuedTokenValue>();
+		fake.addUserTokenQueue.push(createToken);
+		component.handleInput("T");
+		typeAndSubmit(component, "cli");
+		await flushAsync();
+
+		expect(fake.addUserTokenCalls).toEqual([{ userId: 1, label: "cli" }]);
+		expect(plain(component, 120)).toContain("Creating token…");
+		component.handleInput("\x1b");
+		component.handleInput("\x03");
+		expect(plain(component, 120)).toContain("Creating token…");
+
+		createToken.resolve({ id: 502, value: SECRET_TOKEN, label: "cli" });
+		await waitUntil(() => plain(component, 120).includes("One-time token"), "created token dialog did not open");
+		component.handleInput("\n");
+		await flushAsync();
+
+		const rotatedToken = deferred<AuthGatewayIssuedTokenValue>();
+		fake.rotateUserTokenQueue.push(rotatedToken);
+		component.handleInput("R");
+		typeAndSubmit(component, "rotate alice");
+		await flushAsync();
+
+		expect(fake.rotateUserCalls).toEqual([1]);
+		expect(plain(component, 120)).toContain("Rotating tokens…");
+		component.handleInput("\x1b");
+		expect(plain(component, 120)).toContain("Rotating tokens…");
+
+		rotatedToken.resolve({ id: 503, value: SECRET_TOKEN, label: null });
+		await waitUntil(() => plain(component, 120).includes("One-time token"), "rotated token dialog did not open");
+		component.dispose?.();
+	});
+
 	it("opens one-time token modals once while failed post-mutation refetches mark stale", async () => {
 		const component = makeConsole();
 		await component.ready;
 		component.handleInput("2");
 		await flushAsync();
 		const actions = [
-			{
-				open: "c",
-				input: "carol|||user",
-				promptLabel: "Create user",
-				refetchError: "create refetch failed",
-				calls: () => fake.createUserCalls.length,
-			},
 			{
 				open: "T",
 				input: "cli",
@@ -1544,22 +1875,247 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
-	it("shows invalid pool strategy input instead of silently omitting it", async () => {
+	it("guides user form creation, preserves one-time tokens once, and keeps Escape reversible", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("c");
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("Create user name");
+		expect(rendered).toContain("Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.");
+		typeAndSubmit(component, "carol");
+		expect(plain(component, 120)).toContain("Create user description");
+		typeAndSubmit(component, "Batch runner");
+		expect(plain(component, 120)).toContain("Create user owner");
+		typeAndSubmit(component, "ops");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Create user role");
+		expect(rendered).toContain("ACLs and ordered pool bindings apply");
+		expect(rendered).toContain("Bypasses ACLs and cannot bind pools");
+		component.handleInput("\n");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Review user");
+		expect(rendered).toContain("Name: carol");
+		expect(rendered).toContain("Save user");
+		component.handleInput("\n");
+		await waitUntil(() => fake.createUserCalls.length === 1, "create user was not submitted");
+		expect(fake.createUserCalls).toEqual([
+			{ name: "carol", description: "Batch runner", owner: "ops", role: "user" },
+		]);
+		await waitUntil(() => plain(component, 120).includes("One-time token"), "create user token modal did not open");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("One-time token");
+		expect(Array.from(rendered.matchAll(new RegExp(SECRET_TOKEN, "g")))).toHaveLength(1);
+		component.handleInput("\n");
+		await flushAsync();
+		expect(JSON.stringify(component.controller.state)).not.toContain(SECRET_TOKEN);
+
+		component.handleInput("c");
+		typeAndSubmit(component, "dana");
+		expect(plain(component, 120)).toContain("Create user description");
+		component.handleInput("\x1b");
+		expect(plain(component, 120)).toContain("Create user name");
+		component.handleInput("\x1b");
+		expect(component.controller.state.modalOpen).toBe(false);
+		expect(plain(component, 120)).not.toContain("Create user");
+		component.dispose?.();
+	});
+
+	it("guides user form edit with current values and exact nullable update input", async () => {
+		fake.users = [{ ...user(1, "alice", "admin"), description: "Current desc", owner: "infra" }, user(2, "bob")];
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("e");
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("Edit user description");
+		expect(rendered).toContain("Current desc");
+		component.handleInput("\x15");
+		component.handleInput("\n");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Edit user owner");
+		expect(rendered).toContain("infra");
+		component.handleInput("\x15");
+		typeAndSubmit(component, "platform");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Edit user role");
+		expect(rendered).toContain("Current role: admin");
+		component.handleInput("\n");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Save changes");
+		component.handleInput("\n");
+		await waitUntil(() => fake.updateUserCalls.length === 1, "update user was not submitted");
+		expect(fake.updateUserCalls).toEqual([
+			{ userId: 1, input: { description: null, owner: "platform", role: "admin" } },
+		]);
+		component.dispose?.();
+	});
+
+	it("guides pool form create and edit without provider or model fields", async () => {
+		fake.pools = [{ ...pool(10, "primary", [11, 12]), strategy: "least-used" }];
 		const component = makeConsole();
 		await component.ready;
 		component.handleInput("3");
 		await flushAsync();
+		expect(fake.listCredentialsCalls).toBeGreaterThan(0);
+		expect(plain(component, 120)).toContain("primary · least-used · 2 accounts");
+
 		component.handleInput("c");
-		typeAndSubmit(component, "invalid|openai|gpt-test|bogus");
-		await flushAsync();
-		expect(fake.createPoolCalls).toEqual([]);
-		expect(plain(component, 120)).toContain("Invalid pool input");
-		component.handleInput("\x1b");
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("Create pool name");
+		expect(rendered).toContain("Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.");
+		expect(rendered).not.toContain("provider");
+		typeAndSubmit(component, "overflow");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Pool strategy");
+		expect(rendered).toContain("least-used ranks live OAuth usage for new/replacement sessions");
+		clickRenderedLine(component, "least-used");
+		expect(plain(component, 120)).toContain("Review pool");
+		component.handleInput("\n");
+		await waitUntil(() => fake.createPoolCalls.length === 1, "create pool was not submitted");
+		await waitUntil(() => !plain(component, 120).includes("Review pool"), "create pool flow did not close");
+		expect(fake.createPoolCalls).toEqual([{ name: "overflow", strategy: "least-used" }]);
+
 		component.handleInput("e");
-		typeAndSubmit(component, "primary|bogus");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Edit pool name");
+		expect(rendered).toContain("primary");
+		component.handleInput("\x15");
+		typeAndSubmit(component, "primary-renamed");
+		expect(plain(component, 120)).toContain("Current strategy: least-used");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await waitUntil(() => fake.updatePoolCalls.length === 1, "update pool was not submitted");
+		expect(fake.updatePoolCalls).toEqual([
+			{ poolId: 10, input: { name: "primary-renamed", strategy: "least-used" } },
+		]);
+		component.dispose?.();
+	});
+
+	it("uses redacted pool account pickers for add and removable unavailable members", async () => {
+		fake.pools = [pool(10, "primary", [11, 99])];
+		fake.credentials = [credential(11, "anthropic"), credential(12, "openai", "api_key")];
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("3");
 		await flushAsync();
-		expect(fake.updatePoolCalls).toEqual([]);
-		expect(plain(component, 120)).toContain("Invalid pool input");
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("#11 · anthropic · oauth");
+		expect(rendered).toContain("#99 · unavailable");
+
+		component.handleInput("a");
+		await waitUntil(
+			() => plain(component, 120).includes("#12 · openai · api_key"),
+			"pool account picker did not load",
+		);
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Add pool account");
+		expect(rendered).toContain("#12 · openai · api_key");
+		expect(rendered).not.toContain("#11 · anthropic");
+		clickRenderedLine(component, "#12 · openai · api_key");
+		await waitUntil(() => fake.addPoolCredentialCalls.length === 1, "add pool account was not submitted");
+		expect(fake.addPoolCredentialCalls).toEqual([{ poolId: 10, credentialId: 12 }]);
+		await waitUntil(() => !plain(component, 120).includes("Add pool account"), "add pool account flow did not close");
+
+		component.handleInput("x");
+		expect(plain(component, 120)).toContain("#99 · unavailable");
+		clickRenderedLine(component, "#99 · unavailable");
+		expect(plain(component, 120)).toContain("Remove pool account #99?");
+		component.handleInput("\n");
+		expect(fake.removePoolCredentialCalls).toEqual([]);
+		clickRenderedLine(component, "#99 · unavailable");
+		fake.nextRemovePoolCredentialError = new AuthGatewayAdminClientError(
+			500,
+			"internal_error",
+			"managed-token remove failed",
+		);
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await waitUntil(() => fake.removePoolCredentialCalls.length === 1, "remove pool account was not submitted");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("remove failed");
+		expect(rendered).toContain("[redacted]");
+		expect(rendered).toContain("Remove pool account #99?");
+		component.dispose?.();
+	});
+
+	it("uses pool binding pickers and exact order permutations for user binding reorder", async () => {
+		fake.pools = [pool(10, "primary", [11]), pool(20, "secondary", [12]), pool(30, "tertiary", [])];
+		fake.userPoolIds.set(1, [10, 20]);
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("1. primary · round-robin · 1 accounts");
+		expect(rendered).toContain("2. secondary · round-robin · 1 accounts");
+
+		component.handleInput("]");
+		expect(component.controller.state.selectedUserPoolBindingIndex).toBe(1);
+		component.handleInput("-");
+		await waitUntil(() => fake.setUserPoolOrderCalls.length === 1, "pool order was not submitted");
+		expect(fake.setUserPoolOrderCalls).toEqual([{ userId: 1, poolIds: [20, 10] }]);
+		expect(component.controller.state.selectedUserPoolBindingIndex).toBe(0);
+
+		component.handleInput("b");
+		await waitUntil(() => plain(component, 120).includes("tertiary"), "bind pool picker did not load");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Bind pool");
+		expect(rendered).toContain("tertiary");
+		expect(rendered).not.toContain("primary");
+		fake.nextBindUserPoolError = new AuthGatewayAdminClientError(409, "conflict", "managed-token bind failed");
+		clickRenderedLine(component, "tertiary");
+		await waitUntil(() => fake.bindUserPoolCalls.length === 1, "bind pool was not submitted");
+		await waitUntil(() => plain(component, 120).includes("bind failed"), "bind error did not render");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("bind failed");
+		expect(rendered).toContain("[redacted]");
+		expect(rendered).toContain("Bind pool");
+		component.handleInput("\x1b");
+		await waitUntil(() => component.controller.state.modalOpen === false, "bind flow did not close after Escape");
+
+		component.handleInput("u");
+		await waitUntil(() => plain(component, 120).includes("Unbind pool"), "unbind pool picker did not load");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Unbind pool");
+		expect(rendered).toContain("secondary");
+		clickRenderedLine(component, "secondary");
+		expect(plain(component, 120)).toContain("Unbind secondary?");
+		component.handleInput("\n");
+		expect(fake.unbindUserPoolCalls).toEqual([]);
+		clickRenderedLine(component, "secondary");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await waitUntil(() => fake.unbindUserPoolCalls.length === 1, "unbind pool was not submitted");
+		expect(fake.unbindUserPoolCalls).toEqual([{ userId: 1, poolId: 20 }]);
+		component.dispose?.();
+	});
+
+	it("keeps user pool binding unbind load failures reversible", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		delete component.controller.state.userDetails[1];
+		const detail = deferred<AuthGatewayUserDetails>();
+		fake.userDetailQueue.set(1, detail);
+
+		component.handleInput("u");
+		expect(component.controller.state.modalOpen).toBe(true);
+		expect(plain(component, 120)).toContain("Loading user pools…");
+
+		detail.reject(new AuthGatewayAdminClientError(500, "internal_error", "managed-token details failed"));
+		await waitUntil(() => plain(component, 120).includes("details failed"), "unbind detail error did not render");
+		const rendered = plain(component, 120);
+		expect(rendered).toContain("[redacted]");
+		expect(rendered).toContain("Unbind pool");
+		expect(component.controller.state.modalOpen).toBe(true);
+		component.handleInput("\x1b");
+		expect(component.controller.state.modalOpen).toBe(false);
+		expect(fake.unbindUserPoolCalls).toEqual([]);
 		component.dispose?.();
 	});
 
@@ -1630,7 +2186,6 @@ describe("AuthGatewayConsole", () => {
 		await component.ready;
 		component.handleInput("4");
 		await flushAsync();
-
 		component.handleInput("l");
 		let rendered = plain(component, 120);
 		expect(rendered).toContain("Select provider to login:");
@@ -1658,6 +2213,48 @@ describe("AuthGatewayConsole", () => {
 		expect(hostCloseCalls).toBe(0);
 		expect(component.controller.state.modalOpen).toBe(false);
 		expect(rendered).not.toContain("Select provider to login:");
+		component.dispose?.();
+	});
+
+	it("clears account-login cancellation when the provider retry UI opens", async () => {
+		let attempts = 0;
+		registerOAuthProvider({
+			id: "task6-retry-login",
+			name: "Task 6 Retry Login",
+			sourceId: OAUTH_SOURCE_ID,
+			async login() {
+				attempts++;
+				return attempts === 1 ? "" : API_KEY;
+			},
+		});
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		const listCredentialsCallsBeforeLogin = fake.listCredentialsCalls;
+
+		component.handleInput("l");
+		typeAndSubmit(component, "task6-retry-login");
+		await waitUntil(
+			() => plain(component, 120).includes("Account login cancelled"),
+			"cancelled login did not render",
+		);
+		expect(component.controller.state.errorBanner).toBe("Account login cancelled");
+		expect(component.controller.state.health).toBe("Connected");
+
+		component.handleInput("l");
+
+		expect(plain(component, 120)).toContain("Select provider to login:");
+		expect(plain(component, 120)).not.toContain("Account login cancelled");
+		typeAndSubmit(component, "task6-retry-login");
+		await waitUntil(() => fake.uploadCredentialCalls.length === 1, "retry login did not upload credential");
+
+		expect(fake.uploadCredentialCalls).toEqual([
+			{ provider: "task6-retry-login", credential: { type: "api_key", key: API_KEY } },
+		]);
+		expect(fake.listCredentialsCalls).toBe(listCredentialsCallsBeforeLogin + 1);
+		expect(component.controller.state.health).toBe("Connected");
+		expect(component.controller.state.errorBanner).toBeNull();
 		component.dispose?.();
 	});
 
@@ -1722,7 +2319,7 @@ describe("AuthGatewayConsole", () => {
 
 		const rawLines = component.render(80);
 		const innerPlainLines = rawLines.map(line =>
-			stripVTControlCharacters(line).replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd(),
+			Bun.stripANSI(line).replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd(),
 		);
 		for (const line of innerPlainLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
@@ -1738,7 +2335,7 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
-	it("guides ACL add through effect and kind choices", async () => {
+	it("keeps the ACL add flow reversible from pattern to Users without stale prompts", async () => {
 		const component = makeConsole();
 		await component.ready;
 		component.handleInput("2");
@@ -1746,52 +2343,286 @@ describe("AuthGatewayConsole", () => {
 
 		component.handleInput("a");
 		expect(plain(component, 120)).toContain("Add ACL effect");
-		component.handleInput("\x1b[B");
+		expect(component.controller.state.modalOpen).toBe(true);
 		component.handleInput("\n");
 		expect(plain(component, 120)).toContain("Add ACL kind");
 		component.handleInput("\n");
-		expect(plain(component, 120)).toContain("ACL pattern:");
+		await flushAsync();
+		expect(plain(component, 120)).toContain("Add ACL provider pattern");
+		expect(plain(component, 120)).toContain("Custom pattern…");
+
+		component.handleInput("\x1b");
+		expect(plain(component, 120)).toContain("Add ACL kind");
+		expect(plain(component, 120)).not.toContain("ACL pattern:");
+		component.handleInput("\x1b");
+		expect(plain(component, 120)).toContain("Add ACL effect");
+		component.handleInput("\x1b");
+		const rendered = plain(component, 120);
+		expect(rendered).toContain("Users");
+		expect(rendered).not.toContain("Add ACL");
+		expect(rendered).not.toContain("ACL pattern:");
+		expect(component.controller.state.modalOpen).toBe(false);
+		component.dispose?.();
+	});
+
+	it("closes the ACL flow with Ctrl-C from every depth", async () => {
+		for (const depth of ["effect", "kind", "pattern"] as const) {
+			const component = makeConsole();
+			await component.ready;
+			component.handleInput("2");
+			await flushAsync();
+			component.handleInput("a");
+			if (depth === "kind" || depth === "pattern") component.handleInput("\n");
+			if (depth === "pattern") component.handleInput("\n");
+
+			component.handleInput("\x03");
+
+			expect(component.controller.state.modalOpen).toBe(false);
+			expect(plain(component, 120)).not.toContain("Add ACL");
+			component.dispose?.();
+		}
+	});
+
+	it("renders catalog-backed ACL provider, model, and route suggestions", async () => {
+		fake.credentials = [credential(21, "zed"), credential(22, "anthropic"), credential(23, "openai", "api_key")];
+		fake.models = [
+			modelSummary("claude-3-5-sonnet", "anthropic"),
+			modelSummary("gemini-2.0-flash", "google"),
+			modelSummary("gpt-4o", "openai"),
+		];
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("a");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await flushAsync();
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("Add ACL provider pattern");
+		for (const provider of ["*", "anthropic", "google", "openai", "zed", "Custom pattern…"]) {
+			expect(rendered).toContain(provider);
+		}
+		expect(fake.listCredentialsCalls).toBeGreaterThan(0);
+		expect(fake.listModelsCalls).toBe(1);
+
+		component.handleInput("\x1b");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await flushAsync();
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Add ACL model pattern");
+		for (const pattern of [
+			"*",
+			"anthropic/*",
+			"google/*",
+			"openai/*",
+			"anthropic/claude-3-5-sonnet",
+			"google/gemini-2.0-flash",
+			"openai/gpt-4o",
+			"Custom pattern…",
+		]) {
+			expect(rendered).toContain(pattern);
+		}
+
+		component.handleInput("\x1b");
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Add ACL route pattern");
+		expect(rendered).toContain("Basic routes");
+		expect(rendered).toContain(AUTH_GATEWAY_BASIC_ROUTES.join(", "));
+		expect(rendered).toContain("All routes (*)");
+		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(rendered).toContain(route);
+		component.dispose?.();
+	});
+
+	it("routes ACL flow mouse selections through console body offsets", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("a");
+		component.render(120);
+
+		clickRenderedLine(component, "Deny");
+
+		expect(plain(component, 120)).toContain("Add ACL kind");
+		component.dispose?.();
+	});
+
+	it("submits Basic routes as one busy ACL batch and rejects duplicate submissions", async () => {
+		const pendingAdd = deferred<Array<{ rule: AuthGatewayAclRule; created: boolean }>>();
+		fake.addAclRulesQueue.push(pendingAdd);
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("a");
+		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await flushAsync();
+
+		expect(plain(component, 120)).toContain("Adding ACL rules…");
+		expect(fake.addAclRulesCalls).toEqual([
+			{
+				userId: 1,
+				rules: AUTH_GATEWAY_BASIC_ROUTES.map(pattern => ({ effect: "allow", kind: "route", pattern })),
+			},
+		]);
+		component.handleInput("\n");
+		clickRenderedLine(component, "Basic routes");
+		expect(fake.addAclRulesCalls).toHaveLength(1);
+
+		pendingAdd.resolve([]);
+		await flushAsync();
+		component.dispose?.();
+	});
+
+	it("guides custom ACL provider input through the same batch API", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("a");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await flushAsync();
+		clickRenderedLine(component, "Custom pattern…");
+		expect(plain(component, 120)).toContain("ACL provider pattern:");
 
 		typeAndSubmit(component, "   ");
 		await flushAsync();
-		expect(fake.addAclRuleCalls).toEqual([]);
+		expect(fake.addAclRulesCalls).toEqual([]);
 		expect(plain(component, 120)).toContain("ACL pattern is required");
 
 		component.handleInput("\x15");
 		typeAndSubmit(component, "anthropic");
 		await flushAsync();
-		expect(fake.addAclRuleCalls).toEqual([
-			{ userId: 1, input: { effect: "deny", kind: "provider", pattern: "anthropic" } },
+		expect(fake.addAclRulesCalls).toEqual([
+			{ userId: 1, rules: [{ effect: "deny", kind: "provider", pattern: "anthropic" }] },
 		]);
 		component.dispose?.();
 	});
 
-	it("guides ACL deletion through rule selection and confirmation", async () => {
+	it("loads ACL rules for deletion, defaults confirmation to No, and lets Escape/No return to the picker", async () => {
+		const pendingDetails = deferred<AuthGatewayUserDetails>();
+		fake.userDetailQueue.set(1, pendingDetails);
 		const component = makeConsole();
 		await component.ready;
 		component.handleInput("2");
 		await flushAsync();
 
 		component.handleInput("x");
-		const rendered = plain(component, 120);
-		expect(rendered).toContain("#301");
-		expect(rendered).toContain("allow route /v1/chat/*");
+		expect(fake.getUserCalls.filter(id => id === 1).length).toBeGreaterThan(0);
+		pendingDetails.resolve({ user: user(1, "alice", "admin"), tokens: [], acl: [aclRule(301, 1)], poolBindings: [] });
+		await waitUntil(() => plain(component, 120).includes("#301"), "ACL delete picker did not load details");
+		expect(plain(component, 120)).toContain("allow route /v1/chat/*");
+
 		component.handleInput("\n");
 		expect(plain(component, 120)).toContain("Delete ACL rule #301?");
-		component.handleInput("\x1b[B");
 		component.handleInput("\n");
 		expect(fake.deleteAclRuleCalls).toEqual([]);
+		expect(plain(component, 120)).toContain("Delete ACL rule");
 		expect(plain(component, 120)).toContain("#301");
 
 		component.handleInput("\n");
 		component.handleInput("\x1b");
-		expect(fake.deleteAclRuleCalls).toEqual([]);
+		pendingDetails.resolve({ user: user(1, "alice", "admin"), tokens: [], acl: [aclRule(301, 1)], poolBindings: [] });
+		expect(plain(component, 120)).toContain("Delete ACL rule");
 		expect(plain(component, 120)).toContain("#301");
+		component.dispose?.();
+	});
+
+	it("keeps ACL deletion feedback in the dialog until success refreshes the picker or closes the last rule", async () => {
+		fake.acl.set(1, [aclRule(301, 1), { ...aclRule(302, 1), pattern: "models" }]);
+		const pendingDelete = deferred<void>();
+		fake.deleteAclRuleQueue.push(pendingDelete);
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("x");
+		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await flushAsync();
+		expect(plain(component, 120)).toContain("Deleting ACL rule #301…");
+		expect(fake.deleteAclRuleCalls).toEqual([{ userId: 1, ruleId: 301 }]);
+
+		pendingDelete.resolve();
+		await waitUntil(
+			() => !plain(component, 120).includes("#301") && plain(component, 120).includes("#302"),
+			"ACL picker did not refresh after delete",
+		);
+		expect(component.controller.state.modalOpen).toBe(true);
 
 		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await waitUntil(() => component.controller.state.modalOpen === false, "last ACL delete did not close dialog");
+		expect(plain(component, 120)).toContain("Deleted ACL rule #302");
+		component.dispose?.();
+	});
+
+	it("keeps failed ACL deletion confirmation open with the sanitized error", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		fake.nextAclDeleteError = new AuthGatewayAdminClientError(404, "not_found", "managed-token missing");
+
+		component.handleInput("x");
+		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await flushAsync();
+
+		expect(component.controller.state.modalOpen).toBe(true);
+		expect(plain(component, 120)).toContain("not_found");
+		expect(plain(component, 120)).not.toContain("managed-token");
+		expect(plain(component, 120)).toContain("Delete ACL rule #301?");
+		component.dispose?.();
+	});
+
+	it("closes ACL deletion confirmation when the post-delete visible refresh fails", async () => {
+		fake.acl.set(1, [aclRule(301, 1), { ...aclRule(302, 1), pattern: "models" }]);
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("x");
+		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		const pendingRefresh = deferred<AuthGatewayUserDetails>();
+		fake.userDetailQueue.set(1, pendingRefresh);
 		component.handleInput("\n");
 		await flushAsync();
 		expect(fake.deleteAclRuleCalls).toEqual([{ userId: 1, ruleId: 301 }]);
+
+		pendingRefresh.reject(new Error("refresh failed for managed-token"));
+		await waitUntil(
+			() => component.controller.state.errorBanner?.includes("refresh failed") === true,
+			"refresh error did not reach controller state",
+		);
+
+		const rendered = plain(component, 120);
+		expect(component.controller.state.modalOpen).toBe(false);
+		expect(component.controller.state.errorBannerSource).toBe("visible-load");
+		expect(rendered).toContain("refresh failed");
+		expect(rendered).toContain("[redacted]");
+		expect(rendered).not.toContain("managed-token");
+		expect(rendered).not.toContain("Delete ACL rule #301?");
+		expect(rendered).not.toContain("Deleted ACL rule #301");
+		expect(rendered).not.toContain("Choose an ACL rule to delete.");
 		component.dispose?.();
 	});
 
@@ -2272,14 +3103,13 @@ describe("AuthGatewayConsole", () => {
 			const account = component.controller.state.accounts.data.find(candidate => candidate.provider === providerId);
 			if (!account) throw new Error("expected uploaded account");
 			await component.controller.switchTab("pools");
-			expect(await component.controller.createPoolFromInput(`task8-pool|${providerId}|model-a|round-robin`)).toBe(
-				true,
-			);
+			expect(await component.controller.createPool({ name: "task8-pool", strategy: "round-robin" })).toBe(true);
+			component.controller.setFilter("task8-pool");
 			const pool = component.controller.selectedPool();
 			if (!pool) throw new Error("expected created pool");
 			expect(await component.controller.addSelectedPoolCredential(account.id)).toBe(true);
 			await component.controller.switchTab("users");
-			expect(await component.controller.createUserFromInput("task8-user|||user")).toBe(true);
+			expect(await component.controller.createUser({ name: "task8-user", role: "user" })).toBe(true);
 			const managedToken = component.controller.state.oneTimeToken?.value;
 			if (!managedToken) throw new Error("expected managed user token");
 			component.controller.closeOneTimeToken();
@@ -2373,6 +3203,23 @@ describe("auth-gateway dialogs and account login", () => {
 		expect(JSON.stringify(dialog)).not.toContain(SECRET_TOKEN);
 	});
 
+	it("one-time token copy resets copied state before a failed retry", async () => {
+		const dialog = createOneTimeTokenDialog({ id: 1, value: SECRET_TOKEN, label: null });
+		const copySpy = vi
+			.spyOn(clipboard, "copyToClipboard")
+			.mockResolvedValueOnce()
+			.mockRejectedValueOnce(new Error("clipboard unavailable"));
+
+		await copyOneTimeTokenDialogValue(dialog);
+		expect(dialog.copied).toBe(true);
+
+		const failedCopy = copyOneTimeTokenDialogValue(dialog);
+		expect(dialog.copied).toBe(false);
+		await expect(failedCopy).rejects.toThrow("clipboard unavailable");
+		expect(dialog.copied).toBe(false);
+		expect(copySpy).toHaveBeenCalledTimes(2);
+	});
+
 	it("uploads acquired credentials exactly once and clears local references in finally", async () => {
 		const uploaded = await uploadAcquiredAuthGatewayCredential({
 			provider: "openai",
@@ -2426,6 +3273,12 @@ describe("auth-gateway dialogs and account login", () => {
 			requestRender: () => {},
 		});
 		const submitted = controller.oauthController.onPrompt?.({ message: "Paste provider API key:" });
+		controller.oauthController.onAuth?.({
+			url: "https://auth.example/start",
+			launchUrl: "https://auth.example/launch",
+			instructions: "Enter code ABCD",
+		});
+		controller.oauthController.onProgress?.("Waiting for browser authentication...");
 		expect(controller.state.prompt?.masked).toBe(true);
 
 		controller.handleInput("sk-live");
@@ -2436,7 +3289,13 @@ describe("auth-gateway dialogs and account login", () => {
 		expect(controller.state.prompt?.value).toBe("sk-livx");
 
 		controller.handleInput("\x03");
-		expect(controller.state.prompt).toBeNull();
+		expect(controller.state).toEqual({
+			authUrl: null,
+			launchUrl: null,
+			instructions: null,
+			progress: [],
+			prompt: null,
+		});
 		expect(controller.oauthController.signal?.aborted).toBe(true);
 		controller.handleInput("\n");
 		expect(await submitted).toBe("");
