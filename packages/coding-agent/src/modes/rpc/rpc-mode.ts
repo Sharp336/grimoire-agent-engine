@@ -35,6 +35,8 @@ import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./h
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcAgentEndStatus,
+	RpcAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -99,8 +101,6 @@ export const RPC_AGENT_END_MAX_BYTES = 1024 * 1024 - 64 * 1024;
 
 const rpcTextEncoder = new TextEncoder();
 
-type RpcAgentEndStatus = "completed" | "failed" | "cancelled";
-
 function serializedJsonBytes(value: object): number | undefined {
 	try {
 		const encoded = JSON.stringify(value);
@@ -134,7 +134,7 @@ function rpcAgentEndStatus(messages: Extract<AgentSessionEvent, { type: "agent_e
  * so an oversized aggregate can retain the newest contiguous suffix while the
  * terminal status and original count remain explicit.
  */
-export function boundedRpcSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
+export function boundedRpcSessionEvent(event: AgentSessionEvent): RpcAgentSessionEvent {
 	if (event.type !== "agent_end" || fitsRpcLine(event)) return event;
 
 	const terminal = {
