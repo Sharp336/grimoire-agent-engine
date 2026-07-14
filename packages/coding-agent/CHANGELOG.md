@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dynamic timeout window for bash commands: automatically adjusts per-call timeouts based on recent execution history keyed by command signature (first two tokens), enabled by default via `bash.dynamicTimeout.enabled`. Timeouts scale with confidence — conservative with few samples, aggressive with a full history window. Configurable via `bash.dynamicTimeout.multiplier`, `.minTimeout`, and `.maxTimeout`.
+
 ## [16.5.0] - 2026-07-13
 
 ### Breaking Changes

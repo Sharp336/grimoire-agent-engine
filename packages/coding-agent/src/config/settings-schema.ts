@@ -3795,6 +3795,50 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"bash.dynamicTimeout.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Dynamic Timeout",
+			description: "Automatically adjust bash command timeouts based on recent execution history per command type",
+		},
+	},
+
+	"bash.dynamicTimeout.multiplier": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Dynamic Timeout Multiplier",
+			description: "Headroom multiplier applied to the predicted duration (e.g. 2x = twice the p90 wall time)",
+		},
+	},
+
+	"bash.dynamicTimeout.minTimeout": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Dynamic Timeout Minimum",
+			description: "Hard floor in seconds for dynamically computed timeouts",
+		},
+	},
+
+	"bash.dynamicTimeout.maxTimeout": {
+		type: "number",
+		default: 600,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Dynamic Timeout Maximum",
+			description: "Ceiling in seconds for dynamically computed timeouts",
+		},
+	},
+
 	// Async jobs
 	"async.enabled": {
 		type: "boolean",
