@@ -1178,6 +1178,7 @@ describe("ExtensionRunner", () => {
 					input: async () => undefined,
 					notify: () => {},
 					onTerminalInput: () => () => {},
+					onTerminalFocusChange: () => () => {},
 					setStatus: () => {},
 					setWorkingMessage: () => {},
 					setWidget: () => {},

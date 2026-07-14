@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added extension-facing xterm focus reports with scoped DECSET 1004 lifecycle management.
+
 ## [16.5.1] - 2026-07-14
 
 ### Fixed

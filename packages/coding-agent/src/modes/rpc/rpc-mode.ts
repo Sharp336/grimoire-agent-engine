@@ -749,6 +749,11 @@ export async function runRpcMode(
 			return () => {};
 		}
 
+		onTerminalFocusChange(): () => void {
+			// Terminal focus reports are not supported in RPC mode.
+			return () => {};
+		}
+
 		notify(message: string, type?: "info" | "warning" | "error"): void {
 			// Fire and forget - no response needed
 			this.output({

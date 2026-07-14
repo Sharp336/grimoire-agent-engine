@@ -18,6 +18,7 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendUserMessageHandler,
+	TerminalFocusHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
@@ -64,6 +65,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
 
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
+	#extensionTerminalFocusUnsubscribers = new Set<() => void>();
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
@@ -86,6 +88,7 @@ export class ExtensionUiController {
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
+			onTerminalFocusChange: handler => this.addExtensionTerminalFocusListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
@@ -1072,6 +1075,17 @@ export class ExtensionUiController {
 		};
 	}
 
+	addExtensionTerminalFocusListener(handler: TerminalFocusHandler): () => void {
+		if (!this.ctx.ui.terminal.onFocusChange) return () => {};
+
+		const unsubscribe = this.ctx.ui.terminal.onFocusChange(handler);
+		this.#extensionTerminalFocusUnsubscribers.add(unsubscribe);
+		return () => {
+			unsubscribe();
+			this.#extensionTerminalFocusUnsubscribers.delete(unsubscribe);
+		};
+	}
+
 	clearHookWidgets(): void {
 		for (const widget of this.#hookWidgetsAbove.values()) {
 			widget.dispose?.();
@@ -1089,6 +1103,10 @@ export class ExtensionUiController {
 			unsubscribe();
 		}
 		this.#extensionTerminalInputUnsubscribers.clear();
+		for (const unsubscribe of this.#extensionTerminalFocusUnsubscribers) {
+			unsubscribe();
+		}
+		this.#extensionTerminalFocusUnsubscribers.clear();
 	}
 
 	showExtensionError(extensionPath: string, error: string): void {

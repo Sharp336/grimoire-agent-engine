@@ -450,6 +450,33 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const pops = writes.filter(w => w === "\x1b[<u").length;
 		expect(pops).toBe(1);
 	});
+
+	it("enables and consumes focus reports only while an extension subscribes", () => {
+		const { terminal, writes, received } = setupTerminal();
+		const focusStates: boolean[] = [];
+
+		expect(writes).not.toContain("\x1b[?1004h");
+		process.stdin.emit("data", "\x1b[I");
+		expect(received).toContain("\x1b[I");
+		received.length = 0;
+
+		const unsubscribe = terminal.onFocusChange(focused => {
+			focusStates.push(focused);
+		});
+		const unsubscribeLast = terminal.onFocusChange(() => {});
+		process.stdin.emit("data", "\x1b[I");
+		process.stdin.emit("data", "\x1b[O");
+		unsubscribe();
+		expect(writes).not.toContain("\x1b[?1004l");
+		unsubscribeLast();
+		expect(writes).toContain("\x1b[?1004l");
+		terminal.stop();
+
+		expect(writes).toContain("\x1b[?1004h");
+		expect(focusStates).toEqual([true, false]);
+		expect(received).not.toContain("\x1b[I");
+		expect(received).not.toContain("\x1b[O");
+	});
 });
 
 describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {

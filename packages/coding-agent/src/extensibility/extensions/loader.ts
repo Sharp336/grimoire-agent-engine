@@ -21,7 +21,12 @@ import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
-import { getAllPluginExtensionPaths } from "../plugins/loader";
+import {
+	getAllPluginExtensionPaths,
+	getEnabledPlugins,
+	getPluginSettings,
+	resolvePluginExtensionPaths,
+} from "../plugins/loader";
 import * as TypeBox from "../typebox";
 
 import { resolvePath, withExitGuard } from "../utils";
@@ -138,6 +143,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly extension: Extension,
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
+		private readonly pluginSettings: Readonly<Record<string, unknown>>,
 		public readonly events: EventBus,
 	) {}
 
@@ -200,6 +206,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
 		return this.runtime.flagValues.get(name);
+	}
+
+	getPluginSettings(): Readonly<Record<string, unknown>> {
+		return this.pluginSettings;
 	}
 
 	sendMessage<T = unknown>(
@@ -282,6 +292,18 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+async function getExtensionPluginSettings(
+	extensionPath: string,
+	cwd: string,
+): Promise<Readonly<Record<string, unknown>>> {
+	for (const plugin of await getEnabledPlugins(cwd)) {
+		if (resolvePluginExtensionPaths(plugin).includes(extensionPath)) {
+			return await getPluginSettings(plugin.name, cwd);
+		}
+	}
+	return {};
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
@@ -301,7 +323,8 @@ async function loadExtension(
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+		const pluginSettings = await getExtensionPluginSettings(resolvedPath, cwd);
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, pluginSettings, eventBus);
 		await withExitGuard(async () => {
 			await factory(api);
 		});
@@ -324,7 +347,7 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, {}, eventBus);
 	await factory(api);
 	return extension;
 }

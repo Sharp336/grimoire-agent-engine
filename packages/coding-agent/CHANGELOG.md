@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added extension access to resolved plugin settings and interactive terminal-focus notifications.
+
 ## [16.5.1] - 2026-07-14
 
 ### Changed

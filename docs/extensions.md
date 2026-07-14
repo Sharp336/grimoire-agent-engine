@@ -312,7 +312,7 @@ Supported:
 - dialogs: `select`, `confirm`, `input`, `editor`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
-- terminal title and working message (`setTitle`, `setWorkingMessage`)
+- terminal title, working message, and focus reports (`setTitle`, `setWorkingMessage`, `onTerminalFocusChange`)
 - notifications/status/editor text/terminal input/custom overlays
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
@@ -334,6 +334,7 @@ Current no-op methods in this controller:
 Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
+- `onTerminalFocusChange`
 - `custom`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
@@ -346,7 +347,7 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while only `select`/`confirm`/`input` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, editor, theming, terminal input, autocomplete stacking) is stubbed no-op.
+ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while only `select`/`confirm`/`input` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, editor, theming, terminal input/focus, autocomplete stacking) is stubbed no-op.
 
 ## Session and state patterns
 

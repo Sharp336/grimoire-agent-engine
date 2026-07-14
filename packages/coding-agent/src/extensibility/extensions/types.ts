@@ -197,6 +197,8 @@ export interface ExtensionUIDialogOptions {
 
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
+/** Terminal focus listener for extensions. */
+export type TerminalFocusHandler = (focused: boolean) => void | Promise<void>;
 
 export type WidgetPlacement = "aboveEditor" | "belowEditor";
 
@@ -247,6 +249,9 @@ export interface ExtensionUIContext {
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
+
+	/** Listen to xterm focus reports (interactive mode only). Returns an unsubscribe function. */
+	onTerminalFocusChange(handler: TerminalFocusHandler): () => void;
 
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
@@ -1146,6 +1151,9 @@ export interface ExtensionAPI {
 
 	/** Get the value of a registered CLI flag. */
 	getFlag(name: string): boolean | string | undefined;
+
+	/** Get resolved settings for the plugin that owns this extension. */
+	getPluginSettings(): Readonly<Record<string, unknown>>;
 
 	// =========================================================================
 	// Message Rendering

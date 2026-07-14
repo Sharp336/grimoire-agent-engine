@@ -318,6 +318,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?5522l" + // Disable enhanced paste notifications
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+					"\x1b[?1004l" + // Disable focus reporting
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
@@ -335,6 +336,7 @@ export function emergencyTerminalRestore(): void {
 		// Terminal may already be dead during crash cleanup - ignore errors
 	}
 }
+type TerminalFocusCallback = (focused: boolean) => void | Promise<void>;
 /** Terminal-reported appearance (dark/light mode). */
 export type TerminalAppearance = "dark" | "light";
 export interface Terminal {
@@ -410,8 +412,12 @@ export interface Terminal {
 	 * status resolves. Optional: only real terminals implement capability probing.
 	 */
 	onPrivateModeReport?(callback: (mode: number, supported: boolean) => void): void;
+	/**
+	 * Subscribe to xterm focus reports. The first subscriber enables DECSET
+	 * 1004; the final unsubscriber restores the terminal mode.
+	 */
+	onFocusChange?(callback: TerminalFocusCallback): () => void;
 }
-
 /**
  * True when stdout flows through a ConPTY pseudo-console (native win32, or
  * Linux running under WSL where stdout still crosses into ConPTY at the
@@ -498,6 +504,9 @@ export class ProcessTerminal implements Terminal {
 	/** Resolved DECRQM support per private mode (mode → supported). */
 	#privateModeSupport = new Map<number, boolean>();
 	#privateModeCallbacks: Array<(mode: number, supported: boolean) => void> = [];
+	#focusCallbacks: TerminalFocusCallback[] = [];
+	#focused: boolean | undefined;
+	#focusReportingActive = false;
 	/** Whether DEC 2048 in-band resize notifications are currently enabled. */
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
@@ -547,6 +556,26 @@ export class ProcessTerminal implements Terminal {
 				/* ignore callback errors */
 			}
 		}
+	}
+
+	onFocusChange(callback: TerminalFocusCallback): () => void {
+		this.#focusCallbacks.push(callback);
+		this.#setFocusReporting(true);
+		if (this.#focused !== undefined) {
+			try {
+				void Promise.resolve(callback(this.#focused)).catch(() => {});
+			} catch {
+				/* ignore callback errors */
+			}
+		}
+		let subscribed = true;
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			const index = this.#focusCallbacks.indexOf(callback);
+			if (index >= 0) this.#focusCallbacks.splice(index, 1);
+			if (this.#focusCallbacks.length === 0) this.#setFocusReporting(false);
+		};
 	}
 
 	onPrivateModeReport(callback: (mode: number, supported: boolean) => void): void {
@@ -610,6 +639,7 @@ export class ProcessTerminal implements Terminal {
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.#queryAndEnableKittyProtocol();
 		setHangulCompatibilityJamoWidth(resolveHangulCompatibilityJamoWidthFromTerminalIdentity());
+		if (this.#focusCallbacks.length > 0) this.#setFocusReporting(true);
 
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
@@ -765,6 +795,15 @@ export class ProcessTerminal implements Terminal {
 				if (this.#inputHandler) {
 					this.#inputHandler(sequence);
 				}
+				return;
+			}
+
+			if (this.#focusReportingActive && sequence === "\x1b[I") {
+				this.#handleFocusChange(true);
+				return;
+			}
+			if (this.#focusReportingActive && sequence === "\x1b[O") {
+				this.#handleFocusChange(false);
 				return;
 			}
 
@@ -1349,6 +1388,11 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;
 		}
+		if (this.#focusReportingActive) {
+			this.#safeWrite("\x1b[?1004l");
+			this.#focusReportingActive = false;
+		}
+		this.#focused = undefined;
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
 		this.#clearWindowsTerminalAppearancePoll();
@@ -1413,6 +1457,24 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#stdoutErrorCleanup?.();
 		this.#stdoutErrorCleanup = undefined;
+	}
+
+	#setFocusReporting(active: boolean): void {
+		if (this.#headless || this.#focusReportingActive === active) return;
+		this.#safeWrite(active ? "\x1b[?1004h" : "\x1b[?1004l");
+		this.#focusReportingActive = active;
+	}
+
+	#handleFocusChange(focused: boolean): void {
+		if (this.#focused === focused) return;
+		this.#focused = focused;
+		for (const callback of this.#focusCallbacks) {
+			try {
+				void Promise.resolve(callback(focused)).catch(() => {});
+			} catch {
+				/* ignore callback errors */
+			}
+		}
 	}
 
 	#ensureStdoutErrorHandler(): void {
