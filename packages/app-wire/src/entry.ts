@@ -1,6 +1,6 @@
-import { fail } from "./errors";
-import { boundedMap, controlFree, inputObject } from "./guards";
-import { type EntryId, entryId, type HostId, hostId, type SessionId, sessionId } from "./ids";
+import { fail } from "./errors.js";
+import { boundedMap, controlFree, inputObject } from "./guards.js";
+import { type EntryId, entryId, type HostId, hostId, type SessionId, sessionId } from "./ids.js";
 export interface DurableEntry {
 	id: EntryId;
 	parentId: EntryId | null;
