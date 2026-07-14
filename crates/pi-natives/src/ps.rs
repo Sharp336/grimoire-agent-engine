@@ -94,6 +94,12 @@ impl Process {
 		self.inner.pid()
 	}
 
+	/// Kernel-reported process creation marker used to detect PID reuse.
+	#[napi(getter)]
+	pub fn start_marker(&self) -> String {
+		self.inner.start_marker()
+	}
+
 	/// Parent process id for this process, when available.
 	#[napi(getter)]
 	pub fn ppid(&self) -> Option<i32> {

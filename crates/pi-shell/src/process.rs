@@ -51,6 +51,10 @@ mod platform {
 			self.pid
 		}
 
+		pub fn start_marker(&self) -> String {
+			format!("linux:{}", self.start_time)
+		}
+
 		pub fn children(&self) -> Vec<Self> {
 			if !self.live_identity() {
 				return Vec::new();
@@ -360,6 +364,10 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		pub fn start_marker(&self) -> String {
+			format!("darwin:{}:{}", self.start_tvsec, self.start_tvusec)
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -876,6 +884,10 @@ mod platform {
 			self.pid
 		}
 
+		pub fn start_marker(&self) -> String {
+			format!("win32:{}", self.creation_time)
+		}
+
 		pub fn parent_pid(&self) -> Option<i32> {
 			process_basic_information(self.handle.as_raw())
 				.and_then(|info| i32::try_from(info.inherited_from_unique_process_id).ok())
@@ -1294,6 +1306,15 @@ impl Process {
 	#[must_use]
 	pub const fn pid(&self) -> i32 {
 		self.inner.pid()
+	}
+
+	/// Kernel-reported process creation marker used to detect PID reuse.
+	///
+	/// The value is intentionally encoded as a string so Windows FILETIME and
+	/// other 64-bit counters retain their full precision across JavaScript.
+	#[must_use]
+	pub fn start_marker(&self) -> String {
+		self.inner.start_marker()
 	}
 
 	/// Parent process id for this process, when available.

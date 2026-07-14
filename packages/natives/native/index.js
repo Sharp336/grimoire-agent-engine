@@ -16,6 +16,7 @@ import { loadNative } from "./loader-state.js";
 const nativeBindings = loadNative();
 // --- generated native exports (do not edit) ---
 // classes
+export const AdvisoryLock = nativeBindings.AdvisoryLock;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
 export const Process = nativeBindings.Process;
@@ -61,6 +62,9 @@ export const parseKittySequence = nativeBindings.parseKittySequence;
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard;
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng;
 export const search = nativeBindings.search;
+export const secureListDirectory = nativeBindings.secureListDirectory;
+export const secureReadFile = nativeBindings.secureReadFile;
+export const secureWriteFileAtomic = nativeBindings.secureWriteFileAtomic;
 export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride;
 export const sliceWithWidth = nativeBindings.sliceWithWidth;
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars;

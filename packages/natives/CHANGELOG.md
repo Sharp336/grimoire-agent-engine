@@ -6,6 +6,12 @@
 
 - Fixed an issue where Windows PTY callers were forced through shell command re-quoting by supporting direct executable and argument launching.
 
+### Added
+
+- Added `AdvisoryLock.tryAcquire(path)`, a synchronous non-blocking native file guard for cross-process coordination. Guard files remain stable on disk, reject symlink/reparse, directory, foreign-owned, and non-private existing targets, and release automatically on explicit release, garbage collection, or process exit.
+- Added `Process.startMarker`, exposing the kernel-reported process creation identity needed to distinguish a live owner from a recycled PID.
+- Added `secureReadFile`, `secureListDirectory`, and revision-guarded `secureWriteFileAtomic` for root-confined local file access. Unix implementations traverse through stable directory handles without following symlinks; Windows currently reports the explicit `UNSUPPORTED` error until an equivalent handle-relative implementation is available.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added
