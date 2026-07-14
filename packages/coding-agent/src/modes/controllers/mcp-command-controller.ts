@@ -4,7 +4,7 @@
  * Handles /mcp subcommands for managing MCP servers.
  */
 import * as path from "node:path";
-import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -48,11 +48,11 @@ import {
 } from "../../mcp/smithery-registry";
 import type { MCPAuthConfig, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { shortenPath } from "../../tools/render-utils";
-import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "../components/chat-block";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
+import { renderOAuthAuthorizationLink } from "../components/oauth-authorization-link";
 import { TranscriptBlock } from "../components/transcript-container";
 import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
@@ -78,38 +78,6 @@ function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal, createErro
 	return Promise.race([promise, aborted.promise]).finally(() => {
 		signal.removeEventListener("abort", onAbort);
 	});
-}
-
-/**
- * Minimum column budget for URL wrapping. Below this the terminal is
- * effectively unusable, but we still emit chunks so no character is silently
- * dropped and the user can widen and reflow.
- */
-const MCP_AUTH_MIN_WRAP_WIDTH = 16;
-
-/**
- * Wrap `url` into rows that each fit inside `width`. When the label + URL fit
- * on one line, returns a single indented row; otherwise puts the label on its
- * own indented row and slices the URL into fixed-width chunks that start at
- * column 0. Continuation chunks carry ZERO leading bytes on purpose: a
- * multi-row terminal selection includes the newline plus any leading indent,
- * and while address bars strip newlines they preserve or percent-encode
- * embedded spaces — an indent would corrupt the URL at every chunk boundary
- * (silently, when the damage lands inside a query value).
- */
-function wrapUrlRows(label: string, url: string, width: number): string[] {
-	const indent = " ";
-	const sanitized = replaceTabs(url);
-	const effective = Math.max(MCP_AUTH_MIN_WRAP_WIDTH, Math.trunc(width));
-	const inlineWidth = indent.length + label.length + 1 + sanitized.length;
-	if (inlineWidth <= effective) {
-		return [`${indent}${theme.fg("muted", `${label} ${sanitized}`)}`];
-	}
-	const rows: string[] = [`${indent}${theme.fg("muted", label)}`];
-	for (let i = 0; i < sanitized.length; i += effective) {
-		rows.push(theme.fg("muted", sanitized.slice(i, i + effective)));
-	}
-	return rows;
 }
 
 /**
@@ -142,16 +110,7 @@ export class MCPAuthorizationLinkPrompt implements Component {
 	invalidate(): void {}
 
 	render(width: number): readonly string[] {
-		const link = urlHyperlinkAlways(this.#fullUrl, "Click here to authorize");
-		const lines: string[] = [
-			` ${theme.fg("success", "Open authorization URL:")}`,
-			` ${theme.fg("accent", link)}`,
-			...wrapUrlRows("Copy URL:", this.#fullUrl, width),
-		];
-		if (this.#launchUrl) {
-			lines.push(...wrapUrlRows("Local shortcut (this machine only):", this.#launchUrl, width));
-		}
-		return lines;
+		return renderOAuthAuthorizationLink(this.#fullUrl, this.#launchUrl, width);
 	}
 }
 

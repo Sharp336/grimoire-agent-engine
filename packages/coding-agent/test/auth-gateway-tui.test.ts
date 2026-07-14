@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { type AuthCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -31,6 +32,7 @@ import {
 	AuthGatewayProfileStore,
 	type ResolvedAuthGatewayConnection,
 } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	AuthGatewayAccountLoginController,
 	uploadAcquiredAuthGatewayCredential,
@@ -46,7 +48,7 @@ import {
 	createOneTimeTokenDialog,
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/dialogs";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -512,6 +514,8 @@ let fake: FakeGatewayClient;
 
 beforeEach(async () => {
 	await initTheme();
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
 	setSystemTime(NOW);
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-gateway-tui-"));
 	store = AuthGatewayProfileStore.open({
@@ -530,6 +534,7 @@ afterEach(async () => {
 	setSystemTime();
 	vi.restoreAllMocks();
 	unregisterOAuthProviders(OAUTH_SOURCE_ID);
+	resetSettingsForTest();
 	await removeWithRetries(root);
 });
 
@@ -553,6 +558,26 @@ function plain(component: { render(width: number): readonly string[] }, width = 
 		.render(width)
 		.map(line => Bun.stripANSI(line).replaceAll("\x1b_pi:c\x07", ""))
 		.join("\n");
+}
+
+const COPY_URL_LABEL = "Copy URL:";
+const SHORTCUT_LABEL = "Local shortcut (this machine only):";
+const LINEAR_AUTH_URL =
+	"https://auth.example.com/oauth/authorize?response_type=code&client_id=abcdefghij0123456789ABCDEFGHIJ0123456789&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&scope=read%20write%20mcp%3Aall&state=0123456789abcdef0123456789abcdef&code_challenge=5MlkJfN2GhX9uP0rQ7sT8vB1oCwDeFgHiJkLmNoPqRsTuVwXyZ&code_challenge_method=S256";
+
+function reassembleUrl(plainLines: string[], label: string): string {
+	const start = plainLines.findIndex(line => line.startsWith(` ${label}`));
+	if (start < 0) return "";
+	const first = plainLines[start]!;
+	const inlineMatch = first.match(new RegExp(`^ ${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (.*)$`));
+	if (inlineMatch) return inlineMatch[1]!;
+	let joined = "";
+	for (let i = start + 1; i < plainLines.length; i++) {
+		const line = plainLines[i]!;
+		if (line.startsWith(" ") || line.trim().length === 0) break;
+		joined += line;
+	}
+	return joined;
 }
 
 function typeAndSubmit(component: { handleInput(data: string): void }, value: string): void {
@@ -763,11 +788,11 @@ describe("AuthGatewayConsoleController", () => {
 		ctl.closeOneTimeToken();
 		expect(await ctl.revokeSelectedUserToken(501, "y")).toBe(true);
 		expect(fake.revokeUserTokenCalls).toEqual([{ userId: 2, tokenId: 501 }]);
-		expect(await ctl.addSelectedUserAclFromInput("deny|provider|anthropic")).toBe(true);
+		expect(await ctl.addSelectedUserAcl({ effect: "deny", kind: "provider", pattern: "anthropic" })).toBe(true);
 		expect(fake.addAclRuleCalls).toEqual([
 			{ userId: 2, input: { effect: "deny", kind: "provider", pattern: "anthropic" } },
 		]);
-		expect(await ctl.deleteSelectedUserAcl(301, "y")).toBe(true);
+		expect(await ctl.deleteSelectedUserAcl(301)).toBe(true);
 		expect(fake.deleteAclRuleCalls).toEqual([{ userId: 2, ruleId: 301 }]);
 		expect(await ctl.bindSelectedUserPool(10)).toBe(true);
 		expect(fake.bindUserPoolCalls).toEqual([{ userId: 2, poolId: 10 }]);
@@ -1230,6 +1255,74 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
+	it("keeps arrow selection working when a mouse tab click shares an input chunk", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.render(120);
+		component.handleInput("\x1b[<0;15;2M");
+		await flushAsync();
+		expect(component.controller.state.activeTab).toBe("users");
+		component.handleInput("\x1b[<0;15;2m\x1b[B");
+		expect(component.controller.state.selected.users).toBe(1);
+		component.dispose?.();
+	});
+
+	it("ignores body mouse clicks below the last row", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.render(120);
+		component.handleInput("\x1b[<0;5;25M");
+		expect(component.controller.state.selected.users).toBe(0);
+		component.dispose?.();
+	});
+
+	it("maps user row mouse clicks to the rendered row instead of the row above", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.render(120);
+		component.handleInput("\x1b[<0;5;7M");
+		expect(component.controller.state.selected.users).toBe(1);
+		component.dispose?.();
+	});
+
+	it("maps account row mouse clicks to the rendered row instead of the row above", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		component.render(120);
+		component.handleInput("\x1b[<0;5;7M");
+		expect(component.controller.state.selected.accounts).toBe(1);
+		component.dispose?.();
+	});
+
+	it("ignores account row-height clicks outside the list column", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		component.render(120);
+		component.handleInput("\x1b[<0;90;7M");
+		expect(component.controller.state.selected.accounts).toBe(0);
+		component.dispose?.();
+	});
+
+	it("handles large coalesced mouse drag bursts without recursive input crashes", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		component.render(120);
+		const dragChunk = Array.from({ length: 20_000 }, (_, index) => `\x1b[<32;5;${7 + (index % 3)}M`).join("");
+		component.handleInput(dragChunk);
+		expect(component.controller.state.activeTab).toBe("accounts");
+		component.dispose?.();
+	});
+
 	it("performs action confirmations and never sends mismatched destructive requests", async () => {
 		const component = makeConsole();
 		await component.ready;
@@ -1516,6 +1609,253 @@ describe("AuthGatewayConsole", () => {
 		component.dispose?.();
 	});
 
+	it("opens the /login provider picker from Accounts and cancels without starting login", async () => {
+		let loginStarts = 0;
+		registerOAuthProvider({
+			id: "task6-picker-login",
+			name: "Task 6 Picker Login",
+			sourceId: OAUTH_SOURCE_ID,
+			async login() {
+				loginStarts++;
+				return API_KEY;
+			},
+		});
+		let hostCloseCalls = 0;
+		const component = new AuthGatewayConsole({
+			connection,
+			profileStore: store,
+			createClient: () => fake as unknown as AuthGatewayAdminClient,
+			host: { ui: new TUI(new VirtualTerminal(120, 32)), openInBrowser: () => {}, close: () => hostCloseCalls++ },
+		});
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+
+		component.handleInput("l");
+		let rendered = plain(component, 120);
+		expect(rendered).toContain("Select provider to login:");
+		expect(rendered).not.toContain("Provider id:");
+		for (const char of "task6-picker-login") component.handleInput(char);
+		rendered = plain(component, 120);
+		expect(rendered).toContain("Task 6 Picker Login");
+		component.handleInput("\x1b");
+		await flushAsync();
+		expect(loginStarts).toBe(0);
+		expect(hostCloseCalls).toBe(0);
+		expect(component.controller.state.modalOpen).toBe(false);
+
+		component.handleInput("l");
+		for (const char of "provider-with-no-match") component.handleInput(char);
+		component.handleInput("\n");
+		await flushAsync();
+		expect(loginStarts).toBe(0);
+		expect(fake.uploadCredentialCalls).toEqual([]);
+		expect(component.controller.state.modalOpen).toBe(true);
+
+		component.handleInput("\x1b");
+		await flushAsync();
+		rendered = plain(component, 120);
+		expect(hostCloseCalls).toBe(0);
+		expect(component.controller.state.modalOpen).toBe(false);
+		expect(rendered).not.toContain("Select provider to login:");
+		component.dispose?.();
+	});
+
+	it("routes Accounts provider-picker mouse selection through console body offsets", async () => {
+		registerOAuthProvider({
+			id: "task6-picker-mouse",
+			name: "Task 6 Picker Mouse",
+			sourceId: OAUTH_SOURCE_ID,
+			async login() {
+				return API_KEY;
+			},
+		});
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		const listCredentialsCallsBeforeLogin = fake.listCredentialsCalls;
+
+		component.handleInput("l");
+		for (const char of "task6-picker-mouse") component.handleInput(char);
+		component.render(120);
+		component.handleInput("\x1b[<0;4;9M");
+		await waitUntil(() => fake.uploadCredentialCalls.length === 1, "provider-picker mouse did not select provider");
+
+		expect(fake.uploadCredentialCalls).toEqual([
+			{ provider: "task6-picker-mouse", credential: { type: "api_key", key: API_KEY } },
+		]);
+		expect(fake.listCredentialsCalls).toBe(listCredentialsCallsBeforeLogin + 1);
+		expect(component.controller.state.modalOpen).toBe(false);
+		component.dispose?.();
+	});
+
+	it("renders the full authorization URL as a clickable width-safe link", async () => {
+		const opened: string[] = [];
+		const pendingLogin = deferred<string>();
+		registerOAuthProvider({
+			id: "task6-link-oauth",
+			name: "Task 6 Link OAuth",
+			sourceId: OAUTH_SOURCE_ID,
+			async login(callbacks) {
+				callbacks.onAuth({
+					url: LINEAR_AUTH_URL,
+					launchUrl: "http://localhost:14570/launch",
+					instructions: "Use the browser to authorize",
+				});
+				callbacks.onProgress?.("Waiting for authorization");
+				return await pendingLogin.promise;
+			},
+		});
+		const component = new AuthGatewayConsole({
+			connection,
+			profileStore: store,
+			createClient: () => fake as unknown as AuthGatewayAdminClient,
+			host: { ui: new TUI(new VirtualTerminal(120, 32)), openInBrowser: url => opened.push(url), close: () => {} },
+		});
+		await component.ready;
+		component.handleInput("4");
+		await flushAsync();
+		component.handleInput("l");
+		typeAndSubmit(component, "task6-link-oauth");
+		await flushAsync();
+
+		const rawLines = component.render(80);
+		const innerPlainLines = rawLines.map(line =>
+			stripVTControlCharacters(line).replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd(),
+		);
+		for (const line of innerPlainLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		}
+		expect(opened).toEqual([LINEAR_AUTH_URL]);
+		expect(rawLines.join("\n").match(/\x1b\]8;[^;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)/)?.[1]).toBe(LINEAR_AUTH_URL);
+		expect(reassembleUrl(innerPlainLines, COPY_URL_LABEL)).toBe(LINEAR_AUTH_URL);
+		expect(reassembleUrl(innerPlainLines, COPY_URL_LABEL)).toEndWith("&code_challenge_method=S256");
+		expect(reassembleUrl(innerPlainLines, SHORTCUT_LABEL)).toBe("http://localhost:14570/launch");
+		expect(plain(component, 120)).not.toContain(OAUTH_ACCESS);
+		pendingLogin.resolve(API_KEY);
+		await waitUntil(() => fake.uploadCredentialCalls.length === 1, "link OAuth login did not finish");
+		component.dispose?.();
+	});
+
+	it("guides ACL add through effect and kind choices", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("a");
+		expect(plain(component, 120)).toContain("Add ACL effect");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		expect(plain(component, 120)).toContain("Add ACL kind");
+		component.handleInput("\n");
+		expect(plain(component, 120)).toContain("ACL pattern:");
+
+		typeAndSubmit(component, "   ");
+		await flushAsync();
+		expect(fake.addAclRuleCalls).toEqual([]);
+		expect(plain(component, 120)).toContain("ACL pattern is required");
+
+		component.handleInput("\x15");
+		typeAndSubmit(component, "anthropic");
+		await flushAsync();
+		expect(fake.addAclRuleCalls).toEqual([
+			{ userId: 1, input: { effect: "deny", kind: "provider", pattern: "anthropic" } },
+		]);
+		component.dispose?.();
+	});
+
+	it("guides ACL deletion through rule selection and confirmation", async () => {
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+
+		component.handleInput("x");
+		const rendered = plain(component, 120);
+		expect(rendered).toContain("#301");
+		expect(rendered).toContain("allow route /v1/chat/*");
+		component.handleInput("\n");
+		expect(plain(component, 120)).toContain("Delete ACL rule #301?");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		expect(fake.deleteAclRuleCalls).toEqual([]);
+		expect(plain(component, 120)).toContain("#301");
+
+		component.handleInput("\n");
+		component.handleInput("\x1b");
+		expect(fake.deleteAclRuleCalls).toEqual([]);
+		expect(plain(component, 120)).toContain("#301");
+
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await flushAsync();
+		expect(fake.deleteAclRuleCalls).toEqual([{ userId: 1, ruleId: 301 }]);
+		component.dispose?.();
+	});
+
+	it("clears list filters before closing the console", async () => {
+		let hostCloseCalls = 0;
+		const component = new AuthGatewayConsole({
+			connection,
+			profileStore: store,
+			createClient: () => fake as unknown as AuthGatewayAdminClient,
+			host: { ui: new TUI(new VirtualTerminal(120, 32)), openInBrowser: () => {}, close: () => hostCloseCalls++ },
+		});
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("/");
+		typeAndSubmit(component, "bob");
+		expect(plain(component, 120)).toContain("filter: bob");
+		expect(plain(component, 120)).toContain("Esc clear filter");
+
+		component.handleInput("\x1b");
+		await flushAsync();
+		expect(component.controller.state.filter).toBe("");
+		expect(hostCloseCalls).toBe(0);
+		expect(plain(component, 120)).toContain("Esc close");
+		expect(plain(component, 120)).toContain("alice");
+
+		component.handleInput("\x1b");
+		expect(hostCloseCalls).toBe(1);
+		component.dispose?.();
+	});
+
+	it("clears Audit text and user filters together before closing", async () => {
+		let hostCloseCalls = 0;
+		const component = new AuthGatewayConsole({
+			connection,
+			profileStore: store,
+			createClient: () => fake as unknown as AuthGatewayAdminClient,
+			host: { ui: new TUI(new VirtualTerminal(120, 32)), openInBrowser: () => {}, close: () => hostCloseCalls++ },
+		});
+		await component.ready;
+		component.handleInput("5");
+		await flushAsync();
+		component.handleInput("u");
+		typeAndSubmit(component, "2");
+		await flushAsync();
+		component.handleInput("/");
+		typeAndSubmit(component, "req-1");
+		expect(plain(component, 120)).toContain("text: req-1");
+		expect(plain(component, 120)).toContain("user: 2");
+		const queriesBeforeClear = fake.listAuditQueries.length;
+
+		component.handleInput("\x1b");
+		await flushAsync();
+		expect(component.controller.state.audit.textFilter).toBe("");
+		expect(component.controller.state.audit.userFilter).toBeNull();
+		expect(hostCloseCalls).toBe(0);
+		expect(fake.listAuditQueries).toHaveLength(queriesBeforeClear + 1);
+		expect(fake.listAuditQueries.at(-1)).toEqual({ limit: 50 });
+
+		component.handleInput("\x1b");
+		expect(hostCloseCalls).toBe(1);
+		component.dispose?.();
+	});
+
 	it("blocks normal console shortcuts while account login waits without a prompt and cancels with Esc or Ctrl-C", async () => {
 		const loginWaits = [deferred<string>(), deferred<string>()];
 		let loginCount = 0;
@@ -1670,7 +2010,7 @@ describe("AuthGatewayConsole", () => {
 		component.handleInput("l");
 		typeAndSubmit(component, "task6-oauth");
 		await flushAsync();
-		expect(opened).toEqual(["https://auth.example.com/launch"]);
+		expect(opened).toEqual(["https://auth.example.com/full"]);
 		expect(plain(component, 120)).toContain("Enter the displayed code");
 		expect(plain(component, 120)).toContain("Waiting for authorization");
 		typeAndSubmit(component, "manual-code");
@@ -1948,11 +2288,21 @@ describe("AuthGatewayConsole", () => {
 				"created managed user was not refetched",
 			);
 			component.controller.setFilter("task8-user");
-			expect(await component.controller.addSelectedUserAclFromInput("allow|route|chat")).toBe(true);
+			expect(
+				await component.controller.addSelectedUserAcl({ effect: "allow", kind: "route", pattern: "chat" }),
+			).toBe(true);
 			component.controller.setFilter("task8-user");
-			expect(await component.controller.addSelectedUserAclFromInput(`allow|provider|${providerId}`)).toBe(true);
+			expect(
+				await component.controller.addSelectedUserAcl({ effect: "allow", kind: "provider", pattern: providerId }),
+			).toBe(true);
 			component.controller.setFilter("task8-user");
-			expect(await component.controller.addSelectedUserAclFromInput(`allow|model|${providerId}/model-a`)).toBe(true);
+			expect(
+				await component.controller.addSelectedUserAcl({
+					effect: "allow",
+					kind: "model",
+					pattern: `${providerId}/model-a`,
+				}),
+			).toBe(true);
 			component.controller.setFilter("task8-user");
 			expect(await component.controller.bindSelectedUserPool(pool.id)).toBe(true);
 			const response = await fetch(`${gatewayHandle.url}/v1/chat/completions`, {

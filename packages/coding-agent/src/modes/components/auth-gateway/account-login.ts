@@ -1,13 +1,6 @@
 import { type AcquiredAuthCredential, type AuthCredential, acquireAuthCredential } from "@oh-my-pi/pi-ai";
 import type { AuthGatewayAdminClient, AuthGatewayCredentialSummary } from "@oh-my-pi/pi-ai/auth-gateway";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type {
-	OAuthAuthInfo,
-	OAuthController,
-	OAuthPrompt,
-	OAuthProviderId,
-	OAuthProviderInfo,
-} from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthAuthInfo, OAuthController, OAuthPrompt, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 
 export interface AuthGatewayAccountLoginResult {
 	ok: boolean;
@@ -36,6 +29,7 @@ export interface AuthGatewayAccountLoginPromptState {
 
 export interface AuthGatewayAccountLoginState {
 	authUrl: string | null;
+	launchUrl: string | null;
 	instructions: string | null;
 	progress: string[];
 	prompt: AuthGatewayAccountLoginPromptState | null;
@@ -51,7 +45,13 @@ export class AuthGatewayAccountLoginController {
 	readonly #openInBrowser: (url: string) => void;
 	readonly #requestRender: () => void;
 	readonly #abort = new AbortController();
-	#state: AuthGatewayAccountLoginState = { authUrl: null, instructions: null, progress: [], prompt: null };
+	#state: AuthGatewayAccountLoginState = {
+		authUrl: null,
+		launchUrl: null,
+		instructions: null,
+		progress: [],
+		prompt: null,
+	};
 	#pendingPrompt: PromiseWithResolvers<string> | null = null;
 	#closed = false;
 
@@ -118,10 +118,11 @@ export class AuthGatewayAccountLoginController {
 
 	#handleAuth(info: OAuthAuthInfo): void {
 		if (this.#closed) return;
-		const url = info.launchUrl ?? info.url;
-		this.#state.authUrl = url;
+		const launchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : null;
+		this.#state.authUrl = info.url;
+		this.#state.launchUrl = launchUrl;
 		this.#state.instructions = info.instructions ?? null;
-		this.#openInBrowser(url);
+		this.#openInBrowser(info.url);
 		this.#requestRender();
 	}
 
@@ -156,10 +157,6 @@ function printablePromptInput(data: string): string {
 			return code !== undefined && code >= 32 && code !== 0x7f;
 		})
 		.join("");
-}
-
-export function listAuthGatewayLoginProviders(): OAuthProviderInfo[] {
-	return getOAuthProviders();
 }
 
 export async function uploadAcquiredAuthGatewayCredential(

@@ -1,6 +1,7 @@
 import { AuthGatewayAdminClient } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { ProcessTerminal, TUI as TerminalUi } from "@oh-my-pi/pi-tui";
+import { Settings } from "../config/settings";
 import type { AuthGatewayConsoleOptions } from "../modes/components/auth-gateway/console";
 import { AuthGatewayConsole } from "../modes/components/auth-gateway/console";
 import { GatewayProfileSettingsComponent } from "../modes/components/auth-gateway/profile-settings";
@@ -146,6 +147,7 @@ export async function runAuthGatewayTuiWithDependencies(options: RunAuthGatewayT
 }
 
 export async function runAuthGatewayTui(options: RunAuthGatewayTuiOptions = {}): Promise<void> {
+	await Settings.init();
 	const ui = new TerminalUi(new ProcessTerminal());
 	await runAuthGatewayTuiWithDependencies({
 		ui,

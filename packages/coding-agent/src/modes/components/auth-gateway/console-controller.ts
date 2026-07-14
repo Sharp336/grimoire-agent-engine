@@ -1,4 +1,6 @@
 import type {
+	AuthGatewayAclEffect,
+	AuthGatewayAclKind,
 	AuthGatewayAdminClient,
 	AuthGatewayAdminStatus,
 	AuthGatewayAuditEvent,
@@ -250,6 +252,38 @@ export class AuthGatewayConsoleController {
 		await this.refresh("manual");
 	}
 
+	hasActiveFilters(): boolean {
+		const tab = this.#state.activeTab;
+		if (tab === "audit") {
+			return this.#state.audit.textFilter.length > 0 || this.#state.audit.userFilter !== null;
+		}
+		return (tab === "users" || tab === "pools" || tab === "accounts") && this.#state.filter.length > 0;
+	}
+
+	clearActiveFilters(): boolean {
+		const tab = this.#state.activeTab;
+		if (tab === "audit") {
+			const hadUserFilter = this.#state.audit.userFilter !== null;
+			if (this.#state.audit.textFilter.length === 0 && !hadUserFilter) return false;
+			this.#state.audit.textFilter = "";
+			this.#state.audit.userFilter = null;
+			this.#state.audit.pages = [];
+			this.#state.audit.pageIndex = 0;
+			this.#state.audit.nextBefore = null;
+			this.#state.selected.audit = 0;
+			if (hadUserFilter) void this.refresh("manual");
+			else this.#requestRender();
+			return true;
+		}
+		if (tab !== "users" && tab !== "pools" && tab !== "accounts") return false;
+		if (this.#state.filter.length === 0) return false;
+		this.#state.filter = "";
+		this.#state.selected[tab] = 0;
+		void this.#loadSelectedDetail(tab);
+		this.#requestRender();
+		return true;
+	}
+
 	async reloadSelectedUserUsage(since: number | undefined): Promise<boolean> {
 		const selected = this.selectedUser();
 		if (!selected || (since !== undefined && !Number.isFinite(since))) return false;
@@ -405,28 +439,32 @@ export class AuthGatewayConsoleController {
 		);
 	}
 
-	async addSelectedUserAclFromInput(value: string): Promise<boolean> {
+	async addSelectedUserAcl(input: {
+		effect: AuthGatewayAclEffect;
+		kind: AuthGatewayAclKind;
+		pattern: string;
+	}): Promise<boolean> {
 		const selected = this.selectedUser();
-		const [effect, kind, pattern] = splitFields(value);
+		const pattern = input.pattern.trim();
 		if (
 			!selected ||
-			(effect !== "allow" && effect !== "deny") ||
-			(kind !== "route" && kind !== "model" && kind !== "provider") ||
+			(input.effect !== "allow" && input.effect !== "deny") ||
+			(input.kind !== "route" && input.kind !== "model" && input.kind !== "provider") ||
 			!pattern
 		)
 			return false;
 		return await this.#mutate(
 			"add-acl",
 			async signal => {
-				await this.#client.addAclRule(selected.id, { effect, kind, pattern }, signal);
+				await this.#client.addAclRule(selected.id, { effect: input.effect, kind: input.kind, pattern }, signal);
 			},
 			"users",
 		);
 	}
 
-	async deleteSelectedUserAcl(ruleId: number, confirmation: string): Promise<boolean> {
+	async deleteSelectedUserAcl(ruleId: number): Promise<boolean> {
 		const selected = this.selectedUser();
-		if (!selected || !Number.isInteger(ruleId) || confirmation.toLowerCase() !== "y") return false;
+		if (!selected || !Number.isInteger(ruleId)) return false;
 		return await this.#mutate(
 			"delete-acl",
 			async signal => {

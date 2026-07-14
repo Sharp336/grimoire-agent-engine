@@ -13,7 +13,7 @@ import {
 import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
-import type { AuthStorage, CredentialOriginKind } from "../../session/auth-storage";
+import type { CredentialOrigin, CredentialOriginKind } from "../../session/auth-storage";
 import { DynamicBorder } from "./dynamic-border";
 
 const OAUTH_SELECTOR_MAX_VISIBLE = 10;
@@ -38,6 +38,12 @@ function getDisabledProviderIds(): ReadonlySet<string> {
  */
 const LIST_ROW_OFFSET = 4;
 
+export interface OAuthSelectorAuthState {
+	has(providerId: string): boolean;
+	hasAuth(providerId: string): boolean;
+	getCredentialOrigin(providerId: string): CredentialOrigin | undefined;
+}
+
 /** Compact, human-readable tag for each credential-origin leg. */
 const ORIGIN_LABELS: Record<CredentialOriginKind, string> = {
 	runtime: "--api-key",
@@ -61,7 +67,7 @@ export class OAuthSelectorComponent extends Container {
 	#scrollStart = 0;
 	#visibleCount = 0;
 	#mode: "login" | "logout";
-	#authStorage: AuthStorage;
+	#authStorage: OAuthSelectorAuthState | undefined;
 	#onSelectCallback: (providerId: string) => void;
 	#onCancelCallback: () => void;
 	#statusMessage: string | undefined;
@@ -73,7 +79,7 @@ export class OAuthSelectorComponent extends Container {
 	#validationGeneration: number = 0;
 	constructor(
 		mode: "login" | "logout",
-		authStorage: AuthStorage,
+		authState: OAuthSelectorAuthState | undefined,
 		onSelect: (providerId: string) => void,
 		onCancel: () => void,
 		options?: {
@@ -83,7 +89,7 @@ export class OAuthSelectorComponent extends Container {
 	) {
 		super();
 		this.#mode = mode;
-		this.#authStorage = authStorage;
+		this.#authStorage = authState;
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
 		this.#validateAuthCallback = options?.validateAuth;
@@ -112,6 +118,7 @@ export class OAuthSelectorComponent extends Container {
 		this.#stopSpinner();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
+		if (!this.#authStorage) return false;
 		return this.#mode === "logout" ? this.#authStorage.has(providerId) : this.#authStorage.hasAuth(providerId);
 	}
 
@@ -201,7 +208,7 @@ export class OAuthSelectorComponent extends Container {
 	 * the list distinguishes a real login from an env var aliasing the provider.
 	 */
 	#getSourceLabel(providerId: string): string {
-		const origin = this.#authStorage.getCredentialOrigin(providerId);
+		const origin = this.#authStorage?.getCredentialOrigin(providerId);
 		if (!origin) return "";
 		const detail = origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind];
 		return theme.fg("muted", ` (${detail})`);
@@ -242,7 +249,7 @@ export class OAuthSelectorComponent extends Container {
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
 		let text = `${provider.name} ${provider.id}`;
-		const origin = this.#authStorage.getCredentialOrigin(provider.id);
+		const origin = this.#authStorage?.getCredentialOrigin(provider.id);
 		if (origin) {
 			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
 			if (origin.envVar) text += ` ${origin.envVar}`;

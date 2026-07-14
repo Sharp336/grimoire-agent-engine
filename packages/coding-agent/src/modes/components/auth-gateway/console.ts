@@ -1,5 +1,11 @@
-import type { AuthGatewayAdminClient, AuthGatewayCredentialSummary } from "@oh-my-pi/pi-ai/auth-gateway";
-import type { Component, Focusable, SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
+import type {
+	AuthGatewayAclEffect,
+	AuthGatewayAclKind,
+	AuthGatewayAclRule,
+	AuthGatewayAdminClient,
+	AuthGatewayCredentialSummary,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import type { Component, Focusable, SelectItem, SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 import {
 	matchesKey,
 	parseSgrMouse,
@@ -13,12 +19,15 @@ import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../
 import { copyToClipboard } from "../../../utils/clipboard";
 import { getTabBarTheme } from "../../shared";
 import { theme } from "../../theme/theme";
+import { renderOAuthAuthorizationLink } from "../oauth-authorization-link";
+import { OAuthSelectorComponent } from "../oauth-selector";
 import { bottomBorder, divider, row, topBorder } from "../overlay-box";
 import {
 	AuthGatewayAccountLoginController,
 	type AuthGatewayAccountLoginPromptState,
 	uploadAcquiredAuthGatewayCredential,
 } from "./account-login";
+import { AuthGatewayChoiceDialog } from "./choice-dialog";
 import { AuthGatewayConsoleController, type AuthGatewayConsoleTab } from "./console-controller";
 import {
 	type AuthGatewayOneTimeTokenDialog,
@@ -52,8 +61,7 @@ type PromptKind =
 	| "create-token"
 	| "revoke-token"
 	| "rotate-user"
-	| "add-acl"
-	| "delete-acl"
+	| "add-acl-pattern"
 	| "bind-pool"
 	| "unbind-pool"
 	| "create-pool"
@@ -64,7 +72,6 @@ type PromptKind =
 	| "remove-account"
 	| "api-key-provider"
 	| "api-key-value"
-	| "login-provider"
 	| "switch-connection";
 
 interface PromptState {
@@ -74,6 +81,8 @@ interface PromptState {
 	masked: boolean;
 	error: string | null;
 	provider?: string;
+	aclEffect?: AuthGatewayAclEffect;
+	aclKind?: AuthGatewayAclKind;
 }
 
 const TABS: Array<{ id: AuthGatewayConsoleTab; label: string; short: string }> = [
@@ -84,7 +93,8 @@ const TABS: Array<{ id: AuthGatewayConsoleTab; label: string; short: string }> =
 	{ id: "audit", label: "Audit", short: "Aud" },
 ];
 
-const FOOTER = "1-5 tabs · ↑/↓ select · / filter · r refresh · ? help · Esc close";
+const FOOTER_PREFIX = "1-5 tabs · ↑/↓ select · / filter · r refresh · ? help";
+const LEADING_SGR_MOUSE_EVENT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]/;
 
 export class AuthGatewayConsole implements Component, Focusable {
 	focused = false;
@@ -101,11 +111,18 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#help = false;
 	#oneTimeDialog: AuthGatewayOneTimeTokenDialog | null = null;
 	#accountLogin: AuthGatewayAccountLoginController | null = null;
+	#loginProviderSelector: OAuthSelectorComponent | null = null;
+	#choiceDialog: AuthGatewayChoiceDialog | null = null;
 	#loginGeneration = 0;
 	#disposed = false;
 	#tabRowStart = 0;
 	#tabRowCount = 0;
 	#bodyRowStart = 0;
+	#listItemBodyLineStart = 2;
+	#listItemBodyLineCount = 0;
+	#listItemBodyColumnEnd = 0;
+	#loginProviderBodyLineStart = 0;
+	#choiceDialogBodyLineStart = 0;
 	#useTerminalCursor = false;
 
 	constructor(options: AuthGatewayConsoleOptions) {
@@ -136,6 +153,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#loginGeneration++;
 		this.#accountLogin?.abort();
 		this.#accountLogin = null;
+		this.#loginProviderSelector?.stopValidation();
+		this.#loginProviderSelector = null;
+		this.#choiceDialog = null;
 		this.controller.close();
 		if (this.#oneTimeDialog) closeOneTimeTokenDialog(this.#oneTimeDialog);
 		this.#oneTimeDialog = null;
@@ -162,15 +182,31 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#bodyRowStart = out.length;
 		for (let index = 0; index < contentRows; index++) out.push(row(bodyLines[index] ?? "", width));
 		out.push(divider(width));
-		out.push(row(theme.fg("dim", FOOTER), width));
+		const escHint = this.controller.hasActiveFilters() ? "Esc clear filter" : "Esc close";
+		out.push(row(theme.fg("dim", `${FOOTER_PREFIX} · ${escHint}`), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
 
 	handleInput(data: string): void {
+		const splitMouseInputs = splitLeadingSgrMouseInputs(data);
+		if (splitMouseInputs) {
+			for (const input of splitMouseInputs) this.handleInput(input);
+			return;
+		}
 		const isMouseInput = data.startsWith("\x1b[<");
 		if (this.#oneTimeDialog) {
 			if (!isMouseInput) void this.#handleTokenDialogInput(data);
+			return;
+		}
+		if (this.#loginProviderSelector) {
+			if (isMouseInput) this.#handleMouse(data);
+			else this.#loginProviderSelector.handleInput(data);
+			return;
+		}
+		if (this.#choiceDialog) {
+			if (isMouseInput) this.#handleMouse(data);
+			else this.#choiceDialog.handleInput(data);
 			return;
 		}
 		if (this.#accountLogin?.state.prompt) {
@@ -206,6 +242,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 				this.#mode = "list";
 				return;
 			}
+			if (this.controller.clearActiveFilters()) return;
 			this.#host.close();
 			return;
 		}
@@ -400,13 +437,11 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (data === "a") {
-			this.#prompt = { kind: "add-acl", label: "ACL effect|kind|pattern: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			this.#openAclEffectDialog();
 			return;
 		}
 		if (data === "x") {
-			this.#prompt = { kind: "delete-acl", label: "ACL rule id|y: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			this.#openDeleteAclRulePicker();
 			return;
 		}
 		if (data === "b") {
@@ -516,8 +551,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 			return;
 		}
 		if (data === "l") {
-			this.#prompt = { kind: "login-provider", label: "Provider id: ", value: "", masked: false, error: null };
-			this.controller.setModalOpen(true);
+			this.#openLoginProviderSelector();
 			return;
 		}
 		if (data === "k") this.#startApiKeyPrompt();
@@ -525,6 +559,126 @@ export class AuthGatewayConsole implements Component, Focusable {
 
 	#startApiKeyPrompt(): void {
 		this.#prompt = { kind: "api-key-provider", label: "Provider id: ", value: "", masked: false, error: null };
+		this.controller.setModalOpen(true);
+	}
+
+	#openLoginProviderSelector(): void {
+		this.#loginProviderSelector?.stopValidation();
+		this.#loginProviderSelector = new OAuthSelectorComponent(
+			"login",
+			undefined,
+			providerId => {
+				this.#loginProviderSelector?.stopValidation();
+				this.#loginProviderSelector = null;
+				this.controller.setModalOpen(false);
+				void this.#runAccountLogin(providerId);
+			},
+			() => {
+				this.#loginProviderSelector?.stopValidation();
+				this.#loginProviderSelector = null;
+				this.controller.setModalOpen(false);
+			},
+		);
+		this.controller.setModalOpen(true);
+	}
+
+	#openAclEffectDialog(): void {
+		const items: SelectItem[] = [
+			{ value: "allow", label: "Allow", description: "Permit matching requests" },
+			{ value: "deny", label: "Deny", description: "Block matching requests" },
+		];
+		this.#choiceDialog = new AuthGatewayChoiceDialog(
+			"Add ACL effect",
+			items,
+			value => this.#openAclKindDialog(value as AuthGatewayAclEffect),
+			() => {
+				this.#choiceDialog = null;
+				this.controller.setModalOpen(false);
+			},
+		);
+		this.controller.setModalOpen(true);
+	}
+
+	#openAclKindDialog(effect: AuthGatewayAclEffect): void {
+		const items: SelectItem[] = [
+			{ value: "provider", label: "Provider", description: "Match provider ids" },
+			{ value: "model", label: "Model", description: "Match model selectors" },
+			{ value: "route", label: "Route", description: "Match gateway route families" },
+		];
+		this.#choiceDialog = new AuthGatewayChoiceDialog(
+			"Add ACL kind",
+			items,
+			value => {
+				this.#choiceDialog = null;
+				this.#prompt = {
+					kind: "add-acl-pattern",
+					label: "ACL pattern: ",
+					value: "",
+					masked: false,
+					error: null,
+					aclEffect: effect,
+					aclKind: value as AuthGatewayAclKind,
+				};
+				this.controller.setModalOpen(true);
+			},
+			() => this.#openAclEffectDialog(),
+		);
+		this.controller.setModalOpen(true);
+	}
+
+	#openDeleteAclRulePicker(): void {
+		const selected = this.controller.selectedUser();
+		if (!selected) return;
+		const details = this.controller.state.userDetails[selected.id];
+		if (!details) {
+			this.controller.setErrorBanner("ACL rules are still loading", { preserveHealth: true });
+			return;
+		}
+		if (details.acl.length === 0) {
+			this.controller.setErrorBanner("No ACL rules to delete", { preserveHealth: true });
+			return;
+		}
+		const rules = details.acl;
+		const items: SelectItem[] = rules.map(rule => ({
+			value: String(rule.id),
+			label: `#${rule.id}`,
+			description: `${rule.effect} ${rule.kind} ${rule.pattern}`,
+		}));
+		this.#choiceDialog = new AuthGatewayChoiceDialog(
+			"Delete ACL rule",
+			items,
+			value => {
+				const ruleId = Number(value);
+				const rule = rules.find(candidate => candidate.id === ruleId);
+				if (rule) this.#openDeleteAclConfirm(rule);
+			},
+			() => {
+				this.#choiceDialog = null;
+				this.controller.setModalOpen(false);
+			},
+		);
+		this.controller.setModalOpen(true);
+	}
+
+	#openDeleteAclConfirm(rule: AuthGatewayAclRule): void {
+		const items: SelectItem[] = [
+			{ value: "yes", label: "Yes", description: "Delete this ACL rule" },
+			{ value: "no", label: "No", description: "Keep this ACL rule" },
+		];
+		this.#choiceDialog = new AuthGatewayChoiceDialog(
+			`Delete ACL rule #${rule.id}?`,
+			items,
+			value => {
+				if (value === "yes") {
+					this.#choiceDialog = null;
+					this.controller.setModalOpen(false);
+					void this.controller.deleteSelectedUserAcl(rule.id);
+					return;
+				}
+				this.#openDeleteAclRulePicker();
+			},
+			() => this.#openDeleteAclRulePicker(),
+		);
 		this.controller.setModalOpen(true);
 	}
 
@@ -537,6 +691,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 
 	async #switchTab(tab: AuthGatewayConsoleTab): Promise<void> {
 		this.#mode = "list";
+		this.#loginProviderSelector?.stopValidation();
+		this.#loginProviderSelector = null;
+		this.#choiceDialog = null;
 		this.#clearPrompt();
 		await this.controller.switchTab(tab);
 	}
@@ -544,7 +701,12 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#handlePromptInput(data: string): void {
 		const prompt = this.#prompt;
 		if (!prompt) return;
-		if (data === "\x1b" || data === "\x03") {
+		if (data === "\x1b") {
+			if (prompt.kind === "add-acl-pattern" && prompt.aclEffect) this.#openAclKindDialog(prompt.aclEffect);
+			else this.#clearPrompt();
+			return;
+		}
+		if (data === "\x03") {
 			this.#clearPrompt();
 			return;
 		}
@@ -684,20 +846,17 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#prompt = null;
 			return;
 		}
-		if (prompt.kind === "add-acl") {
-			const ok = await this.controller.addSelectedUserAclFromInput(prompt.value);
-			if (!ok) {
-				prompt.error = "Invalid ACL input";
+		if (prompt.kind === "add-acl-pattern") {
+			const effect = prompt.aclEffect;
+			const kind = prompt.aclKind;
+			const pattern = prompt.value.trim();
+			if (!pattern) {
+				prompt.error = "ACL pattern is required";
 				return;
 			}
-			this.#clearPrompt();
-			return;
-		}
-		if (prompt.kind === "delete-acl") {
-			const [ruleId, confirmation] = prompt.value.split("|").map(item => item.trim());
-			const ok = await this.controller.deleteSelectedUserAcl(Number(ruleId), confirmation ?? "");
+			const ok = effect && kind ? await this.controller.addSelectedUserAcl({ effect, kind, pattern }) : false;
 			if (!ok) {
-				prompt.error = "Confirmation did not match";
+				prompt.error = this.controller.state.errorBanner ?? "Invalid ACL input";
 				return;
 			}
 			this.#clearPrompt();
@@ -793,11 +952,6 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#clearPrompt();
 			return;
 		}
-		if (prompt.kind === "login-provider") {
-			const provider = prompt.value.trim();
-			this.#prompt = null;
-			await this.#runAccountLogin(provider);
-		}
 	}
 
 	#clearPrompt(): void {
@@ -855,6 +1009,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 			this.#loginGeneration++;
 			this.#accountLogin?.abort();
 			this.#accountLogin = null;
+			this.#loginProviderSelector?.stopValidation();
+			this.#loginProviderSelector = null;
+			this.#choiceDialog = null;
 			this.controller.close();
 			this.#connection = nextConnection;
 			this.#client = nextClient;
@@ -896,16 +1053,26 @@ export class AuthGatewayConsole implements Component, Focusable {
 		const event = parseSgrMouse(data);
 		if (!event) return;
 		const innerCol = event.col - 2;
+		if (this.#loginProviderSelector) {
+			const line = event.row - this.#bodyRowStart - this.#loginProviderBodyLineStart;
+			this.#loginProviderSelector.routeMouse(event, line, innerCol);
+			return;
+		}
+		if (this.#choiceDialog) {
+			const line = event.row - this.#bodyRowStart - this.#choiceDialogBodyLineStart;
+			this.#choiceDialog.routeMouse(event, line, innerCol);
+			return;
+		}
 		const tabLine = event.row - this.#tabRowStart;
 		if (tabLine >= 0 && tabLine < this.#tabRowCount && event.leftClick) {
 			const tab = this.#tabBar.tabAt(tabLine, innerCol);
 			if (tab) void this.#switchTab(tab.id as AuthGatewayConsoleTab);
 			return;
 		}
-		this.#handleBodyMouse(event);
+		this.#handleBodyMouse(event, innerCol);
 	}
 
-	#handleBodyMouse(event: SgrMouseEvent): void {
+	#handleBodyMouse(event: SgrMouseEvent, innerCol: number): void {
 		const line = event.row - this.#bodyRowStart;
 		if (line < 0 || !event.leftClick) return;
 		if (line >= 0) {
@@ -917,23 +1084,54 @@ export class AuthGatewayConsole implements Component, Focusable {
 				}
 			}
 			if (this.controller.state.activeTab === "overview") return;
-			const index = Math.max(0, line - 3);
-			while (this.controller.state.selected[this.controller.state.activeTab] < index) this.controller.selectNext();
-			while (this.controller.state.selected[this.controller.state.activeTab] > index)
+			if (this.#listItemBodyLineCount <= 0 || innerCol < 0 || innerCol >= this.#listItemBodyColumnEnd) return;
+			const tab = this.controller.state.activeTab;
+			const index = line - this.#listItemBodyLineStart;
+			if (index < 0 || index >= this.#listItemBodyLineCount) return;
+			const target = index;
+			while (this.controller.state.selected[tab] < target) {
+				const before = this.controller.state.selected[tab];
+				this.controller.selectNext();
+				if (this.controller.state.selected[tab] === before) break;
+			}
+			while (this.controller.state.selected[tab] > target) {
+				const before = this.controller.state.selected[tab];
 				this.controller.selectPrevious();
+				if (this.controller.state.selected[tab] === before) break;
+			}
 		}
 	}
 
 	#bodyLines(width: number, rows: number, outerWidth: number): string[] {
 		const lines: string[] = [];
+		this.#listItemBodyLineStart = 2;
+		this.#listItemBodyLineCount = 0;
+		this.#listItemBodyColumnEnd = 0;
+		this.#loginProviderBodyLineStart = 0;
+		this.#choiceDialogBodyLineStart = 0;
 		const state = this.controller.state;
 		lines.push(this.#statusLine(width));
 		if (state.errorBanner) lines.push(...wrapFreeform(state.errorBanner, width, "error"));
 		if (this.#help) return fitRows([...lines, ...this.#helpLines(width)], rows, width);
 		if (this.#oneTimeDialog) return fitRows([...lines, ...this.#tokenDialogLines(width)], rows, width);
+		if (this.#loginProviderSelector) {
+			this.#loginProviderBodyLineStart = lines.length;
+			return fitRows([...lines, ...this.#loginProviderSelector.render(width)], rows, width);
+		}
+		if (this.#choiceDialog) {
+			this.#choiceDialogBodyLineStart = lines.length;
+			return fitRows([...lines, ...this.#choiceDialog.render(width)], rows, width);
+		}
 		if (this.#prompt) return fitRows([...lines, ...this.#promptLines(width)], rows, width);
 		if (this.#accountLogin) return fitRows([...lines, ...this.#accountLoginLines(width)], rows, width);
 		const content = this.#contentLines(width, outerWidth);
+		const listVisible =
+			state.activeTab !== "overview" && !(outerWidth >= 60 && outerWidth < 100 && this.#mode === "detail");
+		if (listVisible) {
+			this.#listItemBodyLineStart = lines.length + 1;
+			this.#listItemBodyLineCount = this.#visibleListItemCount();
+			this.#listItemBodyColumnEnd = outerWidth >= 100 ? Math.floor(width * 0.45) : width;
+		}
 		return fitRows([...lines, ...content], rows, width);
 	}
 
@@ -945,7 +1143,22 @@ export class AuthGatewayConsole implements Component, Focusable {
 				: state.health === "Stale"
 					? theme.fg("warning", `${theme.status.warning} Stale`)
 					: theme.fg("error", `${theme.status.error} Error`);
-		const detail = ` ${sanitizeCell(state.connectionName)} · ${state.activeTab} · ${status}`;
+		const filterParts: string[] = [];
+		const filterWidth = Math.max(8, Math.floor(width / 4));
+		if (
+			(state.activeTab === "users" || state.activeTab === "pools" || state.activeTab === "accounts") &&
+			state.filter.length > 0
+		) {
+			filterParts.push(`filter: ${truncateToWidth(sanitizeCell(state.filter), filterWidth)}`);
+		}
+		if (state.activeTab === "audit") {
+			if (state.audit.textFilter.length > 0) {
+				filterParts.push(`text: ${truncateToWidth(sanitizeCell(state.audit.textFilter), filterWidth)}`);
+			}
+			if (state.audit.userFilter !== null) filterParts.push(`user: ${state.audit.userFilter}`);
+		}
+		const filterDetail = filterParts.length > 0 ? ` · ${filterParts.join(" · ")}` : "";
+		const detail = ` ${sanitizeCell(state.connectionName)} · ${state.activeTab}${filterDetail} · ${status}`;
 		return truncateToWidth(detail, width);
 	}
 
@@ -984,6 +1197,15 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (tab === "pools") return this.#poolsList(width);
 		if (tab === "accounts") return this.#accountsList(width);
 		return this.#auditList(width);
+	}
+
+	#visibleListItemCount(): number {
+		const tab = this.controller.state.activeTab;
+		if (tab === "users") return this.controller.filteredUsers().length;
+		if (tab === "pools") return this.controller.filteredPools().length;
+		if (tab === "accounts") return this.controller.filteredCredentials().length;
+		if (tab === "audit") return this.controller.filteredAuditEvents().length;
+		return 0;
 	}
 
 	#usersList(width: number): string[] {
@@ -1173,15 +1395,17 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (!login) return [];
 		const state = login.state;
 		const promptLines = state.prompt ? this.#oauthPromptLines(state.prompt, width) : [];
-		return [
-			theme.bold("Account login"),
-			state.authUrl ? `Open: ${sanitizeCell(state.authUrl)}` : "Starting provider login...",
-			state.instructions ? sanitizeCell(state.instructions) : "",
-			...state.progress.map(line => sanitizeCell(line)),
+		const authLines = state.authUrl
+			? renderOAuthAuthorizationLink(state.authUrl, state.launchUrl ?? undefined, width)
+			: ["Starting provider login..."];
+		const lines = [
+			truncateToWidth(theme.bold("Account login"), width),
+			...authLines,
+			...(state.instructions ? [truncateToWidth(sanitizeCell(state.instructions), width)] : []),
+			...state.progress.map(line => truncateToWidth(sanitizeCell(line), width)),
 			...promptLines,
-		]
-			.filter(line => line.length > 0)
-			.map(line => truncateToWidth(line, width));
+		];
+		return lines.filter(line => line.length > 0);
 	}
 
 	#oauthPromptLines(prompt: AuthGatewayAccountLoginPromptState, width: number): string[] {
@@ -1209,6 +1433,21 @@ export class AuthGatewayConsole implements Component, Focusable {
 	#narrowDetailAvailable(): boolean {
 		return this.controller.state.activeTab !== "overview";
 	}
+}
+
+function splitLeadingSgrMouseInputs(data: string): string[] | null {
+	const chunks: string[] = [];
+	let remaining = data;
+	while (remaining.length > 0) {
+		const match = LEADING_SGR_MOUSE_EVENT_PATTERN.exec(remaining);
+		if (!match) break;
+		chunks.push(match[0]);
+		remaining = remaining.slice(match[0].length);
+		if (!remaining.startsWith("\x1b[<")) break;
+	}
+	if (chunks.length === 0 || (chunks.length === 1 && remaining.length === 0)) return null;
+	if (remaining.length > 0) chunks.push(remaining);
+	return chunks;
 }
 
 function sanitizeCell(value: string): string {
