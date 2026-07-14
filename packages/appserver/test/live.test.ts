@@ -29,13 +29,17 @@ function record(id: string): SessionRecord {
 		entries: [],
 	};
 }
-function hello(capabilities?: string[], authentication = false): Record<string, unknown> {
+function hello(
+	capabilities?: string[],
+	authentication = false,
+	requestedFeatures: string[] = ["resume"],
+): Record<string, unknown> {
 	return {
 		v: "omp-app/1",
 		type: "hello",
 		protocol: { min: "omp-app/1", max: "omp-app/1" },
 		client: { name: "raw-test", version: "1", build: "test", platform: "linux" },
-		requestedFeatures: ["resume"],
+		requestedFeatures,
 		savedCursors: [],
 		...(capabilities ? { capabilities: { client: capabilities } } : {}),
 		...(authentication
@@ -268,13 +272,14 @@ function responseFor(child: LiveChild, command: string, success = true): void {
 async function readyClient(
 	path: string,
 	capabilities?: string[],
+	requestedFeatures?: string[],
 ): Promise<{
 	client: RawUdsWebSocket;
 	welcome: Extract<ServerFrame, { type: "welcome" }>;
 	sessions: Extract<ServerFrame, { type: "sessions" }>;
 }> {
 	const client = await RawUdsWebSocket.connect(path);
-	client.sendJson(hello(capabilities));
+	client.sendJson(hello(capabilities, false, requestedFeatures));
 	const welcome = await client.nextServer();
 	expect(welcome.type).toBe("welcome");
 	const sessions = await client.nextServer();
@@ -365,6 +370,18 @@ async function liveServer(
 }
 
 describe("live Unix websocket protocol", () => {
+	test("ignores unknown additive client feature requests", async () => {
+		const { appserver, path, root } = await liveServer(new LiveFactory());
+		try {
+			const connected = await readyClient(path, ["sessions.read"], ["resume", "future.client.feature"]);
+			expect(connected.welcome.grantedFeatures).toEqual(["resume"]);
+			await closeClients([connected.client]);
+		} finally {
+			await appserver.stop();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("local transport rejects device authentication without echoing the token", async () => {
 		const { appserver, path } = await liveServer(new LiveFactory(), []);
 		const client = await RawUdsWebSocket.connect(path);

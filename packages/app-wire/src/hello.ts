@@ -93,8 +93,9 @@ export function decodeHello(input: unknown): HelloFrame {
 	const maxMajor = protocolMajor(protocol.max, "protocol.max").major;
 	if (minMajor > 1 || maxMajor < 1) fail("UNSUPPORTED_PROTOCOL", "no supported protocol in range", "protocol");
 	const client = identity(frame.client, "client");
-	// Clients may be newer than the host. Preserve unknown additive requests so
-	// the host can ignore features it does not grant instead of rejecting hello.
+	// Client requests are additive: a newer client may name a feature this host
+	// does not know yet. Preserve bounded unknown names so negotiation can grant
+	// the supported intersection; welcome frames remain strict below.
 	const requestedFeatures = decodeFeatureList(frame.requestedFeatures, "requestedFeatures");
 	const raw = boundedArray(frame.savedCursors, "savedCursors", MAX_SAVED_CURSORS);
 	const savedCursors: SavedCursor[] = [];
