@@ -1,6 +1,6 @@
-import type { DeviceCapability } from "./capabilities.ts";
-import { decodeCursor } from "./cursor.ts";
-import { fail } from "./errors.ts";
+import type { DeviceCapability } from "./capabilities";
+import { decodeCursor } from "./cursor";
+import { fail } from "./errors";
 import {
 	boundedArray,
 	boundedMap,
@@ -12,7 +12,7 @@ import {
 	isSecretLikeKey,
 	safeRelativePath,
 	safeSeq,
-} from "./guards.ts";
+} from "./guards";
 import {
 	type CommandId,
 	type ConfirmationId,
@@ -30,10 +30,10 @@ import {
 	type SessionId,
 	sessionId,
 	terminalId,
-} from "./ids.ts";
-import { MAX_FILE_BYTES, MAX_STRING_BYTES, PROTOCOL_VERSION } from "./limits.ts";
-import { decodeSessionListResult, decodeSessionRef, type SessionListResult } from "./session-index.ts";
-import { decodeSessionStateResult } from "./session-state.ts";
+} from "./ids";
+import { MAX_FILE_BYTES, MAX_STRING_BYTES, PROTOCOL_VERSION } from "./limits";
+import { decodeSessionListResult, decodeSessionRef, type SessionListResult } from "./session-index";
+import { decodeSessionStateResult } from "./session-state";
 export type RevisionOwner = "none" | "session" | "authority";
 export interface CommandDescriptor {
 	capability: DeviceCapability;
