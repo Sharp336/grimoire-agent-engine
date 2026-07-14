@@ -15,6 +15,7 @@ import {
 	decodeServerFrame,
 	decodeSessionListResult,
 	inputObject,
+	isSecretLikeKey,
 	isServerFrame,
 	MAX_FILE_BYTES,
 	MAX_INPUT_BYTES,
@@ -423,6 +424,41 @@ describe("app-wire authority", () => {
 		).toThrow(AppWireError);
 		expect(() =>
 			decodeServerFrame({ ...frame, sessions: [{ ...session, liveState: { nested: { session_key: "x" } } }] }),
+		).toThrow(AppWireError);
+		expect(() =>
+			decodeServerFrame({ ...frame, sessions: [{ ...session, liveState: { nested: { "session.key": "x" } } }] }),
+		).toThrow(AppWireError);
+	});
+	test("secret-like metadata keys cannot hide behind separators", () => {
+		for (const key of [
+			"api.key",
+			"api_key",
+			"API KEY",
+			"private/key",
+			"session:key",
+			"pass.word",
+			"to\u200bken",
+			"ＡＰＩ．ＫＥＹ",
+		])
+			expect(isSecretLikeKey(key)).toBe(true);
+		for (const key of ["public.key", "api.version", "session.id"]) expect(isSecretLikeKey(key)).toBe(false);
+		expect(() => decodeCommandArguments("settings.write", { values: { "api.key": "must-not-cross" } })).toThrow(
+			AppWireError,
+		);
+		expect(() => decodeCommandArguments("config.write", { provider: { "private/key": "must-not-cross" } })).toThrow(
+			AppWireError,
+		);
+		expect(decodeCommandArguments("config.write", { provider: { "public.key": "visible", version: 1 } })).toEqual({
+			provider: { "public.key": "visible", version: 1 },
+		});
+		expect(() =>
+			decodeServerFrame({
+				v: "omp-app/1",
+				type: "catalog",
+				hostId: "h",
+				revision: "r",
+				items: [{ id: "tool", kind: "tool", name: "shell", metadata: { "api\u200bkey": "must-not-cross" } }],
+			}),
 		).toThrow(AppWireError);
 	});
 	test("malicious secret metadata fixture is rejected", async () => {
