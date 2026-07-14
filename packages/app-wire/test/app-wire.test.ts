@@ -14,6 +14,7 @@ import {
 	decodeEntry,
 	decodeServerFrame,
 	decodeSessionListResult,
+	deviceToken,
 	inputObject,
 	isSecretLikeKey,
 	isServerFrame,
@@ -530,6 +531,12 @@ describe("app-wire authority", () => {
 		}
 		expect(caught).toBeInstanceOf(AppWireError);
 		expect(String(caught)).not.toContain("not-a-token");
+		const base64urlAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+		for (const [index, last] of Array.from(base64urlAlphabet).entries()) {
+			const decode = () => deviceToken(`${"A".repeat(42)}${last}`);
+			if (index % 4 === 0) expect(decode()).toHaveLength(43);
+			else expect(decode).toThrow(AppWireError);
+		}
 	});
 	test("additive watch, lease, PTY, files, audit, catalog, preview discriminants are bounded", () => {
 		const frames = [
@@ -1030,6 +1037,23 @@ describe("app-wire authority", () => {
 				result: { cancelled: true },
 			}),
 		).toThrow(AppWireError);
+		const failed = {
+			v: "omp-app/1",
+			type: "response",
+			requestId: "r",
+			hostId: "h",
+			command: "session.cancel",
+			ok: false,
+			error: { code: "cancel_failed", message: "cancel failed" },
+		} as const;
+		expect(decodeServerFrame(failed).ok).toBe(false);
+		for (const result of [null, false, { cancelled: true }])
+			expect(() =>
+				decodeServerFrame({
+					...failed,
+					result,
+				}),
+			).toThrow(AppWireError);
 		expect(sameSession({ hostId: "h", sessionId: "s" }, { hostId: "other", sessionId: "s" })).toBe(false);
 	});
 });
