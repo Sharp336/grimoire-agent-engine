@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -36,10 +37,6 @@ describe("ElectronHub provider catalog", () => {
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			// ElectronHub is OpenAI-compatible but does not support the OpenAI `store` flag.
 			expect(model.compat.supportsStore).toBe(false);
-			// ElectronHub documents reasoning_effort: "none" as the explicit way to hide
-			// reasoning output; the generic "openai" dialect default ("lowest-effort") would
-			// still send the ladder's floor tier instead of actually turning reasoning off.
-			expect(model.compat.reasoningDisableMode).toBe("reasoning-effort-none");
 		}
 	});
 
@@ -52,8 +49,10 @@ describe("ElectronHub provider catalog", () => {
 		const glm = getBundledModel<"openai-completions">("electronhub", "glm-5.2:dev");
 		expect(glm.compat.thinkingFormat).toBe("openai");
 		expect(glm.compat.thinkingFormat).not.toBe("zai");
-		// reasoningDisableMode is asserted uniformly across all six DevPass models
-		// (including glm-5.2:dev) in the "bundles all six DevPass models" test above.
+		// reasoningDisableMode is not uniform across all six DevPass models (see
+		// the dedicated minimax-m2.7:dev and gpt-oss-120b:dev tests below); the
+		// four models sharing reasoning-effort-none are asserted together in
+		// "opts kimi/glm/gemma/qwen into ElectronHub's explicit reasoning_effort:none".
 		expect(glm.compat.reasoningContentField).toBe("reasoning_content");
 		// Leaving thinkingFormat "zai" also drops its reasoning_content continuation
 		// replay (openai-completions.ts only fires that branch for thinkingFormat ===
@@ -99,6 +98,34 @@ describe("ElectronHub provider catalog", () => {
 		expect(minimax.compat.reasoningDisableMode).toBe("reasoning-effort-none");
 	});
 
+	it("opts kimi/glm/gemma/qwen into ElectronHub's explicit reasoning_effort:none, unlike minimax/gpt-oss", () => {
+		// kimi-k2.6:dev, glm-5.2:dev, gemma-4-31b-it:dev, and qwen3.6-27b:dev have no
+		// mandatory-reasoning floor and no narrower Harmony-style effort vocabulary,
+		// so they inherit the shared ElectronHub base's reasoning-effort-none disable
+		// mode uncontested — minimax-m2.7:dev and gpt-oss-120b:dev are the two
+		// deliberate exceptions, covered by their own dedicated tests.
+		for (const id of ["kimi-k2.6:dev", "glm-5.2:dev", "gemma-4-31b-it:dev", "qwen3.6-27b:dev"] as const) {
+			const model = getBundledModel<"openai-completions">("electronhub", id);
+			expect(model.compat.reasoningDisableMode).toBe("reasoning-effort-none");
+		}
+	});
+
+	it("keeps gpt-oss-120b:dev on the tested-safe lowest-effort disable path instead of reasoning-effort-none", () => {
+		// GPT-OSS's Harmony reasoning format only accepts low/medium/high for
+		// reasoning_effort and rejects minimal/xhigh/none on its native hosts (see
+		// isOpenAIGptOssModelId in identity/family.ts, and the issue #2315
+		// regression coverage in packages/ai/test/issue-2315-repro.test.ts, which
+		// locks every other GPT-OSS host onto the "low" floor instead of "none" —
+		// built from a real prior production failure). ElectronHub's gateway did
+		// not reject reasoning_effort:"none" when live-probed directly, but that's
+		// weaker evidence than an established cross-provider regression test, so
+		// this model deliberately stays off the shared reasoning-effort-none mode.
+		const gptOss = getBundledModel<"openai-completions">("electronhub", "gpt-oss-120b:dev");
+		expect(gptOss.compat.reasoningDisableMode).toBe("lowest-effort");
+		expect(gptOss.compat.reasoningDisableMode).not.toBe("reasoning-effort-none");
+		expect(gptOss.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+	});
+
 	it("applies the same OpenAI-shaped dialect override to qwen3.6-27b:dev via dynamic discovery", async () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response(
@@ -120,6 +147,30 @@ describe("ElectronHub provider catalog", () => {
 		const qwen = models?.find(candidate => candidate.id === "qwen3.6-27b:dev");
 		expect(qwen).toBeDefined();
 		expect(qwen?.compat?.thinkingFormat).toBe("openai");
+	});
+
+	it("applies the same lowest-effort disable override to gpt-oss-120b:dev via dynamic discovery", async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "gpt-oss-120b:dev",
+							name: "ElectronHub: GPT OSS 120B (DevPass)",
+							tokens: 128_000,
+							metadata: { devpass_only: false, reasoning: true, vision: false, function_call: true },
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const options = getElectronHubOptions(fetchImpl);
+		const models = (await options.fetchDynamicModels?.()) as ModelSpec<"openai-completions">[] | null | undefined;
+		const gptOss = models?.find(candidate => candidate.id === "gpt-oss-120b:dev");
+		expect(gptOss).toBeDefined();
+		expect(gptOss?.compat?.reasoningDisableMode).toBe("lowest-effort");
+		expect(gptOss?.compat?.reasoningDisableMode).not.toBe("reasoning-effort-none");
 	});
 
 	it("keeps DevPass models from /v1/models discovery via :dev suffix, devpass_only, or pricing.plan=devpass", async () => {

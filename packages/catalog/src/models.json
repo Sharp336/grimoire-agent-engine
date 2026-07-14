@@ -17598,7 +17598,7 @@
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
-				"reasoningDisableMode": "reasoning-effort-none"
+				"reasoningDisableMode": "lowest-effort"
 			}
 		},
 		"kimi-k2.6:dev": {

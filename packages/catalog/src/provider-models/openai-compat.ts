@@ -9,6 +9,7 @@ import {
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiModelId,
+	isOpenAIGptOssModelId,
 	isQwenModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
@@ -1904,7 +1905,24 @@ function electronHubCompatForModel(id: string, base: ModelSpec<"openai-completio
 						// not honour — silently dropping user-selected effort levels.
 						thinkingFormat: "openai",
 					}
-				: {}),
+				: isOpenAIGptOssModelId(id)
+					? {
+							// GPT-OSS's Harmony reasoning format only accepts low/medium/high
+							// for reasoning_effort and rejects minimal/xhigh/none on its
+							// native hosts (see isOpenAIGptOssModelId in identity/family.ts,
+							// and the issue #2315 regression coverage in
+							// packages/ai/test/issue-2315-repro.test.ts, which locks every
+							// other GPT-OSS host onto the "low" floor instead of "none" —
+							// built from a real prior production failure). ElectronHub's
+							// gateway did not reject reasoning_effort:"none" when live-probed
+							// directly, but that's weaker evidence than an established
+							// cross-provider regression test: keep this one model on the
+							// tested-safe "lowest-effort" disable path rather than opting into
+							// the shared reasoning-effort-none mode, so a future gateway-side
+							// validation tightening can't reintroduce #2315.
+							reasoningDisableMode: "lowest-effort",
+						}
+					: {}),
 	} as const satisfies ModelSpec<"openai-completions">["compat"];
 }
 
@@ -1976,7 +1994,7 @@ export const ELECTRONHUB_DEVPASS_STATIC_MODELS: readonly ModelSpec<"openai-compl
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: null,
-		compat: ELECTRONHUB_OPENAI_COMPAT,
+		compat: electronHubCompatForModel("gpt-oss-120b:dev", ELECTRONHUB_OPENAI_COMPAT),
 	},
 	{
 		id: "glm-5.2:dev",
