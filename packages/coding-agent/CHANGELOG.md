@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Documented the `ELECTRONHUB_DEV_API_KEY` environment variable in `omp --help` for ElectronHub Coding Plan (DevPass) models.
+
 ## [16.5.0] - 2026-07-13
 
 ### Breaking Changes
@@ -19,7 +23,6 @@
 - Added a project-scoped `launch` tool (gated by `launch.enabled`) for managing shared long-running services and debuggers, featuring readiness probes, bounded logs, PTY input, restart policies, and automatic teardown.
 - Added support for `detached` launches, allowing standalone services to survive broker shutdowns and reconnect to subsequent sessions.
 - Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
-- Documented the `ELECTRONHUB_DEV_API_KEY` environment variable in `omp --help` for ElectronHub Coding Plan (DevPass) models.
 
 ### Changed
 

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ElectronHub Coding Plan (DevPass) as a `/login electronhub` API-key provider, validating `ek-dev-…` keys against `kimi-k2.6:dev` on `https://api.electronhub.ai/v1`.
+- Added a `reasoning-effort-none` OpenAI-completions reasoning-disable mode that sends an explicit `reasoning_effort: "none"` on the wire, for OpenAI-shaped gateways (e.g. ElectronHub) that document `"none"` as a distinct value below their lowest selectable effort tier — unlike the existing `"lowest-effort"` mode (sends the floor tier) or `"omit"` (drops the field, falling back to the gateway's own default).
+
 ## [16.5.0] - 2026-07-13
 
 ### Added
@@ -19,10 +24,6 @@
 ### Removed
 
 - Removed automatic /interactions chaining for follow-up turns in Google provider calls, along with the useInteractionsApi, storeInteraction, and previousInteractionId stream options.
-### Added
-
-- Added ElectronHub Coding Plan (DevPass) as a `/login electronhub` API-key provider, validating `ek-dev-…` keys against `kimi-k2.6:dev` on `https://api.electronhub.ai/v1`.
-- Added a `reasoning-effort-none` OpenAI-completions reasoning-disable mode that sends an explicit `reasoning_effort: "none"` on the wire, for OpenAI-shaped gateways (e.g. ElectronHub) that document `"none"` as a distinct value below their lowest selectable effort tier — unlike the existing `"lowest-effort"` mode (sends the floor tier) or `"omit"` (drops the field, falling back to the gateway's own default).
 
 ## [16.4.6] - 2026-07-12
 
