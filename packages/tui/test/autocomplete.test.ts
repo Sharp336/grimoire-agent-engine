@@ -800,6 +800,22 @@ describe("trySyncSlashCompletion", () => {
 		expect(result!.items[0]?.value).toBe("providers");
 	});
 
+	it("/clear alias resolves to /new instead of fuzzy-matching /autoresearch description (#5349)", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "new", aliases: ["clear"], description: "Start a new session" },
+				{
+					name: "autoresearch",
+					description: "Toggle builtin autoresearch mode, or pass off / clear, or a goal message.",
+				},
+			],
+			"/tmp",
+		);
+		const result = provider.trySyncSlashCompletion("/clear");
+		expect(result).not.toBeNull();
+		expect(result!.items[0]?.value).toBe("clear");
+	});
+
 	it("uses aliases when completing slash command arguments", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[
