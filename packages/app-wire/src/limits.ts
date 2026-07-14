@@ -1,0 +1,14 @@
+export const PROTOCOL_VERSION = "omp-app/1" as const;
+export const APP_WIRE_VERSION = "0.5.3" as const;
+export const MAX_INPUT_BYTES = 1_048_576;
+export const MAX_STRING_BYTES = 65_536;
+export const MAX_ID_BYTES = 256;
+export const MAX_ARRAY_ITEMS = 1_000;
+export const MAX_MAP_KEYS = 512;
+export const MAX_JSON_DEPTH = 32;
+export const MAX_JSON_NODES = 20_000;
+export const MAX_CAPABILITIES = 128;
+export const MAX_TERMINAL_OUTPUT_BYTES = 256_000;
+export const MAX_FILE_BYTES = 768 * 1024;
+export const MAX_SAVED_CURSORS = 128;
+export const MAX_EPOCH_BYTES = 128;

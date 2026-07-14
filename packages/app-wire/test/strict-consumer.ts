@@ -1,0 +1,35 @@
+import {
+	APP_WIRE_VERSION,
+	type AppFrame,
+	COMMAND_DESCRIPTORS,
+	type CommandFrame,
+	commandId,
+	decodeClientFrame,
+	decodeServerFrame,
+	hostId,
+	type ResultFrame,
+	requestId,
+} from "../src/index.ts";
+
+const command: CommandFrame = {
+	v: "omp-app/1",
+	type: "command",
+	requestId: requestId("request"),
+	commandId: commandId("command"),
+	hostId: hostId("host"),
+	command: "session.create",
+	args: {},
+};
+const decoded: AppFrame = decodeClientFrame(command);
+const result: ResultFrame = {
+	v: "omp-app/1",
+	type: "response",
+	requestId: requestId("request"),
+	commandId: commandId("command"),
+	hostId: hostId("host"),
+	ok: true,
+};
+void decodeServerFrame(result);
+void decoded;
+void APP_WIRE_VERSION;
+void COMMAND_DESCRIPTORS["session.create"];

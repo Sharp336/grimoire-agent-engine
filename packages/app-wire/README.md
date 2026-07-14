@@ -1,0 +1,33 @@
+# @oh-my-pi/app-wire
+
+`@oh-my-pi/app-wire` is the dependency-free `omp-app/1` JSON boundary. It owns branded control IDs, allocation-conscious UTF-8 bounds, duplicate-key rejection, cycle-safe JSON validation, safe relative paths, and versioned golden fixtures. JSONL plus profile-scoped lifecycle metadata are the durable session truth. Volatile order uses an opaque string epoch plus a safe sequence; durable entries carry explicit nullable `parentId` and deduplicate by entry ID separately from sequence replay.
+
+Cursor sequence numbers are scoped by frame domain. A session's `snapshot`, `entry`, and `event` frames share the transcript cursor used by `session.attach` replay. Host-wide `session.delta` frames use a separate per-session index cursor and never advance or enter the transcript replay ring. Clients must not compare or merge sequence numbers across those two domains, even when their opaque epoch strings match.
+
+Use `decodeClientFrame` or `decodeServerFrame` at every JSON boundary. Every decoder accepts encoded JSON (`string` or `Uint8Array`) and already-parsed JSON. Known frames preserve additive fields; unknown top-level families fail with typed `AppWireError`; unknown leaf event subtypes are accepted. Hello declares a protocol range, client identity, requested features, and saved cursors. Welcome records selected protocol, host/appserver identity, restart epoch, capabilities, negotiated limits, and resume status.
+
+```ts
+import { decodeServerFrame } from "@oh-my-pi/app-wire";
+const frame = decodeServerFrame(line); // AppWireError on malformed input
+```
+
+Appserver command idempotency is a bounded retry contract. Reusing a pending `commandId` with the same semantic payload waits for its original outcome; a different payload conflicts. For a completed command, the same payload, ignoring only the envelope `requestId`, replays the retained outcome. Completed outcomes expire five minutes after completion. Replay updates the outcome's least-recently-used position without extending that deadline. The default host cache retains at most 1,024 completed outcomes and never evicts pending commands. Once a completed outcome expires or is displaced, the ID is new again and the command may execute again.
+
+`session.attach` prepares its snapshot or requested replay before acknowledging success. It then delivers the acknowledgement, prepared frames, catch-up replay from the acknowledged baseline, and current subagent state in order. Cached attach delivery rebuilds this connection-scoped output and revalidates session existence, so an old success cannot resurrect a deleted session. Preparation failure does not mark the connection attached.
+
+Appserver accepts one unresolved `session.prompt` per session. A second normal prompt receives `session_busy` before another prompt is written to the RPC child; use `session.steer` or `session.followUp` to add work to an active run. The session remains `active` across intermediate `turn.end` events, including tool-driven multi-turn runs, and returns to `idle` on the final `agent.end`.
+
+The appserver consumes child-RPC `prompt_result` frames internally instead of forwarding them as `omp-app/1` frames. A matching local-only result returns the session to `idle`; a matching late failure emits a sanitized `turn.error` and then returns it to `idle`. A stale result may still produce diagnostic output, but it cannot release newer work. A rejected or non-invoking child response, a dispatch failure, or a successful cancel also releases the prompt lifecycle. Runtime closure or child termination releases ownership and marks the session `closed`.
+
+The exact device capability set and command mapping are exported. Destructive confirmation is separate from one-time `pair.start`/`pair.ok` pairing. File and review paths, plus known file-command arguments, must be safe relative POSIX paths. Remote-only transport supervision and terminal scraping remain outside this wire package.
+
+## Revision ownership
+
+Every command descriptor declares both its revision policy and its owner:
+
+- `session`: session lifecycle/prompt/cancel/close, agent, bash, terminal, lease, and preview commands. The appserver compares these revisions with the session projection.
+- `authority`: `files.*`, `review.*`, `config.write`, and `settings.write`. The resource authority receives the opaque `expectedRevision` unchanged and performs the resource comparison.
+- `none`: host/session listing and attachment, audit, settings reads, catalog, and watch commands. These commands reject `expectedRevision`.
+
+`revision: "none"` always has `revisionOwner: "none"`; optional and required revisions always name either `session` or `authority`.
+`session.create` accepts an opaque `projectId` and optional title. The server resolves that ID to a local project root; clients cannot send a filesystem path. `term.open.args.cwd`, when present, is a safe relative path beneath the selected project root.
