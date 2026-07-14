@@ -286,6 +286,8 @@ import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redire
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
+import ultraModeContextPrompt from "../prompts/system/ultra-mode-context.md" with { type: "text" };
+import ultraModeResetPrompt from "../prompts/system/ultra-mode-reset.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -303,6 +305,7 @@ import {
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	concreteThinkingLevel,
+	getAvailableThinkingLevelsForModel,
 	parseConfiguredThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
@@ -511,6 +514,28 @@ const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
  *  thinking/response loop. Steers the model off the repeated content; never displayed. */
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
+
+const ULTRA_MODE_CONTEXT_TYPE = "ultra-mode-context";
+const ULTRA_MODE_RESET_TYPE = "ultra-mode-reset";
+
+type UltraModeInactiveReason =
+	| "selector-inactive"
+	| "subagent"
+	| "vibe-mode"
+	| "task-eager-configured"
+	| "task-unavailable";
+
+type UltraModeDecision = { active: true; taskToolName: string } | { active: false; reason: UltraModeInactiveReason };
+
+type UltraModeContextStatus = "active" | "reset";
+
+interface UltraModeContextDetails {
+	selector: "ultra";
+	status: UltraModeContextStatus;
+	reason: string;
+	taskTool?: string;
+	providerThinkingLevel?: Effort;
+}
 
 function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") return content;
@@ -1212,6 +1237,7 @@ function parseRetryFallbackSelector(
 	if (!trimmed) return undefined;
 	const parsed = parseModelString(trimmed, {
 		allowMaxSuffix: true,
+		allowUltraSuffix: true,
 		allowAutoAlias: true,
 		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
 	});
@@ -1662,7 +1688,8 @@ type AgentContinueSkipReason =
 	| PostPromptSkipReason
 	| "session-unavailable"
 	| "should-continue-false"
-	| "post-restore-unavailable";
+	| "post-restore-unavailable"
+	| "post-ultra-reconcile-unavailable";
 
 type ScheduledAgentContinueOptions = {
 	delayMs?: number;
@@ -1739,7 +1766,7 @@ export class AgentSession {
 	readonly configWarnings: string[] = [];
 
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	/** Effective, metadata-clamped thinking level applied to the agent (never `auto`). */
+	/** Model-clamped local selector (never `auto`); Ultra lowers to Max when applied to the agent. */
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** True when the user configured `auto`; the effective level is resolved per turn. */
 	#autoThinking: boolean = false;
@@ -1938,6 +1965,14 @@ export class AgentSession {
 	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
+	/** Current logical session whose explicit active-tool update removed `task`. */
+	#runtimeTaskExclusionSessionId: string | undefined;
+	/** Monotonic logical-session generation; never restored across rollback. */
+	#runtimeTaskExclusionEpoch = 0;
+	/** Last logical session synchronized into the agent. */
+	#runtimeTaskExclusionLogicalSessionId: string | undefined;
+	/** Serializes explicit tool intent with session switches. */
+	#runtimeTaskExclusionGate: Promise<void> = Promise.resolve();
 	#baseSystemPrompt: string[];
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
 	/**
@@ -2391,7 +2426,7 @@ export class AgentSession {
 		const previousTools = this.getActiveToolNames();
 		const augmentations = ["resolve"];
 		if (this.hasBuiltInTool("write")) augmentations.push("write");
-		await this.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
+		await this.setActiveToolsByName([...new Set([...previousTools, ...augmentations])], { explicit: false });
 		this.#planYoloPreviousTools = previousTools;
 		this.setPlanModeState({
 			enabled: true,
@@ -2427,7 +2462,7 @@ export class AgentSession {
 				});
 				const previousTools = this.#planYoloPreviousTools;
 				if (previousTools) {
-					await this.setActiveToolsByName(previousTools);
+					await this.setActiveToolsByName(previousTools, { explicit: false });
 				}
 				this.setStandingResolveHandler(null);
 				this.setPlanModeState(undefined);
@@ -2507,7 +2542,7 @@ export class AgentSession {
 			this.#autoThinking = true;
 			this.#thinkingLevel = resolveProvisionalAutoLevel(this.model);
 		} else {
-			this.#thinkingLevel = config.thinkingLevel;
+			this.#thinkingLevel = resolveThinkingLevelForModel(this.model, config.thinkingLevel);
 		}
 		if (config.prewalk) {
 			this.#prewalk = config.prewalk;
@@ -2603,6 +2638,7 @@ export class AgentSession {
 				}
 			}
 			await this.#maintainContextMidRun(messages, signal, context);
+			await this.#reconcileQueuedUltraModeContext();
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -4772,6 +4808,13 @@ export class AgentSession {
 						this.#skipAgentContinue("post-restore-unavailable", options);
 						return;
 					}
+					if (this.agent.hasQueuedMessages()) {
+						await this.#reconcileQueuedUltraModeContext();
+						if (signal.aborted || this.#isDisposed) {
+							this.#skipAgentContinue("post-ultra-reconcile-unavailable", options);
+							return;
+						}
+					}
 					await this.agent.continue();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
@@ -4793,11 +4836,12 @@ export class AgentSession {
 
 	#scheduleAutoContinuePrompt(generation: number): void {
 		const continuePrompt = async () => {
-			// Compaction summarizes away the first-message eager preludes, so re-assert the
-			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
-			// at invocation (past the abort check below), so an aborted continuation queues
-			// nothing; scoped to this request via prependMessages, never the shared queue.
-			const eagerNudges = this.#buildPostCompactionEagerNudges();
+			// Compaction can summarize away hidden mode/task preludes, so re-assert any
+			// currently-applicable root-session context on this auto-resumed turn. This
+			// runs at invocation (past the abort check below), so an aborted continuation
+			// queues nothing; scoped to this request via prependMessages, never the shared
+			// queue.
+			const eagerNudges = await this.#buildPostCompactionEagerNudges();
 			await this.#promptWithMessage(
 				{
 					role: "developer",
@@ -6159,6 +6203,15 @@ export class AgentSession {
 	 * needing to re-call `#syncAgentSessionId()` on every such event.
 	 */
 	#syncAgentSessionId(sessionId?: string): void {
+		const logicalSessionId = sessionId ?? this.sessionManager.getSessionId();
+		if (
+			this.#runtimeTaskExclusionLogicalSessionId !== undefined &&
+			this.#runtimeTaskExclusionLogicalSessionId !== logicalSessionId
+		) {
+			this.#runtimeTaskExclusionEpoch++;
+			this.#runtimeTaskExclusionSessionId = undefined;
+		}
+		this.#runtimeTaskExclusionLogicalSessionId = logicalSessionId;
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) =>
@@ -6721,7 +6774,7 @@ export class AgentSession {
 			...this.#getActiveNonMCPToolNames(),
 			...this.#filterSelectableMCPToolNames(nextSelectedMCPToolNames),
 		];
-		await this.setActiveToolsByName(nextActive);
+		await this.#applyActiveToolsByName(nextActive);
 		return [...new Set(activated)];
 	}
 
@@ -6816,7 +6869,7 @@ export class AgentSession {
 			}
 			if (newlyAdded.length > 0) {
 				const nextActive = [...this.getActiveToolNames(), ...newlyAdded];
-				await this.setActiveToolsByName(nextActive);
+				await this.#applyActiveToolsByName(nextActive);
 				this.#invalidateDiscoverableToolSearchIndex();
 			}
 		}
@@ -7049,13 +7102,50 @@ export class AgentSession {
 	}
 
 	/**
+	 * Serialize explicit active-tool intent with session switches and reloads.
+	 * Internal reconciliation bypasses this gate with `explicit: false`.
+	 */
+	async #acquireRuntimeTaskExclusionGate(): Promise<() => void> {
+		const previous = this.#runtimeTaskExclusionGate;
+		let releaseGate!: () => void;
+		this.#runtimeTaskExclusionGate = new Promise<void>(resolve => {
+			releaseGate = resolve;
+		});
+		await previous;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			releaseGate();
+		};
+	}
+
+	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect before the next model call.
+	 * Public calls are explicit by default. Internal reconciliation must opt out
+	 * with `explicit: false` so it cannot create or clear user task-exclusion intent.
 	 */
-	async setActiveToolsByName(toolNames: string[]): Promise<void> {
-		await this.#applyActiveToolsByName(toolNames);
+	async setActiveToolsByName(toolNames: string[], options?: { explicit?: boolean }): Promise<void> {
+		const normalizedToolNames = normalizeToolNames(toolNames);
+		const explicit = options?.explicit !== false;
+		const releaseGate = explicit ? await this.#acquireRuntimeTaskExclusionGate() : undefined;
+		try {
+			const explicitSessionId = explicit ? this.sessionManager.getSessionId() : undefined;
+			const explicitEpoch = this.#runtimeTaskExclusionEpoch;
+			await this.#applyActiveToolsByName(normalizedToolNames);
+			if (
+				explicitSessionId !== undefined &&
+				explicitSessionId === this.sessionManager.getSessionId() &&
+				explicitEpoch === this.#runtimeTaskExclusionEpoch
+			) {
+				this.#runtimeTaskExclusionSessionId = normalizedToolNames.includes("task") ? undefined : explicitSessionId;
+			}
+		} finally {
+			releaseGate?.();
+		}
 	}
 
 	async #restoreMCPSelectionsForSessionContext(
@@ -8179,8 +8269,9 @@ export class AgentSession {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
-			// Steer/follow-up the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
+			// Steer/follow-up hidden keyword context BEFORE the queued user message so the
+			// model reads turn-local guidance ahead of the prompt it modifies. Standing
+			// Ultra mode context is re-derived when the queued turn actually executes.
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
@@ -8383,6 +8474,12 @@ export class AgentSession {
 			const vibeModeMessage = this.#buildVibeModeMessage();
 			if (vibeModeMessage) {
 				messages.push(vibeModeMessage);
+			}
+			const hasExplicitUltraModeMessage = options?.prependMessages?.some(message =>
+				this.#isUltraModeCustomMessage(message),
+			);
+			if (!hasExplicitUltraModeMessage) {
+				messages.push(...(await this.#buildRootTurnUltraModeMessages(message, { activateTask: true })));
 			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
@@ -9078,9 +9175,10 @@ export class AgentSession {
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).
-	 *  Only user-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
-	 *  returned for editor restore. Other queued messages stay in the agent-core queues so a continuing
-	 *  stream still delivers them — EXCEPT on `forInterrupt` (Esc+abort), where only advisor cards are
+	 *  User-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
+	 *  returned for editor restore; known hidden user companions and queued Ultra context leave with
+	 *  a removed root, while Ultra remains beside a retained vibe root. Other agent-authored messages
+	 *  stay queued — EXCEPT on `forInterrupt` (Esc+abort), where only advisor cards are
 	 *  kept (abort()'s #extractQueuedAdvisorCards preserves them as visible advice) and every other
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
@@ -9093,10 +9191,17 @@ export class AgentSession {
 		const followUpAll = this.agent.peekFollowUpQueue();
 		const steering = steeringAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
 		const followUp = followUpAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
-		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
-			? isAdvisorCard
-			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
-		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
+		const keepAfterRestore = (queue: readonly AgentMessage[]): AgentMessage[] =>
+			queue.filter((message, index) => {
+				if (isUserQueuedMessage(message) || isHiddenUserCompanion(message)) return false;
+				if (!this.#isUltraModeCustomMessage(message)) return true;
+				const root = queue[index + 1];
+				return root?.role === "custom" && root.customType === "vibe-mode-context";
+			});
+		this.agent.replaceQueues(
+			options?.forInterrupt ? steeringAll.filter(isAdvisorCard) : keepAfterRestore(steeringAll),
+			options?.forInterrupt ? followUpAll.filter(isAdvisorCard) : keepAfterRestore(followUpAll),
+		);
 		return { steering, followUp };
 	}
 
@@ -9132,12 +9237,16 @@ export class AgentSession {
 			}
 			return -1;
 		};
-		// Notices queue immediately before their user message, so dropping the popped
-		// prompt means also dropping the contiguous hidden-user companions right before
-		// it — companions of other queued prompts stay put.
+		// Known hidden notices and a queued Ultra context sit immediately before
+		// their user message. Remove that contiguous group with the restored prompt;
+		// agent-authored entries such as advisor cards remain independently queued.
 		const removeWithCompanions = (queue: readonly AgentMessage[], userIndex: number): AgentMessage[] => {
 			let start = userIndex;
-			while (start > 0 && isHiddenUserCompanion(queue[start - 1])) start--;
+			while (start > 0) {
+				const previous = queue[start - 1];
+				if (!isHiddenUserCompanion(previous) && !this.#isUltraModeCustomMessage(previous)) break;
+				start--;
+			}
 			const next = queue.slice();
 			next.splice(start, userIndex - start + 1);
 			return next;
@@ -9882,7 +9991,15 @@ export class AgentSession {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		if (this.#autoThinking) {
+			this.setThinkingLevel(AUTO_THINKING);
+			return;
+		}
+		const requestedLevel =
+			this.configuredThinkingLevel() === ThinkingLevel.Ultra
+				? ThinkingLevel.Ultra
+				: (preferredDefault ?? this.#thinkingLevel);
+		this.setThinkingLevel(requestedLevel);
 	}
 
 	/**
@@ -10067,9 +10184,9 @@ export class AgentSession {
 	/**
 	 * Get available thinking levels for current model.
 	 */
-	getAvailableThinkingLevels(): ReadonlyArray<Effort> {
+	getAvailableThinkingLevels(): readonly ThinkingLevel[] {
 		if (!this.model) return [];
-		return getSupportedEfforts(this.model);
+		return getAvailableThinkingLevelsForModel(this.model);
 	}
 
 	// =========================================================================
@@ -11984,6 +12101,209 @@ export class AgentSession {
 		};
 	}
 
+	#stripQueuedUltraModeMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+		return messages.filter(message => !this.#isUltraModeCustomMessage(message));
+	}
+
+	#isQueuedUltraRootMessage(message: AgentMessage): boolean {
+		if (message.role === "custom" && message.customType === "vibe-mode-context") return true;
+		return !this.#isAgentOnlyRootTurnMessage(message) && !isHiddenUserCompanion(message);
+	}
+
+	async #reconcileQueuedUltraModeContext(): Promise<void> {
+		if (!this.agent.hasQueuedMessages()) return;
+
+		const hasQueuedRootMessage = [...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue()].some(
+			message => this.#isQueuedUltraRootMessage(message),
+		);
+		if (!hasQueuedRootMessage) {
+			this.agent.transformQueues(queues => ({
+				steering: this.#stripQueuedUltraModeMessages(queues.steering),
+				followUp: this.#stripQueuedUltraModeMessages(queues.followUp),
+			}));
+			return;
+		}
+
+		const ultraModeMessages = await this.#buildUltraModeContextMessages({
+			activateTask: true,
+			suppressActiveReassertion: true,
+		});
+		this.agent.transformQueues(queues => {
+			const steering = this.#stripQueuedUltraModeMessages(queues.steering);
+			const followUp = this.#stripQueuedUltraModeMessages(queues.followUp);
+			const steeringRootIndex = steering.findIndex(message => this.#isQueuedUltraRootMessage(message));
+			const followUpRootIndex = followUp.findIndex(message => this.#isQueuedUltraRootMessage(message));
+			const target = steeringRootIndex >= 0 ? "steering" : followUpRootIndex >= 0 ? "followUp" : undefined;
+			if (!target || ultraModeMessages.length === 0) return { steering, followUp };
+
+			const queued = target === "steering" ? steering : followUp;
+			const rootIndex = target === "steering" ? steeringRootIndex : followUpRootIndex;
+			let insertionIndex = rootIndex;
+			while (insertionIndex > 0 && isHiddenUserCompanion(queued[insertionIndex - 1])) {
+				insertionIndex--;
+			}
+			const hiddenCompanions = queued.slice(insertionIndex, rootIndex);
+			const reconciled = [...queued.slice(0, insertionIndex), ...ultraModeMessages, ...queued.slice(insertionIndex)];
+			return {
+				steering: target === "steering" ? reconciled : steering,
+				followUp: target === "followUp" ? reconciled : followUp,
+				companions: [...ultraModeMessages, ...hiddenCompanions],
+			};
+		});
+	}
+
+	#hasRuntimeTaskExclusion(): boolean {
+		return this.#runtimeTaskExclusionSessionId === this.sessionManager.getSessionId();
+	}
+
+	#implicitUltraTaskAllowed(): boolean {
+		if (this.#requestedToolNames !== undefined && !this.#requestedToolNames.has("task")) return false;
+		return !this.#hasRuntimeTaskExclusion();
+	}
+
+	#resolveImplicitUltraModeDecision(): UltraModeDecision {
+		if (this.configuredThinkingLevel() !== ThinkingLevel.Ultra) {
+			return { active: false, reason: "selector-inactive" };
+		}
+		if (this.#agentKind === "sub") {
+			return { active: false, reason: "subagent" };
+		}
+		if (this.#vibeModeState?.enabled) {
+			return { active: false, reason: "vibe-mode" };
+		}
+		if (this.settings.isConfigured("task.eager")) {
+			return { active: false, reason: "task-eager-configured" };
+		}
+		if (!this.#implicitUltraTaskAllowed()) {
+			return { active: false, reason: "task-unavailable" };
+		}
+		const activeToolNames = this.getActiveToolNames();
+		const taskIsAvailable =
+			this.#builtInToolNames.has("task") && (activeToolNames.includes("task") || this.#toolRegistry.has("task"));
+		if (!taskIsAvailable) {
+			return { active: false, reason: "task-unavailable" };
+		}
+		return { active: true, taskToolName: this.#buildEagerPreludeContext().toolRefs.task };
+	}
+
+	async #ensureImplicitUltraTaskActive(): Promise<void> {
+		if (!this.#implicitUltraTaskAllowed()) return;
+		if (!this.#builtInToolNames.has("task")) return;
+		const activeToolNames = this.getActiveToolNames();
+		if (activeToolNames.includes("task")) return;
+		if (!this.#toolRegistry.has("task")) return;
+		await this.#applyActiveToolsByName([...activeToolNames, "task"], { persistMCPSelection: false });
+	}
+
+	#isUltraModeCustomMessage(message: AgentMessage): message is CustomMessage<UltraModeContextDetails> {
+		return (
+			message.role === "custom" &&
+			(message.customType === ULTRA_MODE_CONTEXT_TYPE || message.customType === ULTRA_MODE_RESET_TYPE)
+		);
+	}
+
+	#isAgentOnlyRootTurnMessage(message: AgentMessage): boolean {
+		if (message.role === "user") return false;
+		if ("attribution" in message && message.attribution === "user") return false;
+		return true;
+	}
+
+	#lastUltraModeContextStatusFromBranch(): UltraModeContextStatus | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry?.type !== "custom_message") continue;
+			if (entry.customType === ULTRA_MODE_CONTEXT_TYPE) return "active";
+			if (entry.customType === ULTRA_MODE_RESET_TYPE) return "reset";
+			const details = entry.details;
+			if (!details || typeof details !== "object" || Array.isArray(details)) continue;
+			if ((details as Partial<UltraModeContextDetails>).selector !== "ultra") continue;
+			const status = (details as Partial<UltraModeContextDetails>).status;
+			if (status === "active" || status === "reset") return status;
+		}
+		return undefined;
+	}
+
+	#createUltraModeContextMessage(taskToolName: string): CustomMessage<UltraModeContextDetails> {
+		const context = this.#buildEagerPreludeContext();
+		const details: UltraModeContextDetails = {
+			selector: "ultra",
+			status: "active",
+			reason: "implicit-root",
+			taskTool: taskToolName,
+			providerThinkingLevel: Effort.Max,
+		};
+		return {
+			role: "custom",
+			customType: ULTRA_MODE_CONTEXT_TYPE,
+			content: prompt.render(ultraModeContextPrompt, context),
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	#createUltraModeResetMessage(reason: UltraModeInactiveReason): CustomMessage<UltraModeContextDetails> {
+		const details: UltraModeContextDetails = {
+			selector: "ultra",
+			status: "reset",
+			reason,
+		};
+		return {
+			role: "custom",
+			customType: ULTRA_MODE_RESET_TYPE,
+			content: prompt.render(ultraModeResetPrompt, {}),
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	async #buildUltraModeContextMessages(options: {
+		activateTask: boolean;
+		suppressActiveReassertion?: boolean;
+	}): Promise<CustomMessage[]> {
+		const lastStatus = this.#lastUltraModeContextStatusFromBranch();
+		if (this.#hasRuntimeTaskExclusion()) {
+			const activeToolNames = this.getActiveToolNames();
+			if (activeToolNames.includes("task")) {
+				await this.#applyActiveToolsByName(
+					activeToolNames.filter(name => name !== "task"),
+					{ persistMCPSelection: false },
+				);
+			}
+		}
+		const decision = this.#resolveImplicitUltraModeDecision();
+		if (decision.active) {
+			if (options.activateTask) {
+				await this.#ensureImplicitUltraTaskActive();
+			}
+			if (!this.getActiveToolNames().includes("task")) {
+				return [];
+			}
+			if (options.suppressActiveReassertion && lastStatus === "active") {
+				return [];
+			}
+			return [this.#createUltraModeContextMessage(decision.taskToolName)];
+		}
+		if (lastStatus !== "active") {
+			return [];
+		}
+		return [this.#createUltraModeResetMessage(decision.reason)];
+	}
+
+	async #buildRootTurnUltraModeMessages(
+		message: AgentMessage,
+		options: { activateTask: boolean },
+	): Promise<CustomMessage[]> {
+		if (this.#isUltraModeCustomMessage(message)) return [];
+		return this.#buildUltraModeContextMessages({
+			activateTask: options.activateTask,
+			suppressActiveReassertion: this.#isAgentOnlyRootTurnMessage(message),
+		});
+	}
 	#createEagerTodoPrelude(
 		promptText: string | undefined,
 	): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
@@ -12085,16 +12405,15 @@ export class AgentSession {
 	}
 
 	/**
-	 * Build the eager task/todo reminders to re-inject on the auto-continuation turn that
-	 * follows a compaction. The first-message preludes are the oldest messages, so
-	 * compaction summarizes them away and the agent silently loses the delegate-via-tasks
-	 * and phased-todo guidance mid-work; this re-asserts them, reminder-only (the todo
-	 * builder drops its forced tool_choice when `promptText` is undefined). Each builder
-	 * still applies its own mode / agent-kind / plan-mode / tool-active / surviving-todo
-	 * gates, so an empty array means nothing currently warrants a nudge.
+	 * Build the hidden mode/task reminders to re-inject on the auto-continuation turn
+	 * that follows a compaction. Compaction can summarize away the earliest hidden
+	 * custom messages, so this re-asserts only currently applicable guidance. Each
+	 * builder still applies its own mode / agent-kind / plan-mode / tool-active gates,
+	 * so an empty array means nothing currently warrants a nudge.
 	 */
-	#buildPostCompactionEagerNudges(): AgentMessage[] {
+	async #buildPostCompactionEagerNudges(): Promise<AgentMessage[]> {
 		const nudges: AgentMessage[] = [];
+		nudges.push(...(await this.#buildUltraModeContextMessages({ activateTask: true })));
 		const todo = this.#createEagerTodoPrelude(undefined);
 		if (todo) nudges.push(todo.message);
 		const task = this.#createEagerTaskPrelude(undefined);
@@ -12661,6 +12980,7 @@ export class AgentSession {
 
 		const parsed = parseModelString(trimmedTarget, {
 			allowMaxSuffix: true,
+			allowUltraSuffix: true,
 			allowAutoAlias: true,
 			isLiteralModelId: (provider, id) =>
 				availableModels.some(model => model.provider === provider && model.id === id),
@@ -15682,13 +16002,14 @@ export class AgentSession {
 				return false;
 			}
 		}
+		let releaseRuntimeTaskExclusionGate: (() => void) | undefined;
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
+		let previousSessionState = this.sessionManager.captureState();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
 		// different-session switch is a pure waste — and on huge pre-fix sessions
@@ -15697,7 +16018,7 @@ export class AgentSession {
 		// blowing the heap before the new session even loads (issue #3846). The
 		// error-recovery path rebuilds the context on demand from the restored
 		// state instead.
-		const previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
+		let previousSessionContext: SessionContext | undefined;
 		// switchSession replaces these arrays wholesale during load/rollback, so retaining
 		// the existing message objects is sufficient and avoids structured-clone failures for
 		// extension/custom metadata that is valid to persist but not cloneable.
@@ -15711,14 +16032,15 @@ export class AgentSession {
 		const previousAutoThinking = this.#autoThinking;
 		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		const previousServiceTierByFamily = this.#serviceTierByFamily;
-		const previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
-		const previousTools = [...this.agent.state.tools];
-		const previousBaseSystemPrompt = this.#baseSystemPrompt;
-		const previousSystemPrompt = this.agent.state.systemPrompt;
-		const previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
+		let previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+		let previousTools = [...this.agent.state.tools];
+		let previousBaseSystemPrompt = this.#baseSystemPrompt;
+		let previousSystemPrompt = this.agent.state.systemPrompt;
+		let previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
-		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
-		const previousFallbackSelectedMCPToolNames = previousSessionFile
+		let previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		let previousRuntimeTaskExclusionSessionId = this.#runtimeTaskExclusionSessionId;
+		let previousFallbackSelectedMCPToolNames = previousSessionFile
 			? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
 			: undefined;
 
@@ -15736,6 +16058,21 @@ export class AgentSession {
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		try {
+			releaseRuntimeTaskExclusionGate = await this.#acquireRuntimeTaskExclusionGate();
+			// Explicit updates may have completed while abort/flush ran. Refresh every
+			// tool-related rollback snapshot only after the gate has drained them.
+			previousSessionState = this.sessionManager.captureState();
+			previousSessionContext = switchingToDifferentSession ? undefined : this.buildDisplaySessionContext();
+			previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+			previousTools = [...this.agent.state.tools];
+			previousBaseSystemPrompt = this.#baseSystemPrompt;
+			previousSystemPrompt = this.agent.state.systemPrompt;
+			previousBaseSystemPromptBeforeMemoryPromotion = this.#baseSystemPromptBeforeMemoryPromotion;
+			previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+			previousRuntimeTaskExclusionSessionId = this.#runtimeTaskExclusionSessionId;
+			previousFallbackSelectedMCPToolNames = previousSessionFile
+				? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
+				: undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
@@ -15754,13 +16091,21 @@ export class AgentSession {
 			await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
 			this.#rehydrateCheckpointRewindState();
 
-			// Emit session_switch event to hooks
-			if (this.#extensionRunner) {
-				await this.#extensionRunner.emit({
-					type: "session_switch",
-					reason: "resume",
-					previousSessionFile,
-				});
+			// Session-switch hooks may make explicit active-tool updates. Temporarily
+			// release the gate after target adoption, then drain those updates before
+			// continuing so rollback can still restore the source atomically.
+			releaseRuntimeTaskExclusionGate?.();
+			releaseRuntimeTaskExclusionGate = undefined;
+			try {
+				if (this.#extensionRunner) {
+					await this.#extensionRunner.emit({
+						type: "session_switch",
+						reason: "resume",
+						previousSessionFile,
+					});
+				}
+			} finally {
+				releaseRuntimeTaskExclusionGate = await this.#acquireRuntimeTaskExclusionGate();
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
@@ -15877,6 +16222,7 @@ export class AgentSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId);
+			this.#runtimeTaskExclusionSessionId = previousRuntimeTaskExclusionSessionId;
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
 			let restoreMcpError: unknown;
@@ -15928,6 +16274,8 @@ export class AgentSession {
 				throw restoreMcpError;
 			}
 			throw error;
+		} finally {
+			releaseRuntimeTaskExclusionGate?.();
 		}
 	}
 

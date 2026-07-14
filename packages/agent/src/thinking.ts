@@ -14,6 +14,7 @@ export const ThinkingLevel = {
 	High: Effort.High,
 	XHigh: Effort.XHigh,
 	Max: Effort.Max,
+	Ultra: "ultra",
 } as const;
 
 export type ThinkingLevel = (typeof ThinkingLevel)[keyof typeof ThinkingLevel];

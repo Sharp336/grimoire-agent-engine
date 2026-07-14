@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentEvent, type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort, type TextContent } from "@oh-my-pi/pi-ai";
 import {
 	type CompactionEntry,
@@ -11,6 +11,12 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import {
+	dispatchRpcInputFrame,
+	type PendingExtensionRequest,
+	type RpcInputFrameDeps,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import type { RpcCommand, RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { BashExecutionMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { e2eApiKey } from "./utilities";
@@ -24,6 +30,76 @@ const isAssistantMessage = (message: AgentMessage): message is AssistantMessage 
 const isSessionMessageEntry = (entry: FileEntry): entry is SessionMessageEntry => entry.type === "message";
 
 const isCompactionEntry = (entry: FileEntry): entry is CompactionEntry => entry.type === "compaction";
+
+const ULTRA_THINKING_LEVEL = ThinkingLevel.Ultra;
+
+function createRpcDispatchDeps(
+	handleCommand: (command: RpcCommand) => Promise<RpcResponse>,
+	outputs: object[],
+): RpcInputFrameDeps {
+	return {
+		handleCommand,
+		output: obj => {
+			outputs.push(obj);
+		},
+		errorResponse: (id, command, message) => ({
+			id,
+			type: "response",
+			command,
+			success: false,
+			error: message,
+		}),
+		pendingExtensionRequests: new Map<string, PendingExtensionRequest>(),
+		onHostToolResult: () => {},
+		onHostToolUpdate: () => {},
+		onHostUriResult: () => {},
+	};
+}
+
+test("RPC dispatch preserves Ultra set_thinking_level selector strings", async () => {
+	const outputs: object[] = [];
+	const handled: RpcCommand[] = [];
+	const command = { id: "set-ultra", type: "set_thinking_level", level: ULTRA_THINKING_LEVEL } satisfies RpcCommand;
+	const deps = createRpcDispatchDeps(async frame => {
+		handled.push(frame);
+		if (frame.type !== command.type) {
+			return {
+				id: frame.id,
+				type: "response",
+				command: frame.type,
+				success: false,
+				error: `Unexpected command: ${frame.type}`,
+			};
+		}
+		return { id: frame.id, type: "response", command: frame.type, success: true };
+	}, outputs);
+
+	const dispatched = dispatchRpcInputFrame(command, deps);
+	expect(dispatched).toBeInstanceOf(Promise);
+	await dispatched;
+
+	expect(handled).toEqual([command]);
+	expect(outputs).toEqual([{ id: "set-ultra", type: "response", command: "set_thinking_level", success: true }]);
+});
+
+test("RPC dispatch round-trips Ultra cycle_thinking_level responses", async () => {
+	const outputs: object[] = [];
+	const response = {
+		id: "cycle-ultra",
+		type: "response",
+		command: "cycle_thinking_level",
+		success: true,
+		data: { level: ULTRA_THINKING_LEVEL },
+	} satisfies RpcResponse;
+	const deps = createRpcDispatchDeps(async command => {
+		expect(command.type).toBe("cycle_thinking_level");
+		return response;
+	}, outputs);
+
+	await dispatchRpcInputFrame({ id: "cycle-ultra", type: "cycle_thinking_level" } satisfies RpcCommand, deps);
+
+	expect(outputs).toEqual([response]);
+});
 
 /**
  * RPC mode tests.

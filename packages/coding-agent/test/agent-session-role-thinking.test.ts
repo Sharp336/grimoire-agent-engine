@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
@@ -304,7 +304,7 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(Effort.Minimal);
 	});
 
-	it("cycles through max as the final tier on a max-capable model", async () => {
+	it("cycles through ultra after max on a max-capable model", async () => {
 		const model = getAnthropicModelOrThrow("claude-opus-4-7");
 		const agent = new Agent({
 			initialState: {
@@ -329,12 +329,16 @@ describe("AgentSession role model thinking behavior", () => {
 		});
 
 		const available = session.getAvailableThinkingLevels();
-		expect(available.at(-1)).toBe(Effort.Max);
+		expect(available.at(-2)).toBe(Effort.Max);
+		expect(available.at(-1)).toBe(ThinkingLevel.Ultra);
 
 		session.setThinkingLevel(Effort.XHigh);
 		expect(session.cycleThinkingLevel()).toBe(Effort.Max);
 		expect(session.thinkingLevel).toBe(Effort.Max);
-		// max is the last tier: the wheel wraps back to off.
+		expect(session.cycleThinkingLevel()).toBe(ThinkingLevel.Ultra);
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Max);
+		// ultra is the last local selector: the wheel wraps back to off.
 		expect(session.cycleThinkingLevel()).toBe("off");
 	});
 

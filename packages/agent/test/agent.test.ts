@@ -80,6 +80,55 @@ describe("Agent", () => {
 		expect(mock.calls.length).toBe(2);
 	});
 
+	for (const queueKind of ["steering", "follow-up"] as const) {
+		it(`delivers queue companions with the next ${queueKind} message in one-at-a-time mode`, async () => {
+			const mock = createMockModel({
+				responses: [{ content: ["Processed 1"] }, { content: ["Processed 2"] }],
+			});
+			const agent = new Agent({ streamFn: mock.stream });
+			agent.replaceMessages([
+				{
+					role: "user",
+					content: [{ type: "text", text: "Initial" }],
+					timestamp: Date.now() - 10,
+				},
+				createAssistantMessage([{ type: "text", text: "Initial response" }]),
+			]);
+
+			const contextMessage = {
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "Companion context" }],
+				timestamp: Date.now(),
+			};
+			const firstMessage = {
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "Queued 1" }],
+				timestamp: Date.now() + 1,
+			};
+			const secondMessage = {
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "Queued 2" }],
+				timestamp: Date.now() + 2,
+			};
+			const enqueue = queueKind === "steering" ? agent.steer.bind(agent) : agent.followUp.bind(agent);
+			enqueue(firstMessage);
+			enqueue(secondMessage);
+			agent.transformQueues(queues => ({
+				steering: queueKind === "steering" ? [contextMessage, ...queues.steering] : queues.steering,
+				followUp: queueKind === "follow-up" ? [contextMessage, ...queues.followUp] : queues.followUp,
+				companions: [contextMessage],
+			}));
+
+			await expect(agent.continue()).resolves.toBeUndefined();
+
+			expect(mock.calls).toHaveLength(2);
+			const firstCall = JSON.stringify(mock.calls[0]?.context.messages);
+			expect(firstCall).toContain("Companion context");
+			expect(firstCall).toContain("Queued 1");
+			expect(firstCall).not.toContain("Queued 2");
+		});
+	}
+
 	it("delivers a steer that lands at the yield boundary instead of stranding it", async () => {
 		// Regression: a steering message queued after the stop-boundary dequeue
 		// (e.g. while onBeforeYield runs) was silently stranded in the queue until

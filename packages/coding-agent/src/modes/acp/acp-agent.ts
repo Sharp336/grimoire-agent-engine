@@ -1604,6 +1604,9 @@ export class AcpAgent implements Agent {
 		if (!thinkingLevel) {
 			throw new Error(`Unknown ACP thinking level: ${value}`);
 		}
+		if (!this.#buildThinkingOptions(session).some(option => option.value === thinkingLevel)) {
+			throw new Error(`ACP thinking level unavailable for current model: ${value}`);
+		}
 		session.setThinkingLevel(thinkingLevel);
 	}
 
@@ -2286,7 +2289,7 @@ export class AcpAgent implements Agent {
 				},
 				getActiveTools: () => record.session.getActiveToolNames(),
 				getAllTools: () => record.session.getAllToolNames(),
-				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
+				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames, { explicit: true }),
 				getCommands: () => getSessionSlashCommands(record.session),
 				setModel: async model => {
 					const apiKey = await record.session.modelRegistry.getApiKey(model);

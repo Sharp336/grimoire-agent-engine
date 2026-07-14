@@ -180,6 +180,9 @@
 
 - Fixed PageUp/PageDown in the model browser wrapping past the list edges instead of clamping
 - Fixed the hover highlight sticking to the last hovered model row when the pointer moved into the provider sidebar
+### Added
+
+- Added model-gated Ultra thinking across CLI, TUI, config, suffix, ACP, and RPC surfaces, with root-only proactive delegation through the existing task runtime, atomic queued-context delivery, explicit tool exclusions, and vibe-mode precedence ([#5117](https://github.com/can1357/oh-my-pi/pull/5117) by [@jeffscottward](https://github.com/jeffscottward)).
 
 ## [16.4.6] - 2026-07-12
 

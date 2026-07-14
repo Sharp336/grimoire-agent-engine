@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -27,6 +27,7 @@ function makeTool(name: string): AgentTool {
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	modelId?: string;
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -74,7 +75,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	 *  entries still have built-in provenance after extension shadowing. */
 	function createHarness(settings: Settings, options: HarnessOptions = {}): InteractiveMode {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${Bun.nanoseconds()}.yml`));
-		const initialModel = modelOrThrow(registry, "claude-sonnet-4-5");
+		const initialModel = modelOrThrow(registry, options.modelId ?? "claude-sonnet-4-5");
 		const readTool = makeTool("read");
 		const resolveTool = makeTool("resolve");
 		// AgentSession requires a Map-typed tool registry; the harness needs both
@@ -116,6 +117,28 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
 		expect(session?.getActiveToolNames()).toContain("resolve");
+	});
+
+	it("does not turn temporary plan tool reconciliation into an Ultra task exclusion", async () => {
+		const taskTool = makeTool("task");
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), {
+			extraRegistryTools: [taskTool],
+			builtInToolNames: ["read", "resolve", "task"],
+			modelId: "claude-opus-4-7",
+		});
+		session?.setThinkingLevel(Effort.Max);
+
+		expect(session?.getActiveToolNames()).not.toContain("task");
+		await created.handlePlanModeCommand();
+		await created.handlePlanModeCommand();
+		await created.handlePlanModeCommand();
+
+		session?.setThinkingLevel(ThinkingLevel.Ultra);
+		const promptSpy = vi.spyOn(session!.agent, "prompt").mockResolvedValue(undefined);
+		await session?.prompt("delegate after leaving plan mode");
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(session?.getActiveToolNames()).toContain("task");
 	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {

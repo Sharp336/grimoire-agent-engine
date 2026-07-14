@@ -150,7 +150,7 @@ export class ExtensionUiController {
 			},
 			getActiveTools: () => this.ctx.session.getActiveToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
+			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames, { explicit: true }),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;
@@ -370,7 +370,7 @@ export class ExtensionUiController {
 			},
 			getActiveTools: () => this.ctx.session.getActiveToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
+			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames, { explicit: true }),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;

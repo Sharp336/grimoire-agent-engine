@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort, type Model, type ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -1934,6 +1934,105 @@ describe("AgentSession retry fallback", () => {
 			(session.model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only,
 		).toEqual(["cerebras"]);
 	});
+
+	it("applies explicit Ultra fallback selectors without treating them as literal ids", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		const provider = "ultra-fallback";
+		const fallbackId = "max-fallback";
+		modelRegistry.registerProvider(
+			provider,
+			{
+				baseUrl: "https://ultra-fallback.example.com/v1",
+				apiKey: "ultra-fallback-key",
+				api: "openai-responses",
+				models: [
+					{
+						id: fallbackId,
+						name: "Max Fallback",
+						reasoning: true,
+						thinking: {
+							mode: "effort",
+							efforts: [Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+						},
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128_000,
+						maxTokens: 8192,
+					},
+				],
+			},
+			"test://ultra-fallback",
+		);
+		const fallbackModel = modelRegistry.find(provider, fallbackId);
+		if (!fallbackModel) {
+			throw new Error("Expected runtime fallback model to be registered");
+		}
+
+		const requested: Array<{ selector: string; reasoning?: Effort }> = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				if (!options) throw new Error("Expected stream options");
+				requested.push({
+					selector: `${requestedModel.provider}/${requestedModel.id}`,
+					reasoning: options.reasoning,
+				});
+				if (requestedModel.provider === primaryModel.provider && requestedModel.id === primaryModel.id) {
+					primaryAttempts += 1;
+					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				} else {
+					mock.push({ content: [`ok:${requestedModel.provider}/${requestedModel.id}`] });
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${provider}/${fallbackId}:ultra`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		expect(session.configWarnings).not.toContain(
+			`Fallback chain for role 'default' references unknown model: ${provider}/${fallbackId}:ultra`,
+		);
+
+		await session.prompt("First prompt triggers Ultra fallback");
+		await session.waitForIdle();
+
+		expect(primaryAttempts).toBe(1);
+		expect(requested.map(call => call.selector)).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(fallbackAppliedEvents[0]?.to).toBe(`${provider}/${fallbackId}:ultra`);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Ultra);
+		expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Ultra);
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Max);
+		expect(requested[1]?.reasoning).toBe(Effort.Max);
+	});
 	it("preserves thinking on bare fallback selectors and does not overwrite user thinking on restore", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -2076,11 +2175,19 @@ describe("AgentSession retry fallback", () => {
 		// to distinct selectors...
 		expect(parseModelString("openai/gpt-4o:max", { allowMaxSuffix: true })?.thinkingLevel).toBe(Effort.Max);
 		expect(parseModelString("openai/gpt-4o:xhigh")?.thinkingLevel).toBe(Effort.XHigh);
+		expect(parseModelString("openai/gpt-4o:ultra", { allowUltraSuffix: true })?.thinkingLevel).toBe(
+			ThinkingLevel.Ultra,
+		);
 		// ...but suppression normalizes every thinking suffix to the base selector,
 		// so suppressing either still covers both.
 		modelRegistry.suppressSelector("openai/gpt-4o:max", future);
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:xhigh")).toBe(true);
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:max")).toBe(true);
+		modelRegistry.clearSuppressedSelectors();
+		modelRegistry.suppressSelector("openai/gpt-4o:ultra", future);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o")).toBe(true);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:xhigh")).toBe(true);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:ultra")).toBe(true);
 
 		await modelRegistry.refresh("offline");
 		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o")).toBe(false);

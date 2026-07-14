@@ -10,6 +10,7 @@ import {
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Pins fix #1 of the compaction effort-override bug. Before this fix,
@@ -62,6 +63,25 @@ function getGrokBuildModel(): Model {
 	const model = getBundledModel("xai-oauth", "grok-build");
 	if (!model) throw new Error("Expected built-in xai-oauth/grok-build to exist");
 	return model;
+}
+
+function getMaxCapableModel(): Model {
+	return buildModel({
+		id: "mock-max-capable",
+		name: "Mock Max Capable",
+		api: "openai-responses",
+		provider: "mock",
+		baseUrl: "https://example.com",
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts: [ai.Effort.Low, ai.Effort.Medium, ai.Effort.High, ai.Effort.XHigh, ai.Effort.Max],
+		},
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 4096,
+	});
 }
 
 const messages: AgentMessage[] = [
@@ -147,6 +167,20 @@ describe("compaction thinking-level resolution (regression)", () => {
 		const call = spy.mock.calls[0];
 		if (!call) throw new Error("expected completeSimple call");
 		expect(call[2]?.reasoning).toBe(ai.Effort.High);
+	});
+
+	test("ThinkingLevel.Ultra on max-capable models → reasoning=max", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "handoff" }]));
+		await generateHandoff(messages, getMaxCapableModel(), "test-key", {
+			systemPrompt: ["sp"],
+			tools: [],
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+		const call = spy.mock.calls[0];
+		if (!call) throw new Error("expected completeSimple call");
+		expect(call[2]?.reasoning).toBe(ai.Effort.Max);
 	});
 });
 
@@ -249,6 +283,21 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 			// trip requireSupportedEffort. The fix + the wire-side strip in
 			// fix #2 keep this clean.
 			expect(opts?.reasoning).toBeUndefined();
+		}
+	});
+
+	test("ThinkingLevel.Ultra → every fan-out call gets reasoning=max", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+
+		await compact(makePreparation(), getMaxCapableModel(), "test-key", undefined, undefined, {
+			thinkingLevel: ThinkingLevel.Ultra,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(3);
+		for (const [, , opts] of spy.mock.calls) {
+			expect(opts?.reasoning).toBe(ai.Effort.Max);
 		}
 	});
 });

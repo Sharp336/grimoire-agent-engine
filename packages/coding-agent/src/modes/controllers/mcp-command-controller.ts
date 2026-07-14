@@ -1181,7 +1181,9 @@ export class MCPCommandController {
 					const currentActive = this.ctx.session.getActiveToolNames();
 					const toActivate = serverTools.map(t => t.name).filter(n => this.ctx.session.getToolByName(n));
 					if (toActivate.length > 0) {
-						await this.ctx.session.setActiveToolsByName([...new Set([...currentActive, ...toActivate])]);
+						await this.ctx.session.setActiveToolsByName([...new Set([...currentActive, ...toActivate])], {
+							explicit: false,
+						});
 					}
 				}
 			}

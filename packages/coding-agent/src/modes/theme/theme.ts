@@ -1685,6 +1685,7 @@ export class Theme {
 				return (str: string) => this.fg("thinkingHigh", str);
 			case "xhigh":
 				return (str: string) => this.fg("thinkingXhigh", str);
+			case "ultra":
 			case "max":
 				// thinkingMax is optional; themes without it resolve to the xhigh color.
 				return (str: string) => this.fg(this.#fgColors.thinkingMax ? "thinkingMax" : "thinkingXhigh", str);
@@ -1876,6 +1877,7 @@ export class Theme {
 			high: this.#symbols["thinking.high"],
 			xhigh: this.#symbols["thinking.xhigh"],
 			max: this.#symbols["thinking.max"],
+			ultra: this.#symbols["thinking.max"],
 			autoPending: this.#symbols["thinking.autoPending"],
 		};
 	}
