@@ -30,6 +30,7 @@ export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1
  */
 export const BROWSER_PROTOCOL_TIMEOUT_MS = 60_000;
 const ENABLE_AUTOMATION_FLAG = "--enable-automation";
+const WINDOWS_HEADLESS_WINDOW_POSITION_ARG = "--window-position=-10000,-10000";
 // Automation-tell launch flags that puppeteer-core adds by default. We suppress
 // them via `ignoreDefaultArgs` (the supported escape hatch) to mirror xxxx's
 // chromiumSwitches patch. `--enable-automation` is the loudest: it normally sets
@@ -280,20 +281,37 @@ export interface LaunchHeadlessOptions {
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 }
 
-export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<Browser> {
+export interface BrowserLaunchConfig {
+	initialViewport: { width: number; height: number; deviceScaleFactor: number };
+	launchArgs: string[];
+}
+
+export function buildBrowserLaunchConfig(
+	opts: LaunchHeadlessOptions,
+	platform: NodeJS.Platform = process.platform,
+): BrowserLaunchConfig {
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const initialViewport = {
 		width: vp.width,
 		height: vp.height,
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
-	const puppeteer = await loadPuppeteer();
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		"--disable-blink-features=AutomationControlled",
 		`--window-size=${initialViewport.width},${initialViewport.height}`,
 	];
+	// Unified headless Chrome still owns a hidden native window. Some Windows
+	// builds can compose and expose it as a blank white window (Chromium
+	// 359921643), so keep that fallback surface outside the visible desktop.
+	if (opts.headless && platform === "win32") launchArgs.push(WINDOWS_HEADLESS_WINDOW_POSITION_ARG);
+	return { initialViewport, launchArgs };
+}
+
+export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<Browser> {
+	const { initialViewport, launchArgs } = buildBrowserLaunchConfig(opts);
+	const puppeteer = await loadPuppeteer();
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);

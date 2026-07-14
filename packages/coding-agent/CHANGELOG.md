@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added regression coverage and documentation for configuring OpenAI-compatible relay providers through `models.yml`, including provider-level `baseUrl`, `apiKey`, discovery, and selector availability.
+
+### Fixed
+
+- Fixed headless browser automation on Windows occasionally exposing a blank Chrome window by keeping its hidden native fallback surface off-screen. ([#5397](https://github.com/can1357/oh-my-pi/issues/5397))
+
 ## [16.5.1] - 2026-07-14
 
 ### Changed

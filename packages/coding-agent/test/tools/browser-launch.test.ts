@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { stealthIgnoreDefaultArgsForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	buildBrowserLaunchConfig,
+	stealthIgnoreDefaultArgsForTest,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
 const AUTOMATION_FLAG = "--enable-automation";
 
@@ -31,5 +34,17 @@ describe("browser launch stealth defaults", () => {
 
 			expect(ignoreDefaultArgs).toContain(AUTOMATION_FLAG);
 		}
+	});
+});
+
+describe("browser launch platform safety", () => {
+	it("moves only the Windows headless fallback window off-screen", () => {
+		const windowsHeadless = buildBrowserLaunchConfig({ headless: true }, "win32");
+		const windowsVisible = buildBrowserLaunchConfig({ headless: false }, "win32");
+		const linuxHeadless = buildBrowserLaunchConfig({ headless: true }, "linux");
+
+		expect(windowsHeadless.launchArgs).toContain("--window-position=-10000,-10000");
+		expect(windowsVisible.launchArgs).not.toContain("--window-position=-10000,-10000");
+		expect(linuxHeadless.launchArgs).not.toContain("--window-position=-10000,-10000");
 	});
 });
