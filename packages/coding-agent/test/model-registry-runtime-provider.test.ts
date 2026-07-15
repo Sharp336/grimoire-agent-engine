@@ -11,7 +11,8 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -189,6 +190,32 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		registry.clearSourceRegistrations("ext://runtime");
 		expectProviderHeader(registry, providerName, "Authorization", undefined);
+	});
+
+	test("auth none runtime models stay keyless across reloads and source handoffs", async () => {
+		const providerName = "keyless-runtime-provider";
+		const config = (id: string): ProviderConfig => ({
+			auth: "none",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			api: "openai-completions",
+			models: [{ ...baseModel, id }],
+		});
+		const expectKeyless = async (modelId: string): Promise<void> => {
+			const model = registry.find(providerName, modelId);
+			if (!model) throw new Error(`Expected ${providerName}/${modelId}`);
+			expect(await registry.getApiKey(model)).toBe(kNoAuth);
+		};
+
+		registry.registerProvider(providerName, config("source-a-model"), "ext://runtime");
+		await expectKeyless("source-a-model");
+		await registry.refresh("offline");
+		await expectKeyless("source-a-model");
+
+		registry.registerProvider(providerName, config("source-b-model"), "ext://atomic");
+		expect(registry.find(providerName, "source-a-model")).toBeUndefined();
+		await expectKeyless("source-b-model");
+		await registry.refreshProvider(providerName, "offline");
+		await expectKeyless("source-b-model");
 	});
 
 	test("registerProvider applies remoteCompaction-only overrides to existing provider models across refresh", async () => {

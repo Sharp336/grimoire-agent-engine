@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevented keyless OpenAI-compatible providers from sending the public no-auth sentinel as a Bearer token.
+
 ## [17.0.0] - 2026-07-15
 
 ### Changed

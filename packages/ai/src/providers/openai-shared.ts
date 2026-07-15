@@ -30,6 +30,7 @@ import {
 	stringifyJson,
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
+import { kNoAuth } from "../api-key";
 import * as AIError from "../error";
 import {
 	type Api,
@@ -278,7 +279,7 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
 	}
 	const requestHeaders = { ...headers };
-	headers.Authorization ??= `Bearer ${apiKey}`;
+	if (apiKey !== kNoAuth) headers.Authorization ??= `Bearer ${apiKey}`;
 	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
 }
 

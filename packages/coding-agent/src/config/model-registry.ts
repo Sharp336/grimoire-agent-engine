@@ -62,6 +62,7 @@ const BUILT_IN_DISCOVERY_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
+import { kNoAuth } from "@oh-my-pi/pi-ai/api-key";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { getBundledModelReferenceIndex, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
@@ -84,7 +85,7 @@ import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfigu
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
 import { settings } from "./settings";
 
-export const kNoAuth = "N/A";
+export { kNoAuth } from "@oh-my-pi/pi-ai/api-key";
 
 export function isAuthenticated(apiKey: string | undefined | null): apiKey is string {
 	return Boolean(apiKey) && apiKey !== kNoAuth;
@@ -760,6 +761,7 @@ export class ModelRegistry {
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
+	#runtimeKeylessProviders: Set<string> = new Set();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
@@ -980,7 +982,7 @@ export class ModelRegistry {
 			error: configError,
 		} = this.#loadCustomModels();
 		this.#configError = configError;
-		this.#keylessProviders = keylessProviders;
+		this.#keylessProviders = new Set([...keylessProviders, ...this.#runtimeKeylessProviders]);
 		this.#discoverableProviders = discoverableProviders;
 		this.#customModelOverlays = customModels;
 		this.#providerOverrides = overrides;
@@ -2070,6 +2072,7 @@ export class ModelRegistry {
 
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
+		this.#runtimeKeylessProviders.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
@@ -2131,6 +2134,7 @@ export class ModelRegistry {
 				baseUrl: config.baseUrl,
 				headers: config.headers,
 				apiKey: config.apiKey,
+				auth: config.auth,
 				api: config.api,
 				oauthConfigured: Boolean(config.oauth),
 				models: (config.models ?? []) as ProviderValidationModel[],
@@ -2181,6 +2185,10 @@ export class ModelRegistry {
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
+		if (config.auth === "none") {
+			this.#runtimeKeylessProviders.add(providerName);
+			this.#keylessProviders.add(providerName);
+		}
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
@@ -2194,7 +2202,7 @@ export class ModelRegistry {
 					config.apiKey,
 					config.authHeader,
 					config.compat,
-					undefined,
+					config.auth,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
 				);
@@ -2262,7 +2270,7 @@ export class ModelRegistry {
 							providerApiKey,
 							providerAuthHeader,
 							providerCompat,
-							undefined,
+							config.auth,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
@@ -2355,6 +2363,7 @@ export class ModelRegistry {
 export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
+	auth?: "none";
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;

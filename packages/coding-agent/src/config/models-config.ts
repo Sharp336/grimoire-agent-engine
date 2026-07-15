@@ -67,14 +67,11 @@ export function validateProviderConfiguration(
 		if (!config.baseUrl) {
 			throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
 		}
-		const requiresAuth =
-			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+		const requiresAuth = !config.apiKey && !config.oauthConfigured && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
-					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
+					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models unless auth is "none".`
 					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
 			);
 		}

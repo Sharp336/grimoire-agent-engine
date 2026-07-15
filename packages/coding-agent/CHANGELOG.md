@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `auth: "none"` support to extension runtime providers with static models, preserving keyless state across registry reloads and source handoffs.
+
 ## [17.0.0] - 2026-07-15
 
 ### Breaking Changes
