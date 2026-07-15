@@ -383,9 +383,12 @@ export class SelectorController {
 			}
 			return;
 		}
-
 		switch (id) {
-			// Session-managed settings (not in SettingsManager)
+			case "context.windowBudgetPercent":
+				this.ctx.session.reapplyContextBudget();
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+				break;
 			case "autoCompact":
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);

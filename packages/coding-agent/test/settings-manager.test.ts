@@ -879,3 +879,19 @@ describe("Settings", () => {
 		});
 	});
 });
+
+describe("context.windowBudgetPercent settings", () => {
+	it("defaults to -1", () => {
+		const settings = Settings.isolated();
+		expect(settings.get("context.windowBudgetPercent")).toBe(-1);
+	});
+
+	it("accepts and serializes allowed percentage options", () => {
+		const settings = Settings.isolated();
+		settings.set("context.windowBudgetPercent", 75);
+		expect(settings.get("context.windowBudgetPercent")).toBe(75);
+
+		settings.set("context.windowBudgetPercent", 100);
+		expect(settings.get("context.windowBudgetPercent")).toBe(100);
+	});
+});

@@ -63545,6 +63545,7 @@
 				"v2StreamingEnabled": true
 			},
 			"contextWindow": 372000,
+			"defaultContextTokens": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,
@@ -63584,6 +63585,7 @@
 				"v2StreamingEnabled": true
 			},
 			"contextWindow": 372000,
+			"defaultContextTokens": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,
@@ -63623,6 +63625,7 @@
 				"v2StreamingEnabled": true
 			},
 			"contextWindow": 372000,
+			"defaultContextTokens": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,

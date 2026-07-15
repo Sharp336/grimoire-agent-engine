@@ -135,4 +135,16 @@ describe("settings layout", () => {
 			group: "Available Tools",
 		});
 	});
+	it("exposes the context budget in Context General settings", () => {
+		const def = getSettingsForTab("context").find(def => def.path === "context.windowBudgetPercent");
+
+		expect(def).toMatchObject({
+			type: "submenu",
+			label: "Context Window Budget",
+			group: "General",
+		});
+		if (def?.type !== "submenu") throw new Error("context.windowBudgetPercent should render as a submenu");
+		expect(def.options.map(option => option.value)).toEqual(["default", "50", "75", "85", "90", "95", "100"]);
+	});
+
 });

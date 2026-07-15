@@ -276,4 +276,38 @@ describe("Codex model discovery", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	it("keeps declared hard capacity when discovery reports the conservative budget", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-context-budget-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const baseModel: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 372_000,
+			defaultContextTokens: 272_000,
+			maxTokens: 128_000,
+		};
+
+		try {
+			const resolved = await resolveProviderModels<"openai-codex-responses">({
+				providerId: "openai-codex",
+				staticModels: [buildModel(baseModel)],
+				dynamicModelsAuthoritative: true,
+				cacheDbPath: dbPath,
+				fetchDynamicModels: async () => [{ ...baseModel, contextWindow: 272_000, defaultContextTokens: undefined }],
+			});
+
+			const sol = resolved.models.find(model => model.id === "gpt-5.6-sol");
+			expect(sol?.contextWindow).toBe(372_000);
+			expect(sol?.defaultContextTokens).toBe(272_000);
+			expect(sol?.maxTokens).toBe(128_000);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });

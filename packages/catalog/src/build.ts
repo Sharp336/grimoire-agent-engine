@@ -45,3 +45,18 @@ export function buildCompat(spec: ModelSpec<Api>): CompatOf<Api> {
 			return undefined;
 	}
 }
+
+export function resolveEffectiveContextWindow(
+	model: { contextWindow: number | null; defaultContextTokens?: number },
+	percent: number | undefined | null
+): number {
+	const hardCapacity = model.contextWindow ?? 0;
+	if (hardCapacity <= 0) {
+		return 0;
+	}
+	if (percent === undefined || percent === null || percent === -1) {
+		return model.defaultContextTokens ?? hardCapacity;
+	}
+	const calculated = Math.floor((hardCapacity * percent) / 100);
+	return Math.min(hardCapacity, Math.max(1, calculated));
+}

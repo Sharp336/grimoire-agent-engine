@@ -18,6 +18,7 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
@@ -556,7 +557,12 @@ export class CollabGuestLink {
 			(session.agent.state.model?.id !== state.model.id ||
 				session.agent.state.model?.provider !== state.model.provider)
 		) {
-			session.agent.setModel(state.model);
+			const percent = session.settings.get("context.windowBudgetPercent");
+			const effectiveWindow = resolveEffectiveContextWindow(state.model, percent);
+			session.agent.setModel({
+				...state.model,
+				contextWindow: effectiveWindow,
+			});
 		}
 		const level = state.thinkingLevel as ThinkingLevel | undefined;
 		session.agent.setThinkingLevel(toReasoningEffort(level));

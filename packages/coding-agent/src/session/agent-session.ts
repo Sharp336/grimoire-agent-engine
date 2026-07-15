@@ -127,6 +127,7 @@ import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
@@ -2486,6 +2487,9 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		if (this.agent.state.model) {
+			this.agent.setModel(this.#getEffectiveModel(this.agent.state.model));
+		}
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -2958,7 +2962,7 @@ export class AgentSession {
 			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
-					model: advisorModel,
+					model: this.#getEffectiveModel(advisorModel),
 					thinkingLevel: toReasoningEffort(advisorThinkingLevel),
 					tools: [adviseTool, ...tools],
 				},
@@ -3239,7 +3243,7 @@ export class AgentSession {
 		// keeps its suffix across a promotion); only the model changes.
 		const advisorThinkingLevel = advisor.thinkingLevel;
 		try {
-			advisor.agent.setModel(targetModel);
+			advisor.agent.setModel(this.#getEffectiveModel(targetModel));
 			advisor.agent.setThinkingLevel(toReasoningEffort(advisorThinkingLevel));
 			advisor.agent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
 			advisor.agent.appendOnlyContext?.invalidateForModelChange();
@@ -9232,6 +9236,35 @@ export class AgentSession {
 	// Model Management
 	// =========================================================================
 
+	#getEffectiveModel(model: Model): Model {
+		const percent = this.settings.get("context.windowBudgetPercent");
+		const effectiveWindow = resolveEffectiveContextWindow(model, percent);
+		return {
+			...model,
+			contextWindow: effectiveWindow,
+		};
+	}
+
+	reapplyContextBudget(): void {
+		const currentModel = this.model;
+		if (!currentModel) return;
+		const canonicalModel = this.#modelRegistry.find(currentModel.provider, currentModel.id);
+		if (!canonicalModel) return;
+
+		const effectiveModel = this.#getEffectiveModel(canonicalModel);
+		this.agent.setModel(effectiveModel);
+
+		for (const advisor of this.#advisors) {
+			const advModel = advisor.agent.state.model;
+			if (advModel) {
+				const canonicalAdvModel = this.#modelRegistry.find(advModel.provider, advModel.id);
+				if (canonicalAdvModel) {
+					advisor.agent.setModel(this.#getEffectiveModel(canonicalAdvModel));
+				}
+			}
+		}
+	}
+
 	/**
 	 * Set model directly.
 	 * Validates that a credential source is configured (synchronously, without
@@ -9239,7 +9272,6 @@ export class AgentSession {
 	 * always take effect; if the current transcript is too large for the target
 	 * model, the next prompt's compaction/error path owns that recovery instead
 	 * of leaving the session pinned to the old model.
-	 * @throws Error if no API key available for the model
 	 */
 	async setModel(
 		model: Model,
@@ -12041,25 +12073,25 @@ export class AgentSession {
 
 		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
 		if (!candidate) return undefined;
-		if (modelsAreEqual(candidate, currentModel)) return undefined;
-		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
+		const candidateEffectiveWindow = resolveEffectiveContextWindow(candidate, this.settings.get("context.windowBudgetPercent"));
+		if (candidateEffectiveWindow <= contextWindow) return undefined;
 		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 		if (!apiKey) return undefined;
 		return candidate;
 	}
-
 	#setModelWithProviderSessionReset(model: Model): void {
+		const effectiveModel = this.#getEffectiveModel(model);
 		const currentModel = this.model;
 		if (currentModel) {
-			this.#closeProviderSessionsForModelSwitch(currentModel, model);
-			if (!modelsAreEqual(currentModel, model)) {
+			this.#closeProviderSessionsForModelSwitch(currentModel, effectiveModel);
+			if (!modelsAreEqual(currentModel, effectiveModel)) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
 		}
-		this.agent.setModel(model);
+		this.agent.setModel(effectiveModel);
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
-		this.#syncAppendOnlyContext(model);
+		this.#syncAppendOnlyContext(effectiveModel);
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
@@ -15484,7 +15516,7 @@ export class AgentSession {
 					if (shouldResetProviderState) {
 						this.#setModelWithProviderSessionReset(match);
 					} else {
-						this.agent.setModel(match);
+						this.agent.setModel(this.#getEffectiveModel(match));
 					}
 				}
 			}
@@ -15578,7 +15610,7 @@ export class AgentSession {
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
 			if (previousModel) {
-				this.agent.setModel(previousModel);
+				this.agent.setModel(this.#getEffectiveModel(previousModel));
 			}
 			this.#thinkingLevel = previousThinkingLevel;
 			this.#autoThinking = previousAutoThinking;

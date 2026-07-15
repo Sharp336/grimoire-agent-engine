@@ -376,6 +376,19 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const discoveryContextWindow = preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow);
+	const preservesCatalogCapacity =
+		!endpointChanged &&
+		existingModel.defaultContextTokens !== undefined &&
+		existingModel.contextWindow !== null &&
+		dynamicModel.contextWindow !== null &&
+		Number.isFinite(dynamicModel.contextWindow) &&
+		dynamicModel.contextWindow > 0 &&
+		dynamicModel.contextWindow <= existingModel.contextWindow;
+	const contextWindow = preservesCatalogCapacity ? existingModel.contextWindow : discoveryContextWindow;
+	const defaultContextTokens = preservesCatalogCapacity
+		? Math.min(existingModel.defaultContextTokens!, dynamicModel.contextWindow!)
+		: existingModel.defaultContextTokens;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -390,7 +403,8 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
+		contextWindow,
+		defaultContextTokens,
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,

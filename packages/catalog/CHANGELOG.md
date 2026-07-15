@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Codex discovery overwriting bundled context limits when the provider omits `context_window`.
+- Preserved catalog-declared hard context capacity for models with a separate conservative default budget.
 
 
 ## [16.5.2] - 2026-07-14

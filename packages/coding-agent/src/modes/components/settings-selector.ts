@@ -870,12 +870,14 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
+		if (path === "context.windowBudgetPercent" && (rawValue === "-1" || rawValue === "")) {
+			return "default";
+		}
 		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
 		return rawValue;
 	}
-
 	/**
 	 * Create a submenu for a submenu-type setting.
 	 */
@@ -1040,6 +1042,8 @@ export class SettingsSelectorComponent implements Component {
 		const currentValue = settings.get(path);
 		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
+			settings.set(path, -1 as never);
+		} else if (path === "context.windowBudgetPercent" && value === "default") {
 			settings.set(path, -1 as never);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
 			settings.set(path, -1 as never);

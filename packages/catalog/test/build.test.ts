@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildModel, resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { buildOpenAICompat, buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -555,5 +555,23 @@ describe("isOfficialAnthropicApiUrl", () => {
 
 	it("rejects lookalike hostnames", () => {
 		expect(isOfficialAnthropicApiUrl("https://api.anthropic.com.evil.com")).toBe(false);
+	});
+});
+
+describe("resolveEffectiveContextWindow", () => {
+	it("uses the model default or hard capacity when the percentage is default", () => {
+		expect(resolveEffectiveContextWindow({ contextWindow: 372_000, defaultContextTokens: 272_000 }, -1)).toBe(
+			272_000,
+		);
+		expect(resolveEffectiveContextWindow({ contextWindow: 200_000 }, undefined)).toBe(200_000);
+	});
+
+	it("uses and clamps an explicit percentage of hard capacity", () => {
+		const model = { contextWindow: 372_000, defaultContextTokens: 272_000 };
+		expect(resolveEffectiveContextWindow(model, 100)).toBe(372_000);
+		expect(resolveEffectiveContextWindow(model, 50)).toBe(186_000);
+		expect(resolveEffectiveContextWindow({ contextWindow: 1_000 }, 200)).toBe(1_000);
+		expect(resolveEffectiveContextWindow({ contextWindow: 1_000 }, 0)).toBe(1);
+		expect(resolveEffectiveContextWindow({ contextWindow: null }, 100)).toBe(0);
 	});
 });

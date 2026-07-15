@@ -344,6 +344,13 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIModel): void {
+	// GPT-5.6 Codex family: hard capacity 372K, recommended budget 272K, output 128K
+	if (model.api === "openai-codex-responses" && semverEqual(parsedModel.version, "5.6")) {
+		model.contextWindow = 372000;
+		model.defaultContextTokens = 272000;
+		model.maxTokens = 128000;
+		return;
+	}
 	// Codex models: 400K figure includes output budget; input window is 272K.
 	if (parsedModel.variant.startsWith("codex") && parsedModel.variant !== "codex-spark") {
 		model.contextWindow = 272000;

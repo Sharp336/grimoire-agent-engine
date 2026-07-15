@@ -590,4 +590,143 @@ describe("AgentSession context promotion", () => {
 		expect(session.model?.provider).toBe(codexModel.provider);
 		expect(session.model?.id).toBe(codexModel.id);
 	});
+
+	it("compares candidate effective budget and skips promotion if effective budget is not larger", async () => {
+		const gpt55 = modelRegistry.find("openai-codex", "gpt-5.5");
+		const luna = modelRegistry.find("openai-codex", "gpt-5.6-luna");
+		if (!gpt55 || !luna) {
+			throw new Error("Expected gpt-5.5 and gpt-5.6-luna to exist");
+		}
+		const originalLunaContextWindow = luna.contextWindow;
+		const originalLunaDefaultContextTokens = luna.defaultContextTokens;
+		luna.contextWindow = 372_000;
+		luna.defaultContextTokens = 272_000;
+
+		// Mutate promotion target to point to luna
+		const originalTarget = gpt55.contextPromotionTarget;
+		gpt55.contextPromotionTarget = "openai-codex/gpt-5.6-luna";
+
+		try {
+			// Under default context budget percent (-1):
+			// gpt-5.5 has 272k budget.
+			// luna has 272k budget (defaultContextTokens).
+			// They are equal, so promotion should be skipped!
+			const settingsDefault = Settings.isolated({
+				"compaction.enabled": false,
+				"contextPromotion.enabled": true,
+				"context.windowBudgetPercent": -1,
+			});
+
+			const agent1 = new Agent({
+				initialState: {
+					model: gpt55,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			});
+
+			const sessionDefault = new AgentSession({
+				agent: agent1,
+				sessionManager: SessionManager.inMemory(),
+				settings: settingsDefault,
+				modelRegistry,
+			});
+
+			const overflowMsg = createOverflowMessage(gpt55);
+			sessionDefault.agent.emitExternalEvent({ type: "message_end", message: overflowMsg });
+			sessionDefault.agent.emitExternalEvent({ type: "agent_end", messages: [overflowMsg] });
+
+			await settle();
+
+			// Should NOT have promoted
+			expect(sessionDefault.model?.id).toBe("gpt-5.5");
+			await sessionDefault.dispose();
+
+			// Under 100% budget percent:
+			// gpt-5.5 has 272k budget.
+			// luna has 372k budget (contextWindow).
+			// 372k > 272k, so promotion should succeed!
+			const settings100 = Settings.isolated({
+				"compaction.enabled": false,
+				"contextPromotion.enabled": true,
+				"context.windowBudgetPercent": 100,
+			});
+
+			const agent2 = new Agent({
+				initialState: {
+					model: gpt55,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			});
+
+			const session100 = new AgentSession({
+				agent: agent2,
+				sessionManager: SessionManager.inMemory(),
+				settings: settings100,
+				modelRegistry,
+			});
+
+			const overflowMsg2 = createOverflowMessage(gpt55);
+			session100.agent.emitExternalEvent({ type: "message_end", message: overflowMsg2 });
+			session100.agent.emitExternalEvent({ type: "agent_end", messages: [overflowMsg2] });
+
+			await settle();
+
+			// Should have promoted to luna
+			expect(session100.model?.id).toBe("gpt-5.6-luna");
+			await session100.dispose();
+		} finally {
+			gpt55.contextPromotionTarget = originalTarget;
+			luna.contextWindow = originalLunaContextWindow;
+			luna.defaultContextTokens = originalLunaDefaultContextTokens;
+		}
+	});
+	it("reapplies a changed budget from the canonical model capacity", async () => {
+		const luna = modelRegistry.find("openai-codex", "gpt-5.6-luna");
+		if (!luna) {
+			throw new Error("Expected gpt-5.6-luna to exist");
+		}
+		const originalContextWindow = luna.contextWindow;
+		const originalDefaultContextTokens = luna.defaultContextTokens;
+		luna.contextWindow = 372_000;
+		luna.defaultContextTokens = 272_000;
+
+		const settings = Settings.isolated();
+		const agent = new Agent({
+			initialState: {
+				model: luna,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+		});
+		const budgetSession = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		expect(budgetSession.model?.contextWindow).toBe(272_000);
+		expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
+
+		settings.set("context.windowBudgetPercent", 100);
+		expect(settings.get("context.windowBudgetPercent")).toBe(100);
+		expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
+		const setModelSpy = vi.spyOn(budgetSession.agent, "setModel");
+		budgetSession.reapplyContextBudget();
+		expect(setModelSpy).toHaveBeenLastCalledWith(expect.objectContaining({ contextWindow: 372_000 }));
+		expect(budgetSession.model?.contextWindow).toBe(372_000);
+		expect(budgetSession.model?.maxTokens).toBe(128_000);
+
+		settings.set("context.windowBudgetPercent", 50);
+		budgetSession.reapplyContextBudget();
+		expect(budgetSession.model?.contextWindow).toBe(186_000);
+		luna.contextWindow = originalContextWindow;
+		luna.defaultContextTokens = originalDefaultContextTokens;
+		await budgetSession.dispose();
+	});
 });

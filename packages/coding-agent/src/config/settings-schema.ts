@@ -1945,6 +1945,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"context.windowBudgetPercent": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Context Window Budget",
+			description: "Percentage of the model's catalog context window to use as the active operating budget",
+			options: [
+				{ value: "default", label: "Default", description: "Use model default context budget" },
+				{ value: "50", label: "50%", description: "Use 50% of context window" },
+				{ value: "75", label: "75%", description: "Use 75% of context window" },
+				{ value: "85", label: "85%", description: "Use 85% of context window" },
+				{ value: "90", label: "90%", description: "Use 90% of context window" },
+				{ value: "95", label: "95%", description: "Use 95% of context window" },
+				{ value: "100", label: "100%", description: "Use 100% of context window" },
+			],
+		},
+	},
+
 	// Compaction
 	"compaction.enabled": {
 		type: "boolean",
@@ -5173,6 +5193,10 @@ export interface TitleSettings {
 	refreshOnReplan: boolean;
 }
 
+
+export interface ContextSettings {
+	windowBudgetPercent: number;
+}
 export interface ContextPromotionSettings {
 	enabled: boolean;
 }
@@ -5320,6 +5344,7 @@ export interface GcSettings {
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
 	recap: RecapSettings;
+	context: ContextSettings;
 	title: TitleSettings;
 	contextPromotion: ContextPromotionSettings;
 	retry: RetrySettings;
