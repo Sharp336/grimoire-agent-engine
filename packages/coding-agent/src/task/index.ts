@@ -205,6 +205,7 @@ function renderDescription(
 		agents: renderedAgents,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
+		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
 		isolationEnabled,
 		batchEnabled,
 		asyncEnabled,
