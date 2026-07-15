@@ -2256,6 +2256,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 			await runtime.ctx.refreshSlashCommandState();
 			resetCapabilities();
+			await runtime.ctx.reloadHooksAndCustomTools();
 			runtime.ctx.showStatus("Plugins reloaded.");
 			runtime.ctx.editor.setText("");
 		},
@@ -2603,6 +2604,7 @@ export async function executeBuiltinSlashCommand(
 				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 				await ctx.refreshSlashCommandState();
 				resetCapabilities();
+				await ctx.reloadHooksAndCustomTools();
 			},
 		};
 		const result = await command.handle(parsed, adapted);

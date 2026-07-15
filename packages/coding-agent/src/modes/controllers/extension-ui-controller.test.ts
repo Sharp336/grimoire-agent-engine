@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { Container } from "@oh-my-pi/pi-tui";
 import type { ExtensionUIContext } from "../../extensibility/extensions";
 import { CustomEditor } from "../components/custom-editor";
 import { getEditorTheme } from "../theme/theme";
@@ -22,6 +23,9 @@ function makeHarness() {
 			expect(hasUI).toBe(true);
 			uiContext = context;
 		},
+		hookWidgetContainerAbove: new Container(),
+		hookWidgetContainerBelow: new Container(),
+		setRightInfo: vi.fn(),
 		addAutocompleteProvider,
 	} as unknown as InteractiveModeContext;
 
@@ -31,6 +35,7 @@ function makeHarness() {
 		addAutocompleteProvider,
 		async init(): Promise<ExtensionUIContext> {
 			await new ExtensionUiController(ctx).initHooksAndCustomTools();
+			requestRender.mockClear();
 			expect(uiContext).toBeDefined();
 			return uiContext!;
 		},
