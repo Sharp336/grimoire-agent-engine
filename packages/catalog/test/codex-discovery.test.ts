@@ -56,7 +56,7 @@ describe("Codex model discovery", () => {
 		});
 	});
 
-	it("carries use_responses_lite and prefer_websockets onto the model spec", async () => {
+	it("preserves bundled limits when discovery omits them", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				new Response(
@@ -65,7 +65,6 @@ describe("Codex model discovery", () => {
 							{
 								slug: "gpt-5.6-terra",
 								display_name: "GPT-5.6-Terra",
-								context_window: 372_000,
 								default_reasoning_level: "medium",
 								supported_reasoning_levels: ["low", "medium", "high"],
 								input_modalities: ["text", "image"],
@@ -95,9 +94,32 @@ describe("Codex model discovery", () => {
 		});
 
 		const terra = result?.models.find(model => model.id === "gpt-5.6-terra");
-		expect(terra).toMatchObject({ preferWebsockets: true, useResponsesLite: true });
+		expect(terra).toMatchObject({
+			preferWebsockets: true,
+			useResponsesLite: true,
+			contextWindow: null,
+			maxTokens: null,
+		});
 		const legacy = result?.models.find(model => model.id === "gpt-5.5");
 		expect(legacy?.useResponsesLite).toBeUndefined();
+
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-limits-"));
+		try {
+			const resolved = await resolveProviderModels<"openai-codex-responses">(
+				{
+					providerId: "openai-codex",
+					cacheDbPath: path.join(tempDir, "models.db"),
+					fetchDynamicModels: async () => result?.models ?? null,
+				},
+				"online",
+			);
+			expect(resolved.models.find(model => model.id === "gpt-5.6-terra")).toMatchObject({
+				contextWindow: 372_000,
+				maxTokens: 128_000,
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("ignores pre-V2 Codex discovery cache rows", async () => {
