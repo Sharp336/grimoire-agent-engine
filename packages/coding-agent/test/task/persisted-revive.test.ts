@@ -25,6 +25,7 @@ function makeContext(cwd: string) {
 function revivedSession() {
 	return {
 		setActiveToolsByName: vi.fn(async () => {}),
+		getMountedXdevToolNames: () => [],
 		subscribe: vi.fn(() => () => {}),
 	} as unknown as AgentSession;
 }
