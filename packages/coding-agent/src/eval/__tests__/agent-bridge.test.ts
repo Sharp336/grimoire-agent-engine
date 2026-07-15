@@ -364,11 +364,19 @@ describe("runEvalAgent", () => {
 		});
 	});
 
-	it("keeps unstructured subagent failures on the generic ToolError path", async () => {
+	it("keeps unstructured subagent failures, including schema-shaped failures, on the generic ToolError path", async () => {
 		mockAgents();
+		const violation: SchemaViolationResult = {
+			error: "schema_violation",
+			message: "result.data.accepted must be boolean",
+			missingRequired: [],
+			data: '{"accepted":"no"}',
+		};
 		const runSpy = vi
 			.spyOn(taskExecutor, "runSubprocess")
-			.mockImplementation(async options => singleResult(options, { exitCode: 1, error: "subagent failed" }));
+			.mockImplementation(async options =>
+				singleResult(options, { exitCode: 1, error: "subagent failed", failure: violation }),
+			);
 
 		await expect(runEvalAgent({ prompt: "unstructured" }, { session: makeSession() })).rejects.toThrow(
 			"subagent failed",

@@ -458,6 +458,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		// for subagent → circular). Each bridge-spawned subagent gets its own
 		// eval session with an independent kernel.
 	};
+	const usesStrictSchemaMode = baseRunOptions.schemaMode === "strict";
 
 	// Suspend eval timeout accounting through the WHOLE bridge call: the
 	// subagent subprocess plus any isolation post-processing (merge,
@@ -516,7 +517,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					},
 				});
 			})();
-			const strictSchemaFailure = structured && result.failure !== undefined;
+			const strictSchemaFailure = usesStrictSchemaMode && result.failure !== undefined;
 			if (
 				!strictSchemaFailure &&
 				(result.failure !== undefined || result.exitCode !== 0 || result.error || result.aborted)
@@ -596,7 +597,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		},
 		{ deferExternalAbort: true },
 	);
-	if (result.failure) {
+	if (usesStrictSchemaMode && result.failure) {
 		return {
 			text: result.output,
 			details: {

@@ -75,6 +75,8 @@
 - Added `xd://` virtual tool devices (controlled by the `tools.xdev` setting, default on), allowing mounted tools to be discovered via `read xd://`, documented via `read xd://<tool>`, and executed via `write xd://<tool>`.
 - Added the `edit.enforceSeenLines` setting (default off) to gate the hashline seen-line guard. When enabled, edits anchored on lines that a prior `read` or `grep` never displayed are rejected.
 - Added per-agent prewalk for subagents, featuring a `prewalk` frontmatter field, a `task.agentPrewalk` settings override toggled from the `/agents` dashboard, and a `task.prewalk` boolean (default off) to arm the bundled generic `task` agent.
+- Added per-agent prewalk for subagents: a `prewalk` frontmatter field (`true` = hand off to the default prewalk target, a string = custom target model pattern) and a `task.agentPrewalk` settings override toggled per agent from the `/agents` dashboard with `P`. The bundled generic `task` agent ships with prewalk enabled by default (skipped when the target resolves to the subagent's own starting model, and never armed for plan-mode spawns). Prewalk-armed subagents keep the normally parent-owned `todo` tool so the plan-nudge → todo → hand-off flow works, and the prewalk todo gate now keys on the active tool set instead of the registry so a deactivated todo tool can no longer stall the switch.
+- Added fail-closed validation for caller-supplied eval subagent schemas, with pre-dispatch schema checks, bounded correction attempts, exact final assembly validation, and typed schema-violation errors across eval runtimes; task-agent native schemas remain best effort ([#5278](https://github.com/can1357/oh-my-pi/issues/5278))
 
 ### Changed
 
@@ -192,10 +194,6 @@
 ### Removed
 
 - Removed the unreliable Bing and Yahoo HTML-scraping web search providers
-## [16.4.8] - 2026-07-12
-### Added
-
-- Added fail-closed validation for caller-supplied eval subagent schemas, with pre-dispatch schema checks, bounded correction attempts, exact final assembly validation, and typed schema-violation errors across eval runtimes; task-agent native schemas remain best effort ([#5278](https://github.com/can1357/oh-my-pi/issues/5278))
 
 ## [16.4.8] - 2026-07-12
 ### Fixed
