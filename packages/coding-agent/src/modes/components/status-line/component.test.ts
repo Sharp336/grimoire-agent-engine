@@ -80,4 +80,35 @@ describe("StatusLineComponent", () => {
 		const stripped = border.content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("Prewalk");
 	});
+
+	it("shows the vibe marker inside the goal chip only while both modes are active", () => {
+		const sessionStub = makeSessionWithLastMessage(null) as Record<string, unknown>;
+		sessionStub.getGoalModeState = () => ({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "g-1",
+				objective: "Ship the release",
+				status: "active",
+				tokensUsed: 5,
+				tokenBudget: 10,
+				timeUsedSeconds: 0,
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		});
+		sessionStub.settings = Settings.isolated({});
+		const statusLine = new StatusLineComponent(sessionStub as unknown as AgentSession);
+
+		statusLine.setGoalModeStatus({ enabled: true, paused: false });
+		statusLine.setVibeModeStatus({ enabled: true });
+		const combined = statusLine.getTopBorder(160).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(combined).toContain("Goal");
+		expect(combined).toContain("Vibe");
+
+		statusLine.setVibeModeStatus(undefined);
+		const goalOnly = statusLine.getTopBorder(160).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(goalOnly).toContain("Goal");
+		expect(goalOnly).not.toContain("Vibe");
+	});
 });

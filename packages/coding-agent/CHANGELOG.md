@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Goal mode now composes with vibe mode: `/goal` and `/vibe` can be active together, turning the vibe director into a goal-guided autonomous orchestrator. Goal prompts adapt to directing (verify with `read`, delegate checks to workers), goal auto-continuation defers while worker turns are in flight, worker-session token usage counts toward the goal budget, and the combined mode persists across session resume.
+
 ## [16.5.2] - 2026-07-14
 
 ### Breaking Changes

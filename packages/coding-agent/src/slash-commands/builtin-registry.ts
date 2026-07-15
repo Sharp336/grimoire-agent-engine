@@ -240,6 +240,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return `Plan: on${planFile ? ` (${path.basename(planFile)})` : ""}`;
 			}
 			if (runtime.ctx.goalModeEnabled) return "Plan: blocked by goal mode";
+			if (runtime.ctx.vibeModeEnabled) return "Plan: blocked by vibe mode";
 			return "Plan: off";
 		},
 		handleTui: async (command, runtime) => {
@@ -259,13 +260,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "vibe",
-		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
+		description:
+			"Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset; composes with /goal)",
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
+			if (runtime.ctx.vibeModeEnabled) return runtime.ctx.goalModeEnabled ? "Vibe: on (goal-guided)" : "Vibe: on";
 			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
-			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
 			return "Vibe: off";
 		},
 		handleTui: async (command, runtime) => {
@@ -290,7 +291,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (!runtime.ctx.settings.get("goal.enabled" as SettingPath)) return "Goal: disabled in settings";
 			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
 			const state = runtime.ctx.session.getGoalModeState();
-			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
+			if (!state) return "Goal: off";
+			const vibeSuffix = runtime.ctx.vibeModeEnabled ? " + vibe" : "";
+			return `Goal: ${state.goal.status}${vibeSuffix} (${shortDetail(state.goal.objective)})`;
 		},
 		handleTui: async (command, runtime) => {
 			await runtime.ctx.handleGoalModeCommand(command.args || undefined);

@@ -27,7 +27,7 @@ import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-coding-agent/task
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
-function createSession(options: { manager?: AsyncJobManager } = {}): ToolSession {
+function createSession(options: { manager?: AsyncJobManager; goalRuntime?: unknown } = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -35,6 +35,7 @@ function createSession(options: { manager?: AsyncJobManager } = {}): ToolSession
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		getGoalRuntime: options.goalRuntime ? () => options.goalRuntime : undefined,
 	} as unknown as ToolSession;
 }
 
@@ -496,6 +497,99 @@ describe("vibe session registry", () => {
 		await expect(registry.send(session, { session: "Doomed", message: "hello?" })).rejects.toThrow("dead");
 
 		gate.resolve();
+	});
+
+	it("hasInFlightTurn tracks the turn lifecycle per owner: spawn, settle, follow-up, kill", async () => {
+		const gate = deferred();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			await gate.promise;
+			AgentRegistry.global().setStatus(options.id, "idle");
+			return makeResult(options.id);
+		});
+		const followUpGate = deferred();
+		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			await followUpGate.promise;
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const session = createSession({ manager });
+		const registry = VibeSessionRegistry.global();
+		expect(registry.hasInFlightTurn("Main")).toBe(false);
+
+		const { jobId } = await registry.spawn(session, { cli: "fast", name: "Fast", prompt: "Task A." });
+		expect(registry.hasInFlightTurn("Main")).toBe(true);
+		// Owner-scoped: another agent's roster is unaffected.
+		expect(registry.hasInFlightTurn("Other")).toBe(false);
+
+		gate.resolve();
+		await manager.getJob(jobId)!.promise;
+		expect(registry.hasInFlightTurn("Main")).toBe(false);
+
+		const outcome = await registry.send(session, { session: "Fast", message: "Task B." });
+		expect(registry.hasInFlightTurn("Main")).toBe(true);
+
+		await registry.kill(session, "Fast");
+		expect(registry.hasInFlightTurn("Main")).toBe(false);
+
+		followUpGate.resolve();
+		await manager.getJob(outcome.jobId!)!.promise;
+	});
+
+	it("feeds settled worker-turn usage into the goal runtime, including failed turns", async () => {
+		const recorded: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number }> = [];
+		const goalRuntime = {
+			addExternalUsage: async (usage: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
+				recorded.push({
+					input: usage.input,
+					output: usage.output,
+					cacheRead: usage.cacheRead,
+					cacheWrite: usage.cacheWrite,
+				});
+			},
+		};
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const usage = { input: 120, output: 40, cacheRead: 999, cacheWrite: 8, totalTokens: 1167, cost: zeroCost };
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			AgentRegistry.global().setStatus(options.id, "idle");
+			return makeResult(options.id, { usage });
+		});
+		const failedUsage = { input: 30, output: 5, cacheRead: 0, cacheWrite: 1, totalTokens: 36, cost: zeroCost };
+		vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockImplementation(async options =>
+			makeResult(options.id, { exitCode: 1, error: "worker crashed", usage: failedUsage }),
+		);
+
+		const manager = createManager();
+		const session = createSession({ manager, goalRuntime });
+		const registry = VibeSessionRegistry.global();
+
+		const spawn = await registry.spawn(session, { cli: "fast", name: "Fast", prompt: "Task A." });
+		await manager.getJob(spawn.jobId)!.promise;
+		expect(recorded).toEqual([{ input: 120, output: 40, cacheRead: 999, cacheWrite: 8 }]);
+
+		// A failed turn still burned its reported tokens.
+		const followUp = await registry.send(session, { session: "Fast", message: "Task B." });
+		const failedJob = manager.getJob(followUp.jobId!)!;
+		await failedJob.promise;
+		expect(failedJob.status).toBe("failed");
+		expect(recorded).toHaveLength(2);
+		expect(recorded[1]).toEqual({ input: 30, output: 5, cacheRead: 0, cacheWrite: 1 });
 	});
 
 	it("killAll terminates every session for the owner (mode-exit path)", async () => {

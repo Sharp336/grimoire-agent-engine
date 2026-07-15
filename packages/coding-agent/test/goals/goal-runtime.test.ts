@@ -52,10 +52,11 @@ function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
 	return { ...event };
 }
 
-function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number } = {}) {
+function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number; vibe?: boolean } = {}) {
 	let state = cloneState(initial.state);
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
+	let vibe = initial.vibe ?? false;
 	const events: GoalRuntimeEvent[] = [];
 	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState }> = [];
 	const hiddenMessages: Array<{ customType: string; content: string; deliverAs?: "steer" | "followUp" | "nextTurn" }> =
@@ -66,6 +67,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 			state = cloneState(next);
 		},
 		getCurrentUsage: () => createUsage(usage),
+		isVibeModeActive: () => vibe,
 		emit: async event => {
 			events.push(cloneEvent(event));
 		},
@@ -85,6 +87,9 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		},
 		setUsage: (next: Partial<GoalTokenUsage>) => {
 			usage = createUsage(next);
+		},
+		setVibe: (next: boolean) => {
+			vibe = next;
 		},
 		advance: (ms: number) => {
 			now += ms;
@@ -446,5 +451,98 @@ describe("goal runtime", () => {
 		expect(state?.enabled).toBe(false);
 		expect(state?.mode).toBe("exiting");
 		expect(state?.goal.status).toBe("complete");
+	});
+
+	it("addExternalUsage counts input+cacheWrite+output, ignores cacheRead, and persists a goal snapshot", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		await harness.runtime.addExternalUsage(createUsage({ input: 10, output: 5, cacheRead: 999, cacheWrite: 3 }));
+
+		expect(harness.getState()?.goal.tokensUsed).toBe(18);
+		expect(harness.persists.at(-1)).toMatchObject({ mode: "goal", state: { goal: { tokensUsed: 18 } } });
+	});
+
+	it("addExternalUsage leaves the per-turn snapshot baseline alone so turn flushes cannot double-count", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		await harness.runtime.addExternalUsage(createUsage({ input: 100 }));
+		// The director's own turn later flushes a session-stats delta; external
+		// usage must not have consumed or shifted that baseline.
+		harness.setUsage({ input: 7 });
+		await harness.runtime.flushUsage("suppressed");
+
+		expect(harness.getState()?.goal.tokensUsed).toBe(107);
+	});
+
+	it("addExternalUsage flips active to budget-limited at the threshold, steers once, and keeps accounting", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ tokenBudget: 20, tokensUsed: 10 }),
+			},
+		});
+
+		await harness.runtime.addExternalUsage(createUsage({ input: 12 }));
+		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]).toMatchObject({ customType: "goal-budget-limit", deliverAs: "steer" });
+
+		// budget-limited still accounts (worker turns finishing late), but the
+		// steer is not repeated for the same goal.
+		await harness.runtime.addExternalUsage(createUsage({ output: 4 }));
+		expect(harness.getState()?.goal.tokensUsed).toBe(26);
+		expect(harness.hiddenMessages).toHaveLength(1);
+	});
+
+	it("addExternalUsage no-ops for paused goals, absent goals, and zero-token usage", async () => {
+		const paused = createHarness({
+			state: { enabled: false, mode: "active", goal: createGoal({ status: "paused", tokensUsed: 5 }) },
+		});
+		await paused.runtime.addExternalUsage(createUsage({ input: 50 }));
+		expect(paused.getState()?.goal.tokensUsed).toBe(5);
+		expect(paused.persists).toHaveLength(0);
+
+		const absent = createHarness();
+		await absent.runtime.addExternalUsage(createUsage({ input: 50 }));
+		expect(absent.getState()).toBeUndefined();
+		expect(absent.persists).toHaveLength(0);
+
+		const active = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+		await active.runtime.addExternalUsage(createUsage({ cacheRead: 500 }));
+		expect(active.getState()?.goal.tokensUsed).toBe(0);
+		expect(active.persists).toHaveLength(0);
+	});
+
+	it("renders director guidance in goal prompts only while vibe mode is active", () => {
+		const goal = createGoal();
+
+		const activeVibe = renderGoalPrompt("active", goal, { vibe: true });
+		expect(activeVibe).toContain("worker sessions");
+		const activePlain = renderGoalPrompt("active", goal);
+		expect(activePlain).not.toContain("worker sessions");
+		expect(activePlain).toContain("run the relevant checks");
+
+		const continuationVibe = renderGoalPrompt("continuation", goal, { vibe: true });
+		expect(continuationVibe).toContain("vibe_send");
+		const continuationPlain = renderGoalPrompt("continuation", goal);
+		expect(continuationPlain).not.toContain("vibe_send");
+	});
+
+	it("buildActivePrompt follows the host's live isVibeModeActive flag", () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		expect(harness.runtime.buildActivePrompt()).not.toContain("worker sessions");
+		harness.setVibe(true);
+		expect(harness.runtime.buildActivePrompt()).toContain("worker sessions");
 	});
 });

@@ -2702,16 +2702,24 @@ export class AgentSession {
 					cacheWrite: usage.cacheWrite,
 				};
 			},
+			isVibeModeActive: () => this.#vibeModeState?.enabled === true,
 			emit: event => {
 				if (event.type === "goal_updated") {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
 			persist: (mode, state) => {
+				// Goal persistence is vibe-aware: while vibe mode is on, dropping the
+				// goal must leave the session marked "vibe" (not "none"), and goal
+				// snapshots carry `vibe: true` so resume restores the combined mode.
+				const vibeActive = this.#vibeModeState?.enabled === true;
 				if (mode === "none") {
-					this.sessionManager.appendModeChange("none");
+					this.sessionManager.appendModeChange(vibeActive ? "vibe" : "none");
 				} else if (state) {
-					this.sessionManager.appendModeChange(mode, { goal: state.goal });
+					this.sessionManager.appendModeChange(
+						mode,
+						vibeActive ? { goal: state.goal, vibe: true } : { goal: state.goal },
+					);
 				}
 			},
 			sendHiddenMessage: async message => {

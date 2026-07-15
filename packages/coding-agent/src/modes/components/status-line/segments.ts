@@ -188,6 +188,9 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	}
 
 	const parts: string[] = [withIcon(icon, "Goal")];
+	if (ctx.vibeMode?.enabled) {
+		parts.push(withIcon(theme.icon.agents, "Vibe"));
+	}
 	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
 	if (showBudget && goal) {
 		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));

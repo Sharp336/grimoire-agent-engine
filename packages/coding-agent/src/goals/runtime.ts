@@ -8,6 +8,8 @@ export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
+	/** True while the session is in vibe mode (goal prompts switch to director guidance). */
+	isVibeModeActive?(): boolean;
 	emit(event: GoalRuntimeEvent): void | Promise<void>;
 	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState): void;
 	sendHiddenMessage(message: {
@@ -76,7 +78,7 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, options?: { vibe?: boolean }): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
@@ -89,6 +91,7 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		vibe: options?.vibe === true,
 	});
 }
 
@@ -366,6 +369,38 @@ export class GoalRuntime {
 		await this.#withAccounting(() => this.#flushUsageLocked(steering, currentUsage));
 	}
 
+	/**
+	 * Account tokens consumed outside this session's own LLM stream (vibe worker
+	 * turns, delegated subagent work). Applies the same input+cacheWrite+output
+	 * rule as {@link goalTokenDelta}. Independent of the per-turn snapshot
+	 * accounting: external usage never appears in the host's getCurrentUsage()
+	 * stream, so the two paths cannot double-count.
+	 */
+	async addExternalUsage(usage: GoalTokenUsage): Promise<void> {
+		const tokens = goalTokenDelta(usage, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		if (tokens <= 0 || !this.#hasAccountingState()) return;
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
+			state.goal.tokensUsed += tokens;
+			state.goal.updatedAt = this.#now();
+			const flippedToBudgetLimited =
+				state.goal.tokenBudget !== undefined &&
+				state.goal.tokensUsed >= state.goal.tokenBudget &&
+				state.goal.status === "active";
+			if (flippedToBudgetLimited) {
+				state.goal.status = "budget-limited";
+			}
+			await this.#commitState(state, { persist: "goal" });
+			if (state.goal.status !== "budget-limited") {
+				this.#budgetReportedFor = undefined;
+			}
+			if (flippedToBudgetLimited) {
+				await this.#sendBudgetLimitSteer(state.goal);
+			}
+		});
+	}
+
 	#createGoalState(objective: string, tokenBudget: number | undefined): GoalModeState {
 		const now = this.#now();
 		const goal: Goal = {
@@ -495,17 +530,21 @@ export class GoalRuntime {
 		});
 	}
 
+	#promptOptions(): { vibe: boolean } {
+		return { vibe: this.#host.isVibeModeActive?.() === true };
+	}
+
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
+			? renderGoalPrompt("active", state.goal, this.#promptOptions())
 			: undefined;
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPrompt("continuation", state.goal, this.#promptOptions())
 			: undefined;
 	}
 
@@ -514,7 +553,7 @@ export class GoalRuntime {
 		this.#budgetReportedFor = goal.id;
 		await this.#host.sendHiddenMessage({
 			customType: "goal-budget-limit",
-			content: renderGoalPrompt("budget-limit", goal),
+			content: renderGoalPrompt("budget-limit", goal, this.#promptOptions()),
 			deliverAs: "steer",
 		});
 	}

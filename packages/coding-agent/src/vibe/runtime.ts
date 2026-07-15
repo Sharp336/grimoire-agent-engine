@@ -236,6 +236,14 @@ export class VibeSessionRegistry {
 		return ids;
 	}
 
+	/** True when any of `owner`'s sessions has a turn in flight (set synchronously at turn registration). */
+	hasInFlightTurn(owner: string): boolean {
+		for (const record of this.#records.values()) {
+			if (record.ownerId === owner && record.state !== "dead" && record.turn !== undefined) return true;
+		}
+		return false;
+	}
+
 	/**
 	 * Live screen snapshots for rich rendering (the "TV wall"): one entry per
 	 * session in creation order, carrying the in-flight turn's trace, current
@@ -592,7 +600,7 @@ export class VibeSessionRegistry {
 								eventBus: session.eventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
-					return this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
+					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
 					this.#finishTurn(session, manager, record, ownJobId);
@@ -638,7 +646,7 @@ export class VibeSessionRegistry {
 	}
 
 	/** Format a settled turn into the self-delivering result text (activity trace + response). */
-	#settleTurn(
+	async #settleTurn(
 		session: ToolSession,
 		manager: AsyncJobManager,
 		record: VibeRecord,
@@ -646,7 +654,21 @@ export class VibeSessionRegistry {
 		settledJobId: string,
 		turnIndex: number,
 		result: SingleResult,
-	): string {
+	): Promise<string> {
+		// Worker turns never reach the director's own session stats; feed their
+		// usage into the goal budget. No-op when no goal is actively accounting,
+		// and failed/aborted turns still burned the tokens they report.
+		const goalRuntime = session.getGoalRuntime?.();
+		if (goalRuntime && result.usage) {
+			try {
+				await goalRuntime.addExternalUsage(result.usage);
+			} catch (error) {
+				logger.warn("vibe: goal usage accounting for worker turn failed", {
+					id: record.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 		this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
