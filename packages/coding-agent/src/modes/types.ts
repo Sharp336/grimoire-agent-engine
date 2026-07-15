@@ -154,6 +154,7 @@ export interface InteractiveModeContext {
 	isBashMode: boolean;
 	toolOutputExpanded: boolean;
 	todoExpanded: boolean;
+	pendingQueueExpanded: boolean;
 	planModeEnabled: boolean;
 	vibeModeEnabled: boolean;
 	goalModeEnabled: boolean;
