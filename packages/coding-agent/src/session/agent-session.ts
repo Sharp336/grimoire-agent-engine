@@ -124,10 +124,10 @@ import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/provider
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
+import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog/build";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
@@ -12073,7 +12073,10 @@ export class AgentSession {
 
 		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
 		if (!candidate) return undefined;
-		const candidateEffectiveWindow = resolveEffectiveContextWindow(candidate, this.settings.get("context.windowBudgetPercent"));
+		const candidateEffectiveWindow = resolveEffectiveContextWindow(
+			candidate,
+			this.settings.get("context.windowBudgetPercent"),
+		);
 		if (candidateEffectiveWindow <= contextWindow) return undefined;
 		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 		if (!apiKey) return undefined;
@@ -15610,7 +15613,10 @@ export class AgentSession {
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
 			if (previousModel) {
-				this.agent.setModel(this.#getEffectiveModel(previousModel));
+				const canonicalPreviousModel = this.#modelRegistry.find(previousModel.provider, previousModel.id);
+				this.agent.setModel(
+					canonicalPreviousModel ? this.#getEffectiveModel(canonicalPreviousModel) : previousModel,
+				);
 			}
 			this.#thinkingLevel = previousThinkingLevel;
 			this.#autoThinking = previousAutoThinking;

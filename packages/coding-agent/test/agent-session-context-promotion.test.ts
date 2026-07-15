@@ -694,39 +694,101 @@ describe("AgentSession context promotion", () => {
 		luna.contextWindow = 372_000;
 		luna.defaultContextTokens = 272_000;
 
-		const settings = Settings.isolated();
-		const agent = new Agent({
-			initialState: {
-				model: luna,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-		});
-		const budgetSession = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
+		let budgetSession: AgentSession | undefined;
+		try {
+			const settings = Settings.isolated();
+			const agent = new Agent({
+				initialState: {
+					model: luna,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			});
+			budgetSession = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 
-		expect(budgetSession.model?.contextWindow).toBe(272_000);
-		expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
+			expect(budgetSession.model?.contextWindow).toBe(272_000);
+			expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
 
-		settings.set("context.windowBudgetPercent", 100);
-		expect(settings.get("context.windowBudgetPercent")).toBe(100);
-		expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
-		const setModelSpy = vi.spyOn(budgetSession.agent, "setModel");
-		budgetSession.reapplyContextBudget();
-		expect(setModelSpy).toHaveBeenLastCalledWith(expect.objectContaining({ contextWindow: 372_000 }));
-		expect(budgetSession.model?.contextWindow).toBe(372_000);
-		expect(budgetSession.model?.maxTokens).toBe(128_000);
+			settings.set("context.windowBudgetPercent", 100);
+			expect(settings.get("context.windowBudgetPercent")).toBe(100);
+			expect(modelRegistry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(372_000);
+			const setModelSpy = vi.spyOn(budgetSession.agent, "setModel");
+			budgetSession.reapplyContextBudget();
+			expect(setModelSpy).toHaveBeenLastCalledWith(expect.objectContaining({ contextWindow: 372_000 }));
+			expect(budgetSession.model?.contextWindow).toBe(372_000);
+			expect(budgetSession.model?.maxTokens).toBe(128_000);
 
-		settings.set("context.windowBudgetPercent", 50);
-		budgetSession.reapplyContextBudget();
-		expect(budgetSession.model?.contextWindow).toBe(186_000);
-		luna.contextWindow = originalContextWindow;
-		luna.defaultContextTokens = originalDefaultContextTokens;
-		await budgetSession.dispose();
+			settings.set("context.windowBudgetPercent", 50);
+			budgetSession.reapplyContextBudget();
+			expect(budgetSession.model?.contextWindow).toBe(186_000);
+		} finally {
+			luna.contextWindow = originalContextWindow;
+			luna.defaultContextTokens = originalDefaultContextTokens;
+			await budgetSession?.dispose();
+		}
+	});
+	it("restores a failed session switch from canonical capacity without reducing the budget twice", async () => {
+		const luna = modelRegistry.find("openai-codex", "gpt-5.6-luna");
+		const targetModel = modelRegistry.find("openai-codex", "gpt-5.5");
+		if (!luna || !targetModel) {
+			throw new Error("Expected gpt-5.6-luna and gpt-5.5 to exist");
+		}
+		const originalContextWindow = luna.contextWindow;
+		const originalDefaultContextTokens = luna.defaultContextTokens;
+		luna.contextWindow = 372_000;
+		luna.defaultContextTokens = 272_000;
+
+		try {
+			const settings = Settings.isolated({ "context.windowBudgetPercent": 50 });
+			const agent = new Agent({
+				initialState: {
+					model: luna,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "rollback-active")),
+				settings,
+				modelRegistry,
+			});
+			expect(session.model?.contextWindow).toBe(186_000);
+
+			const targetSessionFile = path.join(tempDir.path(), "rollback-target.jsonl");
+			const timestamp = "2026-07-15T00:00:00.000Z";
+			await Bun.write(
+				targetSessionFile,
+				`${[
+					{ type: "session", version: 3, id: "rollback-target", timestamp, cwd: tempDir.path() },
+					{
+						type: "model_change",
+						id: "target-model",
+						parentId: null,
+						timestamp,
+						model: `${targetModel.provider}/${targetModel.id}`,
+					},
+				]
+					.map(entry => JSON.stringify(entry))
+					.join("\n")}\n`,
+			);
+			vi.spyOn(session.agent, "setThinkingLevel").mockImplementationOnce(() => {
+				throw new Error("forced switch failure");
+			});
+
+			await expect(session.switchSession(targetSessionFile)).rejects.toThrow("forced switch failure");
+			expect(session.model?.id).toBe(luna.id);
+			expect(session.model?.contextWindow).toBe(186_000);
+		} finally {
+			luna.contextWindow = originalContextWindow;
+			luna.defaultContextTokens = originalDefaultContextTokens;
+		}
 	});
 });

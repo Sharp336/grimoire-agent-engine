@@ -18,7 +18,7 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog";
+import { resolveEffectiveContextWindow } from "@oh-my-pi/pi-catalog/build";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
