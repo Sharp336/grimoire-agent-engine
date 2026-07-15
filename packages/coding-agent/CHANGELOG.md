@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added macOS Option-as-Alt guidance to `/hotkeys` and the keybindings documentation.
+
 ## [16.5.2] - 2026-07-14
 
 ### Breaking Changes

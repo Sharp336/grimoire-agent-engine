@@ -34,7 +34,10 @@ describe("buildHotkeysMarkdown", () => {
 		});
 
 		const lines = markdown.split("\n");
-		expect(lines[0]).toBe("**Navigation**");
+		expect(lines[0]).toBe("On macOS, `Alt` means Option (⌥) only when the terminal sends Option as Meta/Alt.");
+		expect(lines[1]).toContain("Option+letter inserts symbols");
+		expect(lines[3]).toBe("**Navigation**");
+		expect(markdown).toContain("`~/.omp/agent/keybindings.yml`");
 		expect(markdown).toContain("| `Ctrl+Shift+P` | Copy whole prompt |");
 		expect(markdown).toContain("| `Ctrl+Shift+L` | Select model (temporary) |");
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");

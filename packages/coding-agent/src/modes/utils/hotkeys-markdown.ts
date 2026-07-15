@@ -10,6 +10,9 @@ function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): strin
 
 export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string {
 	return [
+		"On macOS, `Alt` means Option (⌥) only when the terminal sends Option as Meta/Alt.",
+		"If Option+letter inserts symbols such as `µ`, enable Option-as-Meta/Esc+ in your terminal or remap the action in `~/.omp/agent/keybindings.yml`.",
+		"",
 		"**Navigation**",
 		"| Key | Action |",
 		"|-----|--------|",

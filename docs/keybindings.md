@@ -14,6 +14,18 @@ app.plan.toggle: Alt+Shift+P
 
 Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
 
+## macOS Alt / Option keys
+
+On macOS, `Alt` means the Option (`⌥`) key only when your terminal sends Option as Meta/Alt. If Option plus a letter inserts a symbol such as `µ`, the terminal is handling Option as text input instead of passing the shortcut to `omp`.
+
+Use one of these terminal settings, then press the listed `Alt` chord with `Option`:
+
+- iTerm2: set Profiles › Keys › Left Option Key to `Esc+` or `Meta`.
+- Terminal.app: enable Profiles › Keyboard › Use Option as Meta key.
+- VS Code integrated terminal: set `terminal.integrated.macOptionIsMeta` to `true`.
+
+If you want to keep Option for accents and symbols, remap the affected actions in `~/.omp/agent/keybindings.yml` to non-Alt chords.
+
 Set an action to an empty array to disable it:
 
 ```yaml
