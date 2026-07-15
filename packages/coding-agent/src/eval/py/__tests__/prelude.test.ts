@@ -155,10 +155,7 @@ describe("python prelude", () => {
 
 		try {
 			const { exitCode, stderr, stdout } = await runPrelude(
-				[
-					'result = agent("classify", schema={"type": "object"})',
-					'print(json.dumps(result))',
-				].join("\n"),
+				['result = agent("classify", schema={"type": "object"})', "print(json.dumps(result))"].join("\n"),
 				{
 					PI_TOOL_BRIDGE_URL: server.url.toString(),
 					PI_TOOL_BRIDGE_TOKEN: "test-token",
