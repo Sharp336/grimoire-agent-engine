@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex discovery overwriting bundled context limits when the provider omits `context_window`.
+
+
 ## [16.5.2] - 2026-07-14
 
 ### Fixed

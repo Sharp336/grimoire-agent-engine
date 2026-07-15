@@ -4,7 +4,6 @@ import { discoveryFetch } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
-const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
 const CODEX_REMOTE_COMPACTION = {
 	enabled: true,
@@ -214,8 +213,8 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 	}
 
 	const name = toNonEmptyString(payload.display_name) ?? slug;
-	const contextWindow = toPositiveInt(payload.context_window) ?? DEFAULT_CONTEXT_WINDOW;
-	const maxTokens = Math.min(DEFAULT_MAX_TOKENS, contextWindow);
+	const contextWindow = toPositiveInt(payload.context_window);
+	const maxTokens = contextWindow !== null ? Math.min(DEFAULT_MAX_TOKENS, contextWindow) : null;
 	const reasoning = supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels);
 	const input = normalizeInputModalities(payload.input_modalities);
 	const preferWebsockets = toBoolean(payload.prefer_websockets) === true;

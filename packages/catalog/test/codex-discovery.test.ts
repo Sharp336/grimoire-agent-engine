@@ -214,4 +214,66 @@ describe("Codex model discovery", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	it.each([
+		["omitted", undefined, 372_000],
+		["explicit", 400_000, 400_000],
+	] as const)("merges %s discovery limits without inventing a fallback", async (_case, discoveredLimit, expectedLimit) => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-limit-"));
+		const dbPath = path.join(tempDir, "models.db");
+		try {
+			const staticModel = buildModel({
+				id: "gpt-5.6-terra",
+				name: "GPT-5.6 Terra",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api/codex",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 372_000,
+				maxTokens: 128_000,
+			});
+			const fetchFn: typeof fetch = Object.assign(
+				async () =>
+					new Response(
+						JSON.stringify({
+							models: [
+								{
+									slug: "gpt-5.6-terra",
+									display_name: "GPT-5.6 Terra",
+									...(discoveredLimit === undefined ? {} : { context_window: discoveredLimit }),
+									default_reasoning_level: "medium",
+									supported_reasoning_levels: ["low", "medium", "high"],
+									input_modalities: ["text"],
+									supported_in_api: true,
+								},
+							],
+						}),
+					),
+				{ preconnect() {} },
+			);
+			const discoveryResult = await fetchCodexModels({
+				accessToken: "test-token",
+				baseUrl: "https://codex.example/backend-api",
+				clientVersion: "0.99.0",
+				fetchFn,
+			});
+
+			expect(discoveryResult?.models[0].contextWindow).toBe(discoveredLimit ?? null);
+			expect(discoveryResult?.models[0].maxTokens).toBe(discoveredLimit === undefined ? null : 128_000);
+
+			const resolved = await resolveProviderModels<"openai-codex-responses">({
+				providerId: "openai-codex",
+				staticModels: [staticModel],
+				dynamicModelsAuthoritative: true,
+				cacheDbPath: dbPath,
+				fetchDynamicModels: async () => discoveryResult?.models ?? [],
+			});
+			const terra = resolved.models.find(model => model.id === "gpt-5.6-terra");
+			expect(terra?.contextWindow).toBe(expectedLimit);
+			expect(terra?.maxTokens).toBe(128_000);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
