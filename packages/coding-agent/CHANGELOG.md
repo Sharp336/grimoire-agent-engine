@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Fixed auto-compaction pausing with `Nothing to compact` when the newest assistant/tool turn alone exceeded the recovery band: the no-preparation path now runs the artifact-backed shake rescue before blocking, suppresses stale pre-rewrite provider usage, and continues once the rewritten context has headroom.
 - Fixed compiled appserver startup deadlocking before socket creation when any user extension was present ([#5568](https://github.com/can1357/oh-my-pi/issues/5568)).
 - Fixed Bash internal URLs remaining unresolved when used as unquoted arguments inside command substitutions ([#5535](https://github.com/can1357/oh-my-pi/issues/5535)).
 - Fixed `--tools` silently dropping hidden tool names (`xdev`, `yield`, ...); hidden built-ins are now addressable per the `hidden` tool contract.

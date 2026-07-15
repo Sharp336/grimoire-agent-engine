@@ -2017,6 +2017,10 @@ export class AgentSession {
 	// turn-end/abort invalidates the cache even though the message list is
 	// unchanged — otherwise a mid-turn estimate would survive into idle.
 	#contextUsageRevision = 0;
+	// Shake-only maintenance has no compaction entry to mark prior provider usage
+	// stale. Keep a transient timestamp boundary so an auto-continued turn does
+	// not immediately re-trigger on the pre-rewrite billed token count.
+	#providerUsageStaleThroughTimestamp = 0;
 	#obfuscator: SecretObfuscator | undefined;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
@@ -10928,20 +10932,12 @@ export class AgentSession {
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = await this.#pruneToolOutputs();
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
-		// `errorIsFromBeforeCompaction` (computed above) is the general
-		// "this assistant message predates the latest compaction" predicate here,
-		// not just an error-specific one; alias it locally so the threshold intent
-		// reads clearly (#3412 review).
-		const assistantPredatesCompaction = errorIsFromBeforeCompaction;
-		// An assistant that predates the latest compaction carries stale, pre-rewrite
-		// `usage`: the scheduled auto-continue re-enters this check with the kept
-		// assistant (#promptWithMessage → #checkCompaction), and its old high prompt
-		// count would re-trip the threshold on a freshly compacted history. Drop the
-		// stale provider number for those messages and let the live stored estimate
-		// (the floor applied below) drive the decision instead.
-		const assistantUsageContextTokens = assistantPredatesCompaction
-			? 0
-			: calculateContextTokens(assistantMessage.usage);
+		// Provider usage predating either a compaction entry or a shake-only
+		// rewrite is stale: the next prompt uses the rewritten history, not the
+		// large prompt the provider billed before maintenance.
+		const assistantUsageIsStale =
+			errorIsFromBeforeCompaction || assistantMessage.timestamp <= this.#providerUsageStaleThroughTimestamp;
+		const assistantUsageContextTokens = assistantUsageIsStale ? 0 : calculateContextTokens(assistantMessage.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		// Pruning frees bytes for the NEXT prompt; it does not change the size of
 		// the prompt the LLM just billed for. Earlier revisions subtracted the
@@ -12726,6 +12722,19 @@ export class AgentSession {
 		return residualTokens <= fitBudget;
 	}
 
+	/** Remove a failed/truncated assistant turn before measuring retry fit. */
+	#dropFailedAssistantBeforeRetry(reason: "overflow" | "threshold" | "idle" | "incomplete"): void {
+		const messages = this.agent.state.messages;
+		const lastMsg = messages[messages.length - 1];
+		if (lastMsg?.role !== "assistant") return;
+		const lastAssistant = lastMsg as AssistantMessage;
+		const shouldDrop =
+			lastAssistant.stopReason === "error" || (reason === "incomplete" && lastAssistant.stopReason === "length");
+		if (!shouldDrop) return;
+		this.agent.replaceMessages(messages.slice(0, -1));
+		this.#rebasePendingContextSnapshotAfterCompaction();
+	}
+
 	/**
 	 * Last-resort tiered reducer when {@link #runAutoCompaction} would otherwise
 	 * dead-end. The summarizer cut at the only available turn boundary, but the
@@ -12749,9 +12758,12 @@ export class AgentSession {
 	 */
 	async #rescueCompactionDeadEnd(
 		signal: AbortSignal,
-		options: { skipElide: boolean; hasProgress: () => boolean },
+		options: { skipElide: boolean; hasProgress: () => boolean; precheck?: boolean },
 	): Promise<boolean> {
 		if (signal.aborted) return false;
+		// Threshold maintenance can race another pass over the same completed
+		// turn. Re-test before rewriting history again or emitting a duplicate rescue.
+		if (options.precheck && options.hasProgress()) return true;
 		let elided = 0;
 		let elidedTokens = 0;
 		let elideSink = "placeholders";
@@ -12981,13 +12993,74 @@ export class AgentSession {
 				return COMPACTION_CHECK_NONE;
 			}
 
-			const pathEntries = this.sessionManager.getBranch();
+			let pathEntries = this.sessionManager.getBranch();
 
 			const autoCompactionCandidates = await this.#runnableCompactionCandidates(
 				this.#getCompactionModelCandidates(availableModels),
 				this.sessionId,
 			);
-			const preparation = prepareCompaction(pathEntries, compactionSettings, autoCompactionCandidates);
+			let preparation = prepareCompaction(pathEntries, compactionSettings, autoCompactionCandidates);
+			if (!preparation && reason !== "idle") {
+				let rescueMadeRoom = false;
+				let rescuedPreparation: CompactionPreparation | undefined;
+				const rescued = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+					skipElide: fallbackFromShake,
+					precheck: !willRetry,
+					hasProgress: () => {
+						rescueMadeRoom = willRetry ? this.#compactionCreatedRetryFit() : this.#compactionCreatedHeadroom();
+						const refreshedEntries = this.sessionManager.getBranch();
+						rescuedPreparation = prepareCompaction(
+							refreshedEntries,
+							compactionSettings,
+							autoCompactionCandidates,
+						);
+						if (rescuedPreparation) pathEntries = refreshedEntries;
+						return rescueMadeRoom || rescuedPreparation !== undefined;
+					},
+				});
+				preparation = rescuedPreparation;
+				if (!preparation && rescued && rescueMadeRoom) {
+					if (willRetry) this.#dropFailedAssistantBeforeRetry(reason);
+					const messages = this.agent.state.messages;
+					for (let index = messages.length - 1; index >= 0; index--) {
+						const message = messages[index];
+						if (message.role !== "assistant") continue;
+						this.#providerUsageStaleThroughTimestamp = Math.max(
+							this.#providerUsageStaleThroughTimestamp,
+							message.timestamp,
+						);
+						break;
+					}
+					await this.#emitSessionEvent({
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry,
+						skipped: true,
+					});
+					let continuationScheduled = false;
+					if (willRetry) {
+						this.#scheduleAgentContinue({ delayMs: 100, generation });
+						continuationScheduled = true;
+					} else if (shouldAutoContinue) {
+						this.#scheduleAutoContinuePrompt(generation);
+						continuationScheduled = true;
+					}
+					if (!continuationScheduled && !suppressContinuation && this.agent.hasQueuedMessages()) {
+						this.#scheduleAgentContinue({
+							delayMs: 100,
+							generation,
+							shouldContinue: () => this.agent.hasQueuedMessages(),
+						});
+						continuationScheduled = true;
+					}
+					return {
+						...(continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE),
+						historyRewritten: true,
+					};
+				}
+			}
 			if (!preparation) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
@@ -13371,22 +13444,7 @@ export class AgentSession {
 			let hasHeadroom = false;
 
 			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				if (lastMsg?.role === "assistant") {
-					const lastAssistant = lastMsg as AssistantMessage;
-					// Drop the prior turn before retry when it carries no actionable deliverable:
-					// - "error": failure was kept in history but must not re-enter the next turn's prompt.
-					// - reason === "incomplete" && stopReason === "length": truncated output (typically
-					//   reasoning-only) — re-running it produces the same dead-end.
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" && lastAssistant.stopReason === "length");
-					if (shouldDrop) {
-						this.agent.replaceMessages(messages.slice(0, -1));
-						this.#rebasePendingContextSnapshotAfterCompaction();
-					}
-				}
+				this.#dropFailedAssistantBeforeRetry(reason);
 
 				// Retry only needs the rebuilt prompt to fit the window again — measured
 				// AFTER the drop above so the just-failed turn (which the retry prompt
