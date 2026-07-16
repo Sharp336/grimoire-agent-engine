@@ -374,6 +374,7 @@ import {
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
+	invalidateLlmConversion,
 	isEmptyErrorTurn,
 	isUserInterruptAbort,
 	normalizeCustomMessagePayload,
@@ -10499,6 +10500,15 @@ export class AgentSession {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	/** Drop convertToLlm memo entries for branch messages after in-place history rewrites. */
+	#invalidateLlmConversionsFromBranch(entries: SessionEntry[]): void {
+		for (const entry of entries) {
+			if (entry.type === "message") {
+				invalidateLlmConversion(entry.message);
+			}
+		}
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -10518,6 +10528,7 @@ export class AgentSession {
 		}
 
 		await this.sessionManager.rewriteEntries();
+		this.#invalidateLlmConversionsFromBranch(branchEntries);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -10561,6 +10572,7 @@ export class AgentSession {
 		}
 
 		await this.sessionManager.rewriteEntries();
+		this.#invalidateLlmConversionsFromBranch(branchEntries);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -10669,6 +10681,7 @@ export class AgentSession {
 		applyShakeRegions(items);
 
 		await this.sessionManager.rewriteEntries();
+		this.#invalidateLlmConversionsFromBranch(branchEntries);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
