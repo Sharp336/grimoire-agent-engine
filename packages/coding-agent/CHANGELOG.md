@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex web search for Responses-Lite GPT models and prioritized GPT-5.6 Sol, Terra, then Luna by default.
+
 ## [17.0.1] - 2026-07-16
 
 ### Changed

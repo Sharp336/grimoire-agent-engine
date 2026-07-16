@@ -25,9 +25,9 @@ const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
 const FALLBACK_MODEL = "gpt-5.5";
 const DEFAULT_MODEL_PREFERENCES = [
-	"gpt-5.6-luna",
-	"gpt-5.6-terra",
 	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5-codex",
@@ -402,6 +402,7 @@ async function callCodexSearch(
 		body.client_metadata = metadata.clientMetadata;
 		body.reasoning = { context: "all_turns" };
 		applyCodexResponsesLiteShape(body);
+		delete body.tool_choice;
 	}
 
 	const fetchImpl = options.fetch ?? fetch;
@@ -534,8 +535,8 @@ async function callCodexSearch(
  * Default-model behavior:
  * - If `PI_CODEX_WEB_SEARCH_MODEL` is set, use it exactly once and surface any
  *   upstream error verbatim.
- * - Otherwise prefer ChatGPT-account-safe bundled defaults (GPT-5.6 Luna,
- *   Terra, Sol, GPT-5.5, …) and retry the next candidate only when Codex
+ * - Otherwise prefer ChatGPT-account-safe bundled defaults (GPT-5.6 Sol,
+ *   Terra, Luna, GPT-5.5, …) and retry the next candidate only when Codex
  *   returns the known 400 "model is not supported" family. This avoids
  *   selecting `gpt-5-codex-mini` first on ChatGPT accounts, which OpenAI
  *   rejects.
