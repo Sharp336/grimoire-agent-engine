@@ -1259,6 +1259,47 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
  * hook with source pre-rewritten during graph collection; Bun rejects a CJS
  * `require()` whose onLoad callback returns a promise.
  */
+
+function isCommonJsModulePath(modulePath: string): boolean {
+	const ext = path.extname(modulePath);
+	return ext === ".cjs" || ext === ".cts";
+}
+
+function findCreateRequireAnchor(modulePath: string): string {
+	let dir = path.dirname(modulePath);
+	for (;;) {
+		const candidate = path.join(dir, "package.json");
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) {
+			return modulePath;
+		}
+		dir = parent;
+	}
+}
+
+/** Bun's extension graph hook serves hooked .cjs modules to ESM importers. */
+function synthesizeCommonJsDefaultExportInterop(modulePath: string): string {
+	let targetPath = modulePath;
+	if (modulePath.endsWith("canvas.cjs")) {
+		// linkedom's canvas.cjs tries optional native `canvas`; OMP never ships it.
+		targetPath = modulePath.replace(/canvas\.cjs$/, "canvas-shim.cjs");
+	}
+	const anchorPath = findCreateRequireAnchor(targetPath);
+	const requireSpecifier = JSON.stringify(
+		anchorPath === targetPath ? targetPath : `./${path.relative(path.dirname(anchorPath), targetPath).replace(/\\/g, "/")}`,
+	);
+	const anchorSpecifier = JSON.stringify(anchorPath);
+	return [
+		'import { createRequire } from "node:module";',
+		`const require = createRequire(${anchorSpecifier});`,
+		`const __ompCjsModule = require(${requireSpecifier});`,
+		"export default __ompCjsModule;",
+	].join("\n");
+}
+
 function installExtensionGraphHook(
 	entryRealPath: string,
 	modules: Map<string, string>,
@@ -1266,8 +1307,16 @@ function installExtensionGraphHook(
 	const asyncModules = new Map<string, string>();
 	const syncCommonJsModules = new Map<string, string>();
 	for (const [modulePath, source] of modules) {
-		const destination = nativeAddonLoaderModulePaths.has(modulePath) ? syncCommonJsModules : asyncModules;
-		destination.set(modulePath, source);
+		if (nativeAddonLoaderModulePaths.has(modulePath)) {
+			syncCommonJsModules.set(modulePath, source);
+		} else if (isCommonJsModulePath(modulePath)) {
+			// ESM `import x from "./foo.cjs"` must be served from a synchronous onLoad
+			// hook. Async hooks make the target an "async module" that createRequire()
+			// cannot load (linkedom/canvas.cjs under pi-task).
+			syncCommonJsModules.set(modulePath, synthesizeCommonJsDefaultExportInterop(modulePath));
+		} else {
+			asyncModules.set(modulePath, source);
+		}
 	}
 
 	if (asyncModules.size > 0) {

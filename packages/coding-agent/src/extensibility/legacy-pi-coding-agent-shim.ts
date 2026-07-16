@@ -1193,6 +1193,14 @@ export async function createAgentSession(
 	return ompCreateAgentSession(forwarded);
 }
 
+export {
+	DefaultPackageManager,
+	type PathMetadata,
+	type ResolvedPaths,
+	type ResolvedResource,
+	type SourceScope,
+} from "./legacy-default-package-manager";
+
 export * from "../index";
 export { formatBytes as formatSize } from "../tools/render-utils";
 export { Type } from "./typebox";
