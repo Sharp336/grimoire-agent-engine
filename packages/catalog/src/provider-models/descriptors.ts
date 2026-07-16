@@ -51,6 +51,7 @@ import {
 	xiaomiModelManagerOptions,
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
+	volcengineCodingPlanModelManagerOptions,
 } from "./openai-compat";
 import {
 	cursorModelManagerOptions,
@@ -483,6 +484,13 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => zhipuCodingPlanModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Zhipu Coding Plan" },
+	},
+	{
+		id: "volcengine-coding-plan",
+		defaultModel: "doubao-seed-code",
+		envVars: ["VOLCENGINE_CODING_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineCodingPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "Volcengine Coding Plan" },
 	},
 ] as const satisfies readonly ProviderCatalogEntry[];
 

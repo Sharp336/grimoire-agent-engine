@@ -1480,6 +1480,56 @@ export function zhipuCodingPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 6.8 Volcengine Coding Plan (火山方舟)
+// ---------------------------------------------------------------------------
+
+export interface VolcengineCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function volcengineCodingPlanModelManagerOptions(
+	config?: VolcengineCodingPlanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://ark.cn-beijing.volces.com/api/coding/v3";
+	return {
+		providerId: "volcengine-coding-plan",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "volcengine-coding-plan",
+					baseUrl,
+					apiKey,
+					mapModel: (
+						_entry: OpenAICompatibleModelRecord,
+						defaults: ModelSpec<"openai-completions">,
+						_context: OpenAICompatibleModelMapperContext<"openai-completions">,
+					): ModelSpec<"openai-completions"> => {
+						const id = defaults.id;
+						const isReasoning = /deepseek|glm-[456789]|thinking/.test(id);
+						return {
+							...defaults,
+							reasoning: isReasoning,
+							input: ["text"],
+							compat: {
+								supportsDeveloperRole: false,
+								...(isReasoning && {
+									thinkingFormat: "zai",
+									reasoningContentField: "reasoning_content",
+								}),
+							},
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 
