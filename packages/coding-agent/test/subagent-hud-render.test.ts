@@ -4,6 +4,11 @@
  * `Id: description` rows and yields no output once nothing qualifies, so the
  * block self-clears. Sync task spawns and eval `agent()` spawns are excluded:
  * their progress is already rendered inline (tool block / eval cell).
+ *
+ * When vibe worker screens are provided, a sibling "Vibe" block lists them so
+ * background turns stay visible after the director goes idle. Vibe keep-alive
+ * workers that also emit detached lifecycle events are de-duplicated into the
+ * Vibe block only.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -26,6 +31,7 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task";
+import type { VibeScreenSnapshot } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -88,8 +94,21 @@ function makeProgressPayload(
 	};
 }
 
-function render(sessions: ObservableSession[], columns = 120): string {
-	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).join("\n"));
+function makeVibeScreen(overrides: Partial<VibeScreenSnapshot> & { id: string }): VibeScreenSnapshot {
+	return {
+		cli: "fast",
+		state: "running",
+		turns: 1,
+		queued: 0,
+		trace: [],
+		outputTail: [],
+		lastActivityAt: Date.now(),
+		...overrides,
+	};
+}
+
+function render(sessions: ObservableSession[], columns = 120, vibeScreens: VibeScreenSnapshot[] = []): string {
+	return Bun.stripANSI(renderSubagentHudLines(sessions, columns, vibeScreens).join("\n"));
 }
 
 describe("subagent HUD lines", () => {
@@ -170,6 +189,57 @@ describe("subagent HUD lines", () => {
 		for (const line of out.split("\n")) {
 			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
 		}
+	});
+
+	it("renders vibe workers under a Vibe header with state and live activity", () => {
+		const out = render(
+			[],
+			120,
+			[
+				makeVibeScreen({
+					id: "FastWorker",
+					cli: "fast",
+					state: "running",
+					currentTool: "edit",
+					currentToolArgs: "src/a.ts",
+				}),
+				makeVibeScreen({
+					id: "GoodWorker",
+					cli: "good",
+					state: "idle",
+					lastActivity: "turn finished",
+				}),
+			],
+		);
+		expect(out).toContain("Vibe");
+		expect(out).toContain("FastWorker");
+		expect(out).toContain("[fast]");
+		expect(out).toContain("running");
+		expect(out).toContain("edit src/a.ts");
+		expect(out).toContain("GoodWorker");
+		expect(out).toContain("[good]");
+		expect(out).toContain("idle");
+		expect(out).toContain("turn finished");
+		expect(out).not.toContain("Subagents");
+	});
+
+	it("dedupes vibe keep-alive workers out of the Subagents list", () => {
+		const out = render(
+			[
+				makeSession({ id: "FastWorker", description: "vibe fast session" }),
+				makeSession({ id: "RegularTask", description: "detached non-vibe work" }),
+			],
+			120,
+			[makeVibeScreen({ id: "FastWorker", cli: "fast", state: "running", currentTool: "read" })],
+		);
+		expect(out).toContain("Subagents");
+		expect(out).toContain("RegularTask: detached non-vibe work");
+		expect(out).toContain("Vibe");
+		expect(out).toContain("FastWorker");
+		expect(out).toContain("read");
+		// FastWorker should only appear once (in the Vibe block), not also as a Subagents row description.
+		const occurrences = out.split("FastWorker").length - 1;
+		expect(occurrences).toBe(1);
 	});
 
 	it("keeps subagent registry order stable while progress arrives out of order", () => {

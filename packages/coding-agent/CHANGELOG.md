@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added regression coverage and documentation for configuring OpenAI-compatible relay providers through `models.yml`, including provider-level `baseUrl`, `apiKey`, discovery, and selector availability.
+
+### Fixed
+
+- Fixed vibe mode background workers being invisible after the director went idle: status line now shows live run/idle counts, the anchored HUD keeps a Vibe roster while workers are alive, and roster changes refresh the TUI without requiring another `vibe_wait`/`vibe_list`.
 ## [17.0.1] - 2026-07-16
 
 ### Changed

@@ -72,6 +72,12 @@ export interface SegmentContext {
 	} | null;
 	vibeMode: {
 		enabled: boolean;
+		/** Non-dead worker sessions owned by the director. */
+		total?: number;
+		/** Sessions currently starting or mid-turn. */
+		running?: number;
+		/** Sessions parked between turns. */
+		idle?: number;
 	} | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)

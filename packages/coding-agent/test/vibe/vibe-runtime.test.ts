@@ -498,6 +498,49 @@ describe("vibe session registry", () => {
 		gate.resolve();
 	});
 
+	it("summary + onChange expose live roster counts for TUI visibility", async () => {
+		const gate = deferred();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			options.onProgress?.(
+				progressSnapshot(options.id, {
+					currentTool: "read",
+					currentToolArgs: "file.ts",
+					lastIntent: "reading file",
+				}),
+			);
+			await gate.promise;
+			return makeResult(options.id, { lastIntent: "done reading" });
+		});
+
+		const manager = createManager();
+		const session = createSession({ manager });
+		const registry = VibeSessionRegistry.global();
+		const changes: Array<{ total: number; running: number; idle: number }> = [];
+		const unsub = registry.onChange(() => {
+			changes.push(registry.summary("Main"));
+		});
+
+		expect(registry.summary("Main")).toEqual({ total: 0, running: 0, idle: 0 });
+		await registry.spawn(session, { cli: "fast", name: "Visible", prompt: "Stay visible." });
+		await pollUntil(() => registry.summary("Main").running >= 1);
+		expect(registry.summary("Main")).toEqual({ total: 1, running: 1, idle: 0 });
+		expect(changes.some(entry => entry.running >= 1)).toBe(true);
+
+		gate.resolve();
+		await pollUntil(() => registry.summary("Main").idle === 1);
+		expect(registry.summary("Main")).toEqual({ total: 1, running: 0, idle: 1 });
+		expect(changes.some(entry => entry.idle === 1)).toBe(true);
+		unsub();
+	});
+
 	it("killAll terminates every session for the owner (mode-exit path)", async () => {
 		const gates = new Map<string, Deferred>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {

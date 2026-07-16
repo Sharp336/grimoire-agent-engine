@@ -125,7 +125,7 @@ import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
-import { VibeSessionRegistry } from "../vibe/runtime";
+import { type VibeScreenSnapshot, VibeSessionRegistry } from "../vibe/runtime";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -361,45 +361,100 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * Only detached background spawns are listed: a sync task call blocks the
  * parent turn and its inline tool block already renders progress live, and
  * eval `agent()` spawns are rendered by their own eval cell tree.
+ *
+ * When vibe mode has worker sessions, a sibling "Vibe" block lists them so
+ * background turns stay visible after the director goes idle (spawn/send alone
+ * only leave a one-shot "turn started" ack in the transcript).
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	vibeScreens: VibeScreenSnapshot[] = [],
+): string[] {
+	const vibeWorkers = vibeScreens.filter(screen => screen.state !== "dead");
+	const vibeIds = new Set(vibeWorkers.map(screen => screen.id));
+	// Vibe keep-alive workers also emit detached subagent lifecycle events.
+	// Prefer the dedicated Vibe block so they don't double-list under Subagents.
 	const running = sessions.filter(
-		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
+		session =>
+			session.kind === "subagent" &&
+			session.status === "active" &&
+			session.detached === true &&
+			!vibeIds.has(session.id),
 	);
-	if (running.length === 0) return [];
+	if (running.length === 0 && vibeWorkers.length === 0) return [];
 
+	const lines: string[] = [""];
 	const dot = theme.styledSymbol("status.done", "accent");
-	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
-	const hiddenCount = running.length - visible.length;
-	const rows = renderTreeList(
-		{
-			items: visible,
-			expanded: true,
-			renderItem: session => {
-				const displayId = formatTaskId(session.id);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
-				const description = session.description?.trim() || session.progress?.description?.trim();
-				if (description) {
-					const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - 10);
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
-				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
-					if (taskPreview) {
-						line += ` ${theme.fg("muted", truncateToWidth(replaceTabs(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;
+
+	if (running.length > 0) {
+		const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
+		const hiddenCount = running.length - visible.length;
+		const rows = renderTreeList(
+			{
+				items: visible,
+				expanded: true,
+				renderItem: session => {
+					const displayId = formatTaskId(session.id);
+					let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
+					const description = session.description?.trim() || session.progress?.description?.trim();
+					if (description) {
+						const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - 10);
+						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
+					} else {
+						// No spawn description: fall back to a muted task preview, same as
+						// the inline task rows when a row has no label.
+						const taskPreview = session.progress?.task?.trim();
+						if (taskPreview) {
+							line += ` ${theme.fg("muted", truncateToWidth(replaceTabs(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;
+						}
 					}
-				}
-				return line;
+					return line;
+				},
 			},
-		},
-		theme,
-	);
-	if (hiddenCount > 0) {
-		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+			theme,
+		);
+		if (hiddenCount > 0) {
+			rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+		}
+		lines.push(theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+
+	if (vibeWorkers.length > 0) {
+		const visible = vibeWorkers.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
+		const hiddenCount = vibeWorkers.length - visible.length;
+		const rows = renderTreeList(
+			{
+				items: visible,
+				expanded: true,
+				renderItem: screen => {
+					const displayId = formatTaskId(screen.id);
+					const live = screen.state === "running" || screen.state === "starting";
+					const idColor = live ? "accent" : "dim";
+					let line = `${dot} ${theme.fg(idColor, theme.bold(displayId))}`;
+					line += ` ${theme.fg("muted", `[${screen.cli}]`)}`;
+					line += ` ${theme.fg(live ? "accent" : "dim", screen.state)}`;
+					const activity =
+						screen.currentTool
+							? `${screen.currentTool}${screen.currentToolArgs ? ` ${screen.currentToolArgs}` : ""}`
+							: (screen.lastIntent ?? screen.turnMessage ?? screen.lastActivity);
+					if (activity) {
+						const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - 24);
+						line += `${theme.fg(idColor, ":")} ${theme.fg(live ? "accent" : "muted", truncateToWidth(replaceTabs(activity), budget))}`;
+					}
+					return line;
+				},
+			},
+			theme,
+		);
+		if (hiddenCount > 0) {
+			rows.push(theme.fg("dim", `… ${hiddenCount} more workers — use vibe_list for full roster`));
+		}
+		lines.push(theme.bold(theme.fg("accent", "Vibe")), ...rows.map(line => ` ${line}`));
+	}
+
+	return lines;
 }
 
 export class InteractiveMode implements InteractiveModeContext {
@@ -615,6 +670,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	#vibeRosterUnsubscribe?: () => void;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -941,6 +997,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
+		// Vibe workers keep running after the director turn ends. Subscribe so
+		// the status line / anchored HUD refresh while background turns progress.
+		this.#vibeRosterUnsubscribe = VibeSessionRegistry.global().onChange(() => {
+			this.#scheduleObserverUiSync("progress");
+		});
+		this.#syncVibeModeStatus();
+		this.#renderSubagentList();
 
 		// Load initial todos
 		await this.#loadTodoList();
@@ -1850,6 +1913,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#reconcileTodosWithSubagents();
 		}
 		this.#syncTodoAutoClearTimer();
+		this.#syncVibeModeStatus();
 		this.#renderTodoList();
 		this.#renderSubagentList();
 		this.ui.requestRender();
@@ -1934,11 +1998,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 	 * editor. Driven entirely by observer-registry change events, so rows appear
 	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
+	 * the "active" state. While vibe mode is on, also lists the director's
+	 * worker roster so background turns stay visible after the main turn ends.
 	 */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		const ownerId = this.session.getAgentId() ?? MAIN_AGENT_ID;
+		const vibeScreens = this.vibeModeEnabled ? VibeSessionRegistry.global().screens(ownerId) : [];
+		const lines = renderSubagentHudLines(
+			this.#observerRegistry.getSessions(),
+			this.ui.terminal.columns,
+			vibeScreens,
+		);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
@@ -1976,8 +2047,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	#syncVibeModeStatus(): void {
+		if (!this.vibeModeEnabled) {
+			this.statusLine.setVibeModeStatus(undefined);
+			return;
+		}
+		const ownerId = this.session.getAgentId() ?? MAIN_AGENT_ID;
+		const summary = VibeSessionRegistry.global().summary(ownerId);
+		this.statusLine.setVibeModeStatus({
+			enabled: true,
+			total: summary.total,
+			running: summary.running,
+			idle: summary.idle,
+		});
+	}
+
 	#updateVibeModeStatus(): void {
-		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
+		this.#syncVibeModeStatus();
+		this.#renderSubagentList();
 		this.ui.requestRender();
 	}
 
@@ -3603,6 +3690,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#eventBusUnsubscribers = [];
 		this.#observerRegistry.dispose();
+		this.#vibeRosterUnsubscribe?.();
+		this.#vibeRosterUnsubscribe = undefined;
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;

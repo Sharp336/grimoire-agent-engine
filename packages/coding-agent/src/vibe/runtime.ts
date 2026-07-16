@@ -166,6 +166,16 @@ export interface VibeWaitOutcome {
 	timedOut: boolean;
 }
 
+/** Compact roster counts for status-line / HUD visibility while the director is idle. */
+export interface VibeRosterSummary {
+	/** Non-dead sessions owned by the director. */
+	total: number;
+	/** Sessions currently starting or mid-turn. */
+	running: number;
+	/** Sessions parked between turns. */
+	idle: number;
+}
+
 /** Normalize a text fragment to one bounded roster/trace line. */
 function firstLine(text: string, max = 100): string {
 	return oneLineLabel(text, max);
@@ -208,6 +218,29 @@ export class VibeSessionRegistry {
 	}
 
 	readonly #records = new Map<string, VibeRecord>();
+	readonly #listeners = new Set<() => void>();
+
+	/**
+	 * Subscribe to roster / live-activity changes. Used by the TUI so status line
+	 * and the anchored HUD refresh while workers keep running after the director
+	 * has gone idle. Returns an unsubscribe function.
+	 */
+	onChange(cb: () => void): () => void {
+		this.#listeners.add(cb);
+		return () => this.#listeners.delete(cb);
+	}
+
+	#notifyChange(): void {
+		for (const cb of this.#listeners) {
+			try {
+				cb();
+			} catch (error) {
+				logger.warn("vibe: roster change listener failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
 
 	#manager(session: ToolSession): AsyncJobManager {
 		const manager = session.asyncJobManager;
@@ -234,6 +267,20 @@ export class VibeSessionRegistry {
 			if (record.ownerId === owner && record.state !== "dead") ids.push(record.id);
 		}
 		return ids;
+	}
+
+	/** Running / idle / total counts for the director's roster (dead sessions excluded). */
+	summary(owner: string): VibeRosterSummary {
+		let total = 0;
+		let running = 0;
+		let idle = 0;
+		for (const record of this.#records.values()) {
+			if (record.ownerId !== owner || record.state === "dead") continue;
+			total++;
+			if (record.state === "running" || record.state === "starting") running++;
+			else if (record.state === "idle") idle++;
+		}
+		return { total, running, idle };
 	}
 
 	/**
@@ -314,12 +361,14 @@ export class VibeSessionRegistry {
 			killed: false,
 		};
 		this.#records.set(id, record);
+		this.#notifyChange();
 
 		try {
 			const jobId = this.#registerTurnJob(session, manager, record, args.prompt, { first: true });
 			return { id, jobId };
 		} catch (error) {
 			this.#records.delete(id);
+			this.#notifyChange();
 			throw error;
 		}
 	}
@@ -343,10 +392,12 @@ export class VibeSessionRegistry {
 			if (live?.isStreaming) {
 				await live.steer(message);
 				record.lastActivityAt = Date.now();
+				this.#notifyChange();
 				return { id: record.id, mode: "steered" };
 			}
 			record.queue.push(message);
 			record.lastActivityAt = Date.now();
+			this.#notifyChange();
 			return { id: record.id, mode: "queued" };
 		}
 
@@ -468,6 +519,7 @@ export class VibeSessionRegistry {
 		record.state = "dead";
 		record.lastActivityAt = Date.now();
 		record.lastActivity = "killed";
+		this.#notifyChange();
 		try {
 			await AgentLifecycleManager.global().release(record.id);
 		} catch (error) {
@@ -570,6 +622,7 @@ export class VibeSessionRegistry {
 				(progress.currentTool ? `${progress.currentTool} ${progress.currentToolArgs ?? ""}` : undefined);
 			if (gist) record.lastActivity = firstLine(gist);
 			record.lastActivityAt = Date.now();
+			this.#notifyChange();
 		};
 
 		const jobId = manager.register(
@@ -579,6 +632,7 @@ export class VibeSessionRegistry {
 				record.state = "running";
 				record.turnCount = turnIndex;
 				record.lastActivityAt = Date.now();
+				this.#notifyChange();
 				try {
 					const result = options.first
 						? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
@@ -607,6 +661,9 @@ export class VibeSessionRegistry {
 		);
 		turn.jobId = jobId;
 		record.turn = turn;
+		// Keep the roster in "starting" until the job body flips it to running.
+		if (record.state === "idle") record.state = "starting";
+		this.#notifyChange();
 		return jobId;
 	}
 
@@ -618,11 +675,13 @@ export class VibeSessionRegistry {
 		record.lastActivityAt = Date.now();
 		if (record.killed) {
 			record.state = "dead";
+			this.#notifyChange();
 			return;
 		}
 		// A spawn that failed before its session ever registered leaves nothing
 		// to continue — mark the record dead so sends fail with clear guidance.
 		record.state = AgentRegistry.global().get(record.id) ? "idle" : "dead";
+		this.#notifyChange();
 		if (record.state === "dead" || record.queue.length === 0) return;
 		const nextMessage = record.queue.splice(0, record.queue.length).join("\n\n");
 		try {
@@ -634,6 +693,7 @@ export class VibeSessionRegistry {
 				id: record.id,
 				error: error instanceof Error ? error.message : String(error),
 			});
+			this.#notifyChange();
 		}
 	}
 
@@ -655,6 +715,7 @@ export class VibeSessionRegistry {
 				? `turn ${turnIndex} ${status}: ${result.abortReason ?? result.error ?? ""}`
 				: (result.lastIntent ?? result.output),
 		);
+		this.#notifyChange();
 
 		const traceLines = turn.trace.map(entry =>
 			firstLine(`${entry.tool}${entry.args ? `(${entry.args})` : ""}`, TRACE_LINE_MAX),

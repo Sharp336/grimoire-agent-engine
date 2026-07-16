@@ -221,8 +221,18 @@ const modeSegment: StatusLineSegment = {
 
 		const vibe = ctx.vibeMode;
 		if (vibe?.enabled) {
-			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
+			// Keep a persistent roster count so background workers remain visible
+			// after the director goes idle and tool TV walls stop updating.
+			const parts = ["Vibe"];
+			const running = vibe.running ?? 0;
+			const idle = vibe.idle ?? 0;
+			const total = vibe.total ?? running + idle;
+			if (running > 0) parts.push(`${running} run`);
+			if (idle > 0) parts.push(`${idle} idle`);
+			if (running === 0 && idle === 0 && total > 0) parts.push(`${total}`);
+			const content = withIcon(theme.icon.agents, parts.join(" · "));
+			const color = running > 0 ? "accent" : "dim";
+			return { content: theme.fg(color, content), visible: true };
 		}
 
 		const loop = ctx.loopMode;
