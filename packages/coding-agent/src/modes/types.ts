@@ -348,6 +348,7 @@ export interface InteractiveModeContext {
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<void>;
+	syncImageGenModeSnapshots(enabled: boolean): void;
 
 	// Selector handling
 	showSettingsSelector(): void;

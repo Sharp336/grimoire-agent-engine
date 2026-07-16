@@ -6726,6 +6726,15 @@ export class AgentSession {
 		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
 	): Promise<void> {
 		toolNames = normalizeToolNames(toolNames);
+		// Hard-gate the image-gen tool on `imagegen.enabled`. The tool is registered
+		// unconditionally (sdk.ts) so the setting can toggle it live, but it must never
+		// be active while disabled — no matter the caller. This single chokepoint every
+		// active-set mutation flows through catches the paths the startup filter misses:
+		// plan/goal/vibe mode-restore snapshots and cold persisted-subagent revives that
+		// replay a saved active list captured while imagegen was enabled.
+		if (!this.settings.get("imagegen.enabled")) {
+			toolNames = toolNames.filter(name => name !== "generate_image");
+		}
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];

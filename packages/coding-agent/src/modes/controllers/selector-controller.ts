@@ -591,12 +591,16 @@ export class SelectorController {
 				break;
 
 			// Image-gen tool is registered unconditionally (sdk.ts); toggle its live
-			// active membership so the setting withdraws/restores it without a restart.
+			// active membership so the setting withdraws/restores it without a restart,
+			// and keep the mode restore snapshots in sync so exiting a plan/goal/vibe
+			// mode entered before the toggle doesn't clobber the new state.
 			case "imagegen.enabled": {
+				const enabled = value === true;
+				this.ctx.syncImageGenModeSnapshots(enabled);
 				const toolName = imageGenTool.name;
 				const active = this.ctx.session.getActiveToolNames();
 				let next: string[] | undefined;
-				if (value) {
+				if (enabled) {
 					if (this.ctx.session.getAllToolNames().includes(toolName) && !active.includes(toolName)) {
 						next = [...active, toolName];
 					}

@@ -112,6 +112,7 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { LspStartupServerInfo } from "../tools";
+import { imageGenTool } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
@@ -2138,6 +2139,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			this.#updateVibeModeStatus();
 		}
+	}
+
+	/**
+	 * Keep the image-gen tool consistent inside plan/goal/vibe restore snapshots
+	 * when `imagegen.enabled` toggles mid-mode. Those modes capture the active tool
+	 * list on entry and replay it on exit; without this, disabling the setting during
+	 * a mode is undone on exit (snapshot re-adds the tool) and enabling it during a
+	 * mode is dropped on exit (snapshot lacks it). Called from the settings toggle.
+	 */
+	syncImageGenModeSnapshots(enabled: boolean): void {
+		const name = imageGenTool.name;
+		const patch = (tools: string[] | undefined): string[] | undefined => {
+			if (!tools) return tools;
+			const has = tools.includes(name);
+			if (enabled) return has ? tools : [...tools, name];
+			return has ? tools.filter(n => n !== name) : tools;
+		};
+		this.#planModePreviousTools = patch(this.#planModePreviousTools);
+		this.#goalModePreviousTools = patch(this.#goalModePreviousTools);
+		this.#vibeModePreviousTools = patch(this.#vibeModePreviousTools);
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */

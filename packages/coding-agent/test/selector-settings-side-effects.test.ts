@@ -228,6 +228,7 @@ describe("selector setting side effects", () => {
 				getAllToolNames: () => ["read", "generate_image"],
 				setActiveToolsByName,
 			},
+			syncImageGenModeSnapshots: () => {},
 		} as unknown as InteractiveModeContext);
 
 		controller.handleSettingChange("imagegen.enabled", true);
@@ -243,6 +244,7 @@ describe("selector setting side effects", () => {
 				getAllToolNames: () => ["read", "generate_image"],
 				setActiveToolsByName,
 			},
+			syncImageGenModeSnapshots: () => {},
 		} as unknown as InteractiveModeContext);
 
 		controller.handleSettingChange("imagegen.enabled", false);
@@ -258,6 +260,7 @@ describe("selector setting side effects", () => {
 				getAllToolNames: () => ["read"],
 				setActiveToolsByName,
 			},
+			syncImageGenModeSnapshots: () => {},
 		} as unknown as InteractiveModeContext);
 
 		controller.handleSettingChange("imagegen.enabled", true);
