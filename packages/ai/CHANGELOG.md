@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Cursor MCP tool calls executing twice: mounted `xd://` devices and external MCP tools advertised into the Cursor request context are run once through the exec-channel bridge (which buffers the `toolResult` out-of-band), but the finalized `toolCall` block was left unstamped, so the shared agent-loop dispatch pass re-ran the same side-effecting call after `message_end`. Completed Cursor MCP blocks are now stamped with `kCursorExecResolved`, mirroring the native exec path, so agent-loop skips them ([#5650](https://github.com/can1357/oh-my-pi/issues/5650)).
 - Fixed OpenRouter cost reporting to use the provider's authoritative account charge instead of catalog token-price estimates on both Responses and Chat Completions streams.
 - Fixed OpenAI Responses and Chat Completions requests forwarding unsupported sampling parameters such as `temperature` to o-series and GPT-5+ models, preventing 400 errors for mnemopi memory calls through GitHub Copilot GPT-5.6 Luna. ([#5606](https://github.com/can1357/oh-my-pi/issues/5606))
 - Fixed boolean JSON Schema subschemas (`true`/`false`) in MCP tool inputs triggering `400 INVALID_ARGUMENT` on the Google/Cloud Code Assist (Antigravity) transport by coercing them to their object equivalents (`true` → `{}`, `false` → `{ not: {} }`) before sending ([#5604](https://github.com/can1357/oh-my-pi/issues/5604)).

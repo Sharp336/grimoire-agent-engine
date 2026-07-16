@@ -8,7 +8,11 @@ import {
 	type UsageState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
-import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	type CursorExecResolvedCarrier,
+	getStreamingPartialJson,
+	kCursorExecResolved,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 interface Harness {
@@ -194,6 +198,37 @@ describe("processInteractionUpdate content block ordering", () => {
 			"text_start",
 			"text_delta",
 		]);
+	});
+});
+
+describe("processInteractionUpdate MCP exec-resolved stamping (issue #5650)", () => {
+	it("stamps a completed MCP toolCall block so agent-loop skips re-execution", () => {
+		// Cursor resolves advertised MCP tools out-of-band: the exec channel
+		// (`mcpArgs` -> `CursorExecHandlers.mcp`) runs the tool and buffers its
+		// `toolResult` via `onToolResult`. Now that mounted devices / external MCP
+		// tools are advertised into `currentContext.tools` (PR #5651), the shared
+		// `agent-loop.ts` dispatch pass would otherwise treat the finalized block as
+		// runnable and re-execute the same side-effecting call after `message_end`.
+		// The completed block MUST carry `kCursorExecResolved` so agent-loop skips
+		// it, mirroring the native `synthesizeCursorExecToolCall` path.
+		const h = newHarness();
+		startMcpToolCall(h, "mcp__glean_report_disposition");
+		completeMcpToolCall(h, undefined);
+
+		const finalBlock = h.output.content[0];
+		expect(finalBlock?.type).toBe("toolCall");
+		if (finalBlock?.type !== "toolCall") throw new Error("expected toolCall block");
+		const resolved: CursorExecResolvedCarrier = finalBlock;
+		expect(resolved[kCursorExecResolved]).toBe(true);
+
+		// Mirror agent-loop's runnable-block predicate: the resolved MCP block must
+		// be excluded, leaving nothing for the dispatch pass to execute.
+		const runnable = h.output.content.filter(c => {
+			if (c.type !== "toolCall") return false;
+			const carrier: CursorExecResolvedCarrier = c;
+			return carrier[kCursorExecResolved] !== true;
+		});
+		expect(runnable).toHaveLength(0);
 	});
 });
 

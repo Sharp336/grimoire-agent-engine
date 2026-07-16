@@ -2288,6 +2288,17 @@ export function processInteractionUpdate(
 					state.currentToolCall.arguments as Record<string, unknown> | undefined,
 					decodedArgs,
 				);
+				// Cursor resolves advertised MCP tools out-of-band: the exec channel
+				// (`mcpArgs` → `CursorExecHandlers.mcp`) runs the tool and buffers its
+				// `toolResult` via `onToolResult`, mirroring the native exec path. Stamp
+				// the finalized block with `kCursorExecResolved` so the shared
+				// `agent-loop.ts` dispatch pass skips it. Without this, now that mounted
+				// devices/external MCP tools are advertised into `currentContext.tools`,
+				// agent-loop would treat the completed block as runnable and re-execute
+				// the same side-effecting call after `message_end` — duplicating
+				// `ast_edit`/external MCP mutations (issue #5650 review by
+				// @chatgpt-codex-connector).
+				state.currentToolCall[kCursorExecResolved] = true;
 			} else if (state.currentToolCall[kStreamingBlockKind] === "todo" && toolCall) {
 				const todoArgs = buildTodoArgs(toolCall);
 				if (todoArgs) {
