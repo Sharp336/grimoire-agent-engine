@@ -29,17 +29,27 @@ import { buildExperiments, experimentDetail, experimentOf } from "./experiments"
 import { harborRunnerArgs, type LaunchRequest } from "./launch-args";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
 
-/** PUT /api/experiments/:id body — goal and per-run role/note/label metadata. */
+/** Explicit closure metadata supplied by PUT /api/experiments/:id. */
+export interface ExperimentClosureUpdate {
+	verdict: string;
+}
+
+/** PUT /api/experiments/:id body — experiment and per-run metadata. */
 export interface ExperimentMetaUpdate {
 	goal?: string;
+	maxRuns?: number | null;
+	maxArms?: number | null;
+	closure?: ExperimentClosureUpdate;
 	runs?: Record<string, { role?: RunRole; note?: string; label?: string }>;
 }
 
-/** POST /api/experiments body — pre-registers an experiment id with a goal. */
+/** POST /api/experiments body — pre-registers an experiment id with metadata. */
 export interface CreateExperimentRequest {
 	/** Dash-free token; runs group into it as `<id>-<arm>` job names. */
 	id: string;
 	goal?: string;
+	maxRuns?: number | null;
+	maxArms?: number | null;
 }
 
 import indexHtml from "./web/index.html";
@@ -97,6 +107,18 @@ function assertSafeJobName(jobName: string): void {
 	}
 }
 
+
+function assertExperimentLimit(name: "maxRuns" | "maxArms", value: number | null | undefined): void {
+	if (value !== undefined && value !== null && (!Number.isSafeInteger(value) || value < 1)) {
+		throw new Error(`${name} must be a positive safe integer`);
+	}
+}
+
+function assertClosureVerdict(verdict: string): string {
+	const value = verdict.trim();
+	if (!value) throw new Error("closure verdict must be non-empty");
+	return value;
+}
 /** True when `pid` names a live process (signal-0 probe). */
 function pidAlive(pid: number | null): boolean {
 	if (pid == null) return false;
@@ -392,8 +414,15 @@ export class ManagerServer {
 		if (this.#children.has(jobName) || this.#store.getRun(jobName)?.status === "running") {
 			throw new Error(`run ${jobName} is already running`);
 		}
-		const jobDir = path.join(this.jobsDir, jobName);
-		fs.mkdirSync(jobDir, { recursive: true });
+		this.#store.admitExperimentLaunch({
+			jobName,
+			goal: request.goal,
+			maxRuns: request.maxRuns,
+			maxArms: request.maxArms,
+		});
+		try {
+			const jobDir = path.join(this.jobsDir, jobName);
+			fs.mkdirSync(jobDir, { recursive: true });
 
 		let argv: string[];
 		let cwd: string;
@@ -427,8 +456,11 @@ export class ManagerServer {
 			role: request.role,
 			note: request.note,
 		});
-		if (request.goal) this.#store.setExperimentGoal(experimentOf(jobName), request.goal);
 		return { jobName, pid };
+		} catch (err) {
+			this.#store.releaseExperimentLaunch(jobName);
+			throw err;
+		}
 	}
 
 	/**
@@ -442,6 +474,10 @@ export class ManagerServer {
 	resume(jobName: string, opts: { filterErrorTypes?: string[] } = {}): { jobName: string; pid: number } {
 		const run = this.#store.getRun(jobName);
 		if (!run) throw new Error(`run ${jobName} not found`);
+		const experiment = experimentOf(jobName);
+		if (this.#store.getExperimentMeta(experiment)?.closure) {
+			throw new Error(`experiment ${experiment} is closed`);
+		}
 		if (run.benchmark !== "harbor")
 			throw new Error(`resume supports only harbor runs (${jobName} is ${run.benchmark})`);
 		// Trust liveness, not the recorded status: a runner killed while a
@@ -518,30 +554,82 @@ export class ManagerServer {
 		return this.#children.has(run.jobName) || (run.status === "running" && pidAlive(run.pid));
 	}
 
-	/** Register an experiment id (with an optional goal) so it is browsable before its first arm. */
-	createExperiment(req: CreateExperimentRequest): { id: string; goal: string } {
+
+	/** Register an experiment id (with optional lifecycle metadata). */
+	createExperiment(req: CreateExperimentRequest): {
+		id: string;
+		goal: string;
+		maxRuns: number | null;
+		maxArms: number | null;
+		closure: { verdict: string; closedAt: number } | null;
+	} {
 		const id = req.id?.trim() ?? "";
 		// Dashes are structurally impossible: `experimentOf` groups job names by
 		// the token before the first dash, so a dashed id could never own a run.
 		if (!/^[A-Za-z0-9_.]+$/.test(id)) {
 			throw new Error("experiment id must be a non-empty token of [A-Za-z0-9_.] (runs group as `<id>-<arm>`)");
 		}
-		const goal = req.goal ?? this.#store.getExperimentMeta(id)?.goal ?? "";
-		this.#store.setExperimentGoal(id, goal);
-		return { id, goal };
+		assertExperimentLimit("maxRuns", req.maxRuns);
+		assertExperimentLimit("maxArms", req.maxArms);
+		const current = this.#store.getExperimentMeta(id);
+		const scopeEdit = req.goal !== undefined || req.maxRuns !== undefined || req.maxArms !== undefined;
+		if (current?.closure) {
+			if (scopeEdit) throw new Error(`experiment ${id} is closed`);
+			return {
+				id,
+				goal: current.goal,
+				maxRuns: current.maxRuns,
+				maxArms: current.maxArms,
+				closure: current.closure,
+			};
+		}
+		this.#store.setExperimentMeta(id, {
+			goal: req.goal,
+			maxRuns: req.maxRuns,
+			maxArms: req.maxArms,
+		});
+		const meta = this.#store.getExperimentMeta(id);
+		return {
+			id,
+			goal: meta?.goal ?? "",
+			maxRuns: meta?.maxRuns ?? null,
+			maxArms: meta?.maxArms ?? null,
+			closure: meta?.closure ?? null,
+		};
 	}
 
-	/** Apply goal + per-run role/note metadata; used by the UI and for backfill. */
-	updateExperimentMeta(id: string, update: ExperimentMetaUpdate): { id: string; updatedRuns: string[] } {
-		if (update.goal !== undefined) this.#store.setExperimentGoal(id, update.goal);
+	/** Apply experiment lifecycle and per-run role/note metadata. */
+	updateExperimentMeta(
+		id: string,
+		update: ExperimentMetaUpdate,
+	): { id: string; updatedRuns: string[]; closure: { verdict: string; closedAt: number } | null } {
+		assertExperimentLimit("maxRuns", update.maxRuns);
+		assertExperimentLimit("maxArms", update.maxArms);
+		const verdict = update.closure ? assertClosureVerdict(update.closure.verdict) : undefined;
+		const current = this.#store.getExperimentMeta(id);
+		const scopeEdit =
+			update.goal !== undefined || update.maxRuns !== undefined || update.maxArms !== undefined;
+		if (current?.closure && (scopeEdit || update.closure !== undefined)) throw new Error(`experiment ${id} is closed`);
+		if (verdict !== undefined && scopeEdit) {
+			throw new Error("cannot change goal or limits while closing an experiment");
+		}
+		if (scopeEdit) {
+			this.#store.setExperimentMeta(id, {
+				goal: update.goal,
+				maxRuns: update.maxRuns,
+				maxArms: update.maxArms,
+			});
+		}
 		const updatedRuns: string[] = [];
 		for (const jobName in update.runs) {
 			if (experimentOf(jobName) !== id) continue;
 			if (this.#store.setRunMeta(jobName, update.runs[jobName])) updatedRuns.push(jobName);
 		}
+		if (verdict !== undefined) this.#store.closeExperiment(id, verdict);
 		this.#tick();
-		return { id, updatedRuns };
+		return { id, updatedRuns, closure: this.#store.getExperimentMeta(id)?.closure ?? null };
 	}
+
 
 	/**
 	 * Delete an experiment: every arm's DB row, job dir, and manager log, plus
@@ -587,7 +675,6 @@ export class ManagerServer {
 		fs.rmSync(path.join(this.jobsDir, "_manager", "logs", `${jobName}.log`), { force: true });
 	}
 
-	/** Add a comparable arm to an existing experiment, inheriting its sample + config. */
 	addArm(experimentId: string, req: AddArmRequest): { jobName: string; pid: number } {
 		return this.launch(resolveArmLaunch(this.#store, experimentId, req));
 	}

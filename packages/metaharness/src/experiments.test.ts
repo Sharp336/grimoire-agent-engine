@@ -1,12 +1,18 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	armOf,
+	buildExperiments,
 	calibratedFinalPassPct,
 	canonicalArmOf,
+	experimentDetail,
 	experimentOf,
 	pickMergedTrials,
 	summarizeArm,
 } from "./experiments";
+import { RunStore } from "./store";
 import type { RunRow, TraceRow } from "./store";
 
 /**
@@ -64,6 +70,72 @@ function traceRow(overrides: Partial<TraceRow>): TraceRow {
 		...overrides,
 	};
 }
+
+describe("experiment lifecycle metadata", () => {
+	it("reads persisted state for grouped and armless experiments and nulls legacy rows", () => {
+		const jobsDir = mkdtempSync(join(tmpdir(), "metaharness-experiments-"));
+		const store = new RunStore(jobsDir);
+		try {
+			store.setExperimentMeta("persisted", { goal: "bounded", maxRuns: 4, maxArms: 2 });
+			store.closeExperiment("persisted", "operator", 1_700_000_000_000);
+			store.setExperimentGoal("legacy", "old");
+			store.setExperimentMeta("empty", { goal: "waiting", maxRuns: 9, maxArms: 3 });
+			for (const jobName of ["persisted-arm", "legacy-arm"]) {
+				store.registerLaunch({
+					benchmark: "harbor",
+					jobName,
+					dataset: "d",
+					agent: "omp",
+					models: ["m"],
+					pid: process.pid,
+				});
+			}
+
+			const summaries = buildExperiments(store);
+			expect(summaries.find(s => s.id === "persisted")).toMatchObject({
+				goal: "bounded",
+				maxRuns: 4,
+				maxArms: 2,
+				closure: { verdict: "operator", closedAt: 1_700_000_000_000 },
+				arms: 1,
+			});
+			expect(summaries.find(s => s.id === "legacy")).toMatchObject({
+				goal: "old",
+				maxRuns: null,
+				maxArms: null,
+				closure: null,
+				arms: 1,
+			});
+			expect(summaries.find(s => s.id === "empty")).toMatchObject({
+				maxRuns: 9,
+				maxArms: 3,
+				closure: null,
+				arms: 0,
+			});
+
+			expect(experimentDetail(store, "persisted")).toMatchObject({
+				goal: "bounded",
+				maxRuns: 4,
+				maxArms: 2,
+				closure: { verdict: "operator", closedAt: 1_700_000_000_000 },
+			});
+			expect(experimentDetail(store, "empty")).toMatchObject({
+				maxRuns: 9,
+				maxArms: 3,
+				closure: null,
+				arms: [],
+			});
+			expect(experimentDetail(store, "legacy")).toMatchObject({
+				maxRuns: null,
+				maxArms: null,
+				closure: null,
+			});
+		} finally {
+			store.close();
+			rmSync(jobsDir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("experiment grouping", () => {
 	it("groups by prefix and strips it from arm labels", () => {
