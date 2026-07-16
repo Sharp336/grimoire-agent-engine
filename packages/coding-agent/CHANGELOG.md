@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Codex web search for Responses-Lite GPT models and prioritized GPT-5.6 Sol, Terra, then Luna by default.
+- Fixed Codex web search for Responses-Lite GPT models and prioritized GPT-5.6 Sol, Terra, then Luna by default. ([#5678](https://github.com/can1357/oh-my-pi/pull/5678) by [@daandden](https://github.com/daandden))
 
 ## [17.0.1] - 2026-07-16
 

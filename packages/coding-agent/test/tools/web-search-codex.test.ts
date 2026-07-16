@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 
@@ -10,6 +11,7 @@ type CapturedRequest = {
 };
 
 const originalCodexSearchModel = process.env.PI_CODEX_WEB_SEARCH_MODEL;
+const bundledCodexGptModels = getBundledModels("openai-codex").filter(model => model.id.startsWith("gpt-"));
 
 function makeSseResponse(model: string): string {
 	return [
@@ -328,6 +330,45 @@ describe("searchCodex model selection", () => {
 		expect(capturedRequest?.body?.tool_choice).toBeUndefined();
 		expect(capturedRequest?.body?.instructions).toBeUndefined();
 		expect(result.model).toBe("gpt-5.6-sol");
+	});
+
+	it("encodes every bundled GPT model with its catalog transport", async () => {
+		for (const model of bundledCodexGptModels) {
+			process.env.PI_CODEX_WEB_SEARCH_MODEL = model.id;
+			const result = await searchCodex(makeSearchParams(`${model.id} web search`, mockCodexFetch(model.id)));
+			const headers = new Headers(capturedRequest?.headers);
+
+			expect(capturedRequest?.body?.model).toBe(model.id);
+			if (model.useResponsesLite) {
+				expect(headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
+				expect(capturedRequest?.body?.tools).toBeUndefined();
+				expect(capturedRequest?.body?.tool_choice).toBeUndefined();
+				expect(capturedRequest?.body?.instructions).toBeUndefined();
+				expect(capturedRequest?.body?.input).toEqual([
+					{
+						type: "additional_tools",
+						role: "developer",
+						tools: [{ type: "web_search", search_context_size: "high" }],
+					},
+					{
+						type: "message",
+						role: "developer",
+						content: [{ type: "input_text", text: "Codex test system prompt" }],
+					},
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: `${model.id} web search` }],
+					},
+				]);
+			} else {
+				expect(headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
+				expect(capturedRequest?.body?.tools).toEqual([{ type: "web_search", search_context_size: "high" }]);
+				expect(capturedRequest?.body?.tool_choice).toEqual({ type: "web_search" });
+				expect(capturedRequest?.body?.instructions).toBe("Codex test system prompt");
+			}
+			expect(result.model).toBe(model.id);
+		}
 	});
 
 	it("does not retry default candidates when PI_CODEX_WEB_SEARCH_MODEL is explicitly unsupported", async () => {
