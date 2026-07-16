@@ -32,6 +32,9 @@ export interface ArmSummary {
 export interface ExperimentSummary {
 	id: string;
 	goal: string;
+	maxRuns: number | null;
+	maxArms: number | null;
+	closure: { verdict: string; closedAt: number } | null;
 	arms: number;
 	runningArms: number;
 	datasets: string[];
@@ -48,6 +51,9 @@ export interface ExperimentSummary {
 export interface ExperimentDetail {
 	id: string;
 	goal: string;
+	maxRuns: number | null;
+	maxArms: number | null;
+	closure: { verdict: string; closedAt: number } | null;
 	arms: ArmSummary[];
 	/** Union of task ids across arms, sorted. */
 	tasks: string[];
@@ -202,9 +208,13 @@ export function buildExperiments(store: RunStore): ExperimentSummary[] {
 	}
 	const out: ExperimentSummary[] = [];
 	for (const [id, runs] of groups) {
+		const meta = store.getExperimentMeta(id);
 		out.push({
 			id,
-			goal: store.getExperimentMeta(id)?.goal ?? "",
+			goal: meta?.goal ?? "",
+			maxRuns: meta?.maxRuns ?? null,
+			maxArms: meta?.maxArms ?? null,
+			closure: meta?.closure ?? null,
 			arms: runs.length,
 			runningArms: runs.filter(r => r.status === "running").length,
 			datasets: [...new Set(runs.map(r => r.dataset).filter(Boolean))],
@@ -225,6 +235,9 @@ export function buildExperiments(store: RunStore): ExperimentSummary[] {
 		out.push({
 			id: meta.id,
 			goal: meta.goal,
+			maxRuns: meta.maxRuns ?? null,
+			maxArms: meta.maxArms ?? null,
+			closure: meta.closure ?? null,
 			arms: 0,
 			runningArms: 0,
 			datasets: [],
@@ -278,11 +291,22 @@ export function pickMergedTrials(traces: TraceRow[]): TraceRow[] {
 }
 
 export function experimentDetail(store: RunStore, id: string): ExperimentDetail | null {
+	const meta = store.getExperimentMeta(id);
 	const runs = store.listRuns().filter(r => experimentOf(r.jobName) === id);
 	if (runs.length === 0) {
 		// Registered but armless (POST /api/experiments): still readable.
-		const meta = store.getExperimentMeta(id);
-		return meta ? { id, goal: meta.goal, arms: [], tasks: [], matrix: {} } : null;
+		return meta
+			? {
+					id,
+					goal: meta.goal,
+					maxRuns: meta.maxRuns ?? null,
+					maxArms: meta.maxArms ?? null,
+					closure: meta.closure ?? null,
+					arms: [],
+					tasks: [],
+					matrix: {},
+				}
+			: null;
 	}
 	// One row per CANONICAL arm: `-fix`/`-backfill` re-runs merge into their
 	// base arm — per-task best trial, summed spend.
@@ -371,5 +395,14 @@ export function experimentDetail(store: RunStore, id: string): ExperimentDetail 
 	// "reference rows, then treatments".
 	const roleRank = (role: string) => (role === "baseline" ? 0 : role === "variant" ? 1 : 2);
 	arms.sort((a, b) => roleRank(a.run.role) - roleRank(b.run.role) || a.arm.localeCompare(b.arm));
-	return { id, goal: store.getExperimentMeta(id)?.goal ?? "", arms, tasks: [...tasks].sort(), matrix };
+	return {
+		id,
+		goal: meta?.goal ?? "",
+		maxRuns: meta?.maxRuns ?? null,
+		maxArms: meta?.maxArms ?? null,
+		closure: meta?.closure ?? null,
+		arms,
+		tasks: [...tasks].sort(),
+		matrix,
+	};
 }

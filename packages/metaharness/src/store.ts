@@ -72,11 +72,25 @@ export interface TraceRow {
 	tracePath: string | null;
 }
 
-/** Row in the `experiments` table: goal metadata keyed by experiment id. */
+/** Public metadata for an experiment, including optional lifecycle limits. */
 export interface ExperimentMeta {
 	id: string;
 	goal: string;
 	updatedAt: number;
+	maxRuns: number | null;
+	maxArms: number | null;
+	closure: { verdict: string; closedAt: number } | null;
+}
+
+export interface ExperimentMetaUpdate {
+	goal?: string;
+	maxRuns?: number | null;
+	maxArms?: number | null;
+}
+
+export interface ExperimentClosure {
+	verdict: string;
+	closedAt: number;
 }
 
 export interface LaunchRecord {
@@ -139,7 +153,15 @@ CREATE INDEX IF NOT EXISTS idx_trials_job ON trials(job_name);
 CREATE TABLE IF NOT EXISTS experiments (
 	id TEXT PRIMARY KEY,
 	goal TEXT NOT NULL DEFAULT '',
-	updated_at INTEGER NOT NULL
+	updated_at INTEGER NOT NULL,
+	max_runs INTEGER,
+	max_arms INTEGER,
+	closure_verdict TEXT,
+	closed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS experiment_launches (
+	job_name TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL
 );
 `;
 
@@ -180,6 +202,31 @@ function enableWal(db: Database): void {
 	}
 }
 
+function validateExperimentLimit(name: string, value: number | null | undefined): void {
+	if (value !== undefined && value !== null && (!Number.isSafeInteger(value) || value <= 0)) {
+		throw new Error(`${name} must be a positive safe integer`);
+	}
+}
+
+function validateExperimentVerdict(verdict: string): string {
+	if (typeof verdict !== "string" || verdict.trim() === "") throw new Error("closure verdict must be non-empty");
+	return verdict;
+}
+
+function experimentIdOf(jobName: string): string {
+	const dash = jobName.indexOf("-");
+	return dash > 0 ? jobName.slice(0, dash) : jobName;
+}
+
+function addColumnIfMissing(db: Database, columns: Set<string>, name: string, sql: string): void {
+	if (columns.has(name)) return;
+	try {
+		db.run(sql);
+	} catch (err) {
+		if (!String(err).toLowerCase().includes("duplicate column")) throw err;
+	}
+}
+
 export class RunStore {
 	#db: Database;
 	readonly jobsDir: string;
@@ -194,29 +241,43 @@ export class RunStore {
 		const runColumns = new Set(
 			(this.#db.query("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map(c => c.name),
 		);
-		if (!runColumns.has("role")) this.#db.run("ALTER TABLE runs ADD COLUMN role TEXT NOT NULL DEFAULT ''");
-		if (!runColumns.has("note")) this.#db.run("ALTER TABLE runs ADD COLUMN note TEXT NOT NULL DEFAULT ''");
-		if (!runColumns.has("label")) this.#db.run("ALTER TABLE runs ADD COLUMN label TEXT NOT NULL DEFAULT ''");
-		if (!runColumns.has("benchmark")) {
-			this.#db.run("ALTER TABLE runs ADD COLUMN benchmark TEXT NOT NULL DEFAULT 'harbor'");
-		}
-		if (!runColumns.has("config_json")) {
-			this.#db.run("ALTER TABLE runs ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'");
-		}
-		if (!runColumns.has("score")) this.#db.run("ALTER TABLE runs ADD COLUMN score REAL");
-		if (!runColumns.has("metrics_json")) {
-			this.#db.run("ALTER TABLE runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'");
-		}
+		addColumnIfMissing(this.#db, runColumns, "role", "ALTER TABLE runs ADD COLUMN role TEXT NOT NULL DEFAULT ''");
+		addColumnIfMissing(this.#db, runColumns, "note", "ALTER TABLE runs ADD COLUMN note TEXT NOT NULL DEFAULT ''");
+		addColumnIfMissing(this.#db, runColumns, "label", "ALTER TABLE runs ADD COLUMN label TEXT NOT NULL DEFAULT ''");
+		addColumnIfMissing(this.#db, runColumns, "benchmark", "ALTER TABLE runs ADD COLUMN benchmark TEXT NOT NULL DEFAULT 'harbor'");
+		addColumnIfMissing(this.#db, runColumns, "config_json", "ALTER TABLE runs ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'");
+		addColumnIfMissing(this.#db, runColumns, "score", "ALTER TABLE runs ADD COLUMN score REAL");
+		addColumnIfMissing(this.#db, runColumns, "metrics_json", "ALTER TABLE runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'");
 		if (runColumns.has("slide") && !runColumns.has("prewalk")) {
 			this.#db.run("ALTER TABLE runs RENAME COLUMN slide TO prewalk");
 		}
 		if (!runColumns.has("slide") && !runColumns.has("prewalk")) {
-			this.#db.run("ALTER TABLE runs ADD COLUMN prewalk TEXT");
+			addColumnIfMissing(this.#db, runColumns, "prewalk", "ALTER TABLE runs ADD COLUMN prewalk TEXT");
 		}
 		const traceColumns = new Set(
 			(this.#db.query("PRAGMA table_info(trials)").all() as Array<{ name: string }>).map(c => c.name),
 		);
-		if (!traceColumns.has("trace_path")) this.#db.run("ALTER TABLE trials ADD COLUMN trace_path TEXT");
+		addColumnIfMissing(this.#db, traceColumns, "trace_path", "ALTER TABLE trials ADD COLUMN trace_path TEXT");
+		const experimentColumns = new Set(
+			(this.#db.query("PRAGMA table_info(experiments)").all() as Array<{ name: string }>).map(c => c.name),
+		);
+		addColumnIfMissing(this.#db, experimentColumns, "max_runs", "ALTER TABLE experiments ADD COLUMN max_runs INTEGER");
+		addColumnIfMissing(this.#db, experimentColumns, "max_arms", "ALTER TABLE experiments ADD COLUMN max_arms INTEGER");
+		addColumnIfMissing(
+			this.#db,
+			experimentColumns,
+			"closure_verdict",
+			"ALTER TABLE experiments ADD COLUMN closure_verdict TEXT",
+		);
+		addColumnIfMissing(this.#db, experimentColumns, "closed_at", "ALTER TABLE experiments ADD COLUMN closed_at INTEGER");
+		for (const row of this.#db.query("SELECT job_name FROM experiment_launches").all() as Array<{ job_name: string }>) {
+			if (
+				this.#db.query("SELECT 1 FROM runs WHERE job_name = ?").get(row.job_name) == null &&
+				!fs.existsSync(path.join(this.jobsDir, row.job_name))
+			) {
+				this.#db.query("DELETE FROM experiment_launches WHERE job_name = ?").run(row.job_name);
+			}
+		}
 	}
 
 	close(): void {
@@ -225,66 +286,235 @@ export class RunStore {
 
 	/** Register a run this manager just launched (pid-owning). */
 	registerLaunch(launch: LaunchRecord): void {
-		this.#db.query("DELETE FROM trials WHERE job_name = ?").run(launch.jobName);
-		this.#db
-			.query(
-				`INSERT INTO runs
-				 (job_name, benchmark, dataset, agent, models, prewalk, role, note, config_json, status, pid, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
-				 ON CONFLICT(job_name) DO UPDATE SET
-					benchmark = excluded.benchmark, pid = excluded.pid, status = 'running',
-					config_json = excluded.config_json,
-					role = CASE WHEN excluded.role != '' THEN excluded.role ELSE runs.role END,
-					note = CASE WHEN excluded.note != '' THEN excluded.note ELSE runs.note END`,
-			)
-			.run(
-				launch.jobName,
-				launch.benchmark,
-				launch.dataset,
-				launch.agent,
-				launch.models.join(","),
-				launch.prewalk ? JSON.stringify(launch.prewalk) : null,
-				launch.role ?? "",
-				launch.note ?? "",
-				JSON.stringify(launch.config ?? {}),
-				launch.pid,
-				Date.now(),
-			);
+		const tx = this.#db.transaction(() => {
+			this.#db.query("DELETE FROM trials WHERE job_name = ?").run(launch.jobName);
+			this.#db.query("DELETE FROM experiment_launches WHERE job_name = ?").run(launch.jobName);
+			this.#db
+				.query(
+					`INSERT INTO runs
+					 (job_name, benchmark, dataset, agent, models, prewalk, role, note, config_json, status, pid, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+					 ON CONFLICT(job_name) DO UPDATE SET
+						benchmark = excluded.benchmark, pid = excluded.pid, status = 'running',
+						config_json = excluded.config_json,
+						role = CASE WHEN excluded.role != '' THEN excluded.role ELSE runs.role END,
+						note = CASE WHEN excluded.note != '' THEN excluded.note ELSE runs.note END`,
+				)
+				.run(
+					launch.jobName,
+					launch.benchmark,
+					launch.dataset,
+					launch.agent,
+					launch.models.join(","),
+					launch.prewalk ? JSON.stringify(launch.prewalk) : null,
+					launch.role ?? "",
+					launch.note ?? "",
+					JSON.stringify(launch.config ?? {}),
+					launch.pid,
+					Date.now(),
+				);
+		});
+		tx();
 		const jobDir = path.join(this.jobsDir, launch.jobName);
 		fs.mkdirSync(jobDir, { recursive: true });
 		fs.writeFileSync(path.join(jobDir, "manager.json"), JSON.stringify(launch, null, 2));
 	}
 
+	/** Upsert experiment metadata while preserving omitted fields. */
+	/** Atomically reserve a grouped launch before its child process is spawned. */
+	admitExperimentLaunch(admission: {
+		jobName: string;
+		goal?: string;
+		maxRuns?: number | null;
+		maxArms?: number | null;
+		armAddition?: boolean;
+	}): void {
+		if (!admission.jobName) throw new Error("jobName must be non-empty");
+		validateExperimentLimit("maxRuns", admission.maxRuns);
+		validateExperimentLimit("maxArms", admission.maxArms);
+		const id = experimentIdOf(admission.jobName);
+		const tx = this.#db.transaction(() => {
+			const existing = this.#db.query(
+				"SELECT goal, max_runs, max_arms, closure_verdict, closed_at FROM experiments WHERE id = ?",
+			).get(id) as {
+				goal: string;
+				max_runs: number | null;
+				max_arms: number | null;
+				closure_verdict: string | null;
+				closed_at: number | null;
+			} | null;
+			if (existing && (existing.closure_verdict != null || existing.closed_at != null)) {
+				throw new Error("experiment is closed");
+			}
+			validateExperimentLimit("maxRuns", existing?.max_runs);
+			validateExperimentLimit("maxArms", existing?.max_arms);
+			const hasReservation =
+				this.#db.query("SELECT 1 FROM experiment_launches WHERE job_name = ?").get(admission.jobName) != null;
+			const runNames = this.#db.query("SELECT job_name FROM runs").all() as Array<{ job_name: string }>;
+			const reservationNames = this.#db
+				.query("SELECT job_name FROM experiment_launches")
+				.all() as Array<{ job_name: string }>;
+			const runCount = runNames.filter(r => experimentIdOf(r.job_name) === id).length;
+			const reservationCount = reservationNames.filter(r => experimentIdOf(r.job_name) === id).length;
+			const groupedCount = runCount + reservationCount;
+			const occupiedCount = groupedCount - (hasReservation ? 1 : 0);
+			const maxRuns =
+				groupedCount > 0
+					? (existing?.max_runs ?? null)
+					: (admission.maxRuns !== undefined ? admission.maxRuns : (existing?.max_runs ?? null));
+			const maxArms =
+				groupedCount > 0
+					? (existing?.max_arms ?? null)
+					: (admission.maxArms !== undefined ? admission.maxArms : (existing?.max_arms ?? null));
+			if (groupedCount > 0 && admission.maxRuns != null && admission.maxRuns !== (existing?.max_runs ?? null)) {
+				throw new Error("maxRuns cannot change after grouped launches exist");
+			}
+			if (groupedCount > 0 && admission.maxArms != null && admission.maxArms !== (existing?.max_arms ?? null)) {
+				throw new Error("maxArms cannot change after grouped launches exist");
+			}
+			if (admission.armAddition && maxArms !== null && occupiedCount >= maxArms) {
+				throw new Error("maxArms limit reached");
+			}
+			if (maxRuns !== null && occupiedCount >= maxRuns) throw new Error("maxRuns limit reached");
+			const goal = admission.goal ?? existing?.goal ?? "";
+			this.#db
+				.query(
+					`INSERT INTO experiments
+					 (id, goal, updated_at, max_runs, max_arms, closure_verdict, closed_at)
+					 VALUES (?, ?, ?, ?, ?, NULL, NULL)
+					 ON CONFLICT(id) DO UPDATE SET
+						goal = excluded.goal,
+						updated_at = excluded.updated_at,
+						max_runs = excluded.max_runs,
+						max_arms = excluded.max_arms`,
+				)
+				.run(id, goal, Date.now(), maxRuns, maxArms);
+			this.#db
+				.query("INSERT INTO experiment_launches (job_name, created_at) VALUES (?, ?) ON CONFLICT(job_name) DO NOTHING")
+				.run(admission.jobName, Date.now());
+		});
+		tx();
+	}
+
+	/** Release a pre-spawn launch reservation. */
+	releaseExperimentLaunch(jobName: string): void {
+		this.#db.query("DELETE FROM experiment_launches WHERE job_name = ?").run(jobName);
+	}
+
+	setExperimentMeta(id: string, update: ExperimentMetaUpdate): void {
+		validateExperimentLimit("maxRuns", update.maxRuns);
+		validateExperimentLimit("maxArms", update.maxArms);
+		const tx = this.#db.transaction(() => {
+			const existing = this.#db.query(
+				"SELECT goal, max_runs, max_arms, closure_verdict, closed_at FROM experiments WHERE id = ?",
+			).get(id) as {
+				goal: string;
+				max_runs: number | null;
+				max_arms: number | null;
+				closure_verdict: string | null;
+				closed_at: number | null;
+			} | null;
+			if (existing && (existing.closure_verdict != null || existing.closed_at != null)) {
+				throw new Error("experiment is closed");
+			}
+			const goal = update.goal ?? existing?.goal ?? "";
+			const maxRuns = update.maxRuns !== undefined ? update.maxRuns : (existing?.max_runs ?? null);
+			const maxArms = update.maxArms !== undefined ? update.maxArms : (existing?.max_arms ?? null);
+			this.#db
+				.query(
+					`INSERT INTO experiments
+					 (id, goal, updated_at, max_runs, max_arms, closure_verdict, closed_at)
+					 VALUES (?, ?, ?, ?, ?, NULL, NULL)
+					 ON CONFLICT(id) DO UPDATE SET
+						goal = excluded.goal,
+						updated_at = excluded.updated_at,
+						max_runs = excluded.max_runs,
+						max_arms = excluded.max_arms`,
+				)
+				.run(id, goal, Date.now(), maxRuns, maxArms);
+		});
+		tx();
+	}
+
 	/** Upsert the experiment's stated goal. */
 	setExperimentGoal(id: string, goal: string): void {
-		this.#db
-			.query(
-				`INSERT INTO experiments (id, goal, updated_at) VALUES (?, ?, ?)
-				 ON CONFLICT(id) DO UPDATE SET goal = excluded.goal, updated_at = excluded.updated_at`,
-			)
-			.run(id, goal, Date.now());
+		this.setExperimentMeta(id, { goal });
+	}
+
+	/** Persist a non-empty measured verdict and close an experiment. */
+	closeExperiment(id: string, verdict: string, closedAt = Date.now()): void {
+		const measuredVerdict = validateExperimentVerdict(verdict);
+		if (!Number.isSafeInteger(closedAt) || closedAt < 0) {
+			throw new Error("closedAt must be a non-negative safe integer");
+		}
+		const tx = this.#db.transaction(() => {
+			const existing = this.#db.query(
+				"SELECT goal, max_runs, max_arms, closure_verdict, closed_at FROM experiments WHERE id = ?",
+			).get(id) as {
+				goal: string;
+				max_runs: number | null;
+				max_arms: number | null;
+				closure_verdict: string | null;
+				closed_at: number | null;
+			} | null;
+			if (existing && (existing.closure_verdict != null || existing.closed_at != null)) {
+				throw new Error("experiment is already closed");
+			}
+			const result = this.#db
+				.query(
+					`INSERT INTO experiments
+					 (id, goal, updated_at, max_runs, max_arms, closure_verdict, closed_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(id) DO UPDATE SET
+						updated_at = excluded.updated_at,
+						closure_verdict = excluded.closure_verdict,
+						closed_at = excluded.closed_at
+					 WHERE experiments.closure_verdict IS NULL AND experiments.closed_at IS NULL`,
+				)
+				.run(
+					id,
+					existing?.goal ?? "",
+					Date.now(),
+					existing?.max_runs ?? null,
+					existing?.max_arms ?? null,
+					measuredVerdict,
+					closedAt,
+				);
+			if (result.changes === 0) throw new Error("experiment is already closed");
+		});
+		tx();
 	}
 
 	/** Stored experiment metadata, or null when the id was never registered. */
 	getExperimentMeta(id: string): ExperimentMeta | null {
-		const row = this.#db.query("SELECT id, goal, updated_at FROM experiments WHERE id = ?").get(id) as {
+		const row = this.#db.query(
+			"SELECT id, goal, updated_at, max_runs, max_arms, closure_verdict, closed_at FROM experiments WHERE id = ?",
+		).get(id) as {
 			id: string;
 			goal: string;
 			updated_at: number;
+			max_runs: number | null;
+			max_arms: number | null;
+			closure_verdict: string | null;
+			closed_at: number | null;
 		} | null;
-		return row ? { id: row.id, goal: row.goal, updatedAt: row.updated_at } : null;
+		return row ? rowToExperimentMeta(row) : null;
 	}
 
 	/** Every registered experiment row, newest first. */
 	listExperimentMeta(): ExperimentMeta[] {
 		const rows = this.#db
-			.query("SELECT id, goal, updated_at FROM experiments ORDER BY updated_at DESC")
+			.query("SELECT id, goal, updated_at, max_runs, max_arms, closure_verdict, closed_at FROM experiments ORDER BY updated_at DESC")
 			.all() as Array<{
 			id: string;
 			goal: string;
 			updated_at: number;
+			max_runs: number | null;
+			max_arms: number | null;
+			closure_verdict: string | null;
+			closed_at: number | null;
 		}>;
-		return rows.map(r => ({ id: r.id, goal: r.goal, updatedAt: r.updated_at }));
+		return rows.map(rowToExperimentMeta);
 	}
 
 	/** Drop the experiment metadata row (run rows are deleted separately via deleteRun). */
@@ -344,6 +574,7 @@ export class RunStore {
 					 VALUES (?, ?, ?, ?, 'running', ?)`,
 				)
 				.run(e.name, meta.dataset, meta.agent, meta.models, createdAt);
+			this.#db.query("DELETE FROM experiment_launches WHERE job_name = ?").run(e.name);
 			this.syncRun(e.name);
 			added++;
 		}
@@ -500,6 +731,28 @@ export class RunStore {
 			tracePath: r.trace_path === null ? null : String(r.trace_path),
 		}));
 	}
+}
+
+function rowToExperimentMeta(r: {
+	id: string;
+	goal: string;
+	updated_at: number;
+	max_runs: number | null;
+	max_arms: number | null;
+	closure_verdict: string | null;
+	closed_at: number | null;
+}): ExperimentMeta {
+	return {
+		id: r.id,
+		goal: r.goal,
+		updatedAt: r.updated_at,
+		maxRuns: r.max_runs === null ? null : Number(r.max_runs),
+		maxArms: r.max_arms === null ? null : Number(r.max_arms),
+		closure:
+			r.closure_verdict != null || r.closed_at != null
+				? { verdict: r.closure_verdict ?? "", closedAt: r.closed_at == null ? 0 : Number(r.closed_at) }
+				: null,
+	};
 }
 
 function rowToRun(r: Record<string, unknown>): RunRow {

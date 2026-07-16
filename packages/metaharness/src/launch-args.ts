@@ -42,6 +42,10 @@ export interface LaunchRequest {
 	prebuiltBinaries?: boolean;
 	/** Extra raw runner args, appended verbatim. */
 	extraArgs?: string[];
+	/** Experiment-wide maximum number of new grouped run launches. */
+	maxRuns?: number | null;
+	/** Experiment-wide maximum number of arms. */
+	maxArms?: number | null;
 }
 
 /** Runner CLI flags (sans the `bun src/runner.ts` prefix) for a harbor launch. */

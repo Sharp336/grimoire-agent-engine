@@ -163,6 +163,40 @@ describe("RunStore", () => {
 		expect(treat?.role).toBe("variant");
 		expect(treat?.note).toBe("prewalk flash v2");
 	});
+	it("persists experiment limits and closure across a fresh store", () => {
+		const jobsDir = makeJobsDir();
+		const dbPath = path.join(jobsDir, "experiment.sqlite");
+		const store = new RunStore(jobsDir, dbPath);
+		store.setExperimentGoal("legacy", "existing goal");
+		expect(store.getExperimentMeta("legacy")).toEqual({
+			id: "legacy",
+			goal: "existing goal",
+			updatedAt: expect.any(Number),
+			maxRuns: null,
+			maxArms: null,
+			closure: null,
+		});
+
+		store.setExperimentMeta("bounded", { goal: "measure it", maxRuns: 3, maxArms: 2 });
+		store.closeExperiment("bounded", "measured: treatment wins", 1_752_000_000_000);
+		expect(store.getExperimentMeta("bounded")?.closure).toEqual({
+			verdict: "measured: treatment wins",
+			closedAt: 1_752_000_000_000,
+		});
+		store.close();
+
+		const reopened = new RunStore(jobsDir, dbPath);
+		cleanups.push(() => reopened.close());
+		expect(reopened.getExperimentMeta("bounded")).toEqual({
+			id: "bounded",
+			goal: "measure it",
+			updatedAt: expect.any(Number),
+			maxRuns: 3,
+			maxArms: 2,
+			closure: { verdict: "measured: treatment wins", closedAt: 1_752_000_000_000 },
+		});
+	});
+
 
 	it("releases a dead runner's pid without failing a possibly-live orphan", () => {
 		const jobsDir = makeJobsDir();
@@ -547,5 +581,111 @@ describe("resolveArmLaunch", () => {
 		});
 		expect(() => resolveArmLaunch(store, "exp", { arm: "base", model: "m/y" })).toThrow(/already exists/);
 		expect(() => resolveArmLaunch(store, "ghost", { arm: "x", model: "m/y" })).toThrow(/no runs to inherit/);
+	});
+});
+
+describe("experiment lifecycle gates", () => {
+	it("enforces limits and durable closure across fresh ManagerServer instances", async () => {
+		const jobsDir = makeJobsDir();
+		const dbPath = path.join(jobsDir, "_manager", "lifecycle.sqlite");
+		const first = new ManagerServer(jobsDir, dbPath);
+		first.store.registerLaunch({
+			benchmark: "harbor",
+			jobName: "exp-base",
+			dataset: "terminal-bench@2.0",
+			agent: "omp",
+			models: ["m/x"],
+			pid: process.pid,
+			config: { include: ["task-1"] },
+		});
+		first.store.markExit("exp-base", 0);
+		first.store.setExperimentMeta("exp", { goal: "measure", maxRuns: 5, maxArms: 1 });
+		const firstServer = first.start(0);
+		const firstBase = `http://localhost:${firstServer.port}`;
+
+		const lowerLimit = await fetch(`${firstBase}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ benchmark: "harbor", jobName: "exp-drive", model: "m/x", maxRuns: 1 }),
+		});
+		expect(lowerLimit.status).toBe(400);
+
+		first.store.setExperimentMeta("exp", { maxRuns: 1 });
+		const maxRun = await fetch(`${firstBase}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ benchmark: "harbor", jobName: "exp-drive", model: "m/x" }),
+		});
+		expect(maxRun.status).toBe(400);
+		expect((await maxRun.json()).error).toMatch(/maxRuns/);
+		await first.stop();
+
+		const bounded = new ManagerServer(jobsDir, dbPath);
+		const boundedServer = bounded.start(0);
+		const boundedBase = `http://localhost:${boundedServer.port}`;
+		const maxArm = await fetch(`${boundedBase}/api/experiments/exp/arms`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ arm: "next", model: "m/y" }),
+		});
+		expect(maxArm.status).toBe(400);
+		expect((await maxArm.json()).error).toMatch(/maxArms/);
+
+		const closed = await fetch(`${boundedBase}/api/experiments/exp`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ closure: { verdict: "measured: baseline wins" } }),
+		});
+		expect(closed.status).toBe(200);
+		await bounded.stop();
+
+		const second = new ManagerServer(jobsDir, dbPath);
+		cleanups.push(() => {
+			void second.stop();
+		});
+		const server = second.start(0);
+		const base = `http://localhost:${server.port}`;
+		const detail = (await (await fetch(`${base}/api/experiments/exp`)).json()) as {
+			goal: string;
+			maxRuns: number | null;
+			maxArms: number | null;
+			closure: { verdict: string; closedAt: number } | null;
+		};
+		expect(detail).toMatchObject({
+			goal: "measure",
+			maxRuns: 1,
+			maxArms: 1,
+			closure: { verdict: "measured: baseline wins" },
+		});
+		const failedClose = await fetch(`${base}/api/experiments/exp`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ closure: { verdict: "second verdict" }, runs: { "exp-base": { note: "must not apply" } } }),
+		});
+		expect(failedClose.status).toBe(400);
+		const unchangedRun = (await (await fetch(`${base}/api/runs/exp-base`)).json()) as { run: { note: string } };
+		expect(unchangedRun.run.note).toBe("");
+		for (const [url, body] of [
+			[`${base}/api/runs`, { benchmark: "harbor", jobName: "exp-late", model: "m/x" }],
+			[`${base}/api/experiments/exp/arms`, { arm: "late", model: "m/y" }],
+		] as const) {
+			const response = await fetch(url, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(400);
+			expect((await response.json()).error).toMatch(/closed/);
+		}
+		const resume = await fetch(`${base}/api/runs/exp-base/resume`, { method: "POST" });
+		expect(resume.status).toBe(400);
+		expect((await resume.json()).error).toMatch(/closed/);
+		const goal = await fetch(`${base}/api/experiments/exp`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ goal: "changed" }),
+		});
+		expect(goal.status).toBe(400);
+		expect((await goal.json()).error).toMatch(/closed/);
 	});
 });
