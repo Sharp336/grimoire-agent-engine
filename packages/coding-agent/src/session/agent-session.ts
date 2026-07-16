@@ -6825,10 +6825,6 @@ export class AgentSession {
 			display: false,
 			timestamp: Date.now(),
 		});
-		const parts: string[] = [];
-		if (added.length > 0) parts.push(`mounted ${added.map(entry => entry.name).join(", ")}`);
-		if (removed.length > 0) parts.push(`unmounted ${removed.map(entry => entry.name).join(", ")}`);
-		this.emitNotice("info", `xd://: ${parts.join("; ")}`, "xdev");
 	}
 
 	/**

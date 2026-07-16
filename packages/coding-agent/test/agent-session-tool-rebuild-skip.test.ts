@@ -501,7 +501,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(2);
 	});
 
-	it("announces xd:// mount deltas as steered notices instead of rebuilding the prompt", async () => {
+	it("keeps xd:// mount deltas hidden from the UI while steering them to the model", async () => {
 		let rebuildCount = 0;
 		const { session } = newSession(
 			async toolNames => {
@@ -510,6 +510,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			},
 			{ xdevRegistry: new XdevRegistry([]) },
 		);
+		const xdevNotices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "xdev") xdevNotices.push(event.message);
+		});
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 		const noticeTexts = () =>
@@ -548,5 +552,6 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([search]);
 		expect(rebuildCount).toBe(1);
 		expect(noticeTexts().length).toBe(noticeCount);
+		expect(xdevNotices).toEqual([]);
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hid the verbose `xd://` device mount inventory from the interactive startup transcript while preserving hidden model-facing mount updates.
+
 ## [17.0.1] - 2026-07-16
 
 ### Changed
