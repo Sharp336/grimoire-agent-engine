@@ -107,7 +107,7 @@ function pushArgsTextDelta(h: Harness, argsTextDelta: string): void {
 	);
 }
 
-function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | undefined): void {
+function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | undefined, mcpExecBridged = false): void {
 	processInteractionUpdate(
 		{
 			message: {
@@ -119,6 +119,7 @@ function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | unde
 		h.stream,
 		h.state,
 		h.usageState,
+		mcpExecBridged,
 	);
 }
 
@@ -202,18 +203,18 @@ describe("processInteractionUpdate content block ordering", () => {
 });
 
 describe("processInteractionUpdate MCP exec-resolved stamping (issue #5650)", () => {
-	it("stamps a completed MCP toolCall block so agent-loop skips re-execution", () => {
-		// Cursor resolves advertised MCP tools out-of-band: the exec channel
-		// (`mcpArgs` -> `CursorExecHandlers.mcp`) runs the tool and buffers its
+	it("stamps a bridged MCP toolCall block so agent-loop skips re-execution", () => {
+		// With an MCP exec bridge wired, Cursor resolves the tool out-of-band: the
+		// exec channel (`mcpArgs` -> `CursorExecHandlers.mcp`) runs it and buffers its
 		// `toolResult` via `onToolResult`. Now that mounted devices / external MCP
 		// tools are advertised into `currentContext.tools` (PR #5651), the shared
 		// `agent-loop.ts` dispatch pass would otherwise treat the finalized block as
 		// runnable and re-execute the same side-effecting call after `message_end`.
-		// The completed block MUST carry `kCursorExecResolved` so agent-loop skips
-		// it, mirroring the native `synthesizeCursorExecToolCall` path.
+		// The completed block MUST carry `kCursorExecResolved` so agent-loop skips it,
+		// mirroring the native `synthesizeCursorExecToolCall` path.
 		const h = newHarness();
 		startMcpToolCall(h, "mcp__glean_report_disposition");
-		completeMcpToolCall(h, undefined);
+		completeMcpToolCall(h, undefined, true);
 
 		const finalBlock = h.output.content[0];
 		expect(finalBlock?.type).toBe("toolCall");
@@ -229,6 +230,29 @@ describe("processInteractionUpdate MCP exec-resolved stamping (issue #5650)", ()
 			return carrier[kCursorExecResolved] !== true;
 		});
 		expect(runnable).toHaveLength(0);
+	});
+
+	it("keeps an unbridged MCP toolCall block runnable for local dispatch", () => {
+		// Without an MCP exec bridge, `handleExecServerMessage` returns "Tool not
+		// available" without buffering a result, so the block must stay runnable for
+		// agent-loop to dispatch the advertised tool locally (issue #5650 review
+		// r3597064639). Stamping it here would strand the turn with no tool result.
+		const h = newHarness();
+		startMcpToolCall(h, "mcp__glean_report_disposition");
+		completeMcpToolCall(h, undefined, false);
+
+		const finalBlock = h.output.content[0];
+		expect(finalBlock?.type).toBe("toolCall");
+		if (finalBlock?.type !== "toolCall") throw new Error("expected toolCall block");
+		const resolved: CursorExecResolvedCarrier = finalBlock;
+		expect(resolved[kCursorExecResolved]).toBeUndefined();
+
+		const runnable = h.output.content.filter(c => {
+			if (c.type !== "toolCall") return false;
+			const carrier: CursorExecResolvedCarrier = c;
+			return carrier[kCursorExecResolved] !== true;
+		});
+		expect(runnable).toHaveLength(1);
 	});
 });
 

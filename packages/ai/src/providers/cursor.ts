@@ -670,7 +670,7 @@ export async function handleServerMessage(
 	log("serverMessage", msgCase, msg.message.value);
 
 	if (msgCase === "interactionUpdate") {
-		processInteractionUpdate(msg.message.value, output, stream, state, usageState);
+		processInteractionUpdate(msg.message.value, output, stream, state, usageState, !!execHandlers?.mcp);
 	} else if (msgCase === "kvServerMessage") {
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
 	} else if (msgCase === "execServerMessage") {
@@ -2170,6 +2170,10 @@ export function processInteractionUpdate(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	usageState: UsageState,
+	// True when the caller wired an MCP exec bridge (`execHandlers.mcp`). Only then
+	// is a completed Cursor MCP toolCall resolved out-of-band by the bridge, so only
+	// then may we stamp its block as exec-resolved (see the `mcp` branch below).
+	mcpExecBridged = false,
 ): void {
 	const updateCase = update.message?.case;
 
@@ -2288,17 +2292,22 @@ export function processInteractionUpdate(
 					state.currentToolCall.arguments as Record<string, unknown> | undefined,
 					decodedArgs,
 				);
-				// Cursor resolves advertised MCP tools out-of-band: the exec channel
-				// (`mcpArgs` → `CursorExecHandlers.mcp`) runs the tool and buffers its
-				// `toolResult` via `onToolResult`, mirroring the native exec path. Stamp
-				// the finalized block with `kCursorExecResolved` so the shared
-				// `agent-loop.ts` dispatch pass skips it. Without this, now that mounted
-				// devices/external MCP tools are advertised into `currentContext.tools`,
-				// agent-loop would treat the completed block as runnable and re-execute
-				// the same side-effecting call after `message_end` — duplicating
-				// `ast_edit`/external MCP mutations (issue #5650 review by
-				// @chatgpt-codex-connector).
-				state.currentToolCall[kCursorExecResolved] = true;
+				// Cursor resolves advertised MCP tools out-of-band ONLY when an MCP exec
+				// bridge is wired: the exec channel (`mcpArgs` → `CursorExecHandlers.mcp`)
+				// runs the tool and buffers its `toolResult` via `onToolResult`, mirroring
+				// the native exec path. In that case stamp the finalized block with
+				// `kCursorExecResolved` so the shared `agent-loop.ts` dispatch pass skips
+				// it — otherwise, now that mounted devices/external MCP tools are advertised
+				// into `currentContext.tools`, agent-loop would re-execute the same
+				// side-effecting call after `message_end`, duplicating `ast_edit`/external
+				// MCP mutations (issue #5650 review r3592465176).
+				//
+				// When no bridge is wired, `handleExecServerMessage` returns "Tool not
+				// available" without buffering a result, so the block MUST stay runnable
+				// for agent-loop to dispatch locally (issue #5650 review r3597064639).
+				if (mcpExecBridged) {
+					state.currentToolCall[kCursorExecResolved] = true;
+				}
 			} else if (state.currentToolCall[kStreamingBlockKind] === "todo" && toolCall) {
 				const todoArgs = buildTodoArgs(toolCall);
 				if (todoArgs) {
