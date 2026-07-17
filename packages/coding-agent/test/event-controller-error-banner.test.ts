@@ -17,6 +17,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { splitAssistantMessageToolTimeline } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -335,6 +336,72 @@ describe("EventController error banner", () => {
 			message: update,
 		} as Extract<AgentSessionEvent, { type: "message_end" }>);
 		expect(rebuilt.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("does not resume an orphaned update onto a trailing post-tool replay segment", async () => {
+		const { controller: eventController, ctx, chatChildren } = createFixture();
+		const fullMessage = makeAssistantMessage({
+			content: [
+				{ type: "text", text: "lead text" },
+				{ type: "toolCall", id: "call-replay", name: "bash", arguments: { command: "pwd" } },
+				{ type: "text", text: "trailing text" },
+			],
+		});
+		const timeline = splitAssistantMessageToolTimeline(fullMessage);
+		const trailingMessage = timeline.afterToolCalls.get("call-replay");
+		if (!trailingMessage) throw new Error("Expected a trailing post-tool assistant segment");
+		const head = new AssistantMessageComponent(timeline.beforeTools);
+		const trailing = new AssistantMessageComponent(trailingMessage);
+		const mountReplay = () => {
+			ctx.chatContainer.clear();
+			ctx.chatContainer.addChild(head);
+			ctx.chatContainer.addChild(trailing);
+			eventController.inheritAssistantAwaitingSeal(trailing);
+		};
+		mountReplay();
+
+		expect(head.messagePersistenceKey()).toBe(trailing.messagePersistenceKey());
+		expect(eventController.resumeAssistantStream(fullMessage)).toBe(false);
+
+		const main = makeAttachSessionStub();
+		const worker = makeAttachSessionStub(true);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: worker.session,
+			status: "running",
+		});
+		const lifecycle = new AgentLifecycleManager(registry);
+		Object.assign(ctx, {
+			session: main.session,
+			unsubscribe: vi.fn(),
+			eventController,
+			clearTransientSessionUi: vi.fn(),
+			renderInitialMessages: vi.fn(mountReplay),
+			updateEditorBorderColor: vi.fn(),
+			showStatus: vi.fn(),
+		});
+		Object.assign(ctx.statusLine, { setSession: vi.fn() });
+		const focusController = new SessionFocusController(ctx, registry, () => lifecycle);
+
+		await focusController.focusAgent("Worker");
+		await worker.emit({
+			type: "message_update",
+			message: timeline.beforeTools,
+			assistantMessageEvent: { type: "text_delta", delta: "lead text" },
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+
+		expect(ctx.streamingComponent).toBeInstanceOf(AssistantMessageComponent);
+		expect(ctx.streamingComponent).not.toBe(head);
+		expect(ctx.streamingComponent).not.toBe(trailing);
+		expect(chatChildren).toContain(ctx.streamingComponent);
+		expect(trailing.isTranscriptBlockFinalized()).toBe(true);
+		const trailingRender = Bun.stripANSI(trailing.render(120).join("\n"));
+		expect(trailingRender).toContain("trailing text");
+		expect(trailingRender).not.toContain("lead text");
 	});
 
 	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {

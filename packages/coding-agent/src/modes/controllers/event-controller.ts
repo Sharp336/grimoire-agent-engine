@@ -663,6 +663,10 @@ export class EventController {
 		const component = this.#lastAssistantComponent;
 		const persistenceKey = sessionMessagePersistenceKey(message);
 		if (!component || component.messagePersistenceKey() !== persistenceKey) return false;
+		const replayHead = this.ctx.chatContainer.children.find(
+			child => child instanceof AssistantMessageComponent && child.messagePersistenceKey() === persistenceKey,
+		);
+		if (component !== replayHead) return false;
 		// Historical rebuild constructs with a message, so the block is finalized.
 		// Re-open it as live before streaming so the transcript seam stays pinned.
 		component.markTranscriptBlockLive();
