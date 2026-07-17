@@ -64,9 +64,7 @@ export class YieldQueue {
 			this.#entries.set(kind, entries);
 		}
 		entries.push(entry);
-		if (!this.#options.isStreaming() && !this.#dispatchers.get(kind)!.skipIdleFlush) {
-			this.#scheduleIdleFlush();
-		}
+		this.scheduleIdleFlushIfNeeded();
 	}
 
 	has(kind?: string): boolean {
@@ -75,6 +73,37 @@ export class YieldQueue {
 			if (entries.length > 0) return true;
 		}
 		return false;
+	}
+	hasDeliverable(kind?: string): boolean {
+		if (kind !== undefined) {
+			const dispatcher = this.#dispatchers.get(kind);
+			const entries = this.#entries.get(kind);
+			if (!dispatcher || !entries) return false;
+			return entries.some(entry => this.#isDeliverable(kind, dispatcher, entry));
+		}
+		for (const [entryKind, entries] of this.#entries) {
+			const dispatcher = this.#dispatchers.get(entryKind);
+			if (dispatcher && entries.some(entry => this.#isDeliverable(entryKind, dispatcher, entry))) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Re-arm entries queued during streaming once the agent becomes idle.
+	 * The session calls this from agent_end so injection stays on the existing
+	 * post-prompt scheduler rather than racing the prompt unwind.
+	 */
+	scheduleIdleFlushIfNeeded(): boolean {
+		if (this.#options.isStreaming()) return false;
+		for (const [kind] of this.#entries) {
+			if (this.#dispatchers.get(kind)?.skipIdleFlush || !this.hasDeliverable(kind)) continue;
+			this.#scheduleIdleFlush();
+			return true;
+		}
+		return false;
+	}
+	hasPendingIdleFlush(): boolean {
+		return this.#idleFlushPending && this.hasDeliverable();
 	}
 
 	async flush(mode: YieldFlushMode): Promise<void> {
@@ -158,26 +187,23 @@ export class YieldQueue {
 	}
 
 	#build(kind: string, dispatcher: StoredDispatcher, entries: unknown[]): AgentMessage | null {
-		const survivors: unknown[] = [];
-		for (const entry of entries) {
-			if (dispatcher.isStale) {
-				let stale: boolean;
-				try {
-					stale = dispatcher.isStale(entry);
-				} catch (error) {
-					logger.warn("Yield queue stale check failed", { kind, error: formatError(error) });
-					continue;
-				}
-				if (stale) continue;
-			}
-			survivors.push(entry);
-		}
+		const survivors = entries.filter(entry => this.#isDeliverable(kind, dispatcher, entry));
 		if (survivors.length === 0) return null;
 		try {
 			return dispatcher.build(survivors);
 		} catch (error) {
 			logger.warn("Yield queue build failed", { kind, error: formatError(error) });
 			return null;
+		}
+	}
+
+	#isDeliverable(kind: string, dispatcher: StoredDispatcher, entry: unknown): boolean {
+		if (!dispatcher.isStale) return true;
+		try {
+			return !dispatcher.isStale(entry);
+		} catch (error) {
+			logger.warn("Yield queue stale check failed", { kind, error: formatError(error) });
+			return false;
 		}
 	}
 }

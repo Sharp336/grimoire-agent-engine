@@ -3866,6 +3866,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"monitor.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Event Monitors",
+			description: "Enable managed shell and WebSocket monitors that deliver bounded intermediate events",
+		},
+	},
+
 	"async.maxJobs": {
 		type: "number",
 		default: 100,

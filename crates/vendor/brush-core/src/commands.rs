@@ -689,11 +689,12 @@ pub(crate) fn execute_external_command(
 				tracing::warn!("could not retrieve pid for child process");
 			}
 
-			// Report the spawned child for scoped teardown. Skipped for reparented
-			// launches (`detach_reparent`, e.g. `nohup cmd &`): those double-fork
-			// out of the descendant tree and must survive the host's cancellation
-			// cleanup, so they are intentionally left unowned.
-			if !context.params.detach_reparent
+			// Report the spawned child for scoped teardown. Reparented launches
+			// (`detach_reparent`, e.g. `nohup cmd &`) are omitted by default so
+			// they survive host cancellation. Embedders that own detached process
+			// lifetimes can explicitly include them.
+			if (!context.params.detach_reparent
+				|| context.params.observe_reparented_processes())
 				&& let Some(observer) = context.params.spawn_observer()
 				&& let Some(pid) = pid
 			{

@@ -33,6 +33,117 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 	});
 
+	test("delivers intermediate events before completion with per-job sequence", async () => {
+		const deliveryOrder: string[] = [];
+		const events: Array<{ sequence: number; text: string; timestamp: number }> = [];
+		const manager = new AsyncJobManager({
+			onJobEvent: async (_jobId, event) => {
+				events.push(event);
+				deliveryOrder.push(`event:${event.sequence}`);
+			},
+			onJobComplete: async () => {
+				deliveryOrder.push("complete");
+			},
+		});
+
+		manager.register("monitor", "watch logs", async ({ reportEvent }) => {
+			await reportEvent("first");
+			await reportEvent("second");
+			return "monitor complete";
+		});
+
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(events.map(({ sequence, text }) => ({ sequence, text }))).toEqual([
+			{ sequence: 1, text: "first" },
+			{ sequence: 2, text: "second" },
+		]);
+		expect(events.every(event => Number.isFinite(event.timestamp))).toBe(true);
+		expect(deliveryOrder).toEqual(["event:1", "event:2", "complete"]);
+	});
+
+	test("drops event callback failures without failing the job", async () => {
+		const completions: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobEvent: async () => {
+				throw new Error("event delivery exploded");
+			},
+			onJobComplete: async (_jobId, text) => {
+				completions.push(text);
+			},
+		});
+
+		const jobId = manager.register("monitor", "watch logs", async ({ reportEvent }) => {
+			await reportEvent("still running");
+			return "monitor complete";
+		});
+
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.getJob(jobId)?.status).toBe("completed");
+		expect(completions).toEqual(["monitor complete"]);
+	});
+
+	test("ignores intermediate events after cancellation", async () => {
+		const events: string[] = [];
+		const started = Promise.withResolvers<(text: string) => Promise<void>>();
+		const manager = new AsyncJobManager({
+			onJobEvent: async (_jobId, event) => {
+				events.push(event.text);
+			},
+			onJobComplete: async () => {},
+		});
+
+		const jobId = manager.register("monitor", "watch logs", async ({ reportEvent, signal }) => {
+			started.resolve(reportEvent);
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			await reportEvent("during cancellation");
+			return "cancelled";
+		});
+
+		const reportEvent = await started.promise;
+		await reportEvent("before cancellation");
+		expect(manager.cancel(jobId)).toBe(true);
+		await manager.waitForAll();
+		await reportEvent("after cancellation");
+
+		expect(events).toEqual(["before cancellation"]);
+	});
+
+	test("keeps progress UI-only unless reportEvent is called", async () => {
+		const progress: string[] = [];
+		const events: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobEvent: async (_jobId, event) => {
+				events.push(event.text);
+			},
+			onJobComplete: async () => {},
+		});
+
+		manager.register(
+			"bash",
+			"build",
+			async ({ reportProgress }) => {
+				await reportProgress("chunk one");
+				await reportProgress("chunk two");
+				return "done";
+			},
+			{
+				onProgress: async text => {
+					progress.push(text);
+				},
+			},
+		);
+
+		await manager.waitForAll();
+		expect(progress).toEqual(["chunk one", "chunk two"]);
+		expect(events).toEqual([]);
+	});
+
 	test("swallows progress callback errors without failing the job", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({

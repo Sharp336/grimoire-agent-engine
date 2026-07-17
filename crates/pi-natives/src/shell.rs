@@ -88,15 +88,17 @@ impl From<ShellOptions> for CoreShellOptions {
 #[napi(object)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
-	pub command:    String,
+	pub command: String,
 	/// Working directory for the command.
-	pub cwd:        Option<String>,
+	pub cwd: Option<String>,
 	/// Environment variables to apply for this command only.
-	pub env:        Option<HashMap<String, String>>,
+	pub env: Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling the command.
 	pub timeout_ms: Option<u32>,
+	/// Terminate all processes spawned by the command before resolving.
+	pub terminate_background_processes_on_exit: Option<bool>,
 	/// Abort signal for cancelling the operation.
-	pub signal:     Option<Unknown<'env>>,
+	pub signal: Option<Unknown<'env>>,
 }
 
 /// Options for executing a shell command via brush-core.
@@ -219,10 +221,13 @@ impl Shell {
 		let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 		let inner = Arc::clone(&self.inner);
 		let run_options = CoreShellRunOptions {
-			command:    options.command,
-			cwd:        options.cwd,
-			env:        options.env,
+			command: options.command,
+			cwd: options.cwd,
+			env: options.env,
 			timeout_ms: options.timeout_ms,
+			terminate_background_processes_on_exit: options
+				.terminate_background_processes_on_exit
+				.unwrap_or(false),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -491,10 +496,11 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
-						cwd:        None,
-						env:        None,
+						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
+						cwd: None,
+						env: None,
 						timeout_ms: None,
+						terminate_background_processes_on_exit: false,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -538,10 +544,11 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "sh -c 'sleep 30 & wait'".to_string(),
-						cwd:        None,
-						env:        None,
+						command: "sh -c 'sleep 30 & wait'".to_string(),
+						cwd: None,
+						env: None,
 						timeout_ms: None,
+						terminate_background_processes_on_exit: false,
 					},
 					None,
 					cancel,
@@ -573,10 +580,11 @@ mod tests {
 		let result = shell
 			.run(
 				CoreShellRunOptions {
-					command:    "yes x | tail -5".to_string(),
-					cwd:        None,
-					env:        None,
+					command: "yes x | tail -5".to_string(),
+					cwd: None,
+					env: None,
 					timeout_ms: Some(TIMEOUT_MS),
+					terminate_background_processes_on_exit: false,
 				},
 				Some(tx),
 				CancelToken::new(Some(TIMEOUT_MS)),

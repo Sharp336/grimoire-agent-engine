@@ -38,7 +38,13 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		AsyncJobManager.resetForTests();
 	});
 
-	async function spawnTopLevelSession(extraSettings?: Record<string, unknown>) {
+	interface SessionRouting {
+		parentTaskPrefix?: string;
+		taskDepth?: number;
+		agentId?: string;
+	}
+
+	async function spawnTopLevelSession(extraSettings?: Record<string, unknown>, routing: SessionRouting = {}) {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-singleton-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, `project-${Snowflake.next()}`);
@@ -56,6 +62,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			enableMCP: false,
 			enableLsp: false,
 			modelRegistry: sharedModelRegistry,
+			...routing,
 		});
 		return session;
 	}
@@ -156,6 +163,42 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
+	it("keeps the monitor tool and event dispatcher exclusive to the owning top-level session", async () => {
+		const primary = await spawnTopLevelSession({ "async.enabled": true, "monitor.enabled": true });
+		try {
+			expect(primary.getXdevToolEntries().map(entry => entry.name)).toContain("monitor");
+
+			const secondary = await spawnTopLevelSession({ "async.enabled": true, "monitor.enabled": true });
+			const subagent = await spawnTopLevelSession(
+				{ "async.enabled": true, "monitor.enabled": true },
+				{ parentTaskPrefix: "SubMonitor", agentId: "SubMonitor" },
+			);
+			try {
+				expect(secondary.getXdevToolEntries().map(entry => entry.name)).not.toContain("monitor");
+				expect(subagent.getXdevToolEntries().map(entry => entry.name)).not.toContain("monitor");
+
+				const entry = {
+					jobId: "probe",
+					description: "dispatcher ownership probe",
+					sequence: 1,
+					text: "event",
+					timestamp: Date.now(),
+				};
+				primary.yieldQueue.enqueue("monitor-event", entry);
+				secondary.yieldQueue.enqueue("monitor-event", entry);
+				subagent.yieldQueue.enqueue("monitor-event", entry);
+				expect(primary.yieldQueue.has("monitor-event")).toBe(true);
+				expect(secondary.yieldQueue.has("monitor-event")).toBe(false);
+				expect(subagent.yieldQueue.has("monitor-event")).toBe(false);
+				primary.yieldQueue.clear("monitor-event");
+			} finally {
+				await subagent.dispose();
+				await secondary.dispose();
+			}
+		} finally {
+			await primary.dispose();
+		}
+	}, 60000);
 	it("clears a manager installed before a top-level session startup failure takes ownership", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-startup-failure-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);

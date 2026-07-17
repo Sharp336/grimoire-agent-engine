@@ -27,9 +27,26 @@ interface PollEscalationState {
 	lastPollEndAt: number;
 }
 
+export type AsyncJobType = "bash" | "task" | "monitor";
+
+export interface AsyncJobEvent {
+	sequence: number;
+	text: string;
+	timestamp: number;
+}
+
+export interface AsyncJobRunContext {
+	jobId: string;
+	signal: AbortSignal;
+	reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
+	reportEvent: (text: string) => Promise<void>;
+	/** Clear the queued flag once the job actually starts executing. */
+	markRunning: () => void;
+}
+
 export interface AsyncJob {
 	id: string;
-	type: "bash" | "task";
+	type: AsyncJobType;
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
@@ -56,10 +73,13 @@ export interface AsyncJob {
 	 * until the caller invokes `markRunning()` from the run context.
 	 */
 	queued?: boolean;
+	/** Intentionally runs until cancelled or its source closes. */
+	persistent?: boolean;
 }
 
 export interface AsyncJobManagerOptions {
 	onJobComplete: (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
+	onJobEvent?: (jobId: string, event: AsyncJobEvent, job: AsyncJob) => void | Promise<void>;
 	maxRunningJobs?: number;
 	retentionMs?: number;
 }
@@ -90,6 +110,8 @@ export interface AsyncJobRegisterOptions {
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
+	/** Mark a long-lived job that must not defer stop-time session passes indefinitely. */
+	persistent?: boolean;
 }
 
 /**
@@ -127,6 +149,7 @@ export class AsyncJobManager {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
+	readonly #onJobEvent: AsyncJobManagerOptions["onJobEvent"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
 	#deliveryLoop: Promise<void> | undefined;
@@ -144,6 +167,7 @@ export class AsyncJobManager {
 
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
+		this.#onJobEvent = options.onJobEvent;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 	}
@@ -160,15 +184,9 @@ export class AsyncJobManager {
 	}
 
 	register(
-		type: "bash" | "task",
+		type: AsyncJobType,
 		label: string,
-		run: (ctx: {
-			jobId: string;
-			signal: AbortSignal;
-			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
-			/** Clear the queued flag once the job actually starts executing. */
-			markRunning: () => void;
-		}) => Promise<string>,
+		run: (ctx: AsyncJobRunContext) => Promise<string>,
 		options?: AsyncJobRegisterOptions,
 	): string {
 		if (this.#disposed) {
@@ -202,6 +220,7 @@ export class AsyncJobManager {
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
+			...(options?.persistent ? { persistent: true } : {}),
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
@@ -215,12 +234,30 @@ export class AsyncJobManager {
 				});
 			}
 		};
+		let eventSequence = 0;
+		const reportEvent = async (text: string): Promise<void> => {
+			if (!this.#onJobEvent || job.status !== "running") return;
+			const event: AsyncJobEvent = {
+				sequence: ++eventSequence,
+				text,
+				timestamp: Date.now(),
+			};
+			try {
+				await this.#onJobEvent(id, event, job);
+			} catch (error) {
+				logger.warn("Async job event callback failed", {
+					jobId: id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 		job.promise = (async () => {
 			try {
 				const text = await run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
+					reportEvent,
 					markRunning: () => {
 						job.queued = false;
 					},

@@ -92,18 +92,20 @@ pub struct ShellOptions {
 }
 
 struct ShellRunConfig {
-	command:   String,
-	cwd:       Option<String>,
-	env:       Option<HashMap<String, String>>,
+	command: String,
+	cwd: Option<String>,
+	env: Option<HashMap<String, String>>,
 	minimizer: Option<minimizer::MinimizerConfig>,
+	terminate_background_processes_on_exit: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellRunOptions {
-	pub command:    String,
-	pub cwd:        Option<String>,
-	pub env:        Option<HashMap<String, String>>,
+	pub command: String,
+	pub cwd: Option<String>,
+	pub env: Option<HashMap<String, String>>,
 	pub timeout_ms: Option<u32>,
+	pub terminate_background_processes_on_exit: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -174,10 +176,11 @@ impl Shell {
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
-			command:   options.command,
-			cwd:       options.cwd,
-			env:       options.env,
+			command: options.command,
+			cwd: options.cwd,
+			env: options.env,
 			minimizer: self.config.minimizer.clone(),
+			terminate_background_processes_on_exit: options.terminate_background_processes_on_exit,
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -238,8 +241,13 @@ pub async fn execute_shell(
 		snapshot_path: options.snapshot_path,
 		minimizer:     minimizer.clone(),
 	};
-	let run_config =
-		ShellRunConfig { command: options.command, cwd: options.cwd, env: options.env, minimizer };
+	let run_config = ShellRunConfig {
+		command: options.command,
+		cwd: options.cwd,
+		env: options.env,
+		minimizer,
+		terminate_background_processes_on_exit: false,
+	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
 
@@ -271,10 +279,11 @@ pub async fn execute_shell_streams(
 		minimizer:     None,
 	};
 	let run_config = ShellRunConfig {
-		command:   options.command,
-		cwd:       options.cwd,
-		env:       options.env,
+		command: options.command,
+		cwd: options.cwd,
+		env: options.env,
 		minimizer: None,
+		terminate_background_processes_on_exit: false,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -289,6 +298,7 @@ async fn run_shell_session(
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
+	let terminate_background_processes_on_exit = run_config.terminate_background_processes_on_exit;
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
@@ -351,6 +361,9 @@ async fn run_shell_session(
 	};
 	let res =
 		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
+	if terminate_background_processes_on_exit {
+		terminate_run(&spawn_registry).await;
+	}
 	process_cancel_bridge.abort();
 	let _ = process_cancel_bridge.await;
 	abort_state.clear().await;
@@ -877,7 +890,8 @@ async fn run_shell_command_single(
 ) -> Result<(ExecutionResult, Option<MinimizerResult>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 
-	let params = session.shell.default_exec_params();
+	let mut params = session.shell.default_exec_params();
+	params.set_observe_reparented_processes(options.terminate_background_processes_on_exit);
 	let capture_mode = match minimizer_mode {
 		minimizer::engine::MinimizerMode::WholeCommand => {
 			let Some(config) = options.minimizer.as_ref() else {
@@ -996,7 +1010,8 @@ async fn run_shell_command_segmented_chain(
 		.await;
 	};
 
-	let params = session.shell.default_exec_params();
+	let mut params = session.shell.default_exec_params();
+	params.set_observe_reparented_processes(options.terminate_background_processes_on_exit);
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_result = None;

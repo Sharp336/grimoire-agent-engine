@@ -56,6 +56,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
+import { buildMonitorEventBatchMessage, type MonitorEventEntry } from "./monitor/events";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -207,7 +208,7 @@ type AsyncResultEntry = {
 
 type AsyncResultJobDetails = {
 	jobId: string;
-	type?: "bash" | "task";
+	type?: AsyncJob["type"];
 	label?: string;
 	durationMs?: number;
 };
@@ -1593,6 +1594,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							durationMs,
 						});
 					},
+					onJobEvent: (jobId, event, job) => {
+						if (!session || job.type !== "monitor") return;
+						session.yieldQueue.enqueue<MonitorEventEntry>("monitor-event", {
+							jobId,
+							description: job.label,
+							sequence: event.sequence,
+							text: event.text,
+							timestamp: event.timestamp,
+						});
+					},
 				})
 			: undefined;
 
@@ -1658,6 +1669,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			agentKind,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>
@@ -2917,6 +2929,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasSession = true;
 		if (asyncJobManager) {
+			// Intermediate monitor output must precede a same-window terminal result.
+			session.yieldQueue.register<MonitorEventEntry>("monitor-event", {
+				build: buildMonitorEventBatchMessage,
+			});
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,

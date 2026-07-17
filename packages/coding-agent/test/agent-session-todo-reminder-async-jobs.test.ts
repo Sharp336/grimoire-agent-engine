@@ -13,39 +13,12 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 /**
- * Regression coverage for the `#hasPendingAsyncWake()` gate shared by the
- * stop-time passes in the `agent_end` settle path: a background async job
- * (bash/task) owned by this agent re-wakes the loop when it completes — its
- * result delivery enqueues an async-result follow-up that continues the run,
- * and the stop-time passes re-run at that settle. A text-only stop with such a
- * job in flight is a scheduling pause, not a terminal stop, so both:
- *
- * - the todo reminder (`todo_reminder` event + injected `<system-reminder>`
- *   continuation in `#checkTodoCompletion`), and
- * - the `session_stop` extension hook pass (`#emitSessionStopEvent`)
- *
- * must stay silent and defer to the settle reached once the session is fully
- * idle.
- *
- * The contract these tests defend:
- * 1. A running job owned by this session's `agentId` (delivery not
- *    suppressed) defers the reminder: no `todo_reminder` event, no scheduled
- *    `agent.continue`.
- * 2. Jobs owned by a DIFFERENT agent do not defer — the stop still fires
- *    reminder attempt 1.
- * 3. The deferral is temporary: once the owned job completes and its delivery
- *    drains, the next text-only stop fires the reminder.
- * 4. With no incomplete todos at all, the same running owned job still defers
- *    the `session_stop` hook pass.
- * 5. That deferral lifts too: after the job completes and its delivery
- *    drains, the next stop invokes `session_stop` exactly once.
- *
- * Negative assertions rely on `session.waitForIdle()` being deterministic
- * here: the agent's synchronous `#emit` invokes the session's `agent_end`
- * handler, which registers itself as a tracked post-prompt task BEFORE its
- * first await, and anything it schedules (e.g. `agent.continue`) is tracked
- * the same way — so once `waitForIdle()` resolves, the settle has definitively
- * decided whether to fire the stop-time passes. No wall-clock sleeps needed.
+ * Regression coverage for the stop-time async-wake gate. Finite owned jobs
+ * defer todo reminders and `session_stop` until their terminal delivery can
+ * re-wake the loop. Persistent monitors do not defer those passes merely by
+ * remaining alive; only an actually queued monitor event does. Prompt unwind
+ * also must not look like pending async work, and events queued during unwind
+ * must be re-armed once the outer prompt releases.
  */
 describe("AgentSession todo reminder async-job deferral", () => {
 	let tempDir: TempDir;
@@ -87,11 +60,18 @@ describe("AgentSession todo reminder async-job deferral", () => {
 	}
 
 	/** Register a job that stays running until the returned resolver fires. */
-	function registerGatedJob(ownerId: string): { resolve: () => void } {
+	function registerGatedJob(
+		ownerId: string,
+		type: "bash" | "monitor" = "bash",
+		persistent = false,
+	): { jobId: string; resolve: () => void } {
 		const gate = Promise.withResolvers<string>();
 		gates.push(gate);
-		manager.register("bash", `gated job owned by ${ownerId}`, async () => await gate.promise, { ownerId });
-		return { resolve: () => gate.resolve("done") };
+		const jobId = manager.register(type, `gated ${type} owned by ${ownerId}`, async () => await gate.promise, {
+			ownerId,
+			persistent,
+		});
+		return { jobId, resolve: () => gate.resolve("done") };
 	}
 
 	/** Give the session incomplete todos so the stop-time reminder is armed. */
@@ -245,6 +225,135 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not defer terminal processing for a suppressed staged completion", async () => {
+		setIncompleteTodos();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const jobId = manager.register("bash", "stale staged result", async () => "done", { ownerId: "Main" });
+		await manager.waitForAll();
+		session.yieldQueue.register<{ jobId: string }>("async-result", {
+			isStale: entry => manager.isDeliverySuppressed(entry.jobId),
+			build: entries => ({
+				role: "custom",
+				customType: "async-result",
+				content: entries.map(entry => entry.jobId).join("\n"),
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+		session.agent.state.isStreaming = true;
+		session.yieldQueue.enqueue("async-result", { jobId });
+		manager.acknowledgeDeliveries([jobId]);
+		session.agent.state.isStreaming = false;
+
+		emitTextOnlyStop();
+		await withTimeout(firstReminderPromise, 1000, "stale async result suppressed the todo reminder");
+
+		expect(reminderAttempts).toEqual([1]);
+	});
+
+	it("does not mistake the current prompt unwind for pending async work", async () => {
+		setIncompleteTodos();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+			emitTextOnlyStop();
+		});
+
+		await session.prompt("finish the turn");
+		await withTimeout(firstReminderPromise, 1000, "ordinary prompt unwind suppressed the todo reminder");
+
+		expect(reminderAttempts).toEqual([1]);
+	});
+
+	it("re-schedules a monitor event queued during prompt unwind", async () => {
+		const idleWake = Promise.withResolvers<void>();
+		let idlePrompt: unknown;
+		let promptCalls = 0;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			promptCalls++;
+			if (promptCalls === 1) {
+				session.agent.state.isStreaming = true;
+				session.yieldQueue.enqueue("monitor-event", { text: "late event" });
+				session.agent.state.isStreaming = false;
+				emitTextOnlyStop();
+				return;
+			}
+			idlePrompt = message;
+			idleWake.resolve();
+		});
+		session.yieldQueue.register<{ text: string }>("monitor-event", {
+			build: entries => ({
+				role: "custom",
+				customType: "monitor-event",
+				content: entries.map(entry => entry.text).join("\n"),
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+
+		await session.prompt("start");
+		await withTimeout(idleWake.promise, 1000, "queued monitor event did not re-wake after prompt unwind");
+
+		expect(promptSpy).toHaveBeenCalledTimes(2);
+		expect(idlePrompt).toEqual(
+			expect.objectContaining({ role: "custom", customType: "monitor-event", content: "late event" }),
+		);
+		expect(extensionRunner.emitSessionStop).not.toHaveBeenCalled();
+	});
+
+	it("defers for a live monitor and cancellation releases the reminder", async () => {
+		setIncompleteTodos();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const monitor = registerGatedJob("Main", "monitor");
+
+		emitTextOnlyStop();
+		await session.waitForIdle();
+		expect(reminderAttempts).toEqual([]);
+
+		expect(manager.cancel(monitor.jobId, { ownerId: "Main" })).toBe(true);
+		emitTextOnlyStop();
+		await withTimeout(firstReminderPromise, 1000, "todo_reminder never fired after monitor cancellation");
+		expect(reminderAttempts).toEqual([1]);
+	});
+
+	it("does not defer the reminder for a persistent monitor with no queued event", async () => {
+		setIncompleteTodos();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		registerGatedJob("Main", "monitor", true);
+
+		emitTextOnlyStop();
+		await withTimeout(firstReminderPromise, 1000, "persistent monitor suppressed the todo reminder");
+
+		expect(reminderAttempts).toEqual([1]);
+	});
+
+	it("does not defer session_stop for a persistent monitor with no queued event", async () => {
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		registerGatedJob("Main", "monitor", true);
+
+		emitTextOnlyStop();
+		await session.waitForIdle();
+
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers for a live monitor and completion releases the session_stop pass", async () => {
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const monitor = registerGatedJob("Main", "monitor");
+
+		emitTextOnlyStop();
+		await session.waitForIdle();
+		expect(extensionRunner.emitSessionStop).not.toHaveBeenCalled();
+
+		monitor.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries();
+		emitTextOnlyStop();
+		await session.waitForIdle();
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});
 });
