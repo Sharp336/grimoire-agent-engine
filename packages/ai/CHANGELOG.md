@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added SuperGrok OAuth subscription-credit usage reporting to `omp usage` through Grok's billing RPC.
+
 ## [17.0.2] - 2026-07-17
 
 ### Fixed

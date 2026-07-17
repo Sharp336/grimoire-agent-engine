@@ -759,9 +759,8 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
  *
  * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
  * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
- * `omp usage --provider xai` can still confirm the stored credential has no
- * usage endpoint.
+ * here. An explicit `--provider` request bypasses the cull so credentials for
+ * providers without usage reporting can still be inspected directly.
  */
 export function selectReportableAccounts(
 	accounts: UsageAccountIdentity[],
