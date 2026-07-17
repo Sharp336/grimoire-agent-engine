@@ -729,13 +729,19 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
-	const toolInfo = toolNames.map(name => ({
+	// xd://-mounted tools are only accessible via write xd://<tool> — exclude
+	// them from the flat TOOL INVENTORY so the model never tries to call them
+	// directly as function-call tools. They remain in `tools` for handlebars
+	// gates ({{#has tools "web_search"}}) and in `toolPromptNames` for refs.
+	const xdevNames = new Set(xdevTools.map(m => m.name));
+	const displayToolNames = toolNames.filter(n => !xdevNames.has(n));
+	const toolInfo = displayToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
 		label: tools?.get(name)?.label ?? "",
 		description: tools?.get(name)?.description ?? "",
 	}));
-	const inventoryTools = toolNames.map(name => {
+	const inventoryTools = displayToolNames.map(name => {
 		const meta = tools?.get(name);
 		return {
 			name: toolPromptNames.get(name) ?? name,
@@ -749,7 +755,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Otherwise render full `# Tool:` sections inline in the system prompt.
 	const toolListMode = !inlineToolDescriptors && nativeTools;
 	const toolInventory = toolListMode ? "" : renderToolInventory(inventoryTools, model ?? "");
-
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
