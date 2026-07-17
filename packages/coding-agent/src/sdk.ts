@@ -1701,10 +1701,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
 		};
+		const mcpDefaultIdleTimeoutMs = settings.get("mcp.defaultIdleTimeoutMs") ?? 300_000;
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager = new MCPManager(
+					cwd,
+					cacheStorage ? new MCPToolCache(cacheStorage) : null,
+					mcpDefaultIdleTimeoutMs,
+				);
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -1743,6 +1748,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					...mcpDiscoverOptions,
 					cacheStorage: settings.getStorage(),
 					authStorage,
+					defaultIdleTimeoutMs: mcpDefaultIdleTimeoutMs,
 				});
 				mcpManager = mcpResult.manager;
 				toolSession.mcpManager = mcpManager;

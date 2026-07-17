@@ -77,6 +77,22 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
+	/**
+	 * Connection lifecycle. `"eager"` (default) connects at startup like
+	 * every other server. `"lazy"` connects once on first run to populate
+	 * the tool cache, then defers reconnection until a tool call actually
+	 * needs the server, disconnecting again after `idleTimeoutMs` of no
+	 * active calls.
+	 */
+	lifecycle?: "eager" | "lazy";
+	/**
+	 * Idle time in milliseconds before a `lifecycle: "lazy"` server is
+	 * disconnected after its last active call. Falls back to
+	 * `mcp.defaultIdleTimeoutMs` when unset. `0` disables idle
+	 * disconnection — the server stays connected indefinitely once
+	 * activated. Ignored for `"eager"` servers.
+	 */
+	idleTimeoutMs?: number;
 }
 
 /** Stdio server configuration */

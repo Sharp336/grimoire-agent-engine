@@ -28,6 +28,17 @@ import type { MCPContent, MCPServerConnection, MCPToolCallParams, MCPToolCallRes
 export type MCPReconnect = () => Promise<MCPServerConnection | null>;
 
 /**
+ * Idle-reap suppression hooks for `lifecycle: "lazy"` MCP servers. The
+ * manager increments an active-call count on `begin()` and decrements on
+ * `end()`; the idle timer only arms while the count is zero, so a
+ * long-running tool call can never be torn down mid-flight.
+ */
+export interface MCPLazyActivity {
+	begin(): void;
+	end(): void;
+}
+
+/**
  * Network-level and stale-session errors that warrant a reconnect + single retry.
  * Conservative: only catches errors where the server is likely alive but the
  * connection object is stale (dead SSE, expired session, refused after restart).
@@ -334,14 +345,25 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mergeCallAndResult = true;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+	static fromTools(
+		connection: MCPServerConnection,
+		tools: MCPToolDefinition[],
+		reconnect?: MCPReconnect,
+		activity?: MCPLazyActivity,
+	): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, reconnect, activity));
 	}
 
 	constructor(
 		private connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
 		private readonly reconnect?: MCPReconnect,
+		/**
+		 * Idle-reap suppression hook for `lifecycle: "lazy"` servers — see
+		 * {@link MCPLazyActivity}. Undefined for eager servers, which have no
+		 * idle timer.
+		 */
+		private readonly activity?: MCPLazyActivity,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
@@ -371,6 +393,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 
+		this.activity?.begin();
 		try {
 			const result = await callTool(this.connection, this.tool.name, args, { signal });
 			return buildResult(result, this.connection.name, this.tool.name, provider, providerName);
@@ -399,6 +422,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+		} finally {
+			this.activity?.end();
 		}
 	}
 }
@@ -429,8 +454,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
+		activity?: MCPLazyActivity,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, activity));
 	}
 
 	constructor(
@@ -439,6 +465,15 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		private readonly reconnect?: MCPReconnect,
+		/**
+		 * Idle-reap suppression hook for `lifecycle: "lazy"` servers. `begin()`
+		 * is called before connection resolution and `end()` in a `finally`
+		 * once the call settles, so the manager's idle timer never fires
+		 * mid-call. Absent for eager-cache-backed deferred tools (the
+		 * pre-lazy-lifecycle fallback path used when a server is still
+		 * connecting at startup), which have no idle timer to suppress.
+		 */
+		private readonly activity?: MCPLazyActivity,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
@@ -470,6 +505,20 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 
+		this.activity?.begin();
+		try {
+			return await this.#executeInner(args, provider, providerName, signal);
+		} finally {
+			this.activity?.end();
+		}
+	}
+
+	async #executeInner(
+		args: MCPToolArgs,
+		provider: string | undefined,
+		providerName: string | undefined,
+		signal?: AbortSignal,
+	): Promise<CustomToolResult<MCPToolDetails>> {
 		try {
 			const connection = await untilAborted(signal, () => this.getConnection());
 			throwIfAborted(signal);

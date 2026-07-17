@@ -279,6 +279,13 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 		errors.push(`Server "${name}": unknown server type "${serverType}"`);
 	}
 
+	if (config.lifecycle !== undefined && config.lifecycle !== "eager" && config.lifecycle !== "lazy") {
+		errors.push(`Server "${name}": "lifecycle" must be "eager" or "lazy", got "${config.lifecycle}"`);
+	}
+	if (config.idleTimeoutMs !== undefined && (!Number.isFinite(config.idleTimeoutMs) || config.idleTimeoutMs < 0)) {
+		errors.push(`Server "${name}": "idleTimeoutMs" must be a non-negative number`);
+	}
+
 	return errors;
 }
 

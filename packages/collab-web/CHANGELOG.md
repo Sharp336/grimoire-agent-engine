@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-server MCP `lifecycle: "eager" | "lazy"` and `idleTimeoutMs`: a `lazy` server skips connecting at startup when its tool cache is warm, connects on demand through the first tool call, and disconnects again after `idleTimeoutMs` of inactivity. ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
+
 ## [17.0.1] - 2026-07-16
 
 ### Fixed

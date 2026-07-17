@@ -3937,6 +3937,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.defaultIdleTimeoutMs": {
+		type: "number",
+		default: 300_000,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Lazy Idle Timeout",
+			description:
+				"Default idle time in milliseconds before a lazy-lifecycle MCP server is disconnected after its last use. Per-server idleTimeoutMs overrides this. 0 disables idle disconnection.",
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────

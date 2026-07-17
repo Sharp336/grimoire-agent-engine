@@ -39,6 +39,8 @@ export interface MCPToolsLoadOptions {
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
+	/** Fallback idle timeout (ms) for `lifecycle: "lazy"` servers without a per-server `idleTimeoutMs` */
+	defaultIdleTimeoutMs?: number;
 }
 
 async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
@@ -61,7 +63,7 @@ async function resolveToolCache(storage: AgentStorage | null | undefined): Promi
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
 	const toolCache = await resolveToolCache(options?.cacheStorage);
-	const manager = new MCPManager(cwd, toolCache);
+	const manager = new MCPManager(cwd, toolCache, options?.defaultIdleTimeoutMs);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
 	}

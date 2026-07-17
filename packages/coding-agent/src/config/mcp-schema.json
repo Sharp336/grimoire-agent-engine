@@ -123,6 +123,16 @@
         },
         "oauth": {
           "$ref": "#/$defs/oauthConfig"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["eager", "lazy"],
+          "description": "Connection lifecycle. \"eager\" (default) connects at startup. \"lazy\" connects once to populate the tool cache, then defers reconnection until a tool call needs the server, disconnecting again after idleTimeoutMs of inactivity."
+        },
+        "idleTimeoutMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Idle time in milliseconds before a lifecycle: \"lazy\" server disconnects after its last active call. Falls back to mcp.defaultIdleTimeoutMs when unset. 0 disables idle disconnection. Ignored for \"eager\" servers."
         }
       }
     },
