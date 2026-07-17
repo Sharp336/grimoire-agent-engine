@@ -229,13 +229,28 @@ export function calculatePromptTokens(usage: Usage): number {
 }
 
 /**
+ * True when provider usage can anchor context display/compaction.
+ * All-zero usage is treated as missing: some providers under-report or emit
+ * placeholder zeros, which must not collapse the context footer/status.
+ */
+export function isUsableAssistantUsage(usage: Usage): boolean {
+	return !(calculatePromptTokens(usage) === 0 && calculateContextTokens(usage) === 0);
+}
+
+/**
  * Get usage from an assistant message if available.
  * Skips aborted and error messages as they don't have valid usage data.
+ * Also skips all-zero usage so it cannot become a context anchor.
  */
 function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
-		if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+		if (
+			assistantMsg.stopReason !== "aborted" &&
+			assistantMsg.stopReason !== "error" &&
+			assistantMsg.usage &&
+			isUsableAssistantUsage(assistantMsg.usage)
+		) {
 			return assistantMsg.usage;
 		}
 	}

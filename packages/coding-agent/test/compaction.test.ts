@@ -10,6 +10,7 @@ import {
 	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	isUsableAssistantUsage,
 	prepareCompaction,
 	resolveThresholdTokens,
 	shouldCompact,
@@ -224,6 +225,42 @@ describe("getLastAssistantUsage", () => {
 	it("should return undefined if no assistant messages", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
 		expect(getLastAssistantUsage(entries)).toBeUndefined();
+	});
+
+	it("should skip a terminal all-zero usage and return earlier usable usage", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Hello")),
+			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
+			createMessageEntry(createUserMessage("Again")),
+			createMessageEntry(createAssistantMessage("Zero", createMockUsage(0, 0))),
+		];
+
+		const usage = getLastAssistantUsage(entries);
+		expect(usage).not.toBeUndefined();
+		expect(usage!.input).toBe(100);
+	});
+
+	it("should return undefined when only all-zero assistant usage exists", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Hello")),
+			createMessageEntry(createAssistantMessage("Zero", createMockUsage(0, 0))),
+		];
+		expect(getLastAssistantUsage(entries)).toBeUndefined();
+	});
+});
+
+describe("isUsableAssistantUsage", () => {
+	it("accepts usage when prompt tokens are non-zero even if total context is otherwise sparse", () => {
+		expect(isUsableAssistantUsage(createMockUsage(10, 0))).toBe(true);
+	});
+
+	it("accepts usage when context total is non-zero even if prompt components are zero", () => {
+		const usage = createMockUsage(0, 25);
+		expect(isUsableAssistantUsage(usage)).toBe(true);
+	});
+
+	it("rejects all-zero usage", () => {
+		expect(isUsableAssistantUsage(createMockUsage(0, 0))).toBe(false);
 	});
 });
 

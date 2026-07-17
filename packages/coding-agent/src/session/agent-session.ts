@@ -63,6 +63,7 @@ import {
 	estimateTokens,
 	generateBranchSummary,
 	generateHandoffFromContext,
+	isUsableAssistantUsage,
 	prepareCompaction,
 	renderHandoffPrompt,
 	resolveBudgetReserveTokens,
@@ -17007,7 +17008,12 @@ export class AgentSession {
 			const entry = branchEntries[i];
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				const assistant = entry.message;
-				if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error" && assistant.usage) {
+				if (
+					assistant.stopReason !== "aborted" &&
+					assistant.stopReason !== "error" &&
+					assistant.usage &&
+					isUsableAssistantUsage(assistant.usage)
+				) {
 					anchorEntry = entry;
 					break;
 				}
@@ -17073,7 +17079,13 @@ export class AgentSession {
 			// Fallback: look for the latest assistant message with usage/snapshot in this.messages (for branchless/fake sessions in tests)
 			for (let i = resolvedActiveMessages.length - 1; i >= 0; i--) {
 				const msg = resolvedActiveMessages[i];
-				if (msg.role === "assistant" && msg.stopReason !== "aborted" && msg.stopReason !== "error" && msg.usage) {
+				if (
+					msg.role === "assistant" &&
+					msg.stopReason !== "aborted" &&
+					msg.stopReason !== "error" &&
+					msg.usage &&
+					isUsableAssistantUsage(msg.usage)
+				) {
 					const promptTokens = msg.contextSnapshot?.promptTokens ?? calculatePromptTokens(msg.usage);
 					const nonMessageTokens = msg.contextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this);
 
@@ -17102,6 +17114,12 @@ export class AgentSession {
 				messagesTokens +
 				pendingMessages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
 		}
+
+		// Floor display/residual the same way compaction does: provider usage can
+		// under-report (or be all zeros), while the local stored estimate remains a
+		// reliable lower bound for footer/status and /context.
+		const storedEstimate = this.#estimateStoredContextTokens(pendingMessages);
+		usedTokens = compactionContextTokens(usedTokens, storedEstimate);
 
 		const messagesTokens = Math.max(0, usedTokens - categoryNonMessageTokens);
 

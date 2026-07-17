@@ -548,4 +548,197 @@ describe("Context usage consolidation", () => {
 
 		await tempDir.remove();
 	});
+
+	it("skips all-zero terminal usage as an anchor and floors tokens by stored estimate", async () => {
+		const tempDir = TempDir.createSync("@zero-usage-floor-");
+		const bulky = "context under-report filler ".repeat(400);
+		const { session, sessionManager, agent } = createSession(tempDir);
+
+		sessionManager.appendMessage({ role: "user", content: bulky, timestamp: 1000 } as Message);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "zero usage reply" }],
+			api: mockModel.api,
+			provider: mockModel.provider,
+			model: mockModel.id,
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 0, nonMessageTokens: 10 },
+			timestamp: 2000,
+		} as AssistantMessage);
+
+		syncSession(session, agent);
+
+		const messageEstimate =
+			estimateTokens({ role: "user", content: bulky, timestamp: 1000 } as Message, {
+				excludeEncryptedReasoning: true,
+			}) +
+			estimateTokens(
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "zero usage reply" }],
+					api: mockModel.api,
+					provider: mockModel.provider,
+					model: mockModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: 2000,
+				} as AssistantMessage,
+				{ excludeEncryptedReasoning: true },
+			);
+
+		const breakdown = session.getContextBreakdown();
+		const cu = session.getContextUsage();
+		// All-zero usage must not be treated as a provider-truth anchor.
+		expect(breakdown?.anchored).toBe(false);
+		expect(cu?.tokens).toBeGreaterThan(0);
+		// usedTokens includes non-message tokens as well, so it is at least the message estimate.
+		expect(cu?.tokens).toBeGreaterThanOrEqual(messageEstimate);
+
+		await tempDir.remove();
+	});
+
+	it("floors a deliberately tiny provider anchor by the stored conversation estimate", async () => {
+		const tempDir = TempDir.createSync("@tiny-provider-floor-");
+		const bulky = "stored conversation estimate filler ".repeat(800);
+		const { session, sessionManager, agent } = createSession(tempDir);
+
+		sessionManager.appendMessage({ role: "user", content: bulky, timestamp: 1000 } as Message);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "under-reported" }],
+			api: mockModel.api,
+			provider: mockModel.provider,
+			model: mockModel.id,
+			stopReason: "stop",
+			usage: {
+				input: 985,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1005,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 985, nonMessageTokens: 10 },
+			timestamp: 2000,
+		} as AssistantMessage);
+
+		syncSession(session, agent);
+
+		const messageEstimate =
+			estimateTokens({ role: "user", content: bulky, timestamp: 1000 } as Message, {
+				excludeEncryptedReasoning: true,
+			}) +
+			estimateTokens(
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "under-reported" }],
+					api: mockModel.api,
+					provider: mockModel.provider,
+					model: mockModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 985,
+						output: 20,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 1005,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: 2000,
+				} as AssistantMessage,
+				{ excludeEncryptedReasoning: true },
+			);
+
+		const breakdown = session.getContextBreakdown();
+		expect(breakdown?.anchored).toBe(true);
+		expect(breakdown!.usedTokens).toBeGreaterThan(985);
+		expect(breakdown!.usedTokens).toBeGreaterThanOrEqual(messageEstimate);
+		expect(session.getContextUsage()?.tokens).toBe(breakdown!.usedTokens);
+
+		// /context + status-line still observe the same floored value
+		const cb = computeContextBreakdown(session);
+		expect(cb.usedTokens).toBe(breakdown!.usedTokens);
+		const sl = new StatusLineComponent(session);
+		expect(sl.getCachedContextBreakdown().usedTokens).toBe(breakdown!.usedTokens);
+
+		await tempDir.remove();
+	});
+
+	it("keeps a large provider anchor unchanged when it exceeds the stored estimate", async () => {
+		const tempDir = TempDir.createSync("@large-provider-truth-");
+		const { session, sessionManager, agent } = createSession(tempDir);
+
+		sessionManager.appendMessage({ role: "user", content: "short", timestamp: 1000 } as Message);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "provider truth" }],
+			api: mockModel.api,
+			provider: mockModel.provider,
+			model: mockModel.id,
+			stopReason: "stop",
+			usage: {
+				input: 90000,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 90020,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			contextSnapshot: { promptTokens: 90000, nonMessageTokens: 10 },
+			timestamp: 2000,
+		} as AssistantMessage);
+
+		syncSession(session, agent);
+
+		const breakdown = session.getContextBreakdown();
+		expect(breakdown?.anchored).toBe(true);
+		// Provider prompt dominates; floor must not lower provider truth.
+		// Exact value is promptTokens + max(0, currentNonMessage - snapshotNonMessage).
+		expect(breakdown!.usedTokens).toBeGreaterThanOrEqual(90000);
+		const messageOnlyEstimate =
+			estimateTokens({ role: "user", content: "short", timestamp: 1000 } as Message, {
+				excludeEncryptedReasoning: true,
+			}) +
+			estimateTokens(
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "provider truth" }],
+					api: mockModel.api,
+					provider: mockModel.provider,
+					model: mockModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 90000,
+						output: 20,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 90020,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: 2000,
+				} as AssistantMessage,
+				{ excludeEncryptedReasoning: true },
+			);
+		expect(messageOnlyEstimate).toBeLessThan(90000);
+		expect(breakdown!.usedTokens).toBeGreaterThan(messageOnlyEstimate);
+		// Should remain provider-anchored magnitude, not collapse to tiny local text estimate.
+		expect(breakdown!.usedTokens).toBeLessThan(90000 + 5000);
+
+		await tempDir.remove();
+	});
 });
