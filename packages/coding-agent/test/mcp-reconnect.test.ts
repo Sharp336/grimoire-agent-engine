@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { DeferredMCPTool, isRetriableConnectionError, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type {
+	MCPServerConnection,
+	MCPStdioServerConfig,
+	MCPToolCallResult,
+	MCPTransport,
+} from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 // ---------------------------------------------------------------------------
@@ -306,5 +313,46 @@ describe("reconnect abort propagation", () => {
 		controller.abort();
 
 		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// MCPManager reconnect tool replacement
+// ---------------------------------------------------------------------------
+
+const MANAGER_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
+const DASHED_SERVER_NAME = "test-server";
+const DASHED_SERVER_TOOL_NAME = "mcp__test_server_do_thing";
+
+describe("MCPManager reconnect tool replacement", () => {
+	it("replaces the old tool identity for a dashed server name", async () => {
+		const manager = new MCPManager(process.cwd());
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: process.execPath,
+			args: [MANAGER_FIXTURE_PATH],
+		};
+
+		try {
+			const connected = await manager.connectServers({ [DASHED_SERVER_NAME]: config }, {});
+			expect(connected.errors.has(DASHED_SERVER_NAME)).toBe(false);
+
+			const initialTools = manager.getTools().filter(tool => tool.name === DASHED_SERVER_TOOL_NAME);
+			expect(initialTools).toHaveLength(1);
+			const oldTool = initialTools[0];
+			if (!oldTool) throw new Error("expected the fixture tool to be registered");
+			const oldConnection = manager.getConnection(DASHED_SERVER_NAME);
+			if (!oldConnection) throw new Error("expected the fixture server to be connected");
+
+			const replacementConnection = await manager.reconnectServer(DASHED_SERVER_NAME, { manual: true });
+			expect(replacementConnection).not.toBeNull();
+			expect(replacementConnection).not.toBe(oldConnection);
+
+			const replacementTools = manager.getTools().filter(tool => tool.name === DASHED_SERVER_TOOL_NAME);
+			expect(replacementTools).toHaveLength(1);
+			expect(replacementTools[0]).not.toBe(oldTool);
+		} finally {
+			await manager.disconnectAll();
+		}
 	});
 });

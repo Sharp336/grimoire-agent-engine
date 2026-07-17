@@ -1,7 +1,8 @@
 import { expect, test, vi } from "bun:test";
-import type { CustomTool, CustomToolContext } from "../src/extensibility/custom-tools/types";
+import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
 import { MCPManager } from "../src/mcp/manager";
-import type { MCPRequestOptions, MCPServerConnection, MCPTransport } from "../src/mcp/types";
+import { MCPTool } from "../src/mcp/tool-bridge";
+import type { MCPRequestOptions, MCPServerConnection, MCPToolDefinition, MCPTransport } from "../src/mcp/types";
 import { createMCPProxyTools } from "../src/task/executor";
 import { ToolAbortError } from "../src/tools/tool-errors";
 
@@ -45,24 +46,19 @@ function createFakeConnection() {
 	};
 }
 
+const hangingToolDefinition: MCPToolDefinition = {
+	name: "test_tool",
+	description: "A tool whose source MCP transport hangs until aborted",
+	inputSchema: { type: "object", properties: {} },
+};
+
 test("MCP proxy tool aborts underlying operation on caller abort", async () => {
 	const fake = createFakeConnection();
 	const manager = new MCPManager(process.cwd());
 
-	const toolsData: CustomTool[] = [
-		{
-			name: "test_tool",
-			label: "Test Tool",
-			description: "A test tool",
-			strict: false,
-			mcpToolName: "test_tool",
-			mcpServerName: "test-server",
-			parameters: { type: "object", properties: {} },
-			execute: async () => ({ content: [] }),
-		} as CustomTool,
-	];
+	const sourceTool = new MCPTool(fake.connection, hangingToolDefinition);
 
-	vi.spyOn(manager, "getTools").mockReturnValue(toolsData);
+	vi.spyOn(manager, "getTools").mockReturnValue([sourceTool]);
 	vi.spyOn(manager, "waitForConnection").mockResolvedValue(fake.connection);
 
 	const tools = createMCPProxyTools(manager);
@@ -104,20 +100,9 @@ test("MCP proxy tool aborts underlying operation on timeout", async () => {
 		const fake = createFakeConnection();
 		const manager = new MCPManager(process.cwd());
 
-		const toolsData: CustomTool[] = [
-			{
-				name: "test_tool",
-				label: "Test Tool",
-				description: "A test tool",
-				strict: false,
-				mcpToolName: "test_tool",
-				mcpServerName: "test-server",
-				parameters: { type: "object", properties: {} },
-				execute: async () => ({ content: [] }),
-			} as CustomTool,
-		];
+		const sourceTool = new MCPTool(fake.connection, hangingToolDefinition);
 
-		vi.spyOn(manager, "getTools").mockReturnValue(toolsData);
+		vi.spyOn(manager, "getTools").mockReturnValue([sourceTool]);
 		vi.spyOn(manager, "waitForConnection").mockResolvedValue(fake.connection);
 
 		const tools = createMCPProxyTools(manager);

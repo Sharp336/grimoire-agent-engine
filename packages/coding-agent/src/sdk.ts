@@ -889,6 +889,7 @@ function customToolToDefinition(tool: CustomTool): ToolDefinition {
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters,
+		strict: tool.strict,
 		hidden: tool.hidden,
 		loadMode: tool.loadMode ?? "discoverable",
 		deferrable: tool.deferrable,

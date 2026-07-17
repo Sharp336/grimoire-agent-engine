@@ -98,6 +98,29 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	afterAll(() => {
 		removeSyncWithRetries(registryAuthDir);
 	});
+	it("preserves explicit non-strict custom tools in the model-facing session registry", async () => {
+		const tempDir = makeTempDir();
+		const customTool = {
+			name: "sdk_custom_non_strict_tool",
+			label: "SDK Custom Non-Strict Tool",
+			description: "Checks strict metadata survives SDK registration.",
+			strict: false,
+			parameters: type({ value: "string" }),
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [customTool],
+		});
+
+		try {
+			expect(session.getToolByName(customTool.name)?.strict).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
 
 	it("excludes defaultInactive extension tools from the initial active set unless explicitly requested", async () => {
 		const tempDir = makeTempDir();

@@ -29,7 +29,6 @@ import { getSessionSlashCommands } from "../extensibility/extensions/get-command
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
@@ -651,61 +650,54 @@ function getUsageTokens(usage: unknown): number {
  * Create proxy tools that reuse the parent's MCP connections.
  */
 export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
-	return mcpManager.getTools().map(tool => {
-		const mcpTool = tool as { mcpToolName?: string; mcpServerName?: string };
-		return {
-			name: tool.name,
-			label: tool.label ?? tool.name,
-			description: tool.description ?? "",
-			parameters: tool.parameters,
-			execute: async (_toolCallId, params, _onUpdate, _ctx, signal) => {
-				if (signal?.aborted) {
-					throw new ToolAbortError();
-				}
-				const serverName = mcpTool.mcpServerName ?? "";
-				const mcpToolName = mcpTool.mcpToolName ?? "";
-				try {
-					const timeoutController = new AbortController();
-					const timeoutSignal = timeoutController.signal;
-					const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-					const result = await withAbortTimeout(
-						(async () => {
-							const connection = await untilAborted(combinedSignal, () =>
-								mcpManager.waitForConnection(serverName),
-							);
-							return callTool(connection, mcpToolName, params as Record<string, unknown>, {
-								signal: combinedSignal,
-							});
-						})(),
-						MCP_CALL_TIMEOUT_MS,
-						signal,
-						timeoutController,
+	return mcpManager.getTools().map(tool => ({
+		name: tool.name,
+		label: tool.label ?? tool.name,
+		description: tool.description ?? "",
+		parameters: tool.parameters,
+		strict: tool.strict,
+		execute: async (toolCallId, params, onUpdate, context, signal) => {
+			if (signal?.aborted) {
+				throw new ToolAbortError();
+			}
+			const serverName = tool.mcpServerName ?? "";
+			const mcpToolName = tool.mcpToolName ?? "";
+			try {
+				const timeoutController = new AbortController();
+				const timeoutSignal = timeoutController.signal;
+				const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+				const currentTool = mcpManager
+					.getTools()
+					.find(
+						candidate =>
+							candidate.mcpServerName === tool.mcpServerName && candidate.mcpToolName === tool.mcpToolName,
 					);
-					return {
-						content: (result.content ?? []).map(item =>
-							item.type === "text"
-								? { type: "text" as const, text: item.text ?? "" }
-								: { type: "text" as const, text: JSON.stringify(item) },
-						),
-						details: { serverName, mcpToolName, isError: result.isError },
-					};
-				} catch (error) {
-					if (error instanceof ToolAbortError) {
-						throw error;
-					}
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `MCP error: ${error instanceof Error ? error.message : String(error)}`,
-							},
-						],
-						details: { serverName, mcpToolName, isError: true },
-					};
+				if (!currentTool) {
+					throw new Error(`MCP tool "${tool.name}" is no longer available`);
 				}
-			},
-		};
-	});
+				return await withAbortTimeout(
+					currentTool.execute(toolCallId, params, onUpdate, context, combinedSignal),
+					MCP_CALL_TIMEOUT_MS,
+					signal,
+					timeoutController,
+				);
+			} catch (error) {
+				if (error instanceof ToolAbortError) {
+					throw error;
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `MCP error: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					details: { serverName, mcpToolName, isError: true },
+					isError: true,
+				};
+			}
+		},
+	}));
 }
 
 export function createSubagentSettings(

@@ -74,6 +74,20 @@ async function createLocalImageContext(
 }
 
 describe("MCP tool arguments", () => {
+	it("marks active MCP tools explicitly non-strict", () => {
+		const tool = new MCPTool(createCapturedConnection([]), createSearchToolDefinition());
+
+		expect(tool.strict).toBe(false);
+	});
+
+	it("marks deferred MCP tools explicitly non-strict", () => {
+		const tool = new DeferredMCPTool("intellij-index", createSearchToolDefinition(), async () =>
+			createCapturedConnection([]),
+		);
+
+		expect(tool.strict).toBe(false);
+	});
+
 	it("omits optional empty placeholders before tools/call", async () => {
 		const calls: CapturedRequest[] = [];
 		const tool = new MCPTool(createCapturedConnection(calls), createSearchToolDefinition());

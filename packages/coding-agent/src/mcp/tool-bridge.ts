@@ -325,6 +325,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
+	/** MCP tools use permissive schemas because servers own parameter validation. */
+	readonly strict = false;
 	/** Original MCP tool name (before normalization) */
 	readonly mcpToolName: string;
 	/** Server name */
@@ -411,6 +413,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
+	/** MCP tools use permissive schemas because servers own parameter validation. */
+	readonly strict = false;
 	/** Original MCP tool name (before normalization) */
 	readonly mcpToolName: string;
 	/** Server name */
