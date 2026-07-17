@@ -1,9 +1,10 @@
 /**
- * Workstream D: parallelize session dispose so /exit no longer stacks subsystem
+ * Parallelize session dispose so /exit no longer stacks subsystem
  * timeouts. Contracts:
  *  - independent Phase-B branches start before either resolves (causal, not wall-only)
  *  - post-prompt drain is bounded at 5s with the exact warn string
  *  - async-job delivery write lands before sessionManager.close
+ *  - Hindsight retain flush lands before sessionManager.close
  *  - idle dispose stays under the 3s perceived-hang budget
  *  - owned AsyncJobManager singleton clears even when dispose rejects
  *  - mnemopi embed shutdown runs even when state.dispose rejects
@@ -12,17 +13,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import * as mnemopiEmbedClientModule from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
-import {
-	type MnemopiSessionState,
-	setMnemopiSessionState,
-} from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -46,7 +44,7 @@ function hindsightFlushStub(flush: () => Promise<void>): HindsightSessionState {
 	return stub as HindsightSessionState;
 }
 
-describe("AgentSession dispose parallelization (WS-D)", () => {
+describe("AgentSession dispose parallelization", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
@@ -159,32 +157,28 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 		expect(hindsightStartAt).toBeLessThan(firstEnd);
 	});
 
-	it(
-		"bounds a never-settling post-prompt task at 5s and logs the exact warn",
-		async () => {
-			// Real platform clock: withTimeout is implemented with setTimeout, and
-			// awaiting dispose under fake timers leaves the deadline timer unfired
-			// while the hang task never settles. This is the intentional 5s hang-fix.
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-			const hang = deferred(); // intentionally never resolved
+	it("bounds a never-settling post-prompt task at 5s and logs the exact warn", async () => {
+		// Real platform clock: withTimeout is implemented with setTimeout, and
+		// awaiting dispose under fake timers leaves the deadline timer unfired
+		// while the hang task never settles. This is the intentional 5s hang-fix.
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const hang = deferred(); // intentionally never resolved
 
-			const s = await createSession();
-			s.trackPostPromptTaskForTests(hang.promise);
-			expect(s.hasPostPromptWork).toBe(true);
+		const s = await createSession();
+		s.trackPostPromptTaskForTests(hang.promise);
+		expect(s.hasPostPromptWork).toBe(true);
 
-			const started = performance.now();
-			await s.dispose();
-			session = undefined;
-			const elapsed = performance.now() - started;
+		const started = performance.now();
+		await s.dispose();
+		session = undefined;
+		const elapsed = performance.now() - started;
 
-			expect(elapsed).toBeGreaterThanOrEqual(4_500);
-			expect(elapsed).toBeLessThan(7_000);
-			expect(
-				warnSpy.mock.calls.some(call => call[0] === "Post-prompt tasks still draining at dispose deadline"),
-			).toBe(true);
-		},
-		15_000,
-	);
+		expect(elapsed).toBeGreaterThanOrEqual(4_500);
+		expect(elapsed).toBeLessThan(7_000);
+		expect(warnSpy.mock.calls.some(call => call[0] === "Post-prompt tasks still draining at dispose deadline")).toBe(
+			true,
+		);
+	}, 15_000);
 
 	it("writes async-job delivery entries before sessionManager.close", async () => {
 		const order: string[] = [];
@@ -199,13 +193,7 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 				await deliveryGate.promise;
 				const manager = session?.sessionManager;
 				if (!manager) throw new Error("session missing during delivery");
-				manager.appendCustomMessageEntry(
-					"async-result",
-					`delivery:${jobId}:${text}`,
-					true,
-					{ jobId },
-					"agent",
-				);
+				manager.appendCustomMessageEntry("async-result", `delivery:${jobId}:${text}`, true, { jobId }, "agent");
 				order.push("delivery-write");
 			},
 		});
@@ -259,6 +247,49 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 		}
 	});
 
+	it("flushes Hindsight retain queue before sessionManager.close", async () => {
+		const order: string[] = [];
+		const flushGate = deferred();
+		const flushEntered = deferred();
+
+		const s = await createSession({ persist: true });
+		s.setHindsightSessionState(
+			hindsightFlushStub(async () => {
+				order.push("hindsight-flush:start");
+				flushEntered.resolve();
+				await flushGate.promise;
+				order.push("hindsight-flush:end");
+			}),
+		);
+
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			order.push("close");
+			await originalClose();
+		};
+
+		const disposePromise = s.dispose();
+		try {
+			// Hang the Phase-B Hindsight writer across dispose start: while the
+			// flush pends the allSettled barrier cannot settle, so Phase C close
+			// must not be observed. Deterministic — close only runs post-barrier.
+			await flushEntered.promise;
+			expect(order).toContain("hindsight-flush:start");
+			expect(order).not.toContain("close");
+		} finally {
+			// Resolve even on assertion failure so the unbounded flush cannot
+			// wedge this dispose or the afterEach re-dispose.
+			flushGate.resolve();
+		}
+		await disposePromise;
+		session = undefined;
+
+		const flushEndAt = order.indexOf("hindsight-flush:end");
+		const closeAt = order.indexOf("close");
+		expect(flushEndAt).toBeGreaterThanOrEqual(0);
+		expect(closeAt).toBeGreaterThan(flushEndAt);
+	});
+
 	it("idle dispose completes under the 3s status budget", async () => {
 		// Integration wall-clock check against the real platform clock: the
 		// perceived-hang status arms at 3s, and empty/idle dispose must finish
@@ -274,18 +305,8 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 
 	it("clears owned AsyncJobManager singleton when dispose rejects", async () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const owned = {
-			dispose: async (_opts?: { timeoutMs?: number }) => {
-				throw new Error("owned async dispose boom");
-			},
-			// #cancelOwnAsyncJobs calls cancelAll on the scoped manager before dispose.
-			cancelAll: () => {},
-			getDeliveryState: () => ({
-				queued: 0,
-				delivering: false,
-				pendingJobIds: [] as string[],
-			}),
-		} as AsyncJobManager;
+		const owned = new AsyncJobManager({ onJobComplete: () => {} });
+		vi.spyOn(owned, "dispose").mockRejectedValue(new Error("owned async dispose boom"));
 		AsyncJobManager.setInstance(owned);
 
 		const s = await createSession({ ownedAsyncJobManager: owned });
@@ -297,9 +318,7 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 			warnSpy.mock.calls.some(
 				call =>
 					call[0] === "Session dispose subsystem failed during parallel teardown" &&
-					String((call[1] as { error?: unknown } | undefined)?.error ?? "").includes(
-						"owned async dispose boom",
-					),
+					String((call[1] as { error?: unknown } | undefined)?.error ?? "").includes("owned async dispose boom"),
 			),
 		).toBe(true);
 	});
@@ -313,12 +332,11 @@ describe("AgentSession dispose parallelization (WS-D)", () => {
 			.mockResolvedValue(undefined);
 
 		const order: string[] = [];
-		const rejectingState = {
-			dispose: async (_opts?: { timeoutMs?: number; consolidate?: boolean }) => {
-				order.push("mnemopi:dispose");
-				throw new Error("mnemopi dispose boom");
-			},
-		} as MnemopiSessionState;
+		const rejectingState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		vi.spyOn(rejectingState, "dispose").mockImplementation(async () => {
+			order.push("mnemopi:dispose");
+			throw new Error("mnemopi dispose boom");
+		});
 
 		const s = await createSession();
 		setMnemopiSessionState(s, rejectingState);

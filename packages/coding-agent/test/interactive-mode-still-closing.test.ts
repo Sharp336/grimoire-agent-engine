@@ -1,5 +1,5 @@
 /**
- * Workstream D: InteractiveMode.shutdown arms a 3s "Still closing…" status
+ * InteractiveMode.shutdown arms a 3s "Still closing…" status
  * before signal teardown and always clears the timer in finally.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -20,7 +20,7 @@ async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
 }
 
-describe("InteractiveMode.shutdown still-closing status (WS-D)", () => {
+describe("InteractiveMode.shutdown still-closing status", () => {
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
 	let session: AgentSession;
@@ -85,10 +85,7 @@ describe("InteractiveMode.shutdown still-closing status (WS-D)", () => {
 
 		vi.advanceTimersByTime(1);
 		await flushMicrotasks();
-		expect(statuses).toEqual([
-			"Closing session…",
-			"Still closing… (flushing memory backend / network)",
-		]);
+		expect(statuses).toEqual(["Closing session…", "Still closing… (flushing memory backend / network)"]);
 
 		teardownGate.resolve();
 		await shutdownPromise;

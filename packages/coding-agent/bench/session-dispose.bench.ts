@@ -1,5 +1,5 @@
 /**
- * Idle AgentSession.dispose wall-clock (Workstream D).
+ * Idle AgentSession.dispose wall-clock.
  *
  * Measures empty/idle dispose with no pending network flush. Acceptance:
  * median < 3000ms (the InteractiveMode "Still closing…" status budget).
