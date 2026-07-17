@@ -10,7 +10,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
-import { usesCodexTaskPrompt } from "@oh-my-pi/pi-coding-agent/task/prompt-policy";
+import { evalPromptStyle, usesCodexTaskPrompt } from "@oh-my-pi/pi-coding-agent/task/prompt-policy";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
@@ -167,15 +167,16 @@ describe("AgentSession model-change prompt refresh", () => {
 		return [first, second];
 	}
 
-	function pickTwoModelsWithSameTaskPolicy(): [Model, Model] {
+	function pickTwoModelsWithSamePromptPolicy(): [Model, Model] {
 		const all = modelRegistry.getAll();
 		const first = all[0];
 		const second = all.find(
 			model =>
 				(model.provider !== first.provider || model.id !== first.id) &&
-				usesCodexTaskPrompt(model.id) === usesCodexTaskPrompt(first.id),
+				usesCodexTaskPrompt(model.id) === usesCodexTaskPrompt(first.id) &&
+				evalPromptStyle(model.id) === evalPromptStyle(first.id),
 		);
-		if (!first || !second) throw new Error("Expected two distinct models with the same task prompt policy");
+		if (!first || !second) throw new Error("Expected two distinct models with the same prompt policy cohort");
 		return [first, second];
 	}
 
@@ -185,6 +186,19 @@ describe("AgentSession model-change prompt refresh", () => {
 		const codexPolicy = all.find(model => usesCodexTaskPrompt(model.id));
 		if (!defaultPolicy || !codexPolicy) throw new Error("Expected default-policy and GPT-5.6 models");
 		return [defaultPolicy, codexPolicy];
+	}
+
+	function pickModelsAcrossEvalStyles(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all.find(model => !usesCodexTaskPrompt(model.id));
+		const second = all.find(
+			model =>
+				!usesCodexTaskPrompt(model.id) &&
+				evalPromptStyle(model.id) !== evalPromptStyle(first?.id ?? "") &&
+				(model.provider !== first?.provider || model.id !== first?.id),
+		);
+		if (!first || !second) throw new Error("Expected two same-task-policy models with different eval styles");
+		return [first, second];
 	}
 
 	function newSession(
@@ -228,8 +242,8 @@ describe("AgentSession model-change prompt refresh", () => {
 		expect(rebuildCount).toBe(1);
 	});
 
-	it("does not rebuild a hidden-model prompt when the task policy stays the same", async () => {
-		const [modelA, modelB] = pickTwoModelsWithSameTaskPolicy();
+	it("does not rebuild a hidden-model prompt when the prompt policy cohort stays the same", async () => {
+		const [modelA, modelB] = pickTwoModelsWithSamePromptPolicy();
 		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
 		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
 
@@ -266,5 +280,25 @@ describe("AgentSession model-change prompt refresh", () => {
 		await session.setModel(modelB);
 		expect(rebuildCount).toBe(1);
 		expect(session.agent.state.systemPrompt).toEqual(["policy changed"]);
+	});
+
+	it("rebuilds a hidden-model prompt when the eval style changes", async () => {
+		const [modelA, modelB] = pickModelsAcrossEvalStyles();
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		let rebuildCount = 0;
+		session = newSession(
+			modelA,
+			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
+			async () => {
+				rebuildCount++;
+				return { systemPrompt: ["eval style changed"] };
+			},
+		);
+
+		await session.setModel(modelB);
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["eval style changed"]);
 	});
 });

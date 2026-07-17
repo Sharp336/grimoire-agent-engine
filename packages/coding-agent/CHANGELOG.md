@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a model-aware `Eval-First Batching` section to the system prompt: when the `eval` tool is active, the prompt now instructs models to batch multi-call steps into single eval cells with `parallel([...])`, in-cell control flow, and per-call error handling, with dialects tuned per model family (Claude/GLM, OpenAI, Kimi, and a maximum-emphasis default fallback). Hidden-model prompt rebuilds now key on the eval dialect cohort as well as the task policy.
+
 ## [17.0.2] - 2026-07-17
 
 ### Added

@@ -303,7 +303,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
-import { usesCodexTaskPrompt } from "../task/prompt-policy";
+import { evalPromptStyle, usesCodexTaskPrompt } from "../task/prompt-policy";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -7071,7 +7071,8 @@ export class AgentSession {
 	#currentPromptModelKey(): string | undefined {
 		const model = this.model ? formatModelString(this.model) : undefined;
 		if (!model || this.settings.get("includeModelInPrompt")) return model;
-		return usesCodexTaskPrompt(model) ? "task-policy:gpt-5.6" : "task-policy:default";
+		const taskPolicy = usesCodexTaskPrompt(model) ? "gpt-5.6" : "default";
+		return `task-policy:${taskPolicy};eval-style:${evalPromptStyle(model)}`;
 	}
 
 	async #syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
