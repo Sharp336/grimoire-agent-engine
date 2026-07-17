@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ([#5914](https://github.com/can1357/oh-my-pi/issues/5914)) llama.cpp rejecting every tool-carrying request with HTTP 400 `Unable to generate parser for this template ... Unrecognized schema: true`. `toolWireSchema` intentionally emits a bare boolean `true` for unconstrained fields (issue #1179), and `supportsStrictMode` is off for these hosts so the raw parameters ship unchanged; the openai-completions encoder now widens boolean subschemas (`true`/`false`) into a value-accepting `anyOf` of primitives and strips boolean `additionalProperties`/`unevaluatedProperties` for grammar-constrained backends. This regressed on 2026-07-17 when the `task` tool gained an `outputSchema?: unknown` field, shipping `properties.outputSchema: true` to llama.cpp on every request.
+
 ## [17.0.3] - 2026-07-17
 
 ### Fixed

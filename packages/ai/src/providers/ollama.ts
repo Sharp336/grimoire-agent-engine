@@ -24,7 +24,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
-import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
+import { sanitizeSchemaForGrammarConstrainedSampler, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
 	type HealedToolCall,
@@ -281,7 +281,7 @@ function convertTools(tools: Tool[] | undefined): OllamaFunctionTool[] | undefin
 		function: {
 			name: tool.name,
 			description: tool.description,
-			parameters: sanitizeSchemaForOllama(toolWireSchema(tool)),
+			parameters: sanitizeSchemaForGrammarConstrainedSampler(toolWireSchema(tool)),
 		},
 	}));
 }

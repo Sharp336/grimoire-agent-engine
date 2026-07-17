@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `OpenAICompat.sanitizeToolSchemaForGrammar` (resolved by `buildOpenAICompat`): when true (local grammar-constrained backends — `llama.cpp`/`lm-studio`/`vllm`/openai-compatible server), signals that the openai-completions encoder must widen bare boolean JSON Schema subschemas before sending, since the sampler's grammar generator rejects them with HTTP 400 `Unrecognized schema: true`. Mirrors the `replayReasoningContent` detection gate.
+
 ## [17.0.3] - 2026-07-17
 
 ### Fixed
