@@ -16,6 +16,7 @@ type RequestLine = {
 async function withSocketServer(
 	handleLine: (line: string, socket: net.Socket) => void,
 	run: (socketPath: string) => Promise<void>,
+	transport: "unix" | "tcp" = "unix",
 ): Promise<void> {
 	const dir = await mkdtemp(join(tmpdir(), "cmux-browser-test-"));
 	const socketPath = join(dir, "cmux.sock");
@@ -35,15 +36,28 @@ async function withSocketServer(
 	});
 
 	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(socketPath, () => {
+		const onListening = (): void => {
 			server.off("error", reject);
 			resolve();
-		});
+		};
+		server.once("error", reject);
+		if (transport === "tcp") {
+			server.listen(0, "127.0.0.1", onListening);
+		} else {
+			server.listen(socketPath, onListening);
+		}
 	});
 
 	try {
-		await run(socketPath);
+		let socketAddress = socketPath;
+		if (transport === "tcp") {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				throw new Error("Expected TCP server address");
+			}
+			socketAddress = `127.0.0.1:${address.port}`;
+		}
+		await run(socketAddress);
 	} finally {
 		await new Promise<void>(resolve => server.close(() => resolve()));
 		await rm(dir, { recursive: true, force: true });
@@ -90,6 +104,26 @@ describe("CmuxSocketClient", () => {
 					client.close();
 				}
 			},
+		);
+	});
+
+	it("connects and round-trips requests over a cmux SSH TCP relay address", async () => {
+		const lines: string[] = [];
+		await withSocketServer(
+			(line, socket) => {
+				lines.push(line);
+				socket.write(`${JSON.stringify({ ok: true, result: { transport: "tcp" } })}\n`);
+			},
+			async socketAddress => {
+				const client = new CmuxSocketClient({ socketPath: socketAddress });
+				try {
+					expect(await client.request("browser.list", {})).toEqual({ transport: "tcp" });
+					expect(lines).toHaveLength(1);
+				} finally {
+					client.close();
+				}
+			},
+			"tcp",
 		);
 	});
 

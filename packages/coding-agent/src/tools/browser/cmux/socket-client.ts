@@ -5,6 +5,16 @@ import { ToolError } from "../../tool-errors";
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+function parseTcpSocketAddress(socketPath: string): { host: string; port: number } | null {
+	const match = /^([A-Za-z0-9.-]+):(\d+)$/.exec(socketPath);
+	const host = match?.[1];
+	const port = Number(match?.[2]);
+	if (!host || !Number.isSafeInteger(port) || port <= 0 || port > 65_535) {
+		return null;
+	}
+	return { host, port };
+}
+
 type RequestJob = {
 	method: string;
 	params: Record<string, unknown>;
@@ -101,7 +111,8 @@ export class CmuxSocketClient {
 	}
 
 	async #openSocket(): Promise<void> {
-		const socket = net.createConnection({ path: this.#socketPath });
+		const tcpAddress = parseTcpSocketAddress(this.#socketPath);
+		const socket = tcpAddress ? net.createConnection(tcpAddress) : net.createConnection({ path: this.#socketPath });
 		this.#socket = socket;
 		this.#buffer = "";
 		socket.setEncoding("utf8");

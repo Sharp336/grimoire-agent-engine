@@ -6,6 +6,10 @@
 
 - `retry.fallbackChains` wildcards now support id-prefixed targets and keys: a chain entry like `"openrouter/google/*"` re-prefixes the failing model's bare id (`google-antigravity/gemini-x` → `openrouter/google/gemini-x`), a plain `"provider/*"` entry falling back *from* an aggregator strips the vendor prefix when the target provider only knows the bare id (`openrouter/google/x` → `google-vertex/x`), and an id-prefixed key (`"openrouter/google/*"`) scopes a chain to that provider's ids under the prefix.
 
+### Fixed
+
+- Fixed cmux browser panes failing in `cmux ssh` sessions because the exported `CMUX_SOCKET_PATH=127.0.0.1:<port>` relay address was treated as a Unix socket path; cmux TCP relay addresses now connect over TCP while local Unix socket paths keep their existing behavior.
+
 ## [17.0.1] - 2026-07-16
 
 ### Changed
