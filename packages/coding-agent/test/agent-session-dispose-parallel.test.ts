@@ -48,10 +48,10 @@ async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
-function hindsightFlushStub(flush: () => Promise<void>): HindsightSessionState {
+function hindsightFlushStub(flush: () => Promise<void>, dispose: () => void = () => {}): HindsightSessionState {
 	const stub = {
 		flushRetainQueue: flush,
-		dispose: () => {},
+		dispose,
 	};
 	return stub as HindsightSessionState;
 }
@@ -768,6 +768,44 @@ describe("AgentSession dispose parallelization", () => {
 		const closeAt = order.indexOf("close");
 		expect(flushEndAt).toBeGreaterThanOrEqual(0);
 		expect(closeAt).toBeGreaterThan(flushEndAt);
+	});
+
+	it("flushes Hindsight retains enqueued while post-prompt work drains", async () => {
+		const firstFlushEntered = deferred();
+		const postPromptGate = deferred();
+		const order: string[] = [];
+		let flushCalls = 0;
+		let pendingRetains = 0;
+		const s = await createSession();
+		s.setHindsightSessionState(
+			hindsightFlushStub(
+				async () => {
+					flushCalls++;
+					if (flushCalls === 1) firstFlushEntered.resolve();
+					if (pendingRetains > 0) {
+						pendingRetains = 0;
+						order.push("retain:flush");
+					}
+				},
+				() => order.push("queue:dispose"),
+			),
+		);
+		s.trackPostPromptTaskForTests(
+			postPromptGate.promise.then(() => {
+				pendingRetains++;
+				order.push("retain:enqueue");
+			}),
+		);
+
+		const disposePromise = s.dispose();
+		await firstFlushEntered.promise;
+		postPromptGate.resolve();
+		await disposePromise;
+		session = undefined;
+
+		expect(flushCalls).toBe(2);
+		expect(pendingRetains).toBe(0);
+		expect(order).toEqual(["retain:enqueue", "retain:flush", "queue:dispose"]);
 	});
 
 	it("idle dispose completes under the 3s status budget", async () => {

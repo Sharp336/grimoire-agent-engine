@@ -6985,12 +6985,16 @@ export class AgentSession {
 		// quiescence pass. Seal the writer side with a final stable drain before
 		// aggregating failures and entering Phase C.
 		await this.#drainPostPromptTasksForDispose();
+		// The first Hindsight flush may have completed before a disposal-time
+		// post-prompt continuation enqueued another retain. Re-drain after all
+		// post-prompt work settles, while the session identity is still attached.
+		const finalHindsightFlushResults = await Promise.allSettled([hindsightState?.flushRetainQueue()]);
 
 		// allSettled contains rejections that branch try/catch did not already
 		// log (e.g. async-job dispose, advisor recorder, hindsight flush). Log
 		// every failure, then preserve dispose()'s rejecting contract.
 		const phaseBErrors: unknown[] = [];
-		for (const result of phaseBResults) {
+		for (const result of [...phaseBResults, ...finalHindsightFlushResults]) {
 			if (result.status === "rejected") {
 				phaseBErrors.push(result.reason);
 				logger.warn("Session dispose subsystem failed during parallel teardown", {
