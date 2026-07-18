@@ -393,9 +393,6 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 export const devinUsageProvider: UsageProvider = {
 	id: "devin",
 	fetchUsage: fetchDevinUsage,
-	supports: params =>
-		params.provider === "devin" &&
-		params.credential.type === "api_key" &&
-		normalizeDevinApiKey(params.credential.apiKey) !== undefined,
+	supports: params => params.provider === "devin" && params.credential.type === "api_key",
 	validatesCredentials: true,
 };

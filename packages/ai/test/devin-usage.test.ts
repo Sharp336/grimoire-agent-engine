@@ -1,5 +1,7 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { create, toBinary } from "@bufbuild/protobuf";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { type UsageFetchParams, usageReportSchema } from "@oh-my-pi/pi-ai/usage";
@@ -133,23 +135,54 @@ describe("devinUsageProvider", () => {
 		expect(validatedReport).not.toBeInstanceOf(type.errors);
 	});
 
-	it("only supports Devin v3 API key credentials", () => {
-		const supportedApiKey: UsageFetchParams = {
+	it("supports Devin API-key credentials before resolving their values", () => {
+		const referencedApiKey: UsageFetchParams = {
 			provider: "devin",
-			credential: { type: "api_key", apiKey: "cog_valid-token" },
-		};
-		const unsupportedApiKey: UsageFetchParams = {
-			provider: "devin",
-			credential: { type: "api_key", apiKey: "devin-session-token$devin-token" },
+			credential: { type: "api_key", apiKey: "DEVIN_API_KEY" },
 		};
 		const unsupportedOauth: UsageFetchParams = {
 			provider: "devin",
 			credential: { type: "oauth", accessToken: "devin-oauth-token" },
 		};
+		const wrongProvider: UsageFetchParams = {
+			provider: "anthropic",
+			credential: { type: "api_key", apiKey: "cog_valid-token" },
+		};
 
-		expect(devinUsageProvider.supports?.(supportedApiKey)).toBe(true);
-		expect(devinUsageProvider.supports?.(unsupportedApiKey)).toBe(false);
+		expect(devinUsageProvider.supports?.(referencedApiKey)).toBe(true);
 		expect(devinUsageProvider.supports?.(unsupportedOauth)).toBe(false);
+		expect(devinUsageProvider.supports?.(wrongProvider)).toBe(false);
+	});
+
+	it("resolves stored API-key config references before fetching usage", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => (value === "DEVIN_API_KEY" ? "cog_resolved-token" : value),
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.includes("consumption")
+					? { total_acus: 2, consumption_by_date: [] }
+					: { sessions_count: 1 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "DEVIN_API_KEY" }]);
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual(["Bearer cog_resolved-token", "Bearer cog_resolved-token"]);
+			expect(reports?.map(report => report.provider)).toEqual(["devin"]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 2, unit: "acus" });
+		} finally {
+			storage.close();
+		}
 	});
 
 	it("throws definitive auth failures so credential checks fail", async () => {

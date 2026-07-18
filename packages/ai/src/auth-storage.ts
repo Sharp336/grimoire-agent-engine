@@ -2927,6 +2927,17 @@ export class AuthStorage {
 			signal: timeoutSignal,
 		};
 
+		if (request.credential.type === "api_key") {
+			const configValue = request.credential.apiKey;
+			if (!configValue) return null;
+			const apiKey = await this.#configValueResolver(configValue);
+			if (!apiKey) return null;
+			params = {
+				...params,
+				credential: { ...request.credential, apiKey },
+			};
+		}
+
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
