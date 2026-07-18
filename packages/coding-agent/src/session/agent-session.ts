@@ -6845,8 +6845,6 @@ export class AgentSession {
 					logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
 				}
 			})(),
-			// Tiny title client shutdown (no explicit timeout).
-			shutdownTinyTitleClient(),
 			// MCP owned-manager disconnect: bounded 3s, best-effort.
 			(async () => {
 				// Disconnect the MCP manager this session OWNS so its stdio servers are
@@ -6885,16 +6883,17 @@ export class AgentSession {
 			(async () => {
 				await hindsightState?.flushRetainQueue();
 			})(),
-			// Mnemopi dispose then embed shutdown as one sequential branch (#3031).
-			// Pointer was cleared before the barrier so other code cannot observe a
-			// half-disposed state across concurrent branches.
+			// Mnemopi dispose, then shared tiny-model and embed shutdown as one
+			// sequential branch (#3031). Pointer was cleared before the barrier so
+			// other code cannot observe a half-disposed state across concurrent branches.
 			(async () => {
-				// Embed shutdown must run even when state.dispose rejects: consolidate
-				// failure must not leave the embeddings worker alive after session exit.
-				// Normal order remains dispose-then-shutdown so consolidate can still embed.
+				// Both workers must be torn down even when state.dispose rejects. The
+				// shared tiny-model worker stays alive until consolidation finishes because
+				// providers.memoryModel routes consolidation through tinyModelClient.
 				try {
 					await mnemopiState?.dispose({ timeoutMs: mnemopiConsolidateTimeoutMs });
 				} finally {
+					await shutdownTinyTitleClient();
 					// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
 					// consolidate-on-dispose may still call `embed()` to store the final
 					// memories, and that round-trips through the worker we are about to
