@@ -8646,13 +8646,15 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	/**
-	 * Returns `false` when the command was fully handled locally (extension or
-	 * custom-TS command consumed without calling the LLM). Returns `true` when
-	 * the prompt was forwarded to the agent — either directly or queued as a
-	 * steer/follow-up. Callers that render a UI or manage turn lifecycle (e.g.
-	 * the ACP agent) use this to know whether to expect an `agent_end` event.
+	 * Returns `false` when no agent turn starts: the command was handled locally
+	 * (extension or custom-TS command), or session disposal has begun. Returns
+	 * `true` when the prompt was forwarded to the agent — either directly or
+	 * queued as a steer/follow-up. Callers that render a UI or manage turn
+	 * lifecycle (e.g. the ACP agent) use this to know whether to expect an
+	 * `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		if (this.#isDisposed) return false;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 
 		// Handle extension commands first (execute immediately, even during streaming)

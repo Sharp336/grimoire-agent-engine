@@ -1068,6 +1068,26 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("finishes locally when session.prompt reports that no agent turn started", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("session not registered");
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			return false;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "prompt during teardown" }],
+		});
+
+		expect(session.promptCalls).toEqual(["prompt during teardown"]);
+		expect(response.stopReason).toBe("end_turn");
+		harness.abortController.abort();
+	});
+
 	it("does not duplicate the final answer when the assistant message_end arrives before agent_end", async () => {
 		// Companion to the #4902 regression: when message_end IS delivered, its
 		// fallback emission wins and the agent_end flush must stay silent.

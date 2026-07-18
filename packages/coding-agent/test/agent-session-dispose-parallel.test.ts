@@ -376,6 +376,16 @@ describe("AgentSession dispose parallelization", () => {
 		expect(closeCalls).toBe(1);
 	});
 
+	it("reports that no agent turn started when prompting a disposed session", async () => {
+		const s = await createSession();
+		const promptSpy = vi.spyOn(s.agent, "prompt");
+		await s.dispose();
+		session = undefined;
+
+		expect(await s.prompt("too late")).toBe(false);
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
 	it("invalidates a deferred hidden prompt still in setup when dispose starts", async () => {
 		const apiKeyEntered = deferred();
 		const apiKeyGate = deferred();
