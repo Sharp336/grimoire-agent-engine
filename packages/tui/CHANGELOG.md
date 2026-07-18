@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added native-scrollback prefix virtualization so containers can compact committed history without losing or duplicating terminal rows. ([#5930](https://github.com/can1357/oh-my-pi/issues/5930))
+
 ## [17.0.3] - 2026-07-17
 
 ### Fixed
