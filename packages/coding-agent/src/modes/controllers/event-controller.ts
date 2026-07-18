@@ -719,6 +719,17 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
+		const component = this.#lastAssistantComponent;
+		if (
+			event.message.role === "assistant" &&
+			event.message.stopReason !== "error" &&
+			event.message.stopReason !== "aborted" &&
+			component &&
+			component !== this.#pinnedErrorComponent &&
+			!this.#retrySupersededAssistantQueue.includes(component)
+		) {
+			component.sealTranscriptBlock();
+		}
 		if (!settings.get("speech.enabled")) return;
 		if (settings.get("speech.mode") !== "yield") {
 			vocalizer.flush();

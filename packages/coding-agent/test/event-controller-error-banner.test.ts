@@ -57,15 +57,20 @@ afterEach(() => {
 
 function createFixture(streamingMessage?: AssistantMessage) {
 	const componentCalls: string[] = [];
+	let sealed = false;
 	const streamingComponent = {
 		updateContent: vi.fn(() => componentCalls.push("update")),
 		setComplete: vi.fn(),
 		markTranscriptBlockFinalized: vi.fn(),
-		sealTranscriptBlock: vi.fn(() => componentCalls.push("seal")),
+		sealTranscriptBlock: vi.fn(() => {
+			sealed = true;
+			componentCalls.push("seal");
+		}),
 		setErrorPinned: vi.fn((pinned: boolean) => componentCalls.push(pinned ? "pin" : "unpin")),
 		setHideThinkingBlock: vi.fn((hide: boolean) => componentCalls.push(`hide:${hide}`)),
 		messagePersistenceKey: vi.fn(() => "test-persistence-key"),
 		applyRetryRecovery: vi.fn(() => componentCalls.push("recover")),
+		isTranscriptBlockSealed: vi.fn(() => sealed),
 	};
 	const showPinnedError = vi.fn();
 	const clearPinnedError = vi.fn();
@@ -459,6 +464,49 @@ describe("EventController error banner", () => {
 
 		expect(streamingComponent.sealTranscriptBlock).toHaveBeenCalledTimes(1);
 	});
+	it("seals a clean finalized assistant tail at turn end", async () => {
+		const message = makeAssistantMessage();
+		const { controller, streamingComponent } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(streamingComponent.isTranscriptBlockSealed()).toBe(false);
+
+		await controller.handleEvent({ type: "turn_end", message, toolResults: [] } as Extract<
+			AgentSessionEvent,
+			{ type: "turn_end" }
+		>);
+
+		expect(streamingComponent.isTranscriptBlockSealed()).toBe(true);
+	});
+
+	it("keeps a pinned retry-superseded assistant unsealed at turn end", async () => {
+		const message = makeAssistantMessage({ stopReason: "error", errorMessage: "rate limited" });
+		const { controller, streamingComponent } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 2,
+			delayMs: 0,
+			errorMessage: "rate limited",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+
+		await controller.handleEvent({ type: "turn_end", message, toolResults: [] } as Extract<
+			AgentSessionEvent,
+			{ type: "turn_end" }
+		>);
+
+		expect(streamingComponent.isTranscriptBlockSealed()).toBe(false);
+	});
+
 	it("does not pin a banner for a normal assistant stop", async () => {
 		const message = makeAssistantMessage({ stopReason: "stop" });
 		const { controller, showPinnedError } = createFixture(message);
