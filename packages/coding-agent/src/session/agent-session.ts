@@ -6754,8 +6754,10 @@ export class AgentSession {
 		// Bound the drain: tasks are already aborted; a hang past 5s was the historical
 		// /exit freeze. This is a hang-fix, not a flush drop — unexpected errors rethrow.
 		const postPromptDrainTimeoutMessage = "Timed out draining post-prompt tasks during dispose";
+		let postPromptTasksDrained = false;
 		try {
 			await withTimeout(postPromptDrain, 5_000, postPromptDrainTimeoutMessage);
+			postPromptTasksDrained = true;
 		} catch (error) {
 			if (error instanceof Error && error.message === postPromptDrainTimeoutMessage) {
 				logger.warn("Post-prompt tasks still draining at dispose deadline");
@@ -6770,41 +6772,48 @@ export class AgentSession {
 		// clear the pointer only in Phase C after the barrier settles.
 		const hindsightState = this.getHindsightSessionState();
 		const browserOwnerId = this.sessionManager.getSessionId();
-		const mnemopiState = setMnemopiSessionState(this, undefined);
 		const mnemopiConsolidateTimeoutMs = options.mnemopiConsolidateTimeoutMs;
 
-		// Phase B: independent subsystem teardown runs concurrently under one
-		// allSettled barrier. Each branch keeps its existing inner timeout/log
-		// behavior. Writers (async-job delivery drain, Hindsight flush, mnemopi
-		// dispose) complete before Phase C's sessionManager.close().
-		const phaseBResults = await Promise.allSettled([
-			// Async jobs: cancel this agent, dispose the owned manager (3s), clear singleton.
-			(async () => {
-				// Cancel jobs this agent registered so a subagent's teardown doesn't
-				// leak its background bash/task work into the parent's manager. Only
-				// the session that owns the manager goes on to dispose it (which itself
-				// nukes any leftover jobs and pending deliveries).
-				this.#cancelOwnAsyncJobs();
-				const ownedAsyncManager = this.#ownedAsyncJobManager;
-				if (ownedAsyncManager) {
-					// Clear the process-global singleton even when dispose rejects so a
-					// failed owned teardown cannot leave a dead manager installed for
-					// later top-level sessions / task async routing.
-					try {
-						const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
-						const deliveryState = ownedAsyncManager.getDeliveryState();
-						if (drained === false && deliveryState) {
-							logger.warn("Async job completion deliveries still pending during dispose", {
-								...deliveryState,
-							});
-						}
-					} finally {
-						if (AsyncJobManager.instance() === ownedAsyncManager) {
-							AsyncJobManager.setInstance(undefined);
-						}
+		// Async-job subagents share their parent's MCP manager and mnemopi state.
+		// Drain them first; independent teardown below still begins immediately.
+		const asyncJobDrain = (async () => {
+			// Cancel jobs this agent registered so a subagent's teardown doesn't
+			// leak its background bash/task work into the parent's manager. Only
+			// the session that owns the manager goes on to dispose it (which itself
+			// nukes any leftover jobs and pending deliveries).
+			this.#cancelOwnAsyncJobs();
+			const ownedAsyncManager = this.#ownedAsyncJobManager;
+			if (ownedAsyncManager) {
+				// Clear the process-global singleton even when dispose rejects so a
+				// failed owned teardown cannot leave a dead manager installed for
+				// later top-level sessions / task async routing.
+				try {
+					const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
+					const deliveryState = ownedAsyncManager.getDeliveryState();
+					if (drained === false && deliveryState) {
+						logger.warn("Async job completion deliveries still pending during dispose", {
+							...deliveryState,
+						});
+					}
+				} finally {
+					if (AsyncJobManager.instance() === ownedAsyncManager) {
+						AsyncJobManager.setInstance(undefined);
 					}
 				}
-			})(),
+			}
+		})();
+		// A rejected drain must still release shared resources. Its rejection remains
+		// visible through the Phase-B allSettled result below.
+		const asyncJobsSettled = asyncJobDrain.then(
+			() => undefined,
+			() => undefined,
+		);
+
+		// Phase B: independent subsystem teardown runs concurrently under one
+		// allSettled barrier. MCP and mnemopi wait only for async jobs, not for the
+		// other branches. All writers complete before Phase C closes session storage.
+		const phaseBResults = await Promise.allSettled([
+			asyncJobDrain,
 			// Eval settle then three independent kernel-language disposes.
 			(async () => {
 				const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
@@ -6845,13 +6854,14 @@ export class AgentSession {
 					logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
 				}
 			})(),
-			// MCP owned-manager disconnect: bounded 3s, best-effort.
+			// MCP owned-manager disconnect: bounded 3s, best-effort. Async-job
+			// subagents reuse this manager, so do not disconnect until their drain settles.
 			(async () => {
-				// Disconnect the MCP manager this session OWNS so its stdio servers are
-				// not orphaned at exit. Best-effort: a failure here must never throw out
-				// of dispose. Only owning (top-level) sessions provide this callback;
-				// subagents reuse a parent's manager and must not tear it down. Idempotent
-				// with the deferred-discovery disconnect in `createAgentSession`.
+				await asyncJobsSettled;
+				// Disconnect only the manager this top-level session owns. Best-effort:
+				// a failure must never throw out of dispose. Subagents reuse a parent's
+				// manager and do not provide this callback. Idempotent with the
+				// deferred-discovery disconnect in `createAgentSession`.
 				//
 				// BOUNDED: an owned manager may hold an HTTP/SSE server whose session-
 				// termination DELETE blocks up to the MCP request timeout (30s default,
@@ -6883,10 +6893,12 @@ export class AgentSession {
 			(async () => {
 				await hindsightState?.flushRetainQueue();
 			})(),
-			// Mnemopi dispose and worker shutdown share one branch (#3031). A
-			// timed-out consolidation keeps the shared tiny-model worker alive
-			// until its detached model work actually settles.
+			// Mnemopi is shared with async-job subagents. Detach it only after their
+			// drain settles, and keep the shared tiny-model worker alive until detached
+			// consolidation actually settles.
 			(async () => {
+				await asyncJobsSettled;
+				const mnemopiState = setMnemopiSessionState(this, undefined);
 				try {
 					if (mnemopiState) {
 						await mnemopiState.dispose({
@@ -6924,16 +6936,38 @@ export class AgentSession {
 		const phaseBError =
 			phaseBErrors.length > 0 ? new AggregateError(phaseBErrors, "Session dispose subsystem failures") : undefined;
 
-		// Phase C (sequential): power/empty-move cleanup, then session close
-		// (writers-before-close invariant: Phase A + Phase B flushes finished),
+		// Phase C (sequential): power cleanup, then session storage finalization,
 		// provider sessions, Hindsight pointer clear/dispose, agent disconnect.
 		this.#releasePowerAssertion();
-		// Clean up an empty session created by this session's /move so it doesn't accumulate.
-		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
-		this.#movedFromEmptySessionFile = undefined;
-		// Writers-before-close: async-job deliveries, post-prompt, Hindsight flush,
-		// and mnemopi dispose have all settled under the Phase B barrier above.
-		await this.sessionManager.close();
+		const finalizeSessionStorage = async (): Promise<void> => {
+			// Clean up an empty session created by this session's /move so it doesn't accumulate.
+			await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+			this.#movedFromEmptySessionFile = undefined;
+			await this.sessionManager.close();
+		};
+		if (postPromptTasksDrained) {
+			await finalizeSessionStorage();
+		} else {
+			// Keep /exit bounded, but leave the writer open for a task that ignored abort.
+			// Its final persistence runs before its promise settles; close immediately afterward.
+			void (async () => {
+				try {
+					await postPromptDrain;
+				} catch (error) {
+					logger.warn("Deferred post-prompt drain failed during session storage finalization", {
+						error: String(error),
+					});
+				} finally {
+					try {
+						await finalizeSessionStorage();
+					} catch (error) {
+						logger.warn("Failed to finalize session storage after deferred post-prompt drain", {
+							error: String(error),
+						});
+					}
+				}
+			})();
+		}
 		this.#closeAllProviderSessions("dispose");
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();

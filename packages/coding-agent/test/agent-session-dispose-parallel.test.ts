@@ -63,6 +63,7 @@ describe("AgentSession dispose parallelization", () => {
 		if (current) {
 			await current.dispose();
 		}
+		vi.useRealTimers();
 		authStorage?.close();
 		AsyncJobManager.resetForTests();
 		vi.restoreAllMocks();
@@ -71,6 +72,7 @@ describe("AgentSession dispose parallelization", () => {
 
 	async function createSession(options?: {
 		ownedAsyncJobManager?: AsyncJobManager;
+		disconnectOwnedMcpManager?: () => Promise<void>;
 		persist?: boolean;
 	}): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -95,6 +97,7 @@ describe("AgentSession dispose parallelization", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 			ownedAsyncJobManager: options?.ownedAsyncJobManager,
+			disconnectOwnedMcpManager: options?.disconnectOwnedMcpManager,
 			agentId: "Main",
 		});
 		return session;
@@ -157,6 +160,129 @@ describe("AgentSession dispose parallelization", () => {
 		expect(hindsightStartAt).toBeGreaterThanOrEqual(0);
 		expect(asyncStartAt).toBeLessThan(firstEnd);
 		expect(hindsightStartAt).toBeLessThan(firstEnd);
+	});
+
+	it("waits for async-job drain before disposing shared mnemopi state", async () => {
+		const asyncStarted = deferred();
+		const asyncGate = deferred();
+		const order: string[] = [];
+		const owned = {
+			dispose: async (_opts?: { timeoutMs?: number }) => {
+				order.push("async:start");
+				asyncStarted.resolve();
+				await asyncGate.promise;
+				order.push("async:end");
+				return true;
+			},
+			cancelAll: () => {},
+			getDeliveryState: () => ({ queued: 0, delivering: false, pendingJobIds: [] as string[] }),
+		} as AsyncJobManager;
+		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		vi.spyOn(mnemopiState, "dispose").mockImplementation(async () => {
+			order.push("mnemopi:dispose");
+		});
+
+		const s = await createSession({ ownedAsyncJobManager: owned });
+		setMnemopiSessionState(s, mnemopiState);
+		const disposePromise = s.dispose();
+		try {
+			await asyncStarted.promise;
+			expect(order).toEqual(["async:start"]);
+		} finally {
+			asyncGate.resolve();
+		}
+		await disposePromise;
+		session = undefined;
+
+		expect(order).toEqual(["async:start", "async:end", "mnemopi:dispose"]);
+	});
+
+	it("waits for async-job drain before disconnecting the shared MCP manager", async () => {
+		const asyncStarted = deferred();
+		const asyncGate = deferred();
+		const order: string[] = [];
+		const owned = {
+			dispose: async (_opts?: { timeoutMs?: number }) => {
+				order.push("async:start");
+				asyncStarted.resolve();
+				await asyncGate.promise;
+				order.push("async:end");
+				return true;
+			},
+			cancelAll: () => {},
+			getDeliveryState: () => ({ queued: 0, delivering: false, pendingJobIds: [] as string[] }),
+		} as AsyncJobManager;
+
+		const s = await createSession({
+			ownedAsyncJobManager: owned,
+			disconnectOwnedMcpManager: async () => {
+				order.push("mcp:disconnect");
+			},
+		});
+		const disposePromise = s.dispose();
+		try {
+			await asyncStarted.promise;
+			expect(order).toEqual(["async:start"]);
+		} finally {
+			asyncGate.resolve();
+		}
+		await disposePromise;
+		session = undefined;
+
+		expect(order).toEqual(["async:start", "async:end", "mcp:disconnect"]);
+	});
+
+	it("keeps session storage open for a post-prompt writer past the dispose deadline", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const lateWriteGate = deferred();
+		const closeCalled = deferred();
+		const order: string[] = [];
+		const s = await createSession({ persist: true });
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled anthropic model");
+		const sessionFile = s.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("expected persisted session file");
+		const lateWrite = lateWriteGate.promise.then(() => {
+			s.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "late-write" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			order.push("write");
+		});
+		s.trackPostPromptTaskForTests(lateWrite);
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			order.push("close");
+			await originalClose();
+			closeCalled.resolve();
+		};
+
+		const disposePromise = s.dispose();
+		vi.advanceTimersByTime(5_000);
+		await disposePromise;
+		expect(order).toEqual([]);
+
+		lateWriteGate.resolve();
+		await lateWrite;
+		await closeCalled.promise;
+		session = undefined;
+
+		expect(order).toEqual(["write", "close"]);
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("late-write");
 	});
 
 	it("bounds a never-settling post-prompt task at 5s and logs the exact warn", async () => {
