@@ -221,15 +221,16 @@ fn search_file(
 	collector: &mut BoundedMatchCollector,
 	ct: &task::CancelToken,
 ) -> Result<()> {
-	let bytes = match grep::read_file_bytes(abs_path) {
-		Ok(grep::ReadFile::Bytes(bytes)) => bytes,
+	let mut buffer = Vec::new();
+	match grep::read_file_bytes(abs_path, &mut buffer) {
+		Ok(grep::ReadFile::Read) => {},
 		Ok(grep::ReadFile::Oversized | grep::ReadFile::Skipped) => return Ok(()),
 		Err(err) => {
 			return Err(Error::from_reason(format!("Failed to read {}: {err}", abs_path.display())));
 		},
 	};
 
-	let text = grep::bytes_to_trimmed_string(bytes.as_slice());
+	let text = grep::bytes_to_trimmed_string(&buffer);
 	for (line_index, line) in text.lines().enumerate() {
 		ct.heartbeat()?;
 		let score = score_fuzzy_line(line, query_lower, query_chars);
