@@ -2875,6 +2875,12 @@ export class TUI extends Container {
 			rawFrame = this.render(width);
 			this.#imageBudget.endPass();
 		}
+		// Ghostty initial-image deferral must run before any render state is
+		// consumed (#resizeEventPending, hardware-cursor state, virtualized
+		// drops, commit re-anchoring): the early return abandons this frame and
+		// the deferred render recomposes from scratch, so consuming state here
+		// would strand the deferred frame in abandoned coordinates.
+		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		let virtualizedShift = 0;
 		for (const drop of this.#pendingVirtualizedDrops) {
 			const at = drop.start - virtualizedShift;
@@ -2895,12 +2901,6 @@ export class TUI extends Container {
 			this.#virtualizedRowsEpochTotal += rows;
 		}
 		this.#pendingVirtualizedDrops.length = 0;
-		// Ghostty initial-image deferral must run before any render state is
-		// consumed (#resizeEventPending, hardware-cursor state, commit
-		// re-anchoring): the early return abandons this frame and the deferred
-		// render recomposes from scratch, so consuming state here would
-		// misclassify a pending resize as an ordinary diff and corrupt the paint.
-		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		// Cursor markers were stripped at compose time (they are internal
 		// sentinels and must never reach the terminal, the committed prefix, or
 		// the audit); the visible marker is chosen after the window top is

@@ -10,12 +10,16 @@ import {
 	Text,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualTerminal } from "./virtual-terminal";
 
 type DrainableScheduler = {
 	now(): number;
 	scheduleImmediate(cb: () => void): void;
 	scheduleRender(cb: () => void, delayMs: number): { cancel(): void };
+	flushNext(): void;
 	flush(): void;
 	flushUntil(predicate: () => boolean): void;
 };
@@ -46,6 +50,10 @@ function makeDrainableScheduler(): DrainableScheduler {
 					item.cancelled = true;
 				},
 			};
+		},
+		flushNext() {
+			if (queue.length === 0) throw new Error("scheduler has no pending render");
+			runOne();
 		},
 		flush() {
 			let guard = 0;
@@ -84,6 +92,7 @@ class VirtualizingComponent
 	readonly rows: string[] = [];
 	replayPreparations = 0;
 	committedRows = 0;
+	readonly committedRowsFeeds: number[] = [];
 	renderCalls = 0;
 	#firstVisibleRow = 0;
 	#pendingDropRows = 0;
@@ -96,6 +105,7 @@ class VirtualizingComponent
 
 	setNativeScrollbackCommittedRows(rows: number): void {
 		this.committedRows = rows;
+		this.committedRowsFeeds.push(rows);
 	}
 	growRows(count: number): void {
 		const start = this.rows.length;
@@ -220,6 +230,8 @@ function expectExactlyOnce(term: VirtualTerminal, expectedRows: readonly string[
 
 const headers = ["header-above-0", "header-above-1"];
 const footers = ["footer-0", "footer-1"];
+const BASE64_ONE_PIXEL_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 
 const directTerminalEnvKeys = ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE", "TMUX", "STY", "ZELLIJ"] as const;
 const savedDirectTerminalEnv: Partial<Record<(typeof directTerminalEnvKeys)[number], string>> = {};
@@ -401,6 +413,49 @@ describe("native scrollback virtualized-prefix rebasing", () => {
 		} finally {
 			fixture.tui.stop();
 			await fixture.term.flush();
+		}
+	});
+
+	test("case H: Ghostty image deferral keeps a virtualized drop pending until emit", async () => {
+		const terminal = TERMINAL as { id: string; imageProtocol: ImageProtocol | null };
+		const originalId = terminal.id;
+		const originalProtocol = terminal.imageProtocol;
+		const originalGraphics = { ...getKittyGraphics() };
+		terminal.id = "ghostty";
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+
+		const fixture = makeFixture(false);
+		try {
+			await startAndSettle(fixture);
+			const committedBeforeDrop = fixture.virtualized.committedRows;
+			fixture.virtualized.dropCommittedTop(5);
+			fixture.tui.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: text => text },
+					{ maxWidthCells: 4, maxHeightCells: 4, budget: fixture.tui.imageBudget, imageKey: "deferred" },
+				),
+			);
+
+			fixture.tui.requestRender(true);
+			fixture.scheduler.flushNext();
+			const feedsAfterAbandonedCompose = fixture.virtualized.committedRowsFeeds.length;
+			fixture.scheduler.flushNext();
+
+			expect(fixture.virtualized.committedRowsFeeds[feedsAfterAbandonedCompose]).toBe(committedBeforeDrop);
+			fixture.scheduler.flush();
+			await fixture.term.flush();
+			for (const expected of [...headers, ...fixture.virtualized.rows, ...footers]) {
+				expect(plainBuffer(fixture.term).filter(row => row === expected).length).toBe(1);
+			}
+		} finally {
+			fixture.tui.stop();
+			await fixture.term.flush();
+			terminal.id = originalId;
+			terminal.imageProtocol = originalProtocol;
+			setKittyGraphics(originalGraphics);
 		}
 	});
 });
