@@ -3827,7 +3827,7 @@ export class AgentSession {
 	}
 
 	get asyncJobManager(): AsyncJobManager | undefined {
-		return this.#asyncJobManager;
+		return this.#isDisposed ? undefined : this.#asyncJobManager;
 	}
 
 	getAgentId(): string | undefined {
@@ -6742,6 +6742,7 @@ export class AgentSession {
 	beginDispose(): void {
 		if (this.#isDisposed) return;
 		this.#isDisposed = true;
+		if (this.#agentId) this.#asyncJobManager?.closeAdmissions?.({ ownerId: this.#agentId });
 		this.#promptGeneration++;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#titleGenerationAbortController.abort();
@@ -6771,6 +6772,15 @@ export class AgentSession {
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		// Teardown barrier invariant: synchronously gate every new admission before
+		// the first await, abort admitted producers, await their quiescence, flush
+		// independent sinks behind one barrier, then close storage. Upstream/main
+		// already has two bounded-detach exceptions: a timed-out session_shutdown
+		// handler retains raw sessionManager access, and an eval that ignores abort
+		// past its 3s + 1s settle budgets may finish after close. Do not "fix" either
+		// here by making shutdown unbounded; their lifecycle contracts need separate
+		// cancellation or write-rejection designs.
+		//
 		// Phase A (sequential): mark dispose, emit session_shutdown, and abort
 		// in-flight post-prompt work. The Phase-B barrier below owns the complete
 		// quiescence drain before Phase C closes session storage.
@@ -9198,6 +9208,7 @@ export class AgentSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
+		if (this.#isDisposed) return;
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -9214,6 +9225,7 @@ export class AgentSession {
 	 * flipping advisor auto-resume.
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
+		if (this.#isDisposed) return;
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -9236,6 +9248,7 @@ export class AgentSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		if (this.#isDisposed) return;
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		this.agent.followUp({
 			role: "developer",
@@ -9265,6 +9278,7 @@ export class AgentSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		if (this.#isDisposed) return;
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
@@ -9473,6 +9487,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (this.#isDisposed) return;
 		if (deliverAs === "followUp") {
 			this.agent.followUp(normalizedAppMessage);
 		} else {
@@ -9504,6 +9519,7 @@ export class AgentSession {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
+		if (this.#isDisposed) return false;
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
 		const details =
 			options?.queueChipText && options.deliverAs !== "nextTurn"
@@ -9524,6 +9540,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (this.#isDisposed) return false;
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);

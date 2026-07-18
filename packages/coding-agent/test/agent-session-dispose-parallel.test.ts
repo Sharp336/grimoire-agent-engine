@@ -386,6 +386,45 @@ describe("AgentSession dispose parallelization", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 	});
 
+	it("seals async-job and message admissions synchronously when dispose begins", async () => {
+		const owned = new AsyncJobManager({ onJobComplete: async () => {} });
+		const s = await createSession({ ownedAsyncJobManager: owned });
+		const capturedManager = s.asyncJobManager;
+		if (!capturedManager) throw new Error("expected session-scoped async manager");
+		const steerSpy = vi.spyOn(s.agent, "steer");
+		const followUpSpy = vi.spyOn(s.agent, "followUp");
+		const appendCustomSpy = vi.spyOn(s.sessionManager, "appendCustomMessageEntry");
+
+		s.beginDispose();
+
+		expect(s.asyncJobManager).toBeUndefined();
+		expect(() =>
+			capturedManager.register("task", "too late", async () => "late", {
+				ownerId: "Main",
+			}),
+		).toThrow("session disposal is in progress");
+		const peerJobId = capturedManager.register("task", "peer remains admitted", async () => "ok", {
+			ownerId: "Peer",
+		});
+		await capturedManager.waitForAll();
+		expect(capturedManager.getJob(peerJobId)?.status).toBe("completed");
+		await s.steer("too late");
+		await s.followUp("too late");
+		expect(
+			await s.sendCustomMessage({
+				customType: "dispose-admission",
+				content: "too late",
+				display: false,
+			}),
+		).toBe(false);
+		expect(steerSpy).not.toHaveBeenCalled();
+		expect(followUpSpy).not.toHaveBeenCalled();
+		expect(appendCustomSpy).not.toHaveBeenCalled();
+
+		await s.dispose();
+		session = undefined;
+	});
+
 	it("invalidates a deferred hidden prompt still in setup when dispose starts", async () => {
 		const apiKeyEntered = deferred();
 		const apiKeyGate = deferred();

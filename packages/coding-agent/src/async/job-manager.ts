@@ -124,6 +124,7 @@ export class AsyncJobManager {
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #deliveryPromises = new Set<Promise<void>>();
 	readonly #suppressedDeliveries = new Set<string>();
+	readonly #closedAdmissionOwners = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
@@ -174,6 +175,9 @@ export class AsyncJobManager {
 	): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
+		}
+		if (options?.ownerId && this.#closedAdmissionOwners.has(options.ownerId)) {
+			throw new Error(`Background jobs are unavailable while session disposal is in progress (${options.ownerId})`);
 		}
 		// Queued jobs hold no execution slot yet — only count jobs that are
 		// actually running so a large parked batch cannot starve registration.
@@ -388,6 +392,11 @@ export class AsyncJobManager {
 			if (queued) continue;
 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
 		}
+	}
+
+	/** Permanently reject new jobs for one disposing session without sealing its shared manager. */
+	closeAdmissions(filter: AsyncJobFilter): void {
+		if (filter.ownerId) this.#closedAdmissionOwners.add(filter.ownerId);
 	}
 
 	/**
