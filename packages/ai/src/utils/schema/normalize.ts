@@ -1080,6 +1080,14 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
  *    `default` and `description` are MFJS Meta Data fields and are preserved.
  *  - `additionalProperties` (boolean or schema) and `type: "null"` (incl.
  *    inside `anyOf`) are kept.
+ *  - A bare boolean subschema in a subschema slot (e.g. `properties.x: true`)
+ *    is rejected — MFJS 400s with "property schema for '<name>' must be an
+ *    object". This is not hypothetical: {@link normalizeEmptySchemas} rewrites
+ *    every empty `{}` subschema to `true` upstream (issue #1179), so the wire
+ *    encoder itself manufactures the construct. Coerced to object form
+ *    (`true` -> `{}`, `false` -> `{ not: {} }`); both are accepted by the live
+ *    Moonshot endpoint. `additionalProperties: true/false` is a native MFJS
+ *    keyword (not a subschema slot) and is preserved untouched.
  *
  * Out of scope (absent from the built-in tool surface, spec-ambiguous to
  * rewrite blindly): `allOf` intersection merging, external/recursive `$ref`,
@@ -1087,6 +1095,7 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
  */
 export function normalizeSchemaForMoonshot(value: unknown): unknown {
 	return normalizeSchema(value, {
+		coerceBooleanSubschemas: true,
 		unsupportedFields: isMoonshotUnsupportedSchemaField,
 		normalizeFieldNames: false,
 		collapseNullFields: false,

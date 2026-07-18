@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Moonshot/Kimi tool calls 400ing with "tools.function.parameters is not a valid moonshot flavored json schema, details: property schema for '<name>' must be an object" whenever a tool parameter schema carried a bare boolean subschema. `normalizeSchemaForMoonshot` now coerces boolean subschemas to their object form (`true` → `{}`, `false` → `{ not: {} }`, both accepted by the live Moonshot endpoint), matching `normalizeSchemaForGoogle`/`normalizeSchemaForCCA`. This also covers the empty-`{}`-schema case, since `normalizeEmptySchemas` rewrites empty subschemas to `true` on the wire (#1179) — so the encoder itself manufactured the rejected construct even for boolean-free source schemas. `additionalProperties: true/false` (a native MFJS keyword) is preserved untouched.
+
 ## [17.0.3] - 2026-07-17
 
 ### Fixed

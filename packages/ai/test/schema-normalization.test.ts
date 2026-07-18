@@ -1276,11 +1276,29 @@ describe("normalizeSchemaForMoonshot", () => {
 		expect(props.limit).toEqual({ type: "integer", default: 10 });
 	});
 
-	it("preserves boolean subschemas rather than synthesizing MFJS-forbidden not", () => {
+	it("coerces bare boolean subschemas to object form (MFJS rejects booleans in subschema slots)", () => {
+		// Verified against the live Moonshot endpoint: `properties.x: true` and
+		// `properties.x: false` both 400 with "property schema for 'x' must be an
+		// object"; the coerced `{}` and `{ not: {} }` forms both return 200. The
+		// wire encoder itself manufactures these booleans via normalizeEmptySchemas
+		// (`{}` -> `true`, issue #1179), so this fires even for boolean-free sources.
+		expect(normalizeSchemaForMoonshot({ type: "object", properties: { open: true } })).toEqual({
+			type: "object",
+			properties: { open: {} },
+		});
 		expect(normalizeSchemaForMoonshot({ type: "object", properties: { forbidden: false } })).toEqual({
 			type: "object",
-			properties: { forbidden: false },
+			properties: { forbidden: { not: {} } },
 		});
+	});
+
+	it("coerces boolean subschemas inside items and combinator arrays", () => {
+		expect(normalizeSchemaForMoonshot({ type: "array", items: true }) as Record<string, unknown>).toEqual({
+			type: "array",
+			items: {},
+		});
+		const anyOf = normalizeSchemaForMoonshot({ anyOf: [true, { type: "string" }] }) as Record<string, unknown>;
+		expect(anyOf.anyOf).toEqual([{}, { type: "string" }]);
 	});
 
 	it("folds oneOf into anyOf (the only MFJS combinator)", () => {
