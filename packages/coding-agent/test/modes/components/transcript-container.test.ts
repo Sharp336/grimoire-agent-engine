@@ -660,6 +660,7 @@ describe("TranscriptContainer spacing", () => {
 	it("preserves background-colored padding rows (block-internal design)", () => {
 		const bgPad = "\x1b[48;2;0;0;0m   \x1b[0m";
 		const container = new TranscriptContainer();
+
 		container.addChild(new MutableBlock(["a"]));
 		// The ANSI-bearing padding row is not "plain blank", so it survives stripping.
 		container.addChild(new MutableBlock([bgPad, "x", bgPad]));
@@ -881,6 +882,19 @@ describe("TranscriptContainer isBlockUncommitted", () => {
 		container.addChild(block);
 
 		expect(container.isBlockUncommitted(block)).toBe(true);
+	});
+
+	it("keeps a live block uncommitted when only its leading separator entered scrollback", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new CountingFinalizedBlock(["history"]));
+		const live = new StreamingBlock(["live"]);
+		container.addChild(live);
+
+		expect(container.render(40)).toEqual(["history", "", "live"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["live"]);
+
+		expect(container.isBlockUncommitted(live)).toBe(true);
 	});
 
 	it("tracks whether committed rows have reached a rendered block", () => {

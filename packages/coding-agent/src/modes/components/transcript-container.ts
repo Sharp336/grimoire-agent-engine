@@ -671,7 +671,7 @@ export class TranscriptContainer
 		}
 		for (let i = dropUntil; i < segments.length; i++) {
 			const segment = segments[i];
-			if (segment !== undefined) segment.startRow -= dropRows;
+			if (segment !== undefined) segment.startRow = Math.max(0, segment.startRow - dropRows);
 		}
 		this.#compactedChildStart = dropUntil;
 		this.#committedRows = Math.max(0, this.#committedRows - dropRows);
