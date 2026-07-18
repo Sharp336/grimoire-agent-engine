@@ -56,6 +56,13 @@ function hindsightFlushStub(flush: () => Promise<void>): HindsightSessionState {
 	return stub as HindsightSessionState;
 }
 
+function setMnemopiProviderLlm(state: MnemopiSessionState, llm: object | false): void {
+	Object.defineProperty(state, "config", {
+		value: { providerOptions: { llm } },
+		configurable: true,
+	});
+}
+
 describe("AgentSession dispose parallelization", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -774,6 +781,7 @@ describe("AgentSession dispose parallelization", () => {
 			order.push("tiny:shutdown");
 		});
 		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		setMnemopiProviderLlm(mnemopiState, { complete: async () => null });
 		vi.spyOn(mnemopiState, "dispose").mockImplementation(async options => {
 			order.push("mnemopi:start");
 			mnemopiStarted.resolve();
@@ -803,6 +811,7 @@ describe("AgentSession dispose parallelization", () => {
 		const detachedCleanupSettled = deferred();
 		const terminateSpy = vi.spyOn(tinyTitleClientModule.tinyTitleClient, "terminate").mockResolvedValue();
 		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		setMnemopiProviderLlm(mnemopiState, { complete: async () => null });
 		vi.spyOn(mnemopiState, "dispose").mockImplementation(async options => {
 			mnemopiStarted.resolve();
 			void consolidationGate.promise.then(async () => {
@@ -824,6 +833,29 @@ describe("AgentSession dispose parallelization", () => {
 			await detachedCleanupSettled.promise;
 		}
 
+		expect(terminateSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("shuts down the tiny client promptly when remote consolidation remains detached", async () => {
+		const terminateSpy = vi.spyOn(tinyTitleClientModule.tinyTitleClient, "terminate").mockResolvedValue();
+		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		setMnemopiProviderLlm(mnemopiState, {
+			baseUrl: "https://memory.example.invalid",
+			model: "remote-memory-model",
+		});
+		let deferredCleanup: (() => void | Promise<void>) | undefined;
+		vi.spyOn(mnemopiState, "dispose").mockImplementation(async options => {
+			// Model MnemopiSessionState.dispose returning on timeout while remote
+			// consolidation and its optional settled callback remain detached.
+			deferredCleanup = options?.onConsolidationSettled;
+		});
+
+		const s = await createSession();
+		setMnemopiSessionState(s, mnemopiState);
+		await s.dispose({ mnemopiConsolidateTimeoutMs: 1 });
+		session = undefined;
+
+		expect(deferredCleanup).toBeUndefined();
 		expect(terminateSpy).toHaveBeenCalledTimes(1);
 	});
 

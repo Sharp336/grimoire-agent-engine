@@ -6947,17 +6947,25 @@ export class AgentSession {
 				await hindsightState?.flushRetainQueue();
 			})(),
 			// Mnemopi is shared with async-job subagents. Detach it only after their
-			// drain settles, and keep the shared tiny-model worker alive until detached
-			// consolidation actually settles.
+			// drain settles. Only local-tiny consolidation uses the shared title
+			// worker; remote/smol consolidation must not keep that worker alive if
+			// its bounded dispose detaches a hung request.
 			(async () => {
 				await postPromptDrain;
 				const mnemopiState = setMnemopiSessionState(this, undefined);
+				const mnemopiLlm = mnemopiState?.config?.providerOptions.llm;
+				const consolidationUsesTinyClient =
+					typeof mnemopiLlm === "object" &&
+					mnemopiLlm !== null &&
+					"complete" in mnemopiLlm &&
+					typeof mnemopiLlm.complete === "function";
 				try {
 					if (mnemopiState) {
 						await mnemopiState.dispose({
 							timeoutMs: mnemopiConsolidateTimeoutMs,
-							onConsolidationSettled: shutdownTinyTitleClient,
+							onConsolidationSettled: consolidationUsesTinyClient ? shutdownTinyTitleClient : undefined,
 						});
+						if (!consolidationUsesTinyClient) await shutdownTinyTitleClient();
 					} else {
 						await shutdownTinyTitleClient();
 					}
