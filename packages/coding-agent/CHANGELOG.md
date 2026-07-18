@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced `/exit` latency by running independent disposal phases concurrently while preserving cleanup ordering. ([#5932](https://github.com/can1357/oh-my-pi/issues/5932))
+
 ## [17.0.3] - 2026-07-17
 
 ### Changed
