@@ -86,6 +86,24 @@ describe("estimateTokens memo", () => {
 		expect(first).toBe(estimateTokensUncached(message));
 	});
 
+	test("terminal aborted assistants remain memoized within settled history", () => {
+		const abortedBlock = { type: "text" as const, text: "interrupted turn" };
+		const tailBlock = { type: "text" as const, text: "settled tail" };
+		const history: AgentMessage[] = [
+			{ role: "user", content: "before abort", timestamp: 1 },
+			assistantMessage([{ type: "text", text: "settled prefix" }]),
+			assistantMessage([abortedBlock], { duration: undefined, stopReason: "aborted" }),
+			{ role: "user", content: "after abort", timestamp: 2 },
+			assistantMessage([tailBlock]),
+		];
+		const first = history.map(message => estimateTokens(message));
+
+		abortedBlock.text = "interrupted turn ".repeat(80);
+		tailBlock.text = "settled tail ".repeat(80);
+
+		expect(history.map(message => estimateTokens(message))).toEqual(first);
+	});
+
 	test("live assistant partials bypass identity memoization until duration is set", () => {
 		const block = { type: "text" as const, text: "streaming answer" };
 		const message = assistantMessage([block], { duration: undefined });

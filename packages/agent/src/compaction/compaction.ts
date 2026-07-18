@@ -482,11 +482,12 @@ const tokenEstimateCacheExcludeEncrypted = new WeakMap<object, number>();
  *
  * Provider streams add `duration` immediately before emitting their terminal
  * done/error event. Live partials intentionally omit it while mutating content
- * in place under the same identity, even though they may already carry an empty
- * usage object and the default `"stop"` reason.
+ * in place under the same identity and retain the default `"stop"` reason.
+ * Terminal abort/error paths may synthesize a duration-less snapshot, but those
+ * stop reasons are only assigned when finalizing the message.
  */
 export function isSettledAssistantMessage(message: AssistantMessage): boolean {
-	return message.duration != null;
+	return message.duration != null || message.stopReason === "aborted" || message.stopReason === "error";
 }
 
 /**

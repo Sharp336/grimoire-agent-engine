@@ -162,6 +162,21 @@ describe("convertToLlm", () => {
 		}
 	});
 
+	it("keeps terminal aborted assistants eligible for whole-array carry", () => {
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "before abort", timestamp: 1 },
+			assistantMessage([{ type: "text", text: "settled prefix" }], 10),
+			abortedAssistant([{ type: "text", text: "interrupted turn" }]),
+			{ role: "user", content: "after abort", timestamp: 2 },
+			assistantMessage([{ type: "text", text: "settled tail" }], 10),
+		];
+
+		const first = convertToLlm(messages);
+		const second = convertToLlm(messages);
+
+		expect(second).toBe(first);
+	});
+
 	it("reconverts a live assistant mutated in place on the same source array", () => {
 		const user: AgentMessage = {
 			role: "user",
