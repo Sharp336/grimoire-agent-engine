@@ -31,12 +31,14 @@ import { buildInitialMessage } from "./cli/initial-message";
 import {
 	consumeRestartAdvisorEnabled,
 	consumeRestartExtensionFlagValues,
+	consumeRestartExtensionPackageRoots,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
 	type RestartExtensionFlagValue,
 	type RestartLaunchFlags,
 	type RestartToolRestriction,
 	restoreRestartExtensionFlagValues,
+	selectRestartExtensionPackageRoots,
 } from "./cli/restart";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
@@ -503,7 +505,19 @@ export function buildRestartLaunchFlags(
 	apiKeyProvider?: string,
 	sessionStartCwd: string = launchCwd,
 	restartApiKey?: string,
+	restartExtensionPackageRoots?: readonly string[],
 ): RestartLaunchFlags {
+	const extensionPackageRootInputs = selectRestartExtensionPackageRoots(
+		restartExtensionPackageRoots,
+		parsed.extensions,
+		parsed.hooks,
+	);
+	const extensionPackageRoots =
+		restartExtensionPackageRoots !== undefined
+			? extensionPackageRootInputs
+			: extensionPackageRootInputs.length > 0
+				? resolveRestartLaunchPaths(extensionPackageRootInputs, launchCwd)
+				: undefined;
 	return {
 		apiKey: parsed.apiKey ?? restartApiKey,
 		apiKeyProvider,
@@ -516,6 +530,7 @@ export function buildRestartLaunchFlags(
 		disableSkills: Boolean(parsed.noSkills),
 		noTitle: Boolean(parsed.noTitle),
 		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
+		extensionPackageRoots,
 		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
 		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),
 		pluginDirs: resolveRestartLaunchPaths(parsed.pluginDirs, launchCwd),
@@ -1351,6 +1366,7 @@ export async function runRootCommand(
 	const restartApiKeyHandoff = applyRestartApiKeyHandoff(parsedArgs);
 	const restartApiKeyProvider = restartApiKeyHandoff?.provider;
 	const restartExtensionFlagValues = consumeRestartExtensionFlagValues();
+	const restartExtensionPackageRoots = consumeRestartExtensionPackageRoots();
 	const restartAdvisorEnabled = consumeRestartAdvisorEnabled();
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
@@ -1404,7 +1420,11 @@ export async function runRootCommand(
 	// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
 	// `--no-extensions` short-circuits both the factory load and the sub-discovery.
 	if (!parsedArgs.noExtensions) {
-		const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
+		const cliExtensions = selectRestartExtensionPackageRoots(
+			restartExtensionPackageRoots,
+			parsedArgs.extensions,
+			parsedArgs.hooks,
+		);
 		if (cliExtensions.length > 0) {
 			injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir());
 		}
@@ -1890,6 +1910,7 @@ export async function runRootCommand(
 					runtimeApiKeyProvider,
 					cwd,
 					restartApiKeyHandoff?.apiKey,
+					restartExtensionPackageRoots,
 				),
 			);
 		} else {

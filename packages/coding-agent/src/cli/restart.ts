@@ -12,6 +12,8 @@ export const RESTART_ADVISOR_ENABLED_ENV = "OMP_RESTART_ADVISOR_ENABLED";
 
 /** Environment variable used for one-hop restart handoff of extension CLI flag values. */
 export const RESTART_EXTENSION_FLAG_VALUES_ENV = "OMP_RESTART_EXTENSION_FLAG_VALUES";
+/** Environment variable used to preserve CLI extension package roots across picker resumes and restarts. */
+export const RESTART_EXTENSION_PACKAGE_ROOTS_ENV = "OMP_RESTART_EXTENSION_PACKAGE_ROOTS";
 
 /** Tool approval modes that can be restored across a process restart. */
 export type RestartApprovalMode = "always-ask" | "write" | "yolo";
@@ -34,6 +36,7 @@ export interface RestartLaunchFlags {
 	noTitle?: boolean;
 	configFiles?: string[];
 	extensionPaths?: string[];
+	extensionPackageRoots?: string[];
 	hookPaths?: string[];
 	pluginDirs?: string[];
 	extensionFlagValues?: readonly RestartExtensionFlagValue[];
@@ -157,6 +160,32 @@ export function consumeRestartExtensionFlagValues(
 	return values;
 }
 
+/** Consume CLI extension package roots from the one-hop restart environment payload. */
+export function consumeRestartExtensionPackageRoots(
+	env: Record<string, string | undefined> = process.env,
+): string[] | undefined {
+	const encoded = env[RESTART_EXTENSION_PACKAGE_ROOTS_ENV];
+	if (encoded === undefined) return undefined;
+	delete env[RESTART_EXTENSION_PACKAGE_ROOTS_ENV];
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(encoded);
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(decoded)) return undefined;
+	return decoded.filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+/** Prefer restart-carried package roots over CLI paths re-resolved in the restarted cwd. */
+export function selectRestartExtensionPackageRoots(
+	carriedRoots: readonly string[] | undefined,
+	extensionPaths: readonly string[] | undefined,
+	hookPaths: readonly string[] | undefined,
+): string[] {
+	return carriedRoots !== undefined ? [...carriedRoots] : [...(extensionPaths ?? []), ...(hookPaths ?? [])];
+}
+
 /** Restore restart-carried extension flag values for names still registered after discovery. */
 export function restoreRestartExtensionFlagValues(
 	sink: RestartExtensionFlagSink,
@@ -201,6 +230,10 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 	}
 	if (options.extensionFlagValues !== undefined) {
 		childEnv[RESTART_EXTENSION_FLAG_VALUES_ENV] = JSON.stringify(options.extensionFlagValues);
+		hasChildEnv = true;
+	}
+	if (options.extensionPackageRoots !== undefined) {
+		childEnv[RESTART_EXTENSION_PACKAGE_ROOTS_ENV] = JSON.stringify(options.extensionPackageRoots);
 		hasChildEnv = true;
 	}
 	if (options.advisor !== undefined) {

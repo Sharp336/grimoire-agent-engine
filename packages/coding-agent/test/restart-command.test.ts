@@ -3,15 +3,18 @@ import {
 	buildRestartCommand,
 	consumeRestartAdvisorEnabled,
 	consumeRestartExtensionFlagValues,
+	consumeRestartExtensionPackageRoots,
 	RESTART_ADVISOR_ENABLED_ENV,
 	RESTART_API_KEY_ENV,
 	RESTART_API_KEY_PROVIDER_ENV,
 	RESTART_EXTENSION_FLAG_VALUES_ENV,
+	RESTART_EXTENSION_PACKAGE_ROOTS_ENV,
 	type RestartCommandEnvironment,
 	type RestartExtensionFlagValue,
 	type RestartSpawn,
 	type RestartSpawnInput,
 	restoreRestartExtensionFlagValues,
+	selectRestartExtensionPackageRoots,
 	spawnRestartProcess,
 } from "@oh-my-pi/pi-coding-agent/cli/restart";
 
@@ -198,6 +201,7 @@ describe("restart command construction", () => {
 				...baseOptions(),
 				extensionPaths: ["./ext-one", "pkg-two"],
 				hookPaths: ["./hook-one"],
+				extensionPackageRoots: ["/project-a/ext-one", "/project-a/hook-one"],
 				pluginDirs: ["./plugin-one", "./plugin-two"],
 			},
 			env,
@@ -206,6 +210,9 @@ describe("restart command construction", () => {
 		expect(valuesForFlag(command.cmd, "--extension")).toEqual(["./ext-one", "pkg-two"]);
 		expect(valuesForFlag(command.cmd, "--hook")).toEqual(["./hook-one"]);
 		expect(valuesForFlag(command.cmd, "--plugin-dir")).toEqual(["./plugin-one", "./plugin-two"]);
+		expect(command.env).toEqual({
+			[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]: JSON.stringify(["/project-a/ext-one", "/project-a/hook-one"]),
+		});
 		expect(command.cmd.indexOf("--extension")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--hook")).toBeLessThan(command.cmd.indexOf("--resume"));
 		expect(command.cmd.indexOf("--plugin-dir")).toBeLessThan(command.cmd.indexOf("--resume"));
@@ -298,6 +305,22 @@ describe("restart command construction", () => {
 
 		expect(consumeRestartExtensionFlagValues(env)).toEqual([]);
 		expect(env[RESTART_EXTENSION_FLAG_VALUES_ENV]).toBeUndefined();
+	});
+
+	test("preserves carried extension package roots across picker-cwd restarts", () => {
+		const env = {
+			[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]: JSON.stringify(["/project-a/ext", "/project-a/hook"]),
+		};
+
+		const carriedRoots = consumeRestartExtensionPackageRoots(env);
+
+		expect(carriedRoots).toEqual(["/project-a/ext", "/project-a/hook"]);
+		expect(selectRestartExtensionPackageRoots(carriedRoots, ["/project-b/ext"], ["/project-b/hook"])).toEqual([
+			"/project-a/ext",
+			"/project-a/hook",
+		]);
+		expect(env[RESTART_EXTENSION_PACKAGE_ROOTS_ENV]).toBeUndefined();
+		expect(selectRestartExtensionPackageRoots(undefined, ["./ext"], ["./hook"])).toEqual(["./ext", "./hook"]);
 	});
 
 	test("consumes restart advisor env toggles", () => {

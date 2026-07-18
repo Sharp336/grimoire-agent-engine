@@ -37,6 +37,13 @@ describe("restart launch flags", () => {
 
 		expect(flags.configFiles).toEqual(["/repo/original/omp.yml", "/tmp/global.yml"]);
 		expect(flags.extensionPaths).toEqual(["/repo/resumed/ext", "/repo/resumed/pkg-extension", "/repo/shared/ext"]);
+		expect(flags.extensionPackageRoots).toEqual([
+			"/repo/original/ext",
+			"/repo/original/pkg-extension",
+			"/repo/shared/ext",
+			"/repo/original/hooks/restart.ts",
+			"/repo/original/@scope/pkg",
+		]);
 		expect(flags.hookPaths).toEqual(["/repo/resumed/hooks/restart.ts", "/repo/resumed/@scope/pkg"]);
 		expect(flags.pluginDirs).toEqual(["/repo/original/plugins", "/opt/plugins"]);
 		expect(flags.providerSessionId).toBe("provider-session-1");
