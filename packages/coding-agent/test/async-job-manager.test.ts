@@ -292,6 +292,39 @@ describe("AsyncJobManager", () => {
 		expect(manager.getAllJobs()).toHaveLength(0);
 	});
 
+	test("dispose delivers a backoff-pending retry immediately instead of waiting out the backoff", async () => {
+		let attempts = 0;
+		const completions: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (_jobId, text) => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("first delivery fails");
+				completions.push(text);
+			},
+		});
+
+		manager.register("bash", "retry-then-succeed", async () => "payload");
+		await manager.waitForAll();
+		// Wait until the failed first attempt has been requeued with its
+		// exponential backoff (>= 500ms out).
+		const deadline = Date.now() + 2_000;
+		while (!(attempts >= 1 && manager.hasPendingDeliveries())) {
+			if (Date.now() >= deadline) throw new Error("Timed out waiting for requeued delivery");
+			await Bun.sleep(5);
+		}
+
+		const startedAt = Date.now();
+		const clean = await manager.dispose({ timeoutMs: 3_000 });
+		const elapsedMs = Date.now() - startedAt;
+
+		// The terminal drain ignores nextAttemptAt: well under the 500ms+ backoff.
+		expect(elapsedMs).toBeLessThan(400);
+		expect(clean).toBe(true);
+		expect(attempts).toBe(2);
+		expect(completions).toEqual(["payload"]);
+		expect(manager.hasPendingDeliveries()).toBe(false);
+	});
+
 	test("scoped delivery drain returns once matching owner deliveries finish", async () => {
 		let mainJobId = "";
 		let releaseMainDelivery = (): void => {};

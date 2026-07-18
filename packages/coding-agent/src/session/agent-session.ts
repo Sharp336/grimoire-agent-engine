@@ -365,6 +365,7 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import {
+	ASYNC_RESULT_MESSAGE_TYPE,
 	type BashExecutionMessage,
 	type CustomMessage,
 	type CustomMessagePayload,
@@ -4378,20 +4379,31 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Disposed inject path: the only yield content that may still be written
+	 * after dispose begins is a background job's `async-result` follow-up (the
+	 * no-loss contract). Every other kind — MCP resource-change notifications,
+	 * late diagnostics — is advisory and must NOT be persisted into a session
+	 * that will never resume this turn (a stray `role: "user"` MCP batch would
+	 * otherwise land in the transcript at shutdown).
+	 */
 	#persistYieldMessagesDuringDispose(messages: AgentMessage[]): void {
 		for (const message of messages) {
-			this.agent.appendMessage(message);
-			if (message.role === "hookMessage" || message.role === "custom") {
-				this.sessionManager.appendCustomMessageEntry(
-					message.customType,
-					message.content,
-					message.display,
-					message.details,
-					message.attribution ?? "agent",
-				);
-			} else {
-				this.#persistSessionMessageIfMissing(message);
+			if (message.role !== "custom" || message.customType !== ASYNC_RESULT_MESSAGE_TYPE) {
+				logger.debug("Dropping non-async-result yield message during dispose", {
+					role: message.role,
+					customType: message.role === "custom" || message.role === "hookMessage" ? message.customType : undefined,
+				});
+				continue;
 			}
+			this.agent.appendMessage(message);
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution ?? "agent",
+			);
 		}
 	}
 
@@ -5282,29 +5294,36 @@ export class AgentSession {
 	}
 
 	/**
-	 * Drain disposal-owned post-prompt work to true quiescence. The controller
-	 * stays aborted for the remainder of the session: tasks spawned by a task
-	 * already unwinding cannot start fresh provider work. Yield deliveries that
-	 * arrived while the async-job manager drained are persisted directly by the
-	 * disposed inject path above, then their scheduled no-op tasks are reaped.
+	 * Reap disposal-owned post-prompt tasks. The controller stays aborted for
+	 * the remainder of the session, so a task scheduled while this loop runs
+	 * (or after it) is a no-op that settles without running user code — the
+	 * loop therefore terminates. Yield persistence is NOT this method's job:
+	 * dispose runs one targeted `#flushAsyncResultsForDispose()` after the
+	 * async-job manager's terminal delivery drain.
 	 */
 	async #drainPostPromptTasksForDispose(): Promise<void> {
 		this.#postPromptTasksAbortController.abort();
 		this.#resolveTtsrResume();
-
-		let emptyPasses = 0;
-		while (emptyPasses < 2) {
-			await this.yieldQueue.flush("idle");
-			const pendingTasks = Array.from(this.#postPromptTasks);
-			if (pendingTasks.length === 0 && !this.yieldQueue.has()) {
-				emptyPasses++;
-				await Promise.resolve();
-				continue;
-			}
-			emptyPasses = 0;
-			await Promise.allSettled(pendingTasks);
+		while (this.#postPromptTasks.size > 0) {
+			await Promise.allSettled(Array.from(this.#postPromptTasks));
 		}
 		this.#resolvePostPromptTasks();
+	}
+
+	/**
+	 * Dispose-time writer barrier for async-job follow-ups. Runs strictly after
+	 * `AsyncJobManager.dispose()` — the manager's terminal drain has awaited
+	 * every delivery callback, and the production callback's last act is the
+	 * synchronous `yieldQueue.enqueue` (sdk.ts), so no producer can add another
+	 * `async-result` entry after this flush. One pass persists the survivors
+	 * (suppressed entries drop via the SDK `isStale` check, which stays
+	 * authoritative because the dead manager retains its suppression sets);
+	 * every other yield kind is dropped, not persisted (see
+	 * `#persistYieldMessagesDuringDispose`).
+	 */
+	async #flushAsyncResultsForDispose(): Promise<void> {
+		await this.yieldQueue.flush("idle", ASYNC_RESULT_MESSAGE_TYPE);
+		this.yieldQueue.clear();
 	}
 	/**
 	 * Wait for retry, TTSR resume, and any background continuation to settle.
@@ -6821,16 +6840,10 @@ export class AgentSession {
 
 		// Async-job subagents share their parent's MCP manager and mnemopi state.
 		// Drain them first; independent teardown below still begins immediately.
-		// A delivery callback is limited to local artifact persistence plus a
-		// yieldQueue enqueue (sdk.ts); it has no abort seam. Preserve the no-loss
-		// contract by awaiting true callback quiescence after the bounded manager
-		// cleanup rather than force-closing session storage underneath it.
-		let timedOutDeliveryQuiescence: Promise<void> = Promise.resolve();
 		const asyncJobDrain = (async () => {
 			// Cancel jobs this agent registered so a subagent's teardown doesn't
 			// leak its background bash/task work into the parent's manager. Only
-			// the session that owns the manager goes on to dispose it (which itself
-			// nukes any leftover jobs and pending deliveries).
+			// the session that owns the manager goes on to dispose it.
 			this.#cancelOwnAsyncJobs();
 			const ownedAsyncManager = this.#ownedAsyncJobManager;
 			if (ownedAsyncManager) {
@@ -6838,13 +6851,20 @@ export class AgentSession {
 				// failed owned teardown cannot leave a dead manager installed for
 				// later top-level sessions / task async routing.
 				try {
-					const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
-					const deliveryState = ownedAsyncManager.getDeliveryState();
-					if (drained === false && deliveryState) {
-						logger.warn("Async job completion deliveries exceeded bounded cleanup; awaiting quiescence", {
-							...deliveryState,
+					// Manager-owned shutdown barrier (see AsyncJobManager.dispose):
+					// seals admissions, cancels jobs, awaits abort-terminating job
+					// promises under the 3s bound, then drains every queued/in-flight
+					// delivery callback to completion — a failed callback is terminal
+					// (logged, never retried), so retry backoff cannot delay shutdown.
+					// A delivery callback is limited to local artifact persistence
+					// plus a synchronous yieldQueue enqueue (sdk.ts); a callback that
+					// never settles is the documented irreducible edge and holds
+					// dispose open rather than losing its yield.
+					const clean = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
+					if (!clean) {
+						logger.warn("Async job teardown exceeded the job-settle bound or lost a terminal delivery", {
+							...ownedAsyncManager.getDeliveryState(),
 						});
-						timedOutDeliveryQuiescence = ownedAsyncManager.waitForDeliveryQuiescence();
 					}
 				} finally {
 					if (AsyncJobManager.instance() === ownedAsyncManager) {
@@ -6859,15 +6879,16 @@ export class AgentSession {
 			() => undefined,
 			() => undefined,
 		);
-		// Let the first stable-empty pass overlap a delivery callback that exceeded
-		// the manager's bounded cleanup. Then wait until that callback can no longer
-		// enqueue and run a second stable-empty pass to persist its late yield.
-		const initialPostPromptDrain = asyncJobsSettled.then(() => this.#drainPostPromptTasksForDispose());
-		const asyncDeliveryQuiescence = asyncJobsSettled.then(() => timedOutDeliveryQuiescence);
-		const postPromptDrain = Promise.all([initialPostPromptDrain, asyncDeliveryQuiescence]).then(() =>
-			this.#drainPostPromptTasksForDispose(),
-		);
-
+		// Writer barrier, in order: (1) the manager drain above ran every
+		// delivery callback to completion, so every async-result enqueue has
+		// happened; (2) reap the aborted post-prompt tasks; (3) one targeted
+		// yieldQueue flush persists the async-result entries and drops every
+		// other kind. No producer can enqueue past (1), so a single flush is a
+		// true barrier — no stable-empty polling, no second quiescence pass.
+		const postPromptDrain = asyncJobsSettled.then(async () => {
+			await this.#drainPostPromptTasksForDispose();
+			await this.#flushAsyncResultsForDispose();
+		});
 		// Phase B: independent subsystem teardown runs concurrently under one
 		// allSettled barrier. Async-shared resources wait for the full async-job
 		// plus post-prompt drain, but not for unrelated branches.
@@ -6991,9 +7012,10 @@ export class AgentSession {
 				}
 			})(),
 		]);
-		// A Phase-B branch may have queued one last delivery after the first
-		// quiescence pass. Seal the writer side with a final stable drain before
-		// aggregating failures and entering Phase C.
+		// A Phase-B branch may have scheduled one last post-prompt task (all
+		// no-ops under the aborted controller). Reap them so no dangling task
+		// promise survives into Phase C. Async-result persistence already
+		// happened inside postPromptDrain; this is task hygiene only.
 		await this.#drainPostPromptTasksForDispose();
 		// The first Hindsight flush may have completed before a disposal-time
 		// post-prompt continuation enqueued another retain. Re-drain after all

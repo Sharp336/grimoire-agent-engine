@@ -122,7 +122,8 @@ export class AsyncJobManager {
 	readonly #jobs = new Map<string, AsyncJob>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
-	readonly #deliveryPromises = new Set<Promise<void>>();
+	/** Count of delivery callbacks that failed after dispose sealed the manager (terminal, never retried). */
+	#terminalDeliveryFailures = 0;
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #closedAdmissionOwners = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
@@ -482,37 +483,70 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Wait until no delivery callback can still invoke `onJobComplete`. Unlike
-	 * {@link drainDeliveries}, this remains valid after bounded `dispose()`
-	 * clears the queue/in-flight bookkeeping. Track callback promises separately
-	 * because owner-filtered drains can deliver outside the shared loop; re-sample
-	 * after every await so retry-loop handoffs cannot escape the barrier.
+	 * Manager-owned shutdown barrier. Single ordered sequence — no secondary
+	 * promise registry, no quiescence polling:
+	 *
+	 *  1. seal the manager (`#disposed`; `register()` already rejects, owner
+	 *     admissions were closed by the session via `closeAdmissions`);
+	 *  2. cancel every running job — a cancelled job's late return takes the
+	 *     `status === "cancelled"` branch in `register()` and can never enqueue
+	 *     a delivery, so the delivery set is frozen from here on;
+	 *  3. await job promises under the existing bound (abort-terminating jobs
+	 *     settle here; a job that ignores abort is detached, not awaited);
+	 *  4. drain every queued/in-flight delivery to completion through the
+	 *     existing `delivery.promise` bookkeeping — immediately, ignoring retry
+	 *     backoff, and terminally: a callback failure under `#disposed` is
+	 *     surfaced/logged, never requeued (see `#deliverDelivery`).
+	 *
+	 * `#suppressedDeliveries`/`#watchedJobs` are intentionally retained for the
+	 * dead manager's lifetime so the SDK's `isStale` staleness check stays
+	 * authoritative while the session persists late yield entries after this
+	 * drain.
+	 *
+	 * Irreducible edge (documented, not solved): a delivery callback that NEVER
+	 * settles cannot have both a hard-bounded dispose and guaranteed
+	 * persistence of its yield — there is no cancellable-callback or durable
+	 * journal seam. Step 4 therefore awaits callbacks unbounded; bounded exit
+	 * is proven for abort-terminating jobs plus the production SDK callback
+	 * (artifact persistence + a synchronous yieldQueue enqueue). Same spirit as
+	 * the documented session_shutdown/eval bounded-detach exceptions.
+	 *
+	 * Returns false when jobs exceeded the bound or a terminal delivery failed.
 	 */
-	async waitForDeliveryQuiescence(): Promise<void> {
-		while (true) {
-			const callbacks = Array.from(this.#deliveryPromises);
-			const loop = this.#deliveryLoop;
-			if (callbacks.length === 0 && !loop) return;
-			await Promise.all(loop ? [...callbacks, loop] : callbacks);
-		}
-	}
-
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
 		this.cancelAll();
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
-		const deadline = Date.now() + timeoutMs;
-		const jobsSettled = await this.#waitForAllUntil(deadline);
-		const drained = await this.drainDeliveries({ timeoutMs: Math.max(deadline - Date.now(), 0) });
+		const jobsSettled = await this.#waitForAllUntil(Date.now() + timeoutMs);
+		await this.#drainDeliveriesForDispose();
 		this.#clearEvictionTimers();
 		this.#jobs.clear();
-		this.#deliveries.length = 0;
-		this.#inFlightDeliveries.length = 0;
-		this.#suppressedDeliveries.clear();
-		this.#watchedJobs.clear();
 		this.#pollEscalation.clear();
-		return jobsSettled && drained;
+		return jobsSettled && this.#terminalDeliveryFailures === 0;
+	}
+
+	/**
+	 * Terminal delivery drain for `dispose()`: deliver everything still queued
+	 * (immediately — a pending retry's 30s backoff must not delay shutdown) and
+	 * await every in-flight callback. The shared delivery loop is deliberately
+	 * NOT awaited: it may be sleeping on a retry backoff timer; it wakes to a
+	 * shifted queue (or the `#disposed` check) and exits without delivering.
+	 */
+	async #drainDeliveriesForDispose(): Promise<void> {
+		while (true) {
+			const delivery = this.#deliveries.shift();
+			if (delivery) {
+				if (this.isDeliverySuppressed(delivery.jobId)) continue;
+				await this.#deliverDelivery(delivery);
+				continue;
+			}
+			const inFlight = this.#inFlightDeliveries
+				.map(d => d.promise)
+				.filter((p): p is Promise<void> => p !== undefined);
+			if (inFlight.length === 0) return;
+			await Promise.all(inFlight);
+		}
 	}
 
 	#resolveJobId(preferredId?: string): string {
@@ -623,6 +657,10 @@ export class AsyncJobManager {
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {
+		// A sealed manager can never grow its delivery set: dispose()'s terminal
+		// drain is the last writer barrier (a late resumeDeliveries must not
+		// re-open it).
+		if (this.#disposed) return;
 		// Skip delivery if already acknowledged
 		if (this.isDeliverySuppressed(jobId)) {
 			return;
@@ -638,6 +676,8 @@ export class AsyncJobManager {
 	}
 
 	#ensureDeliveryLoop(): void {
+		// During dispose the terminal drain is the sole delivery driver.
+		if (this.#disposed) return;
 		if (this.#deliveryLoop) {
 			return;
 		}
@@ -656,6 +696,9 @@ export class AsyncJobManager {
 
 	async #runDeliveryLoop(): Promise<void> {
 		while (this.#deliveries.length > 0) {
+			// dispose() owns any remaining deliveries; exit without competing
+			// (a wake from a retry-backoff sleep lands here).
+			if (this.#disposed) return;
 			const delivery = this.#deliveries[0];
 			if (this.isDeliverySuppressed(delivery.jobId)) {
 				this.#deliveries.shift();
@@ -686,25 +729,34 @@ export class AsyncJobManager {
 			} catch (error) {
 				delivery.attempt += 1;
 				delivery.lastError = error instanceof Error ? error.message : String(error);
-				delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
-				if (!this.isDeliverySuppressed(delivery.jobId)) {
-					this.#deliveries.push(delivery);
+				if (this.#disposed) {
+					// Terminal: retry backoff must not delay shutdown. Surface the
+					// loss; dispose() reports it through its return value.
+					this.#terminalDeliveryFailures += 1;
+					logger.error("Async job completion delivery failed terminally during dispose", {
+						jobId: delivery.jobId,
+						attempt: delivery.attempt,
+						error: delivery.lastError,
+					});
+				} else {
+					delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
+					if (!this.isDeliverySuppressed(delivery.jobId)) {
+						this.#deliveries.push(delivery);
+					}
+					logger.warn("Async job completion delivery failed", {
+						jobId: delivery.jobId,
+						attempt: delivery.attempt,
+						nextRetryAt: delivery.nextAttemptAt,
+						error: delivery.lastError,
+					});
 				}
-				logger.warn("Async job completion delivery failed", {
-					jobId: delivery.jobId,
-					attempt: delivery.attempt,
-					nextRetryAt: delivery.nextAttemptAt,
-					error: delivery.lastError,
-				});
 			} finally {
-				if (delivery.promise) this.#deliveryPromises.delete(delivery.promise);
 				const index = this.#inFlightDeliveries.indexOf(delivery);
 				if (index !== -1) this.#inFlightDeliveries.splice(index, 1);
 				if (this.#deliveries.length > 0) this.#ensureDeliveryLoop();
 			}
 		})();
 		delivery.promise = promise;
-		this.#deliveryPromises.add(promise);
 		return promise;
 	}
 

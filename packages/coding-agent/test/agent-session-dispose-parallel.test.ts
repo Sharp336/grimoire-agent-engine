@@ -663,14 +663,14 @@ describe("AgentSession dispose parallelization", () => {
 			onJobComplete: async (jobId, text) => {
 				deliveryEntered.resolve();
 				await deliveryGate.promise;
-				targetSession?.yieldQueue.enqueue("round7-async-result", { jobId, text });
+				targetSession?.yieldQueue.enqueue("async-result", { jobId, text });
 			},
 		});
 		AsyncJobManager.setInstance(asyncJobManager);
 
 		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
 		targetSession = s;
-		s.yieldQueue.register<{ jobId: string; text: string }>("round7-async-result", {
+		s.yieldQueue.register<{ jobId: string; text: string }>("async-result", {
 			build: entries => ({
 				role: "custom",
 				customType: "async-result",
@@ -718,14 +718,14 @@ describe("AgentSession dispose parallelization", () => {
 			onJobComplete: async (jobId, text) => {
 				deliveryEntered.resolve();
 				await deliveryGate.promise;
-				targetSession?.yieldQueue.enqueue("late-async-result", { jobId, text });
+				targetSession?.yieldQueue.enqueue("async-result", { jobId, text });
 			},
 		});
 		AsyncJobManager.setInstance(asyncJobManager);
 
 		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
 		targetSession = s;
-		s.yieldQueue.register<{ jobId: string; text: string }>("late-async-result", {
+		s.yieldQueue.register<{ jobId: string; text: string }>("async-result", {
 			build: entries => ({
 				role: "custom",
 				customType: "async-result",
@@ -737,7 +737,7 @@ describe("AgentSession dispose parallelization", () => {
 		});
 		const originalAppendCustom = s.sessionManager.appendCustomMessageEntry.bind(s.sessionManager);
 		s.sessionManager.appendCustomMessageEntry = (customType, content, display, details, attribution) => {
-			if (customType === "async-result") order.push("late-async-result-write");
+			if (customType === "async-result") order.push("async-result-write");
 			return originalAppendCustom(customType, content, display, details, attribution);
 		};
 		const originalClose = s.sessionManager.close.bind(s.sessionManager);
@@ -763,7 +763,7 @@ describe("AgentSession dispose parallelization", () => {
 		await disposePromise;
 		session = undefined;
 
-		expect(order).toEqual(["late-async-result-write", "close"]);
+		expect(order).toEqual(["async-result-write", "close"]);
 	});
 
 	it("flushes Hindsight retain queue before sessionManager.close", async () => {
@@ -998,5 +998,106 @@ describe("AgentSession dispose parallelization", () => {
 					String((call[1] as { error?: unknown } | undefined)?.error ?? "").includes("mnemopi dispose boom"),
 			),
 		).toBe(true);
+	});
+	it("completes dispose promptly when the delivery callback throws synchronously every time", async () => {
+		let attempts = 0;
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: () => {
+				attempts += 1;
+				throw new Error("delivery boom");
+			},
+		});
+		AsyncJobManager.setInstance(asyncJobManager);
+
+		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
+		asyncJobManager.register("bash", "always-fails", async () => "payload", { id: "fail-job", ownerId: "Main" });
+		await asyncJobManager.waitForAll();
+		// Let the first attempt fail before dispose so a retry with backoff is
+		// already queued — the historical hang chased that retry loop forever.
+		const deadline = Date.now() + 2_000;
+		while (attempts === 0) {
+			if (Date.now() >= deadline) throw new Error("Timed out waiting for first delivery attempt");
+			await Bun.sleep(5);
+		}
+
+		let timer: Timer | undefined;
+		const completed = await Promise.race([
+			s.dispose().then(() => true),
+			new Promise<boolean>(resolve => {
+				timer = setTimeout(() => resolve(false), 2_000);
+			}),
+		]).finally(() => clearTimeout(timer));
+		session = undefined;
+
+		expect(completed).toBe(true);
+		// Exactly one terminal re-attempt during the dispose drain; never retried after.
+		const attemptsAtDispose = attempts;
+		await Bun.sleep(50);
+		expect(attempts).toBe(attemptsAtDispose);
+	});
+
+	it("drops queued MCP notifications instead of persisting them at shutdown", async () => {
+		const s = await createSession({ persist: true });
+		s.yieldQueue.register<{ serverName: string; uri: string }>("mcp-notification", {
+			build: entries => ({
+				role: "user",
+				content: [{ type: "text", text: `[MCP notification] ${entries.length} resource(s) updated` }],
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+		s.yieldQueue.enqueue("mcp-notification", { serverName: "srv", uri: "mcp://srv/resource" });
+
+		await s.dispose();
+		session = undefined;
+
+		const persistedMessages = s.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message")
+			.map(entry => JSON.stringify(entry.message));
+		expect(persistedMessages.some(message => message.includes("MCP notification"))).toBe(false);
+	});
+
+	it("keeps a hub-acknowledged async-result suppressed through dispose", async () => {
+		let targetSession: AgentSession | undefined;
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				if (asyncJobManager.isDeliverySuppressed(jobId)) return;
+				targetSession?.yieldQueue.enqueue("async-result", { jobId, text });
+			},
+		});
+		AsyncJobManager.setInstance(asyncJobManager);
+
+		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
+		targetSession = s;
+		// Mirror the SDK registration: staleness defers to the manager's
+		// suppression sets, which must stay authoritative through dispose.
+		s.yieldQueue.register<{ jobId: string; text: string }>("async-result", {
+			isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
+			build: entries => ({
+				role: "custom",
+				customType: "async-result",
+				content: entries.map(entry => `${entry.jobId}:${entry.text}`).join("\n"),
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+
+		asyncJobManager.register("bash", "acked job", async () => "payload", { id: "acked-job", ownerId: "Main" });
+		await asyncJobManager.waitForAll();
+		await asyncJobManager.drainDeliveries({ timeoutMs: 2_000 });
+		// The follow-up entry is already queued; the hub acknowledgement arrives
+		// before dispose, so the queued entry must be dropped as stale, not
+		// re-persisted by the dispose-time flush.
+		asyncJobManager.acknowledgeDeliveries(["acked-job"]);
+
+		await s.dispose();
+		session = undefined;
+
+		const persistedAsyncResults = s.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === "async-result");
+		expect(persistedAsyncResults).toHaveLength(0);
 	});
 });
