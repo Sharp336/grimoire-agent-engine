@@ -387,6 +387,21 @@ describe("TranscriptContainer", () => {
 		expect(history.renderCount).toBe(2);
 	});
 
+	it("renders compacted rows for exporters without changing virtualization state", () => {
+		const container = new TranscriptContainer();
+		const history = new CountingFinalizedBlock(["committed-history"]);
+		container.addChild(history);
+		container.addChild(new CountingFinalizedBlock(["retained-tail"]));
+
+		expect(container.render(40)).toEqual(["committed-history", "", "retained-tail"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["retained-tail"]);
+
+		expect(container.renderFullHistory(40)).toEqual(["committed-history", "", "retained-tail"]);
+		expect(container.render(40)).toEqual(["retained-tail"]);
+		expect(container.takeNativeScrollbackVirtualizedRows()).toBe(2);
+	});
+
 	it("suppresses first-time compaction inside a destructive replay transaction", () => {
 		const container = new TranscriptContainer();
 		const history = new CountingFinalizedBlock(["committed-history"]);

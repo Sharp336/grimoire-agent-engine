@@ -418,6 +418,24 @@ export class TranscriptContainer
 		return rows.length > maxRows ? rows.slice(rows.length - maxRows) : rows;
 	}
 
+	/**
+	 * Render the complete session-owned transcript for out-of-band exporters.
+	 * Unlike {@link render}, this includes children whose rows were virtualized
+	 * into native scrollback and touches none of the container's compose, commit,
+	 * replay, stability, or pending-drop bookkeeping.
+	 */
+	renderFullHistory(width: number): readonly string[] {
+		width = Math.max(1, width);
+		const rows: string[] = [];
+		for (const child of this.children) {
+			const contribution = stripPlainBlankEdges(child.render(width));
+			if (contribution.length === 0) continue;
+			if (rows.length > 0 && !isPlainBlank(rows.at(-1) ?? "")) rows.push("");
+			for (const row of contribution) rows.push(row);
+		}
+		return rows;
+	}
+
 	override render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		this.#nativeScrollbackLiveRegionStart = undefined;
