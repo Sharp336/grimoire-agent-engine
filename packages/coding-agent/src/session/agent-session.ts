@@ -7787,13 +7787,11 @@ export class AgentSession {
 
 	/**
 	 * Test-only: register a promise as a post-prompt task so dispose's 5s drain
-	 * bound can be exercised without driving a full agent turn. Production code
-	 * must not call this.
+	 * bound can be exercised without driving a full agent turn. The seam is inert
+	 * outside Bun tests so SDK consumers cannot trigger test-only behavior.
 	 */
 	trackPostPromptTaskForTests(task: Promise<unknown>): void {
-		if (!isBunTestRuntime()) {
-			throw new Error("trackPostPromptTaskForTests is test-only");
-		}
+		if (!isBunTestRuntime()) return;
 		this.#trackPostPromptTask(task);
 	}
 
