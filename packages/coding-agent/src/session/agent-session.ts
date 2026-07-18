@@ -6916,9 +6916,7 @@ export class AgentSession {
 			}
 		}
 		const phaseBError =
-			phaseBErrors.length > 0
-				? new AggregateError(phaseBErrors, "Session dispose subsystem failures")
-				: undefined;
+			phaseBErrors.length > 0 ? new AggregateError(phaseBErrors, "Session dispose subsystem failures") : undefined;
 
 		// Phase C (sequential): power/empty-move cleanup, then session close
 		// (writers-before-close invariant: Phase A + Phase B flushes finished),

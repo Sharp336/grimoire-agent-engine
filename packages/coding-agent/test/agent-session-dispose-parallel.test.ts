@@ -21,10 +21,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import * as mnemopiEmbedClientModule from "@oh-my-pi/pi-coding-agent/mnemopi/embed-client";
 import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
-import * as tinyTitleClientModule from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as tinyTitleClientModule from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 type Deferred = {
@@ -308,11 +308,9 @@ describe("AgentSession dispose parallelization", () => {
 		const mnemopiStarted = deferred();
 		const mnemopiGate = deferred();
 		const order: string[] = [];
-		const terminateSpy = vi
-			.spyOn(tinyTitleClientModule.tinyTitleClient, "terminate")
-			.mockImplementation(async () => {
-				order.push("tiny:shutdown");
-			});
+		const terminateSpy = vi.spyOn(tinyTitleClientModule.tinyTitleClient, "terminate").mockImplementation(async () => {
+			order.push("tiny:shutdown");
+		});
 		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
 		vi.spyOn(mnemopiState, "dispose").mockImplementation(async () => {
 			order.push("mnemopi:start");

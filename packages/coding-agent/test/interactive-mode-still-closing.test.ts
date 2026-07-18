@@ -125,5 +125,4 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 			error: String(disposeError),
 		});
 	});
-
 });
