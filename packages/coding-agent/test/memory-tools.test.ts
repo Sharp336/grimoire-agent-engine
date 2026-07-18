@@ -590,10 +590,12 @@ describe("Mnemopi backend lifecycle", () => {
 			await flushStall.promise;
 		});
 		const closeSpy = vi.spyOn(retainMemory, "close");
+		const cleanupSettled = Promise.withResolvers<void>();
+		const onConsolidationSettled = vi.fn(() => cleanupSettled.resolve());
 
 		const BUDGET_MS = 100;
 		const start = Bun.nanoseconds();
-		await state.dispose({ timeoutMs: BUDGET_MS });
+		await state.dispose({ timeoutMs: BUDGET_MS, onConsolidationSettled });
 		const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 
 		// Dispose must surrender within the budget (plus a generous slack); the
@@ -604,12 +606,15 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(flushCalls).toBe(1);
 		// `close()` is deferred so SQLite writes don't race a closed handle.
 		expect(closeSpy).not.toHaveBeenCalled();
+		expect(onConsolidationSettled).not.toHaveBeenCalled();
 
-		// Release the stall and confirm the deferred close runs once consolidate
-		// settles — i.e. the SQLite handle still ends up released eventually.
+		// Release the stall and confirm close plus dependent cleanup run once
+		// consolidation settles.
 		flushStall.resolve();
-		await Bun.sleep(50);
+		await cleanupSettled.promise;
 		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(onConsolidationSettled).toHaveBeenCalledTimes(1);
+		expect(closeSpy.mock.invocationCallOrder[0]).toBeLessThan(onConsolidationSettled.mock.invocationCallOrder[0]);
 
 		registeredMnemopiState = undefined;
 	});

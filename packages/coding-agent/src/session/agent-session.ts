@@ -6883,21 +6883,27 @@ export class AgentSession {
 			(async () => {
 				await hindsightState?.flushRetainQueue();
 			})(),
-			// Mnemopi dispose, then shared tiny-model and embed shutdown as one
-			// sequential branch (#3031). Pointer was cleared before the barrier so
-			// other code cannot observe a half-disposed state across concurrent branches.
+			// Mnemopi dispose and worker shutdown share one branch (#3031). A
+			// timed-out consolidation keeps the shared tiny-model worker alive
+			// until its detached model work actually settles.
 			(async () => {
-				// Both workers must be torn down even when state.dispose rejects. The
-				// shared tiny-model worker stays alive until consolidation finishes because
-				// providers.memoryModel routes consolidation through tinyModelClient.
 				try {
-					await mnemopiState?.dispose({ timeoutMs: mnemopiConsolidateTimeoutMs });
-				} finally {
+					if (mnemopiState) {
+						await mnemopiState.dispose({
+							timeoutMs: mnemopiConsolidateTimeoutMs,
+							onConsolidationSettled: shutdownTinyTitleClient,
+						});
+					} else {
+						await shutdownTinyTitleClient();
+					}
+				} catch (error) {
+					// dispose can reject before it reaches the completion callback.
 					await shutdownTinyTitleClient();
-					// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
-					// consolidate-on-dispose may still call `embed()` to store the final
-					// memories, and that round-trips through the worker we are about to
-					// hard-kill (issue #3031).
+					throw error;
+				} finally {
+					// The embedding worker remains intentionally bounded: timed-out
+					// consolidation may lose its last pending embedding, while working
+					// memory rows remain durable for the next session.
 					await shutdownMnemopiEmbedClient();
 				}
 			})(),

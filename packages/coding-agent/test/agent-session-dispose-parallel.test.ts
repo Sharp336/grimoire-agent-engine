@@ -8,6 +8,7 @@
  *  - idle dispose stays under the 3s perceived-hang budget
  *  - owned AsyncJobManager singleton clears even when dispose rejects
  *  - mnemopi embed shutdown runs even when state.dispose rejects
+ *  - detached mnemopi consolidation keeps the shared tiny worker alive
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
@@ -312,11 +313,12 @@ describe("AgentSession dispose parallelization", () => {
 			order.push("tiny:shutdown");
 		});
 		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
-		vi.spyOn(mnemopiState, "dispose").mockImplementation(async () => {
+		vi.spyOn(mnemopiState, "dispose").mockImplementation(async options => {
 			order.push("mnemopi:start");
 			mnemopiStarted.resolve();
 			await mnemopiGate.promise;
 			order.push("mnemopi:end");
+			await options?.onConsolidationSettled?.();
 		});
 
 		const s = await createSession();
@@ -332,6 +334,36 @@ describe("AgentSession dispose parallelization", () => {
 		}
 
 		expect(order).toEqual(["mnemopi:start", "mnemopi:end", "tiny:shutdown"]);
+	});
+
+	it("keeps the tiny-model client alive while timed-out consolidation continues detached", async () => {
+		const mnemopiStarted = deferred();
+		const consolidationGate = deferred();
+		const detachedCleanupSettled = deferred();
+		const terminateSpy = vi.spyOn(tinyTitleClientModule.tinyTitleClient, "terminate").mockResolvedValue();
+		const mnemopiState: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		vi.spyOn(mnemopiState, "dispose").mockImplementation(async options => {
+			mnemopiStarted.resolve();
+			void consolidationGate.promise.then(async () => {
+				await options?.onConsolidationSettled?.();
+				detachedCleanupSettled.resolve();
+			});
+		});
+
+		const s = await createSession();
+		setMnemopiSessionState(s, mnemopiState);
+		const disposePromise = s.dispose({ mnemopiConsolidateTimeoutMs: 1 });
+		try {
+			await mnemopiStarted.promise;
+			await disposePromise;
+			session = undefined;
+			expect(terminateSpy).not.toHaveBeenCalled();
+		} finally {
+			consolidationGate.resolve();
+			await detachedCleanupSettled.promise;
+		}
+
+		expect(terminateSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("clears owned AsyncJobManager singleton when dispose rejects", async () => {

@@ -196,6 +196,13 @@ export interface MnemopiSessionStateOptions {
 	hasRecalledForFirstTurn?: boolean;
 }
 
+export interface MnemopiSessionDisposeOptions {
+	consolidate?: boolean;
+	timeoutMs?: number;
+	/** Runs after consolidation has actually settled, including detached consolidation. */
+	onConsolidationSettled?: () => void | Promise<void>;
+}
+
 export class MnemopiSessionState {
 	sessionId: string;
 	readonly config: MnemopiBackendConfig;
@@ -558,15 +565,22 @@ export class MnemopiSessionState {
 	 * episodic promotion / embedding for the LAST few turns is skipped,
 	 * and `maybeRetainOnAgentEnd` has already retained earlier turns).
 	 */
-	async dispose(options: { consolidate?: boolean; timeoutMs?: number } = {}): Promise<void> {
+	async dispose(options: MnemopiSessionDisposeOptions = {}): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		if (this.aliasOf) return;
+		const notifyConsolidationSettled = async (): Promise<void> => {
+			await options.onConsolidationSettled?.();
+		};
+		if (this.aliasOf) {
+			await notifyConsolidationSettled();
+			return;
+		}
 		const closeOwned = (): void => {
 			for (const memory of this.scoped.owned) memory.close();
 		};
 		if (options.consolidate === false) {
 			closeOwned();
+			await notifyConsolidationSettled();
 			return;
 		}
 		const consolidatePromise = this.consolidate().catch((error: unknown) => {
@@ -583,18 +597,21 @@ export class MnemopiSessionState {
 				logger.warn("Mnemopi: consolidate-on-dispose exceeded shutdown budget; detaching to background.", {
 					timeoutMs,
 				});
-				// Defer close until the in-flight consolidate settles so SQLite
-				// writes don't race a closed handle. The process is on the way
-				// to `postmortem.quit(0)`; if it exits first, the OS reclaims
-				// the handles (and a still-pending embed() goes down with the
-				// embed worker the caller is about to SIGKILL).
-				void consolidatePromise.finally(closeOwned);
+				// Defer close and dependent cleanup until the in-flight consolidate
+				// settles so neither can interrupt its SQLite or model work.
+				void consolidatePromise
+					.finally(closeOwned)
+					.then(notifyConsolidationSettled)
+					.catch((error: unknown) => {
+						logger.warn("Mnemopi: detached dispose cleanup failed.", { error: String(error) });
+					});
 				return;
 			}
 		} else {
 			await consolidatePromise;
 		}
 		closeOwned();
+		await notifyConsolidationSettled();
 	}
 }
 
