@@ -65,7 +65,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		setErrorPinned: vi.fn((pinned: boolean) => componentCalls.push(pinned ? "pin" : "unpin")),
 		setHideThinkingBlock: vi.fn((hide: boolean) => componentCalls.push(`hide:${hide}`)),
 		messagePersistenceKey: vi.fn(() => "test-persistence-key"),
-		applyRetryRecovery: vi.fn(),
+		applyRetryRecovery: vi.fn(() => componentCalls.push("recover")),
 	};
 	const showPinnedError = vi.fn();
 	const clearPinnedError = vi.fn();
@@ -371,6 +371,94 @@ describe("EventController error banner", () => {
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
 	});
 
+	it("keeps a retry-superseded assistant mutable until recovery is applied", async () => {
+		const failed = makeAssistantMessage({ stopReason: "error", errorMessage: "rate limited" });
+		const retry = makeAssistantMessage({ content: [] });
+		const { controller, streamingComponent, componentCalls } = createFixture(failed);
+
+		await controller.handleEvent({ type: "message_end", message: failed } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 2,
+			delayMs: 0,
+			errorMessage: "rate limited",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+		componentCalls.length = 0;
+
+		await controller.handleEvent({ type: "message_start", message: retry } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		expect(streamingComponent.sealTranscriptBlock).not.toHaveBeenCalled();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: true,
+			attempt: 1,
+			recoveredErrors: [
+				{
+					entryId: "failed-entry",
+					persistenceKey: "test-persistence-key",
+					note: "rate-limited; retried",
+					retryRecovery: {
+						kind: "auto-retry",
+						status: "recovered",
+						attempt: 1,
+						recoveredAt: "2026-07-18T00:00:00.000Z",
+						recovery: "plain",
+						note: "rate-limited; retried",
+						supersededBy: {
+							provider: retry.provider,
+							model: retry.model,
+							timestamp: retry.timestamp,
+						},
+					},
+				},
+			],
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(componentCalls).toEqual(["recover", "seal"]);
+	});
+
+	it("seals a retry-superseded assistant when the retry fails", async () => {
+		const failed = makeAssistantMessage({ stopReason: "error", errorMessage: "rate limited" });
+		const retry = makeAssistantMessage({ content: [] });
+		const { controller, streamingComponent } = createFixture(failed);
+
+		await controller.handleEvent({ type: "message_end", message: failed } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 1,
+			delayMs: 0,
+			errorMessage: "rate limited",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+		streamingComponent.sealTranscriptBlock.mockClear();
+
+		await controller.handleEvent({ type: "message_start", message: retry } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		expect(streamingComponent.sealTranscriptBlock).not.toHaveBeenCalled();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 1,
+			finalError: "rate limited",
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(streamingComponent.sealTranscriptBlock).toHaveBeenCalledTimes(1);
+	});
 	it("does not pin a banner for a normal assistant stop", async () => {
 		const message = makeAssistantMessage({ stopReason: "stop" });
 		const { controller, showPinnedError } = createFixture(message);

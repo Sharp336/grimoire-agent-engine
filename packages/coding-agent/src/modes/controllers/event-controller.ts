@@ -405,7 +405,8 @@ export class EventController {
 		return undefined;
 	}
 
-	#clearRetrySupersededAssistantComponents(): void {
+	#sealAndClearRetrySupersededAssistantComponents(): void {
+		for (const component of this.#retrySupersededAssistantQueue) component.sealTranscriptBlock();
 		this.#retrySupersededAssistantComponents.clear();
 		this.#retrySupersededAssistantQueue = [];
 	}
@@ -507,7 +508,12 @@ export class EventController {
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
 			this.#lastVisibleBlockCount = 0;
-			this.#lastAssistantComponent?.sealTranscriptBlock();
+			if (
+				this.#lastAssistantComponent &&
+				!this.#retrySupersededAssistantQueue.includes(this.#lastAssistantComponent)
+			) {
+				this.#lastAssistantComponent.sealTranscriptBlock();
+			}
 			this.#lastAssistantComponent = undefined;
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
@@ -1430,15 +1436,16 @@ export class EventController {
 				const component = this.#takeRetrySupersededAssistantComponent(recovered.persistenceKey);
 				if (!component) continue;
 				component.applyRetryRecovery(recovered.retryRecovery);
+				component.sealTranscriptBlock();
 				if (this.#pinnedErrorComponent === component) this.#pinnedErrorComponent = undefined;
 				appliedRecovered = true;
 			}
 			if (appliedRecovered || (event.recoveredErrors?.length ?? 0) > 0) {
 				this.ctx.clearPinnedError();
 			}
-			this.#clearRetrySupersededAssistantComponents();
+			this.#sealAndClearRetrySupersededAssistantComponents();
 		} else {
-			this.#clearRetrySupersededAssistantComponents();
+			this.#sealAndClearRetrySupersededAssistantComponents();
 			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}
 		this.#ensureWorkingLoaderWhileStreaming();
