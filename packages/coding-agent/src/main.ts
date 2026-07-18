@@ -98,7 +98,7 @@ import {
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { AUTO_THINKING, concreteThinkingLevel, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
+import { type ConfiguredThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import {
 	getChangelogPath,
@@ -553,7 +553,7 @@ export function getPersistedSessionModelProvider(
 ): string | undefined {
 	if (!sessionManager) return undefined;
 	for (const modelString of sessionManager.getRestorableModelStrings()) {
-		const parsedModel = parseModelString(modelString, { allowMaxAlias: true });
+		const parsedModel = parseModelString(modelString);
 		if (parsedModel) return parsedModel.provider;
 	}
 	return undefined;

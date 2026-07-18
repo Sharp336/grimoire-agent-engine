@@ -216,7 +216,7 @@ describe("provider prompt-cache key session affinity", () => {
 				},
 			];
 
-			const options = await buildSessionOptions(
+			const { options } = await buildSessionOptions(
 				parsed,
 				scopedModels,
 				forkedManager,
