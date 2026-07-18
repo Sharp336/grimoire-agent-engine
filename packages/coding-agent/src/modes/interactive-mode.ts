@@ -3750,6 +3750,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, 3_000);
+		let exitCode = 0;
 		try {
 			try {
 				if (this.#signalTeardown) {
@@ -3758,7 +3759,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 				}
 			} catch (error) {
-				logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
+				if (error instanceof AggregateError && error.message === "Session dispose subsystem failures") {
+					logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
+				} else {
+					exitCode = 1;
+					logger.error("Failed to close interactive session storage during shutdown", { error: String(error) });
+				}
 			}
 		} finally {
 			clearTimeout(stillClosingTimer);
@@ -3781,7 +3787,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
 		}
 
-		await postmortem.quit(0);
+		await postmortem.quit(exitCode);
 	}
 
 	async checkShutdownRequested(): Promise<void> {

@@ -165,7 +165,7 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 		expect(order).toEqual(["write", "close", "quit"]);
 	});
 
-	it("completes /exit when session disposal rejects", async () => {
+	it("tolerates the expected Phase-B aggregate after session cleanup", async () => {
 		const disposeError = new AggregateError([new Error("phase B boom")], "Session dispose subsystem failures");
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		vi.spyOn(session, "dispose").mockRejectedValue(disposeError);
@@ -175,6 +175,18 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 		expect(postmortem.quit).toHaveBeenCalledWith(0);
 		expect(warnSpy).toHaveBeenCalledWith("Failed to dispose interactive session during shutdown", {
 			error: String(disposeError),
+		});
+	});
+	it("exits non-zero when session storage close fails", async () => {
+		const closeError = new Error("storage close failed");
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+		vi.spyOn(session, "dispose").mockRejectedValue(closeError);
+
+		await expect(mode.shutdown()).resolves.toBeUndefined();
+
+		expect(postmortem.quit).toHaveBeenCalledWith(1);
+		expect(errorSpy).toHaveBeenCalledWith("Failed to close interactive session storage during shutdown", {
+			error: String(closeError),
 		});
 	});
 });
