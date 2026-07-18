@@ -14,8 +14,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -82,6 +84,7 @@ describe("AgentSession dispose parallelization", () => {
 		ownedAsyncJobManager?: AsyncJobManager;
 		disconnectOwnedMcpManager?: () => Promise<void>;
 		persist?: boolean;
+		sideStreamFn?: StreamFn;
 	}): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled anthropic model");
@@ -106,6 +109,7 @@ describe("AgentSession dispose parallelization", () => {
 			modelRegistry,
 			ownedAsyncJobManager: options?.ownedAsyncJobManager,
 			disconnectOwnedMcpManager: options?.disconnectOwnedMcpManager,
+			sideStreamFn: options?.sideStreamFn,
 			agentId: "Main",
 		});
 		return session;
@@ -391,6 +395,75 @@ describe("AgentSession dispose parallelization", () => {
 		session = undefined;
 
 		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("aborts an in-flight deferred-handoff provider stream and completes dispose promptly", async () => {
+		const providerStarted = deferred();
+		let providerObservedAbort = false;
+		const sideStreamFn: StreamFn = (_model, _context, options) => {
+			const stream = new AssistantMessageEventStream();
+			const signal = options?.signal;
+			if (!signal) throw new Error("expected handoff provider abort signal");
+			providerStarted.resolve();
+			const abort = () => {
+				providerObservedAbort = true;
+				stream.fail(new DOMException("Provider fetch aborted", "AbortError"));
+			};
+			if (signal.aborted) abort();
+			else signal.addEventListener("abort", abort, { once: true });
+			return stream;
+		};
+		const s = await createSession({ sideStreamFn });
+		const model = s.model;
+		if (!model) throw new Error("expected session model");
+		const userMessage = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "prepare handoff" }],
+			timestamp: Date.now(),
+		};
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "handoff source" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		for (const message of [userMessage, assistantMessage]) {
+			s.agent.appendMessage(message);
+			s.sessionManager.appendMessage(message);
+		}
+
+		const handoffPromise = s.handoff();
+		s.trackPostPromptTaskForTests(handoffPromise);
+		await providerStarted.promise;
+
+		// This integration assertion deliberately uses the platform clock: fake timers
+		// cannot prove that the real abort-driven provider unwind makes /exit return.
+		let timeout: Timer | undefined;
+		const startedAt = performance.now();
+		const completed = await Promise.race([
+			s.dispose().then(() => true),
+			new Promise<boolean>(resolve => {
+				timeout = setTimeout(() => resolve(false), 1_000);
+			}),
+		]).finally(() => clearTimeout(timeout));
+		const elapsedMs = performance.now() - startedAt;
+		session = undefined;
+
+		expect(completed).toBe(true);
+		expect(providerObservedAbort).toBe(true);
+		expect(elapsedMs).toBeLessThan(1_000);
+		await expect(handoffPromise).rejects.toThrow("Handoff cancelled");
 	});
 
 	it("keeps the agent event subscription until a late continuation has drained", async () => {
