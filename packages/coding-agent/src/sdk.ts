@@ -123,6 +123,7 @@ import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/
 import type { AuthStorage } from "./session/auth-storage";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
+	ASYNC_RESULT_MESSAGE_TYPE,
 	type CustomMessage,
 	convertToLlm,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -242,7 +243,7 @@ function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessag
 	};
 	return {
 		role: "custom",
-		customType: "async-result",
+		customType: ASYNC_RESULT_MESSAGE_TYPE,
 		content: prompt.render(asyncResultTemplate, {
 			multiple: jobs.length > 1,
 			jobs,
@@ -1599,7 +1600,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						if (asyncJobManager!.isDeliverySuppressed(jobId)) return;
 
 						const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
-						session.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
+						session.yieldQueue.enqueue<AsyncResultEntry>(ASYNC_RESULT_MESSAGE_TYPE, {
 							jobId,
 							result: formattedResult,
 							job,
@@ -2957,7 +2958,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasSession = true;
 		if (asyncJobManager) {
-			session.yieldQueue.register<AsyncResultEntry>("async-result", {
+			session.yieldQueue.register<AsyncResultEntry>(ASYNC_RESULT_MESSAGE_TYPE, {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
 			});

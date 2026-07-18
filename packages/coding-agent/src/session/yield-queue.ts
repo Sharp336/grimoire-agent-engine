@@ -77,12 +77,15 @@ export class YieldQueue {
 		return false;
 	}
 
-	async flush(mode: YieldFlushMode): Promise<void> {
-		if (mode === "idle") {
+	/** Flush queued entries. With `onlyKind`, dispatch only that kind's entries
+	 *  and leave every other kind queued (dispose's async-result writer barrier). */
+	async flush(mode: YieldFlushMode, onlyKind?: string): Promise<void> {
+		if (mode === "idle" && onlyKind === undefined) {
 			this.#idleFlushPending = false;
 		}
 		const idleMessages: AgentMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (onlyKind !== undefined && kind !== onlyKind) continue;
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
 			const message = this.#build(kind, dispatcher, entries);
