@@ -318,4 +318,28 @@ describe("native scrollback virtualized-prefix rebasing", () => {
 			await fixture.term.flush();
 		}
 	});
+
+	test("case E: pane-preserving clear requests do not rehydrate virtualized history", async () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+		const fixture = makeFixture(false);
+		try {
+			await startAndSettle(fixture);
+			const dropped = fixture.virtualized.rows.slice(0, 5);
+			fixture.virtualized.dropCommittedTop(5);
+			await settle(fixture);
+			const ed3BeforeClear = countED3(fixture.writes);
+
+			fixture.tui.requestRender(true, { clearScrollback: true });
+			fixture.scheduler.flush();
+			await fixture.term.flush();
+
+			expect(fixture.virtualized.replayPreparations).toBe(0);
+			expect(countED3(fixture.writes) - ed3BeforeClear).toBe(0);
+			for (const row of dropped)
+				expect(plainBuffer(fixture.term).filter(candidate => candidate === row)).toHaveLength(1);
+		} finally {
+			fixture.tui.stop();
+			await fixture.term.flush();
+		}
+	});
 });
