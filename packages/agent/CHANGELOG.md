@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reused settled per-message token estimates while bypassing mutable streaming assistants and invalidating rewritten messages. ([#5934](https://github.com/can1357/oh-my-pi/issues/5934))
+
 ## [17.0.2] - 2026-07-17
 
 ### Fixed

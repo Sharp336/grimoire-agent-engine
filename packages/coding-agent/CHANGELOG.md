@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reused stable per-message LLM conversions and token estimates, with invalidation at session pruning, shaking, and image-removal boundaries. ([#5934](https://github.com/can1357/oh-my-pi/issues/5934))
+
 ## [17.0.3] - 2026-07-17
 
 ### Changed
