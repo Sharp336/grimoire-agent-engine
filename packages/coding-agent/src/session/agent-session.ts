@@ -6761,7 +6761,7 @@ export class AgentSession {
 	beginDispose(): void {
 		if (this.#isDisposed) return;
 		this.#isDisposed = true;
-		if (this.#agentId) this.#asyncJobManager?.closeAdmissions?.({ ownerId: this.#agentId });
+		if (this.#agentId) this.#asyncJobManager?.closeAdmissions?.(this);
 		this.#promptGeneration++;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#titleGenerationAbortController.abort();

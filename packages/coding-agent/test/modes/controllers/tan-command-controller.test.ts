@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import type { AsyncJobRegisterOptions } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AsyncJobManager, type AsyncJobRegisterOptions } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TanCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tan-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -171,6 +171,29 @@ describe("TanCommandController", () => {
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith("Usage: /tan <work>");
 	});
 
+	it("rejects a new tan job when the parent session has sealed admissions", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const register = manager.register.bind(manager);
+		const harness = createContext({
+			register: (_run, options) => register("task", "tan admission probe", async () => "", options),
+		});
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		manager.closeAdmissions(harness.ctx.session);
+
+		try {
+			await new TanCommandController(harness.ctx).start("check disposal");
+
+			expect(harness.capturedOptions?.admissionScope).toBe(harness.ctx.session);
+			expect(harness.ctx.showError).toHaveBeenCalledWith(
+				"Background jobs are unavailable while session disposal is in progress (Main)",
+			);
+			expect(harness.ctx.session.sendCustomMessage).not.toHaveBeenCalled();
+			expect(manager.getRunningJobs()).toHaveLength(0);
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
+
 	it("dispatches without disturbing an in-flight turn while streaming", async () => {
 		const harness = createContext({ isStreaming: true });
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
@@ -207,6 +230,7 @@ describe("TanCommandController", () => {
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {
 			ownerId: MAIN_AGENT_ID,
 			agentId: expect.stringMatching(/^Tan-/) as unknown as string,
+			admissionScope: harness.ctx.session,
 		});
 		expect(harness.capturedOptions?.ownerId).toBe(MAIN_AGENT_ID);
 		expect(harness.sequence).toEqual(["register", "sendCustomMessage"]);

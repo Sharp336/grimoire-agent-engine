@@ -85,6 +85,8 @@ export interface AsyncJobRegisterOptions {
 	id?: string;
 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
+	/** Session instance making the registration; dispose seals only this exact instance. */
+	admissionScope?: object;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
@@ -125,7 +127,7 @@ export class AsyncJobManager {
 	/** Count of delivery callbacks that failed after dispose sealed the manager (terminal, never retried). */
 	#terminalDeliveryFailures = 0;
 	readonly #suppressedDeliveries = new Set<string>();
-	readonly #closedAdmissionOwners = new Set<string>();
+	readonly #closedAdmissionScopes = new WeakSet<object>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
@@ -177,8 +179,9 @@ export class AsyncJobManager {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
-		if (options?.ownerId && this.#closedAdmissionOwners.has(options.ownerId)) {
-			throw new Error(`Background jobs are unavailable while session disposal is in progress (${options.ownerId})`);
+		if (options?.admissionScope && this.#closedAdmissionScopes.has(options.admissionScope)) {
+			const owner = options.ownerId ? ` (${options.ownerId})` : "";
+			throw new Error(`Background jobs are unavailable while session disposal is in progress${owner}`);
 		}
 		// Queued jobs hold no execution slot yet — only count jobs that are
 		// actually running so a large parked batch cannot starve registration.
@@ -395,9 +398,9 @@ export class AsyncJobManager {
 		}
 	}
 
-	/** Permanently reject new jobs for one disposing session without sealing its shared manager. */
-	closeAdmissions(filter: AsyncJobFilter): void {
-		if (filter.ownerId) this.#closedAdmissionOwners.add(filter.ownerId);
+	/** Reject new jobs from one disposing session instance without sealing its shared manager. */
+	closeAdmissions(scope: object): void {
+		this.#closedAdmissionScopes.add(scope);
 	}
 
 	/**
@@ -486,8 +489,8 @@ export class AsyncJobManager {
 	 * Manager-owned shutdown barrier. Single ordered sequence — no secondary
 	 * promise registry, no quiescence polling:
 	 *
-	 *  1. seal the manager (`#disposed`; `register()` already rejects, owner
-	 *     admissions were closed by the session via `closeAdmissions`);
+	 *  1. seal the manager (`#disposed`; `register()` already rejects, and the
+	 *     disposing session instance was sealed via `closeAdmissions`);
 	 *  2. cancel every running job — a cancelled job's late return takes the
 	 *     `status === "cancelled"` branch in `register()` and can never enqueue
 	 *     a delivery, so the delivery set is frozen from here on;

@@ -671,6 +671,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			},
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				admissionScope: this.session,
 				onProgress: async text => {
 					latestText = text;
 					if (!forwardUpdates) return;

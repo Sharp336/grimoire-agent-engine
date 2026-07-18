@@ -199,7 +199,7 @@ export class TanCommandController {
 						}
 					}
 				},
-				{ ownerId, agentId: cloneId },
+				{ ownerId, agentId: cloneId, admissionScope: session },
 			);
 		} catch (error) {
 			if (cloneFile) await removeCloneSession(cloneFile);

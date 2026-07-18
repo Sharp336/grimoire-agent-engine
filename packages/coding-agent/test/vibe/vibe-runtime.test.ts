@@ -194,6 +194,24 @@ describe("vibe session registry", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("rejects a new turn job when the owning session has sealed admissions", async () => {
+		const manager = createManager();
+		const session = createSession({ manager });
+		const register = manager.register.bind(manager);
+		let admissionScope: object | undefined;
+		vi.spyOn(manager, "register").mockImplementation((type, label, _run, options) => {
+			admissionScope = options?.admissionScope;
+			return register(type, label, async () => "", options);
+		});
+		manager.closeAdmissions(session);
+
+		await expect(
+			VibeSessionRegistry.global().spawn(session, { cli: "fast", name: "Sealed", prompt: "Do not start." }),
+		).rejects.toThrow("Background jobs are unavailable while session disposal is in progress (Main)");
+		expect(admissionScope).toBe(session);
+		expect(manager.getRunningJobs()).toHaveLength(0);
+	});
+
 	it("spawn returns immediately and self-delivers a turn result with activity trace + response", async () => {
 		const gate = deferred();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {

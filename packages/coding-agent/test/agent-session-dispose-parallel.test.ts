@@ -89,6 +89,7 @@ describe("AgentSession dispose parallelization", () => {
 
 	async function createSession(options?: {
 		ownedAsyncJobManager?: AsyncJobManager;
+		asyncJobManager?: AsyncJobManager;
 		disconnectOwnedMcpManager?: () => Promise<void>;
 		persist?: boolean;
 		sideStreamFn?: StreamFn;
@@ -115,6 +116,7 @@ describe("AgentSession dispose parallelization", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 			ownedAsyncJobManager: options?.ownedAsyncJobManager,
+			asyncJobManager: options?.asyncJobManager,
 			disconnectOwnedMcpManager: options?.disconnectOwnedMcpManager,
 			sideStreamFn: options?.sideStreamFn,
 			agentId: "Main",
@@ -401,6 +403,7 @@ describe("AgentSession dispose parallelization", () => {
 		expect(() =>
 			capturedManager.register("task", "too late", async () => "late", {
 				ownerId: "Main",
+				admissionScope: s,
 			}),
 		).toThrow("session disposal is in progress");
 		const peerJobId = capturedManager.register("task", "peer remains admitted", async () => "ok", {
@@ -423,6 +426,33 @@ describe("AgentSession dispose parallelization", () => {
 
 		await s.dispose();
 		session = undefined;
+	});
+
+	it("admits jobs from a revived session instance that reuses a disposed agent id", async () => {
+		const sharedManager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const prior = await createSession({ asyncJobManager: sharedManager });
+
+		prior.beginDispose();
+		expect(() =>
+			sharedManager.register("task", "prior instance is sealed", async () => "late", {
+				ownerId: "Main",
+				admissionScope: prior,
+			}),
+		).toThrow("session disposal is in progress");
+		await prior.dispose();
+		session = undefined;
+
+		const revived = await createSession({ asyncJobManager: sharedManager });
+		const revivedJobId = sharedManager.register("task", "revived instance is live", async () => "ok", {
+			ownerId: "Main",
+			admissionScope: revived,
+		});
+		await sharedManager.waitForAll();
+
+		expect(sharedManager.getJob(revivedJobId)?.status).toBe("completed");
+		await revived.dispose();
+		session = undefined;
+		await sharedManager.dispose({ timeoutMs: 1_000 });
 	});
 
 	it("invalidates a deferred hidden prompt still in setup when dispose starts", async () => {
