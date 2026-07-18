@@ -50,7 +50,6 @@ import {
 	postmortem,
 	prompt,
 	setProjectDir,
-	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { reset as resetCapabilities } from "../capability";
@@ -208,8 +207,6 @@ import type {
 	TodoPhase,
 } from "./types";
 import { UiHelpers } from "./utils/ui-helpers";
-
-const SHUTDOWN_SESSION_FINALIZATION_BUDGET_MS = 5_000;
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
@@ -3762,17 +3759,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			} catch (error) {
 				logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
-			}
-			try {
-				await withTimeout(
-					this.session.waitForSessionStorageFinalization(),
-					SHUTDOWN_SESSION_FINALIZATION_BUDGET_MS,
-					"Timed out finalizing session storage during interactive shutdown",
-				);
-			} catch (error) {
-				logger.warn("Session storage still finalizing at interactive shutdown deadline", {
-					error: String(error),
-				});
 			}
 		} finally {
 			clearTimeout(stillClosingTimer);

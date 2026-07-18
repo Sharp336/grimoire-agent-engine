@@ -2,8 +2,8 @@
  * Parallelize session dispose so /exit no longer stacks subsystem
  * timeouts. Contracts:
  *  - independent Phase-B branches start before either resolves (causal, not wall-only)
- *  - post-prompt drain is bounded at 5s with the exact warn string
- *  - async-job delivery write lands before sessionManager.close
+ *  - every caller awaits post-prompt quiescence, storage close, and listener teardown
+ *  - async-result follow-up writes land before sessionManager.close
  *  - Hindsight retain flush lands before sessionManager.close
  *  - idle dispose stays under the 3s perceived-hang budget
  *  - owned AsyncJobManager singleton clears even when dispose rejects
@@ -40,6 +40,10 @@ type Deferred = {
 function deferred(): Deferred {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	return { promise, resolve };
+}
+
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
 function hindsightFlushStub(flush: () => Promise<void>): HindsightSessionState {
@@ -287,11 +291,9 @@ describe("AgentSession dispose parallelization", () => {
 		expect(order).toEqual(["async:start", "async:end", "mcp:disconnect"]);
 	});
 
-	it("keeps session storage open for a post-prompt writer past the dispose deadline", async () => {
+	it("does not resolve a programmatic dispose until a post-prompt write is persisted and storage is closed", async () => {
 		vi.useFakeTimers();
-		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const lateWriteGate = deferred();
-		const closeCalled = deferred();
 		const order: string[] = [];
 		const s = await createSession({ persist: true });
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -301,7 +303,7 @@ describe("AgentSession dispose parallelization", () => {
 		const lateWrite = lateWriteGate.promise.then(() => {
 			s.sessionManager.appendMessage({
 				role: "assistant",
-				content: [{ type: "text", text: "late-write" }],
+				content: [{ type: "text", text: "programmatic-dispose-late-write" }],
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
@@ -323,45 +325,137 @@ describe("AgentSession dispose parallelization", () => {
 		s.sessionManager.close = async () => {
 			order.push("close");
 			await originalClose();
+		};
+
+		const disposePromise = s.dispose().then(() => {
+			order.push("dispose:resolved");
+		});
+		try {
+			vi.advanceTimersByTime(5_000);
+			await flushMicrotasks();
+			expect(order).toEqual([]);
+		} finally {
+			lateWriteGate.resolve();
+			await disposePromise;
+			session = undefined;
+		}
+
+		expect(order).toEqual(["write", "close", "dispose:resolved"]);
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("programmatic-dispose-late-write");
+	});
+
+	it("shares one full finalization promise across concurrent dispose callers", async () => {
+		const taskGate = deferred();
+		const s = await createSession();
+		s.trackPostPromptTaskForTests(taskGate.promise);
+		let closeCalls = 0;
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			closeCalls++;
+			await originalClose();
+		};
+
+		const first = s.dispose();
+		const second = s.dispose();
+		expect(second).toBe(first);
+		taskGate.resolve();
+		await Promise.all([first, second]);
+		session = undefined;
+
+		expect(closeCalls).toBe(1);
+	});
+
+	it("invalidates a deferred hidden prompt still in setup when dispose starts", async () => {
+		const apiKeyEntered = deferred();
+		const apiKeyGate = deferred();
+		const s = await createSession();
+		const promptSpy = vi.spyOn(s.agent, "prompt");
+		vi.spyOn(s.modelRegistry, "getApiKey").mockImplementation(async () => {
+			apiKeyEntered.resolve();
+			await apiKeyGate.promise;
+			return "test-key";
+		});
+		s.queueDeferredMessage({
+			role: "custom",
+			customType: "dispose-hidden-follow-up",
+			content: "must not start a provider turn during dispose",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		await apiKeyEntered.promise;
+
+		const disposePromise = s.dispose();
+		apiKeyGate.resolve();
+		await disposePromise;
+		session = undefined;
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps the agent event subscription until a late continuation has drained", async () => {
+		vi.useFakeTimers();
+		const continueGate = deferred();
+		const closeCalled = deferred();
+		const s = await createSession({ persist: true });
+		const userMessage = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "continue after dispose starts" }],
+			timestamp: Date.now(),
+		};
+		s.agent.appendMessage(userMessage);
+		s.sessionManager.appendMessage(userMessage);
+		const model = s.model;
+		if (!model) throw new Error("expected session model");
+		const lateAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "late-continue-event" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now(),
+		};
+		vi.spyOn(s.agent, "continue").mockImplementation(async () => {
+			s.agent.appendMessage(lateAssistant);
+			s.agent.emitExternalEvent({ type: "message_start", message: lateAssistant });
+			s.agent.emitExternalEvent({ type: "message_end", message: lateAssistant });
+			await flushMicrotasks();
+		});
+		const lateContinue = continueGate.promise.then(() => s.agent.continue());
+		s.trackPostPromptTaskForTests(lateContinue);
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			await originalClose();
 			closeCalled.resolve();
 		};
 
 		const disposePromise = s.dispose();
-		vi.advanceTimersByTime(5_000);
-		await disposePromise;
-		expect(order).toEqual([]);
+		try {
+			vi.advanceTimersByTime(5_000);
+			await flushMicrotasks();
+		} finally {
+			continueGate.resolve();
+			await lateContinue;
+			await disposePromise;
+			await closeCalled.promise;
+			session = undefined;
+		}
 
-		lateWriteGate.resolve();
-		await lateWrite;
-		await closeCalled.promise;
-		session = undefined;
-
-		expect(order).toEqual(["write", "close"]);
-		expect(fs.readFileSync(sessionFile, "utf8")).toContain("late-write");
+		const persistedMessages = s.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message")
+			.map(entry => JSON.stringify(entry.message));
+		expect(persistedMessages.some(message => message.includes("late-continue-event"))).toBe(true);
 	});
-
-	it("bounds a never-settling post-prompt task at 5s and logs the exact warn", async () => {
-		// Real platform clock: withTimeout is implemented with setTimeout, and
-		// awaiting dispose under fake timers leaves the deadline timer unfired
-		// while the hang task never settles. This is the intentional 5s hang-fix.
-		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const hang = deferred(); // intentionally never resolved
-
-		const s = await createSession();
-		s.trackPostPromptTaskForTests(hang.promise);
-		expect(s.hasPostPromptWork).toBe(true);
-
-		const started = performance.now();
-		await s.dispose();
-		session = undefined;
-		const elapsed = performance.now() - started;
-
-		expect(elapsed).toBeGreaterThanOrEqual(4_500);
-		expect(elapsed).toBeLessThan(7_000);
-		expect(warnSpy.mock.calls.some(call => call[0] === "Post-prompt tasks still draining at dispose deadline")).toBe(
-			true,
-		);
-	}, 15_000);
 
 	it("writes async-job delivery entries before sessionManager.close", async () => {
 		const order: string[] = [];
@@ -427,6 +521,61 @@ describe("AgentSession dispose parallelization", () => {
 			expect(body).toContain("delivery:writer-job:payload");
 		} else {
 			expect(hasDelivery).toBe(true);
+		}
+	});
+
+	it("persists an async-result follow-up scheduled during async-job drain before storage closes", async () => {
+		vi.useFakeTimers();
+		const order: string[] = [];
+		const deliveryGate = deferred();
+		const deliveryEntered = deferred();
+		let targetSession: AgentSession | undefined;
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				deliveryEntered.resolve();
+				await deliveryGate.promise;
+				targetSession?.yieldQueue.enqueue("round7-async-result", { jobId, text });
+			},
+		});
+		AsyncJobManager.setInstance(asyncJobManager);
+
+		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
+		targetSession = s;
+		s.yieldQueue.register<{ jobId: string; text: string }>("round7-async-result", {
+			build: entries => ({
+				role: "custom",
+				customType: "async-result",
+				content: entries.map(entry => `${entry.jobId}:${entry.text}`).join("\n"),
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+		const originalAppendCustom = s.sessionManager.appendCustomMessageEntry.bind(s.sessionManager);
+		s.sessionManager.appendCustomMessageEntry = (customType, content, display, details, attribution) => {
+			if (customType === "async-result") order.push("async-result-write");
+			return originalAppendCustom(customType, content, display, details, attribution);
+		};
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			order.push("close");
+			await originalClose();
+		};
+
+		asyncJobManager.register("bash", "follow-up job", async () => "payload", {
+			id: "follow-up-job",
+			ownerId: "Main",
+		});
+		await deliveryEntered.promise;
+		const disposePromise = s.dispose();
+		deliveryGate.resolve();
+		try {
+			await disposePromise;
+			expect(order).toEqual(["async-result-write", "close"]);
+		} finally {
+			vi.advanceTimersByTime(10);
+			await flushMicrotasks();
+			session = undefined;
 		}
 	});
 

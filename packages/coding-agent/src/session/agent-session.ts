@@ -2780,6 +2780,10 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				if (this.#isDisposed) {
+					this.#persistYieldMessagesDuringDispose(messages);
+					return;
+				}
 				await this.agent.prompt(messages.length === 1 ? first : messages);
 			},
 			scheduleIdleFlush: run => {
@@ -4374,6 +4378,23 @@ export class AgentSession {
 		}
 	}
 
+	#persistYieldMessagesDuringDispose(messages: AgentMessage[]): void {
+		for (const message of messages) {
+			this.agent.appendMessage(message);
+			if (message.role === "hookMessage" || message.role === "custom") {
+				this.sessionManager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+					message.attribution ?? "agent",
+				);
+			} else {
+				this.#persistSessionMessageIfMissing(message);
+			}
+		}
+	}
+
 	/**
 	 * On a user-interrupted (`Esc`) abort, copy the trailing thinking run into a
 	 * hidden `display: false` continuity message for the next turn WITHOUT
@@ -5123,7 +5144,7 @@ export class AgentSession {
 					return;
 				}
 			}
-			if (signal.aborted) {
+			if (signal.aborted || this.#isDisposed) {
 				options?.onSkip?.("aborted");
 				return;
 			}
@@ -5258,6 +5279,32 @@ export class AgentSession {
 		if (this.#postPromptTasks.size === 0) {
 			this.#resolvePostPromptTasks();
 		}
+	}
+
+	/**
+	 * Drain disposal-owned post-prompt work to true quiescence. The controller
+	 * stays aborted for the remainder of the session: tasks spawned by a task
+	 * already unwinding cannot start fresh provider work. Yield deliveries that
+	 * arrived while the async-job manager drained are persisted directly by the
+	 * disposed inject path above, then their scheduled no-op tasks are reaped.
+	 */
+	async #drainPostPromptTasksForDispose(): Promise<void> {
+		this.#postPromptTasksAbortController.abort();
+		this.#resolveTtsrResume();
+
+		let emptyPasses = 0;
+		while (emptyPasses < 2) {
+			await this.yieldQueue.flush("idle");
+			const pendingTasks = Array.from(this.#postPromptTasks);
+			if (pendingTasks.length === 0 && !this.yieldQueue.has()) {
+				emptyPasses++;
+				await Promise.resolve();
+				continue;
+			}
+			emptyPasses = 0;
+			await Promise.allSettled(pendingTasks);
+		}
+		this.#resolvePostPromptTasks();
 	}
 	/**
 	 * Wait for retry, TTSR resume, and any background continuation to settle.
@@ -5722,14 +5769,20 @@ export class AgentSession {
 		const retryToken = ++this.#ttsrRetryToken;
 		const generation = this.#promptGeneration;
 		this.#schedulePostPromptTask(
-			async () => {
+			async signal => {
 				if (this.#ttsrRetryToken !== retryToken) {
 					this.#resolveTtsrResume();
 					return;
 				}
 
 				const targetAssistantIndex = this.#findTtsrAssistantIndex(targetMessageTimestamp);
-				if (!this.#ttsrAbortPending || this.#promptGeneration !== generation || targetAssistantIndex === -1) {
+				if (
+					!this.#ttsrAbortPending ||
+					signal.aborted ||
+					this.#isDisposed ||
+					this.#promptGeneration !== generation ||
+					targetAssistantIndex === -1
+				) {
 					this.#ttsrAbortPending = false;
 					this.#pendingTtsrInjections = [];
 					this.#perToolTtsrInjections.clear();
@@ -6687,11 +6740,14 @@ export class AgentSession {
 	 * gap slips past the disposal guards.
 	 */
 	beginDispose(): void {
+		if (this.#isDisposed) return;
 		this.#isDisposed = true;
+		this.#promptGeneration++;
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#flushPendingIrcAsides();
-		this.yieldQueue.clear();
+		this.yieldQueue.clear("advisor");
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.#stopAdvisorRuntime();
@@ -6709,24 +6765,15 @@ export class AgentSession {
 	 * double-drain the owned `AsyncJobManager` (issue #4080).
 	 */
 	#disposeCall?: Promise<void>;
-	#sessionStorageFinalization?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
 	}
 
-	/**
-	 * Wait for the session writer to close after a bounded dispose detached a
-	 * post-prompt task that ignored abort. Call after dispose() settles.
-	 */
-	waitForSessionStorageFinalization(): Promise<void> {
-		return this.#sessionStorageFinalization ?? Promise.resolve();
-	}
-
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
-		// Phase A (sequential): mark dispose, emit session_shutdown, abort in-flight
-		// post-prompt work, then bound the post-prompt drain. Writers that can still
-		// append session entries must finish before Phase C's sessionManager.close().
+		// Phase A (sequential): mark dispose, emit session_shutdown, and abort
+		// in-flight post-prompt work. The Phase-B barrier below owns the complete
+		// quiescence drain before Phase C closes session storage.
 		this.beginDispose();
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
@@ -6744,36 +6791,15 @@ export class AgentSession {
 		// implement only the dispatch surface.
 		this.#extensionRunner?.clearManagedTimers?.();
 		this.#fallbackExtensionTimers?.clearAll();
-		// Abort post-prompt work so the drain below can complete. Without this, a
-		// deferred-handoff task that has already advanced into
-		// `await this.handoff(...) → generateHandoff(...)` keeps awaiting a live LLM stream
-		// — Promise.allSettled() in #cancelPostPromptTasks then waits forever, freezing
-		// /exit and Ctrl+C-double-tap. The post-prompt task's own AbortSignal does not
-		// propagate into the inner handoff/compaction controllers, so we abort them
-		// explicitly. agent.abort() is needed for an agent.continue() that may have
-		// raced the deferred handoff (its streaming loop is awaited by the wrapper IIFE).
-		//
-		// Tool work (bash/eval/python) is NOT aborted here — those have their own
-		// dispose paths and shared kernels are contractually allowed to survive a
-		// session's dispose.
+		// Stop every production post-prompt task at its owned cancellation
+		// boundary. Keep this controller aborted: resetting it during disposal
+		// would let an async-result delivery start a fresh provider turn after
+		// agent.abort() had already fired.
 		this.abortRetry();
 		this.abortCompaction();
-		const postPromptDrain = this.#cancelPostPromptTasks();
+		this.#postPromptTasksAbortController.abort();
+		this.#resolveTtsrResume();
 		this.agent.abort();
-		// Bound the drain: tasks are already aborted; a hang past 5s was the historical
-		// /exit freeze. This is a hang-fix, not a flush drop — unexpected errors rethrow.
-		const postPromptDrainTimeoutMessage = "Timed out draining post-prompt tasks during dispose";
-		let postPromptTasksDrained = false;
-		try {
-			await withTimeout(postPromptDrain, 5_000, postPromptDrainTimeoutMessage);
-			postPromptTasksDrained = true;
-		} catch (error) {
-			if (error instanceof Error && error.message === postPromptDrainTimeoutMessage) {
-				logger.warn("Post-prompt tasks still draining at dispose deadline");
-			} else {
-				throw error;
-			}
-		}
 		await this.#drainAutolearnCapture();
 
 		// Capture state needed by Phase B branches before the barrier. Hindsight
@@ -6817,12 +6843,17 @@ export class AgentSession {
 			() => undefined,
 			() => undefined,
 		);
+		// A completed async delivery can enqueue a yield flush, which is itself a
+		// new post-prompt task. Only declare quiescence after the manager can no
+		// longer enqueue deliveries, then repeatedly flush/reap until stable.
+		const postPromptDrain = asyncJobsSettled.then(() => this.#drainPostPromptTasksForDispose());
 
 		// Phase B: independent subsystem teardown runs concurrently under one
-		// allSettled barrier. Async-shared resources wait only for async jobs, not
-		// for the other branches. All writers complete before Phase C closes storage.
+		// allSettled barrier. Async-shared resources wait for the full async-job
+		// plus post-prompt drain, but not for unrelated branches.
 		const phaseBResults = await Promise.allSettled([
 			asyncJobDrain,
+			postPromptDrain,
 			// Eval settle then three independent kernel-language disposes.
 			(async () => {
 				const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
@@ -6841,7 +6872,7 @@ export class AgentSession {
 			// subagents can reuse parent-owned module-global tabs, so do not release
 			// them until their drain settles.
 			(async () => {
-				await asyncJobsSettled;
+				await postPromptDrain;
 				// Release headless / spawned Chromium and worker tabs this session
 				// opened via the browser tool. The tool's `tabs`/`browsers` maps are
 				// module-global — subagents and future sessions share them — so we
@@ -6869,7 +6900,7 @@ export class AgentSession {
 			// MCP owned-manager disconnect: bounded 3s, best-effort. Async-job
 			// subagents reuse this manager, so do not disconnect until their drain settles.
 			(async () => {
-				await asyncJobsSettled;
+				await postPromptDrain;
 				// Disconnect only the manager this top-level session owns. Best-effort:
 				// a failure must never throw out of dispose. Subagents reuse a parent's
 				// manager and do not provide this callback. Idempotent with the
@@ -6909,7 +6940,7 @@ export class AgentSession {
 			// drain settles, and keep the shared tiny-model worker alive until detached
 			// consolidation actually settles.
 			(async () => {
-				await asyncJobsSettled;
+				await postPromptDrain;
 				const mnemopiState = setMnemopiSessionState(this, undefined);
 				try {
 					if (mnemopiState) {
@@ -6932,6 +6963,10 @@ export class AgentSession {
 				}
 			})(),
 		]);
+		// A Phase-B branch may have queued one last delivery after the first
+		// quiescence pass. Seal the writer side with a final stable drain before
+		// aggregating failures and entering Phase C.
+		await this.#drainPostPromptTasksForDispose();
 
 		// allSettled contains rejections that branch try/catch did not already
 		// log (e.g. async-job dispose, advisor recorder, hindsight flush). Log
@@ -6948,39 +6983,13 @@ export class AgentSession {
 		const phaseBError =
 			phaseBErrors.length > 0 ? new AggregateError(phaseBErrors, "Session dispose subsystem failures") : undefined;
 
-		// Phase C (sequential): power cleanup, then session storage finalization,
-		// provider sessions, Hindsight pointer clear/dispose, agent disconnect.
+		// Phase C (sequential): close storage only after every Phase-B writer and
+		// the quiescence drain have settled. dispose() itself owns and awaits this
+		// finalization; no caller-specific follow-up promise can be skipped.
 		this.#releasePowerAssertion();
-		const finalizeSessionStorage = async (): Promise<void> => {
-			// Clean up an empty session created by this session's /move so it doesn't accumulate.
-			await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
-			this.#movedFromEmptySessionFile = undefined;
-			await this.sessionManager.close();
-		};
-		if (postPromptTasksDrained) {
-			this.#sessionStorageFinalization = finalizeSessionStorage();
-			await this.#sessionStorageFinalization;
-		} else {
-			// Keep /exit bounded, but leave the writer open for a task that ignored abort.
-			// Its final persistence runs before its promise settles; close immediately afterward.
-			this.#sessionStorageFinalization = (async () => {
-				try {
-					await postPromptDrain;
-				} catch (error) {
-					logger.warn("Deferred post-prompt drain failed during session storage finalization", {
-						error: String(error),
-					});
-				} finally {
-					try {
-						await finalizeSessionStorage();
-					} catch (error) {
-						logger.warn("Failed to finalize session storage after deferred post-prompt drain", {
-							error: String(error),
-						});
-					}
-				}
-			})();
-		}
+		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		this.#movedFromEmptySessionFile = undefined;
+		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
@@ -8816,6 +8825,7 @@ export class AgentSession {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<void> {
+		if (this.#isDisposed) return;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		try {
@@ -8997,7 +9007,7 @@ export class AgentSession {
 				cutoffCount: this.messages.length + messages.length,
 			});
 			try {
-				await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
+				await this.#promptAgentWithIdleRetry(messages, agentPromptOptions, generation);
 			} finally {
 				this.#setPendingContextSnapshot(undefined);
 			}
@@ -9315,9 +9325,12 @@ export class AgentSession {
 		}
 		this.#scheduledHiddenNextTurnGeneration = generation;
 		this.#schedulePostPromptTask(
-			async () => {
+			async signal => {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
+				}
+				if (signal.aborted || this.#isDisposed || this.#promptGeneration !== generation) {
+					return;
 				}
 				if (this.#pendingNextTurnMessages.length === 0) {
 					return;
@@ -15511,9 +15524,14 @@ export class AgentSession {
 		this.#resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options: { toolChoice?: ToolChoice } | undefined,
+		generation: number,
+	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
+			if (this.#isDisposed || this.#promptGeneration !== generation) return;
 			try {
 				await this.agent.prompt(messages, options);
 				return;

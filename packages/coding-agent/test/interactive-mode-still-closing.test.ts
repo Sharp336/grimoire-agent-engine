@@ -156,7 +156,6 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 
 		const shutdownPromise = mode.shutdown();
 		vi.advanceTimersByTime(5_000);
-		await session.dispose();
 		await flushMicrotasks();
 		expect(postmortem.quit).not.toHaveBeenCalled();
 
@@ -164,26 +163,6 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 		await shutdownPromise;
 
 		expect(order).toEqual(["write", "close", "quit"]);
-	});
-
-	it("bounds the deferred session finalization wait before /exit quits", async () => {
-		vi.useFakeTimers();
-		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		session.trackPostPromptTaskForTests(new Promise<void>(() => {}));
-
-		const shutdownPromise = mode.shutdown();
-		vi.advanceTimersByTime(5_000);
-		await session.dispose();
-		await flushMicrotasks();
-		expect(postmortem.quit).not.toHaveBeenCalled();
-
-		vi.advanceTimersByTime(5_000);
-		await shutdownPromise;
-
-		expect(postmortem.quit).toHaveBeenCalledWith(0);
-		expect(warnSpy).toHaveBeenCalledWith("Session storage still finalizing at interactive shutdown deadline", {
-			error: "Error: Timed out finalizing session storage during interactive shutdown",
-		});
 	});
 
 	it("completes /exit when session disposal rejects", async () => {
