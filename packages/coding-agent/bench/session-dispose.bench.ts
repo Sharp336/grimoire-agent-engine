@@ -40,8 +40,8 @@ function stddev(xs: number[]): number {
 }
 
 function emitMetric(metric: string, median_ms: number, stddev_ms: number): void {
-	console.log(JSON.stringify({ metric, median_ms, stddev_ms }));
-	console.log(`METRIC ${metric}=${median_ms.toFixed(4)}`);
+	process.stdout.write(`${JSON.stringify({ metric, median_ms, stddev_ms })}\n`);
+	process.stdout.write(`METRIC ${metric}=${median_ms.toFixed(4)}\n`);
 }
 
 async function measureOnce(tempDir: TempDir, authStorage: AuthStorage): Promise<number> {
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 	const sd = stddev(samples);
 	emitMetric("session.dispose.idle_ms", med, sd);
 	if (med >= 3_000) {
-		console.error(`FAIL: idle dispose median ${med.toFixed(2)}ms >= 3000ms status budget`);
+		process.stdout.write(`FAIL: idle dispose median ${med.toFixed(2)}ms >= 3000ms status budget\n`);
 		process.exitCode = 1;
 	}
 }
