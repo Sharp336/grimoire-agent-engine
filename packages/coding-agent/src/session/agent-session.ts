@@ -10529,8 +10529,8 @@ export class AgentSession {
 			return undefined;
 		}
 
-		await this.sessionManager.rewriteEntries();
 		this.#invalidateLlmConversionsFromBranch(branchEntries);
+		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -10573,8 +10573,8 @@ export class AgentSession {
 			return undefined;
 		}
 
-		await this.sessionManager.rewriteEntries();
 		this.#invalidateLlmConversionsFromBranch(branchEntries);
+		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -10682,8 +10682,8 @@ export class AgentSession {
 
 		applyShakeRegions(items);
 
-		await this.sessionManager.rewriteEntries();
 		this.#invalidateLlmConversionsFromBranch(branchEntries);
+		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();

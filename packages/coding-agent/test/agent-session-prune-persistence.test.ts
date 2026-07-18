@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { USELESS_NOTICE } from "@oh-my-pi/pi-agent-core/compaction/pruning";
@@ -7,6 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -122,7 +123,7 @@ describe("AgentSession per-turn prune persistence", () => {
 		return text.text;
 	}
 
-	it("persists the pruned rewrite so a from-disk rebuild matches the live context", async () => {
+	function completeTurn(): void {
 		const finalAssistant = {
 			role: "assistant" as const,
 			content: [{ type: "text" as const, text: "Continuing." }],
@@ -142,6 +143,10 @@ describe("AgentSession per-turn prune persistence", () => {
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+	}
+
+	it("persists the pruned rewrite so a from-disk rebuild matches the live context", async () => {
+		completeTurn();
 		await session.waitForIdle();
 
 		// The per-turn pass rewrote the live context…
@@ -161,5 +166,33 @@ describe("AgentSession per-turn prune persistence", () => {
 		}
 		const rebuiltText = rebuilt.content.find(block => block.type === "text");
 		expect(rebuiltText?.type === "text" ? rebuiltText.text : undefined).toBe(USELESS_NOTICE);
+	});
+
+	it("invalidates the converted prompt before async prune persistence settles", async () => {
+		convertToLlm(session.buildDisplaySessionContext().messages);
+		const rewriteStarted = Promise.withResolvers<void>();
+		const releaseRewrite = Promise.withResolvers<void>();
+		const rewriteEntries = sessionManager.rewriteEntries.bind(sessionManager);
+		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			rewriteStarted.resolve();
+			await releaseRewrite.promise;
+			await rewriteEntries();
+		});
+
+		completeTurn();
+		await rewriteStarted.promise;
+		try {
+			const duringPersistence = convertToLlm(session.buildDisplaySessionContext().messages).find(
+				candidate => candidate.role === "toolResult" && candidate.toolCallId === BIG_CALL_ID,
+			);
+			if (duringPersistence?.role !== "toolResult" || !Array.isArray(duringPersistence.content)) {
+				throw new Error("Expected the seeded tool result while persistence is pending");
+			}
+			const text = duringPersistence.content.find(block => block.type === "text");
+			expect(text?.type === "text" ? text.text : undefined).toBe(USELESS_NOTICE);
+		} finally {
+			releaseRewrite.resolve();
+			await session.waitForIdle();
+		}
 	});
 });
