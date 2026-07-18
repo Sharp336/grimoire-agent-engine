@@ -90,6 +90,23 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
+	it("clears the conversion carry when disposed", async () => {
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+		const messages: AgentMessage[] = [{ role: "user", content: "retained history", timestamp: Date.now() }];
+		const beforeDispose = convertToLlm(messages);
+		expect(convertToLlm(messages)).toBe(beforeDispose);
+
+		await session.dispose();
+
+		expect(convertToLlm(messages)).not.toBe(beforeDispose);
+	});
+
 	it("applies transformContext before convertToLlm", async () => {
 		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
 		const transformedMessages: AgentMessage[] = [

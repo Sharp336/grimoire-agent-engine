@@ -792,6 +792,18 @@ let lastConvertOut: Message[] = [];
 let lastConvertEpoch = -1;
 
 /**
+ * Release the strong references held by the same-array conversion fast path.
+ * Per-message WeakMap entries remain valid and collectible with their messages.
+ */
+export function clearConversionCarry(): void {
+	lastConvertSource = undefined;
+	lastConvertRefs = [];
+	lastConvertCounts = [];
+	lastConvertOut = [];
+	lastConvertEpoch = -1;
+}
+
+/**
  * Drop the cached LLM conversion for a message after an in-place content rewrite
  * (image strip, prune-adjacent mutations that keep object identity). Safe no-op
  * when the message was never converted.

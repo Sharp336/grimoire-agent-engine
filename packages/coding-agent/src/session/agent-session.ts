@@ -368,6 +368,7 @@ import {
 	type BashExecutionMessage,
 	type CustomMessage,
 	type CustomMessagePayload,
+	clearConversionCarry,
 	convertToLlm,
 	demoteInterruptedThinking,
 	type FileMentionMessage,
@@ -6717,6 +6718,7 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		clearConversionCarry();
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
