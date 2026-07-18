@@ -3870,6 +3870,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	resetTranscript(): void {
+		this.clearPinnedError();
 		this.eventController?.resetTranscriptAnchors();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();

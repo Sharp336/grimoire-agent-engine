@@ -186,17 +186,20 @@ describe("InteractiveMode.showStatus", () => {
 		expect(ctx.eventController?.inheritAssistantAwaitingSeal).toHaveBeenCalledWith(assistants[1]);
 	});
 
-	test("resetTranscript clears event-controller anchors before disposing chat components", () => {
+	test("resetTranscript clears the pinned banner with its event-controller anchor before disposing chat", () => {
 		const { ctx } = createInitialRenderHarness();
 		const order: string[] = [];
+		const clearPinnedError = vi.fn(() => order.push("banner"));
 		const resetTranscriptAnchors = vi.fn(() => order.push("anchors"));
+		ctx.clearPinnedError = clearPinnedError;
 		if (!ctx.eventController) throw new Error("event controller fixture missing");
 		ctx.eventController.resetTranscriptAnchors = resetTranscriptAnchors;
 		ctx.chatContainer.dispose = vi.fn(() => order.push("dispose"));
 		ctx.chatContainer.clear = vi.fn(() => order.push("clear"));
 
 		InteractiveMode.prototype.resetTranscript.call(ctx as InteractiveMode);
+		expect(clearPinnedError).toHaveBeenCalledTimes(1);
 		expect(resetTranscriptAnchors).toHaveBeenCalledTimes(1);
-		expect(order).toEqual(["anchors", "dispose", "clear"]);
+		expect(order).toEqual(["banner", "anchors", "dispose", "clear"]);
 	});
 });
