@@ -50,6 +50,7 @@ import {
 	postmortem,
 	prompt,
 	setProjectDir,
+	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { reset as resetCapabilities } from "../capability";
@@ -207,6 +208,8 @@ import type {
 	TodoPhase,
 } from "./types";
 import { UiHelpers } from "./utils/ui-helpers";
+
+const SHUTDOWN_SESSION_FINALIZATION_BUDGET_MS = 5_000;
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
@@ -3751,13 +3754,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, 3_000);
 		try {
-			if (this.#signalTeardown) {
-				await this.#signalTeardown();
-			} else {
-				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+			try {
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
+			} catch (error) {
+				logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
 			}
-		} catch (error) {
-			logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
+			try {
+				await withTimeout(
+					this.session.waitForSessionStorageFinalization(),
+					SHUTDOWN_SESSION_FINALIZATION_BUDGET_MS,
+					"Timed out finalizing session storage during interactive shutdown",
+				);
+			} catch (error) {
+				logger.warn("Session storage still finalizing at interactive shutdown deadline", {
+					error: String(error),
+				});
+			}
 		} finally {
 			clearTimeout(stillClosingTimer);
 		}

@@ -6709,9 +6709,18 @@ export class AgentSession {
 	 * double-drain the owned `AsyncJobManager` (issue #4080).
 	 */
 	#disposeCall?: Promise<void>;
+	#sessionStorageFinalization?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
+	}
+
+	/**
+	 * Wait for the session writer to close after a bounded dispose detached a
+	 * post-prompt task that ignored abort. Call after dispose() settles.
+	 */
+	waitForSessionStorageFinalization(): Promise<void> {
+		return this.#sessionStorageFinalization ?? Promise.resolve();
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
@@ -6949,11 +6958,12 @@ export class AgentSession {
 			await this.sessionManager.close();
 		};
 		if (postPromptTasksDrained) {
-			await finalizeSessionStorage();
+			this.#sessionStorageFinalization = finalizeSessionStorage();
+			await this.#sessionStorageFinalization;
 		} else {
 			// Keep /exit bounded, but leave the writer open for a task that ignored abort.
 			// Its final persistence runs before its promise settles; close immediately afterward.
-			void (async () => {
+			this.#sessionStorageFinalization = (async () => {
 				try {
 					await postPromptDrain;
 				} catch (error) {

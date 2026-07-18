@@ -3,6 +3,7 @@
  * before signal teardown and always clears the timer in finally.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -41,7 +42,7 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
@@ -111,6 +112,78 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 		vi.advanceTimersByTime(5_000);
 		await flushMicrotasks();
 		expect(statuses).toEqual(["Closing session…"]);
+	});
+
+	it("persists a late post-prompt write before /exit quits", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const lateWriteGate = Promise.withResolvers<void>();
+		const order: string[] = [];
+		const sessionFile = session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("expected persisted session file");
+		const model = session.model;
+		if (!model) throw new Error("expected session model");
+		const lateWrite = lateWriteGate.promise.then(() => {
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "late-write-before-quit" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			order.push("write");
+		});
+		session.trackPostPromptTaskForTests(lateWrite);
+		const originalClose = session.sessionManager.close.bind(session.sessionManager);
+		session.sessionManager.close = async () => {
+			await originalClose();
+			order.push("close");
+		};
+		vi.spyOn(postmortem, "quit").mockImplementation(async () => {
+			expect(fs.readFileSync(sessionFile, "utf8")).toContain("late-write-before-quit");
+			order.push("quit");
+		});
+
+		const shutdownPromise = mode.shutdown();
+		vi.advanceTimersByTime(5_000);
+		await session.dispose();
+		await flushMicrotasks();
+		expect(postmortem.quit).not.toHaveBeenCalled();
+
+		lateWriteGate.resolve();
+		await shutdownPromise;
+
+		expect(order).toEqual(["write", "close", "quit"]);
+	});
+
+	it("bounds the deferred session finalization wait before /exit quits", async () => {
+		vi.useFakeTimers();
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		session.trackPostPromptTaskForTests(new Promise<void>(() => {}));
+
+		const shutdownPromise = mode.shutdown();
+		vi.advanceTimersByTime(5_000);
+		await session.dispose();
+		await flushMicrotasks();
+		expect(postmortem.quit).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(5_000);
+		await shutdownPromise;
+
+		expect(postmortem.quit).toHaveBeenCalledWith(0);
+		expect(warnSpy).toHaveBeenCalledWith("Session storage still finalizing at interactive shutdown deadline", {
+			error: "Error: Timed out finalizing session storage during interactive shutdown",
+		});
 	});
 
 	it("completes /exit when session disposal rejects", async () => {
