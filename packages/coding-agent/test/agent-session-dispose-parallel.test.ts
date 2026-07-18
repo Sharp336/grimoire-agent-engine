@@ -9,6 +9,7 @@
  *  - owned AsyncJobManager singleton clears even when dispose rejects
  *  - mnemopi embed shutdown runs even when state.dispose rejects
  *  - detached mnemopi consolidation keeps the shared tiny worker alive
+ *  - async-shared browser tabs are released only after the async-job drain
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
@@ -26,6 +27,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as tinyTitleClientModule from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
+import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireTab, getTabsMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 type Deferred = {
@@ -195,6 +199,57 @@ describe("AgentSession dispose parallelization", () => {
 		session = undefined;
 
 		expect(order).toEqual(["async:start", "async:end", "mnemopi:dispose"]);
+	});
+
+	it("waits for async-job drain before releasing shared parent-owned browser tabs", async () => {
+		const asyncStarted = deferred();
+		const asyncGate = deferred();
+		const order: string[] = [];
+		const owned = {
+			dispose: async (_opts?: { timeoutMs?: number }) => {
+				order.push("async:start");
+				asyncStarted.resolve();
+				await asyncGate.promise;
+				order.push("async:end");
+				return true;
+			},
+			cancelAll: () => {},
+			getDeliveryState: () => ({ queued: 0, delivering: false, pendingJobIds: [] as string[] }),
+		} as AsyncJobManager;
+		vi.spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		vi.spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		vi.spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string): Promise<Record<string, unknown>> => {
+				if (method === "browser.open_split") {
+					return { surface_id: "dispose-shared-tab", url: "about:blank" };
+				}
+				return {};
+			},
+		);
+
+		const s = await createSession({ ownedAsyncJobManager: owned });
+		const ownerId = s.sessionManager.getSessionId();
+		if (!ownerId) throw new Error("expected session id for browser tab ownership");
+		const browser = await acquireBrowser(
+			{ kind: "cmux", socketPath: "/tmp/omp-dispose-shared-tab.sock", surface: "dispose-shared-tab" },
+			{ cwd: "/tmp" },
+		);
+		await acquireTab("dispose-shared-tab", browser, { timeoutMs: 1_000, ownerSessionId: ownerId });
+
+		const disposePromise = s.dispose();
+		try {
+			await asyncStarted.promise;
+			for (let i = 0; i < 8; i++) await Promise.resolve();
+			expect(order).toEqual(["async:start"]);
+			expect(getTabsMapForTest().has("dispose-shared-tab")).toBe(true);
+		} finally {
+			asyncGate.resolve();
+		}
+		await disposePromise;
+		session = undefined;
+
+		expect(order).toEqual(["async:start", "async:end"]);
+		expect(getTabsMapForTest().has("dispose-shared-tab")).toBe(false);
 	});
 
 	it("waits for async-job drain before disconnecting the shared MCP manager", async () => {

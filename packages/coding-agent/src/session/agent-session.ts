@@ -6810,8 +6810,8 @@ export class AgentSession {
 		);
 
 		// Phase B: independent subsystem teardown runs concurrently under one
-		// allSettled barrier. MCP and mnemopi wait only for async jobs, not for the
-		// other branches. All writers complete before Phase C closes session storage.
+		// allSettled barrier. Async-shared resources wait only for async jobs, not
+		// for the other branches. All writers complete before Phase C closes storage.
 		const phaseBResults = await Promise.allSettled([
 			asyncJobDrain,
 			// Eval settle then three independent kernel-language disposes.
@@ -6828,8 +6828,11 @@ export class AgentSession {
 					disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId),
 				]);
 			})(),
-			// Browser tabs: bounded 3s CDP close (issue #3963).
+			// Browser tabs: bounded 3s CDP close (issue #3963). Async-job
+			// subagents can reuse parent-owned module-global tabs, so do not release
+			// them until their drain settles.
 			(async () => {
+				await asyncJobsSettled;
 				// Release headless / spawned Chromium and worker tabs this session
 				// opened via the browser tool. The tool's `tabs`/`browsers` maps are
 				// module-global — subagents and future sessions share them — so we
