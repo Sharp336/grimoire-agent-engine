@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Scoped quiet keystroke renders to the focused subtree instead of recomposing unrelated root components. ([#5928](https://github.com/can1357/oh-my-pi/issues/5928))
+
 ## [17.0.3] - 2026-07-17
 
 ### Fixed
