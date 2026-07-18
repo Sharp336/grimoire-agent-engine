@@ -342,4 +342,26 @@ describe("native scrollback virtualized-prefix rebasing", () => {
 			await fixture.term.flush();
 		}
 	});
+
+	test("case F: a destructive clear rehydrates history on resize-in-place terminals", async () => {
+		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
+		const fixture = makeFixture(false);
+		try {
+			await startAndSettle(fixture);
+			fixture.virtualized.dropCommittedTop(5);
+			await settle(fixture);
+			const ed3BeforeClear = countED3(fixture.writes);
+
+			fixture.tui.requestRender(true, { clearScrollback: true });
+			fixture.scheduler.flush();
+			await fixture.term.flush();
+
+			expect(fixture.virtualized.replayPreparations).toBe(1);
+			expect(countED3(fixture.writes) - ed3BeforeClear).toBe(1);
+			expectExactlyOnce(fixture.term, [...headers, ...fixture.virtualized.rows, ...footers]);
+		} finally {
+			fixture.tui.stop();
+			await fixture.term.flush();
+		}
+	});
 });

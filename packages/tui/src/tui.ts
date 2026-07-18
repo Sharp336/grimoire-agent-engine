@@ -2838,16 +2838,18 @@ export class TUI extends Container {
 		}
 
 		// A destructive replay erases native history and must receive the complete
-		// component frame. Give virtualized roots one compose to rehydrate rows
-		// they dropped after commit. Height-only and net-unchanged resize events
-		// count too: both enter the geometry rebuild path below.
-		const replayFullHistory =
-			this.#hasEverRendered &&
+		// component frame. Mirror the full-paint clearScrollback decision below:
+		// explicit clears are destructive on direct terminals even when resize paints
+		// in place, while multiplexer pane-preserving paints never rehydrate.
+		const geometryWillClearScrollback =
 			!resizeRepaintsInPlace() &&
-			(this.#clearScrollbackOnNextRender ||
-				this.#resizeEventPending ||
+			(this.#resizeEventPending ||
 				(this.#previousWidth > 0 && this.#previousWidth !== width) ||
 				(this.#previousHeight > 0 && this.#previousHeight !== height));
+		const replayFullHistory =
+			this.#hasEverRendered &&
+			!isMultiplexerSession() &&
+			(this.#clearScrollbackOnNextRender || geometryWillClearScrollback);
 		if (replayFullHistory) {
 			for (const child of this.children) prepareNativeScrollbackReplay(child);
 		}
