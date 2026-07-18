@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Skipped blob-resolution traversal for session entries that contain no persisted blob references. ([#5922](https://github.com/can1357/oh-my-pi/issues/5922))
+
 ## [17.0.3] - 2026-07-17
 
 ### Changed

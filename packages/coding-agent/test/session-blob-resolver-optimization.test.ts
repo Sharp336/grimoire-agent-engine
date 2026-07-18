@@ -1,19 +1,42 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { BlobStore } from "../src/session/blob-store";
-import type { FileEntry } from "../src/session/session-entries";
+import type { SessionMessageEntry } from "../src/session/session-entries";
 import { resolveBlobRefsInEntries } from "../src/session/session-loader";
 
 const ref = (hash: string): string => `blob:sha256:${hash}`;
 
-function messageEntry(message: object): FileEntry {
+function messageEntry(message: AgentMessage): SessionMessageEntry {
 	return {
 		type: "message",
 		id: crypto.randomUUID(),
 		parentId: null,
 		timestamp: "2026-07-17T00:00:00.000Z",
 		message,
-	} as FileEntry;
+	};
+}
+
+function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5-mini",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+		...overrides,
+	};
 }
 
 class ScriptedStore extends BlobStore {
@@ -36,14 +59,17 @@ describe("blob resolver optimization invariants", () => {
 	it("retains the matched-payload early return", async () => {
 		using tempDir = TempDir.createSync("@blob-resolver-early-return-");
 		const store = new ScriptedStore(tempDir.path(), async hash => Buffer.from(hash));
-		const image = {
+		// Transport-native history keeps provider image URLs on the same block as
+		// the inline image payload; resolving `data` must not descend into it.
+		const image: ImageContent & { image_url: string } = {
 			type: "image",
 			data: ref("payload"),
 			mimeType: "image/png",
 			image_url: ref("nested-provider-url"),
 		};
+		const message: UserMessage = { role: "user", content: [image], timestamp: 0 };
 
-		await resolveBlobRefsInEntries([messageEntry({ role: "user", content: [image] })], store);
+		await resolveBlobRefsInEntries([messageEntry(message)], store);
 
 		expect(image.data).toBe(Buffer.from("payload").toString("base64"));
 		expect(image.image_url).toBe(ref("nested-provider-url"));
@@ -53,15 +79,21 @@ describe("blob resolver optimization invariants", () => {
 	it("retains the content/images key gate", async () => {
 		using tempDir = TempDir.createSync("@blob-resolver-key-gate-");
 		const store = new ScriptedStore(tempDir.path(), async hash => Buffer.from(hash));
-		const metadataImage = { type: "image", data: ref("metadata"), mimeType: "image/png" };
-		const contentImage = { type: "image", data: ref("content"), mimeType: "image/png" };
+		const detailsImage = { type: "image", data: ref("details"), mimeType: "image/png" };
+		const contentImage: ImageContent = { type: "image", data: ref("content"), mimeType: "image/png" };
+		const message: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-key-gate",
+			toolName: "read",
+			content: [contentImage],
+			details: detailsImage,
+			isError: false,
+			timestamp: 0,
+		};
 
-		await resolveBlobRefsInEntries(
-			[messageEntry({ role: "user", metadata: metadataImage, content: [contentImage] })],
-			store,
-		);
+		await resolveBlobRefsInEntries([messageEntry(message)], store);
 
-		expect(metadataImage.data).toBe(ref("metadata"));
+		expect(detailsImage.data).toBe(ref("details"));
 		expect(contentImage.data).toBe(Buffer.from("content").toString("base64"));
 		expect(store.reads).toEqual(["content"]);
 	});
@@ -70,10 +102,19 @@ describe("blob resolver optimization invariants", () => {
 		using tempDir = TempDir.createSync("@blob-resolver-own-keys-");
 		const store = new ScriptedStore(tempDir.path(), async hash => Buffer.from(hash));
 		const inheritedImage = { type: "image", data: ref("inherited"), mimeType: "image/png" };
-		const wrapper = Object.create({ content: [inheritedImage] }) as Record<string, object>;
+		const wrapper: Record<string, object> = Object.create({ content: [inheritedImage] });
 		wrapper.own = { note: "plain" };
+		const message: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-own-keys",
+			toolName: "read",
+			content: [],
+			details: wrapper,
+			isError: false,
+			timestamp: 0,
+		};
 
-		await resolveBlobRefsInEntries([messageEntry({ role: "toolResult", details: wrapper })], store);
+		await resolveBlobRefsInEntries([messageEntry(message)], store);
 
 		expect(inheritedImage.data).toBe(ref("inherited"));
 		expect(store.reads).toEqual([]);
@@ -86,15 +127,17 @@ describe("blob resolver optimization invariants", () => {
 			hash === "slow-result" ? slowResult.promise : null,
 		);
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const node = {
+		// OpenAI Responses items persist on the assistant provider payload.
+		const node: Record<string, unknown> = {
 			type: "image_generation_call",
 			result: ref("slow-result"),
 			image_url: ref("provider-url"),
 			content: [{ type: "image", data: ref("child-image"), mimeType: "image/png" }],
 		};
+		const message = assistantMessage({ providerPayload: { type: "openaiResponsesHistory", items: [node] } });
 
 		try {
-			const resolving = resolveBlobRefsInEntries([messageEntry({ role: "assistant", node })], store);
+			const resolving = resolveBlobRefsInEntries([messageEntry(message)], store);
 			expect(store.reads).toEqual(["slow-result"]);
 			slowResult.resolve(null);
 			await resolving;
@@ -124,7 +167,7 @@ describe("blob resolver optimization invariants", () => {
 			throw new Error(`unexpected read: ${hash}`);
 		});
 		let sharedData = ref("shared");
-		const shared = {
+		const shared: ImageContent = {
 			type: "image",
 			get data(): string {
 				return sharedData;
@@ -135,15 +178,15 @@ describe("blob resolver optimization invariants", () => {
 			},
 			mimeType: "image/png",
 		};
-		const message = {
-			role: "assistant",
-			immediate: { content: [shared] },
-			delayed: {
-				type: "image_generation_call",
-				result: ref("parent"),
-				content: [shared],
-			},
+		const node: Record<string, unknown> = {
+			type: "image_generation_call",
+			result: ref("parent"),
+			content: [shared],
 		};
+		const message = assistantMessage({
+			content: [shared],
+			providerPayload: { type: "openaiResponsesHistory", items: [node] },
+		});
 
 		const resolving = resolveBlobRefsInEntries([messageEntry(message)], store);
 		await sharedMutation.promise;
@@ -152,16 +195,13 @@ describe("blob resolver optimization invariants", () => {
 
 		expect(sharedReads).toBe(1);
 		expect(shared.data).toBe(Buffer.from("shared").toString("base64"));
-		expect(message.delayed.result).toBe(Buffer.from("parent").toString("base64"));
+		expect(node.result).toBe(Buffer.from("parent").toString("base64"));
 		expect(store.reads).toEqual(["shared", "parent"]);
 	});
 
 	it("scans each entry at the original map initiation point", async () => {
 		using tempDir = TempDir.createSync("@blob-resolver-entry-mutation-");
-		const secondMessage: {
-			role: string;
-			content: string | Array<{ type: string; data: string; mimeType: string }>;
-		} = { role: "user", content: "plain before the first read starts" };
+		const secondMessage: UserMessage = { role: "user", content: "plain before the first read starts", timestamp: 0 };
 		const store = new ScriptedStore(tempDir.path(), async hash => {
 			if (hash === "first") {
 				secondMessage.content = [{ type: "image", data: ref("second"), mimeType: "image/png" }];
@@ -170,16 +210,17 @@ describe("blob resolver optimization invariants", () => {
 			if (hash === "second") return Buffer.from("second");
 			throw new Error(`unexpected read: ${hash}`);
 		});
-		const firstImage = { type: "image", data: ref("first"), mimeType: "image/png" };
+		const firstImage: ImageContent = { type: "image", data: ref("first"), mimeType: "image/png" };
+		const firstMessage: UserMessage = { role: "user", content: [firstImage], timestamp: 0 };
 
-		await resolveBlobRefsInEntries(
-			[messageEntry({ role: "user", content: [firstImage] }), messageEntry(secondMessage)],
-			store,
-		);
+		await resolveBlobRefsInEntries([messageEntry(firstMessage), messageEntry(secondMessage)], store);
 
 		expect(Array.isArray(secondMessage.content)).toBe(true);
 		if (!Array.isArray(secondMessage.content)) throw new Error("entry mutation was not applied");
-		expect(secondMessage.content[0]?.data).toBe(Buffer.from("second").toString("base64"));
+		const resolvedImage = secondMessage.content[0];
+		expect(resolvedImage?.type).toBe("image");
+		if (resolvedImage?.type !== "image") throw new Error("expected resolved image content");
+		expect(resolvedImage.data).toBe(Buffer.from("second").toString("base64"));
 		expect(store.reads).toEqual(["first", "second"]);
 	});
 });
