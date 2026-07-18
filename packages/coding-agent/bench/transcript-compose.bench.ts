@@ -119,6 +119,13 @@ console.log(`\nBenchmark: transcript-compose (live tail tick after committed fin
 const results = SIZES.map(n => {
 	const r = measure(n);
 	console.log(`  N=${n}: median ${r.median.toFixed(4)}ms  p95 ${r.p95.toFixed(4)}ms`);
+	process.stdout.write(
+		`${JSON.stringify({
+			metric: n === 500 ? "transcript_compose_n500_ms" : "transcript_compose_n5000_ms",
+			median_ms: r.median,
+			stddev_ms: 0,
+		})}\n`,
+	);
 	return r;
 });
 
