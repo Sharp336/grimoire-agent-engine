@@ -186,6 +186,26 @@ describe("convertToLlm", () => {
 		).toBe("streaming answer, now complete");
 	});
 
+	it("reconverts the same source array after a live assistant settles in place", () => {
+		const assistant = assistantMessage([
+			{ type: "text", text: "partial answer" },
+			{ type: "thinking", thinking: "streaming reasoning" },
+		]);
+		const messages: AgentMessage[] = [assistant, interruptedThinkingContinuity()];
+		const first = convertToLlm(messages);
+
+		assistant.content.push({ type: "text", text: "final answer" });
+		assistant.duration = 10;
+		const second = convertToLlm(messages);
+		const secondAssistant = second.find(message => message.role === "assistant");
+
+		expect(second).not.toBe(first);
+		expect(
+			Array.isArray(secondAssistant?.content) &&
+				secondAssistant.content.some(block => block.type === "text" && block.text === "final answer"),
+		).toBe(true);
+	});
+
 	it("recomputes only the interrupted assistant when the continuity follower is inserted or removed", () => {
 		const assistant = abortedAssistant([
 			{ type: "text", text: "partial answer" },

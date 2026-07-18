@@ -921,11 +921,15 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		counts[index] = converted.length;
 	}
 
-	lastConvertSource = messages;
-	lastConvertRefs = refs;
-	lastConvertCounts = counts;
-	lastConvertOut = out;
-	lastConvertEpoch = llmConversionEpoch;
+	if (hasUnsettledAssistant) {
+		clearConversionCarry();
+	} else {
+		lastConvertSource = messages;
+		lastConvertRefs = refs;
+		lastConvertCounts = counts;
+		lastConvertOut = out;
+		lastConvertEpoch = llmConversionEpoch;
+	}
 	return out;
 }
 
