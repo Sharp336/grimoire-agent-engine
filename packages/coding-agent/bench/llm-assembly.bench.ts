@@ -87,12 +87,7 @@ console.log(`  fixture length=${templateMessages.length}`);
 
 /** Fresh object identities each episode (WeakMap-safe) without rebuild cost noise. */
 function freshHistoryFromTemplate(): AgentMessage[] {
-	return templateMessages.map(m => {
-		if (m && typeof m === "object") {
-			return { ...(m as object) } as AgentMessage;
-		}
-		return m;
-	});
+	return templateMessages.map(m => ({ ...m }));
 }
 
 // ── (a) convertToLlm successive growing history ─────────────────────────────
