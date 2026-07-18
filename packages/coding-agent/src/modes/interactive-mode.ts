@@ -3756,6 +3756,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			} else {
 				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 			}
+		} catch (error) {
+			logger.warn("Failed to dispose interactive session during shutdown", { error: String(error) });
 		} finally {
 			clearTimeout(stillClosingTimer);
 		}

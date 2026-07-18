@@ -343,8 +343,9 @@ describe("AgentSession dispose parallelization", () => {
 		AsyncJobManager.setInstance(owned);
 
 		const s = await createSession({ ownedAsyncJobManager: owned });
-		await s.dispose();
+		const disposePromise = s.dispose();
 		session = undefined;
+		await expect(disposePromise).rejects.toThrow("Session dispose subsystem failures");
 
 		expect(AsyncJobManager.instance()).toBeUndefined();
 		expect(
@@ -373,8 +374,9 @@ describe("AgentSession dispose parallelization", () => {
 
 		const s = await createSession();
 		setMnemopiSessionState(s, rejectingState);
-		await s.dispose();
+		const disposePromise = s.dispose();
 		session = undefined;
+		await expect(disposePromise).rejects.toThrow("Session dispose subsystem failures");
 
 		order.push("after-dispose");
 		expect(order).toEqual(["mnemopi:dispose", "after-dispose"]);

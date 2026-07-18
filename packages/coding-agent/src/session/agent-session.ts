@@ -6904,15 +6904,21 @@ export class AgentSession {
 		]);
 
 		// allSettled contains rejections that branch try/catch did not already
-		// log (e.g. async-job dispose, advisor recorder, hindsight flush). Keep
-		// dispose non-throwing for expected subsystem failures but surface them.
+		// log (e.g. async-job dispose, advisor recorder, hindsight flush). Log
+		// every failure, then preserve dispose()'s rejecting contract.
+		const phaseBErrors: unknown[] = [];
 		for (const result of phaseBResults) {
 			if (result.status === "rejected") {
+				phaseBErrors.push(result.reason);
 				logger.warn("Session dispose subsystem failed during parallel teardown", {
 					error: String(result.reason),
 				});
 			}
 		}
+		const phaseBError =
+			phaseBErrors.length > 0
+				? new AggregateError(phaseBErrors, "Session dispose subsystem failures")
+				: undefined;
 
 		// Phase C (sequential): power/empty-move cleanup, then session close
 		// (writers-before-close invariant: Phase A + Phase B flushes finished),
@@ -6937,6 +6943,7 @@ export class AgentSession {
 			this.#unsubscribeModelRoles = undefined;
 		}
 		this.#eventListeners = [];
+		if (phaseBError) throw phaseBError;
 	}
 
 	#closeAllProviderSessions(reason: string): void {

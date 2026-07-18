@@ -12,7 +12,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
@@ -112,4 +112,18 @@ describe("InteractiveMode.shutdown still-closing status", () => {
 		await flushMicrotasks();
 		expect(statuses).toEqual(["Closing session…"]);
 	});
+
+	it("completes /exit when session disposal rejects", async () => {
+		const disposeError = new AggregateError([new Error("phase B boom")], "Session dispose subsystem failures");
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(session, "dispose").mockRejectedValue(disposeError);
+
+		await expect(mode.shutdown()).resolves.toBeUndefined();
+
+		expect(postmortem.quit).toHaveBeenCalledWith(0);
+		expect(warnSpy).toHaveBeenCalledWith("Failed to dispose interactive session during shutdown", {
+			error: String(disposeError),
+		});
+	});
+
 });
