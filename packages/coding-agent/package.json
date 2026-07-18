@@ -108,6 +108,7 @@
     "dist/cli.js",
     "dist/*.node",
     "scripts",
+    "!scripts/bench-guard.ts",
     "examples",
     "README.md",
     "CHANGELOG.md"
