@@ -122,6 +122,7 @@ export class AsyncJobManager {
 	readonly #jobs = new Map<string, AsyncJob>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
+	readonly #deliveryPromises = new Set<Promise<void>>();
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
@@ -471,6 +472,22 @@ export class AsyncJobManager {
 		return true;
 	}
 
+	/**
+	 * Wait until no delivery callback can still invoke `onJobComplete`. Unlike
+	 * {@link drainDeliveries}, this remains valid after bounded `dispose()`
+	 * clears the queue/in-flight bookkeeping. Track callback promises separately
+	 * because owner-filtered drains can deliver outside the shared loop; re-sample
+	 * after every await so retry-loop handoffs cannot escape the barrier.
+	 */
+	async waitForDeliveryQuiescence(): Promise<void> {
+		while (true) {
+			const callbacks = Array.from(this.#deliveryPromises);
+			const loop = this.#deliveryLoop;
+			if (callbacks.length === 0 && !loop) return;
+			await Promise.all(loop ? [...callbacks, loop] : callbacks);
+		}
+	}
+
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
@@ -671,12 +688,14 @@ export class AsyncJobManager {
 					error: delivery.lastError,
 				});
 			} finally {
+				if (delivery.promise) this.#deliveryPromises.delete(delivery.promise);
 				const index = this.#inFlightDeliveries.indexOf(delivery);
 				if (index !== -1) this.#inFlightDeliveries.splice(index, 1);
 				if (this.#deliveries.length > 0) this.#ensureDeliveryLoop();
 			}
 		})();
 		delivery.promise = promise;
+		this.#deliveryPromises.add(promise);
 		return promise;
 	}
 

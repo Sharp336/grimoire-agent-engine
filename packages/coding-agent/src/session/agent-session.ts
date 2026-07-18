@@ -6811,6 +6811,11 @@ export class AgentSession {
 
 		// Async-job subagents share their parent's MCP manager and mnemopi state.
 		// Drain them first; independent teardown below still begins immediately.
+		// A delivery callback is limited to local artifact persistence plus a
+		// yieldQueue enqueue (sdk.ts); it has no abort seam. Preserve the no-loss
+		// contract by awaiting true callback quiescence after the bounded manager
+		// cleanup rather than force-closing session storage underneath it.
+		let timedOutDeliveryQuiescence: Promise<void> = Promise.resolve();
 		const asyncJobDrain = (async () => {
 			// Cancel jobs this agent registered so a subagent's teardown doesn't
 			// leak its background bash/task work into the parent's manager. Only
@@ -6826,9 +6831,10 @@ export class AgentSession {
 					const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
 					const deliveryState = ownedAsyncManager.getDeliveryState();
 					if (drained === false && deliveryState) {
-						logger.warn("Async job completion deliveries still pending during dispose", {
+						logger.warn("Async job completion deliveries exceeded bounded cleanup; awaiting quiescence", {
 							...deliveryState,
 						});
+						timedOutDeliveryQuiescence = ownedAsyncManager.waitForDeliveryQuiescence();
 					}
 				} finally {
 					if (AsyncJobManager.instance() === ownedAsyncManager) {
@@ -6843,10 +6849,14 @@ export class AgentSession {
 			() => undefined,
 			() => undefined,
 		);
-		// A completed async delivery can enqueue a yield flush, which is itself a
-		// new post-prompt task. Only declare quiescence after the manager can no
-		// longer enqueue deliveries, then repeatedly flush/reap until stable.
-		const postPromptDrain = asyncJobsSettled.then(() => this.#drainPostPromptTasksForDispose());
+		// Let the first stable-empty pass overlap a delivery callback that exceeded
+		// the manager's bounded cleanup. Then wait until that callback can no longer
+		// enqueue and run a second stable-empty pass to persist its late yield.
+		const initialPostPromptDrain = asyncJobsSettled.then(() => this.#drainPostPromptTasksForDispose());
+		const asyncDeliveryQuiescence = asyncJobsSettled.then(() => timedOutDeliveryQuiescence);
+		const postPromptDrain = Promise.all([initialPostPromptDrain, asyncDeliveryQuiescence]).then(() =>
+			this.#drainPostPromptTasksForDispose(),
+		);
 
 		// Phase B: independent subsystem teardown runs concurrently under one
 		// allSettled barrier. Async-shared resources wait for the full async-job

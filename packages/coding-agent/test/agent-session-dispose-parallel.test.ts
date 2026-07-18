@@ -652,6 +652,64 @@ describe("AgentSession dispose parallelization", () => {
 		}
 	});
 
+	it("flushes an async-result enqueued after the bounded delivery drain times out", async () => {
+		vi.useFakeTimers();
+		const order: string[] = [];
+		const deliveryGate = deferred();
+		const deliveryEntered = deferred();
+		let targetSession: AgentSession | undefined;
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				deliveryEntered.resolve();
+				await deliveryGate.promise;
+				targetSession?.yieldQueue.enqueue("late-async-result", { jobId, text });
+			},
+		});
+		AsyncJobManager.setInstance(asyncJobManager);
+
+		const s = await createSession({ ownedAsyncJobManager: asyncJobManager, persist: true });
+		targetSession = s;
+		s.yieldQueue.register<{ jobId: string; text: string }>("late-async-result", {
+			build: entries => ({
+				role: "custom",
+				customType: "async-result",
+				content: entries.map(entry => `${entry.jobId}:${entry.text}`).join("\n"),
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			}),
+		});
+		const originalAppendCustom = s.sessionManager.appendCustomMessageEntry.bind(s.sessionManager);
+		s.sessionManager.appendCustomMessageEntry = (customType, content, display, details, attribution) => {
+			if (customType === "async-result") order.push("late-async-result-write");
+			return originalAppendCustom(customType, content, display, details, attribution);
+		};
+		const originalClose = s.sessionManager.close.bind(s.sessionManager);
+		s.sessionManager.close = async () => {
+			order.push("close");
+			await originalClose();
+		};
+
+		asyncJobManager.register("bash", "late delivery", async () => "payload", {
+			id: "late-delivery",
+			ownerId: "Main",
+		});
+		await deliveryEntered.promise;
+		const disposePromise = s.dispose();
+		await flushMicrotasks();
+		vi.advanceTimersByTime(3_001);
+		await flushMicrotasks();
+
+		// The bounded manager cleanup and initial stable-empty pass have elapsed,
+		// but storage must remain open until the live callback can no longer enqueue.
+		expect(order).not.toContain("close");
+		deliveryGate.resolve();
+		await disposePromise;
+		session = undefined;
+
+		expect(order).toEqual(["late-async-result-write", "close"]);
+	});
+
 	it("flushes Hindsight retain queue before sessionManager.close", async () => {
 		const order: string[] = [];
 		const flushGate = deferred();
