@@ -261,6 +261,48 @@ describe("convertToLlm", () => {
 		]);
 	});
 
+	it("uses carried neighbor state when the per-message cache changes during append conversion", () => {
+		const target = abortedAssistant([
+			{ type: "text", text: "partial answer" },
+			{ type: "thinking", thinking: "interrupted reasoning" },
+		]);
+		let injectSeparateConversion = false;
+		let roleReads = 0;
+		let separateConversionRan = false;
+		let assistant: AssistantMessage;
+		assistant = new Proxy(target, {
+			get(object, property, receiver) {
+				if (property === "role") {
+					roleReads++;
+					if (injectSeparateConversion && roleReads === 2) {
+						injectSeparateConversion = false;
+						separateConversionRan = true;
+						convertToLlm([assistant, interruptedThinkingContinuity()]);
+					}
+				}
+				return Reflect.get(object, property, receiver);
+			},
+		});
+		const messages: AgentMessage[] = [assistant];
+		const first = convertToLlm(messages);
+
+		messages.push(interruptedThinkingContinuity());
+		roleReads = 0;
+		injectSeparateConversion = true;
+		const second = convertToLlm(messages);
+
+		const firstAssistant = first.find(entry => entry.role === "assistant");
+		const secondAssistant = second.find(entry => entry.role === "assistant");
+		expect(separateConversionRan).toBe(true);
+		expect(Array.isArray(firstAssistant?.content) && firstAssistant.content.map(block => block.type)).toEqual([
+			"text",
+			"thinking",
+		]);
+		expect(Array.isArray(secondAssistant?.content) && secondAssistant.content.map(block => block.type)).toEqual([
+			"text",
+		]);
+	});
+
 	it("invalidates conversion cache when stripImagesFromMessage rewrites content in place", () => {
 		const message: AgentMessage = {
 			role: "user",

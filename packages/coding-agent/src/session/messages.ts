@@ -788,6 +788,7 @@ let llmConversionEpoch = 0;
 let lastConvertSource: AgentMessage[] | undefined;
 let lastConvertRefs: AgentMessage[] = [];
 let lastConvertCounts: number[] = [];
+let lastConvertInterruptedNext: boolean[] = [];
 let lastConvertOut: Message[] = [];
 let lastConvertEpoch = -1;
 
@@ -799,6 +800,7 @@ export function clearConversionCarry(): void {
 	lastConvertSource = undefined;
 	lastConvertRefs = [];
 	lastConvertCounts = [];
+	lastConvertInterruptedNext = [];
 	lastConvertOut = [];
 	lastConvertEpoch = -1;
 }
@@ -865,6 +867,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			const out = lastConvertOut.slice();
 			const refs = lastConvertRefs.slice();
 			const counts = lastConvertCounts.slice();
+			const interruptedNextStates = lastConvertInterruptedNext.slice();
 
 			// Previous-last assistant may gain an interrupted-thinking follower.
 			if (prevLen > 0) {
@@ -872,14 +875,14 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				const prevMsg = messages[lastIdx];
 				if (prevMsg !== undefined && prevMsg.role === "assistant") {
 					const interruptedNext = followedByInterruptedThinking(messages, lastIdx);
-					const cached = llmConversionCache.get(prevMsg);
-					if (cached === undefined || cached.interruptedNext !== interruptedNext) {
+					if ((interruptedNextStates[lastIdx] ?? false) !== interruptedNext) {
 						const converted = convertMessageCached(prevMsg, interruptedNext);
 						let offset = 0;
 						for (let i = 0; i < lastIdx; i++) offset += counts[i] ?? 0;
 						const oldCount = counts[lastIdx] ?? 0;
 						out.splice(offset, oldCount, ...converted);
 						counts[lastIdx] = converted.length;
+						interruptedNextStates[lastIdx] = interruptedNext;
 					}
 				}
 			}
@@ -889,6 +892,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				if (m === undefined) {
 					refs.push(m as unknown as AgentMessage);
 					counts.push(0);
+					interruptedNextStates.push(false);
 					continue;
 				}
 				const interruptedNext = m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
@@ -896,11 +900,15 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				for (const entry of converted) out.push(entry);
 				refs.push(m);
 				counts.push(converted.length);
+				interruptedNextStates.push(interruptedNext);
 			}
 
+			lastConvertSource = messages;
 			lastConvertRefs = refs;
 			lastConvertCounts = counts;
+			lastConvertInterruptedNext = interruptedNextStates;
 			lastConvertOut = out;
+			lastConvertEpoch = llmConversionEpoch;
 			return out;
 		}
 	}
@@ -908,17 +916,20 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const out: Message[] = [];
 	const refs: AgentMessage[] = new Array(length);
 	const counts: number[] = new Array(length);
+	const interruptedNextStates: boolean[] = new Array(length);
 	for (let index = 0; index < length; index++) {
 		const m = messages[index];
 		refs[index] = m as AgentMessage;
 		if (m === undefined) {
 			counts[index] = 0;
+			interruptedNextStates[index] = false;
 			continue;
 		}
 		const interruptedNext = m.role === "assistant" ? followedByInterruptedThinking(messages, index) : false;
 		const converted = convertMessageCached(m, interruptedNext);
 		for (const entry of converted) out.push(entry);
 		counts[index] = converted.length;
+		interruptedNextStates[index] = interruptedNext;
 	}
 
 	if (hasUnsettledAssistant) {
@@ -927,6 +938,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		lastConvertSource = messages;
 		lastConvertRefs = refs;
 		lastConvertCounts = counts;
+		lastConvertInterruptedNext = interruptedNextStates;
 		lastConvertOut = out;
 		lastConvertEpoch = llmConversionEpoch;
 	}
