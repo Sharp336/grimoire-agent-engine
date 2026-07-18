@@ -82,6 +82,8 @@ const ENTRIES: BenchEntry[] = [
 	{
 		name: "keystroke-transcript-renders",
 		mode: "json-line",
+		// Same spawn as keystroke-frame: the bench emits both metrics, so both
+		// entries parse one shared run (see runJsonLineBench) instead of re-running.
 		args: ["run", "packages/tui/bench/keystroke-frame.bench.ts"],
 		baselinePath: path.join(benchDir, "keystroke-transcript-renders-baseline.json"),
 		metric: "keystroke_transcript_renders",
@@ -174,14 +176,34 @@ async function measureHyperfine(entry: HyperfineEntry): Promise<{ seconds: numbe
 	return { seconds: medianOfHyperfine(raw), raw };
 }
 
+type JsonLineRun = { stdout: string; code: number };
+
+// Entries sharing a spawn (cwd + args, e.g. the two keystroke-frame metrics)
+// reuse one bench run per guard invocation instead of spawning per metric.
+const jsonLineRuns = new Map<string, Promise<JsonLineRun>>();
+
+function runJsonLineBench(entry: JsonLineEntry): Promise<JsonLineRun> {
+	const key = `${entry.cwd}
+${JSON.stringify(entry.args)}`;
+	let run = jsonLineRuns.get(key);
+	if (!run) {
+		run = (async () => {
+			const proc = Bun.spawn(["bun", ...entry.args], {
+				cwd: entry.cwd,
+				stdout: "pipe",
+				stderr: "inherit",
+			});
+			const stdout = await new Response(proc.stdout).text();
+			const code = await proc.exited;
+			return { stdout, code };
+		})();
+		jsonLineRuns.set(key, run);
+	}
+	return run;
+}
+
 async function measureJsonLine(entry: JsonLineEntry): Promise<JsonMetric> {
-	const proc = Bun.spawn(["bun", ...entry.args], {
-		cwd: entry.cwd,
-		stdout: "pipe",
-		stderr: "inherit",
-	});
-	const stdout = await new Response(proc.stdout).text();
-	const code = await proc.exited;
+	const { stdout, code } = await runJsonLineBench(entry);
 	// Still try to parse metrics even if the process printed warnings.
 	const metric = parseJsonMetricLines(stdout, entry.metric);
 	if (code !== 0) {
