@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
 	type Component,
+	CURSOR_MARKER,
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
 	type NativeScrollbackReplay,
@@ -89,6 +90,7 @@ class VirtualizingComponent
 	#stablePrefixRows = 0;
 	#lastRenderRows = 0;
 	#liveRegionStart: number | undefined = 10;
+	#cursorSourceRow: number | undefined;
 
 	invalidate(): void {}
 
@@ -107,6 +109,11 @@ class VirtualizingComponent
 		const dropped = Math.min(rows, this.committedRows);
 		this.#firstVisibleRow += dropped;
 		this.#pendingDropRows += dropped;
+		this.#stablePrefixRows = 0;
+	}
+
+	setCursorSourceRow(row: number): void {
+		this.#cursorSourceRow = row;
 		this.#stablePrefixRows = 0;
 	}
 
@@ -145,6 +152,9 @@ class VirtualizingComponent
 	render(_width: number): readonly string[] {
 		this.renderCalls++;
 		const rows = this.rows.slice(this.#firstVisibleRow);
+		const cursorIndex = this.#cursorSourceRow === undefined ? -1 : this.#cursorSourceRow - this.#firstVisibleRow;
+		const cursorRow = rows[cursorIndex];
+		if (cursorRow !== undefined) rows[cursorIndex] = `${cursorRow}${CURSOR_MARKER}`;
 		this.#lastRenderRows = rows.length;
 		return rows;
 	}
@@ -158,7 +168,7 @@ type Fixture = {
 	writes: string[];
 };
 
-function makeFixture(scrollbackRebuild: boolean): Fixture {
+function makeFixture(scrollbackRebuild: boolean, showHardwareCursor = false): Fixture {
 	const term = new VirtualTerminal(80, 10, 1_000);
 	const writes: string[] = [];
 	const write = term.write.bind(term);
@@ -167,7 +177,7 @@ function makeFixture(scrollbackRebuild: boolean): Fixture {
 		write(data);
 	};
 	const scheduler = makeDrainableScheduler();
-	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+	const tui = new TUI(term, showHardwareCursor, { renderScheduler: scheduler });
 	const virtualized = new VirtualizingComponent();
 	tui.setScrollbackRebuild(scrollbackRebuild);
 	tui.addChild(new Text("header-above-0\nheader-above-1", 0, 0));
@@ -359,6 +369,35 @@ describe("native scrollback virtualized-prefix rebasing", () => {
 			expect(fixture.virtualized.replayPreparations).toBe(1);
 			expect(countED3(fixture.writes) - ed3BeforeClear).toBe(1);
 			expectExactlyOnce(fixture.term, [...headers, ...fixture.virtualized.rows, ...footers]);
+		} finally {
+			fixture.tui.stop();
+			await fixture.term.flush();
+		}
+	});
+
+	test("case G: virtualized drops rebase a visible hardware cursor", async () => {
+		const fixture = makeFixture(false, true);
+		try {
+			await startAndSettle(fixture);
+			const cursorSourceRow = 26;
+			const cursorText = fixture.virtualized.rows[cursorSourceRow];
+			if (cursorText === undefined) throw new Error("cursor source row was not created");
+			fixture.virtualized.setCursorSourceRow(cursorSourceRow);
+			await settle(fixture);
+			const expectedScreenRow = fixture.term
+				.getViewport()
+				.findIndex(row => Bun.stripANSI(row).trimEnd() === cursorText);
+			expect(expectedScreenRow).toBeGreaterThan(0);
+			expect(expectedScreenRow).toBeLessThan(fixture.term.rows - 1);
+			expect(fixture.term.getCursor().row).toBe(expectedScreenRow);
+
+			fixture.virtualized.dropCommittedTop(5);
+			await settle(fixture);
+
+			expect(fixture.term.getViewport().findIndex(row => Bun.stripANSI(row).trimEnd() === cursorText)).toBe(
+				expectedScreenRow,
+			);
+			expect(fixture.term.getCursor().row).toBe(expectedScreenRow);
 		} finally {
 			fixture.tui.stop();
 			await fixture.term.flush();

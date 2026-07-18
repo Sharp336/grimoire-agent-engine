@@ -2887,6 +2887,10 @@ export class TUI extends Container {
 					? Math.max(at, this.#committedPrefixAuditRows - rows)
 					: this.#committedPrefixAuditRows;
 			this.#windowTopRow = Math.max(0, this.#windowTopRow - rows);
+			this.#hardwareCursorRow = Math.max(0, this.#hardwareCursorRow - rows);
+			if (this.#hardwareCursorState) {
+				this.#hardwareCursorState = { ...this.#hardwareCursorState, row: this.#hardwareCursorRow };
+			}
 			virtualizedShift += rows;
 			this.#virtualizedRowsEpochTotal += rows;
 		}
