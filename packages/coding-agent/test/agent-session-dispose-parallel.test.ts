@@ -388,6 +388,28 @@ describe("AgentSession dispose parallelization", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 	});
 
+	it("returns false when dispose interrupts a prompt during async setup", async () => {
+		const apiKeyEntered = deferred();
+		const apiKeyGate = deferred();
+		const s = await createSession();
+		const agentPromptSpy = vi.spyOn(s.agent, "prompt");
+		vi.spyOn(s.modelRegistry, "getApiKey").mockImplementation(async () => {
+			apiKeyEntered.resolve();
+			await apiKeyGate.promise;
+			return "test-key";
+		});
+
+		const promptPromise = s.prompt("prompt interrupted during setup");
+		await apiKeyEntered.promise;
+		const disposePromise = s.dispose();
+		apiKeyGate.resolve();
+
+		expect(await promptPromise).toBe(false);
+		expect(agentPromptSpy).not.toHaveBeenCalled();
+		await disposePromise;
+		session = undefined;
+	});
+
 	it("seals async-job and message admissions synchronously when dispose begins", async () => {
 		const owned = new AsyncJobManager({ onJobComplete: async () => {} });
 		const s = await createSession({ ownedAsyncJobManager: owned });

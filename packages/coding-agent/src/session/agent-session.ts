@@ -8791,7 +8791,7 @@ export class AgentSession {
 		}
 
 		try {
-			await this.#promptWithMessage(message, expandedText, {
+			return await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
 				prependMessages:
@@ -8804,7 +8804,6 @@ export class AgentSession {
 			// (e.g., compaction aborted, validation failed).
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
 		}
-		return true;
 	}
 
 	async promptCustomMessage<T = unknown>(
@@ -8880,8 +8879,8 @@ export class AgentSession {
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
 		},
-	): Promise<void> {
-		if (this.#isDisposed) return;
+	): Promise<boolean> {
+		if (this.#isDisposed) return false;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		try {
@@ -8954,7 +8953,7 @@ export class AgentSession {
 			// Early bail-out: if a newer abort/prompt cycle started during setup,
 			// return before mutating shared state (nextTurn messages, system prompt).
 			if (this.#promptGeneration !== generation) {
-				return;
+				return false;
 			}
 
 			// A pending xd:// delta accompanies the next user-authored prompt,
@@ -9029,7 +9028,7 @@ export class AgentSession {
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
 			if (this.#promptGeneration !== generation) {
-				return;
+				return false;
 			}
 
 			// Auto thinking: classify this real user turn and set the effective level
@@ -9039,13 +9038,13 @@ export class AgentSession {
 			if (this.#autoThinking && message.role === "user") {
 				await this.#applyAutoThinkingLevel(expandedText, generation);
 				if (this.#promptGeneration !== generation) {
-					return;
+					return false;
 				}
 			}
 
 			await this.#runPrePromptCompactionIfNeeded(messages);
 			if (this.#promptGeneration !== generation) {
-				return;
+				return false;
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
@@ -9062,14 +9061,17 @@ export class AgentSession {
 				nonMessageTokens,
 				cutoffCount: this.messages.length + messages.length,
 			});
+			let agentInvoked: boolean;
 			try {
-				await this.#promptAgentWithIdleRetry(messages, agentPromptOptions, generation);
+				agentInvoked = await this.#promptAgentWithIdleRetry(messages, agentPromptOptions, generation);
 			} finally {
 				this.#setPendingContextSnapshot(undefined);
 			}
+			if (!agentInvoked) return false;
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
+			return true;
 		} finally {
 			this.#endInFlight();
 		}
@@ -15591,13 +15593,13 @@ export class AgentSession {
 		messages: AgentMessage[],
 		options: { toolChoice?: ToolChoice } | undefined,
 		generation: number,
-	): Promise<void> {
+	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
-			if (this.#isDisposed || this.#promptGeneration !== generation) return;
+			if (this.#isDisposed || this.#promptGeneration !== generation) return false;
 			try {
 				await this.agent.prompt(messages, options);
-				return;
+				return true;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
 					throw err;
