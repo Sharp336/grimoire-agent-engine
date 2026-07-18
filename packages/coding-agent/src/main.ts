@@ -478,13 +478,19 @@ export function buildRestartLaunchFlags(
 		| "noExtensions"
 		| "noLsp"
 		| "noPty"
+		| "noPrewalk"
 		| "noRules"
 		| "noSkills"
 		| "noTitle"
 		| "pluginDirs"
 		| "plan"
+		| "planYolo"
+		| "planYoloInto"
+		| "prewalk"
+		| "prewalkInto"
 		| "provider"
 		| "providerSessionId"
+		| "providerPromptCacheKey"
 		| "skills"
 		| "slow"
 		| "smol"
@@ -516,7 +522,13 @@ export function buildRestartLaunchFlags(
 		model: parsed.model,
 		modelPatterns: parsed.models,
 		planModel: parsed.plan,
+		noPrewalk: Boolean(parsed.noPrewalk),
+		planYolo: Boolean(parsed.planYolo),
+		planYoloInto: parsed.planYoloInto,
+		prewalk: Boolean(parsed.prewalk),
+		prewalkInto: parsed.prewalkInto,
 		providerSessionId: parsed.providerSessionId,
+		providerPromptCacheKey: parsed.providerPromptCacheKey,
 		provider: parsed.provider,
 		thinking: parsed.thinking,
 		extensionFlagValues,

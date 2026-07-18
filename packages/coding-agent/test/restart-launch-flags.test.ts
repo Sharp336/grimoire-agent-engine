@@ -18,10 +18,15 @@ describe("restart launch flags", () => {
 				hooks: ["./hooks/restart.ts", "@scope/pkg"],
 				pluginDirs: ["plugins", "/opt/plugins"],
 				providerSessionId: "provider-session-1",
+				providerPromptCacheKey: "cache-shard-1",
 				provider: "openai",
 				model: "gpt-5",
 				noPty: true,
 				noTitle: true,
+				prewalk: true,
+				prewalkInto: "@smol",
+				planYolo: true,
+				planYoloInto: "@slow",
 			},
 			"/repo/original",
 			undefined,
@@ -35,10 +40,15 @@ describe("restart launch flags", () => {
 		expect(flags.hookPaths).toEqual(["/repo/resumed/hooks/restart.ts", "/repo/resumed/@scope/pkg"]);
 		expect(flags.pluginDirs).toEqual(["/repo/original/plugins", "/opt/plugins"]);
 		expect(flags.providerSessionId).toBe("provider-session-1");
+		expect(flags.providerPromptCacheKey).toBe("cache-shard-1");
 		expect(flags.provider).toBe("openai");
 		expect(flags.model).toBe("gpt-5");
 		expect(flags.noPty).toBe(true);
 		expect(flags.noTitle).toBe(true);
+		expect(flags.prewalk).toBe(true);
+		expect(flags.prewalkInto).toBe("@smol");
+		expect(flags.planYolo).toBe(true);
+		expect(flags.planYoloInto).toBe("@slow");
 	});
 
 	test("carries env-injected API keys through extension-aware restart snapshots", () => {

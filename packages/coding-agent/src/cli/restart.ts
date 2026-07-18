@@ -43,10 +43,16 @@ export interface RestartLaunchFlags {
 	smolModel?: string;
 	slowModel?: string;
 	planModel?: string;
+	prewalk?: boolean;
+	noPrewalk?: boolean;
+	prewalkInto?: string;
+	planYolo?: boolean;
+	planYoloInto?: string;
 	thinking?: ConfiguredThinkingLevel;
 	hideThinking?: boolean;
 	advisor?: boolean;
 	providerSessionId?: string;
+	providerPromptCacheKey?: string;
 	skillPatterns?: string[];
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -263,6 +269,9 @@ export function buildRestartCommand(
 	if (options.providerSessionId !== undefined) {
 		cmd.push("--provider-session-id", options.providerSessionId);
 	}
+	if (options.providerPromptCacheKey !== undefined) {
+		cmd.push("--prompt-cache-key", options.providerPromptCacheKey);
+	}
 	if (options.modelPatterns && options.modelPatterns.length > 0) {
 		cmd.push("--models", options.modelPatterns.join(","));
 	}
@@ -274,6 +283,21 @@ export function buildRestartCommand(
 	}
 	if (options.planModel !== undefined) {
 		cmd.push("--plan", options.planModel);
+	}
+	if (options.prewalk) {
+		cmd.push("--prewalk");
+	}
+	if (options.noPrewalk) {
+		cmd.push("--no-prewalk");
+	}
+	if (options.prewalkInto !== undefined) {
+		cmd.push("--prewalk-into", options.prewalkInto);
+	}
+	if (options.planYolo) {
+		cmd.push("--plan-yolo");
+	}
+	if (options.planYoloInto !== undefined) {
+		cmd.push("--plan-yolo-into", options.planYoloInto);
 	}
 	if (options.thinking !== undefined) {
 		cmd.push("--thinking", options.thinking);

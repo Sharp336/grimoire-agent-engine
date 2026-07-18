@@ -387,9 +387,17 @@ describe("restart command construction", () => {
 			packageRoot,
 		};
 
-		const command = buildRestartCommand({ ...baseOptions(), providerSessionId: "provider-session-1" }, env);
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				providerSessionId: "provider-session-1",
+				providerPromptCacheKey: "cache-shard-1",
+			},
+			env,
+		);
 
 		expect(valuesForFlag(command.cmd, "--provider-session-id")).toEqual(["provider-session-1"]);
+		expect(valuesForFlag(command.cmd, "--prompt-cache-key")).toEqual(["cache-shard-1"]);
 		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--provider-session-id")).toBeLessThan(command.cmd.indexOf("--resume"));
 	});
@@ -453,6 +461,34 @@ describe("restart command construction", () => {
 		expect(command.cmd.indexOf("--models")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--hide-thinking")).toBeLessThan(command.cmd.indexOf("--resume"));
 		expect(command.cmd.indexOf("--advisor")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("preserves prewalk and plan-yolo overrides across restart", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const command = buildRestartCommand(
+			{
+				...baseOptions(),
+				prewalk: true,
+				prewalkInto: "@smol",
+				planYolo: true,
+				planYoloInto: "@slow",
+			},
+			env,
+		);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), noPrewalk: true }, env);
+
+		expect(command.cmd).toContain("--prewalk");
+		expect(valuesForFlag(command.cmd, "--prewalk-into")).toEqual(["@smol"]);
+		expect(command.cmd).toContain("--plan-yolo");
+		expect(valuesForFlag(command.cmd, "--plan-yolo-into")).toEqual(["@slow"]);
+		expect(command.cmd.indexOf("--prewalk")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(command.cmd.indexOf("--plan-yolo")).toBeLessThan(command.cmd.indexOf("--resume"));
+		expect(disabledCommand.cmd).toContain("--no-prewalk");
 	});
 
 	test("preserves a positive remaining max-time budget across restart", () => {
