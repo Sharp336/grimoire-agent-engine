@@ -35,6 +35,7 @@ export interface RestartLaunchFlags {
 	noPty?: boolean;
 	noTitle?: boolean;
 	configFiles?: string[];
+	configEnvFiles?: string[];
 	extensionPaths?: string[];
 	extensionPackageRoots?: string[];
 	hookPaths?: string[];
@@ -226,6 +227,10 @@ function buildRestartEnv(options: RestartLaunchFlags): Record<string, string> | 
 		if (options.apiKeyProvider) {
 			childEnv[RESTART_API_KEY_PROVIDER_ENV] = options.apiKeyProvider;
 		}
+		hasChildEnv = true;
+	}
+	if (options.configEnvFiles !== undefined) {
+		childEnv.PI_CONFIG_FILES = options.configEnvFiles.join(path.delimiter);
 		hasChildEnv = true;
 	}
 	if (options.extensionFlagValues !== undefined) {

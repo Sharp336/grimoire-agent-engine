@@ -438,6 +438,11 @@ function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: s
 	return values?.map(value => resolveRestartLaunchPath(value, cwd));
 }
 
+function resolveRestartConfigEnvFiles(value: string | undefined, cwd: string): string[] | undefined {
+	const configFiles = value?.split(path.delimiter).filter(Boolean);
+	return configFiles && configFiles.length > 0 ? resolveRestartLaunchPaths(configFiles, cwd) : undefined;
+}
+
 /** Resolve a restart prompt flag to its original file path only when the launch input was file-backed. */
 export async function resolveRestartPromptLaunchValue(
 	value: string | undefined,
@@ -506,6 +511,7 @@ export function buildRestartLaunchFlags(
 	sessionStartCwd: string = launchCwd,
 	restartApiKey?: string,
 	restartExtensionPackageRoots?: readonly string[],
+	restartConfigFilesEnv?: string,
 ): RestartLaunchFlags {
 	const extensionPackageRootInputs = selectRestartExtensionPackageRoots(
 		restartExtensionPackageRoots,
@@ -530,6 +536,7 @@ export function buildRestartLaunchFlags(
 		disableSkills: Boolean(parsed.noSkills),
 		noTitle: Boolean(parsed.noTitle),
 		configFiles: resolveRestartLaunchPaths(parsed.config, launchCwd),
+		configEnvFiles: resolveRestartConfigEnvFiles(restartConfigFilesEnv, launchCwd),
 		extensionPackageRoots,
 		extensionPaths: resolveRestartLaunchPaths(parsed.extensions, sessionStartCwd),
 		hookPaths: resolveRestartLaunchPaths(parsed.hooks, sessionStartCwd),
@@ -1432,6 +1439,7 @@ export async function runRootCommand(
 
 	let cwd = getProjectDir();
 	const launchConfigCwd = cwd;
+	const restartConfigFilesEnv = process.env.PI_CONFIG_FILES;
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 	if (parsedArgs.approvalMode) {
@@ -1911,6 +1919,7 @@ export async function runRootCommand(
 					cwd,
 					restartApiKeyHandoff?.apiKey,
 					restartExtensionPackageRoots,
+					restartConfigFilesEnv,
 				),
 			);
 		} else {

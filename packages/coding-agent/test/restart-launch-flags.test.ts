@@ -33,9 +33,13 @@ describe("restart launch flags", () => {
 			undefined,
 			undefined,
 			"/repo/resumed",
+			undefined,
+			undefined,
+			["env-overlay.yml", "/tmp/env-overlay.yml"].join(path.delimiter),
 		);
 
 		expect(flags.configFiles).toEqual(["/repo/original/omp.yml", "/tmp/global.yml"]);
+		expect(flags.configEnvFiles).toEqual(["/repo/original/env-overlay.yml", "/tmp/env-overlay.yml"]);
 		expect(flags.extensionPaths).toEqual(["/repo/resumed/ext", "/repo/resumed/pkg-extension", "/repo/shared/ext"]);
 		expect(flags.extensionPackageRoots).toEqual([
 			"/repo/original/ext",

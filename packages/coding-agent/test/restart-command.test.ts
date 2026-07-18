@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import * as path from "node:path";
 import {
 	buildRestartCommand,
 	consumeRestartAdvisorEnabled,
@@ -186,6 +187,20 @@ describe("restart command construction", () => {
 		expect(valuesForFlag(command.cmd, "--config")).toEqual(["./dev.yml", "/tmp/override.yml"]);
 		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--session-dir"));
 		expect(command.cmd.indexOf("--config")).toBeLessThan(command.cmd.indexOf("--resume"));
+	});
+
+	test("overrides inherited PI_CONFIG_FILES with resolved launch paths", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+		const configEnvFiles = ["/project-a/omp.yml", "/shared/override.yml"];
+
+		const command = buildRestartCommand({ ...baseOptions(), configEnvFiles }, env);
+
+		expect(command.env?.PI_CONFIG_FILES).toBe(configEnvFiles.join(path.delimiter));
 	});
 
 	test("preserves explicit extension and plugin roots across restart", () => {
