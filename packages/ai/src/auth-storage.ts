@@ -3307,17 +3307,7 @@ export class AuthStorage {
 				continue;
 			}
 
-			if (entries.length === 0) {
-				const runtimeKey = this.#runtimeOverrides.get(providerId);
-				const envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? envKey;
-				if (!apiKey) continue;
-				const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
-				if (providerImpl.supports && !providerImpl.supports(request)) continue;
-				requests.push(request);
-				continue;
-			}
-
+			const providerRequestStart = requests.length;
 			for (const entry of entries) {
 				const credential = entry.credential;
 				const request =
@@ -3327,6 +3317,15 @@ export class AuthStorage {
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
+			if (requests.length !== providerRequestStart) continue;
+
+			const runtimeKey = this.#runtimeOverrides.get(providerId);
+			const envKey = getEnvApiKey(providerId);
+			const apiKey = runtimeKey ?? envKey;
+			if (!apiKey) continue;
+			const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+			if (providerImpl.supports && !providerImpl.supports(request)) continue;
+			requests.push(request);
 		}
 
 		return requests;

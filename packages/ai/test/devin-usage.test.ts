@@ -40,12 +40,15 @@ const devinModel: Model<"devin-agent"> = buildModel({
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
 const ORIGINAL_DEVIN_ORG_ID = Bun.env.DEVIN_ORG_ID;
 const ORIGINAL_DEVIN_USAGE_ORG_ID = Bun.env.DEVIN_USAGE_ORG_ID;
+const ORIGINAL_DEVIN_API_KEY = Bun.env.DEVIN_API_KEY;
 
 afterEach(() => {
 	if (ORIGINAL_DEVIN_ORG_ID === undefined) delete Bun.env.DEVIN_ORG_ID;
 	else Bun.env.DEVIN_ORG_ID = ORIGINAL_DEVIN_ORG_ID;
 	if (ORIGINAL_DEVIN_USAGE_ORG_ID === undefined) delete Bun.env.DEVIN_USAGE_ORG_ID;
 	else Bun.env.DEVIN_USAGE_ORG_ID = ORIGINAL_DEVIN_USAGE_ORG_ID;
+	if (ORIGINAL_DEVIN_API_KEY === undefined) delete Bun.env.DEVIN_API_KEY;
+	else Bun.env.DEVIN_API_KEY = ORIGINAL_DEVIN_API_KEY;
 });
 
 describe("streamDevin usage", () => {
@@ -156,6 +159,48 @@ describe("devinUsageProvider", () => {
 		expect(devinUsageProvider.supports?.(referencedApiKey)).toBe(true);
 		expect(devinUsageProvider.supports?.(unsupportedOauth)).toBe(false);
 		expect(devinUsageProvider.supports?.(wrongProvider)).toBe(false);
+	});
+
+	it("uses DEVIN_API_KEY when a stored Devin OAuth row cannot fetch usage", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		Bun.env.DEVIN_API_KEY = "cog_env-usage";
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.endsWith("/v3/self")
+					? { principal_type: "service_user", service_user_id: "service-env", org_id: null }
+					: path.includes("consumption")
+						? { total_acus: 4, consumption_by_date: [] }
+						: { sessions_count: 1 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [
+				{
+					type: "oauth",
+					access: "devin-oauth-access",
+					refresh: "devin-oauth-refresh",
+					expires: Date.now() + 3_600_000,
+				},
+			]);
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual(["Bearer cog_env-usage", "Bearer cog_env-usage", "Bearer cog_env-usage"]);
+			expect(reports?.map(report => report.provider)).toEqual(["devin"]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 4, unit: "acus" });
+		} finally {
+			storage.close();
+		}
 	});
 
 	it("resolves stored API-key config references before fetching usage", async () => {
