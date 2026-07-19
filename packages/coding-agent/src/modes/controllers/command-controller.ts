@@ -1647,6 +1647,16 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 		return `${formatNumber(remainingPct)}% free`;
 	}
 
+	if (
+		limits.length > 0 &&
+		limits.every(
+			limit => limit.amount.unit === "acus" && limit.amount.used !== undefined && limit.amount.limit === undefined,
+		)
+	) {
+		const totalUsed = limits.reduce((sum, limit) => sum + (limit.amount.used ?? 0), 0);
+		return `${formatNumber(totalUsed)} ACU used`;
+	}
+
 	if (limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "";
 
 	// Count unique accounts from limit scopes — not limits.length.
