@@ -49,6 +49,10 @@ export interface UsageAccountIdentity {
 	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+}
+
+export interface StoredAccount {
+	identity: UsageAccountIdentity;
 	credential?: AuthCredential;
 }
 
@@ -742,8 +746,8 @@ export function formatUsageHistory(
 	return lines.join("\n");
 }
 
-function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
+function collectStoredAccounts(authStorage: AuthStorage): StoredAccount[] {
+	const accounts: StoredAccount[] = [];
 	const all = authStorage.getAll();
 	for (const provider in all) {
 		const entry = all[provider];
@@ -751,20 +755,24 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 		for (const credential of credentials) {
 			if (credential.type === "oauth") {
 				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
+					identity: {
+						provider,
+						type: "oauth",
+						email: credential.email,
+						accountId: credential.accountId,
+						projectId: credential.projectId,
+						enterpriseUrl: credential.enterpriseUrl,
+						orgId: credential.orgId,
+						orgName: credential.orgName,
+					},
 					credential,
 				});
 			} else {
 				accounts.push({
-					provider,
-					type: "api_key",
+					identity: {
+						provider,
+						type: "api_key",
+					},
 					credential,
 				});
 			}
@@ -787,15 +795,15 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
  * usage endpoint.
  */
 export async function selectReportableAccounts(
-	accounts: UsageAccountIdentity[],
+	accounts: StoredAccount[],
 	isCredentialSupported: (provider: string, credential?: AuthCredential) => Promise<boolean> | boolean,
 	explicitProvider?: string,
 ): Promise<UsageAccountIdentity[]> {
-	if (explicitProvider) return accounts;
+	if (explicitProvider) return accounts.map(a => a.identity);
 	const filtered: UsageAccountIdentity[] = [];
 	for (const account of accounts) {
-		if (await isCredentialSupported(account.provider, account.credential)) {
-			filtered.push(account);
+		if (await isCredentialSupported(account.identity.provider, account.credential)) {
+			filtered.push(account.identity);
 		}
 	}
 	return filtered;

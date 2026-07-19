@@ -88,6 +88,9 @@ describe("devinUsageProvider", () => {
 			const url = String(input instanceof Request ? input.url : input);
 			const parsed = new URL(url);
 			calls.push({ path: parsed.pathname, authorization: new Headers(init?.headers).get("authorization") });
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({}), { status: 404 });
+			}
 			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
 				return new Response(
 					JSON.stringify({
@@ -116,6 +119,7 @@ describe("devinUsageProvider", () => {
 
 		if (!report) throw new Error("expected Devin usage report");
 		expect(calls).toEqual([
+			{ path: "/v3/self", authorization: "Bearer cog_test-token" },
 			{ path: "/v3/enterprise/consumption/daily", authorization: "Bearer cog_test-token" },
 			{ path: "/v3/enterprise/metrics/usage", authorization: "Bearer cog_test-token" },
 		]);
@@ -162,6 +166,9 @@ describe("devinUsageProvider", () => {
 			usageFetch: (async (input, init) => {
 				authorization.push(new Headers(init?.headers).get("authorization"));
 				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				if (path.endsWith("/v3/self")) {
+					return new Response(JSON.stringify({}), { status: 404 });
+				}
 				const payload = path.includes("consumption")
 					? { total_acus: 2, consumption_by_date: [] }
 					: { sessions_count: 1 };
@@ -177,7 +184,11 @@ describe("devinUsageProvider", () => {
 
 			const reports = await storage.fetchUsageReports();
 
-			expect(authorization).toEqual(["Bearer cog_resolved-token", "Bearer cog_resolved-token"]);
+			expect(authorization).toEqual([
+				"Bearer cog_resolved-token",
+				"Bearer cog_resolved-token",
+				"Bearer cog_resolved-token",
+			]);
 			expect(reports?.map(report => report.provider)).toEqual(["devin"]);
 			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 2, unit: "acus" });
 		} finally {
@@ -193,6 +204,9 @@ describe("devinUsageProvider", () => {
 			usageFetch: (async (input, init) => {
 				authorization.push(new Headers(init?.headers).get("authorization"));
 				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				if (path.endsWith("/v3/self")) {
+					return new Response(JSON.stringify({}), { status: 404 });
+				}
 				const payload = path.includes("consumption")
 					? { total_acus: 2, consumption_by_date: [] }
 					: { sessions_count: 1 };
@@ -208,7 +222,11 @@ describe("devinUsageProvider", () => {
 
 			const [result] = await storage.checkCredentials();
 
-			expect(authorization).toEqual(["Bearer cog_resolved-token", "Bearer cog_resolved-token"]);
+			expect(authorization).toEqual([
+				"Bearer cog_resolved-token",
+				"Bearer cog_resolved-token",
+				"Bearer cog_resolved-token",
+			]);
 			expect(result).toMatchObject({
 				provider: "devin",
 				type: "api_key",
@@ -249,7 +267,7 @@ describe("devinUsageProvider", () => {
 				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_bad-token" } },
 				{ fetch: fetchImpl },
 			),
-		).rejects.toThrow("Devin consumption request failed: 401 unauthorized");
+		).rejects.toThrow("Devin profile request failed: 401 unauthorized");
 	});
 
 	it("uses org-scoped endpoints and falls back to enterprise org endpoints", async () => {
@@ -308,6 +326,9 @@ describe("devinUsageProvider", () => {
 		const fetchImpl: FetchImpl = async input => {
 			const parsed = new URL(String(input instanceof Request ? input.url : input));
 			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({}), { status: 404 });
+			}
 			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
 				return new Response(JSON.stringify({ total_acus: 4.5, consumption_by_date: [] }), {
 					status: 200,
@@ -326,7 +347,7 @@ describe("devinUsageProvider", () => {
 		);
 
 		if (!report) throw new Error("expected Devin usage report");
-		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(paths).toEqual(["/v3/self", "/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
 		expect(report.limits.map(limit => [limit.id, limit.amount.used, limit.amount.unit])).toEqual([
 			["devin:acus:total", 4.5, "acus"],
 		]);
@@ -341,6 +362,9 @@ describe("devinUsageProvider", () => {
 		const fetchImpl: FetchImpl = async input => {
 			const parsed = new URL(String(input instanceof Request ? input.url : input));
 			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({}), { status: 404 });
+			}
 			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
 				return new Response("forbidden", { status: 403 });
 			}
@@ -359,7 +383,7 @@ describe("devinUsageProvider", () => {
 		);
 
 		if (!report) throw new Error("expected Devin usage report");
-		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(paths).toEqual(["/v3/self", "/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
 		expect(report.limits).toEqual([]);
 		expect(report.notes).toEqual(["Devin usage metrics were available, but ACU consumption was unavailable."]);
 		expect(report.metadata).toMatchObject({
@@ -374,6 +398,9 @@ describe("devinUsageProvider", () => {
 		const fetchImpl: FetchImpl = async input => {
 			const parsed = new URL(String(input instanceof Request ? input.url : input));
 			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({}), { status: 404 });
+			}
 			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
 				return new Response("unauthorized", { status: 401 });
 			}
@@ -390,7 +417,7 @@ describe("devinUsageProvider", () => {
 			),
 		).rejects.toThrow("Devin consumption request failed: 401 unauthorized");
 
-		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(paths).toEqual(["/v3/self", "/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
 	});
 
 	it("does not throw auth failure if both fail with non-auth errors", async () => {
@@ -400,6 +427,9 @@ describe("devinUsageProvider", () => {
 		const fetchImpl: FetchImpl = async input => {
 			const parsed = new URL(String(input instanceof Request ? input.url : input));
 			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({}), { status: 404 });
+			}
 			return new Response("internal error", { status: 500 });
 		};
 
@@ -409,7 +439,7 @@ describe("devinUsageProvider", () => {
 		);
 
 		expect(report).toBeNull();
-		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(paths).toEqual(["/v3/self", "/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
 	});
 
 	it("determines credential support correctly (OAuth omission, API key inclusion)", async () => {
@@ -445,12 +475,89 @@ describe("devinUsageProvider", () => {
 				type: "oauth",
 				access: "some-access-token",
 				refresh: "some-refresh-token",
+				expires: 0,
 			});
 			expect(oauthSupported).toBe(false);
 		} finally {
 			storage.close();
- 		}
- 	});
+		}
+	});
+
+	it("discovers org_id from /v3/self and queries organization endpoints", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/self") {
+				return new Response(JSON.stringify({ org_id: "org-discovered123" }), { status: 200 });
+			}
+			if (parsed.pathname === "/v3/organizations/org-discovered123/consumption/daily") {
+				return new Response(JSON.stringify({ total_acus: 15.0, consumption_by_date: [] }), { status: 200 });
+			}
+			if (parsed.pathname === "/v3/organizations/org-discovered123/metrics/usage") {
+				return new Response(JSON.stringify({ sessions_count: 5 }), { status: 200 });
+			}
+			return new Response("unexpected", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_token" } },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report).not.toBeNull();
+		expect(paths).toEqual([
+			"/v3/self",
+			"/v3/organizations/org-discovered123/consumption/daily",
+			"/v3/organizations/org-discovered123/metrics/usage",
+		]);
+		expect(report?.metadata).toMatchObject({
+			orgId: "org-discovered123",
+			totalAcus: 15.0,
+			metrics: { sessionsCount: 5 },
+		});
+	});
+
+	it("prioritizes explicit env/config org ID over /v3/self discovery", async () => {
+		Bun.env.DEVIN_ORG_ID = "org-env-priority";
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/organizations/org-env-priority/consumption/daily") {
+				return new Response(JSON.stringify({ total_acus: 5.0, consumption_by_date: [] }), { status: 200 });
+			}
+			if (parsed.pathname === "/v3/organizations/org-env-priority/metrics/usage") {
+				return new Response(JSON.stringify({ sessions_count: 2 }), { status: 200 });
+			}
+			return new Response("unexpected", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_token" } },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report).not.toBeNull();
+		expect(paths).toEqual([
+			"/v3/organizations/org-env-priority/consumption/daily",
+			"/v3/organizations/org-env-priority/metrics/usage",
+		]);
+	});
+
+	it("bubbles up /v3/self auth failure and fails validation", async () => {
+		const fetchImpl: FetchImpl = async () => new Response("unauthorized", { status: 401 });
+
+		await expect(
+			devinUsageProvider.fetchUsage(
+				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_token" } },
+				{ fetch: fetchImpl },
+			),
+		).rejects.toThrow("Devin profile request failed: 401 unauthorized");
+	});
 });
 
 describe("fetchDevinConsumption", () => {

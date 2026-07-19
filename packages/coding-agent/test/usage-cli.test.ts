@@ -7,9 +7,12 @@ import {
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
 	selectReportableAccounts,
+	type StoredAccount,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -510,22 +513,162 @@ describe("formatUsageHistory", () => {
 
 describe("selectReportableAccounts", () => {
 	it("filters out unsupported credentials based on the isCredentialSupported callback", async () => {
-		const accounts: UsageAccountIdentity[] = [
-			{ provider: "devin", type: "api_key", credential: { type: "api_key", key: "cog_test" } },
-			{ provider: "devin", type: "oauth", credential: { type: "oauth", access: "token", refresh: "refresh", expires: 0 } },
-			{ provider: "openai-codex", type: "api_key", credential: { type: "api_key", key: "sk-test" } },
+		const accounts: StoredAccount[] = [
+			{ identity: { provider: "devin", type: "api_key" }, credential: { type: "api_key", key: "cog_test" } },
+			{
+				identity: { provider: "devin", type: "oauth" },
+				credential: { type: "oauth", access: "token", refresh: "refresh", expires: 0 },
+			},
+			{ identity: { provider: "openai-codex", type: "api_key" }, credential: { type: "api_key", key: "sk-test" } },
 		];
 
-		const filtered = await selectReportableAccounts(
-			accounts,
-			(provider, cred) => {
-				if (provider === "devin" && cred?.type === "oauth") return false;
-				return true;
-			}
-		);
+		const filtered = await selectReportableAccounts(accounts, (provider, cred) => {
+			if (provider === "devin" && cred?.type === "oauth") return false;
+			return true;
+		});
 
 		expect(filtered).toHaveLength(2);
 		expect(filtered[0]).toMatchObject({ provider: "devin", type: "api_key" });
 		expect(filtered[1]).toMatchObject({ provider: "openai-codex", type: "api_key" });
+	});
+});
+
+describe("runUsageCommand", () => {
+	it("removes all raw api_key and oauth credentials from accountsWithoutUsage in JSON output", async () => {
+		const mockCredentials = {
+			devin: { type: "api_key", key: "cog_secretkey123" },
+			openai: {
+				type: "oauth",
+				access: "access_token_secret",
+				refresh: "refresh_token_secret",
+				email: "user@example.test",
+				expires: 0,
+			},
+		};
+
+		const mockAuthStorage = {
+			getAll: () => mockCredentials,
+			fetchUsageReports: async () => [],
+			isCredentialSupported: () => true,
+			close: () => {},
+		} as unknown as AuthStorage;
+
+		const deps = {
+			discoverAuthStorage: async () => mockAuthStorage,
+			createBaseUrlResolver: () => () => undefined,
+		};
+
+		const originalWrite = process.stdout.write;
+		let output = "";
+		process.stdout.write = (chunk: string | Uint8Array) => {
+			output += String(chunk);
+			return true;
+		};
+
+		try {
+			await runUsageCommand({ action: "view", json: true }, deps);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		interface AccountIdentityOutput {
+			provider: string;
+			type: string;
+			email?: string;
+			orgId?: string;
+			credential?: unknown;
+			key?: unknown;
+			access?: unknown;
+			refresh?: unknown;
+		}
+
+		const parsed = JSON.parse(output) as { accountsWithoutUsage: AccountIdentityOutput[] };
+		expect(parsed).toHaveProperty("accountsWithoutUsage");
+		expect(parsed.accountsWithoutUsage).toHaveLength(2);
+
+		// Ensure identities are correct but credential info is not present
+		const devinAcc = parsed.accountsWithoutUsage.find(a => a.provider === "devin");
+		expect(devinAcc).toBeDefined();
+		expect(devinAcc!.type).toBe("api_key");
+		expect(devinAcc!.credential).toBeUndefined();
+		expect(devinAcc!.key).toBeUndefined();
+
+		const openaiAcc = parsed.accountsWithoutUsage.find(a => a.provider === "openai");
+		expect(openaiAcc).toBeDefined();
+		expect(openaiAcc!.type).toBe("oauth");
+		expect(openaiAcc!.email).toBe("user@example.test");
+		expect(openaiAcc!.credential).toBeUndefined();
+		expect(openaiAcc!.access).toBeUndefined();
+		expect(openaiAcc!.refresh).toBeUndefined();
+
+		// Ensure no secrets exist anywhere in the JSON output string
+		expect(output).not.toContain("cog_secretkey123");
+		expect(output).not.toContain("access_token_secret");
+		expect(output).not.toContain("refresh_token_secret");
+	});
+
+	it("removes all raw credentials and applies masking to identities with --redact", async () => {
+		const mockCredentials = {
+			devin: { type: "api_key", key: "cog_secretkey123" },
+			openai: {
+				type: "oauth",
+				access: "access_token_secret",
+				refresh: "refresh_token_secret",
+				email: "user@example.test",
+				expires: 0,
+				orgId: "org-discovered-123",
+			},
+		};
+
+		const mockAuthStorage = {
+			getAll: () => mockCredentials,
+			fetchUsageReports: async () => [],
+			isCredentialSupported: () => true,
+			close: () => {},
+		} as unknown as AuthStorage;
+
+		const deps = {
+			discoverAuthStorage: async () => mockAuthStorage,
+			createBaseUrlResolver: () => () => undefined,
+		};
+
+		const originalWrite = process.stdout.write;
+		let output = "";
+		process.stdout.write = (chunk: string | Uint8Array) => {
+			output += String(chunk);
+			return true;
+		};
+
+		try {
+			await runUsageCommand({ action: "view", json: true, redact: true }, deps);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		interface RedactedAccountIdentityOutput {
+			provider: string;
+			type: string;
+			email?: string;
+			orgId?: string;
+			credential?: unknown;
+			access?: unknown;
+		}
+
+		const parsed = JSON.parse(output) as { accountsWithoutUsage: RedactedAccountIdentityOutput[] };
+		expect(parsed).toHaveProperty("accountsWithoutUsage");
+
+		// Ensure identities are masked
+		const openaiAcc = parsed.accountsWithoutUsage.find(a => a.provider === "openai");
+		expect(openaiAcc).toBeDefined();
+		expect(openaiAcc!.email).not.toBe("user@example.test");
+		expect(openaiAcc!.email).toContain("*");
+		expect(openaiAcc!.orgId).not.toBe("org-discovered-123");
+		expect(openaiAcc!.orgId).toContain("*");
+
+		// Ensure credential info is absent
+		expect(openaiAcc!.credential).toBeUndefined();
+		expect(openaiAcc!.access).toBeUndefined();
+		expect(output).not.toContain("cog_secretkey123");
+		expect(output).not.toContain("access_token_secret");
 	});
 });

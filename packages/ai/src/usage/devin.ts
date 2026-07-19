@@ -114,6 +114,49 @@ function readOrgId(auth: Pick<DevinUsageAuth, "orgId">): string | undefined {
 	return auth.orgId?.trim() || $env.DEVIN_USAGE_ORG_ID?.trim() || $env.DEVIN_ORG_ID?.trim() || undefined;
 }
 
+async function discoverDevinOrgId(
+	apiKey: string,
+	baseUrl: string | undefined,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const url = `${normalizeBaseUrl(baseUrl)}/v3/self`;
+	let response: Response;
+	try {
+		response = await fetchImpl(url, {
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${apiKey}`,
+			},
+			signal,
+		});
+	} catch {
+		throw new Error("Devin profile request failed before response");
+	}
+
+	if (!response.ok) {
+		if (response.status === 401 || response.status === 403) {
+			throw new DevinUsageRequestError("profile", {
+				url,
+				status: response.status,
+				body: await response.text(),
+			});
+		}
+		return undefined;
+	}
+
+	try {
+		const data = await response.json();
+		if (isRecord(data)) {
+			const discovered =
+				typeof data.org_id === "string" ? data.org_id : typeof data.orgId === "string" ? data.orgId : undefined;
+			return discovered?.trim() || undefined;
+		}
+	} catch {
+		// Ignore JSON parse errors for discovery and yield no org
+	}
+	return undefined;
+}
 function buildConsumptionPaths(orgId: string | undefined): string[] {
 	if (!orgId) return ["/v3/enterprise/consumption/daily"];
 	const encoded = encodeURIComponent(orgId);
@@ -346,9 +389,21 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	if (!apiKey) return null;
 
 	const baseUrl = params.baseUrl ?? credential.apiEndpoint;
-	const orgId = readOrgId({
+	let orgId = readOrgId({
 		orgId: typeof credential.metadata?.orgId === "string" ? credential.metadata.orgId : undefined,
 	});
+
+	if (!orgId) {
+		try {
+			orgId = await discoverDevinOrgId(apiKey, baseUrl, ctx.fetch, params.signal);
+		} catch (error) {
+			if (isDevinAuthFailure(error)) {
+				throw error;
+			}
+			ctx.logger?.debug("Devin org discovery failed", { provider: params.provider, error: String(error) });
+		}
+	}
+
 	const auth: DevinUsageAuth = {
 		apiKey,
 		baseUrl,
@@ -381,7 +436,10 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 			throw metricsError;
 		}
 		if (consumptionError) {
-			ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(consumptionError) });
+			ctx.logger?.warn("Devin consumption request failed", {
+				provider: params.provider,
+				error: String(consumptionError),
+			});
 		}
 		if (metricsError) {
 			ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(metricsError) });
@@ -390,7 +448,10 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	}
 
 	if (!consumption && consumptionError) {
-		ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(consumptionError) });
+		ctx.logger?.warn("Devin consumption request failed", {
+			provider: params.provider,
+			error: String(consumptionError),
+		});
 	}
 	if (!metrics && metricsError) {
 		ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(metricsError) });
