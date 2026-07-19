@@ -401,14 +401,13 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	let orgId = readOrgId({
 		orgId: typeof credential.metadata?.orgId === "string" ? credential.metadata.orgId : undefined,
 	});
+	let discoveryError: unknown = null;
 
 	if (!orgId) {
 		try {
 			orgId = await discoverDevinOrgId(apiKey, baseUrl, ctx.fetch, params.signal);
 		} catch (error) {
-			if (isDevinAuthFailure(error)) {
-				throw error;
-			}
+			discoveryError = error;
 			ctx.logger?.debug("Devin org discovery failed", { provider: params.provider, error: String(error) });
 		}
 	}
@@ -443,6 +442,9 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 		}
 		if (isDevinAuthFailure(metricsError)) {
 			throw metricsError;
+		}
+		if (isDevinAuthFailure(discoveryError)) {
+			throw discoveryError;
 		}
 		if (consumptionError) {
 			ctx.logger?.warn("Devin consumption request failed", {

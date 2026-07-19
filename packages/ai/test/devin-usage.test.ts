@@ -301,7 +301,7 @@ describe("devinUsageProvider", () => {
 				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_bad-token" } },
 				{ fetch: fetchImpl },
 			),
-		).rejects.toThrow("Devin profile request failed: 401 unauthorized");
+		).rejects.toThrow("Devin consumption request failed: 401 unauthorized");
 	});
 
 	it("uses org-scoped endpoints and falls back to enterprise org endpoints", async () => {
@@ -582,15 +582,47 @@ describe("devinUsageProvider", () => {
 		]);
 	});
 
-	it("bubbles up /v3/self auth failure and fails validation", async () => {
-		const fetchImpl: FetchImpl = async () => new Response("unauthorized", { status: 401 });
+	it("continues to enterprise usage when /v3/self permission is forbidden", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+			paths.push(path);
+			if (path === "/v3/self") {
+				return new Response("forbidden", { status: 403 });
+			}
+			if (path === "/v3/enterprise/consumption/daily") {
+				return new Response(JSON.stringify({ total_acus: 6, consumption_by_date: [] }), { status: 200 });
+			}
+			return new Response("forbidden", { status: 403 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_usage-only" } },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report?.limits[0]?.amount).toEqual({ used: 6, unit: "acus" });
+		expect(paths).toEqual(["/v3/self", "/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+	});
+
+	it("surfaces /v3/self auth failure when enterprise usage is unavailable", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const fetchImpl: FetchImpl = async input => {
+			const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+			return path === "/v3/self"
+				? new Response("forbidden", { status: 403 })
+				: new Response("not found", { status: 404 });
+		};
 
 		await expect(
 			devinUsageProvider.fetchUsage(
-				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_token" } },
+				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_unavailable" } },
 				{ fetch: fetchImpl },
 			),
-		).rejects.toThrow("Devin profile request failed: 401 unauthorized");
+		).rejects.toThrow("Devin profile request failed: 403 forbidden");
 	});
 });
 
