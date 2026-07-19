@@ -112,6 +112,16 @@ describe("restart launch flags", () => {
 		);
 	});
 
+	test("preserves autoApprove flag in launch flags snapshot", () => {
+		const flags = buildRestartLaunchFlags({ autoApprove: true }, "/repo/original");
+
+		expect(flags.autoApprove).toBe(true);
+
+		const defaultFlags = buildRestartLaunchFlags({}, "/repo/original");
+
+		expect(defaultFlags.autoApprove).toBe(false);
+	});
+
 	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {
 		using tempDir = TempDir.createSync("@omp-restart-prompts-");
 		const launchPromptPath = path.join(tempDir.path(), "launch", "prompts", "system.md");

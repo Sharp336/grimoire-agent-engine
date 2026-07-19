@@ -126,7 +126,7 @@ describe("restart command options", () => {
 		expect(options.model).toBe("openrouter/z-ai/glm-4.7@cerebras");
 	});
 
-	test("keeps launch model when the live model is an ephemeral fallback", () => {
+	test("omits model/provider overrides and relies on session restore when the live model is an ephemeral fallback", () => {
 		const options = buildInteractiveRestartCommandOptions({
 			sessionId: "local-session",
 			cwd: "/repo/project",
@@ -140,8 +140,42 @@ describe("restart command options", () => {
 			liveProviderSessionId: "provider-session",
 		});
 
-		expect(options.provider).toBe("anthropic");
-		expect(options.model).toBe("claude-launch");
+		expect(options.provider).toBeUndefined();
+		expect(options.model).toBeUndefined();
+	});
+
+	test("launch A -> switch B -> fallback C restart selection", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { provider: "openai", model: "gpt-A" },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveModel: restartModel({ provider: "anthropic", id: "claude-C" }),
+			liveModelChangeRole: "fallback",
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(options.provider).toBeUndefined();
+		expect(options.model).toBeUndefined();
+	});
+
+	test("preserves autoApprove flag from launch flags", () => {
+		const options = buildInteractiveRestartCommandOptions({
+			sessionId: "local-session",
+			cwd: "/repo/project",
+			sessionDir: "/repo/project/.sessions",
+			approvalMode: "write",
+			launchFlags: { autoApprove: true },
+			liveAdvisorEnabled: false,
+			liveHideThinkingBlock: false,
+			liveModel: restartModel({ provider: "openai", id: "gpt-5-live" }),
+			liveProviderSessionId: "provider-session",
+		});
+
+		expect(options.autoApprove).toBe(true);
 	});
 
 	test("uses the live advisor state after stale launch flags", () => {

@@ -271,10 +271,9 @@ export interface InteractiveRestartCommandInput {
 export function buildInteractiveRestartCommandOptions(
 	options: InteractiveRestartCommandInput,
 ): restartProcess.BuildRestartCommandOptions {
+	const isEphemeralFallback = options.liveModelChangeRole === EPHEMERAL_MODEL_CHANGE_ROLE;
 	const liveModelSelector =
-		options.liveModel && options.liveModelChangeRole !== EPHEMERAL_MODEL_CHANGE_ROLE
-			? formatModelStringWithRouting(options.liveModel)
-			: undefined;
+		options.liveModel && !isEphemeralFallback ? formatModelStringWithRouting(options.liveModel) : undefined;
 	return {
 		sessionId: options.sessionId,
 		cwd: options.cwd,
@@ -283,8 +282,8 @@ export function buildInteractiveRestartCommandOptions(
 		toolRestriction: options.toolRestriction,
 		approvalMode: options.approvalMode,
 		...options.launchFlags,
-		provider: liveModelSelector ? undefined : options.launchFlags?.provider,
-		model: liveModelSelector ?? options.launchFlags?.model,
+		provider: isEphemeralFallback ? undefined : liveModelSelector ? undefined : options.launchFlags?.provider,
+		model: isEphemeralFallback ? undefined : (liveModelSelector ?? options.launchFlags?.model),
 		providerSessionId: options.liveProviderSessionId,
 		advisor: options.liveAdvisorEnabled,
 		hideThinking: options.liveHideThinkingBlock,

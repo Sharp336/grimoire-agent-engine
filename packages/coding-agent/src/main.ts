@@ -476,6 +476,7 @@ export function buildRestartLaunchFlags(
 		| "apiKey"
 		| "advisor"
 		| "appendSystemPrompt"
+		| "autoApprove"
 		| "config"
 		| "extensions"
 		| "hideThinking"
@@ -528,6 +529,7 @@ export function buildRestartLaunchFlags(
 		apiKey: parsed.apiKey ?? restartApiKey,
 		apiKeyProvider,
 		advisor: Boolean(parsed.advisor),
+		autoApprove: Boolean(parsed.autoApprove),
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		disableExtensions: Boolean(parsed.noExtensions),
 		disableLsp: Boolean(parsed.noLsp),

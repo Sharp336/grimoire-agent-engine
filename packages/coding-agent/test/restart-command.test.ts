@@ -308,6 +308,21 @@ describe("restart command construction", () => {
 		});
 	});
 
+	test("carries autoApprove flag in command", () => {
+		const env: RestartCommandEnvironment = {
+			isCompiledBinary: () => true,
+			workerHostEntry: () => null,
+			execPath: "/opt/omp/omp",
+			packageRoot,
+		};
+
+		const enabledCommand = buildRestartCommand({ ...baseOptions(), autoApprove: true }, env);
+		const disabledCommand = buildRestartCommand({ ...baseOptions(), autoApprove: false }, env);
+
+		expect(enabledCommand.cmd).toContain("--auto-approve");
+		expect(disabledCommand.cmd).not.toContain("--auto-approve");
+	});
+
 	test("ignores malformed restart extension flag env payloads", () => {
 		const env = { [RESTART_EXTENSION_FLAG_VALUES_ENV]: "not-json" };
 

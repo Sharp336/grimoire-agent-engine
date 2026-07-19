@@ -62,6 +62,7 @@ export interface RestartLaunchFlags {
 	appendSystemPrompt?: string;
 	/** Absolute wall-clock deadline in epoch milliseconds for replaying remaining --max-time. */
 	maxTimeDeadline?: number;
+	autoApprove?: boolean;
 }
 
 /** Self-entrypoint command before restart-specific CLI arguments are appended. */
@@ -345,6 +346,9 @@ export function buildRestartCommand(
 	}
 	if (options.advisor) {
 		cmd.push("--advisor");
+	}
+	if (options.autoApprove) {
+		cmd.push("--auto-approve");
 	}
 
 	const maxTimeSeconds = getRestartMaxTimeSeconds(options.maxTimeDeadline);
