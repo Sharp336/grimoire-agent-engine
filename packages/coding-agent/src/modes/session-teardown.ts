@@ -22,6 +22,10 @@ export interface SessionTeardownDeps {
 	 */
 	beginDispose: () => void;
 	/**
+	 * Flush pending session writes before shutdown.
+	 */
+	flush: () => Promise<void>;
+	/**
 	 * Persist the snapshotted draft. Called even for an empty string so a
 	 * previously-persisted draft sidecar is cleared on a clean exit.
 	 */
@@ -68,6 +72,11 @@ export function createSessionTeardown(deps: SessionTeardownDeps): SessionTeardow
 	const run = async (reason?: postmortem.Reason): Promise<void> => {
 		const draftText = deps.getDraftText();
 		deps.beginDispose();
+		try {
+			await deps.flush();
+		} catch (err) {
+			logger.warn("Failed to flush session during teardown", { error: String(err) });
+		}
 		try {
 			await deps.saveDraft(draftText);
 		} catch (err) {

@@ -21,6 +21,9 @@ describe("createSessionTeardown", () => {
 			beginDispose: () => {
 				order.push("beginDispose");
 			},
+			flush: async () => {
+				order.push("flush");
+			},
 			saveDraft: async text => {
 				order.push("saveDraft");
 				saved.push(text);
@@ -32,13 +35,13 @@ describe("createSessionTeardown", () => {
 
 		await teardown();
 
-		expect(order).toEqual(["beginDispose", "saveDraft", "disposeSession"]);
+		expect(order).toEqual(["beginDispose", "flush", "saveDraft", "disposeSession"]);
 		expect(saved).toEqual(["unsent draft"]);
 	});
 
-	it("marks the session disposing before awaiting draft persistence", async () => {
+	it("marks the session disposing before awaiting flush or draft persistence", async () => {
 		const order: string[] = [];
-		const release = Promise.withResolvers<void>();
+		const releaseFlush = Promise.withResolvers<void>();
 
 		const teardown = createSessionTeardown({
 			getDraftText: () => {
@@ -48,10 +51,13 @@ describe("createSessionTeardown", () => {
 			beginDispose: () => {
 				order.push("beginDispose");
 			},
+			flush: async () => {
+				order.push("flush:start");
+				await releaseFlush.promise;
+				order.push("flush:done");
+			},
 			saveDraft: async () => {
-				order.push("saveDraft:start");
-				await release.promise;
-				order.push("saveDraft:done");
+				order.push("saveDraft");
 			},
 			disposeSession: async () => {
 				order.push("disposeSession");
@@ -59,11 +65,11 @@ describe("createSessionTeardown", () => {
 		});
 
 		const running = teardown();
-		expect(order).toEqual(["snapshot", "beginDispose", "saveDraft:start"]);
-		release.resolve();
+		expect(order).toEqual(["snapshot", "beginDispose", "flush:start"]);
+		releaseFlush.resolve();
 		await running;
 
-		expect(order).toEqual(["snapshot", "beginDispose", "saveDraft:start", "saveDraft:done", "disposeSession"]);
+		expect(order).toEqual(["snapshot", "beginDispose", "flush:start", "flush:done", "saveDraft", "disposeSession"]);
 	});
 
 	it("still disposes when saveDraft rejects — never leaves session_shutdown unemitted", async () => {
@@ -72,6 +78,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "draft",
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async () => {
 				throw new Error("disk full");
 			},
@@ -90,6 +97,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async text => {
 				seen.push(text);
 			},
@@ -113,6 +121,7 @@ describe("createSessionTeardown", () => {
 				return `draft-${getDraftCalls}`;
 			},
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async () => {
 				saveDraftCalls++;
 			},
@@ -145,6 +154,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => editorText,
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async text => {
 				captured = text;
 			},
@@ -164,6 +174,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async () => {},
 			disposeSession: async reason => {
 				received.push(reason);
@@ -181,6 +192,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async () => {},
 			disposeSession: async reason => {
 				received.push(reason);
@@ -199,6 +211,7 @@ describe("createSessionTeardown", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
 			beginDispose: () => {},
+			flush: async () => {},
 			saveDraft: async () => {},
 			disposeSession: async reason => {
 				received.push(reason);

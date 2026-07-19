@@ -953,6 +953,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.editor.getText(),
 			beginDispose: () => this.session.beginDispose(),
+			flush: () => this.sessionManager.flush(),
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: reason =>
 				this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS, reason }),
@@ -4012,6 +4013,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
+				this.session.beginDispose();
+				try {
+					await this.sessionManager.flush();
+				} catch (err) {
+					logger.warn("Failed to flush session during fallback teardown", { error: String(err) });
+				}
+				try {
+					await this.sessionManager.saveDraft(draftText);
+				} catch (err) {
+					logger.warn("Failed to save session draft during fallback teardown", { error: String(err) });
+				}
 				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 			}
 		} finally {
@@ -4051,49 +4063,71 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
+		this.#isShuttingDown = true;
+
 		if (this.collabHost) {
 			this.showWarning("Stop hosting first (/collab stop)");
+			this.#isShuttingDown = false;
 			return;
 		}
 		if (this.collabGuest) {
 			this.showWarning("Leave collab first (/leave)");
+			this.#isShuttingDown = false;
 			return;
 		}
 		if (hasRestartBlockingWork(this.session, getRunningSubagentBadgeRegistry(this.collabGuest))) {
 			this.showWarning("Wait for active work to finish and drain or dequeue queued messages before restarting.");
+			this.#isShuttingDown = false;
 			return;
 		}
 		if (!this.sessionManager.getSessionFile()) {
 			this.showWarning("Cannot restart because this session is not persisted.");
+			this.#isShuttingDown = false;
 			return;
 		}
 
+		let command: restartProcess.RestartCommand;
 		try {
-			await this.sessionManager.flush();
-			await this.sessionManager.ensureOnDisk();
+			command = restartProcess.buildRestartCommand(
+				buildInteractiveRestartCommandOptions({
+					sessionId: this.sessionManager.getSessionId(),
+					cwd: this.sessionManager.getCwd(),
+					sessionDir: this.sessionManager.getSessionDir(),
+					activeProfile: getActiveProfile(),
+					toolRestriction: this.#restartToolRestriction,
+					approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
+					launchFlags: this.#restartLaunchFlags,
+					liveAdvisorEnabled: this.session.isAdvisorEnabled(),
+					liveHideThinkingBlock: this.hideThinkingBlock,
+					liveModel: this.session.model,
+					liveModelChangeRole: this.sessionManager.getLastModelChangeRole(),
+					liveProviderSessionId: this.session.sessionId,
+				}),
+			);
 		} catch (error) {
 			this.showWarning(`Restart failed: ${errorMessage(error)}`);
+			this.#isShuttingDown = false;
 			return;
 		}
 
-		const command = restartProcess.buildRestartCommand(
-			buildInteractiveRestartCommandOptions({
-				sessionId: this.sessionManager.getSessionId(),
-				cwd: this.sessionManager.getCwd(),
-				sessionDir: this.sessionManager.getSessionDir(),
-				activeProfile: getActiveProfile(),
-				toolRestriction: this.#restartToolRestriction,
-				approvalMode: this.settings.get("tools.approvalMode") as restartProcess.RestartApprovalMode,
-				launchFlags: this.#restartLaunchFlags,
-				liveAdvisorEnabled: this.session.isAdvisorEnabled(),
-				liveHideThinkingBlock: this.hideThinkingBlock,
-				liveModel: this.session.model,
-				liveModelChangeRole: this.sessionManager.getLastModelChangeRole(),
-				liveProviderSessionId: this.session.sessionId,
-			}),
-		);
+		// Teardown ownership transfers here. Mark the session synchronously so
+		// deferred work cannot attach while persistence or process handoff awaits.
+		this.session.beginDispose();
+		try {
+			await this.sessionManager.ensureOnDisk();
+		} catch (error) {
+			process.stderr.write(`Restart failed: ${errorMessage(error)}\n`);
+			try {
+				await this.#teardownForProcessExit({ printResumeHint: false });
+			} catch (teardownError) {
+				logger.warn("Failed to finish teardown after restart persistence failure", {
+					error: errorMessage(teardownError),
+				});
+			}
+			await postmortem.quit(1);
+			return;
+		}
 
-		this.#isShuttingDown = true;
 		try {
 			await this.#teardownForProcessExit({ printResumeHint: false });
 			await postmortem.cleanup();

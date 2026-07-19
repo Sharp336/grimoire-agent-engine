@@ -180,6 +180,7 @@ describe("session exit diagnostics", () => {
 		const teardown = createSessionTeardown({
 			getDraftText: () => "",
 			beginDispose: () => activeSession.beginDispose(),
+			flush: () => sessionManager.flush(),
 			saveDraft: async () => {},
 			disposeSession: reason => activeSession.dispose({ reason }),
 		});
