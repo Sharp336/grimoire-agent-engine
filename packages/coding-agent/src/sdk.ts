@@ -2259,6 +2259,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		if (!model && !hasExplicitModel) {
+			throw new Error(
+				modelFallbackMessage ??
+					"No active model role is resolved or available. Run 'omp models' to configure.",
+			);
+		}
+
 		if (model) {
 			const selectedModel = model;
 			const refreshedModel = await logger.time("refreshInitialModelMetadata", () =>
