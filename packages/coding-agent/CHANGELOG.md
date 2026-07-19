@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved explicit `-e`/`--extension` and `--hook` packages under
+  `--no-extensions` while excluding ambient extension factories and sibling
+  capabilities from settings or installed OMP packages.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

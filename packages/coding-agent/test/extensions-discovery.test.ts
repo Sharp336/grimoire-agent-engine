@@ -138,6 +138,31 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("main.ts");
 	});
 
+	it("explicit-only discovery resolves a package manifest and excludes ambient factories", async () => {
+		fs.writeFileSync(path.join(extensionsDir, "ambient.ts"), extensionCodeWithTool("ambient-tool"));
+		const packageDir = path.join(tempDir.path(), "explicit-package");
+		const sourceDir = path.join(packageDir, "src");
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCodeWithTool("explicit-tool"));
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "explicit-package",
+				omp: {
+					extensions: ["./src/main.ts"],
+				},
+			}),
+		);
+
+		const result = await discoverAndLoadExtensions([packageDir], tempDir.path(), undefined, undefined, {
+			ambient: false,
+		});
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map(extension => extension.path)).toEqual([path.join(sourceDir, "main.ts")]);
+		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual(["explicit-tool"]);
+	});
+
 	it("discovers a symlinked extension package directory", async () => {
 		const packageDir = path.join(tempDir.path(), "linked-package");
 		const sourceDir = path.join(packageDir, "src");

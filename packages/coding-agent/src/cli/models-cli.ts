@@ -17,7 +17,7 @@ import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import { discoverAndLoadExtensions, loadExtensions } from "../extensibility/extensions";
+import { discoverAndLoadExtensions } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { EventBus } from "../utils/event-bus";
 
@@ -277,7 +277,7 @@ export interface RunModelsListingOptions {
 	settingsExtensions?: string[];
 	/** Disabled extension ids from settings (`disabledExtensions`). */
 	disabledExtensionIds?: string[];
-	/** When true, skip discovery and only load `additionalExtensionPaths`. */
+	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
 	disableExtensionDiscovery?: boolean;
 }
 
@@ -295,14 +295,16 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 	} = options;
 
 	const eventBus = new EventBus();
-	const extensionsResult = disableExtensionDiscovery
-		? await loadExtensions(additionalExtensionPaths, cwd, eventBus)
-		: await discoverAndLoadExtensions(
-				[...additionalExtensionPaths, ...settingsExtensions],
-				cwd,
-				eventBus,
-				disabledExtensionIds,
-			);
+	const configuredPaths = disableExtensionDiscovery
+		? additionalExtensionPaths
+		: [...additionalExtensionPaths, ...settingsExtensions];
+	const extensionsResult = await discoverAndLoadExtensions(
+		configuredPaths,
+		cwd,
+		eventBus,
+		disableExtensionDiscovery ? undefined : disabledExtensionIds,
+		{ ambient: !disableExtensionDiscovery },
+	);
 
 	for (const { path: extPath, error } of extensionsResult.errors) {
 		process.stderr.write(`Failed to load extension: ${extPath}: ${error}\n`);
@@ -350,7 +352,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		}
 		await modelRegistry.refresh(action === "refresh" ? "online" : "online-if-uncached");
 
-		const cliExtensionPaths = command.flags.noExtensions ? [] : (command.flags.extensions ?? []);
+		const cliExtensionPaths = command.flags.extensions ?? [];
 		await runModelsListing({
 			modelRegistry,
 			cwd,

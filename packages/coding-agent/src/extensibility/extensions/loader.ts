@@ -494,10 +494,16 @@ async function discoverExtensionsInDir(dir: string): Promise<string[]> {
  * `LoadExtensionsResult` directly would reuse handlers/tools/commands that
  * closed over the parent's `cwd` and event bus.
  */
+export interface DiscoverExtensionPathOptions {
+	/** Include native hooks/extensions and installed plugins in addition to configured paths. */
+	ambient?: boolean;
+}
+
 export async function discoverExtensionPaths(
 	configuredPaths: string[],
 	cwd: string,
 	disabledExtensionIds?: string[],
+	options: DiscoverExtensionPathOptions = {},
 ): Promise<string[]> {
 	const allPaths: string[] = [];
 	const seen = new Set<string>();
@@ -521,33 +527,35 @@ export async function discoverExtensionPaths(
 		}
 	};
 
-	// 1. Discover extension modules via capability API (native .omp/.pi only).
-	// Scope the load to the native provider — the extension-module capability
-	// also has claude/codex/gemini/opencode providers, and their items were
-	// discarded here anyway (see #4198). The provider filter skips the walk
-	// entirely instead of running four foreign directory scans and dropping
-	// the results.
-	const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
-		...loadOptions,
-		providers: ["native"],
-	});
-	for (const ext of discovered.items) {
-		addPath(ext.path);
-	}
+	if (options.ambient !== false) {
+		// 1. Discover extension modules via capability API (native .omp/.pi only).
+		// Scope the load to the native provider — the extension-module capability
+		// also has claude/codex/gemini/opencode providers, and their items were
+		// discarded here anyway (see #4198). The provider filter skips the walk
+		// entirely instead of running four foreign directory scans and dropping
+		// the results.
+		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
+			...loadOptions,
+			providers: ["native"],
+		});
+		for (const ext of discovered.items) {
+			addPath(ext.path);
+		}
 
-	// 2. Discover JS/TS hook factories from hookCapability and bind them through
-	// the extension runner, which owns the current runtime event bus. Hook
-	// capability loading already applies hook-specific disabled ids; do not also
-	// filter them through extension-module names.
-	const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
-	for (const hookPath of hooks.items
-		.map(hook => hook.path)
-		.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
-		addPath(hookPath);
-	}
+		// 2. Discover JS/TS hook factories from hookCapability and bind them through
+		// the extension runner, which owns the current runtime event bus. Hook
+		// capability loading already applies hook-specific disabled ids; do not also
+		// filter them through extension-module names.
+		const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
+		for (const hookPath of hooks.items
+			.map(hook => hook.path)
+			.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
+			addPath(hookPath);
+		}
 
-	// 3. Discover extension entry points from installed plugins
-	addPaths(await getAllPluginExtensionPaths(cwd));
+		// 3. Discover extension entry points from installed plugins.
+		addPaths(await getAllPluginExtensionPaths(cwd));
+	}
 
 	// 4. Explicitly configured paths
 	for (const configuredPath of configuredPaths) {
@@ -590,7 +598,8 @@ export async function discoverAndLoadExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 	disabledExtensionIds?: string[],
+	options: DiscoverExtensionPathOptions = {},
 ): Promise<LoadExtensionsResult> {
-	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds);
+	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
 	return loadExtensions(paths, cwd, eventBus);
 }

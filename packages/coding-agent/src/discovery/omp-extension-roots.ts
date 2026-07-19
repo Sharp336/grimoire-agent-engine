@@ -40,6 +40,18 @@ interface InjectedRoot {
 }
 
 let injectedCliRoots: InjectedRoot[] = [];
+let injectedCliRootMode: "merge" | "explicit-only" = "merge";
+
+export interface InjectOmpExtensionCliRootOptions {
+	/**
+	 * `explicit-only` exposes only roots named by this CLI invocation. Use it
+	 * with `--no-extensions` so configured and installed packages cannot
+	 * contribute sibling capabilities through the `omp-plugins` provider.
+	 */
+	mode?: "merge" | "explicit-only";
+	/** Replace roots from an earlier invocation instead of extending them. */
+	replace?: boolean;
+}
 
 /**
  * Register CLI-provided extension package paths (e.g. from `--extension`/`-e`)
@@ -50,7 +62,14 @@ let injectedCliRoots: InjectedRoot[] = [];
  * Call once during startup before any capability load. Repeated calls extend
  * the registered set; {@link clearOmpExtensionCliRoots} resets for tests.
  */
-export function injectOmpExtensionCliRoots(paths: readonly string[], home: string, cwd: string): void {
+export function injectOmpExtensionCliRoots(
+	paths: readonly string[],
+	home: string,
+	cwd: string,
+	options: InjectOmpExtensionCliRootOptions = {},
+): void {
+	if (options.mode) injectedCliRootMode = options.mode;
+	if (options.replace) injectedCliRoots = [];
 	if (paths.length === 0) return;
 	const expanded = paths.map(raw => {
 		const tilde = expandTilde(raw, home);
@@ -68,6 +87,7 @@ export function injectOmpExtensionCliRoots(paths: readonly string[], home: strin
 /** Drop every CLI-injected root. Tests use this between cases. */
 export function clearOmpExtensionCliRoots(): void {
 	injectedCliRoots = [];
+	injectedCliRootMode = "merge";
 }
 
 /** Inspect currently-injected CLI roots (read-only). Exposed for diagnostics + tests. */
@@ -134,19 +154,21 @@ async function isDirectory(p: string): Promise<boolean> {
  * other sources still surface.
  */
 export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
-	const { project, user } = scopeDirs(ctx);
-	const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([
-		readSettingsExtensions(path.join(project, "settings.json")),
-		readSettingsExtensions(path.join(user, "settings.json")),
-		listInstalledPluginRoots(ctx),
-	]);
-
-	const candidates: InjectedRoot[] = [
-		...injectedCliRoots,
-		...projectExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "project" })),
-		...userExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "user" })),
-		...installedPlugins,
-	];
+	let candidates: InjectedRoot[] = [...injectedCliRoots];
+	if (injectedCliRootMode === "merge") {
+		const { project, user } = scopeDirs(ctx);
+		const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([
+			readSettingsExtensions(path.join(project, "settings.json")),
+			readSettingsExtensions(path.join(user, "settings.json")),
+			listInstalledPluginRoots(ctx),
+		]);
+		candidates = [
+			...candidates,
+			...projectExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "project" })),
+			...userExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "user" })),
+			...installedPlugins,
+		];
+	}
 
 	// First-seen-wins dedup preserves CLI > project-settings > user-settings > installed precedence.
 	const seen = new Set<string>();
