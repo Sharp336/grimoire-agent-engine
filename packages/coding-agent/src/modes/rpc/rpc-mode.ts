@@ -34,6 +34,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcModeController } from "./mode-control";
 import { claimRpcInput } from "./rpc-input";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -600,6 +601,7 @@ export function requestRpcEditor(
 	} as RpcExtensionUIRequest);
 	return promise;
 }
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -677,6 +679,12 @@ export async function runRpcMode(
 			};
 
 			const onAbort = () => {
+				this.output({
+					type: "extension_ui_request",
+					id: Snowflake.next() as string,
+					method: "cancel",
+					targetId: id,
+				} as RpcExtensionUIRequest);
 				cleanup();
 				resolve(defaultValue);
 			};
@@ -889,6 +897,12 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
+	const modeController = new RpcModeController({
+		session,
+		confirm: (title, message, signal) => rpcUiContext.confirm(title, message, { signal }),
+		onModeChanged: mode => output({ type: "mode_changed", mode }),
+	});
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		reportSendError: (action, err) => {
@@ -1000,11 +1014,13 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
+				modeController.cancelPendingProposal();
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
 
 			case "abort_and_prompt": {
+				modeController.cancelPendingProposal();
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				session
 					.prompt(command.message, { images: command.images })
@@ -1015,8 +1031,13 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
+				const resetMode = modeController.ownsPlanMode;
+				if (resetMode) modeController.cancelPendingProposal();
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+				if (!result.data.cancelled) {
+					if (resetMode) await modeController.apply("default");
+					await emitAvailableCommandsUpdate();
+				}
 				return success(id, result.type, result.data);
 			}
 
@@ -1028,6 +1049,8 @@ export async function runRpcMode(
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
+					mode: modeController.mode,
+					approvalMode: session.settings.get("tools.approvalMode"),
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
@@ -1050,6 +1073,36 @@ export async function runRpcMode(
 					contextUsage: session.getContextUsage(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "set_mode": {
+				if (command.mode !== "default" && command.mode !== "plan") {
+					return error(id, "set_mode", `Unsupported mode: ${String(command.mode)}`);
+				}
+				if (session.isStreaming) {
+					return error(id, "set_mode", "Cannot change mode while the agent is streaming");
+				}
+				try {
+					await modeController.apply(command.mode);
+					return success(id, "set_mode", { mode: modeController.mode });
+				} catch (err) {
+					return error(id, "set_mode", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "set_approval_mode": {
+				if (command.mode !== "always-ask" && command.mode !== "write" && command.mode !== "yolo") {
+					return error(id, "set_approval_mode", `Unsupported approval mode: ${String(command.mode)}`);
+				}
+				session.settings.override("tools.approvalMode", command.mode);
+				const approvalMode = session.settings.get("tools.approvalMode");
+				output({
+					type: "config_update",
+					model: session.model,
+					thinkingLevel: session.thinkingLevel,
+					approvalMode,
+				});
+				return success(id, "set_approval_mode", { approvalMode });
 			}
 
 			case "get_available_commands": {

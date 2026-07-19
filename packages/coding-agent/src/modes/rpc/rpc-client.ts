@@ -12,10 +12,12 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { ApprovalMode } from "../../tools/approval";
 import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
+	RpcConfigUpdateFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHandoffResult,
@@ -24,6 +26,8 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcMode,
+	RpcModeChangedFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -62,7 +66,8 @@ export interface RpcClientOptions {
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
 export type RpcEventListener = (event: AgentEvent) => void;
-export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
+export type RpcSessionEventListener = (event: AgentSessionEvent | RpcConfigUpdateFrame | RpcModeChangedFrame) => void;
+export type RpcExtensionUIRequestListener = (request: RpcExtensionUIRequest) => void;
 export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
@@ -170,6 +175,15 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcConfigUpdateFrame(value: unknown): value is RpcConfigUpdateFrame {
+	return isRecord(value) && value.type === "config_update";
+}
+
+function isRpcModeChangedFrame(value: unknown): value is RpcModeChangedFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "mode_changed" && (value.mode === "default" || value.mode === "plan");
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -217,7 +231,7 @@ export class RpcClient {
 	#customTools: RpcClientCustomTool[] = [];
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
-	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
+	#extensionUiListeners = new Set<RpcExtensionUIRequestListener>();
 	#abortController = new AbortController();
 
 	constructor(private options: RpcClientOptions = {}) {
@@ -398,6 +412,21 @@ export class RpcClient {
 	}
 
 	/**
+	 * Subscribe to extension UI requests, including native plan approval.
+	 */
+	onExtensionUIRequest(listener: RpcExtensionUIRequestListener): () => void {
+		this.#extensionUiListeners.add(listener);
+		return () => this.#extensionUiListeners.delete(listener);
+	}
+
+	/**
+	 * Answer a request received through {@link onExtensionUIRequest}.
+	 */
+	sendExtensionUIResponse(response: RpcExtensionUIResponse): void {
+		this.#writeFrame(response);
+	}
+
+	/**
 	 * Subscribe to subagent lifecycle frames after setSubagentSubscription("progress" | "events").
 	 */
 	onSubagentLifecycle(listener: RpcSubagentLifecycleListener): () => void {
@@ -499,6 +528,22 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
 		return this.#getData(response);
+	}
+
+	/**
+	 * Change the session's behavioral mode.
+	 */
+	async setMode(mode: RpcMode): Promise<RpcMode> {
+		const response = await this.#send({ type: "set_mode", mode });
+		return this.#getData<{ mode: RpcMode }>(response).mode;
+	}
+
+	/**
+	 * Change the effective tool approval mode for future tool calls.
+	 */
+	async setApprovalMode(mode: ApprovalMode): Promise<ApprovalMode> {
+		const response = await this.#send({ type: "set_approval_mode", mode });
+		return this.#getData<{ approvalMode: ApprovalMode }>(response).approvalMode;
 	}
 
 	/**
@@ -918,6 +963,20 @@ export class RpcClient {
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
+			}
+			return;
+		}
+
+		if (isRpcConfigUpdateFrame(data)) {
+			for (const listener of this.#sessionEventListeners) {
+				listener(data);
+			}
+			return;
+		}
+
+		if (isRpcModeChangedFrame(data)) {
+			for (const listener of this.#sessionEventListeners) {
+				listener(data);
 			}
 			return;
 		}

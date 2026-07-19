@@ -8067,6 +8067,10 @@ export class AgentSession {
 		return this.#planModeState;
 	}
 
+	hasPlanYoloWorkflow(): boolean {
+		return this.#planYolo !== undefined;
+	}
+
 	/** Prewalk state, if armed and active */
 	getPrewalkState(): Prewalk | undefined {
 		return this.#prewalk;

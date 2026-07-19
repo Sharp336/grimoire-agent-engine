@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added RPC runtime controls for native plan mode and tool approval mode, including state fields and mode-change events.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

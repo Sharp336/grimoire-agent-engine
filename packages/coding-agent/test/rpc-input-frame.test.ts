@@ -317,6 +317,8 @@ describe("RpcInputDispatcher", () => {
 					success: true,
 					data: {
 						thinkingLevel: undefined,
+						mode: "default",
+						approvalMode: "yolo",
 						isStreaming: false,
 						isCompacting: false,
 						steeringMode: "all",

@@ -18,6 +18,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "../../task";
+import type { ApprovalMode } from "../../tools/approval";
 import type { TodoPhase } from "../../tools/todo";
 
 // ============================================================================
@@ -42,6 +43,8 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "set_mode"; mode: RpcMode }
+	| { id?: string; type: "set_approval_mode"; mode: ApprovalMode }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -90,9 +93,13 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+export type RpcMode = "default" | "plan";
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
+	mode: RpcMode;
+	approvalMode: ApprovalMode;
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
@@ -130,6 +137,18 @@ export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
 	agentInvoked: boolean;
+}
+
+export interface RpcConfigUpdateFrame {
+	type: "config_update";
+	model?: Model;
+	thinkingLevel?: ThinkingLevel;
+	approvalMode?: ApprovalMode;
+}
+
+export interface RpcModeChangedFrame {
+	type: "mode_changed";
+	mode: RpcMode;
 }
 
 export interface RpcHandoffResult {
@@ -178,6 +197,14 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "set_mode"; success: true; data: { mode: RpcMode } }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_approval_mode";
+			success: true;
+			data: { approvalMode: ApprovalMode };
+	  }
 	| {
 			id?: string;
 			type: "response";
@@ -319,7 +346,7 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcConfigUpdateFrame | RpcModeChangedFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

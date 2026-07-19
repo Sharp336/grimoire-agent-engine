@@ -48,6 +48,7 @@ There is no envelope beyond the object shape itself.
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Runtime mode updates (`{ type: "mode_changed", mode: "default" | "plan" }`)
 
 ### Inbound frame categories (stdin)
 
@@ -88,6 +89,8 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "set_mode", mode: "default" | "plan" }`
+- `{ id?, type: "set_approval_mode", mode: "always-ask" | "write" | "yolo" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
@@ -193,6 +196,8 @@ Local-only slash commands may emit `command_output` frames before completing via
 {
   "model": { "provider": "...", "id": "..." },
   "thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
+  "mode": "default|plan",
+  "approvalMode": "always-ask|write|yolo",
   "isStreaming": false,
   "isCompacting": false,
   "steeringMode": "all|one-at-a-time",
@@ -363,6 +368,12 @@ Extension runner errors are emitted separately as:
 
 `message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
 
+Native plan-mode transitions are emitted separately:
+
+```json
+{ "type": "mode_changed", "mode": "plan" }
+```
+
 ## Prompt/Queue Concurrency and Ordering
 
 This is the most important operational behavior.
@@ -406,6 +417,34 @@ From `packages/agent/src/agent.ts` defaults:
 - `set_interrupt_mode`
   - `"immediate"`: tool execution checks steering between tool calls; pending steering can abort remaining tool calls in the turn
   - `"wait"`: defer steering until turn completion
+
+### Runtime plan and approval controls
+
+`set_mode` changes the native coding-agent mode:
+
+- `"plan"` enables the existing read-only plan workflow and defaults its plan
+  file to `local://PLAN.md`. The normal plan write guards and `xd://propose`
+  submission path remain active.
+- Entering plan mode fails when `plan.enabled` is false or a `plan-yolo`
+  workflow is configured for the session.
+- Mode changes fail while the agent is streaming.
+- A proposal emits an `extension_ui_request` with `method: "confirm"`. Approval
+  records the plan reference and exits to `"default"`; rejection or cancellation
+  keeps plan mode active for refinement.
+- Every applied transition emits `mode_changed`. Successful `new_session`,
+  `switch_session`, and `branch` commands reset an active plan mode to
+  `"default"` and emit the same event.
+
+`set_approval_mode` replaces the in-memory `tools.approvalMode` override with
+`"always-ask"`, `"write"`, or `"yolo"`. It affects subsequent tool approval
+decisions, does not persist the setting, and does not cancel an approval already
+in flight. The command response and the next `get_state` expose the effective
+value; a `config_update` frame is also emitted.
+
+`RpcClient` exposes these commands as `setMode(...)` and
+`setApprovalMode(...)`. Clients entering plan mode must subscribe with
+`onExtensionUIRequest(...)` and answer confirmation requests with
+`sendExtensionUIResponse(...)`.
 
 ## Extension UI Sub-Protocol
 
