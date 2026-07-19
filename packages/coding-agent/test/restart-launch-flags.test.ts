@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
@@ -120,6 +121,34 @@ describe("restart launch flags", () => {
 		const defaultFlags = buildRestartLaunchFlags({}, "/repo/original");
 
 		expect(defaultFlags.autoApprove).toBe(false);
+	});
+	test("resolves extension and hook path flags with tilde forms and relative paths", () => {
+		const home = os.homedir();
+		const flags = buildRestartLaunchFlags(
+			{
+				extensions: ["~/my-ext", "~\\windows-ext", "~name/named-ext", "./relative-ext"],
+				hooks: ["~/my-hook.ts", "~\\windows-hook.ts", "~name/named-hook.ts", "./relative-hook.ts"],
+			},
+			"/repo/original",
+			undefined,
+			undefined,
+			undefined,
+			"/repo/resumed",
+		);
+
+		expect(flags.extensionPaths).toEqual([
+			path.join(home, "my-ext"),
+			`${home}\\windows-ext`,
+			path.join(home, "name/named-ext"),
+			"/repo/resumed/relative-ext",
+		]);
+
+		expect(flags.hookPaths).toEqual([
+			path.join(home, "my-hook.ts"),
+			`${home}\\windows-hook.ts`,
+			path.join(home, "name/named-hook.ts"),
+			"/repo/resumed/relative-hook.ts",
+		]);
 	});
 
 	test("absolutizes file-backed prompt flags from the session-start cwd only", async () => {

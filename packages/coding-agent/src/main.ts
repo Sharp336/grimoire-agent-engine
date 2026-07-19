@@ -68,6 +68,7 @@ import { formatExtensionLoadNotifications } from "./extensibility/extensions/loa
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { resolvePath } from "./extensibility/utils";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
@@ -429,9 +430,7 @@ function buildRestartToolRestriction(parsed: Pick<Args, "noTools" | "tools">): R
 }
 
 function resolveRestartLaunchPath(value: string, cwd: string): string {
-	if (value === "~") return os.homedir();
-	if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-	return path.isAbsolute(value) ? value : path.resolve(cwd, value);
+	return resolvePath(value, cwd);
 }
 
 function resolveRestartLaunchPaths(values: readonly string[] | undefined, cwd: string): string[] | undefined {
