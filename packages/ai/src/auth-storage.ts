@@ -3884,10 +3884,17 @@ export class AuthStorage {
 
 			const baseUrl = options?.baseUrlResolver?.(row.provider as Provider);
 			const cred = row.credential;
-			const initialRequest: UsageRequestDescriptor =
-				cred.type === "api_key"
-					? this.#buildUsageRequest(row.provider as Provider, { type: "api_key", apiKey: cred.key }, baseUrl)
-					: this.#buildUsageRequestForOauth(row.provider as Provider, cred, baseUrl);
+			let initialRequest: UsageRequestDescriptor;
+			if (cred.type === "api_key") {
+				const resolvedApiKey = await this.#configValueResolver(cred.key);
+				initialRequest = this.#buildUsageRequest(
+					row.provider as Provider,
+					{ type: "api_key", apiKey: resolvedApiKey ?? "" },
+					baseUrl,
+				);
+			} else {
+				initialRequest = this.#buildUsageRequestForOauth(row.provider as Provider, cred, baseUrl);
+			}
 
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const probeSignal = options?.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;

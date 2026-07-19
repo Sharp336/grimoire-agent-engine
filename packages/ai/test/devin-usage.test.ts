@@ -185,6 +185,62 @@ describe("devinUsageProvider", () => {
 		}
 	});
 
+	it("resolves stored API-key config references before checking credentials", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => (value === "DEVIN_API_KEY" ? "cog_resolved-token" : value),
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.includes("consumption")
+					? { total_acus: 2, consumption_by_date: [] }
+					: { sessions_count: 1 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "DEVIN_API_KEY" }]);
+
+			const [result] = await storage.checkCredentials();
+
+			expect(authorization).toEqual(["Bearer cog_resolved-token", "Bearer cog_resolved-token"]);
+			expect(result).toMatchObject({
+				provider: "devin",
+				type: "api_key",
+				ok: true,
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects non-cog Devin API-key credentials during credential check", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+		});
+
+		try {
+			await storage.set("devin", [{ type: "api_key", key: "invalid-key-no-cog" }]);
+
+			const [result] = await storage.checkCredentials();
+
+			expect(result).toMatchObject({
+				provider: "devin",
+				type: "api_key",
+				ok: null,
+			});
+			expect(result.reason).toMatch(/returned no data/);
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("throws definitive auth failures so credential checks fail", async () => {
 		const fetchImpl: FetchImpl = async () => new Response("unauthorized", { status: 401 });
 
