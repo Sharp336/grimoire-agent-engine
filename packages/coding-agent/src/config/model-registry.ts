@@ -139,6 +139,9 @@ interface ProviderOverride {
  *   2. `existing.transport` (carried over from boot-time override application)
  *   3. `model.transport` (rarely set — discovery defaults omit it)
  *
+ * `compat` resolution merges the discovered model's compatibility metadata
+ * with the provider override, with explicit provider fields taking precedence.
+ *
  * Without (1), the user's override would lose to discovery; without (2)
  * preferred over (3), the bundled `api.xiaomimimo.com` would shadow the
  * tp- token-plan host and produce 401s on the first stream call.
@@ -153,7 +156,7 @@ interface ProviderOverride {
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
-	providerOverride?: Pick<ProviderOverride, "baseUrl" | "headers" | "remoteCompaction" | "transport">,
+	providerOverride?: Pick<ProviderOverride, "baseUrl" | "headers" | "compat" | "remoteCompaction" | "transport">,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
@@ -167,7 +170,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				providerOverride?.remoteCompaction,
 			),
 			...(supportsTools !== undefined ? { supportsTools } : {}),
-			compat: model.compatConfig,
+			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
 	}
 	if (providerOverride) {
@@ -180,7 +183,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				model.remoteCompaction,
 				providerOverride.remoteCompaction,
 			),
-			compat: model.compatConfig,
+			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
 	}
 	return model;

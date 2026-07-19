@@ -530,6 +530,36 @@ describe("ModelRegistry", () => {
 				expect(model.baseUrl).toBe("http://localhost:4000");
 			}
 		});
+		test("refresh keeps provider compat override on built-in Anthropic models", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					baseUrl: "http://localhost:4000/v1",
+					apiKey: "proxy-token",
+					compat: {
+						replayUnsignedThinking: false,
+					},
+				},
+			});
+
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "http://localhost:4000/v1/models") {
+					return Response.json({ data: [{ id: "claude-sonnet-5" }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			expect(registry.find("anthropic", "claude-sonnet-5")?.compat).toMatchObject({
+				replayUnsignedThinking: false,
+			});
+
+			await registry.refreshProvider("anthropic", "online");
+
+			expect(registry.find("anthropic", "claude-sonnet-5")?.compat).toMatchObject({
+				replayUnsignedThinking: false,
+			});
+		});
 	});
 
 	describe("provider compat overrides", () => {
