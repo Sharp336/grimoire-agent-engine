@@ -230,6 +230,40 @@ describe("devinUsageProvider", () => {
 		}
 	});
 
+	it("deduplicates enterprise-wide usage when service-user keys have no org", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, {
+			usageFetch: (async input => {
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.endsWith("/v3/self")
+					? {}
+					: path.includes("consumption")
+						? { total_acus: 12.5, consumption_by_date: [] }
+						: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [
+				{ type: "api_key", key: "cog_enterprise-user-one" },
+				{ type: "api_key", key: "cog_enterprise-user-two" },
+			]);
+
+			const reports = (await storage.fetchUsageReports())?.filter(report => report.provider === "devin");
+
+			expect(reports).toHaveLength(1);
+			expect(reports?.[0]?.metadata?.orgId).toBeUndefined();
+			expect(reports?.[0]?.limits).toHaveLength(1);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 12.5, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("resolves stored API-key config references before checking credentials", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const authorization: Array<string | null> = [];
