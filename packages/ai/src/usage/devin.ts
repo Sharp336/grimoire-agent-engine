@@ -177,6 +177,7 @@ async function fetchFirstJson(auth: DevinUsageAuth, paths: string[], label: stri
 	if (!token) return null;
 	const baseUrl = normalizeBaseUrl(auth.baseUrl);
 	let lastFailure: DevinHttpFailure | undefined;
+	let firstAuthFailure: DevinHttpFailure | undefined;
 	for (const path of paths) {
 		const url = withUsageQuery(`${baseUrl}${path}`, auth);
 		let response: Response;
@@ -193,7 +194,11 @@ async function fetchFirstJson(auth: DevinUsageAuth, paths: string[], label: stri
 		}
 
 		if (!response.ok) {
-			lastFailure = { url, status: response.status, body: await response.text() };
+			const failure = { url, status: response.status, body: await response.text() };
+			if (!firstAuthFailure && (failure.status === 401 || failure.status === 403)) {
+				firstAuthFailure = failure;
+			}
+			lastFailure = failure;
 			continue;
 		}
 
@@ -202,6 +207,10 @@ async function fetchFirstJson(auth: DevinUsageAuth, paths: string[], label: stri
 		} catch {
 			lastFailure = { url, status: response.status, body: "invalid JSON response" };
 		}
+	}
+
+	if (firstAuthFailure) {
+		throw new DevinUsageRequestError(label, firstAuthFailure);
 	}
 
 	if (lastFailure) {

@@ -3383,6 +3383,12 @@ export class AuthStorage {
 					identifier => `${report.provider}:org:${orgId.toLowerCase()}|${identifier.toLowerCase()}`,
 				);
 			}
+		}
+		if (report.provider === "devin") {
+			const orgId = this.#getUsageReportMetadataValue(report, "orgId");
+			if (orgId) return [`devin:org:${orgId.toLowerCase()}`];
+		}
+		if (report.provider === "openai-codex") {
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 		}
 		const projectId =
@@ -3744,10 +3750,7 @@ export class AuthStorage {
 		let request: UsageRequestDescriptor;
 		if (credential.type === "api_key") {
 			const resolvedApiKey = await this.#configValueResolver(credential.key);
-			request = this.#buildUsageRequest(
-				provider,
-				{ type: "api_key", apiKey: resolvedApiKey ?? "" },
-			);
+			request = this.#buildUsageRequest(provider, { type: "api_key", apiKey: resolvedApiKey ?? "" });
 		} else {
 			request = this.#buildUsageRequestForOauth(provider, credential);
 		}

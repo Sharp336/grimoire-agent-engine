@@ -196,6 +196,40 @@ describe("devinUsageProvider", () => {
 		}
 	});
 
+	it("deduplicates org-wide usage reported by multiple service-user keys", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, {
+			usageFetch: (async input => {
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.endsWith("/v3/self")
+					? { org_id: "org-shared" }
+					: path.includes("consumption")
+						? { total_acus: 12.5, consumption_by_date: [] }
+						: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [
+				{ type: "api_key", key: "cog_service-user-one" },
+				{ type: "api_key", key: "cog_service-user-two" },
+			]);
+
+			const reports = (await storage.fetchUsageReports())?.filter(report => report.provider === "devin");
+
+			expect(reports).toHaveLength(1);
+			expect(reports?.[0]?.metadata?.orgId).toBe("org-shared");
+			expect(reports?.[0]?.limits).toHaveLength(1);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 12.5, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("resolves stored API-key config references before checking credentials", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const authorization: Array<string | null> = [];
@@ -585,6 +619,31 @@ describe("fetchDevinConsumption", () => {
 		expect(summary.totalAcus).toBe(2);
 		expect(urls).toEqual([
 			"https://api.example.test/v3/organizations/org-xyz/consumption/daily?time_after=1767225600&time_before=1767312000",
+		]);
+	});
+
+	it("preserves an org endpoint auth failure when the fallback is missing", async () => {
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+			paths.push(path);
+			if (path === "/v3/organizations/org-xyz/consumption/daily") {
+				return new Response("forbidden", { status: 403 });
+			}
+			return new Response("not found", { status: 404 });
+		};
+
+		await expect(
+			fetchDevinConsumption({
+				apiKey: "cog_token",
+				baseUrl: "https://api.example.test",
+				orgId: "org-xyz",
+				fetch: fetchImpl,
+			}),
+		).rejects.toThrow("Devin consumption request failed: 403 forbidden");
+		expect(paths).toEqual([
+			"/v3/organizations/org-xyz/consumption/daily",
+			"/v3/enterprise/consumption/daily/organizations/org-xyz",
 		]);
 	});
 });
