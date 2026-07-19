@@ -7,7 +7,8 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
-import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import type { AuthCredential, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import type { Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	resolveUsedFraction,
 	type UsageHistoryEntry,
@@ -48,6 +49,7 @@ export interface UsageAccountIdentity {
 	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+	credential?: AuthCredential;
 }
 
 /**
@@ -757,9 +759,14 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 					enterpriseUrl: credential.enterpriseUrl,
 					orgId: credential.orgId,
 					orgName: credential.orgName,
+					credential,
 				});
 			} else {
-				accounts.push({ provider, type: "api_key" });
+				accounts.push({
+					provider,
+					type: "api_key",
+					credential,
+				});
 			}
 		}
 	}
@@ -773,19 +780,25 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
  * keyless servers, inference providers without a usage API) would only ever
  * render as noise, so they are dropped.
  *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
- * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
+ * `isCredentialSupported` checks whether the provider has a usage provider
+ * and whether that usage provider supports the specific credential type/value.
+ * An explicit `--provider` request bypasses the cull, so
  * `omp usage --provider xai` can still confirm the stored credential has no
  * usage endpoint.
  */
-export function selectReportableAccounts(
+export async function selectReportableAccounts(
 	accounts: UsageAccountIdentity[],
-	hasUsageProvider: (provider: string) => boolean,
+	isCredentialSupported: (provider: string, credential?: AuthCredential) => Promise<boolean> | boolean,
 	explicitProvider?: string,
-): UsageAccountIdentity[] {
+): Promise<UsageAccountIdentity[]> {
 	if (explicitProvider) return accounts;
-	return accounts.filter(account => hasUsageProvider(account.provider));
+	const filtered: UsageAccountIdentity[] = [];
+	for (const account of accounts) {
+		if (await isCredentialSupported(account.provider, account.credential)) {
+			filtered.push(account);
+		}
+	}
+	return filtered;
 }
 
 /** Apply a redaction mask to an optional identity field. */
@@ -870,9 +883,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs, deps: UsageCommandD
 				baseUrlResolver,
 			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
-		let accounts = selectReportableAccounts(
+		let accounts = await selectReportableAccounts(
 			storedAccounts,
-			provider => authStorage.usageProviderFor(provider) !== undefined,
+			(provider, credential) => authStorage.isCredentialSupported(provider as Provider, credential),
 			cmd.provider,
 		);
 		let filteredReports = reports;

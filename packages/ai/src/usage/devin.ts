@@ -358,22 +358,43 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	};
 
 	let consumption: DevinConsumptionSummary | null = null;
+	let consumptionError: unknown = null;
 	try {
 		consumption = await fetchDevinConsumption(auth);
 	} catch (error) {
-		if (isDevinAuthFailure(error)) throw error;
-		ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(error) });
+		consumptionError = error;
 	}
 
 	let metrics: DevinUsageMetrics | null = null;
+	let metricsError: unknown = null;
 	try {
 		metrics = await fetchDevinUsageMetrics(auth);
 	} catch (error) {
-		if (!consumption && isDevinAuthFailure(error)) throw error;
-		ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(error) });
+		metricsError = error;
 	}
 
-	if (!consumption && !metrics) return null;
+	if (!consumption && !metrics) {
+		if (isDevinAuthFailure(consumptionError)) {
+			throw consumptionError;
+		}
+		if (isDevinAuthFailure(metricsError)) {
+			throw metricsError;
+		}
+		if (consumptionError) {
+			ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(consumptionError) });
+		}
+		if (metricsError) {
+			ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(metricsError) });
+		}
+		return null;
+	}
+
+	if (!consumption && consumptionError) {
+		ctx.logger?.warn("Devin consumption request failed", { provider: params.provider, error: String(consumptionError) });
+	}
+	if (!metrics && metricsError) {
+		ctx.logger?.debug("Devin metrics request failed", { provider: params.provider, error: String(metricsError) });
+	}
 	const limits = consumption ? buildAcuLimits(params, consumption, orgId) : [];
 	return {
 		provider: params.provider,
@@ -390,9 +411,21 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	};
 }
 
+function isDevinApiKeyLike(key: string): boolean {
+	const trimmed = key.trim();
+	if (trimmed.startsWith(DEVIN_API_KEY_PREFIX)) return true;
+	if (trimmed.startsWith("!")) return true;
+	if (/^[A-Z_0-9]+$/.test(trimmed)) return true;
+	return false;
+}
+
 export const devinUsageProvider: UsageProvider = {
 	id: "devin",
 	fetchUsage: fetchDevinUsage,
-	supports: params => params.provider === "devin" && params.credential.type === "api_key",
+	supports: params =>
+		params.provider === "devin" &&
+		params.credential.type === "api_key" &&
+		!!params.credential.apiKey &&
+		isDevinApiKeyLike(params.credential.apiKey),
 	validatesCredentials: true,
 };

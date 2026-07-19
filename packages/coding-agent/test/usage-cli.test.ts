@@ -7,6 +7,7 @@ import {
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 
@@ -504,5 +505,27 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
+	});
+});
+
+describe("selectReportableAccounts", () => {
+	it("filters out unsupported credentials based on the isCredentialSupported callback", async () => {
+		const accounts: UsageAccountIdentity[] = [
+			{ provider: "devin", type: "api_key", credential: { type: "api_key", key: "cog_test" } },
+			{ provider: "devin", type: "oauth", credential: { type: "oauth", access: "token", refresh: "refresh", expires: 0 } },
+			{ provider: "openai-codex", type: "api_key", credential: { type: "api_key", key: "sk-test" } },
+		];
+
+		const filtered = await selectReportableAccounts(
+			accounts,
+			(provider, cred) => {
+				if (provider === "devin" && cred?.type === "oauth") return false;
+				return true;
+			}
+		);
+
+		expect(filtered).toHaveLength(2);
+		expect(filtered[0]).toMatchObject({ provider: "devin", type: "api_key" });
+		expect(filtered[1]).toMatchObject({ provider: "openai-codex", type: "api_key" });
 	});
 });

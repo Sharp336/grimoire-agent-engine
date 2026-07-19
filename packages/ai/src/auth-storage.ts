@@ -3732,6 +3732,28 @@ export class AuthStorage {
 		return true;
 	}
 
+	/**
+	 * Check if a credential is supported by the provider's usage provider.
+	 */
+	async isCredentialSupported(provider: Provider, credential?: AuthCredential): Promise<boolean> {
+		const providerImpl = this.usageProviderFor(provider);
+		if (!providerImpl) return false;
+		if (!credential) return true;
+		if (!providerImpl.supports) return true;
+
+		let request: UsageRequestDescriptor;
+		if (credential.type === "api_key") {
+			const resolvedApiKey = await this.#configValueResolver(credential.key);
+			request = this.#buildUsageRequest(
+				provider,
+				{ type: "api_key", apiKey: resolvedApiKey ?? "" },
+			);
+		} else {
+			request = this.#buildUsageRequestForOauth(provider, credential);
+		}
+		return providerImpl.supports(request);
+	}
+
 	async fetchUsageReports(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		/** Caller's cancel signal; only rejects this caller, never the shared upstream fetch. */

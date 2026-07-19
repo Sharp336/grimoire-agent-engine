@@ -235,7 +235,7 @@ describe("devinUsageProvider", () => {
 				type: "api_key",
 				ok: null,
 			});
-			expect(result.reason).toMatch(/returned no data/);
+			expect(result.reason).toMatch(/does not support api_key credentials/);
 		} finally {
 			storage.close();
 		}
@@ -333,6 +333,124 @@ describe("devinUsageProvider", () => {
 		expect(report.metadata).toMatchObject({ totalAcus: 4.5 });
 		expect(report.metadata?.metrics).toBeUndefined();
 	});
+
+	it("keeps metrics when consumption permission is forbidden (metrics-only)", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
+				return new Response("forbidden", { status: 403 });
+			}
+			if (parsed.pathname === "/v3/enterprise/metrics/usage") {
+				return new Response(JSON.stringify({ sessions_count: 10, searches_count: 5 }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("unexpected Devin URL", { status: 404 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_metrics-only" } },
+			{ fetch: fetchImpl },
+		);
+
+		if (!report) throw new Error("expected Devin usage report");
+		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+		expect(report.limits).toEqual([]);
+		expect(report.notes).toEqual(["Devin usage metrics were available, but ACU consumption was unavailable."]);
+		expect(report.metadata).toMatchObject({
+			metrics: { sessionsCount: 10, searchesCount: 5 },
+		});
+	});
+
+	it("throws auth failure if both consumption and metrics fail with auth errors", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			if (parsed.pathname === "/v3/enterprise/consumption/daily") {
+				return new Response("unauthorized", { status: 401 });
+			}
+			if (parsed.pathname === "/v3/enterprise/metrics/usage") {
+				return new Response("forbidden", { status: 403 });
+			}
+			return new Response("unexpected Devin URL", { status: 404 });
+		};
+
+		await expect(
+			devinUsageProvider.fetchUsage(
+				{ provider: "devin", credential: { type: "api_key", apiKey: "cog_bad-token" } },
+				{ fetch: fetchImpl },
+			),
+		).rejects.toThrow("Devin consumption request failed: 401 unauthorized");
+
+		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+	});
+
+	it("does not throw auth failure if both fail with non-auth errors", async () => {
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const paths: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const parsed = new URL(String(input instanceof Request ? input.url : input));
+			paths.push(parsed.pathname);
+			return new Response("internal error", { status: 500 });
+		};
+
+		const report = await devinUsageProvider.fetchUsage(
+			{ provider: "devin", credential: { type: "api_key", apiKey: "cog_server-error" } },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report).toBeNull();
+		expect(paths).toEqual(["/v3/enterprise/consumption/daily", "/v3/enterprise/metrics/usage"]);
+	});
+
+	it("determines credential support correctly (OAuth omission, API key inclusion)", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => (value === "DEVIN_API_KEY" ? "cog_resolved-token" : value),
+		});
+
+		try {
+			// Direct cog_ API key
+			const directSupported = await storage.isCredentialSupported("devin", {
+				type: "api_key",
+				key: "cog_direct-token",
+			});
+			expect(directSupported).toBe(true);
+
+			// Resolved cog_ API key reference
+			const resolvedSupported = await storage.isCredentialSupported("devin", {
+				type: "api_key",
+				key: "DEVIN_API_KEY",
+			});
+			expect(resolvedSupported).toBe(true);
+
+			// Unresolved non-cog API key reference
+			const unresolvedNonCogSupported = await storage.isCredentialSupported("devin", {
+				type: "api_key",
+				key: "invalid-key-no-cog",
+			});
+			expect(unresolvedNonCogSupported).toBe(false);
+
+			// OAuth credential
+			const oauthSupported = await storage.isCredentialSupported("devin", {
+				type: "oauth",
+				access: "some-access-token",
+				refresh: "some-refresh-token",
+			});
+			expect(oauthSupported).toBe(false);
+		} finally {
+			storage.close();
+ 		}
+ 	});
 });
 
 describe("fetchDevinConsumption", () => {
