@@ -225,7 +225,13 @@ const STILL_CLOSING_DELAY_MS = 3_000;
 export function hasRestartBlockingWork(
 	session: Pick<
 		AgentSession,
-		"isStreaming" | "isCompacting" | "hasPostPromptWork" | "isBashRunning" | "isEvalRunning" | "getAsyncJobSnapshot"
+		| "isStreaming"
+		| "isCompacting"
+		| "hasPostPromptWork"
+		| "isBashRunning"
+		| "isEvalRunning"
+		| "queuedMessageCount"
+		| "getAsyncJobSnapshot"
 	>,
 	subagentRegistry?: AgentRegistry,
 ): boolean {
@@ -239,6 +245,7 @@ export function hasRestartBlockingWork(
 		session.hasPostPromptWork ||
 		session.isBashRunning ||
 		session.isEvalRunning ||
+		session.queuedMessageCount > 0 ||
 		(asyncJobSnapshot?.running.length ?? 0) > 0 ||
 		hasPendingAsyncDelivery ||
 		hasRunningSubagents
@@ -4054,7 +4061,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (hasRestartBlockingWork(this.session, getRunningSubagentBadgeRegistry(this.collabGuest))) {
-			this.showWarning("Wait for the current response or tool execution to finish or abort it before restarting.");
+			this.showWarning("Wait for active work to finish and drain or dequeue queued messages before restarting.");
 			return;
 		}
 		if (!this.sessionManager.getSessionFile()) {

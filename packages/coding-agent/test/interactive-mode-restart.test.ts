@@ -9,7 +9,13 @@ import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/s
 
 type RestartBlockingSessionState = Pick<
 	AgentSession,
-	"isStreaming" | "isCompacting" | "hasPostPromptWork" | "isBashRunning" | "isEvalRunning" | "getAsyncJobSnapshot"
+	| "isStreaming"
+	| "isCompacting"
+	| "hasPostPromptWork"
+	| "isBashRunning"
+	| "isEvalRunning"
+	| "queuedMessageCount"
+	| "getAsyncJobSnapshot"
 >;
 
 function restartModel(overrides: Pick<Model, "provider" | "id"> & Partial<Model>): Model {
@@ -34,6 +40,7 @@ function sessionState(overrides: Partial<RestartBlockingSessionState> = {}): Res
 		hasPostPromptWork: false,
 		isBashRunning: false,
 		isEvalRunning: false,
+		queuedMessageCount: 0,
 		getAsyncJobSnapshot: () => null,
 		...overrides,
 	};
@@ -200,6 +207,10 @@ describe("restart active-work guard", () => {
 		expect(hasRestartBlockingWork(sessionState({ hasPostPromptWork: true }))).toBe(true);
 		expect(hasRestartBlockingWork(sessionState({ isBashRunning: true }))).toBe(true);
 		expect(hasRestartBlockingWork(sessionState({ isEvalRunning: true }))).toBe(true);
+	});
+
+	test("blocks restart while user messages are queued", () => {
+		expect(hasRestartBlockingWork(sessionState({ queuedMessageCount: 1 }))).toBe(true);
 	});
 
 	test("blocks restart while async work or async delivery is active", () => {
