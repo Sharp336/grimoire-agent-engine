@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
@@ -8,11 +9,10 @@ import {
 	formatUsageBreakdown,
 	formatUsageHistory,
 	runUsageCommand,
-	selectReportableAccounts,
 	type StoredAccount,
+	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
-import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -622,7 +622,14 @@ describe("runUsageCommand", () => {
 
 		const mockAuthStorage = {
 			getAll: () => mockCredentials,
-			fetchUsageReports: async () => [],
+			fetchUsageReports: async (): Promise<UsageReport[]> => [
+				{
+					provider: "devin",
+					fetchedAt: Date.now(),
+					limits: [],
+					metadata: { principalId: "service_user:service-secret" },
+				},
+			],
 			isCredentialSupported: () => true,
 			close: () => {},
 		} as unknown as AuthStorage;
@@ -654,7 +661,10 @@ describe("runUsageCommand", () => {
 			access?: unknown;
 		}
 
-		const parsed = JSON.parse(output) as { accountsWithoutUsage: RedactedAccountIdentityOutput[] };
+		const parsed = JSON.parse(output) as {
+			reports: Array<{ metadata?: { principalId?: string } }>;
+			accountsWithoutUsage: RedactedAccountIdentityOutput[];
+		};
 		expect(parsed).toHaveProperty("accountsWithoutUsage");
 
 		// Ensure identities are masked
@@ -664,11 +674,15 @@ describe("runUsageCommand", () => {
 		expect(openaiAcc!.email).toContain("*");
 		expect(openaiAcc!.orgId).not.toBe("org-discovered-123");
 		expect(openaiAcc!.orgId).toContain("*");
+		const principalId = parsed.reports[0]?.metadata?.principalId;
+		expect(principalId).not.toBe("service_user:service-secret");
+		expect(principalId).toContain("*");
 
 		// Ensure credential info is absent
 		expect(openaiAcc!.credential).toBeUndefined();
 		expect(openaiAcc!.access).toBeUndefined();
 		expect(output).not.toContain("cog_secretkey123");
 		expect(output).not.toContain("access_token_secret");
+		expect(output).not.toContain("service_user:service-secret");
 	});
 });

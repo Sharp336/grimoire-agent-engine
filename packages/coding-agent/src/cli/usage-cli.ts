@@ -8,7 +8,6 @@
  * always covers the full credential pool.
  */
 import type { AuthCredential, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import type { Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	resolveUsedFraction,
 	type UsageHistoryEntry,
@@ -16,6 +15,7 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai/usage";
+import type { Provider } from "@oh-my-pi/pi-catalog/types";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils/format";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import chalk from "chalk";
@@ -148,6 +148,7 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 		add(meta.projectId);
 		add(meta.orgId);
 		add(meta.orgName);
+		add(meta.principalId);
 		for (const limit of report.limits) {
 			add(limit.scope.accountId);
 			add(limit.scope.projectId);
@@ -814,7 +815,7 @@ function maskIdentity(redaction: Map<string, string>, value: string | undefined)
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
 }
 
-const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
+const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName", "principalId"] as const;
 
 /** Mask identity fields in a raw-stripped report for `--redact --json`. */
 function redactReportForJson(
