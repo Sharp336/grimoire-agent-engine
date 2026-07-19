@@ -113,4 +113,32 @@ describe("extension loader host runtime binding", () => {
 		expect(hookResult.hooks).toHaveLength(1);
 		expect(hookResult.hooks[0].handlers.has("identity:event")).toBe(true);
 	});
+
+	it("exposes the live transcript presentation constructors to extensions", async () => {
+		expect(projectDir).toBeDefined();
+		const extensionPath = writeModule(
+			"transcript-surface-extension.ts",
+			`
+				export default function(api) {
+					const requiredConstructors = [
+						"AssistantMessageComponent",
+						"ChatTranscriptBuilder",
+						"EventController",
+						"UiHelpers",
+						"UserMessageComponent",
+					];
+					for (const name of requiredConstructors) {
+						if (typeof api.pi[name] !== "function") {
+							throw new Error(\`missing transcript presentation constructor: \${name}\`);
+						}
+					}
+				}
+			`,
+		);
+
+		const result = await loadExtensions([extensionPath], projectDir!.path());
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Expanded `ExtensionAPI.pi`'s live transcript presentation surface with `ChatTranscriptBuilder`, `EventController`, and `UiHelpers`, alongside the existing assistant- and user-message constructors, so extensions can integrate without loading duplicate class instances.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added
