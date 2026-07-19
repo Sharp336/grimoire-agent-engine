@@ -59,6 +59,11 @@ interface DevinHttpFailure {
 	body: string;
 }
 
+interface DevinIdentity {
+	orgId?: string;
+	principalId?: string;
+}
+
 class DevinUsageRequestError extends Error {
 	readonly url: string;
 	readonly status: number;
@@ -114,12 +119,12 @@ function readOrgId(auth: Pick<DevinUsageAuth, "orgId">): string | undefined {
 	return auth.orgId?.trim() || $env.DEVIN_USAGE_ORG_ID?.trim() || $env.DEVIN_ORG_ID?.trim() || undefined;
 }
 
-async function discoverDevinOrgId(
+async function discoverDevinIdentity(
 	apiKey: string,
 	baseUrl: string | undefined,
 	fetchImpl: FetchImpl,
 	signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<DevinIdentity> {
 	const url = `${normalizeBaseUrl(baseUrl)}/v3/self`;
 	let response: Response;
 	try {
@@ -142,20 +147,39 @@ async function discoverDevinOrgId(
 				body: await response.text(),
 			});
 		}
-		return undefined;
+		return {};
 	}
 
 	try {
 		const data = await response.json();
 		if (isRecord(data)) {
-			const discovered =
+			const discoveredOrgId =
 				typeof data.org_id === "string" ? data.org_id : typeof data.orgId === "string" ? data.orgId : undefined;
-			return discovered?.trim() || undefined;
+			const orgId = discoveredOrgId?.trim() || undefined;
+			const principalType = typeof data.principal_type === "string" ? data.principal_type.trim() : undefined;
+			const discoveredPrincipalId =
+				typeof data.service_user_id === "string"
+					? data.service_user_id
+					: typeof data.user_id === "string"
+						? data.user_id
+						: typeof data.devin_id === "string"
+							? data.devin_id
+							: undefined;
+			const rawPrincipalId = discoveredPrincipalId?.trim() || undefined;
+			const principalId = rawPrincipalId
+				? principalType
+					? `${principalType}:${rawPrincipalId}`
+					: rawPrincipalId
+				: undefined;
+			return {
+				...(orgId ? { orgId } : {}),
+				...(principalId ? { principalId } : {}),
+			};
 		}
 	} catch {
-		// Ignore JSON parse errors for discovery and yield no org
+		// Ignore JSON parse errors for discovery and yield no identity.
 	}
-	return undefined;
+	return {};
 }
 function buildConsumptionPaths(orgId: string | undefined): string[] {
 	if (!orgId) return ["/v3/enterprise/consumption/daily"];
@@ -368,6 +392,7 @@ function buildAcuLimits(
 function metadataFromParams(
 	params: UsageFetchParams,
 	orgId: string | undefined,
+	principalId: string | undefined,
 	consumption: DevinConsumptionSummary | null,
 	metrics: DevinUsageMetrics | null,
 ): Record<string, unknown> {
@@ -375,6 +400,7 @@ function metadataFromParams(
 	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
 	if (params.credential.email) metadata.email = params.credential.email;
 	if (orgId) metadata.orgId = orgId;
+	if (principalId) metadata.principalId = principalId;
 	if (consumption) {
 		metadata.totalAcus = consumption.totalAcus;
 		metadata.acusByProduct = consumption.acusByProduct;
@@ -401,11 +427,17 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	let orgId = readOrgId({
 		orgId: typeof credential.metadata?.orgId === "string" ? credential.metadata.orgId : undefined,
 	});
+	let principalId =
+		typeof credential.metadata?.principalId === "string"
+			? credential.metadata.principalId.trim() || undefined
+			: undefined;
 	let discoveryError: unknown = null;
 
 	if (!orgId) {
 		try {
-			orgId = await discoverDevinOrgId(apiKey, baseUrl, ctx.fetch, params.signal);
+			const identity = await discoverDevinIdentity(apiKey, baseUrl, ctx.fetch, params.signal);
+			orgId = identity.orgId;
+			principalId = identity.principalId;
 		} catch (error) {
 			discoveryError = error;
 			ctx.logger?.debug("Devin org discovery failed", { provider: params.provider, error: String(error) });
@@ -475,7 +507,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 		...(consumption
 			? undefined
 			: { notes: ["Devin usage metrics were available, but ACU consumption was unavailable."] }),
-		metadata: metadataFromParams(params, orgId, consumption, metrics),
+		metadata: metadataFromParams(params, orgId, principalId, consumption, metrics),
 		raw: {
 			consumption: consumption?.raw,
 			metrics: metrics?.raw,

@@ -3387,7 +3387,8 @@ export class AuthStorage {
 		if (report.provider === "devin") {
 			const orgId = this.#getUsageReportMetadataValue(report, "orgId");
 			if (orgId) return [`devin:org:${orgId.toLowerCase()}`];
-			return ["devin:enterprise"];
+			const principalId = this.#getUsageReportMetadataValue(report, "principalId");
+			if (principalId) return [`devin:principal:${principalId.toLowerCase()}`];
 		}
 		if (report.provider === "openai-codex") {
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);

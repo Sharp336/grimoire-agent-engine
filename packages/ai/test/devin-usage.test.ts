@@ -230,13 +230,13 @@ describe("devinUsageProvider", () => {
 		}
 	});
 
-	it("deduplicates enterprise-wide usage when service-user keys have no org", async () => {
+	it("deduplicates enterprise-wide usage only when /v3/self identifies the same principal", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store, {
 			usageFetch: (async input => {
 				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
 				const payload = path.endsWith("/v3/self")
-					? {}
+					? { org_id: null, principal_type: "service_user", service_user_id: "service-shared" }
 					: path.includes("consumption")
 						? { total_acus: 12.5, consumption_by_date: [] }
 						: { sessions_count: 2 };
@@ -257,8 +257,53 @@ describe("devinUsageProvider", () => {
 
 			expect(reports).toHaveLength(1);
 			expect(reports?.[0]?.metadata?.orgId).toBeUndefined();
+			expect(reports?.[0]?.metadata?.principalId).toBe("service_user:service-shared");
 			expect(reports?.[0]?.limits).toHaveLength(1);
 			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 12.5, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("keeps org-less enterprise reports from distinct principals separate", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, {
+			usageFetch: (async (input, init) => {
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const authorization = new Headers(init?.headers).get("authorization");
+				const firstPrincipal = authorization === "Bearer cog_enterprise-user-one";
+				const payload = path.endsWith("/v3/self")
+					? {
+							org_id: null,
+							principal_type: "service_user",
+							service_user_id: firstPrincipal ? "service-one" : "service-two",
+						}
+					: path.includes("consumption")
+						? { total_acus: firstPrincipal ? 7 : 9, consumption_by_date: [] }
+						: { sessions_count: 2 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			await storage.set("devin", [
+				{ type: "api_key", key: "cog_enterprise-user-one" },
+				{ type: "api_key", key: "cog_enterprise-user-two" },
+			]);
+
+			const reports = (await storage.fetchUsageReports())?.filter(report => report.provider === "devin");
+
+			expect(reports).toHaveLength(2);
+			expect(reports?.map(report => report.metadata?.principalId).sort()).toEqual([
+				"service_user:service-one",
+				"service_user:service-two",
+			]);
+			expect(
+				reports?.map(report => report.limits[0]?.amount.used).sort((left, right) => (left ?? 0) - (right ?? 0)),
+			).toEqual([7, 9]);
 		} finally {
 			storage.close();
 		}
