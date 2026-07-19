@@ -127,11 +127,11 @@ describe("devinUsageProvider", () => {
 			{ path: "/v3/enterprise/metrics/usage", authorization: "Bearer cog_test-token" },
 		]);
 		expect(report.provider).toBe("devin");
-		expect(report.limits.map(limit => [limit.id, limit.amount.used, limit.amount.unit])).toEqual([
-			["devin:acus:total", 12.5, "acus"],
-			["devin:acus:product:cascade", 2.5, "acus"],
-			["devin:acus:product:devin", 8, "acus"],
-			["devin:acus:product:terminal", 2, "acus"],
+		expect(report.limits.map(limit => [limit.id, limit.label, limit.amount.used, limit.amount.unit])).toEqual([
+			["devin:acus:total", "Devin ACU consumption", 12.5, "acus"],
+			["devin:acus:product:cascade", "Cascade product ACU consumption", 2.5, "acus"],
+			["devin:acus:product:devin", "Devin product ACU consumption", 8, "acus"],
+			["devin:acus:product:terminal", "Terminal product ACU consumption", 2, "acus"],
 		]);
 		expect(report.metadata).toMatchObject({
 			totalAcus: 12.5,

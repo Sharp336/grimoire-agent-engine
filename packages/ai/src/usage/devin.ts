@@ -379,7 +379,7 @@ function buildAcuLimits(
 		if (acus <= 0) continue;
 		limits.push({
 			id: `devin:acus:product:${product}`,
-			label: `${formatProductName(product)} ACU consumption`,
+			label: `${formatProductName(product)} product ACU consumption`,
 			scope: { ...baseScope, tier: product },
 			amount: { used: acus, unit: "acus" },
 			status: "ok",

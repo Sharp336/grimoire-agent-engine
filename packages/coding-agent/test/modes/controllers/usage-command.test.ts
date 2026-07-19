@@ -183,6 +183,13 @@ describe("CommandController /usage", () => {
 						amount: { unit: "acus", used: 12.5 },
 						status: "ok",
 					},
+					{
+						id: "devin:acus:product:devin",
+						label: "Devin product ACU consumption",
+						scope: { provider: "devin", accountId: "acct-1", tier: "devin" },
+						amount: { unit: "acus", used: 8 },
+						status: "ok",
+					},
 				],
 				metadata: { email: "devin-a@example.com", accountId: "acct-1" },
 			},
@@ -191,6 +198,8 @@ describe("CommandController /usage", () => {
 		expect(present).toHaveBeenCalledTimes(1);
 		let output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
 		expect(output).toContain("12.5 ACU used");
+		expect(output).toContain("8 ACU used");
+		expect(output).not.toContain("20.5 ACU used");
 		present.mockClear();
 
 		// 2. Multiple Devin accounts plus neighboring fallback case
