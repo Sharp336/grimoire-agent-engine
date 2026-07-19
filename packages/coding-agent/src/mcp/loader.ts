@@ -35,6 +35,11 @@ export interface MCPToolsLoadOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	extraConfigPaths?: string[];
 	/** SQLite storage for MCP tool cache (null disables cache) */
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
@@ -73,6 +78,7 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
+			extraConfigPaths: options?.extraConfigPaths,
 		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result

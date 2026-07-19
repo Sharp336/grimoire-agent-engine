@@ -479,6 +479,11 @@ export interface CreateAgentSessionOptions {
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	mcpConfigPaths?: string[];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -1842,6 +1847,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			filterExa: true,
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
+			extraConfigPaths: options.mcpConfigPaths,
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {

@@ -4,11 +4,14 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getMCPConfigPath, tryParseJson } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
+import { type MCPConfigFile, transformMCPConfig } from "../discovery/mcp-json";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
@@ -20,6 +23,11 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Extra MCP config files (`mcpServers` JSON, e.g. from `--mcp-config`).
+	 * Servers from these files override same-named discovered servers.
+	 */
+	extraConfigPaths?: string[];
 }
 
 /** Result of loading MCP configs */
@@ -85,6 +93,44 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	};
 }
 
+/** Provider id attached to servers loaded from explicit config paths (--mcp-config). */
+const EXTRA_CONFIG_PROVIDER_ID = "mcp-config-flag";
+
+function expandTilde(p: string): string {
+	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+/**
+ * Load MCP servers from explicitly specified `mcpServers` JSON files.
+ * Unlike provider discovery, an unreadable or malformed file is a hard error:
+ * the caller asked for this exact file.
+ */
+async function loadExtraMCPConfigs(cwd: string, configPaths: string[]): Promise<MCPServer[]> {
+	const servers: MCPServer[] = [];
+	for (const configPath of configPaths) {
+		const resolved = path.resolve(cwd, expandTilde(configPath));
+		let content: string;
+		try {
+			content = await Bun.file(resolved).text();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Cannot read MCP config ${resolved}: ${message}`);
+		}
+		const config = tryParseJson<MCPConfigFile>(content);
+		if (!config) {
+			throw new Error(`Invalid JSON in MCP config ${resolved}`);
+		}
+		const source: SourceMeta = {
+			provider: EXTRA_CONFIG_PROVIDER_ID,
+			providerName: "--mcp-config",
+			path: resolved,
+			level: "project",
+		};
+		servers.push(...transformMCPConfig(config, source));
+	}
+	return servers;
+}
+
 /**
  * Load all MCP server configs from standard locations.
  * Uses the capability system for multi-source discovery.
@@ -127,10 +173,26 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		suppress: suppressServer,
 	});
 
+	// Servers from explicitly named config files (--mcp-config) take the name
+	// over same-named discovered ones. They skip the project-scope gate — the
+	// caller named this exact file — but still honour the user denylist and
+	// their own `enabled: false`, so an `enabled: false` entry here also drops
+	// the discovered server that shares its name. Merged before the Exa/browser
+	// filters below so those apply uniformly to every source.
+	let servers = result.items;
+	if (options?.extraConfigPaths?.length) {
+		const extraServers = await loadExtraMCPConfigs(cwd, options.extraConfigPaths);
+		const extraNames = new Set(extraServers.map(server => server.name));
+		servers = [
+			...extraServers.filter(server => !suppressServer(server)),
+			...servers.filter(server => !extraNames.has(server.name)),
+		];
+	}
+
 	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};
-	for (const server of result.items) {
+	for (const server of servers) {
 		configs[server.name] = convertToLegacyConfig(server);
 		sources[server.name] = server._source;
 	}

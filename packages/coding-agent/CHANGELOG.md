@@ -62,6 +62,9 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+### Added
+
+- Added a repeatable `--mcp-config <path>` flag that loads MCP servers from explicit `mcpServers` JSON files (Claude Code format), overriding same-named discovered servers ([#7101](https://github.com/can1357/oh-my-pi/pull/7101) by [@alvorithm](https://github.com/alvorithm)).
 
 ## [17.2.1] - 2026-07-30
 

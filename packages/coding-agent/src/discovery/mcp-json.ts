@@ -20,7 +20,7 @@ const DISPLAY_NAME = "MCP Config";
 /**
  * Raw MCP JSON format (matches Claude Desktop's format).
  */
-interface MCPConfigFile {
+export interface MCPConfigFile {
 	mcpServers?: Record<
 		string,
 		{
@@ -55,7 +55,7 @@ interface MCPConfigFile {
 /**
  * Transform raw MCP config to canonical MCPServer format.
  */
-function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServer[] {
+export function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServer[] {
 	const servers: MCPServer[] = [];
 
 	if (config.mcpServers) {

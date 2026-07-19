@@ -467,6 +467,16 @@ In practice:
 - keep server names unique across tools when possible
 - use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
 
+### Explicit config files: `--mcp-config`
+
+`omp --mcp-config <path>` loads servers from an explicit `mcpServers` JSON file (the same shape as `.mcp.json`). The flag is repeatable, accepts paths relative to the working directory (with `~` expansion), and its servers override same-named discovered servers. This is useful when a development environment generates per-workspace configs outside the discovery paths (for example `.devenv/mcp/claude-code.json` with workspace-specific ports):
+
+```bash
+omp --mcp-config .devenv/mcp/claude-code.json
+```
+
+Unlike discovery, an unreadable or malformed `--mcp-config` file is a hard error. An entry with `"enabled": false` disables the same-named discovered server. Servers loaded this way still pass through `disabledServers` filtering, and `/mcp reload` re-reads the same files.
+
 ## Troubleshooting
 
 ### `Server "name": stdio server requires "command" field`
