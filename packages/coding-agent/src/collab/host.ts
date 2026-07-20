@@ -21,15 +21,15 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
-import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
-import type { AgentSessionEvent } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import type { SessionManager } from "../session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+import type { EventBus } from "../utils/event-bus";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
-import { collabDisplayName } from "./display-name";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
@@ -118,8 +118,45 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+export type CollabHostSession = Pick<
+	AgentSession,
+	| "abort"
+	| "emitNotice"
+	| "getContextUsage"
+	| "isAborting"
+	| "isStreaming"
+	| "model"
+	| "promptCustomMessage"
+	| "queuedMessageCount"
+	| "sessionName"
+	| "subscribe"
+	| "thinkingLevel"
+>;
+
+export type CollabHostSessionManager = Pick<
+	SessionManager,
+	"getCwd" | "getSessionId" | "onEntryAppended" | "snapshotForReplication"
+>;
+
+export type CollabHostEventBus = Pick<EventBus, "on">;
+
+/**
+ * Runtime dependencies for hosting a collaboration room. UI modes can attach
+ * callbacks, while RPC/headless modes provide only session state.
+ */
+export interface CollabHostContext {
+	session: CollabHostSession;
+	sessionManager: CollabHostSessionManager;
+	eventBus?: CollabHostEventBus;
+	displayName?: string;
+	onPendingMessagesChanged?(): void;
+	onParticipantsChanged?(participantCount: number): void;
+	onRelayReconnecting?(reason: string): void;
+	onStopped?(reason: string): void;
+}
+
 export class CollabHost {
-	#ctx: InteractiveModeContext;
+	#ctx: CollabHostContext;
 	#socket: CollabSocket | null = null;
 	#link = "";
 	#webLink = "";
@@ -139,7 +176,7 @@ export class CollabHost {
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: CollabHostContext) {
 		this.#ctx = ctx;
 	}
 
@@ -163,7 +200,7 @@ export class CollabHost {
 	}
 
 	get participants(): CollabParticipant[] {
-		const list: CollabParticipant[] = [{ name: collabDisplayName(this.#ctx), role: "host" }];
+		const list: CollabParticipant[] = [{ name: this.#ctx.displayName || "anonymous", role: "host" }];
 		for (const peer of this.#peers.values()) {
 			list.push({ name: peer.name, role: "guest", readOnly: peer.canWrite ? undefined : true });
 		}
@@ -243,9 +280,9 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
-				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
+				this.#ctx.onRelayReconnecting?.(reason);
 			} else {
-				void this.#teardown();
+				void this.#teardown(reason);
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
 			}
 		};
@@ -265,6 +302,7 @@ export class CollabHost {
 		} finally {
 			clearTimeout(timeout);
 		}
+		if (this.#stopped) throw new Error("collaboration room ended while starting");
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
@@ -283,17 +321,17 @@ export class CollabHost {
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
 		};
-		this.#updateStatusSegment();
+		this.#notifyParticipantsChanged();
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
 	async stop(reason: string): Promise<void> {
 		if (this.#stopped) return;
 		this.#socket?.send({ t: "bye", reason });
-		await this.#teardown();
+		await this.#teardown(reason);
 	}
 
-	async #teardown(): Promise<void> {
+	async #teardown(reason: string): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		this.#ctx.sessionManager.onEntryAppended = undefined;
@@ -314,9 +352,8 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
-		this.#ctx.statusLine.setCollabStatus(null);
-		this.#ctx.ui.requestRender();
+		this.#ctx.onParticipantsChanged?.(0);
+		this.#ctx.onStopped?.(reason);
 	}
 
 	#broadcast(frame: CollabFrame): void {
@@ -417,7 +454,7 @@ export class CollabHost {
 			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
 			"collab",
 		);
-		this.#updateStatusSegment();
+		this.#notifyParticipantsChanged();
 		this.#scheduleStateBroadcast();
 	}
 
@@ -476,8 +513,7 @@ export class CollabHost {
 			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
-			this.#ctx.updatePendingMessagesDisplay();
-			this.#ctx.ui.requestRender();
+			this.#ctx.onPendingMessagesChanged?.();
 			this.#scheduleStateBroadcast();
 		}
 		this.#ctx.session
@@ -514,17 +550,15 @@ export class CollabHost {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
-		this.#updateStatusSegment();
+		this.#notifyParticipantsChanged();
 		this.#scheduleStateBroadcast();
 	}
 
 	#buildState(): CollabSessionState {
 		const session = this.#ctx.session;
-		// Context numbers come from the status line's memoized breakdown so guests
-		// render exactly the same anchored, provider-real count the host's own
-		// status line shows.
-		const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
-		const tokens = breakdown.usedTokens ?? 0;
+		const usage = session.getContextUsage?.();
+		const tokens = usage?.tokens ?? 0;
+		const contextWindow = usage?.contextWindow ?? session.model?.contextWindow ?? 0;
 		return {
 			isStreaming: session.isStreaming,
 			isAborting: session.isAborting,
@@ -535,8 +569,8 @@ export class CollabHost {
 			thinkingLevel: session.thinkingLevel,
 			contextUsage: {
 				tokens,
-				contextWindow: breakdown.contextWindow,
-				percent: breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : 0,
+				contextWindow,
+				percent: contextWindow > 0 ? (tokens / contextWindow) * 100 : 0,
 			},
 			participants: this.participants,
 		};
@@ -682,9 +716,7 @@ export class CollabHost {
 		}, STATE_DEBOUNCE_MS);
 	}
 
-	#updateStatusSegment(): void {
-		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#peers.size + 1 });
-		this.#ctx.statusLine.invalidate();
-		this.#ctx.ui.requestRender();
+	#notifyParticipantsChanged(): void {
+		this.#ctx.onParticipantsChanged?.(this.#peers.size + 1);
 	}
 }

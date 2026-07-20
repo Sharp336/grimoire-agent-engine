@@ -48,6 +48,7 @@ There is no envelope beyond the object shape itself.
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Collaboration lifecycle frames (`{ type: "collab_state", state, reason?, room }`) emitted when a native room starts, reconnects, stops, or fails
 
 ### Inbound frame categories (stdin)
 
@@ -94,6 +95,17 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+
+### Collaboration
+
+- `{ id?, type: "collab_start", relayUrl?: string, webUrl?: string, displayName?: string }`
+- `{ id?, type: "collab_status" }`
+- `{ id?, type: "collab_stop" }`
+
+`collab_start` creates at most one native room per RPC process and returns that
+room unchanged on repeated calls. `relayUrl` and `webUrl` override the
+`collab.relayUrl` and `collab.webUrl` settings for the first start. Closing
+stdin or shutting down the RPC process closes the room.
 
 ### Model
 
@@ -162,6 +174,34 @@ All command results use `RpcResponse`:
 - Failure: `{ id?, type: "response", command: string, success: false, error: string }`
 
 Data payloads are command-specific and defined in `rpc-types.ts`.
+
+### Collaboration payloads and lifecycle
+
+All three collaboration commands return `RpcCollabRoomState`:
+
+```json
+{
+  "active": true,
+  "joinUrl": "relay.example/r/room.key-and-write-token",
+  "viewUrl": "relay.example/r/room.key",
+  "webUrl": "https://collab.example/#relay.example/r/room.key-and-write-token",
+  "webViewUrl": "https://collab.example/#relay.example/r/room.key",
+  "participants": [{ "name": "host", "role": "host" }]
+}
+```
+
+`joinUrl` grants writable native OMP access; `viewUrl` grants read-only access.
+The web URLs use `collab.webUrl` when configured and otherwise derive an
+HTTP(S) origin from the relay. Room lifecycle changes are unsolicited frames:
+
+```json
+{
+  "type": "collab_state",
+  "state": "started|reconnecting|stopped|failed",
+  "reason": "optional detail",
+  "room": { "active": false, "participants": [] }
+}
+```
 
 ### `prompt` payload
 

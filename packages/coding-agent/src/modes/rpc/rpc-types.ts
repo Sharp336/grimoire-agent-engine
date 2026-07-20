@@ -7,6 +7,7 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { CollabParticipant } from "../../collab/protocol";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -42,6 +43,9 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "collab_start"; relayUrl?: string; webUrl?: string; displayName?: string }
+	| { id?: string; type: "collab_status" }
+	| { id?: string; type: "collab_stop" }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -162,6 +166,22 @@ export interface RpcSubagentMessagesResult {
 	messages: AgentMessage[];
 }
 
+export interface RpcCollabRoomState {
+	active: boolean;
+	joinUrl?: string;
+	viewUrl?: string;
+	webUrl?: string;
+	webViewUrl?: string;
+	participants: CollabParticipant[];
+}
+
+export interface RpcCollabLifecycleFrame {
+	type: "collab_state";
+	state: "started" | "reconnecting" | "stopped" | "failed";
+	reason?: string;
+	room: RpcCollabRoomState;
+}
+
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
@@ -209,6 +229,9 @@ export type RpcResponse =
 			success: true;
 			data: RpcSubagentMessagesResult;
 	  }
+	| { id?: string; type: "response"; command: "collab_start"; success: true; data: RpcCollabRoomState }
+	| { id?: string; type: "response"; command: "collab_status"; success: true; data: RpcCollabRoomState }
+	| { id?: string; type: "response"; command: "collab_stop"; success: true; data: RpcCollabRoomState }
 
 	// Model
 	| {
@@ -319,7 +342,7 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcCollabLifecycleFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

@@ -5,6 +5,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
+import { collabDisplayName } from "../collab/display-name";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
@@ -762,7 +763,27 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
 			const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
 			const webUrl = ctx.settings.get("collab.webUrl") || "";
-			const host = new CollabHost(ctx);
+			const host = new CollabHost({
+				session: ctx.session,
+				sessionManager: ctx.sessionManager,
+				eventBus: ctx.eventBus,
+				displayName: collabDisplayName(ctx),
+				onPendingMessagesChanged: () => {
+					ctx.updatePendingMessagesDisplay();
+					ctx.ui.requestRender();
+				},
+				onParticipantsChanged: participantCount => {
+					ctx.statusLine.setCollabStatus(participantCount > 0 ? { role: "host", participantCount } : null);
+					ctx.statusLine.invalidate();
+					ctx.ui.requestRender();
+				},
+				onRelayReconnecting: reason => {
+					ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
+				},
+				onStopped: () => {
+					if (ctx.collabHost === host) ctx.collabHost = undefined;
+				},
+			});
 			try {
 				await host.start(relayUrl, webUrl);
 			} catch (err) {

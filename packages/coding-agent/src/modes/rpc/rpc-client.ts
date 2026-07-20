@@ -15,6 +15,8 @@ import type { AgentSessionEvent, SessionStats } from "../../session/agent-sessio
 import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
+	RpcCollabLifecycleFrame,
+	RpcCollabRoomState,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -67,6 +69,7 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcCollabStateListener = (frame: RpcCollabLifecycleFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -170,6 +173,18 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcCollabLifecycleFrame(value: unknown): value is RpcCollabLifecycleFrame {
+	if (!isRecord(value) || value.type !== "collab_state" || !isRecord(value.room)) return false;
+	return (
+		(value.state === "started" ||
+			value.state === "reconnecting" ||
+			value.state === "stopped" ||
+			value.state === "failed") &&
+		typeof value.room.active === "boolean" &&
+		Array.isArray(value.room.participants)
+	);
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -212,6 +227,7 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#collabStateListeners = new Set<RpcCollabStateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -429,6 +445,12 @@ export class RpcClient {
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
 	}
 
+	/** Subscribe to native collaboration room lifecycle changes. */
+	onCollabState(listener: RpcCollabStateListener): () => void {
+		this.#collabStateListeners.add(listener);
+		return () => this.#collabStateListeners.delete(listener);
+	}
+
 	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
@@ -498,6 +520,26 @@ export class RpcClient {
 	 */
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
+		return this.#getData(response);
+	}
+
+	/** Start the native collaboration room, or return the existing room unchanged. */
+	async startCollab(
+		options: { relayUrl?: string; webUrl?: string; displayName?: string } = {},
+	): Promise<RpcCollabRoomState> {
+		const response = await this.#send({ type: "collab_start", ...options });
+		return this.#getData(response);
+	}
+
+	/** Return the native collaboration room owned by this RPC process. */
+	async getCollabStatus(): Promise<RpcCollabRoomState> {
+		const response = await this.#send({ type: "collab_status" });
+		return this.#getData(response);
+	}
+
+	/** Stop the native collaboration room without stopping the RPC process. */
+	async stopCollab(): Promise<RpcCollabRoomState> {
+		const response = await this.#send({ type: "collab_stop" });
 		return this.#getData(response);
 	}
 
@@ -911,6 +953,13 @@ export class RpcClient {
 		if (isRpcSubagentEventFrame(data)) {
 			for (const listener of this.#subagentEventListeners) {
 				listener(data.payload);
+			}
+			return;
+		}
+
+		if (isRpcCollabLifecycleFrame(data)) {
+			for (const listener of this.#collabStateListeners) {
+				listener(data);
 			}
 			return;
 		}

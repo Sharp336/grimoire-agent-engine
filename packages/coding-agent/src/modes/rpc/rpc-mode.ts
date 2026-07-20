@@ -14,6 +14,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
+import { collabDisplayName } from "../../collab/display-name";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
@@ -34,6 +35,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcCollabHostController } from "./rpc-collab";
 import { claimRpcInput } from "./rpc-input";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -644,6 +646,15 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const collabController = new RpcCollabHostController({
+		session,
+		sessionManager: session.sessionManager,
+		eventBus,
+		defaultRelayUrl: session.settings.get("collab.relayUrl"),
+		defaultWebUrl: session.settings.get("collab.webUrl"),
+		displayName: collabDisplayName(session),
+		output,
+	});
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -1052,6 +1063,20 @@ export async function runRpcMode(
 				return success(id, "get_state", state);
 			}
 
+			case "collab_start": {
+				const room = await collabController.start(command);
+				return success(id, "collab_start", room);
+			}
+
+			case "collab_status": {
+				return success(id, "collab_status", collabController.status());
+			}
+
+			case "collab_stop": {
+				const room = await collabController.stop("RPC client requested stop");
+				return success(id, "collab_stop", room);
+			}
+
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}
@@ -1358,6 +1383,7 @@ export async function runRpcMode(
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
+			await collabController.shutdown();
 			await session.dispose();
 			process.exit(0);
 		},
@@ -1412,6 +1438,7 @@ export async function runRpcMode(
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
 	// prior pi.shutdown() through the coordinator makes this await settle
 	// immediately.
+	await collabController.shutdown();
 	await session.dispose();
 	process.exit(0);
 }

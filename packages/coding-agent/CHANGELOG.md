@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added native collaboration room controls to RPC mode, including typed start/status/stop commands, join and view capability URLs, client helpers, lifecycle frames, and room teardown on RPC shutdown.
+
 
 ## [17.0.5] - 2026-07-18
 

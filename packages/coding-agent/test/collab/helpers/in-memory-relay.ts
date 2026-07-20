@@ -64,6 +64,14 @@ export class FakeWebSocket {
 		queueMicrotask(() => this.onclose?.({ code: 1000, reason: "closed" }));
 	}
 
+	/** Simulate a relay-side fatal close. */
+	fail(code: number, reason: string): void {
+		if (this.readyState === FakeWebSocket.CLOSED) return;
+		this.readyState = FakeWebSocket.CLOSED;
+		this.#relay.disconnect(this);
+		queueMicrotask(() => this.onclose?.({ code, reason }));
+	}
+
 	/** Relay → this socket: a binary frame, delivered as ArrayBuffer (binaryType "arraybuffer"). */
 	deliver(bytes: Uint8Array): void {
 		if (this.readyState !== FakeWebSocket.OPEN) return;
@@ -83,10 +91,12 @@ export class InMemoryRelay {
 	#host: FakeWebSocket | null = null;
 	readonly #guests = new Map<number, FakeWebSocket>();
 	#nextPeerId = 1;
+	#failHostOnConnect: { code: number; reason: string } | undefined;
 
 	connect(ws: FakeWebSocket): void {
 		if (ws.role === "host") {
 			this.#host = ws;
+			if (this.#failHostOnConnect) ws.fail(this.#failHostOnConnect.code, this.#failHostOnConnect.reason);
 			return;
 		}
 		ws.peerId = this.#nextPeerId++;
@@ -116,6 +126,14 @@ export class InMemoryRelay {
 		}
 		this.#guests.delete(ws.peerId);
 		this.#host?.deliverControl(JSON.stringify({ t: "peer-left", peer: ws.peerId }));
+	}
+
+	failNextHostOnConnect(code: number, reason: string): void {
+		this.#failHostOnConnect = { code, reason };
+	}
+
+	failHost(code: number, reason: string): void {
+		this.#host?.fail(code, reason);
 	}
 }
 
