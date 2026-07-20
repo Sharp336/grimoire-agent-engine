@@ -81,6 +81,66 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
+	it("removes both the failed assistant turn and the trailing synthetic toolResult, then continues", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ["doing something"],
+					stopReason: "error",
+				},
+				{
+					content: ["recovered after retry"],
+					stopReason: "stop",
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("go");
+		await session.waitForIdle();
+
+		// Manually append a toolResult to simulate the mid-tool-call stall recovery
+		session.agent.replaceMessages([
+			...session.agent.state.messages,
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "test-tool",
+				content: [{ type: "text", text: "stalled" }],
+				isError: true,
+				timestamp: Date.now(),
+			},
+		]);
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after retry" });
+	});
+
 	it("returns false when the trailing assistant turn succeeded", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

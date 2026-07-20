@@ -15635,14 +15635,24 @@ export class AgentSession {
 		if (this.isStreaming || this.isCompacting || this.isRetrying) return false;
 
 		const messages = this.agent.state.messages;
-		const lastMsg = messages[messages.length - 1];
+		let lastMsg = messages[messages.length - 1];
+		let sliceCount = 1;
+
+		if (lastMsg?.role === "toolResult") {
+			const penultimateMsg = messages[messages.length - 2];
+			if (penultimateMsg?.role === "assistant") {
+				lastMsg = penultimateMsg;
+				sliceCount = 2;
+			}
+		}
+
 		if (lastMsg?.role !== "assistant") return false;
 
 		const assistantMsg = lastMsg as AssistantMessage;
 		if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") return false;
 
-		// Remove the failed/aborted assistant message (same as auto-retry does before re-attempting)
-		this.agent.replaceMessages(messages.slice(0, -1));
+		// Remove the failed/aborted assistant message (and any shadowing toolResult)
+		this.agent.replaceMessages(messages.slice(0, -sliceCount));
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
