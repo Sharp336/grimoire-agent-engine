@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
+import { wrapTmuxPassthroughIfNeeded } from "./tmux";
 import {
 	isInsideTerminalMultiplexer,
 	NotifyProtocol,
@@ -1075,7 +1076,7 @@ export class ProcessTerminal implements Terminal {
 		this.#osc11Pending = true;
 		this.#osc11ResponseBuffer = "";
 		this.#da1SentinelOwners.push({ kind: "osc11" });
-		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
+		this.#safeWrite(wrapTmuxPassthroughIfNeeded("\x1b]11;?\x07")); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 	}
 

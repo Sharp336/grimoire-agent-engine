@@ -514,6 +514,18 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const pops = writes.filter(w => w === "\x1b[<u").length;
 		expect(pops).toBe(1);
 	});
+
+	it("wraps the OSC 11 query in a tmux passthrough sequence when TMUX is set", () => {
+		Bun.env.TMUX = "1";
+		try {
+			const { terminal, writes } = setupTerminal();
+			const wrapped = writes.find(w => w.includes("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\"));
+			expect(wrapped).toBeDefined();
+			terminal.stop();
+		} finally {
+			delete Bun.env.TMUX;
+		}
+	});
 });
 
 describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
