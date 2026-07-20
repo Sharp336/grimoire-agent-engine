@@ -2133,4 +2133,41 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("litellm-test", "team-gpt")?.contextWindow).toBe(200_000);
 		expect(registry.find("litellm-test", "deployment-id")).toBeUndefined();
 	});
+
+	test("preserves provider-level compat overrides after dynamic model discovery refresh", async () => {
+		const modelsJson: Record<string, unknown> = {
+			providers: {
+				"openai-compat": {
+					api: "openai-completions",
+					auth: "none",
+					baseUrl: "http://127.0.0.1:4005/v1",
+					discovery: { type: "openai-models-list" },
+					compat: {
+						thinkingFormat: "qwen",
+					},
+				},
+			},
+		};
+		fs.writeFileSync(modelsJsonPath, JSON.stringify(modelsJson));
+
+		const fetchMock: FetchImpl = async (url: string | URL | Request) => {
+			const target = typeof url === "string" ? url : url.toString();
+			if (target === "http://127.0.0.1:4005/v1/models") {
+				return Response.json({
+					object: "list",
+					data: [
+						{ id: "qwen3-coder", object: "model" }
+					]
+				});
+			}
+			throw new Error(`Unexpected URL: ${target}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const model = registry.find("openai-compat", "qwen3-coder");
+		expect(model).toBeDefined();
+		expect(model?.compat?.thinkingFormat).toBe("qwen");
+	});
 });
