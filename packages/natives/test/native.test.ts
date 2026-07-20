@@ -800,6 +800,11 @@ describe("pi-natives", () => {
 			expect(cleaned).toContain("Main content");
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
+
+		it("should reject deeply nested HTML to prevent stack overflow", async () => {
+			const nested = "<div>".repeat(300) + "hello" + "</div>".repeat(300);
+			await expect(htmlToMarkdown(nested)).rejects.toThrow("HTML nesting depth exceeds maximum limit of 256");
+		});
 	});
 
 	describe("MacOSPowerAssertion", () => {

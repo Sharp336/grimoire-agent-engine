@@ -43,7 +43,50 @@ export const glob = nativeBindings.glob;
 export const grep = nativeBindings.grep;
 export const hasMatch = nativeBindings.hasMatch;
 export const highlightCode = nativeBindings.highlightCode;
-export const htmlToMarkdown = nativeBindings.htmlToMarkdown;
+function checkHtmlNestingDepth(html, maxDepth = 256) {
+  if (typeof html !== "string") return;
+  const cleanHtml = html.replace(/<!--[\s\S]*?-->/g, "");
+  const tagNamePattern = /<\s*(\/?)\s*([a-zA-Z0-9:-]+)/g;
+  const voidElements = new Set([
+    "br", "img", "input", "meta", "link", "hr", "col", "embed", "param", "source", "track", "wbr", "area", "base"
+  ]);
+
+  let depth = 0;
+  let match;
+
+  while ((match = tagNamePattern.exec(cleanHtml)) !== null) {
+    const isClose = match[1] === "/";
+    const tagName = match[2].toLowerCase();
+
+    if (isClose) {
+      if (depth > 0) {
+        depth--;
+      }
+    } else {
+      if (!voidElements.has(tagName)) {
+        const tagEndIndex = cleanHtml.indexOf(">", match.index);
+        const isSelfClosing = tagEndIndex !== -1 && cleanHtml.substring(match.index, tagEndIndex).trim().endsWith("/");
+
+        if (!isSelfClosing) {
+          depth++;
+          if (depth > maxDepth) {
+            throw new Error(`HTML nesting depth exceeds maximum limit of ${maxDepth}`);
+          }
+        }
+      }
+    }
+  }
+}
+
+const rawHtmlToMarkdown = nativeBindings.htmlToMarkdown;
+export const htmlToMarkdown = function (html, options) {
+  try {
+    checkHtmlNestingDepth(html, 256);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return rawHtmlToMarkdown(html, options);
+}
 export const invalidateFsScanCache = nativeBindings.invalidateFsScanCache;
 export const isoBackend = nativeBindings.isoBackend;
 export const isoDiff = nativeBindings.isoDiff;
