@@ -3321,7 +3321,7 @@ export class AuthStorage {
 
 			const runtimeKey = this.#runtimeOverrides.get(providerId);
 			const envKey = getEnvApiKey(providerId);
-			const apiKey = runtimeKey ?? envKey;
+			const apiKey = runtimeKey ?? this.#configOverrides.get(providerId) ?? envKey;
 			if (!apiKey) continue;
 			const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 			if (providerImpl.supports && !providerImpl.supports(request)) continue;

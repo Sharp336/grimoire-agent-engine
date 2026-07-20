@@ -203,6 +203,45 @@ describe("devinUsageProvider", () => {
 		}
 	});
 
+	it("uses the configured Devin API key when no supported stored credential exists", async () => {
+		delete Bun.env.DEVIN_API_KEY;
+		delete Bun.env.DEVIN_ORG_ID;
+		delete Bun.env.DEVIN_USAGE_ORG_ID;
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authorization: Array<string | null> = [];
+		const storage = new AuthStorage(store, {
+			usageFetch: (async (input, init) => {
+				authorization.push(new Headers(init?.headers).get("authorization"));
+				const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+				const payload = path.endsWith("/v3/self")
+					? { principal_type: "service_user", service_user_id: "service-config", org_id: null }
+					: path.includes("consumption")
+						? { total_acus: 3, consumption_by_date: [] }
+						: { sessions_count: 1 };
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch,
+		});
+
+		try {
+			storage.setConfigApiKey("devin", "cog_config-usage");
+
+			const reports = await storage.fetchUsageReports();
+
+			expect(authorization).toEqual([
+				"Bearer cog_config-usage",
+				"Bearer cog_config-usage",
+				"Bearer cog_config-usage",
+			]);
+			expect(reports?.map(report => report.provider)).toEqual(["devin"]);
+			expect(reports?.[0]?.limits[0]?.amount).toEqual({ used: 3, unit: "acus" });
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("resolves stored API-key config references before fetching usage", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const authorization: Array<string | null> = [];
