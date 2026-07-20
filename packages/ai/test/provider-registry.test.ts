@@ -15,6 +15,7 @@ import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 const FIXTURE_SOURCE = "provider-registry-test";
 const ENV_KEYS = [
 	"COREWEAVE_API_KEY",
+	"ATLASCLOUD_API_KEY",
 	"ZENMUX_API_KEY",
 	"EXA_API_KEY",
 	"XAI_OAUTH_TOKEN",
@@ -43,6 +44,8 @@ describe("provider registry auth surface", () => {
 		Bun.env.EXA_API_KEY = "exa-env";
 		// Plain name derived from the catalog table's `envVars`.
 		expect(getEnvApiKey("zenmux")).toBe("zenmux-env");
+		Bun.env.ATLASCLOUD_API_KEY = "atlascloud-env";
+		expect(getEnvApiKey("atlascloud")).toBe("atlascloud-env");
 		Bun.env.UMANS_AI_CODING_PLAN_API_KEY = "umans-env";
 		expect(getEnvApiKey("umans")).toBe("umans-env");
 		Bun.env.LLAMA_CPP_API_KEY = "llama-env";

@@ -12,6 +12,7 @@ import {
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	anthropicModelManagerOptions,
+	atlascloudModelManagerOptions,
 	basetenModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
@@ -98,6 +99,14 @@ export const CATALOG_PROVIDERS = [
 		id: "azure",
 		defaultModel: "gpt-5.5",
 		envVars: ["AZURE_OPENAI_API_KEY"],
+	},
+	{
+		id: "atlascloud",
+		defaultModel: "qwen/qwen3.5-flash",
+		envVars: ["ATLASCLOUD_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => atlascloudModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Atlas Cloud" },
 	},
 	{
 		id: "cerebras",

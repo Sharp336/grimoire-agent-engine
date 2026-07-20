@@ -551,6 +551,16 @@ export function createSimpleOpenAICompletionsOptions(
 	};
 }
 
+export function atlascloudModelManagerOptions(
+	config?: SimpleProviderConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions(
+		"atlascloud" as Parameters<typeof getBundledModels>[0],
+		"https://api.atlascloud.ai/v1",
+		config,
+	);
+}
+
 function createSimpleOpenAIResponsesOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
 	defaultBaseUrl: string,

@@ -3,6 +3,7 @@ import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
+import { atlascloudProvider } from "./atlascloud";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { cerebrasProvider } from "./cerebras";
@@ -93,6 +94,7 @@ const ALL = [
 	gitLabDuoWorkflowProvider,
 	alibabaCodingPlanProvider,
 	aimlApiProvider,
+	atlascloudProvider,
 	zhipuCodingPlanProvider,
 	umansProvider,
 	qwenPortalProvider,
