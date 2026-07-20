@@ -81,10 +81,21 @@ export function repairDoubleEncodedJsonString(value: string): string {
 
 /** Repair a single (possibly partial) task item's prose field (`task`). */
 function repairTaskItem(item: TaskItem): TaskItem {
-	if (item === null || typeof item !== "object") return item;
-	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
-	if (task === item.task) return item;
-	return { ...item, task };
+	let resolvedItem = item;
+	if (typeof resolvedItem === "string") {
+		try {
+			const unescaped = repairDoubleEncodedJsonString(resolvedItem);
+			const parsed = JSON.parse(unescaped) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				resolvedItem = parsed as TaskItem;
+			}
+		} catch {}
+	}
+
+	if (resolvedItem === null || typeof resolvedItem !== "object") return resolvedItem;
+	const task = typeof resolvedItem.task === "string" ? repairDoubleEncodedJsonString(resolvedItem.task) : resolvedItem.task;
+	if (task === resolvedItem.task && resolvedItem === item) return resolvedItem;
+	return { ...resolvedItem, task };
 }
 
 /**
@@ -101,14 +112,28 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 	const context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
 
 	let tasks = params.tasks;
-	if (Array.isArray(params.tasks)) {
+	let tasksChanged = false;
+	if (typeof tasks === "string") {
+		try {
+			const unescaped = repairDoubleEncodedJsonString(tasks);
+			const parsed = JSON.parse(unescaped) as unknown;
+			if (Array.isArray(parsed)) {
+				tasks = parsed as TaskItem[];
+				tasksChanged = true;
+			}
+		} catch {}
+	}
+
+	if (Array.isArray(tasks)) {
 		let changed = false;
-		const repaired = params.tasks.map(item => {
+		const repaired = tasks.map(item => {
 			const next = repairTaskItem(item);
 			if (next !== item) changed = true;
 			return next;
 		});
-		if (changed) tasks = repaired;
+		if (changed || tasksChanged) {
+			tasks = repaired;
+		}
 	}
 
 	if (task === params.task && context === params.context && tasks === params.tasks) {
