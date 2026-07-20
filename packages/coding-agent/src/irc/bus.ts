@@ -20,6 +20,53 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
+function findDeadlockCycle(
+	startId: string,
+	targetId: string | undefined,
+	waiters: Map<string, IrcWaiter[]>,
+	activeAgentIds: Set<string>
+): string[] | null {
+	const visited = new Set<string>();
+	const path: string[] = [startId];
+
+	function dfs(current: string): boolean {
+		if (current === startId && visited.size > 0) {
+			return true;
+		}
+		if (visited.has(current)) {
+			return false;
+		}
+		visited.add(current);
+
+		const currentWaiters = waiters.get(current);
+		if (!currentWaiters || currentWaiters.length === 0) {
+			return false;
+		}
+
+		for (const w of currentWaiters) {
+			const deps = w.from ? [w.from] : Array.from(activeAgentIds).filter(id => id !== current);
+			for (const dep of deps) {
+				path.push(dep);
+				if (dfs(dep)) {
+					return true;
+				}
+				path.pop();
+			}
+		}
+		return false;
+	}
+
+	const initialDeps = targetId ? [targetId] : Array.from(activeAgentIds).filter(id => id !== startId);
+	for (const dep of initialDeps) {
+		path.push(dep);
+		if (dfs(dep)) {
+			return path;
+		}
+		path.pop();
+	}
+	return null;
+}
+
 export interface IrcMessage {
 	id: string;
 	/** Sender agent id. */
@@ -215,6 +262,21 @@ export class IrcBus {
 			// Already-pending mail satisfies the wait without parking a waiter.
 			const pending = this.#takeFromMailbox(agentId, filter.from);
 			if (pending) return pending;
+		}
+
+		// Check for deadlock
+		const activeAgents = this.#registry.list().filter(
+			r => r.kind !== "advisor" && (r.status === "running" || r.status === "idle")
+		);
+		const activeAgentIds = new Set(activeAgents.map(r => r.id));
+		const currentWaiters = new Map(this.#waiters);
+		const tempWaiter: IrcWaiter = { from: filter.from, resolve: () => {}, cancel: () => {} };
+		const existingWaiters = currentWaiters.get(agentId) ?? [];
+		currentWaiters.set(agentId, [...existingWaiters, tempWaiter]);
+
+		const cycle = findDeadlockCycle(agentId, filter.from, currentWaiters, activeAgentIds);
+		if (cycle) {
+			throw new Error(`Agent swarm deadlock detected: circular wait (${cycle.join(" -> ")})`);
 		}
 
 		const { promise, resolve, reject } = Promise.withResolvers<IrcMessage | null>();
