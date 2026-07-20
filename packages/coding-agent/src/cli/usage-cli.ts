@@ -732,10 +732,19 @@ export function formatUsageHistory(
 				const latestEntry = series.entries[series.entries.length - 1];
 				const latestFraction = fractions.length > 0 ? fractions[fractions.length - 1] : undefined;
 				const peakFraction = fractions.length > 0 ? Math.max(...fractions) : undefined;
+				const absoluteValues = series.entries
+					.map(entry => entry.used)
+					.filter((used): used is number => used !== undefined);
+				const latestAbsolute = latestEntry?.used;
+				const peakAbsolute = absoluteValues.length > 0 ? Math.max(...absoluteValues) : undefined;
 				const status = historyStatus(latestFraction, latestEntry?.status);
 				const details: string[] = [];
 				if (latestFraction !== undefined) details.push(`latest ${(latestFraction * 100).toFixed(1)}%`);
 				if (peakFraction !== undefined) details.push(`peak ${(peakFraction * 100).toFixed(1)}%`);
+				if (latestFraction === undefined && latestAbsolute !== undefined) {
+					details.push(`latest ${latestAbsolute} ${latestEntry?.unit ?? "units"}`);
+					if (peakAbsolute !== undefined) details.push(`peak ${peakAbsolute} ${latestEntry?.unit ?? "units"}`);
+				}
 				details.push(`${series.entries.length} snapshot${series.entries.length === 1 ? "" : "s"}`);
 				lines.push(
 					`      ${STATUS_COLOR[status]("●")} ${series.title.padEnd(labelWidth)}  ${renderHistorySparkline(series.entries, sinceMs, nowMs)}  ${chalk.dim(details.join(" · "))}`,

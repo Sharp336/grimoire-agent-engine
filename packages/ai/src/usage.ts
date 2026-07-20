@@ -155,6 +155,10 @@ export interface UsageHistoryEntry {
 	windowLabel?: string;
 	/** Used fraction (0..1) when resolvable. */
 	usedFraction?: number;
+	/** Absolute used amount for units without a meaningful limit (e.g. ACUs). */
+	used?: number;
+	/** Unit for the recorded amount. */
+	unit?: UsageUnit;
 	status?: UsageStatus;
 	/** Epoch ms the window resets, when known. */
 	resetsAt?: number;

@@ -3049,7 +3049,6 @@ export class AuthStorage {
 				// fan-out trips 429s every cycle. With ±25% jitter on TTL the refresh
 				// times decorrelate within a few cycles.
 				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
-				this.#recordUsageHistory(request, report);
 				this.#reconcileCodexUsageBlock(request, report);
 				return report;
 			}
@@ -3096,6 +3095,8 @@ export class AuthStorage {
 			label: limit.label,
 			windowLabel: limit.window?.label ?? limit.scope.windowId,
 			usedFraction: resolveUsedFraction(limit),
+			used: limit.amount.used,
+			unit: limit.amount.unit,
 			status: limit.status,
 			resetsAt: limit.window?.resetsAt,
 		}));
@@ -3823,9 +3824,12 @@ export class AuthStorage {
 			const results = await Promise.all(
 				requests.map(request => this.#fetchUsageCached(request, this.#usageRequestTimeoutMs)),
 			);
-			const reports = results.filter((report): report is UsageReport => report !== null);
-			const deduped = this.#dedupeUsageReports(reports);
-			// no outer cache write — see comment above.
+			const reportPairs = results.flatMap((report, index) => (report ? [{ report, request: requests[index] }] : []));
+			const deduped = this.#dedupeUsageReports(reportPairs.map(pair => pair.report));
+			for (const report of deduped) {
+				const pair = reportPairs.find(candidate => candidate.report === report);
+				if (pair) this.#recordUsageHistory(pair.request, report);
+			}
 			const resolved = deduped;
 			this.#usageLogger?.debug("Usage fetch resolved", {
 				reports: resolved.map(report => {
@@ -6499,16 +6503,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
 		this.#insertUsageHistoryStmt = this.#db.prepare(
-			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, used_value, unit, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
 		this.#lastUsageHistoryStmt = this.#db.prepare(
 			"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
 		);
 		this.#updateUsageHistoryStmt = this.#db.prepare(
-			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
+			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, used_value = ?, unit = ?, status = ?, resets_at = ? WHERE id = ?",
 		);
 		this.#listUsageHistoryStmt = this.#db.prepare(
-			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
+			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, used_value, unit, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
 		this.#insertUsageCostStmt = this.#db.prepare(
 			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd) VALUES (?, ?, ?, ?)",
@@ -6605,6 +6609,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label TEXT NOT NULL,
 				window_label TEXT,
 				used_fraction REAL,
+				used_value REAL,
+				unit TEXT,
 				status TEXT,
 				resets_at INTEGER
 			);
@@ -6619,6 +6625,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
 		`);
+		try {
+			this.#db.run("ALTER TABLE usage_history ADD COLUMN used_value REAL");
+		} catch {}
+		try {
+			this.#db.run("ALTER TABLE usage_history ADD COLUMN unit TEXT");
+		} catch {}
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -7301,6 +7313,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						entry.label,
 						entry.windowLabel ?? null,
 						entry.usedFraction ?? null,
+						entry.used ?? null,
+						entry.unit ?? null,
 						entry.status ?? null,
 						entry.resetsAt ?? null,
 						last.id,
@@ -7317,6 +7331,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					entry.label,
 					entry.windowLabel ?? null,
 					entry.usedFraction ?? null,
+					entry.used ?? null,
+					entry.unit ?? null,
 					entry.status ?? null,
 					entry.resetsAt ?? null,
 				);
@@ -7339,6 +7355,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label: string;
 				window_label: string | null;
 				used_fraction: number | null;
+				used_value: number | null;
+				unit: string | null;
 				status: string | null;
 				resets_at: number | null;
 			}>;
@@ -7352,6 +7370,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				label: row.label,
 				windowLabel: row.window_label ?? undefined,
 				usedFraction: row.used_fraction ?? undefined,
+				used: row.used_value ?? undefined,
+				unit: (row.unit ?? undefined) as UsageHistoryEntry["unit"],
 				status: (row.status ?? undefined) as UsageHistoryEntry["status"],
 				resetsAt: row.resets_at ?? undefined,
 			}));
