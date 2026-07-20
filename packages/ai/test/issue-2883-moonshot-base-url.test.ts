@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { loginMoonshot } from "@oh-my-pi/pi-ai/registry/moonshot";
+import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
 const ORIGINAL_MOONSHOT_BASE_URL = Bun.env.MOONSHOT_BASE_URL;
@@ -68,5 +69,29 @@ describe("Moonshot China base URL override (issue #2883)", () => {
 			{ apiKey: "sk-openai", messages: [] },
 		);
 		expect(setup.baseUrl).toBe("https://api.openai.com/v1");
+	});
+
+	test("automatically falls back to api.moonshot.cn when api.moonshot.ai returns 401", async () => {
+		delete Bun.env.MOONSHOT_BASE_URL;
+		let callCount = 0;
+		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input.toString();
+			callCount++;
+			if (url === "https://api.moonshot.ai/v1/models") {
+				return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+			}
+			if (url === "https://api.moonshot.cn/v1/models") {
+				return new Response(JSON.stringify({ object: "list", data: [] }), { status: 200 });
+			}
+			return new Response("Not found", { status: 404 });
+		});
+
+		const key = await loginMoonshot({
+			onPrompt: async () => "sk-china-key",
+			fetch: fetchMock,
+		} as unknown as OAuthController); // Cast to OAuthController to satisfy rules and type checking
+
+		expect(key).toBe("sk-china-key");
+		expect(callCount).toBe(2);
 	});
 });

@@ -134,7 +134,7 @@ export async function validateApiKeyAgainstModelsEndpoint(options: ModelListVali
 	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 	const fetchImpl = options.fetch ?? fetch;
 
-	const response = await fetchImpl(options.modelsUrl, {
+	let response = await fetchImpl(options.modelsUrl, {
 		method: "GET",
 		headers: {
 			...(resolveValidationHeaders(options.headers) ?? {}),
@@ -142,6 +142,22 @@ export async function validateApiKeyAgainstModelsEndpoint(options: ModelListVali
 		},
 		signal,
 	});
+
+	if (!response.ok && response.status === 401 && options.provider === "moonshot" && options.modelsUrl === "https://api.moonshot.ai/v1/models") {
+		const fallbackUrl = "https://api.moonshot.cn/v1/models";
+		const fallbackResponse = await fetchImpl(fallbackUrl, {
+			method: "GET",
+			headers: {
+				...(resolveValidationHeaders(options.headers) ?? {}),
+				Authorization: `Bearer ${options.apiKey}`,
+			},
+			signal,
+		});
+		if (fallbackResponse.ok) {
+			return;
+		}
+		response = fallbackResponse;
+	}
 
 	if (response.ok) {
 		return;
