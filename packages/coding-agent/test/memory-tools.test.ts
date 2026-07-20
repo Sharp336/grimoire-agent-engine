@@ -8,6 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AppMessage } from "@oh-my-pi/pi-agent-core";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1391,5 +1392,67 @@ describe("reflect.execute (Mnemopi backend)", () => {
 		await expect(tool.execute("call-mnemopi-reflect-no-state", { query: "anything" })).rejects.toThrow(
 			/not initialised/i,
 		);
+	});
+
+	it("forceRetainCurrentSession only retains unretained messages incrementally", async () => {
+		const config = makeMnemopiConfig({
+			scoping: "per-project-tagged",
+			bank: "project-alpha",
+			globalBank: "default",
+			retainBank: "project-alpha",
+			recallBanks: ["project-alpha", "default"],
+		});
+		const state = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const retainMessagesSpy = vi.spyOn(state, "retainMessages");
+
+		// Simulate session manager having 2 user messages
+		state.session.sessionManager.getEntries = () => [
+			{
+				type: "message",
+				message: { role: "user", content: "first user message", timestamp: Date.now() }
+			},
+			{
+				type: "message",
+				message: { role: "assistant", content: [{ type: "text", text: "first reply" }], timestamp: Date.now() }
+			},
+		] as unknown as any[]; // Cast to any[] for test mock database
+
+		// Force retain once
+		await state.forceRetainCurrentSession();
+		expect(retainMessagesSpy).toHaveBeenCalledTimes(1);
+		expect(retainMessagesSpy.mock.calls[0]?.[0]).toHaveLength(2); // both messages
+		expect(state.lastRetainedTurn).toBe(1);
+
+		retainMessagesSpy.mockClear();
+
+		// Add another user turn
+		state.session.sessionManager.getEntries = () => [
+			{
+				type: "message",
+				message: { role: "user", content: "first user message", timestamp: Date.now() }
+			},
+			{
+				type: "message",
+				message: { role: "assistant", content: [{ type: "text", text: "first reply" }], timestamp: Date.now() }
+			},
+			{
+				type: "message",
+				message: { role: "user", content: "second user message", timestamp: Date.now() }
+			},
+			{
+				type: "message",
+				message: { role: "assistant", content: [{ type: "text", text: "second reply" }], timestamp: Date.now() }
+			},
+		] as unknown as any[]; // Cast to any[] for test mock validation
+
+		// Force retain again
+		await state.forceRetainCurrentSession();
+		expect(retainMessagesSpy).toHaveBeenCalledTimes(1);
+		// Should only retain the unretained slice (2nd turn, 2 messages)
+		expect(retainMessagesSpy.mock.calls[0]?.[0]).toHaveLength(2);
+		expect(retainMessagesSpy.mock.calls[0]?.[0]?.[0]?.content).toBe("second user message");
+		expect(state.lastRetainedTurn).toBe(2);
+
+		registeredMnemopiState = undefined;
 	});
 });

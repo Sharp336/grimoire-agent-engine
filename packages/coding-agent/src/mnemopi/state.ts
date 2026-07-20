@@ -457,7 +457,9 @@ export class MnemopiSessionState {
 	async forceRetainCurrentSession(options: { extract?: boolean } = {}): Promise<void> {
 		if (this.aliasOf) return;
 		const flat = extractMessages(this.session.sessionManager);
-		await this.retainMessages(flat, this.sessionId, options);
+		const unretained = sliceUnretainedMessages(flat, this.lastRetainedTurn);
+		if (unretained.length === 0) return;
+		await this.retainMessages(unretained, this.sessionId, options);
 		this.lastRetainedTurn = flat.filter(message => message.role === "user").length;
 	}
 
