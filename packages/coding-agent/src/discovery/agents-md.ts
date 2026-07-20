@@ -44,6 +44,7 @@ async function loadAgentsMd(ctx: LoadContext): Promise<LoadResult<ContextFile>> 
 					depth: calculatedDepth,
 					_source: createSourceMeta(PROVIDER_ID, candidate, "project"),
 				});
+				break;
 			}
 		}
 

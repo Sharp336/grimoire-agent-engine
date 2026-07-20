@@ -222,6 +222,22 @@ describe("SYSTEM.md prompt assembly", () => {
 		expect(discoveredFiles[0]?.path).toBe(path.join(appDir, "AGENTS.md"));
 	});
 
+	it("does not load parent standalone AGENTS.md when nearest standalone AGENTS.md is loaded even when contents differ", async () => {
+		const projectDir = path.join(tempDir, "project-diff");
+		const appDir = path.join(projectDir, "packages", "app");
+
+		fs.mkdirSync(appDir, { recursive: true });
+		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), "Parent different instructions");
+		fs.writeFileSync(path.join(appDir, "AGENTS.md"), "Child different instructions");
+
+		const contextFiles = await loadProjectContextFiles({ cwd: appDir });
+		const discoveredFiles = contextFiles.filter(file => file.path.startsWith(projectDir));
+
+		expect(discoveredFiles).toHaveLength(1);
+		expect(discoveredFiles[0]?.path).toBe(path.join(appDir, "AGENTS.md"));
+		expect(discoveredFiles[0]?.content).toBe("Child different instructions");
+	});
+
 	it("keeps distinct context entries when their contents differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");
