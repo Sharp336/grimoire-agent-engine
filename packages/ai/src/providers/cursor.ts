@@ -406,10 +406,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		};
 
 		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
+			const rawApiKey = options?.apiKey;
+			if (!rawApiKey) {
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
+			// A raw CURSOR_API_KEY (crsr_...) cannot authenticate the agent RPCs
+			// directly — exchange it for a session access token first, exactly
+			// like the official CLI's API-key login path. Session tokens (from
+			// /login or CURSOR_ACCESS_TOKEN) pass through unchanged. The OAuth
+			// module is dynamically imported so the common (already-a-session-
+			// token) path doesn't pull it into the eager registry graph.
+			const apiKey = rawApiKey.startsWith("crsr_")
+				? await (await import("../registry/oauth/cursor")).resolveCursorAccessToken(rawApiKey)
+				: rawApiKey;
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();

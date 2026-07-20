@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added automatic `CURSOR_API_KEY` exchange to Cursor model discovery (`GetUsableModels`): a raw dashboard API key is resolved to a session bearer token before the request, so discovery returns the full usable-models list instead of requiring a pre-exchanged `CURSOR_ACCESS_TOKEN`.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

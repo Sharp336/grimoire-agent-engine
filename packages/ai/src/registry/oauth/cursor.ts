@@ -169,3 +169,54 @@ export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300)
 		return true;
 	}
 }
+
+/**
+ * Cursor dashboard API keys (Settings → API Keys, `crsr_...`) are long-lived
+ * and cannot authenticate the agent RPCs directly — the official Cursor
+ * CLI's `CURSOR_API_KEY` login path exchanges them for a session access
+ * token via `exchange_user_api_key` before ever sending a request. Session
+ * access tokens (from `/login` or `CURSOR_ACCESS_TOKEN`) are JWTs and never
+ * carry this prefix, so it alone disambiguates the two credential shapes.
+ */
+export function isRawCursorApiKey(value: string): boolean {
+	return value.startsWith("crsr_");
+}
+
+interface CachedCursorAccessToken {
+	access: string;
+	expires: number;
+}
+
+const rawApiKeyAccessTokenCache = new Map<string, CachedCursorAccessToken>();
+const pendingRawApiKeyExchanges = new Map<string, Promise<string>>();
+
+/**
+ * Resolves any Cursor credential to a bearer usable against the agent RPCs.
+ * Session access tokens pass through unchanged; a raw `CURSOR_API_KEY` is
+ * exchanged once via {@link refreshCursorToken} and the resulting session
+ * token cached until shortly before its JWT `exp`, so a long streaming
+ * session or repeated calls don't re-exchange on every request.
+ */
+export async function resolveCursorAccessToken(apiKeyOrAccessToken: string): Promise<string> {
+	if (!isRawCursorApiKey(apiKeyOrAccessToken)) {
+		return apiKeyOrAccessToken;
+	}
+	const cached = rawApiKeyAccessTokenCache.get(apiKeyOrAccessToken);
+	if (cached && cached.expires > Date.now()) {
+		return cached.access;
+	}
+	const existing = pendingRawApiKeyExchanges.get(apiKeyOrAccessToken);
+	if (existing) {
+		return existing;
+	}
+	const pending = refreshCursorToken(apiKeyOrAccessToken)
+		.then(credentials => {
+			rawApiKeyAccessTokenCache.set(apiKeyOrAccessToken, { access: credentials.access, expires: credentials.expires });
+			return credentials.access;
+		})
+		.finally(() => {
+			pendingRawApiKeyExchanges.delete(apiKeyOrAccessToken);
+		});
+	pendingRawApiKeyExchanges.set(apiKeyOrAccessToken, pending);
+	return pending;
+}
