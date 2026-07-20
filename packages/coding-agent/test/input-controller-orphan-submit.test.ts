@@ -235,4 +235,32 @@ describe("InputController orphaned submit", () => {
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual([undefined]);
 	});
+
+	it("does not generate a session title when the submitted text starts with a slash", async () => {
+		const { ctx, editor } = createContext();
+		const generateTitleSpy = vi.fn(async () => "New Title");
+		ctx.session.generateTitle = generateTitleSpy;
+
+		// Mock session manager to return an unnamed session so titling triggers
+		const getSessionNameSpy = vi.fn(() => undefined);
+		ctx.sessionManager.getSessionName = getSessionNameSpy;
+
+		// Mock settings to prevent TypeError
+		ctx.settings = { get: vi.fn(() => "online") } as any;
+
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		// Case 1: Submit normal prompt
+		await editor.onSubmit?.("investigate memory leaks");
+		expect(generateTitleSpy).toHaveBeenCalledTimes(1);
+		expect(generateTitleSpy).toHaveBeenCalledWith("investigate memory leaks");
+
+		// Reset spy
+		generateTitleSpy.mockClear();
+
+		// Case 2: Submit a slash command
+		await editor.onSubmit?.("/settings --show-all");
+		expect(generateTitleSpy).not.toHaveBeenCalled();
+	});
 });

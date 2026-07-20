@@ -827,7 +827,7 @@ export class InputController {
 			// skipped deterministically (no model invoked, no download-progress UI)
 			// and the session stays unnamed — the next user message gets a fresh
 			// chance, so titling defers past "hi" instead of latching onto it.
-			if (!this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE && !isLowSignalTitleInput(text)) {
+			if (!this.ctx.sessionManager.getSessionName() && !$env.PI_NO_TITLE && !text.startsWith("/") && !isLowSignalTitleInput(text)) {
 				this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel"));
 				this.ctx.session
 					.generateTitle(text)
