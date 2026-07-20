@@ -7,6 +7,7 @@ import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { listCollabHosts } from "../collab/registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
@@ -36,6 +37,7 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
+import { shortenPath } from "../tools/render-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
 	getChangelogPath,
@@ -690,9 +692,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "collab",
 		description: "Share this session live via a relay",
-		inlineHint: "[start|view|stop|status] [relayUrl]",
+		inlineHint: "[start|view|list|stop|status] [relayUrl]",
 		subcommands: [
 			{ name: "view", description: "Share a read-only link (guests can watch, not prompt)" },
+			{ name: "list", description: "List active local Collab hosts (write URLs; `list view` for view-only)" },
 			{ name: "status", description: "Show link + participants" },
 			{ name: "stop", description: "Stop sharing" },
 		],
@@ -734,6 +737,37 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				} else {
 					ctx.showStatus("Not in a collab session");
 				}
+				return;
+			}
+			if (verb === "list") {
+				// Same registry and access-mode semantics as `omp collab list`:
+				// `list view` returns the same hosts with view-only URLs.
+				const viewList = rest.trim().toLowerCase() === "view";
+				const hosts = await listCollabHosts({ mode: viewList ? "view" : "write" });
+				if (hosts.length === 0) {
+					ctx.showStatus("No active Collab hosts");
+					return;
+				}
+				const bullet = theme.fg("accent", theme.format.bullet);
+				const plural = hosts.length === 1 ? "" : "s";
+				const lines = [
+					theme.fg(
+						"dim",
+						viewList
+							? `${hosts.length} active local Collab host${plural} (view-only URLs)`
+							: `${hosts.length} active local Collab host${plural} — write URLs: anyone with one can prompt and control that host`,
+					),
+				];
+				for (const host of hosts) {
+					const session = host.sessionName ? `${host.sessionName} (${host.sessionId})` : host.sessionId;
+					const guests = host.participants - 1;
+					const detail = `pid ${host.pid}, ${guests} guest${guests === 1 ? "" : "s"}, ${shortenPath(host.cwd)}`;
+					lines.push(
+						` ${bullet} ${session} ${theme.fg("muted", `— ${detail}`)}`,
+						`   ${host.mode}: ${collabWebLinkClickable(host.url)}`,
+					);
+				}
+				ctx.showStatus(lines.join("\n"), { dim: false });
 				return;
 			}
 			if (ctx.collabGuest) {
