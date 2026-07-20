@@ -710,7 +710,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	const date = formatLocalCalendarDate();
 	const dateTime = date;
-	const promptCwd = shortenPath(normalizePromptPath(resolvedCwd));
+	const promptCwd = normalizePromptPath(resolvedCwd);
 	const activeRepoContextPrompt = renderActiveRepoContextPrompt(activeRepoContext);
 
 	// Build tool metadata for system prompt rendering.
