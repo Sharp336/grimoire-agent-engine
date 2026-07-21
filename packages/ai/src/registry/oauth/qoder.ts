@@ -108,6 +108,7 @@ export async function refreshQoderToken(refresh: string, fetchOverride?: FetchIm
 			"User-Agent": `qoder/${CLI_VERSION}`,
 		},
 		body: JSON.stringify({ refresh_token: refresh }),
+		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
 	});
 	if (!response.ok) {
 		throw new AIError.OAuthError(`Qoder token refresh failed (${response.status})`, {
