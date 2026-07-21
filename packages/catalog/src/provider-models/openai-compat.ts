@@ -1367,6 +1367,56 @@ export function xaiOAuthModelManagerOptions(
 	};
 }
 
+export interface QoderModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const QODER_DEFAULT_MODEL_BASE_URL = "https://api2-v2.qoder.sh/model/v1";
+
+interface QoderCuratedModel {
+	id: string;
+	name?: string;
+	contextWindow: number;
+	reasoning?: boolean;
+	input?: ("text" | "image")[];
+}
+
+// Qoder's model list is behind a signed endpoint, so this offline seed is the
+// source of truth for the picker. `auto` is Qoder's server-side router.
+export const QODER_CURATED_MODELS: readonly QoderCuratedModel[] = [
+	{ id: "auto", name: "Qoder (Auto)", contextWindow: 262_144, reasoning: false, input: ["text"] },
+];
+
+export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
+	const resolvedBaseUrl = baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
+	return QODER_CURATED_MODELS.map(model => ({
+		id: model.id,
+		name: model.name ?? model.id,
+		api: "openai-completions",
+		provider: "qoder",
+		baseUrl: resolvedBaseUrl,
+		reasoning: model.reasoning ?? false,
+		input: model.input ?? ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: model.contextWindow,
+		maxTokens: Math.min(model.contextWindow, 64_000),
+	}));
+}
+
+export function qoderModelManagerOptions(config?: QoderModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const resolvedBaseUrl = config?.baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
+	// Qoder has no unauthenticated OpenAI `/models` endpoint. Deliberately omit
+	// apiKey here so createSimpleOpenAICompletionsOptions cannot add discovery.
+	const base = createSimpleOpenAICompletionsOptions(
+		"qoder" as Parameters<typeof getBundledModels>[0],
+		QODER_DEFAULT_MODEL_BASE_URL,
+		{ baseUrl: resolvedBaseUrl, fetch: config?.fetch },
+	);
+	return { ...base, staticModels: buildQoderStaticSeed(resolvedBaseUrl) };
+}
+
 // ---------------------------------------------------------------------------
 // 6.4 AIML API
 // ---------------------------------------------------------------------------

@@ -76775,6 +76775,27 @@
 			}
 		}
 	},
+	"qoder": {
+		"auto": {
+			"id": "auto",
+			"name": "Qoder (Auto)",
+			"api": "openai-completions",
+			"provider": "qoder",
+			"baseUrl": "https://api2-v2.qoder.sh/model/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 64000
+		}
+	},
 	"qwen-portal": {
 		"coder-model": {
 			"id": "coder-model",

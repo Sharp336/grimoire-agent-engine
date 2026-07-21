@@ -7,6 +7,7 @@ import { $env, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
+import { getQoderCommonHeaders } from "../registry/oauth/qoder";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -1397,10 +1398,14 @@ function createRequestSetup(
 		promptCacheSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
-		// Provider auth/header overlay: Kimi-code hosts require shared client
-		// attribution headers prepended before caller headers. Kept here (not in
-		// the shared helper) because it is provider-specific request setup.
-		prependHeaders: model.provider === "kimi-code" ? getKimiCommonHeaders : undefined,
+		// Subscription gateways prepend their client-attribution headers before
+		// caller headers. This stays here because it is provider-specific setup.
+		prependHeaders:
+			model.provider === "qoder"
+				? getQoderCommonHeaders
+				: model.provider === "kimi-code"
+					? getKimiCommonHeaders
+					: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});

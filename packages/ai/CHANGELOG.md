@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Qoder browser OAuth login, token refresh, and client-attribution headers for the OpenAI-compatible chat-completions provider.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

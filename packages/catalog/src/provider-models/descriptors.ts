@@ -37,6 +37,7 @@ import {
 	opencodeZenModelManagerOptions,
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
+	qoderModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
 	syntheticModelManagerOptions,
@@ -333,6 +334,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["QIANFAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => qianfanModelManagerOptions(config),
 		catalogDiscovery: { label: "Qianfan" },
+	},
+	{
+		id: "qoder",
+		defaultModel: "auto",
+		envVars: ["QODER_OAUTH_TOKEN"],
+		createModelManagerOptions: (config: ModelManagerConfig) => qoderModelManagerOptions(config),
+		catalogDiscovery: { label: "Qoder", oauthProvider: "qoder" },
 	},
 	{
 		id: "qwen-portal",
