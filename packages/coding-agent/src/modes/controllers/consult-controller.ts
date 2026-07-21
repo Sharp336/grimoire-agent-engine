@@ -273,7 +273,20 @@ export class ConsultController {
 	 * the last selected thread, falling back to the newest known transcript.
 	 */
 	async resume(threadId?: string): Promise<void> {
-		const thread = await this.#resolveThread(threadId);
+		const requestedId = threadId?.trim();
+		const runningThread = this.#activeRequest ? undefined : this.#activeTurnRequest?.thread;
+		if (
+			runningThread &&
+			(!requestedId ||
+				requestedId.toLowerCase() === "latest" ||
+				requestedId === runningThread.consultationId ||
+				requestedId === `consult:${runningThread.consultationId}` ||
+				requestedId.endsWith(`/consult:${runningThread.consultationId}`))
+		) {
+			await this.#selectThread(runningThread);
+			return;
+		}
+		const thread = await this.#resolveThread(requestedId);
 		if (!thread) return;
 		await this.#selectThread(thread);
 	}
@@ -345,6 +358,17 @@ export class ConsultController {
 	}
 
 	async #selectThread(thread: ConsultationThreadHandle): Promise<void> {
+		const runningRequest = this.#activeTurnRequest;
+		if (runningRequest?.thread?.consultationId === thread.consultationId) {
+			this.#activateThread(thread);
+			this.#selectedThreadView = undefined;
+			runningRequest.visibleView = { ...runningRequest.latestView };
+			runningRequest.component = this.#createPanel(runningRequest.question, runningRequest.visibleView);
+			this.#activeRequest = runningRequest;
+			this.#mountPanel(runningRequest);
+			this.ctx.beginConsultComposer(thread);
+			return;
+		}
 		await this.#serializeSwitch(async () => {
 			await this.#cancelActiveTurn();
 			const views = await this.#loadPersistedViews(thread).catch(() => []);

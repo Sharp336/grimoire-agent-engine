@@ -232,10 +232,7 @@ describe("AgentSession durable consultation side turn", () => {
 			return child;
 		});
 
-		let resolveSaved!: () => void;
-		const consultationSaved = new Promise<void>(resolve => {
-			resolveSaved = resolve;
-		});
+		const { promise: consultationSaved, resolve: resolveSaved } = Promise.withResolvers<void>();
 		const showStatus = vi.fn((message: string) => {
 			if (message.startsWith("Consultation saved as consult:")) resolveSaved();
 		});
@@ -688,10 +685,7 @@ describe("AgentSession durable consultation side turn", () => {
 			activeConsultThread = undefined;
 			return true;
 		});
-		let resolveCanonicalRetry: ((title: string) => void) | undefined;
-		const canonicalRetry = new Promise<string>(resolve => {
-			resolveCanonicalRetry = resolve;
-		});
+		const { promise: canonicalRetry, resolve: resolveCanonicalRetry } = Promise.withResolvers<string>();
 		const generateConsultationTitle = vi
 			.fn()
 			.mockRejectedValueOnce(new Error("title provider unavailable"))
@@ -1357,10 +1351,7 @@ describe("AgentSession durable consultation side turn", () => {
 			getEntries: () => entries,
 			getSessionFile: () => "/tmp/__consult.cancelled.jsonl",
 		} as unknown as SessionManager;
-		let sideTurnEntered: (() => void) | undefined;
-		const entered = new Promise<void>(resolve => {
-			sideTurnEntered = resolve;
-		});
+		const { promise: entered, resolve: sideTurnEntered } = Promise.withResolvers<void>();
 		let runningSignal: AbortSignal | undefined;
 		const session = {
 			getAgentId: () => "Main",
@@ -1384,9 +1375,9 @@ describe("AgentSession durable consultation side turn", () => {
 				runningSignal = args.signal;
 				args.onTextDelta?.("partial answer");
 				sideTurnEntered?.();
-				await new Promise<never>((_resolve, reject) => {
-					args.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-				});
+				const { promise, reject } = Promise.withResolvers<never>();
+				args.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				await promise;
 				throw new Error("unreachable");
 			}),
 		} as unknown as InteractiveModeContext["session"];
@@ -1493,6 +1484,14 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(restoreParentEditorFromConsult).toHaveBeenCalledTimes(1);
 		if (!createdConsultationId) throw new Error("consultation thread record was not persisted");
 		expect(consultationTurnStates(entries, createdConsultationId)[0]?.terminal).toBeUndefined();
+		events.length = 0;
+		await controller.resume();
+		expect(runningSignal?.aborted).toBe(false);
+		expect(controller.hasActiveTurn()).toBe(true);
+		expect(controller.getActiveThread()?.consultationId).toBe(createdConsultationId);
+		expect(controller.hasActiveRequest()).toBe(true);
+		expect(controller.handleEscape()).toBe(true);
+		expect(runningSignal?.aborted).toBe(false);
 		events.length = 0;
 		await controller.resume("other");
 
