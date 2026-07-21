@@ -28,7 +28,7 @@ function makeFakeHost(pid: number, opts: { failDispose?: boolean } = {}): FakeHo
 	return fake;
 }
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => Bun.sleep(ms);
 const baseOpts = { cwd: process.cwd(), historyDepth: 5 };
 
 // Pool bookkeeping tests run against fake hosts — no pwsh required, so this
