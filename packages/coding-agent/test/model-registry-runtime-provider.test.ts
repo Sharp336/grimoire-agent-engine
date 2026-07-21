@@ -231,6 +231,57 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(aliasAfterRefresh?.requestModelId).toBe("foo");
 	});
 
+	test("registerProvider inherits requestModelId from an exact bundled reference when the override omits it", async () => {
+		const providerName = "qoder";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://api2-v2.qoder.sh/model/v1",
+				apiKey: "QODER_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "ultimate-1m",
+						name: "Ultimate (1M)",
+						reasoning: true,
+						input: ["text", "image"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_000_000,
+						maxTokens: 32_768,
+					},
+					{
+						id: "vendor/ultimate-1m",
+						name: "Proxied Ultimate (1M)",
+						reasoning: true,
+						input: ["text", "image"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_000_000,
+						maxTokens: 32_768,
+					},
+				],
+			},
+			"ext://runtime",
+		);
+
+		// The override re-declares the retained bundled alias id, so the finalized
+		// model keeps the local id while the wire id stays the upstream base model.
+		const alias = registry.find(providerName, "ultimate-1m");
+		expect(alias).toBeDefined();
+		expect(alias?.id).toBe("ultimate-1m");
+		expect(alias?.requestModelId).toBe("ultimate");
+
+		// A fuzzy reference match must not reroute the wire id.
+		const proxied = registry.find(providerName, "vendor/ultimate-1m");
+		expect(proxied).toBeDefined();
+		expect(proxied?.id).toBe("vendor/ultimate-1m");
+		expect(proxied?.requestModelId).toBeUndefined();
+
+		await registry.refresh("offline");
+		const aliasAfterRefresh = registry.find(providerName, "ultimate-1m");
+		expect(aliasAfterRefresh?.id).toBe("ultimate-1m");
+		expect(aliasAfterRefresh?.requestModelId).toBe("ultimate");
+	});
+
 	test("registerProvider applies authHeader overrides to existing provider models across refresh", async () => {
 		const providerName = "anthropic";
 
