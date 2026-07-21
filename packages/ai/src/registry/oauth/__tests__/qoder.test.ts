@@ -89,6 +89,16 @@ describe("refreshQoderToken", () => {
 		expect(requests[0]?.init?.body).toBe(JSON.stringify({ refresh_token: "old-refresh" }));
 	});
 
+	it("rejects an empty access token returned by refresh", async () => {
+		const fetchMock: FetchImpl = async () => jsonResponse({ token: "" });
+
+		await expect(refreshQoderToken("old-refresh", fetchMock)).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "qoder",
+		});
+	});
+
 	it("rejects an empty refresh token before making a request", async () => {
 		let calls = 0;
 		const fetchMock: FetchImpl = async () => {
