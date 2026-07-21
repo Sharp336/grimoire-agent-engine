@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Qoder `auto` router as an offline static catalog seed with OAuth and direct-bearer discovery.
+
 ## [17.0.6] - 2026-07-20
 
 ### Added

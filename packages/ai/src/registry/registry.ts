@@ -47,6 +47,7 @@ import { openrouterProvider } from "./openrouter";
 import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
+import { qoderProvider } from "./qoder";
 import { qwenPortalProvider } from "./qwen-portal";
 import { sakanaProvider } from "./sakana";
 import { syntheticProvider } from "./synthetic";
@@ -96,6 +97,7 @@ const ALL = [
 	zhipuCodingPlanProvider,
 	umansProvider,
 	qwenPortalProvider,
+	qoderProvider,
 	sakanaProvider,
 	minimaxCodeProvider,
 	minimaxCodeCnProvider,
