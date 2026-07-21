@@ -224,6 +224,9 @@
 ### Removed
 
 - Removed unused `similar` crate dependency and dev-dependency on npm `diff`.
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog self-terminates the sidecar if the host process dies, so a hard crash cannot orphan it. The sidecar's stdin (the length-prefixed request pipe) is detached from child inheritance at startup: native executables spawned by user commands — most visibly Git for Windows' `git.exe`, which blocks reading stdin on every subcommand — inherit the null device instead, so they can neither hang waiting on the protocol channel nor steal request frames from it.
 
 ## [17.0.5] - 2026-07-18
 
@@ -308,9 +311,6 @@
 
 - Fixed the native build script failing to locate the `@napi-rs/cli` `napi` binary on Windows because the `PATH` lookup joined entries with a Unix `:` separator instead of the platform delimiter (`path.delimiter`).
 - Fixed a Windows regression where an abnormal `omp` exit or bash cancellation could `TerminateProcess` unrelated `pwsh.exe` / `powershell.exe` sessions (including other Cursor terminal tabs). `SpawnRegistry` stored only the raw pid of each brush-spawned child and re-opened it via `Process::from_pid` at cancellation time; between those two moments Windows could recycle a freed pid onto an unrelated PowerShell, and `signal_tree` then walked the wrong subtree via Toolhelp. The observer now pins a stable `Process` handle at spawn time — on Windows the open handle keeps the pid slot reserved, on Linux the pidfd carries identity, on macOS the `(pid, start_time)` triple detects impersonation — so cancellation can only reach children this run actually launched. The registry sweeps exited entries once the recorded set crosses a small threshold so a long bash loop of short external commands cannot pin one owned OS handle per historical spawn. ([#4605](https://github.com/can1357/oh-my-pi/issues/4605))
-### Added
-
-- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog self-terminates the sidecar if the host process dies, so a hard crash cannot orphan it.
 
 ## [16.3.6] - 2026-07-04
 
