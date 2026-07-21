@@ -1253,7 +1253,7 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(showError).toHaveBeenLastCalledWith('Consultation id "ambiguous" is ambiguous; use its full id.');
 	});
 
-	it("cancels and durably terminalizes partial output before switching consultation threads", async () => {
+	it("keeps a turn running after Esc, then cancels and flushes it before switching threads", async () => {
 		AgentRegistry.resetGlobalForTests();
 		using temp = TempDir.createSync("@omp-consult-cancel-");
 		const otherSessionFile = path.join(temp.path(), "__consult.other.jsonl");
