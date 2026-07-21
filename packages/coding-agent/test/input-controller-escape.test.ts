@@ -73,7 +73,9 @@ function createContext(): {
 		handleOmfgEscape: Spy;
 		hasActiveBtw: Spy;
 		hasActiveOmfg: Spy;
+		hasActiveConsult: Spy;
 		onInputCallback: Spy;
+		returnConsultToParent: Spy;
 		prompt: Spy;
 		requestRender: Spy;
 		resetDisplay: Spy;
@@ -105,6 +107,8 @@ function createContext(): {
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
+	const hasActiveConsult = vi.fn(() => false);
+	const returnConsultToParent = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
 	const startPendingSubmission = vi.fn(
@@ -211,6 +215,8 @@ function createContext(): {
 		handleBtwEscape,
 		handleBtwCommand,
 		hasActiveBtw,
+		hasActiveConsult,
+		returnConsultToParent,
 		handleOmfgEscape,
 		hasActiveOmfg,
 		showTreeSelector: vi.fn(),
@@ -239,6 +245,8 @@ function createContext(): {
 			handleBtwCommand,
 			handleBtwEscape,
 			hasActiveBtw,
+			hasActiveConsult,
+			returnConsultToParent,
 			handleOmfgEscape,
 			hasActiveOmfg,
 			onInputCallback,
