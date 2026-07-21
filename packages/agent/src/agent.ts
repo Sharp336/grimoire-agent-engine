@@ -696,20 +696,20 @@ export class Agent {
 		this.#appendOnlyContext = manager;
 	}
 
-	#toolsForModel(model: Model): AgentTool[] {
-		if (model.api !== "cursor-agent" || !this.#getCursorTools) return this.#state.tools;
+	#toolsForModel(model: Model, baseTools: AgentTool[] = this.#state.tools): AgentTool[] {
+		if (model.api !== "cursor-agent" || !this.#getCursorTools) return baseTools;
 		const cursorTools = this.#getCursorTools();
-		if (cursorTools.length === 0) return this.#state.tools;
+		if (cursorTools.length === 0) return baseTools;
 
-		const names = new Set(this.#state.tools.map(tool => tool.name));
+		const names = new Set(baseTools.map(tool => tool.name));
 		let merged: AgentTool[] | undefined;
 		for (const tool of cursorTools) {
 			if (names.has(tool.name)) continue;
-			merged ??= this.#state.tools.slice();
+			merged ??= baseTools.slice();
 			merged.push(tool);
 			names.add(tool.name);
 		}
-		return merged ?? this.#state.tools;
+		return merged ?? baseTools;
 	}
 
 	/**
@@ -734,7 +734,7 @@ export class Agent {
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
-		const sourceTools = options?.tools ?? this.#toolsForModel(model);
+		const sourceTools = this.#toolsForModel(model, options?.tools);
 		const tools = ownedDialect
 			? []
 			: (normalizeTools(sourceTools, this.#intentTracing, preferredDialect(model.id), this.#pruneToolDescriptions) ??
