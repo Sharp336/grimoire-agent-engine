@@ -27,7 +27,7 @@ function credentialsFromTokenResponse(
 	body: { token?: unknown; refresh_token?: unknown; expires_at?: unknown },
 	refresh: string,
 ): OAuthCredentials | undefined {
-	if (typeof body.token !== "string") return undefined;
+	if (typeof body.token !== "string" || body.token.trim() === "") return undefined;
 	return {
 		access: body.token,
 		refresh: typeof body.refresh_token === "string" ? body.refresh_token : refresh,
