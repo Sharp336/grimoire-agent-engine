@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the Qoder `auto` router as an offline static catalog seed with OAuth and direct-bearer discovery.
+- Added Qoder's authenticated 15-model catalog, including 22 context-window aliases that route to their base model with the selected 400K or 1M window.
 
 ## [17.0.6] - 2026-07-20
 

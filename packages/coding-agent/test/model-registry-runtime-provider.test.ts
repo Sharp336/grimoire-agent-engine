@@ -180,6 +180,57 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 	});
 
+	test("registerProvider carries requestModelId from extension models into finalized models", async () => {
+		const providerName = "qoder";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://api2-v2.qoder.sh/model/v1",
+				apiKey: "QODER_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "foo",
+						name: "Foo",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 200_000,
+						maxTokens: 32_000,
+					},
+					{
+						id: "foo-1m",
+						name: "Foo (1M)",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_000_000,
+						maxTokens: 32_000,
+						requestModelId: "foo",
+					},
+				],
+			},
+			"ext://runtime",
+		);
+
+		const base = registry.find(providerName, "foo");
+		expect(base).toBeDefined();
+		expect(base?.id).toBe("foo");
+		expect(base?.requestModelId).toBeUndefined();
+
+		const alias = registry.find(providerName, "foo-1m");
+		expect(alias).toBeDefined();
+		expect(alias?.id).toBe("foo-1m");
+		expect(alias?.name).toBe("Foo (1M)");
+		expect(alias?.contextWindow).toBe(1_000_000);
+		expect(alias?.requestModelId).toBe("foo");
+
+		await registry.refresh("offline");
+		const aliasAfterRefresh = registry.find(providerName, "foo-1m");
+		expect(aliasAfterRefresh?.id).toBe("foo-1m");
+		expect(aliasAfterRefresh?.requestModelId).toBe("foo");
+	});
+
 	test("registerProvider applies authHeader overrides to existing provider models across refresh", async () => {
 		const providerName = "anthropic";
 
