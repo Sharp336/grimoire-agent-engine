@@ -311,7 +311,9 @@ describe("consultation render scheduling", () => {
 			expect(initial.some(row => row.includes("Streaming turn"))).toBe(false);
 			expect(initial.filter(row => row.includes("Consult · Viewport budget"))).toHaveLength(1);
 			expect(initial.filter(row => row.includes("QUESTION-ROW"))).toHaveLength(1);
-			expect(initial.some(row => row.includes("Streaming · Alt+PgUp/PgDn scroll · Esc cancel"))).toBe(true);
+			expect(initial.some(row => row.includes("Streaming · Alt+PgUp/PgDn scroll · ? cancel · Esc parent"))).toBe(
+				true,
+			);
 			// The component retains the whole durable answer, but exposes only its
 			// answer viewport between compact panel chrome.
 			expect(initial.filter(row => row.includes("VIEWPORT-ANSWER-"))).toHaveLength(budget - 5);

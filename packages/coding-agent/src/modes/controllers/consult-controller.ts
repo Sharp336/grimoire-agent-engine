@@ -350,6 +350,12 @@ export class ConsultController {
 			this.ctx.showStatus("Usage: /consult <question>");
 			return;
 		}
+		if (
+			this.#activeTurnRequest?.thread?.consultationId === thread.consultationId &&
+			!this.#activeTurnRequest.abortController.signal.aborted
+		) {
+			throw new Error("Consultation is still running; use ? to cancel it before submitting a follow-up.");
+		}
 		await this.#serializeSwitch(async () => {
 			await this.#cancelActiveTurn();
 			this.#activateThread(thread);

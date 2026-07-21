@@ -1500,6 +1500,12 @@ describe("AgentSession durable consultation side turn", () => {
 
 		await controller.start("question to cancel");
 		await entered;
+		await expect(controller.submitCurrentThread("premature follow-up")).rejects.toThrow(
+			"Consultation is still running; use ? to cancel it before submitting a follow-up.",
+		);
+		expect(runningSignal?.aborted).toBe(false);
+		if (!createdConsultationId) throw new Error("consultation thread record was not persisted");
+		expect(consultationTurnStates(entries, createdConsultationId)[0]?.terminal).toBeUndefined();
 		expect(controller.handleEscape()).toBe(true);
 		expect(runningSignal?.aborted).toBe(false);
 		expect(restoreParentEditorFromConsult).toHaveBeenCalledTimes(1);

@@ -503,7 +503,7 @@ export class BtwPanelComponent extends Container {
 			return theme.fg("accent", "↓ new output · Alt+PgUp/PgDn · Alt+Home/End");
 		}
 		if (!this.#isTerminalConsultationStatus(view.status)) {
-			return theme.fg("muted", "Streaming · Alt+PgUp/PgDn scroll · Esc cancel");
+			return theme.fg("muted", "Streaming · Alt+PgUp/PgDn scroll · ? cancel · Esc parent");
 		}
 		return theme.fg("muted", "Enter follow-up · Alt+Enter use in parent · ? actions · Esc parent");
 	}
