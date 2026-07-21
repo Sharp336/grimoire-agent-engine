@@ -145,3 +145,77 @@ export let getQoderCommonHeaders = (): Record<string, string> => {
 	getQoderCommonHeaders = () => headers;
 	return headers;
 };
+
+function isCompleteQoderDataLine(line: string): boolean {
+	const payload = line.slice(line.indexOf(":") + 1).trimStart();
+	if (payload === "[DONE]") return true;
+	try {
+		JSON.parse(payload);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function repairQoderSseBody(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+	const decoder = new TextDecoder();
+	const encoder = new TextEncoder();
+	let buffered = "";
+	let eventLines: string[] = [];
+	const flushEvent = (controller: TransformStreamDefaultController<Uint8Array>): void => {
+		if (eventLines.length === 0) return;
+		const repaired: string[] = [];
+		let dataLine = -1;
+		for (const eventLine of eventLines) {
+			if (/^data(?::|$)/.test(eventLine)) {
+				dataLine = repaired.push(eventLine) - 1;
+			} else if (
+				dataLine !== -1 &&
+				!/^(?:event|id|retry)(?::|$)/.test(eventLine) &&
+				!isCompleteQoderDataLine(repaired[dataLine] ?? "")
+			) {
+				repaired[dataLine] += eventLine;
+			} else {
+				repaired.push(eventLine);
+			}
+		}
+		controller.enqueue(encoder.encode(`${repaired.join("\n")}\n\n`));
+		eventLines = [];
+	};
+
+	return body.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				buffered += decoder.decode(chunk, { stream: true });
+				for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
+					const line = buffered.slice(0, newline).replace(/\r$/, "");
+					buffered = buffered.slice(newline + 1);
+					if (line !== "") {
+						eventLines.push(line);
+						continue;
+					}
+					flushEvent(controller);
+				}
+			},
+			flush(controller) {
+				buffered += decoder.decode();
+				if (buffered !== "") eventLines.push(buffered.replace(/\r$/, ""));
+				flushEvent(controller);
+			},
+		}),
+	);
+}
+
+export function wrapQoderSseFetch(fetchImpl: FetchImpl = fetch): FetchImpl {
+	return async (input, init) => {
+		const response = await fetchImpl(input, init);
+		if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+			return response;
+		}
+		return new Response(repairQoderSseBody(response.body), {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
+	};
+}

@@ -7,7 +7,7 @@ import { $env, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
-import { getQoderCommonHeaders } from "../registry/oauth/qoder";
+import { getQoderCommonHeaders, wrapQoderSseFetch } from "../registry/oauth/qoder";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -28,7 +28,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { isRecord, normalizeSystemPrompts } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withEmptyCompletionRetry } from "../utils/empty-completion-retry";
@@ -705,7 +705,7 @@ const streamOpenAICompletionsOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: model.provider === "qoder" ? wrapQoderSseFetch(options?.fetch) : options?.fetch,
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -1625,6 +1625,18 @@ function buildParams(
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
 	});
+	if (model.provider === "qoder" && requestModelId === "kmodel" && options?.serviceTier === "priority") {
+		const metadataValue: unknown = params.metadata;
+		const metadata = isRecord(metadataValue) ? metadataValue : {};
+		const business = isRecord(metadata.business) ? metadata.business : {};
+		const featureSwitches = isRecord(business.feature_switches) ? business.feature_switches : {};
+		Object.assign(params, {
+			metadata: {
+				...metadata,
+				business: { ...business, feature_switches: { ...featureSwitches, highspeed: "true" } },
+			},
+		});
+	}
 
 	return { params, toolStrictMode, strictToolsApplied };
 }

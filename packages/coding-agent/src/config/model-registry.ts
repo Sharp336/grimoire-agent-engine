@@ -495,6 +495,11 @@ interface ModelPatch {
 	contextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
+	/**
+	 * Upstream wire model id for local aliases. Providers serialize this value
+	 * as the request model id while local selection/caching/usage keys on id.
+	 */
+	requestModelId?: string;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
@@ -522,6 +527,7 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
+	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
@@ -631,6 +637,7 @@ function buildCustomModelOverlay(
 		cost: modelDef.cost,
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
+		requestModelId: modelDef.requestModelId,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: mergeCompat(providerCompat, modelDef.compat),
@@ -673,6 +680,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		cost,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
+		requestModelId: resolvedModel.requestModelId,
 		headers: resolvedModel.headers,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
@@ -2500,6 +2508,11 @@ export interface ProviderConfigInput {
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;
+		/**
+		 * Upstream wire model id. When set, providers serialize this value as
+		 * the request model id while local selection/caching/usage keys on id.
+		 */
+		requestModelId?: string;
 		headers?: Record<string, string>;
 		compat?: ModelSpec<Api>["compat"];
 		contextPromotionTarget?: string;

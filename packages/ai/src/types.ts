@@ -125,7 +125,7 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export type ServiceTierFamily = "openai" | "anthropic" | "google" | "qoder";
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -151,6 +151,11 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	);
 }
 
+export function isQoderFastModel(model: ServiceTierModel): boolean {
+	const id = model.id.toLowerCase();
+	return model.provider === "qoder" && (id === "kmodel" || id === "kmodel-400k" || id === "kmodel-1m");
+}
+
 /**
  * Classify a model into the service-tier family whose knob governs it, or
  * `undefined` when the model exposes no serving-priority control.
@@ -173,6 +178,7 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
 	if (provider === "openai" || provider === "openai-codex") return "openai";
 	if (model.api === "anthropic-messages") return "anthropic";
 	if (provider === "google" || provider === "google-vertex") return "google";
+	if (provider === "qoder" && isQoderFastModel(model)) return "qoder";
 	if (isOpenAIServiceTierModel(model)) return "openai";
 	return undefined;
 }
@@ -203,6 +209,9 @@ export function shouldSendServiceTier(
 ): boolean {
 	if (!serviceTier) return false;
 	const provider = typeof target === "string" ? target : target?.provider;
+	// Qoder realizes priority through a provider-specific metadata field, not the
+	// OpenAI service_tier wire format.
+	if (provider === "qoder") return false;
 	if (provider === "openai" || provider === "openai-codex" || provider === "openrouter") {
 		return serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority";
 	}
@@ -236,6 +245,7 @@ export function realizesPriorityServiceTier(
 		const family = serviceTierFamily(model);
 		return family === "openai" || family === "google";
 	}
+	if (model.provider === "qoder") return isQoderFastModel(model);
 	if (model.api === "anthropic-messages") return false;
 	return shouldSendServiceTier(serviceTier, model);
 }
@@ -278,7 +288,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of ["openai", "anthropic", "google", "qoder"] as const) {
 			const tier = src[family];
 			if (tier === "auto" || tier === "default" || tier === "flex" || tier === "scale" || tier === "priority") {
 				out[family] = tier;
@@ -288,7 +298,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	}
 	switch (value) {
 		case "priority":
-			return { openai: "priority", anthropic: "priority", google: "priority" };
+			return { openai: "priority", anthropic: "priority", google: "priority", qoder: "priority" };
 		case "openai-only":
 			return { openai: "priority" };
 		case "claude-only":

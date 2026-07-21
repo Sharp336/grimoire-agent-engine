@@ -83,6 +83,11 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
+	// Qoder's curated seed carries provider-authored thinking metadata for
+	// models whose wire ids are unknown to identity/family classification.
+	// Re-deriving would replace the evidence-backed effort ladders with
+	// generic defaults, so preserve the authored config exactly.
+	if (model.provider === "qoder") return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));

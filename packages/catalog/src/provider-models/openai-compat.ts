@@ -1375,35 +1375,181 @@ export interface QoderModelManagerConfig {
 
 const QODER_DEFAULT_MODEL_BASE_URL = "https://api2-v2.qoder.sh/model/v1";
 
+interface QoderAliasContext {
+	suffix: string;
+	label: string;
+	contextWindow: number;
+}
+
 interface QoderCuratedModel {
 	id: string;
-	name?: string;
+	name: string;
 	contextWindow: number;
-	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	thinking?: ThinkingConfig;
+	supportsReasoningEffort?: boolean;
+	aliasContexts?: readonly QoderAliasContext[];
 }
+
+const QODER_EFFORT_LADDER_FIVE: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+const QODER_EFFORT_LADDER_HIGH_MAX: readonly Effort[] = [Effort.High, Effort.Max];
+
+const QODER_STANDARD_ALIASES: readonly QoderAliasContext[] = [
+	{ suffix: "-400k", label: " (400K)", contextWindow: 400_000 },
+	{ suffix: "-1m", label: " (1M)", contextWindow: 1_000_000 },
+];
 
 // Qoder's model list is behind a signed endpoint, so this offline seed is the
 // source of truth for the picker. `auto` is Qoder's server-side router.
 export const QODER_CURATED_MODELS: readonly QoderCuratedModel[] = [
-	{ id: "auto", name: "Qoder (Auto)", contextWindow: 262_144, reasoning: false, input: ["text"] },
+	{ id: "auto", name: "Qoder (Auto)", contextWindow: 180_000, reasoning: false, input: ["text", "image"] },
+	{
+		id: "ultimate",
+		name: "Ultimate",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_FIVE, defaultLevel: Effort.High },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "performance",
+		name: "Performance",
+		contextWindow: 272_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{ id: "efficient", name: "Efficient", contextWindow: 180_000, reasoning: false, input: ["text", "image"] },
+	{ id: "lite", name: "Lite", contextWindow: 180_000, reasoning: false, input: ["text"] },
+	{
+		id: "cmodel",
+		name: "Cantus",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_FIVE, defaultLevel: Effort.High },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "qmodel_preview",
+		name: "Qwen3.8-Max-Preview",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: [Effort.High], defaultLevel: Effort.High, requiresEffort: true },
+		supportsReasoningEffort: false,
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "qmodel_latest",
+		name: "Qwen3.7-Max",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "qmodel",
+		name: "Qwen3.7-Plus",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "kmodel_latest",
+		name: "Kimi-K3",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{ id: "kmodel", name: "Kimi-K2.7-Code", contextWindow: 262_144, reasoning: false, input: ["text", "image"] },
+	{
+		id: "gm51model",
+		name: "GLM-5.2",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "dmodel",
+		name: "DeepSeek-V4-Pro",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "dfmodel",
+		name: "DeepSeek-V4-Flash",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
+	{
+		id: "mmodel",
+		name: "MiniMax-M3",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+	},
 ];
 
 export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
 	const resolvedBaseUrl = baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
-	return QODER_CURATED_MODELS.map(model => ({
+	const baseCompat = (model: QoderCuratedModel) => ({
+		supportsStore: false as const,
+		...(model.supportsReasoningEffort === false ? { supportsReasoningEffort: false as const } : {}),
+	});
+	const bases: ModelSpec<"openai-completions">[] = QODER_CURATED_MODELS.map(model => ({
 		id: model.id,
-		name: model.name ?? model.id,
+		name: model.name,
 		api: "openai-completions",
 		provider: "qoder",
 		baseUrl: resolvedBaseUrl,
-		reasoning: model.reasoning ?? false,
-		input: model.input ?? ["text"],
+		reasoning: model.reasoning,
+		input: model.input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		compat: { supportsStore: false },
+		compat: baseCompat(model),
 		contextWindow: model.contextWindow,
-		maxTokens: Math.min(model.contextWindow, 64_000),
+		maxTokens: 32_768,
+		...(model.thinking ? { thinking: model.thinking } : {}),
 	}));
+	const aliases: ModelSpec<"openai-completions">[] = [];
+	for (const model of QODER_CURATED_MODELS) {
+		if (!model.aliasContexts) continue;
+		for (const alias of model.aliasContexts) {
+			aliases.push({
+				id: `${model.id}${alias.suffix}`,
+				name: `${model.name}${alias.label}`,
+				api: "openai-completions",
+				provider: "qoder",
+				baseUrl: resolvedBaseUrl,
+				reasoning: model.reasoning,
+				input: model.input,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				compat: {
+					...baseCompat(model),
+					extraBody: { context_length: alias.contextWindow },
+				},
+				contextWindow: alias.contextWindow,
+				maxTokens: 32_768,
+				requestModelId: model.id,
+				...(model.thinking ? { thinking: model.thinking } : {}),
+			});
+		}
+	}
+	return [...bases, ...aliases];
 }
 
 export function qoderModelManagerOptions(config?: QoderModelManagerConfig): ModelManagerOptions<"openai-completions"> {
