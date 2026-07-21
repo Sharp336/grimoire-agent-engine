@@ -931,6 +931,17 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+	// Locally patched build: replacing this binary with a stock release would
+	// silently drop the local patches. A `<binary>.patched` sentinel next to
+	// the executable opts it out of self-update.
+	const patchSentinel = `${process.execPath}.patched`;
+	if (fs.existsSync(patchSentinel)) {
+		console.log(chalk.yellow(`This ${APP_NAME} is a locally patched build (${patchSentinel} exists).`));
+		console.log(chalk.yellow("Run `omp-rebuild` to update: it rebases the patch onto latest upstream and rebuilds."));
+		console.log(chalk.dim(`To force a stock update anyway, remove ${patchSentinel} and re-run.`));
+		return;
+	}
+
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
