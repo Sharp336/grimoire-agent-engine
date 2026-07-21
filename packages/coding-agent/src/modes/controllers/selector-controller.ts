@@ -1950,6 +1950,7 @@ export class SelectorController {
 			case "Copy selected answer":
 				if (
 					this.ctx.getActiveConsultThread()?.sessionFile === entry.thread.sessionFile &&
+					this.ctx.getConsultTurnPresentation()?.isLatest === true &&
 					this.ctx.canCopyConsultTurn() &&
 					(await this.ctx.handleCopyConsultTurn())
 				) {
@@ -1969,7 +1970,10 @@ export class SelectorController {
 			case "Quote in parent":
 			case "Ask main": {
 				const handoffAction = action === "Quote in parent" ? "quote" : "ask-main";
-				if (this.ctx.getActiveConsultThread()?.sessionFile === entry.thread.sessionFile) {
+				if (
+					this.ctx.getActiveConsultThread()?.sessionFile === entry.thread.sessionFile &&
+					this.ctx.getConsultTurnPresentation()?.isLatest === true
+				) {
 					const prepared =
 						handoffAction === "quote"
 							? await this.ctx.quoteConsultationAnswerInParent()
@@ -1983,7 +1987,7 @@ export class SelectorController {
 					this.ctx.showError("This consultation has no answer to hand off.");
 					return;
 				}
-				this.ctx.beginConsultComposer(entry.thread);
+				if (!this.ctx.isConsultComposerActive) this.ctx.beginConsultComposer(entry.thread);
 				const prepared =
 					handoffAction === "quote"
 						? this.ctx.prepareQuotedConsultationAnswerInParent(entry.latestAnswer, entry.thread)

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -360,6 +360,62 @@ describe("persisted consultation discovery", () => {
 			selections.find(selection => selection.title === "First durable title · consult:cdef0one")?.choices,
 		).toEqual(["Open full transcript in Agent Hub", "Resume", "Copy selected answer", "Quote in parent", "Ask main"]);
 		expect(opened).toEqual([{ openAgentId: `Main/consult:${firstId}` }]);
+	});
+
+	it("hands off the selected latest answer when the active panel shows an older turn", async () => {
+		using temp = TempDir.createSync("@omp-consult-picker-handoff-");
+		const parentFile = path.join(temp.path(), "parent.jsonl");
+		const artifacts = parentFile.slice(0, -6);
+		const consultationId = "abcdef0handoff";
+		const consultationFile = path.join(artifacts, `__consult.${consultationId}.jsonl`);
+		await fs.mkdir(artifacts, { recursive: true });
+		await Bun.write(parentFile, sessionContent("parent", []));
+		await Bun.write(
+			consultationFile,
+			sessionContent(consultationId, [
+				thread(consultationId),
+				title(consultationId, "Handoff review"),
+				turn(consultationId, "first", 0, "running"),
+				message("first-answer", "assistant", "older answer"),
+				turn(consultationId, "first", 0, "completed"),
+				turn(consultationId, "second", 1, "running"),
+				message("second-answer", "assistant", "latest selected answer"),
+				turn(consultationId, "second", 1, "completed"),
+			]),
+		);
+
+		AgentRegistry.resetGlobalForTests();
+		const quoteVisible = vi.fn(async () => true);
+		const prepareSelected = vi.fn(() => true);
+		const ctx = {
+			sessionManager: { getSessionFile: () => parentFile },
+			showHookSelector: async (title: string, choices: readonly string[]) => {
+				if (title === "Consultations") return choices[0];
+				return "Quote in parent";
+			},
+			getActiveConsultThread: () => ({
+				consultationId,
+				sessionFile: consultationFile,
+				ownerId: "Main",
+			}),
+			getConsultTurnPresentation: () => ({ isLatest: false }),
+			isConsultComposerActive: true,
+			quoteConsultationAnswerInParent: quoteVisible,
+			prepareQuotedConsultationAnswerInParent: prepareSelected,
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		try {
+			await new SelectorController(ctx).showConsultsSelector();
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+		}
+
+		expect(quoteVisible).not.toHaveBeenCalled();
+		expect(prepareSelected).toHaveBeenCalledWith(
+			"latest selected answer",
+			expect.objectContaining({ consultationId, sessionFile: consultationFile }),
+		);
 	});
 });
 
