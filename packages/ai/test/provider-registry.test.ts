@@ -66,6 +66,7 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
 		expect(ids).toContain("umans");
+		expect(ids).toContain("qoder");
 		expect(ids).toContain("llama.cpp");
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");

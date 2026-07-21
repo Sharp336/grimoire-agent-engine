@@ -5,7 +5,7 @@ import type { FetchImpl } from "../../types";
 import { pollOAuthDeviceCodeFlow } from "./device-code";
 import type { OAuthController, OAuthCredentials } from "./types";
 
-const CLI_VERSION = "1.1.1";
+const CLI_VERSION = "1.1.2";
 const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
 const WEB_BASE = process.env.QODER_WEB_BASE?.trim() || "https://qoder.com";
 const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
@@ -66,12 +66,12 @@ export async function loginQoder(ctrl: OAuthController): Promise<OAuthCredential
 					headers: { Accept: "application/json" },
 					signal: ctrl.signal ? AbortSignal.any([ctrl.signal, timeoutSignal]) : timeoutSignal,
 				});
-			} catch (cause) {
+			} catch {
 				if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
-				throw new AIError.OAuthError(
-					`Qoder login polling failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-					{ kind: "polling", provider: "qoder", cause },
-				);
+				// A rejected poll fetch (per-request timeout, network blip) is not a
+				// verdict on the device flow — stay pending until the outer 300s
+				// deadline or caller cancellation.
+				return { status: "pending" } as const;
 			}
 			if (response.status === 404) return { status: "pending" } as const;
 			if (!response.ok) return { status: "failed", message: `Qoder login failed (${response.status})` } as const;
@@ -111,7 +111,15 @@ export async function refreshQoderToken(refresh: string, fetchOverride?: FetchIm
 		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
 	});
 	if (!response.ok) {
-		throw new AIError.OAuthError(`Qoder token refresh failed (${response.status})`, {
+		let detail = "";
+		try {
+			detail = (await response.text()).trim();
+		} catch {
+			// Ignore body-read failures; the status code is the diagnostic.
+		}
+		// The body carries the provider's error code (e.g. invalid_grant), which
+		// isDefinitiveOAuthFailure needs to retire a dead credential.
+		throw new AIError.OAuthError(`Qoder token refresh failed (${response.status})${detail ? `: ${detail}` : ""}`, {
 			kind: "token-refresh",
 			provider: "qoder",
 			status: response.status,
