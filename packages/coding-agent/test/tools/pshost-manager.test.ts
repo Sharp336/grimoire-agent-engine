@@ -139,6 +139,28 @@ describe("pshost-manager pool (fake hosts)", () => {
 		again.release();
 	});
 
+	test("disposePsHostSession waits for that session's in-flight spawn", async () => {
+		const spawnedHosts: FakeHost[] = [];
+		setPsHostSpawnerForTests(async () => {
+			await sleep(30);
+			const host = makeFakeHost(spawnedHosts.length + 1);
+			spawnedHosts.push(host);
+			return host as unknown as PsHost;
+		});
+
+		// Teardown races the session's FIRST call: the host lives only in
+		// SPAWNING. Pre-fix, dispose returned without reaping and the spawn
+		// resolved into HOSTS as a live sidecar afterwards.
+		const acquiring = acquirePsHost({ ...baseOpts, sessionId: "race-dispose", idleTtlMs: 0 });
+		await sleep(5); // the caller is now parked inside the spawner
+		await disposePsHostSession("race-dispose");
+
+		expect(spawnedHosts).toHaveLength(1);
+		expect(spawnedHosts[0]?.disposed).toBe(true);
+		// The racing acquire still settles; teardown simply wins.
+		await Promise.allSettled([acquiring]);
+	});
+
 	test("disposeAll reaps pooled and ephemeral hosts, tolerating dispose failures", async () => {
 		let spawned = 0;
 		const good: FakeHost[] = [];

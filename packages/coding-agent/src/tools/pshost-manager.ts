@@ -172,6 +172,19 @@ export async function spawnEphemeralPsHost(options: SpawnPsHostOptions): Promise
 
 /** Dispose one session's host (e.g. on session teardown). */
 export async function disposePsHostSession(sessionId: string): Promise<void> {
+	// Drain an in-flight spawn for this session first: until spawnHost()
+	// settles the host exists only in SPAWNING, and its .then would insert a
+	// live sidecar into HOSTS after this cleanup returned (mirrors
+	// disposeAllPsHosts). Awaiting the tracked promise guarantees the HOSTS
+	// insert has happened; a failed spawn just resolves to nothing to dispose.
+	for (;;) {
+		const spawning = SPAWNING.get(sessionId);
+		if (!spawning) break;
+		await spawning.catch(() => {});
+		// Same (settled) promise still registered means only its .finally
+		// cleanup is pending — nothing new to wait for.
+		if (SPAWNING.get(sessionId) === spawning) break;
+	}
 	const entry = HOSTS.get(sessionId);
 	if (!entry) return;
 	HOSTS.delete(sessionId);
