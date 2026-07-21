@@ -120,6 +120,22 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			historyDepth: settings.get("powershell.historyDepth"),
 		};
 
+		// Everything fallible on the input path runs BEFORE a host is acquired:
+		// a rejected cwd or artifact failure must not leak an ephemeral pwsh or
+		// strand a session lease (leases pin the host against idle eviction).
+		const resolvedCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : undefined;
+		const width = settings.get("powershell.outputWidth");
+
+		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("powershell")) ?? {};
+		const sink = new OutputSink({
+			onChunk: streamTailUpdates(tailBuffer, onUpdate),
+			artifactPath,
+			artifactId,
+			headBytes: resolveOutputSinkHeadBytes(settings),
+			maxColumns: resolveOutputMaxColumns(settings),
+		});
+
 		// Teardown is awaited before the result is built, and means different
 		// things per mode: for an ephemeral host it kills the process — "the
 		// call returned" must mean "the process is gone", because loaded
@@ -149,19 +165,6 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			host = lease.host;
 			teardown = lease.release;
 		}
-
-		const resolvedCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : undefined;
-		const width = settings.get("powershell.outputWidth");
-
-		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("powershell")) ?? {};
-		const sink = new OutputSink({
-			onChunk: streamTailUpdates(tailBuffer, onUpdate),
-			artifactPath,
-			artifactId,
-			headBytes: resolveOutputSinkHeadBytes(settings),
-			maxColumns: resolveOutputMaxColumns(settings),
-		});
 
 		const pid = host.pid;
 		let result: PsRunResult;
