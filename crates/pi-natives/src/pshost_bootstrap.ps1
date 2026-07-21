@@ -41,15 +41,19 @@ $ErrorActionPreference = 'Stop'
 # stream is desynced beyond recovery.
 $MaxFrameBytes = 64MB
 
-# Native executables spawned by user commands inherit this process's OS standard
-# input handle — which is the length-prefixed protocol pipe the Rust side writes
-# requests to. A child that reads stdin (most visibly Git for Windows' git.exe,
-# which blocks on it for every subcommand) hangs forever AND steals bytes from
-# the protocol stream, desyncing the reader. Detach it the same way Console.Out
-# is guarded below: keep the pipe for our own reader, and repoint the
-# inheritable STDIN slot at the null device so children observe immediate EOF.
-# (Console.SetIn only swaps this process's managed reader; the OS handle a child
-# inherits is a separate slot, so the redirect needs a P/Invoke.)
+# The sidecar's stdin/stdout are the length-prefixed JSON protocol channel the
+# Rust side reads from and writes to. Native executables spawned by user
+# commands inherit this process's OS standard handles, so a child that reads
+# stdin (most visibly Git for Windows' git.exe, which blocks on it for every
+# subcommand) hangs forever and steals request bytes, and a child that writes
+# directly to the inherited stdout (e.g. a .NET Process started outside
+# PowerShell's pipeline with RedirectStandardOutput=false) emits raw bytes where
+# the frame reader expects a length prefix and tears the host down. Detach both
+# at startup: keep the real pipes for our own reader/writer, and repoint the
+# inheritable STDIN/STDOUT slots at the null device so children see EOF on read
+# and discard writes. (Console.SetIn/SetOut only swap this process's managed
+# reader/writer; the OS handles a child inherits are separate slots, so the
+# redirect needs a P/Invoke.)
 Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError=true)] static extern System.IntPtr GetStdHandle(int n);
 [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int n, System.IntPtr h);
@@ -58,36 +62,41 @@ Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
 [DllImport("libc", SetLastError=true)] static extern int dup(int fd);
 [DllImport("libc", SetLastError=true)] static extern int dup2(int oldfd, int newfd);
 [DllImport("libc", SetLastError=true)] static extern int close(int fd);
-// Detach child-inheritable stdin from the protocol pipe; return the stream our
-// own framed reader should keep using.
-public static System.IO.Stream DetachStdin() {
+// Preserve the protocol stream on stdHandle/posixFd, then point the inheritable
+// slot at the null device so spawned children can't touch the protocol channel.
+static System.IO.Stream Detach(int stdHandle, int posixFd, bool forWrite) {
+    var access = forWrite ? System.IO.FileAccess.Write : System.IO.FileAccess.Read;
     if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)) {
         // Wrap the original pipe handle (ownsHandle:false — the process still
-        // owns it), then point the inheritable STDIN slot at NUL.
-        System.IntPtr orig = GetStdHandle(-10);
-        var proto = new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(orig, false), System.IO.FileAccess.Read, 1);
-        System.IntPtr nul = CreateFileW("NUL", 0x80000000u, 0x3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);
-        SetStdHandle(-10, nul);
-        return proto;
+        // owns it), then point the inheritable slot at NUL.
+        System.IntPtr orig = GetStdHandle(stdHandle);
+        var keep = new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(orig, false), access, 1);
+        uint gen = forWrite ? 0x40000000u : 0x80000000u; // GENERIC_WRITE : GENERIC_READ
+        System.IntPtr nul = CreateFileW("NUL", gen, 0x3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);
+        SetStdHandle(stdHandle, nul);
+        return keep;
     }
-    // POSIX: dup the real stdin aside, then swap fd 0 to /dev/null so children
-    // inherit EOF while our reader keeps the pipe on the saved descriptor.
-    int saved = dup(0);
-    int nulFd = open("/dev/null", 0);
-    if (nulFd >= 0) { dup2(nulFd, 0); close(nulFd); }
-    return new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle((System.IntPtr)saved, true), System.IO.FileAccess.Read, 1);
+    // POSIX: dup the real descriptor aside, then swap the fd to /dev/null so
+    // children inherit EOF/discard while our stream keeps the pipe.
+    int saved = dup(posixFd);
+    int nulFd = open("/dev/null", forWrite ? 1 : 0); // O_WRONLY : O_RDONLY
+    if (nulFd >= 0) { dup2(nulFd, posixFd); close(nulFd); }
+    return new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle((System.IntPtr)saved, true), access, 1);
 }
+public static System.IO.Stream DetachStdin()  { return Detach(-10, 0, false); }
+public static System.IO.Stream DetachStdout() { return Detach(-11, 1, true); }
 '@
 
 # ── Binary framing over raw stdio ────────────────────────────────────────────
 $stdin  = [Omp.Stdio]::DetachStdin()
-$stdout = [Console]::OpenStandardOutput()
+$stdout = [Omp.Stdio]::DetachStdout()
 
-# The framed protocol owns the raw stdout stream captured above. User commands
-# (or .NET libraries they load) can still write directly to [Console]::Out —
-# e.g. [Console]::WriteLine(...) — and raw bytes on the protocol channel would
-# desync the frame reader and kill the host. Point Console.Out at a buffer
-# instead; Complete-Exec drains it as ordinary output after each command.
+# DetachStdout guards children that inherit the OS stdout slot, but managed
+# writes to [Console]::Out (e.g. [Console]::WriteLine from a loaded .NET
+# library) still target this process's stdout — the private protocol handle
+# above — and raw bytes there would desync the frame reader and kill the host.
+# Point Console.Out at a buffer instead; Complete-Exec drains it as ordinary
+# output after each command.
 $script:consoleOut = [System.IO.StringWriter]::new()
 [Console]::SetOut($script:consoleOut)
 

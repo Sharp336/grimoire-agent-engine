@@ -35,7 +35,7 @@ use std::{
 use napi::{
 	Env, Error, Result,
 	bindgen_prelude::*,
-	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
@@ -54,6 +54,11 @@ const BOOTSTRAP: &str = include_str!("pshost_bootstrap.ps1");
 
 /// Hard cap on a single inbound frame body, guarding against a desynced stream.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Bound on the reader→JS chunk queue. A slow `on_chunk` consumer backpressures
+/// the sidecar's stdout pipe instead of buffering its whole output in memory
+/// (mirrors `shell`'s bridge queue; see #4078).
+const CHUNK_QUEUE_CHUNKS: usize = 64;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire protocol
@@ -107,7 +112,7 @@ struct DoneInfo {
 
 /// Per-exec routing: streamed chunks + the single completion signal.
 struct Pending {
-	chunk_tx: mpsc::UnboundedSender<String>,
+	chunk_tx: mpsc::Sender<String>,
 	done_tx:  oneshot::Sender<DoneInfo>,
 }
 
@@ -238,7 +243,7 @@ impl HostCore {
 		env: Option<HashMap<String, String>>,
 		width: u32,
 		cancel: task::CancelToken,
-		chunk_tx: mpsc::UnboundedSender<String>,
+		chunk_tx: mpsc::Sender<String>,
 	) -> Result<PsRunResult> {
 		// A run issued before start() would otherwise park on done_rx until the
 		// caller's timeout: nothing consumes req_tx until supervise() spawns.
@@ -559,7 +564,7 @@ impl PsHost {
 		env: &'env Env,
 		options: PsRunOptions<'env>,
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
-		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	) -> Result<PromiseRaw<'env, PsRunResult>> {
 		let cancel = task::CancelToken::new(options.timeout_ms, options.signal);
 		let core = Arc::clone(&self.core);
@@ -571,7 +576,7 @@ impl PsHost {
 		task::future(env, "pshost.run", async move {
 			// Bridge the per-exec chunk stream to the JS callback. Created inside
 			// the runtime context so `spawn_chunk_forwarder` has a reactor.
-			let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
+			let (chunk_tx, chunk_rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
 			let drain = spawn_chunk_forwarder(on_chunk, chunk_rx);
 			let result = core
 				.exec(command, cwd, cmd_env, width, cancel, chunk_tx)
@@ -625,8 +630,8 @@ impl PsHost {
 /// main thread never sees a multi-MB single call (mirrors
 /// `shell::bridge_chunks`).
 fn spawn_chunk_forwarder(
-	on_chunk: Option<ThreadsafeFunction<String>>,
-	mut rx: mpsc::UnboundedReceiver<String>,
+	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
+	mut rx: mpsc::Receiver<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
 	let on_chunk = on_chunk?;
 	Some(tokio::spawn(async move {
@@ -642,7 +647,15 @@ fn spawn_chunk_forwarder(
 				}
 			}
 			let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-			on_chunk.call(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking);
+			// `call_async` resolves only after the JS callback ran, so `run()`
+			// (which awaits this task) cannot resolve until every batch is
+			// delivered — no truncated `sink.dump()` — and at most one batch sits
+			// in the napi queue, so the JS consumption rate backpressures the
+			// bounded channel and the sidecar's stdout pipe. Err means the JS side
+			// is gone (env teardown): stop forwarding.
+			if on_chunk.call_async(Ok(payload)).await.is_err() {
+				break;
+			}
 		}
 	}))
 }
@@ -787,7 +800,7 @@ async fn read_events(stdout: tokio::process::ChildStdout, core: &Arc<HostCore>) 
 					.get(&id)
 					.map(|pending| pending.chunk_tx.clone());
 				if let Some(chunk_tx) = chunk_tx {
-					let _ = chunk_tx.send(text);
+					let _ = chunk_tx.send(text).await;
 				}
 			},
 			HostEvent::Done { id, exit_code, had_errors, stopped } => {
@@ -839,16 +852,23 @@ mod tests {
 		command: &str,
 		cancel: task::CancelToken,
 	) -> (String, super::PsRunResult) {
-		let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<String>();
+		let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		// Drain concurrently: the bounded channel backpressures the sidecar
+		// reader, so draining only after `exec` returns could deadlock a
+		// chunk-heavy command.
+		let collector = tokio::spawn(async move {
+			let mut output = String::new();
+			while let Some(chunk) = chunk_rx.recv().await {
+				output.push_str(&chunk);
+			}
+			output
+		});
 		let result = host
 			.core
 			.exec(command.to_string(), None, None, 200, cancel, chunk_tx)
 			.await
 			.expect("exec returns a result");
-		let mut output = String::new();
-		while let Ok(chunk) = chunk_rx.try_recv() {
-			output.push_str(&chunk);
-		}
+		let output = collector.await.expect("chunk collector joins");
 		(output.trim().to_string(), result)
 	}
 
@@ -914,7 +934,7 @@ mod tests {
 
 		// Invalid cwd fails fast without running the command.
 		let (bad_out, bad_res) = {
-			let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+			let (tx, mut rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
 			let r = host
 				.core
 				.exec(
@@ -967,10 +987,11 @@ mod tests {
 		// (emplace_abort_token: a default token has no abort flag to hook.)
 		let mut cancel = task::CancelToken::default();
 		let aborter = cancel.emplace_abort_token();
-		let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel::<String>();
-		let exec_fut = host
-			.core
-			.exec("Start-Sleep -Seconds 30".to_string(), None, None, 200, cancel, chunk_tx);
+		let (chunk_tx, _chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		let exec_fut =
+			host
+				.core
+				.exec("Start-Sleep -Seconds 30".to_string(), None, None, 200, cancel, chunk_tx);
 		let abort_fut = async {
 			tokio::time::sleep(Duration::from_millis(400)).await;
 			aborter.abort(task::AbortReason::Signal);
@@ -999,7 +1020,7 @@ mod tests {
 
 		// Kill the sidecar from inside the exec: the awaiting run must reject
 		// promptly instead of hanging until an outer timeout.
-		let (chunk_tx, _chunk_rx) = mpsc::unbounded_channel::<String>();
+		let (chunk_tx, _chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
 		let res = host
 			.core
 			.exec(
