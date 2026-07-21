@@ -284,6 +284,19 @@ impl HostCore {
 			self.abandon(id);
 			return Err(err);
 		}
+		// Bound the per-exec stderr forward (below) to content written DURING
+		// this exec's window, not stale content from an idle period between
+		// commands. Without this, a PREVIOUS command's fire-and-forget child
+		// (spawned without waiting for it, e.g. Start-Process without -Wait)
+		// could keep writing to the sidecar's inherited stderr pipe after
+		// that command's own exec already completed and took+cleared the
+		// tail; those idle-period bytes would then sit in stderr_tail until
+		// THIS unrelated exec's completion misattributed them as its own
+		// diagnostic output. A background child racing this exact clear (in
+		// the narrow window between it and the exec's own frames starting)
+		// remains possible but is now a few-millisecond race instead of an
+		// unbounded idle period.
+		self.stderr_tail.lock().clear();
 
 		// `None` signals the host died before completing; every other path
 		// yields a result and falls through to the shared cleanup below.
@@ -689,57 +702,70 @@ fn spawn_chunk_forwarder(
 		const MAX_BATCH_BYTES: usize = 64 * 1024;
 		const INITIAL_BATCH_CAP: usize = 8 * 1024;
 		let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-		while let Some(first) = rx.recv().await {
-			// A single PowerShell frame can be up to ~4M chars (multiple MB —
-			// see Write-Chunk's $sliceChars in pshost_bootstrap.ps1). The
-			// coalescing loop below only bounds how many items get ADDED to an
-			// already-under-budget batch; it never SPLITS an individual
-			// oversized item, so without this an oversized `first` alone would
-			// sail straight through to `call_async` as one multi-MB call,
-			// silently breaking the "JS main thread never sees a multi-MB
-			// single call" contract for exactly the common case (any command
-			// whose total rendered output exceeds one batch).
-			if first.len() > MAX_BATCH_BYTES {
-				// Flush whatever was already pending first, so delivery order
-				// is preserved across the split.
-				if !batch.is_empty() {
-					let pending = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-					if on_chunk.call_async(Ok(pending)).await.is_err() {
-						break;
+		// A single PowerShell frame can be up to ~4M chars (multiple MB — see
+		// Write-Chunk's $sliceChars in pshost_bootstrap.ps1). Every item pulled
+		// here — the first (blocking recv) and every subsequent one coalesced
+		// via non-blocking try_recv — goes through the SAME oversized check
+		// before being appended to `batch`: an earlier version only checked
+		// the first item, so a small chunk followed by a queued multi-MB one
+		// still sailed through unsplit via the coalescing branch, silently
+		// breaking the "JS main thread never sees a multi-MB single call"
+		// contract for exactly the sequence codex flagged (small progress
+		// chunk immediately followed by one large output chunk).
+		'outer: while let Some(first) = rx.recv().await {
+			let mut pending = Some(first);
+			loop {
+				let item = match pending.take() {
+					Some(item) => item,
+					None => match rx.try_recv() {
+						Ok(item) => item,
+						Err(_) => break, // nothing more immediately available
+					},
+				};
+
+				if item.len() > MAX_BATCH_BYTES {
+					// Flush whatever was already pending first, so delivery
+					// order is preserved across the split.
+					if !batch.is_empty() {
+						let flushed =
+							std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+						if on_chunk.call_async(Ok(flushed)).await.is_err() {
+							break 'outer;
+						}
+					}
+					let mut rest = item.as_str();
+					while !rest.is_empty() {
+						let split = floor_char_boundary(rest, MAX_BATCH_BYTES);
+						let (piece, remainder) = rest.split_at(split);
+						if on_chunk.call_async(Ok(piece.to_string())).await.is_err() {
+							break 'outer;
+						}
+						rest = remainder;
+					}
+					continue;
+				}
+
+				if !batch.is_empty() && batch.len() + item.len() > MAX_BATCH_BYTES {
+					let flushed =
+						std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+					if on_chunk.call_async(Ok(flushed)).await.is_err() {
+						break 'outer;
 					}
 				}
-				let mut rest = first.as_str();
-				let mut js_gone = false;
-				while !rest.is_empty() {
-					let split = floor_char_boundary(rest, MAX_BATCH_BYTES);
-					let (piece, remainder) = rest.split_at(split);
-					if on_chunk.call_async(Ok(piece.to_string())).await.is_err() {
-						js_gone = true;
-						break;
-					}
-					rest = remainder;
-				}
-				if js_gone {
+				batch.push_str(&item);
+			}
+			if !batch.is_empty() {
+				let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+				// `call_async` resolves only after the JS callback ran, so
+				// `run()` (which awaits this task) cannot resolve until every
+				// batch is delivered — no truncated `sink.dump()` — and at
+				// most one batch sits in the napi queue, so the JS
+				// consumption rate backpressures the bounded channel and the
+				// sidecar's stdout pipe. Err means the JS side is gone (env
+				// teardown): stop forwarding.
+				if on_chunk.call_async(Ok(payload)).await.is_err() {
 					break;
 				}
-				continue;
-			}
-			batch.push_str(&first);
-			while batch.len() < MAX_BATCH_BYTES {
-				match rx.try_recv() {
-					Ok(more) => batch.push_str(&more),
-					Err(_) => break,
-				}
-			}
-			let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-			// `call_async` resolves only after the JS callback ran, so `run()`
-			// (which awaits this task) cannot resolve until every batch is
-			// delivered — no truncated `sink.dump()` — and at most one batch sits
-			// in the napi queue, so the JS consumption rate backpressures the
-			// bounded channel and the sidecar's stdout pipe. Err means the JS side
-			// is gone (env teardown): stop forwarding.
-			if on_chunk.call_async(Ok(payload)).await.is_err() {
-				break;
 			}
 		}
 	})
@@ -1011,6 +1037,53 @@ mod tests {
 
 		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
 		assert!(drained.is_ok(), "forwarder task must exit once the channel closes");
+	}
+
+	/// A previous command's fire-and-forget child (started without waiting
+	/// for it) can keep writing to the sidecar's inherited stderr pipe AFTER
+	/// that command's own exec has already completed and taken+cleared the
+	/// tail. Reproduces the finding's exact complaint: those idle-period
+	/// bytes must NOT surface as a LATER, unrelated exec's diagnostic output.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn idle_period_stderr_does_not_leak_into_a_later_exec() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Fire-and-forget a child that sleeps, THEN writes to its inherited
+		// stderr -- guaranteed to write well after this command's own exec
+		// (which does not wait for it) has already completed.
+		let child_args = if cfg!(windows) {
+			"'cmd.exe'; '/c ping -n 2 127.0.0.1 >nul & echo idle-stderr-marker 1>&2'"
+		} else {
+			"'/bin/sh'; '-c'; 'sleep 0.6; echo idle-stderr-marker >&2'"
+		};
+		let spawn_cmd = format!(
+			"$args = @({child_args}); $psi = New-Object System.Diagnostics.ProcessStartInfo; \
+			 $psi.FileName = $args[0]; if ($args.Count -gt 2) {{ $psi.ArgumentList.Add($args[1]); \
+			 $psi.ArgumentList.Add($args[2]) }} else {{ $psi.Arguments = $args[1] }}; \
+			 $psi.UseShellExecute = $false; $psi.RedirectStandardError = $false; \
+			 [void][System.Diagnostics.Process]::Start($psi); 'spawner-done'"
+		);
+		let (out, _) = run_cmd(&host, &spawn_cmd, task::CancelToken::default()).await;
+		assert!(out.contains("spawner-done"), "spawner returns without waiting: {out:?}");
+		assert!(!out.contains("idle-stderr-marker"), "child hasn't written yet: {out:?}");
+
+		// Genuinely idle: no exec running while the child sleeps, then writes.
+		tokio::time::sleep(Duration::from_millis(1400)).await;
+
+		let (out2, _) = run_cmd(&host, "'unrelated-command'", task::CancelToken::default()).await;
+		assert!(out2.contains("unrelated-command"), "unrelated exec's own output present: {out2:?}");
+		assert!(
+			!out2.contains("idle-stderr-marker"),
+			"a later exec must not inherit a previous command's idle-period stderr: {out2:?}"
+		);
+
+		host.dispose().await.expect("host disposes");
 	}
 
 	/// `floor_char_boundary` must never slice through a multi-byte UTF-8
