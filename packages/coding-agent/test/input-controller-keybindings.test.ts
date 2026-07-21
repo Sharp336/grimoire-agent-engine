@@ -768,7 +768,7 @@ describe("InputController keybinding setup", () => {
 	});
 
 	it("uses the eligible visible consultation answer in the parent only with Alt+Enter", async () => {
-		const { InputController, ctx, setConsultComposerActive, spies } = await createContext();
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
 		setConsultComposerActive(true);
 		const controller = new InputController(ctx);
 
@@ -778,6 +778,11 @@ describe("InputController keybinding setup", () => {
 		expect(spies.askMainAboutConsultationAnswer).not.toHaveBeenCalled();
 
 		spies.canAskMainAboutConsultationAnswer.mockReturnValue(true);
+		editor.setText("follow-up draft");
+		expect(dispatchInput(listeners, "\x1b[13;3u")).toBeUndefined();
+		expect(spies.askMainAboutConsultationAnswer).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("follow-up draft");
+		editor.setText("");
 		expect(dispatchInput(listeners, "\x1b[13;3u")).toEqual({ consume: true });
 		expect(spies.askMainAboutConsultationAnswer).toHaveBeenCalledTimes(1);
 	});

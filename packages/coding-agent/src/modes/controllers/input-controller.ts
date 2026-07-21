@@ -316,7 +316,11 @@ export class InputController {
 					this.ctx.scrollConsultAnswerToEnd();
 					return { consume: true };
 				}
-				if (matchesKey(data, "alt+enter") && this.ctx.canAskMainAboutConsultationAnswer()) {
+				if (
+					matchesKey(data, "alt+enter") &&
+					this.ctx.editor.getText().length === 0 &&
+					this.ctx.canAskMainAboutConsultationAnswer()
+				) {
 					void this.ctx.askMainAboutConsultationAnswer();
 					return { consume: true };
 				}

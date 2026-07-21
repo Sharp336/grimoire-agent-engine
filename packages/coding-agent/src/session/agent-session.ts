@@ -2406,6 +2406,9 @@ export class AgentSession {
 		}
 		const manager = this.sessionManager;
 		const parentSessionFile = manager.getSessionFile();
+		if (!manager.isPersistent()) {
+			throw new Error("Committed child sessions require a persisted parent session");
+		}
 		const hasPersistedParent = manager.hasPersistedSessionFile();
 		if (!hasPersistedParent && !options?.materializeParent) {
 			throw new Error("Committed child sessions require a persisted parent session");

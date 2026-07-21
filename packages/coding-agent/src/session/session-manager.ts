@@ -1742,6 +1742,11 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	/** Whether this manager can durably materialize its assigned session path. */
+	isPersistent(): boolean {
+		return this.#persist;
+	}
+
 	/** Whether the manager currently has a durable session header on its assigned path. */
 	hasPersistedSessionFile(): boolean {
 		return this.#persist && this.#fileIsCurrent && !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);

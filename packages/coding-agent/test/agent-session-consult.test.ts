@@ -356,6 +356,7 @@ describe("AgentSession durable consultation side turn", () => {
 
 	it("keeps /consult unavailable without a model and does not materialize its lazy parent", async () => {
 		using temp = TempDir.createSync("@omp-consult-no-model-");
+
 		const parentManager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));
 		const parentFile = parentManager.getSessionFile();
 		if (!parentFile) throw new Error("expected lazy parent session file");
@@ -389,6 +390,22 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(captureSnapshot).toHaveBeenCalledTimes(1);
 		expect(createChild).not.toHaveBeenCalled();
 		expect(await Bun.file(parentFile).exists()).toBe(false);
+	});
+
+	it("refuses to advertise durable children for intentionally non-persistent parents", async () => {
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: model("consult-model"), systemPrompt: ["system"], messages: [], tools: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { resolver: vi.fn(() => async () => "key") } as never,
+		});
+		sessions.push(session);
+
+		await expect(
+			session.createCommittedChildSession("__consult.no-session", { materializeParent: true }),
+		).rejects.toThrow("Committed child sessions require a persisted parent session");
 	});
 
 	it("generates consultation titles through an isolated tool-free request without changing parent usage state", async () => {
