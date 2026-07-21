@@ -4,11 +4,12 @@ import type { PsHost, PsRunResult } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $which, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import powershellDescription from "../prompts/tools/powershell.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
-import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
+import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import {
@@ -20,10 +21,12 @@ import {
 } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { acquirePsHost, disposePsHostSession, spawnEphemeralPsHost } from "./pshost-manager";
-import { capPreviewLines, replaceTabs } from "./render-utils";
+import { capPreviewLines, DEFAULT_TERMINAL_PREVIEW_LINES, previewWindowRows, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
+
+export const POWERSHELL_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const powershellSchema = type({
 	command: type("string").describe("PowerShell command to run in the persistent session"),
@@ -245,12 +248,12 @@ function powershellTitle(args?: PowerShellRenderArgs): string {
 }
 
 interface PowerShellRenderContext {
-	/** Visual lines for truncated output (pre-computed by tool-execution) */
-	visualLines?: string[];
-	/** Number of lines skipped */
-	skippedCount?: number;
-	/** Total visual lines */
-	totalVisualLines?: number;
+	/** Sanitized output override supplied by tool-execution's render context. */
+	output?: string;
+	/** Expanded state managed by tool-execution. */
+	expanded?: boolean;
+	/** Number of preview lines when collapsed. */
+	previewLines?: number;
 }
 
 function formatPowerShellCommandLines(command: string, uiTheme: Theme): string[] {
@@ -301,18 +304,15 @@ export const powershellToolRenderer = {
 		const state = isPartial ? ("pending" as const) : isError ? ("error" as const) : ("success" as const);
 		const header = renderStatusLine({ icon: state, title: powershellTitle(args), description: "" }, uiTheme);
 		const cmdLines = formatPowerShellCommandLines(command, uiTheme);
-		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
 		const outputBlock = new CachedOutputBlock();
 
-		const output = stripOutputNotice(textContent, details?.meta).trimEnd();
-
-		// Per-instance cache for the inner-lines computation, mirroring bash.ts
-		// (issue #2081): without it every TUI repaint re-runs split/replaceTabs/
-		// styling over the full stored output for every row in scrollback. Keyed
-		// by the inputs that change the produced lines; width is not one of them
-		// (wrapping happens inside the output block, which caches per width).
+		// Width-aware tail truncation -> cache keyed like bash.ts (issue #2081):
+		// TUI repaints must not re-run split/replaceTabs/styling over the full
+		// stored output, and the collapsed window depends on the render width.
+		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
-		let cachedVisual: readonly string[] | undefined;
+		let cachedPreviewLines: number | undefined;
+		let cachedRawOutput: string | undefined;
 		let cachedLines: string[] | undefined;
 
 		const renderFrame = (width: number, expanded: boolean | undefined, outputLines: string[]): readonly string[] =>
@@ -331,42 +331,54 @@ export const powershellToolRenderer = {
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
-				const { expanded, renderContext } = options;
-				const visual = renderContext?.visualLines;
-				if (cachedLines && cachedExpanded === expanded && cachedVisual === visual) {
+				// REACTIVE: read mutable options at render time (mirrors bash.ts).
+				const renderContext = options.renderContext;
+				const expanded = renderContext?.expanded ?? options.expanded;
+				const previewLines = renderContext?.previewLines ?? POWERSHELL_DEFAULT_PREVIEW_LINES;
+				const rawOutput = renderContext?.output ?? result.content?.find(c => c.type === "text")?.text ?? "";
+
+				if (
+					cachedLines !== undefined &&
+					cachedWidth === width &&
+					cachedExpanded === expanded &&
+					cachedPreviewLines === previewLines &&
+					cachedRawOutput === rawOutput
+				) {
 					return renderFrame(width, expanded, cachedLines);
 				}
-				const outputLines: string[] = [];
 
+				const output = stripOutputNotice(rawOutput, details?.meta).trimEnd();
+				const outputLines: string[] = [];
 				if (output) {
+					// Warning/error chunks arrive pre-colored by the host's SGR
+					// labeling (see Format-AnsiText in pshost_bootstrap.ps1);
+					// re-tinting them would clobber that color.
+					const styledLines = output
+						.split("\n")
+						.map(line =>
+							line.includes("\x1b[") ? replaceTabs(line) : uiTheme.fg("toolOutput", replaceTabs(line)),
+						);
 					if (expanded) {
-						outputLines.push(...output.split("\n").map(line => uiTheme.fg("toolOutput", replaceTabs(line))));
-					} else if (renderContext?.visualLines) {
-						const { visualLines, skippedCount = 0, totalVisualLines = visualLines.length } = renderContext;
-						if (skippedCount > 0) {
+						outputLines.push(...styledLines);
+					} else {
+						// Collapsed/streaming preview shows a viewport-capped TAIL
+						// window (matching bash), so long-running output tracks
+						// current progress instead of pinning the first lines.
+						const previewBudget = Math.min(previewLines, previewWindowRows());
+						const window = truncateToVisualLines(
+							styledLines.join("\n"),
+							previewBudget,
+							outputBlockContentWidth(width),
+						);
+						if (window.skippedCount > 0) {
 							outputLines.push(
 								uiTheme.fg(
 									"dim",
-									`… (${skippedCount} earlier lines, showing ${visualLines.length} of ${totalVisualLines}) (ctrl+o to expand)`,
+									`… (${window.skippedCount} earlier lines, showing ${window.visualLines.length} of ${window.skippedCount + window.visualLines.length}) (ctrl+o to expand)`,
 								),
 							);
 						}
-						// Warning/error chunks arrive pre-colored by the host's SGR
-						// labeling (see Format-AnsiText in pshost_bootstrap.ps1);
-						// re-tinting them would clobber that color.
-						const styledVisual = visualLines.map(line =>
-							line.includes("\x1b[") ? replaceTabs(line) : uiTheme.fg("toolOutput", replaceTabs(line)),
-						);
-						outputLines.push(...styledVisual);
-					} else {
-						const outputLinesRaw = output.split("\n");
-						const maxLines = 5;
-						const displayLines = outputLinesRaw.slice(0, maxLines);
-						const remaining = outputLinesRaw.length - maxLines;
-						outputLines.push(...displayLines.map(line => uiTheme.fg("toolOutput", replaceTabs(line))));
-						if (remaining > 0) {
-							outputLines.push(uiTheme.fg("dim", `… (${remaining} more lines) (ctrl+o to expand)`));
-						}
+						outputLines.push(...window.visualLines);
 					}
 				}
 
@@ -375,8 +387,10 @@ export const powershellToolRenderer = {
 					if (warning) outputLines.push(warning);
 				}
 
+				cachedWidth = width;
 				cachedExpanded = expanded;
-				cachedVisual = visual;
+				cachedPreviewLines = previewLines;
+				cachedRawOutput = rawOutput;
 				cachedLines = outputLines;
 				return renderFrame(width, expanded, outputLines);
 			},

@@ -242,3 +242,27 @@ test("renderer tags non-default host modes and renders the output", async () => 
 	expect(sessionPlain).toContain("PowerShell");
 	expect(sessionPlain).not.toContain("PowerShell ·");
 });
+
+test("collapsed preview shows the output TAIL, not the first lines", async () => {
+	const theme = await getThemeByName("dark");
+	expect(theme).toBeDefined();
+	if (!theme) return;
+
+	// 30 lines, collapsed: the preview must window the END of the output (a
+	// long-running command's current progress), with a skipped-lines banner —
+	// not pin the first N lines forever.
+	const lines = Array.from({ length: 30 }, (_, i) => `row-${String(i + 1).padStart(2, "0")}`);
+	const component = powershellToolRenderer.renderResult(
+		{ content: [{ type: "text", text: lines.join("\n") }], details: { host: "session" } as PowerShellToolDetails },
+		{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
+		theme,
+		{ command: "1..30 | ForEach-Object { \"row-$_\" }" },
+	);
+	const plain = component
+		.render(80)
+		.join("\n")
+		.replace(/\x1b\[[0-9;]*m/g, "");
+	expect(plain).toContain("row-30");
+	expect(plain).not.toContain("row-05");
+	expect(plain).toMatch(/earlier lines/);
+});
