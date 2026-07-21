@@ -281,33 +281,36 @@ async function registerPersistedTranscriptsFromDir(
 		if (consultationId) {
 			const sessionEntries = await loadEntriesFromFile(sessionFile).catch(() => []);
 			const thread = consultationThreadMetadata(sessionEntries, consultationId);
-			if (!thread) continue;
-			const turnStates = consultationTurnStates(sessionEntries, consultationId);
-			const latestTurn = latestTerminalConsultationTurn(sessionEntries, consultationId);
-			const currentTurn = turnStates[turnStates.length - 1];
-			const title = consultationThreadTitlePresentation(sessionEntries, consultationId);
-			registerPersistedConsultation(registry, {
-				ownerId,
-				consultationId,
-				sessionFile,
-				state: {
-					thread,
-					generatedTitle: title.generatedTitle,
-					displayTitle: title.displayTitle,
-					latestTurn,
-					currentStatus: currentTurn?.terminal?.status ?? currentTurn?.turn.status ?? "running",
-				},
-			});
-			const ownerSession = registry.get(ownerId)?.session;
-			if (!title.generatedTitle && ownerSession) {
-				void retryPersistedConsultationTitle(registry, {
+			if (!thread) {
+				if (!options.includeAgents) continue;
+			} else {
+				const turnStates = consultationTurnStates(sessionEntries, consultationId);
+				const latestTurn = latestTerminalConsultationTurn(sessionEntries, consultationId);
+				const currentTurn = turnStates[turnStates.length - 1];
+				const title = consultationThreadTitlePresentation(sessionEntries, consultationId);
+				registerPersistedConsultation(registry, {
 					ownerId,
 					consultationId,
 					sessionFile,
-					session: ownerSession,
+					state: {
+						thread,
+						generatedTitle: title.generatedTitle,
+						displayTitle: title.displayTitle,
+						latestTurn,
+						currentStatus: currentTurn?.terminal?.status ?? currentTurn?.turn.status ?? "running",
+					},
 				});
+				const ownerSession = registry.get(ownerId)?.session;
+				if (!title.generatedTitle && ownerSession) {
+					void retryPersistedConsultationTitle(registry, {
+						ownerId,
+						consultationId,
+						sessionFile,
+						session: ownerSession,
+					});
+				}
+				continue;
 			}
-			continue;
 		}
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only

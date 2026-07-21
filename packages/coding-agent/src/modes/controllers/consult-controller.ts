@@ -678,16 +678,14 @@ export class ConsultController {
 		return sessionFile?.endsWith(".jsonl") ? path.resolve(sessionFile.slice(0, -".jsonl".length)) : undefined;
 	}
 	async #serializeSwitch<T>(operation: () => Promise<T>): Promise<T> {
-		let release: (() => void) | undefined;
+		const { promise, resolve: release } = Promise.withResolvers<void>();
 		const previous = this.#switchBarrier;
-		this.#switchBarrier = new Promise<void>(resolve => {
-			release = resolve;
-		});
+		this.#switchBarrier = promise;
 		await previous;
 		try {
 			return await operation();
 		} finally {
-			release?.();
+			release();
 		}
 	}
 

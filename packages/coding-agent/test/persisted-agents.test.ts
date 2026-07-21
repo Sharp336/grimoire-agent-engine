@@ -214,6 +214,26 @@ describe("persisted consultation discovery", () => {
 		expect(registry.get("Main/consult:foreign")).toBeUndefined();
 	});
 
+	it("keeps a parked subagent whose name resembles a consultation transcript", async () => {
+		using temp = TempDir.createSync("@omp-consult-reserved-name-");
+		const parentFile = path.join(temp.path(), "parent.jsonl");
+		const artifacts = parentFile.slice(0, -6);
+		await fs.mkdir(artifacts, { recursive: true });
+		await Bun.write(parentFile, sessionContent("parent", []));
+		await Bun.write(path.join(artifacts, "__consult.named.jsonl"), sessionContent("__consult.named", []));
+
+		const registry = new AgentRegistry();
+		await registerPersistedSubagents(registry, parentFile);
+
+		expect(registry.get("__consult.named")).toMatchObject({
+			displayName: "__consult.named",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+		});
+		expect(registry.get("Main/consult:named")).toBeUndefined();
+	});
+
 	it("keeps a copied legacy question as fallback display while its failed canonical title remains retryable", async () => {
 		using temp = TempDir.createSync("@omp-consult-legacy-title-");
 		const parentFile = path.join(temp.path(), "parent.jsonl");

@@ -2425,10 +2425,8 @@ export class AgentSession {
 		const materializedPromptCacheKey = this.agent.promptCacheKey ?? this.agent.sessionId;
 
 		const prior = this.#sessionIdentityBarrier;
-		let release!: () => void;
-		this.#sessionIdentityBarrier = new Promise<void>(resolve => {
-			release = resolve;
-		});
+		const { promise, resolve: release } = Promise.withResolvers<void>();
+		this.#sessionIdentityBarrier = promise;
 		await prior;
 		try {
 			let sourceSessionFile = parentSessionFile;
