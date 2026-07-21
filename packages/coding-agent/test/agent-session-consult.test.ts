@@ -28,6 +28,7 @@ import {
 	consultationThreadTitleState,
 	consultationTurnStates,
 	fallbackConsultationTitle,
+	latestConsultationAnswer,
 	replayCompletedConsultationMessages,
 } from "@oh-my-pi/pi-coding-agent/session/consultation";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -520,6 +521,18 @@ describe("AgentSession durable consultation side turn", () => {
 		];
 
 		expect(replayCompletedConsultationMessages(entries, "thread-1")).toEqual([completedQuestion, completedAnswer]);
+		expect(latestConsultationAnswer(entries.slice(0, 5), "thread-1")).toBe("completed answer");
+		expect(latestConsultationAnswer(entries, "thread-1")).toBeUndefined();
+		const partialEntries = [
+			...entries.slice(0, -1),
+			turn("cancelled-terminal-partial", {
+				...cancelledRunning,
+				status: "cancelled" as const,
+				finishedAt: 4,
+				partialAnswer: "saved cancelled partial",
+			}),
+		];
+		expect(latestConsultationAnswer(partialEntries, "thread-1")).toBe("saved cancelled partial");
 	});
 	it("keeps a failed title as display-only fallback, then retries canonically after persisted discovery", async () => {
 		AgentRegistry.resetGlobalForTests();

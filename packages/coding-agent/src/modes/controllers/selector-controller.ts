@@ -49,9 +49,8 @@ import {
 	consultationTurnStates,
 	fallbackConsultationTitle,
 	formatConsultationDisplayName,
-	replayCompletedConsultationMessages,
+	latestConsultationAnswer,
 } from "../../session/consultation";
-import type { FileEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
@@ -116,21 +115,6 @@ interface ConsultationSelectorEntry {
 	lastActivity: number;
 	turnCount: number;
 	latestAnswer: string | undefined;
-}
-
-function consultationAnswer(entries: readonly FileEntry[], consultationId: string): string | undefined {
-	const latest = consultationTurnStates(entries, consultationId).at(-1);
-	if (latest?.terminal?.partialAnswer?.trim()) return latest.terminal.partialAnswer.trim();
-	for (const message of [...replayCompletedConsultationMessages(entries, consultationId)].reverse()) {
-		if (message.role !== "assistant") continue;
-		const answer = message.content
-			.filter(content => content.type === "text")
-			.map(content => content.text)
-			.join("")
-			.trim();
-		if (answer) return answer;
-	}
-	return undefined;
 }
 
 function formatConsultationAge(timestamp: number): string {
@@ -1915,7 +1899,7 @@ export class SelectorController {
 							status: terminal?.status ?? latest.turn.status,
 							lastActivity: terminal?.finishedAt ?? latest.turn.startedAt ?? ref.lastActivity,
 							turnCount: turns.length,
-							latestAnswer: consultationAnswer(sessionEntries, consultationId),
+							latestAnswer: latestConsultationAnswer(sessionEntries, consultationId),
 						} satisfies ConsultationSelectorEntry;
 					}),
 			)

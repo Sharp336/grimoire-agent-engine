@@ -19,9 +19,9 @@ import * as path from "node:path";
  */
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry, isReadOnlyAgentKind } from "../registry/agent-registry";
-import { parseConsultationTranscriptName } from "../session/consultation";
+import { consultationThreadMetadata, parseConsultationTranscriptName } from "../session/consultation";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
-import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { loadEntriesFromFile, loadSessionMessagesReadOnly } from "../session/session-loader";
 import { sessionFilesFromDisk } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
@@ -126,13 +126,20 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * Load a transcript for `agentId` from an on-disk `.jsonl` session file,
 	 * matched case-insensitively. Returns `undefined` when no file is found.
 	 */
+	async #isConsultationTranscript(sessionFile: string): Promise<boolean> {
+		const consultationId = parseConsultationTranscriptName(path.basename(sessionFile));
+		if (!consultationId) return false;
+		const entries = await loadEntriesFromFile(sessionFile).catch(() => []);
+		return consultationThreadMetadata(entries, consultationId) !== undefined;
+	}
+
 	async #resolveFromDisk(agentId: string): Promise<InternalResource | undefined> {
 		const files = await sessionFilesFromDisk();
 		const lower = agentId.toLowerCase();
 		let matchedId: string | undefined;
 		let sessionFile: string | undefined;
 		for (const [id, file] of files) {
-			if (parseConsultationTranscriptName(path.basename(file))) continue;
+			if (await this.#isConsultationTranscript(file)) continue;
 			if (id === agentId || id.toLowerCase() === lower) {
 				matchedId = id;
 				sessionFile = file;
@@ -165,7 +172,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const disk = await sessionFilesFromDisk();
 		for (const id of disk.keys()) {
 			const file = disk.get(id);
-			if (file && parseConsultationTranscriptName(path.basename(file))) continue;
+			if (file && (await this.#isConsultationTranscript(file))) continue;
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
 		}
@@ -197,7 +204,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const disk = await sessionFilesFromDisk();
 		for (const id of disk.keys()) {
 			const file = disk.get(id);
-			if (file && parseConsultationTranscriptName(path.basename(file))) continue;
+			if (file && (await this.#isConsultationTranscript(file))) continue;
 			if (seen.has(id)) continue;
 			seen.add(id);
 			completions.push({ value: id, description: "on disk" });

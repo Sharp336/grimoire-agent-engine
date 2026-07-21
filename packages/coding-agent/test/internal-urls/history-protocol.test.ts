@@ -322,6 +322,35 @@ describe("history:// protocol", () => {
 		});
 	});
 
+	it("keeps an unregistered subagent with a consultation-like filename visible from disk", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "session.jsonl");
+			const artifactsDir = sessionFile.slice(0, -6);
+			await fs.mkdir(artifactsDir, { recursive: true });
+			const reservedLookingFile = path.join(artifactsDir, "__consult.named.jsonl");
+			await Bun.write(reservedLookingFile, sessionFixtureJsonl());
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: {
+					messages: [],
+					sessionManager: { getArtifactsDir: () => artifactsDir },
+				} as unknown as AgentSession,
+				sessionFile,
+				status: "idle",
+			});
+
+			const resource = await InternalUrlRouter.instance().resolve("history://__consult.named");
+			expect(resource.content).toContain("# __consult.named (on disk)");
+			expect(resource.sourcePath).toBe(reservedLookingFile);
+			const index = await InternalUrlRouter.instance().resolve("history://");
+			expect(index.content).toContain("| __consult.named | on disk |");
+			const completions = await new HistoryProtocolHandler().complete();
+			expect(completions.map(entry => entry.value)).toContain("__consult.named");
+		});
+	});
+
 	it("resolves an on-disk-only transcript case-insensitively", async () => {
 		await withTempDir(async dir => {
 			const sessionFile = path.join(dir, "session.jsonl");

@@ -501,6 +501,27 @@ export function replayCompletedConsultationMessages(
 	return Object.freeze(replay);
 }
 
+/**
+ * Return only the latest turn's answer. A failed, cancelled, or running latest
+ * turn without a saved partial answer must not fall back to an older turn.
+ */
+export function latestConsultationAnswer(entries: readonly FileEntry[], consultationId: string): string | undefined {
+	const latest = consultationTurnStates(entries, consultationId).at(-1);
+	const partialAnswer = latest?.terminal?.partialAnswer?.trim();
+	if (partialAnswer) return partialAnswer;
+	if (latest?.terminal?.status !== "completed") return undefined;
+	for (const message of [...replayCompletedConsultationMessages(entries, consultationId)].reverse()) {
+		if (message.role !== "assistant") continue;
+		const answer = message.content
+			.filter(content => content.type === "text")
+			.map(content => content.text)
+			.join("")
+			.trim();
+		if (answer) return answer;
+	}
+	return undefined;
+}
+
 export function consultationTranscriptStem(id: string): string {
 	if (!FILE_SAFE_ID.test(id)) throw new Error("Invalid consultation id");
 	return `${CONSULTATION_TRANSCRIPT_STEM}.${id}`;
