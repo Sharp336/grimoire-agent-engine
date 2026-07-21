@@ -124,6 +124,29 @@ describe("refreshQoderToken", () => {
 		expect(requests[0]?.init?.body).toBe(JSON.stringify({ refresh_token: "old-refresh" }));
 	});
 
+	it("bounds an in-flight refresh request", async () => {
+		const timeoutController = new AbortController();
+		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+		const response = Promise.withResolvers<Response>();
+		let requestSignal: AbortSignal | undefined;
+		const fetchMock: FetchImpl = (_input, init) => {
+			requestSignal = init?.signal ?? undefined;
+			requestSignal?.addEventListener("abort", () => response.reject(requestSignal?.reason), { once: true });
+			return response.promise;
+		};
+		const result = refreshQoderToken("old-refresh", fetchMock).then(
+			() => null,
+			error => error,
+		);
+
+		try {
+			expect(requestSignal).toBe(timeoutController.signal);
+			expect(timeout).toHaveBeenCalledWith(20_000);
+		} finally {
+			timeoutController.abort(new DOMException("timed out", "TimeoutError"));
+		}
+		await expect(result).resolves.toMatchObject({ name: "TimeoutError" });
+	});
 	it("rejects an empty access token returned by refresh", async () => {
 		const fetchMock: FetchImpl = async () => jsonResponse({ token: "" });
 
