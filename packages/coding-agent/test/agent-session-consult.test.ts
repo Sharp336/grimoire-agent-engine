@@ -20,6 +20,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession, type CommittedSessionFork } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	CONSULTATION_STATUS_MESSAGE_TYPE,
 	CONSULTATION_THREAD_CUSTOM_TYPE,
 	CONSULTATION_TITLE_CUSTOM_TYPE,
 	CONSULTATION_TURN_CUSTOM_TYPE,
@@ -1329,6 +1330,9 @@ describe("AgentSession durable consultation side turn", () => {
 					timestamp: "2026-07-20T00:00:00.000Z",
 					message,
 				});
+				if (message.role === "custom" && typeof message.content === "string") {
+					events.push(`status:${message.content}`);
+				}
 				return `message-${serial}`;
 			},
 			appendCustomEntry: (customType: string, data?: unknown) => {
@@ -1520,6 +1524,15 @@ describe("AgentSession durable consultation side turn", () => {
 			partialAnswer: "partial answer",
 		});
 		expect(events).toContain("status:partial answer\n\n[Consultation cancelled.]");
+		expect(
+			entries.some(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "custom" &&
+					entry.message.customType === CONSULTATION_STATUS_MESSAGE_TYPE &&
+					entry.message.content === "partial answer\n\n[Consultation cancelled.]",
+			),
+		).toBe(true);
 		expect(events.indexOf("turn:cancelled")).toBeLessThan(events.indexOf("flush"));
 		expect(events.indexOf("flush")).toBeLessThan(events.indexOf("close"));
 		expect(events.indexOf("close")).toBeLessThan(events.indexOf("composer:other"));

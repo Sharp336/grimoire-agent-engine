@@ -11,7 +11,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, prompt, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -40,6 +40,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
+import liveForkTaskPrompt from "../../prompts/system/live-fork-task.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AsyncJobSnapshotItem, CommittedSessionFork } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
@@ -987,7 +988,7 @@ export class CommandController {
 				child = await session.createCommittedChildSession(id, { materializeParent: true });
 				child.manager.appendSessionInit({
 					systemPrompt: systemPrompt.join("\n\n"),
-					task: "Continue the forked session from its committed boundary.",
+					task: prompt.render(liveForkTaskPrompt, {}),
 					tools,
 					spawns: "",
 					readSummarize,

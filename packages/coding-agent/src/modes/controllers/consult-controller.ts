@@ -899,7 +899,13 @@ export class ConsultController {
 				const states = consultationTurnStates(manager.getEntries(), request.consultationId);
 				const running = states.at(-1)?.turn;
 				if (running) {
-					manager.appendCustomMessageEntry(CONSULTATION_STATUS_MESSAGE_TYPE, visible, true);
+					manager.appendMessage({
+						role: "custom",
+						customType: CONSULTATION_STATUS_MESSAGE_TYPE,
+						content: visible,
+						display: true,
+						timestamp: Date.now(),
+					});
 					manager.appendCustomEntry(CONSULTATION_TURN_CUSTOM_TYPE, {
 						...running,
 						status: cancelled ? "cancelled" : "failed",
