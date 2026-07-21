@@ -221,6 +221,7 @@
 - Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
+- Added an opt-in evidence-aware packer for large generic tool results that keeps exact source ranges and preserves the full raw output as a recoverable artifact.
 
 ## [17.0.7] - 2026-07-21
 
