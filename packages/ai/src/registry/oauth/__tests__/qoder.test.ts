@@ -67,6 +67,41 @@ describe("loginQoder", () => {
 		expect(requests.map(request => request.init?.method)).toEqual(["GET", "GET"]);
 		expect(credentials).toEqual({ access: "access-token", refresh: "refresh-token", expires: now + 3_540_000 });
 	});
+
+	it("bounds an in-flight poll request and maps its timeout", async () => {
+		const timeoutController = new AbortController();
+		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+		const response = Promise.withResolvers<Response>();
+		let requestSignal: AbortSignal | undefined;
+		const fetchMock: FetchImpl = (_input, init) => {
+			requestSignal = init?.signal ?? undefined;
+			requestSignal?.addEventListener("abort", () => response.reject(requestSignal?.reason), { once: true });
+			return response.promise;
+		};
+
+		const result = loginQoder({ fetch: fetchMock }).then(
+			() => null,
+			error => error,
+		);
+		expect(requestSignal).toBe(timeoutController.signal);
+		expect(timeout).toHaveBeenCalledWith(20_000);
+		timeoutController.abort(new DOMException("timed out", "TimeoutError"));
+		await expect(result).resolves.toMatchObject({
+			name: "OAuthError",
+			kind: "polling",
+			provider: "qoder",
+		});
+	});
+
+	it("maps in-flight poll cancellation to a login cancellation", async () => {
+		const controller = new AbortController();
+		const fetchMock: FetchImpl = async () => {
+			controller.abort();
+			throw new DOMException("aborted", "AbortError");
+		};
+
+		await expect(loginQoder({ fetch: fetchMock, signal: controller.signal })).rejects.toThrow("Login cancelled");
+	});
 });
 
 describe("refreshQoderToken", () => {

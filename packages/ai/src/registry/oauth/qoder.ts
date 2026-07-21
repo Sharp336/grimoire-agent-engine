@@ -10,6 +10,7 @@ const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
 const WEB_BASE = process.env.QODER_WEB_BASE?.trim() || "https://qoder.com";
 const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
 const SKEW_MS = 60_000;
+const TOKEN_REQUEST_TIMEOUT_MS = 20_000;
 
 const b64url = (buffer: Buffer) => buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -57,11 +58,21 @@ export async function loginQoder(ctrl: OAuthController): Promise<OAuthCredential
 		expiresInSeconds: 300,
 		signal: ctrl.signal,
 		poll: async () => {
-			const response = await fetchImpl(pollUrl, {
-				method: "GET",
-				headers: { Accept: "application/json" },
-				signal: ctrl.signal,
-			});
+			let response: Response;
+			try {
+				const timeoutSignal = AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS);
+				response = await fetchImpl(pollUrl, {
+					method: "GET",
+					headers: { Accept: "application/json" },
+					signal: ctrl.signal ? AbortSignal.any([ctrl.signal, timeoutSignal]) : timeoutSignal,
+				});
+			} catch (cause) {
+				if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+				throw new AIError.OAuthError(
+					`Qoder login polling failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+					{ kind: "polling", provider: "qoder", cause },
+				);
+			}
 			if (response.status === 404) return { status: "pending" } as const;
 			if (!response.ok) return { status: "failed", message: `Qoder login failed (${response.status})` } as const;
 
