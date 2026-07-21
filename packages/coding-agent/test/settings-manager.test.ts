@@ -139,6 +139,20 @@ describe("Settings", () => {
 			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
 		});
 
+		it("defaults preserve-scrollback to auto and accepts all three modes", () => {
+			const isolated = Settings.isolated();
+			expect(isolated.get("terminal.preserveScrollback")).toBe("auto");
+			expect(getDefault("terminal.preserveScrollback")).toBe("auto");
+			expect(getEnumValues("terminal.preserveScrollback")).toEqual(["auto", "always", "never"]);
+
+			isolated.set("terminal.preserveScrollback", "always");
+			expect(isolated.get("terminal.preserveScrollback")).toBe("always");
+			isolated.set("terminal.preserveScrollback", "never");
+			expect(isolated.get("terminal.preserveScrollback")).toBe("never");
+			isolated.set("terminal.preserveScrollback", "auto");
+			expect(isolated.get("terminal.preserveScrollback")).toBe("auto");
+		});
+
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
 			expect(values).toEqual([

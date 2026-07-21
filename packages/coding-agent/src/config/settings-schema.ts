@@ -935,6 +935,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"terminal.preserveScrollback": {
+		type: "enum",
+		values: ["auto", "always", "never"] as const,
+		default: "auto",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Preserve Scrollback",
+			description:
+				"Suppress destructive scrollback erases (ED3) on full repaints such as session switch, theme change, and compaction collapse (auto: preserve inside limux, where the erase snaps the viewport to bottom and collapses the scrollbar; always: never erase scrollback; never: allow destructive erases everywhere)",
+		},
+	},
+
 	"display.shimmer": {
 		type: "enum",
 		values: ["classic", "kitt", "disabled"] as const,

@@ -65,6 +65,7 @@ import {
 	setPreferredSearchProvider,
 } from "../../tools";
 import { shortenPath } from "../../tools/render-utils";
+import { applyPreserveScrollbackSetting } from "../../tui/preserve-scrollback";
 import { copyToClipboard } from "../../utils/clipboard";
 import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -502,6 +503,10 @@ export class SelectorController {
 
 			case "tui.scrollbackRebuild":
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
+				break;
+
+			case "terminal.preserveScrollback":
+				applyPreserveScrollbackSetting(value as "auto" | "always" | "never");
 				break;
 
 			case "tui.renderMermaid":

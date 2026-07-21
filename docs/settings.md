@@ -583,6 +583,7 @@ statusLine:
 
 terminal:
   showImages: true
+  preserveScrollback: auto   # auto, always, never
 images:
   autoResize: true
   blockImages: false
@@ -603,6 +604,7 @@ tui:
 | `statusLine.transparent` | boolean | `false` | Use the terminal background for the status line. |
 | `statusLine.showHookStatus` | boolean | `true` | Show hook status messages. |
 | `terminal.showImages` | boolean | `true` | Render images inline (when the terminal supports it). |
+| `terminal.preserveScrollback` | enum | `auto` | `auto`, `always`, `never`. Suppress destructive scrollback erases (`ESC[3J`) on full repaints (session switch, theme change, compaction collapse) so terminal history and scroll position survive. `auto` preserves scrollback inside limux; `always` everywhere; `never` keeps the destructive erase. |
 | `images.autoResize` | boolean | `true` | Resize large images for model compatibility. |
 | `images.blockImages` | boolean | `false` | Never send images to providers. |
 | `tui.hyperlinks` | enum | `auto` | `off`, `auto`, `always`. |

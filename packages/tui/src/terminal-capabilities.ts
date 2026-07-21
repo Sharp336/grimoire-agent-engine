@@ -200,6 +200,20 @@ export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.ZELLIJ);
 }
 
+/**
+ * Whether the agent process is running inside a limux pane (a ghostty-core GTK
+ * terminal host). Limux exports `LIMUX_SESSION_DIR` (limux-host-linux
+ * `layout_state.rs`: `LIMUX_SESSION_DIR_ENV = "LIMUX_SESSION_DIR"`) and
+ * `LIMUX_CHANNEL` (limux-control `socket_path.rs`:
+ * `LIMUX_CHANNEL_ENV = "LIMUX_CHANNEL"`) into every hosted pane. Destructive
+ * scrollback clears (ED3, `CSI 3 J`) are hostile there: ghostty-family
+ * viewports snap to bottom and the host collapses its scrollbar when native
+ * history is erased.
+ */
+export function isInsideLimux(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.LIMUX_SESSION_DIR || env.LIMUX_CHANNEL);
+}
+
 export function isNotificationSuppressed(): boolean {
 	const value = $env.PI_NOTIFICATIONS;
 	if (!value) return false;
@@ -581,6 +595,27 @@ export function setTerminalDeccara(enabled: boolean): void {
 /** Override screen-to-scrollback clear support for targeted renderer tests. */
 export function setTerminalScreenToScrollback(enabled: boolean): void {
 	TERMINAL.supportsScreenToScrollback = enabled;
+}
+
+let preserveScrollback = false;
+
+/**
+ * Suppress destructive scrollback clears (ED3, `CSI 3 J`) at runtime. The
+ * coding-agent calls this from the `terminal.preserveScrollback` setting
+ * (`"always"`, or `"auto"` inside limux — see {@link isInsideLimux}); tests
+ * flip it directly. When enabled, gesture-driven full repaints (session
+ * replace, theme change, compaction collapse) still replay the frame — only
+ * the history erase degrades to the non-destructive `ED 2` clear, and resizes
+ * repaint in place (multiplexer-style) instead of erasing and rewrapping
+ * native history.
+ */
+export function setPreserveScrollback(enabled: boolean): void {
+	preserveScrollback = enabled;
+}
+
+/** Whether destructive scrollback clears are suppressed (see {@link setPreserveScrollback}). */
+export function isPreserveScrollbackEnabled(): boolean {
+	return preserveScrollback;
 }
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `terminal.preserveScrollback` setting (`auto` | `always` | `never`, default `auto`): suppresses destructive terminal scrollback erases (`ESC[3J`) on full repaints — session switch, theme change, compaction collapse, handoff — degrading them to a non-destructive full repaint so terminal history and scroll position survive. `auto` preserves scrollback when running inside limux (detected via `LIMUX_SESSION_DIR`/`LIMUX_CHANNEL`), where the erase wipes the ghostty-core scrollback, snaps the viewport to bottom, and collapses the host scrollbar; `always` preserves everywhere; `never` keeps the previous behavior.
+
 ## [17.0.6] - 2026-07-20
 
 - Fixed failed plan-mode exits leaving the session on the restored execution model while plan mode remained active and silently changing ambient `xd://` tool presentation; rollback now restores the plan model, thinking level, and exact top-level-versus-mounted tool partition so exit can be retried safely ([#6013](https://github.com/can1357/oh-my-pi/pull/6013)).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a scrollback-preservation gate: `setPreserveScrollback(enabled)` / `isPreserveScrollbackEnabled()` suppress destructive scrollback erases (ED3, `ESC[3J`) — full repaints requested with `clearScrollback: true` still replay the frame but take the non-destructive `ESC[2J` path, resizes repaint in place (multiplexer-style) instead of erasing and rewrapping history, and divergence rebuilds fall back to the repair-below path. Added `isInsideLimux()` to detect limux panes via `LIMUX_SESSION_DIR`/`LIMUX_CHANNEL`.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

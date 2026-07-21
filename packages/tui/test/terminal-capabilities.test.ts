@@ -4,6 +4,7 @@ import {
 	getTerminalInfo,
 	hyperlinksUserOverride,
 	ImageProtocol,
+	isInsideLimux,
 	NotifyProtocol,
 	resolveWarpImageProtocol,
 	shouldEnableHyperlinksByDefault,
@@ -20,6 +21,20 @@ describe("detectTerminalId", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
 		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+});
+
+describe("isInsideLimux", () => {
+	it("detects a limux pane via either exported session marker", () => {
+		// limux-host-linux layout_state.rs: LIMUX_SESSION_DIR_ENV = "LIMUX_SESSION_DIR";
+		// limux-control socket_path.rs: LIMUX_CHANNEL_ENV = "LIMUX_CHANNEL".
+		expect(isInsideLimux({ LIMUX_SESSION_DIR: "/home/user/.local/state/limux" })).toBe(true);
+		expect(isInsideLimux({ LIMUX_CHANNEL: "preview:test" })).toBe(true);
+	});
+
+	it("returns false outside limux, including on bare ghostty", () => {
+		expect(isInsideLimux({})).toBe(false);
+		expect(isInsideLimux({ TERM: "xterm-ghostty", GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty" })).toBe(false);
 	});
 });
 

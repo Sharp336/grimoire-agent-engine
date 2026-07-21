@@ -27,6 +27,7 @@ import {
 	encodeKittyDeleteImage,
 	ImageProtocol,
 	isInsideTerminalMultiplexer,
+	isPreserveScrollbackEnabled,
 	setCellDimensions,
 	setTerminalImageProtocol,
 	shouldEnableSynchronizedOutputByDefault,
@@ -404,12 +405,15 @@ function reportsSizeOnAltScreenToggle(): boolean {
 
 /**
  * Resize should repaint the visible window in place — no alternate-screen
- * borrow, no ED3 scrollback rewrap — for multiplexer panes and for terminals
- * that loop on alt-screen toggles. The tradeoff is identical to a multiplexer:
- * scrollback above the window keeps its old wrap instead of being re-flowed.
+ * borrow, no ED3 scrollback rewrap — for multiplexer panes, for terminals
+ * that loop on alt-screen toggles, and when scrollback preservation is active
+ * (an ED3-free geometry rebuild would replay the whole transcript below the
+ * retained history, duplicating it once per resize settle). The tradeoff is
+ * identical to a multiplexer: scrollback above the window keeps its old wrap
+ * instead of being re-flowed.
  */
 function resizeRepaintsInPlace(): boolean {
-	return isMultiplexerSession() || reportsSizeOnAltScreenToggle();
+	return isMultiplexerSession() || reportsSizeOnAltScreenToggle() || isPreserveScrollbackEnabled();
 }
 
 /**
@@ -3028,6 +3032,7 @@ export class TUI extends Container {
 		// and keep the repair-below fallback in the branches under this one.
 		const divergenceRebuild =
 			this.#scrollbackRebuildEnabled &&
+			!isPreserveScrollbackEnabled() &&
 			!firstPaint &&
 			!replaceRequested &&
 			!geometryChanged &&
@@ -3126,7 +3131,14 @@ export class TUI extends Container {
 		const intent: RenderIntent = fullPaint
 			? {
 					kind: "fullPaint",
-					clearScrollback: divergenceRebuild || ((replaceRequested || geometryRebuild) && !isMultiplexerSession()),
+					// Scrollback preservation (setPreserveScrollback, driven by the
+					// host's `terminal.preserveScrollback` setting) is the single
+					// choke point for destructive clears: the full repaint still
+					// runs, but ED3 degrades to the non-destructive ED 2 branch of
+					// #emitFullPaint so native history survives.
+					clearScrollback:
+						!isPreserveScrollbackEnabled() &&
+						(divergenceRebuild || ((replaceRequested || geometryRebuild) && !isMultiplexerSession())),
 				}
 			: { kind: "update", chunkTo, windowTop };
 		this.#logRedraw(intent, frameLength, height);
