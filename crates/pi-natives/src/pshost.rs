@@ -257,6 +257,10 @@ impl HostCore {
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
 
 		let (done_tx, mut done_rx) = oneshot::channel::<DoneInfo>();
+		// A separate handle survives past `abandon(id)` dropping the Pending
+		// entry's own sender, so the stderr forward below (after abandon) can
+		// still deliver.
+		let stderr_chunk_tx = chunk_tx.clone();
 		self
 			.pending
 			.lock()
@@ -333,6 +337,36 @@ impl HostCore {
 		};
 
 		self.abandon(id);
+		// A child spawned by the user's command outside PowerShell's pipeline
+		// with inherited stderr (e.g. a .NET ProcessStartInfo with
+		// RedirectStandardError = false) writes directly to this sidecar's own
+		// real OS stderr pipe -- untouched by the stdin/stdout detach in the
+		// bootstrap, since stderr carries no protocol frames and detaching it
+		// there would only discard the bytes before Rust ever saw them.
+		// pump_stderr already captures that pipe into stderr_tail, but nothing
+		// previously surfaced it past the startup-diagnostic phase, so it
+		// silently vanished for a successfully-running exec. Forward
+		// (and clear, bounding memory the same way as the PS1-side stream
+		// release) whatever accumulated during this exec -- both on success
+		// and on host death, where a child's last words are often the most
+		// useful diagnostic.
+		let stderr_content = std::mem::take(&mut *self.stderr_tail.lock());
+		if !stderr_content.trim().is_empty() {
+			let labeled = stderr_content
+				.split('\n')
+				.map(|line| {
+					if line.trim().is_empty() {
+						line.to_string()
+					} else {
+						format!("\x1b[31;1m{line}\x1b[0m")
+					}
+				})
+				.collect::<Vec<_>>()
+				.join("\n");
+			let _ = stderr_chunk_tx
+				.send(format!("[external process stderr]\n{labeled}\n"))
+				.await;
+		}
 		match outcome {
 			Some(result) => Ok(result),
 			None => Err(Error::from_reason("PowerShell host terminated before the command completed")),
@@ -856,6 +890,10 @@ async fn read_events(stdout: tokio::process::ChildStdout, core: &Arc<HostCore>) 
 			HostEvent::Ready => {
 				let pid = core.pid.load(Ordering::Relaxed);
 				core.ready_tx.send_replace(ReadyState::Ready(pid));
+				// Any startup-time noise belongs to diagnosing a startup failure
+				// (ReadyState::Pending's read above), not to the first real
+				// exec's per-exec stderr forward.
+				core.stderr_tail.lock().clear();
 			},
 			HostEvent::Chunk { id, text } => {
 				// Clone the sender out before releasing the lock so we never hold
@@ -1263,6 +1301,56 @@ mod tests {
 		let (loud, _) =
 			run_cmd(&host, "Write-Verbose 'shown' -Verbose", task::CancelToken::default()).await;
 		assert!(loud.contains("VERBOSE: shown"), "verbose labeled when opted in: {loud:?}");
+
+		host.dispose().await.expect("host disposes");
+	}
+
+	/// A child spawned outside PowerShell's pipeline with inherited stderr
+	/// (e.g. .NET ProcessStartInfo with RedirectStandardError = false) writes
+	/// directly to the sidecar's own real OS stderr pipe — untouched by the
+	/// bootstrap's stdin/stdout detach — which pump_stderr already captures
+	/// into stderr_tail but nothing previously surfaced past the startup
+	/// diagnostic phase. Must surface as forwarded output, and must not leak
+	/// into a later, unrelated exec.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn forwards_inherited_child_stderr_and_does_not_leak_across_execs() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		let child_args = if cfg!(windows) {
+			"'cmd.exe'; '/c echo stderr-marker-xyz 1>&2'"
+		} else {
+			"'/bin/sh'; '-c'; 'echo stderr-marker-xyz >&2'"
+		};
+		let cmd = format!(
+			"$args = @({child_args}); $psi = New-Object System.Diagnostics.ProcessStartInfo; \
+			 $psi.FileName = $args[0]; if ($args.Count -gt 2) {{ $psi.ArgumentList.Add($args[1]); \
+			 $psi.ArgumentList.Add($args[2]) }} else {{ $psi.Arguments = $args[1] }}; \
+			 $psi.UseShellExecute = $false; $psi.RedirectStandardError = $false; $p = \
+			 [System.Diagnostics.Process]::Start($psi); $p.WaitForExit(); 'pipeline-still-ok'"
+		);
+		let (out, res) = run_cmd(&host, &cmd, task::CancelToken::default()).await;
+		assert!(out.contains("stderr-marker-xyz"), "inherited child stderr forwarded: {out:?}");
+		assert!(out.contains("[external process stderr]"), "forwarded content is labeled: {out:?}");
+		assert!(out.contains("pipeline-still-ok"), "pipeline's own output intact: {out:?}");
+		assert!(
+			!res.had_errors,
+			"inherited stderr alone does not flip had_errors (avoids false positives from benign \
+			 stderr loggers)"
+		);
+
+		// A later, unrelated exec must not see the previous exec's forwarded
+		// stderr content (take-and-clear must not leak across execs).
+		let (out2, _) = run_cmd(&host, "'clean-second-run'", task::CancelToken::default()).await;
+		assert!(
+			!out2.contains("stderr-marker-xyz"),
+			"no stale stderr leaks into a later exec: {out2:?}"
+		);
 
 		host.dispose().await.expect("host disposes");
 	}
