@@ -323,6 +323,40 @@ describe("AgentSession durable consultation side turn", () => {
 		expect(resumed.getActiveThread()).toMatchObject(thread);
 	});
 
+	it("preserves committed context when the assigned parent file is temporarily dirty", async () => {
+		using temp = TempDir.createSync("@omp-consult-dirty-parent-");
+		const parentManager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));
+		const committedMessage: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "committed parent context" }],
+			timestamp: Date.now(),
+		};
+		const committedLeafId = parentManager.appendMessage(committedMessage);
+		await parentManager.flush();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: model("consult-model"), systemPrompt: ["system"], messages: [], tools: [] },
+			}),
+			sessionManager: parentManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: { resolver: vi.fn(() => async () => "key") } as never,
+		});
+		sessions.push(session);
+		vi.spyOn(parentManager, "hasPersistedSessionFile").mockReturnValue(false);
+
+		const child = await session.createCommittedChildSession("__consult.dirty-parent", {
+			materializeParent: true,
+		});
+
+		expect(child).toMatchObject({
+			parentLeafId: committedLeafId,
+			hasCommittedContext: true,
+			messages: [committedMessage],
+		});
+		expect(child.manager.buildSessionContextAt(committedLeafId).messages).toEqual([committedMessage]);
+		await child.manager.close();
+	});
+
 	it("keeps /consult unavailable without a model and does not materialize its lazy parent", async () => {
 		using temp = TempDir.createSync("@omp-consult-no-model-");
 		const parentManager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));

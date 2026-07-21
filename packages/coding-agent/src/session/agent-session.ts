@@ -2414,7 +2414,7 @@ export class AgentSession {
 		const materializedHeader = structuredClone(manager.getHeader());
 		const capturedLeafId = manager.getLeafId();
 		const committedContext = manager.buildSessionContextAt(capturedLeafId);
-		const hasCommittedContext = hasPersistedParent && committedContext.messages.length > 0;
+		const hasCommittedContext = committedContext.messages.length > 0;
 		const parentLeafId = hasCommittedContext ? capturedLeafId : null;
 		const messages = structuredClone(hasCommittedContext ? committedContext.messages : []);
 		const sessionFile = parentSessionFile
@@ -2430,7 +2430,7 @@ export class AgentSession {
 		await prior;
 		try {
 			let sourceSessionFile = parentSessionFile;
-			if (hasPersistedParent && sourceSessionFile) {
+			if (hasCommittedContext && sourceSessionFile) {
 				await manager.ensureOnDisk();
 				await manager.flush();
 			} else {
