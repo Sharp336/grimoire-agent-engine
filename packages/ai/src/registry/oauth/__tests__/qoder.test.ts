@@ -68,6 +68,39 @@ describe("loginQoder", () => {
 		expect(credentials).toEqual({ access: "access-token", refresh: "refresh-token", expires: now + 3_540_000 });
 	});
 
+	it("maps non-pending HTTP failures to polling errors", async () => {
+		const fetchMock: FetchImpl = async () => new Response(null, { status: 500 });
+
+		await expect(loginQoder({ fetch: fetchMock })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "polling",
+		});
+	});
+
+	it("maps invalid poll JSON to validation errors", async () => {
+		const fetchMock: FetchImpl = async () => new Response("<html>", { status: 200 });
+
+		await expect(loginQoder({ fetch: fetchMock })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "qoder",
+		});
+	});
+
+	it("keeps polling after an empty access token", async () => {
+		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		let polls = 0;
+		const fetchMock: FetchImpl = async () => {
+			polls += 1;
+			return polls === 1 ? jsonResponse({ token: "" }) : jsonResponse({ token: "access-token" });
+		};
+
+		const credentials = await loginQoder({ fetch: fetchMock });
+
+		expect(polls).toBe(2);
+		expect(credentials.access).toBe("access-token");
+	});
+
 	it("bounds an in-flight poll request and maps its timeout", async () => {
 		const timeoutController = new AbortController();
 		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
