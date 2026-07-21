@@ -435,8 +435,14 @@ fn ensure_bootstrap() -> Result<PathBuf> {
 		Error::from_reason(format!("Failed to write PowerShell host script: {err}"))
 	})?;
 	if std::fs::rename(&tmp, &path).is_err() {
-		// Windows rename fails onto an existing dest: drop the stale/invalid
-		// file and retry once; clean up our temp if we still lost the race.
+		// Windows rename fails onto an existing dest. If the dest already
+		// validates, a concurrent writer published identical bytes — keep it;
+		// deleting it here could yank the script out from under that process's
+		// in-flight `pwsh -File`. Only a stale/invalid dest is replaced.
+		if bootstrap_is_valid(&path, hash) {
+			let _ = std::fs::remove_file(&tmp);
+			return Ok(path);
+		}
 		let _ = std::fs::remove_file(&path);
 		if std::fs::rename(&tmp, &path).is_err() {
 			let _ = std::fs::remove_file(&tmp);
