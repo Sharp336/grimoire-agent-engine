@@ -161,6 +161,29 @@ describe("pshost-manager pool (fake hosts)", () => {
 		expect((ephemeral.host as unknown as FakeHost).disposed).toBe(true);
 	});
 
+	test("disposeAll waits for in-flight spawns and reaps their hosts", async () => {
+		const spawnedHosts: FakeHost[] = [];
+		setPsHostSpawnerForTests(async () => {
+			await sleep(30);
+			const host = makeFakeHost(spawnedHosts.length + 1);
+			spawnedHosts.push(host);
+			return host as unknown as PsHost;
+		});
+
+		// Kick off both spawn paths, then dispose-all while they are still
+		// inside spawnHost(): pre-fix, the hosts registered *after* the
+		// snapshot and survived dispose-all as live sidecars.
+		const acquiring = acquirePsHost({ ...baseOpts, sessionId: "inflight", idleTtlMs: 0 });
+		const ephemeralSpawning = spawnEphemeralPsHost(baseOpts);
+		await sleep(5); // both callers are now parked inside the spawner
+		await disposeAllPsHosts();
+
+		expect(spawnedHosts).toHaveLength(2);
+		expect(spawnedHosts.every(host => host.disposed)).toBe(true);
+		// The racing callers still settle; shutdown simply wins.
+		await Promise.allSettled([acquiring, ephemeralSpawning]);
+	});
+
 	test("ephemeral dispose is idempotent-safe alongside disposeAll", async () => {
 		setPsHostSpawnerForTests(async () => makeFakeHost(1) as unknown as PsHost);
 		const ephemeral = await spawnEphemeralPsHost(baseOpts);

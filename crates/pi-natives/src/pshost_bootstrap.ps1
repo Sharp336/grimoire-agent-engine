@@ -248,7 +248,55 @@ while (`$global:__omp.History.Count -gt $HistoryDepth) {
     [void]$ps.AddScript($wrapped)
     $out   = [System.Management.Automation.PSDataCollection[psobject]]::new()
     $async = $ps.BeginInvoke([System.Management.Automation.PSDataCollection[psobject]]$null, $out)
-    $script:current = @{ Id = $id; PS = $ps; Async = $async; Out = $out; Width = $width; Stopped = $false }
+    $script:current = @{
+        Id = $id; PS = $ps; Async = $async; Out = $out; Width = $width; Stopped = $false
+        # High-water marks for incremental stream publishing (Publish-Streams).
+        InfoIdx = 0; WarnIdx = 0; VerboseIdx = 0; DebugIdx = 0; ErrorIdx = 0
+    }
+}
+
+# Publish new entries from the pipeline's data streams as labeled chunks.
+# Called from the poll loop while the pipeline runs — so Write-Host /
+# Write-Warning / Write-Verbose / Write-Debug / Write-Error progress reaches
+# the TUI live instead of buffering until completion — and once more from
+# Complete-Exec for the tail. PSDataCollection is documented thread-safe for
+# concurrent producer/consumer access, so indexed reads here are safe while
+# the pipeline thread appends. Success output is NOT streamed: PowerShell's
+# table formatting needs the whole collection to size columns, so rendering
+# per-object would regress every tabular result (see Complete-Exec).
+function Publish-Streams([hashtable] $Cur) {
+    $s = $Cur.PS.Streams
+
+    $n = $s.Information.Count
+    if ($n -gt $Cur.InfoIdx) {
+        $lines = for ($i = $Cur.InfoIdx; $i -lt $n; $i++) { [string]$s.Information[$i].MessageData }
+        $Cur.InfoIdx = $n
+        Write-Chunk -Id $Cur.Id -Stream 'information' -Text (@($lines) -join $NL)
+    }
+    $n = $s.Warning.Count
+    if ($n -gt $Cur.WarnIdx) {
+        $lines = for ($i = $Cur.WarnIdx; $i -lt $n; $i++) { "WARNING: $($s.Warning[$i].Message)" }
+        $Cur.WarnIdx = $n
+        Write-Chunk -Id $Cur.Id -Stream 'warning' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
+    }
+    $n = $s.Verbose.Count
+    if ($n -gt $Cur.VerboseIdx) {
+        $lines = for ($i = $Cur.VerboseIdx; $i -lt $n; $i++) { "VERBOSE: $($s.Verbose[$i].Message)" }
+        $Cur.VerboseIdx = $n
+        Write-Chunk -Id $Cur.Id -Stream 'verbose' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
+    }
+    $n = $s.Debug.Count
+    if ($n -gt $Cur.DebugIdx) {
+        $lines = for ($i = $Cur.DebugIdx; $i -lt $n; $i++) { "DEBUG: $($s.Debug[$i].Message)" }
+        $Cur.DebugIdx = $n
+        Write-Chunk -Id $Cur.Id -Stream 'debug' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
+    }
+    $n = $s.Error.Count
+    if ($n -gt $Cur.ErrorIdx) {
+        $text = $(for ($i = $Cur.ErrorIdx; $i -lt $n; $i++) { $s.Error[$i] }) | Out-String -Width $Cur.Width
+        $Cur.ErrorIdx = $n
+        Write-Chunk -Id $Cur.Id -Stream 'error' -Text (Format-AnsiText $text '31;1')
+    }
 }
 
 function Complete-Exec {
@@ -260,36 +308,20 @@ function Complete-Exec {
 
     $hadErrors = [bool]$cur.PS.HadErrors -or ($cur.PS.Streams.Error.Count -gt 0)
 
-    # Streams, in a stable order (the SDK collects each separately, so true
-    # cross-stream interleaving is not preserved). Success + Information stay
-    # plain; Warning/Verbose/Debug render yellow and Error red — matching the
-    # PowerShell console — with their conventional labels retained.
+    # Success output renders once, from the whole collection: per-object
+    # rendering would break table formatting (columns are sized from every
+    # row). The data streams have been flowing live via Publish-Streams; the
+    # tail is drained below.
     Write-Chunk -Id $cur.Id -Stream 'output' -Text ($cur.Out -join '')
     # Drain direct [Console]::Out writes (redirected at startup) as output.
+    # Completion-only on purpose: the pipeline thread appends to this
+    # StringBuilder while running, and StringBuilder is not safe to read
+    # concurrently with a writer.
     if ($script:consoleOut.GetStringBuilder().Length -gt 0) {
         Write-Chunk -Id $cur.Id -Stream 'output' -Text $script:consoleOut.ToString()
         [void]$script:consoleOut.GetStringBuilder().Clear()
     }
-    if ($cur.PS.Streams.Information.Count -gt 0) {
-        $infoText = ($cur.PS.Streams.Information | ForEach-Object { [string]$_.MessageData }) -join $NL
-        Write-Chunk -Id $cur.Id -Stream 'information' -Text $infoText
-    }
-    if ($cur.PS.Streams.Warning.Count -gt 0) {
-        $warnText = ($cur.PS.Streams.Warning | ForEach-Object { "WARNING: $($_.Message)" }) -join $NL
-        Write-Chunk -Id $cur.Id -Stream 'warning' -Text (Format-AnsiText $warnText '33;1')
-    }
-    if ($cur.PS.Streams.Verbose.Count -gt 0) {
-        $verboseText = ($cur.PS.Streams.Verbose | ForEach-Object { "VERBOSE: $($_.Message)" }) -join $NL
-        Write-Chunk -Id $cur.Id -Stream 'verbose' -Text (Format-AnsiText $verboseText '33;1')
-    }
-    if ($cur.PS.Streams.Debug.Count -gt 0) {
-        $debugText = ($cur.PS.Streams.Debug | ForEach-Object { "DEBUG: $($_.Message)" }) -join $NL
-        Write-Chunk -Id $cur.Id -Stream 'debug' -Text (Format-AnsiText $debugText '33;1')
-    }
-    if ($cur.PS.Streams.Error.Count -gt 0) {
-        $errorText = $cur.PS.Streams.Error | Out-String -Width $cur.Width
-        Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $errorText '31;1')
-    }
+    Publish-Streams $cur
 
     # Per-invocation exit code: the wrapped script records __ompExit only when
     # this pipeline ran a native command (lookup flag or exit-code change), so a
@@ -380,7 +412,10 @@ while ($alive) {
         }
     }
 
-    if ($script:current -and $script:current.Async.IsCompleted) { Complete-Exec }
+    if ($script:current) {
+        Publish-Streams $script:current
+        if ($script:current.Async.IsCompleted) { Complete-Exec }
+    }
 }
 
 try { $rs.Close() } catch { } # best-effort

@@ -35,6 +35,8 @@ const HOSTS = new Map<string, HostEntry>();
 const SPAWNING = new Map<string, Promise<HostEntry>>();
 /** Live ephemeral hosts, tracked only so orderly shutdown can reap them. */
 const EPHEMERAL_HOSTS = new Set<PsHost>();
+/** In-flight ephemeral spawns, so shutdown can wait for hosts not yet in the set. */
+const EPHEMERAL_SPAWNING = new Set<Promise<PsHost>>();
 
 export interface SpawnPsHostOptions {
 	/** Initial working directory for the spawned host. */
@@ -145,15 +147,27 @@ export async function acquirePsHost(options: AcquirePsHostOptions): Promise<PsHo
  * session host; the caller must await `dispose()` when the run completes.
  */
 export async function spawnEphemeralPsHost(options: SpawnPsHostOptions): Promise<EphemeralPsHostLease> {
-	const host = await spawnHost(options);
-	EPHEMERAL_HOSTS.add(host);
-	return {
-		host,
-		dispose: async () => {
-			EPHEMERAL_HOSTS.delete(host);
-			await safeDispose(host);
-		},
-	};
+	// Register the host inside the promise chain (not after an await in this
+	// function) so `disposeAllPsHosts` awaiting the tracked promise observes
+	// the host in EPHEMERAL_HOSTS the moment the spawn settles — a spawn racing
+	// shutdown can then never resolve into an untracked live sidecar.
+	const spawning = spawnHost(options).then(host => {
+		EPHEMERAL_HOSTS.add(host);
+		return host;
+	});
+	EPHEMERAL_SPAWNING.add(spawning);
+	try {
+		const host = await spawning;
+		return {
+			host,
+			dispose: async () => {
+				EPHEMERAL_HOSTS.delete(host);
+				await safeDispose(host);
+			},
+		};
+	} finally {
+		EPHEMERAL_SPAWNING.delete(spawning);
+	}
 }
 
 /** Dispose one session's host (e.g. on session teardown). */
@@ -166,6 +180,15 @@ export async function disposePsHostSession(sessionId: string): Promise<void> {
 
 /** Dispose every pooled and ephemeral host. Wire into the app's orderly-shutdown path. */
 export async function disposeAllPsHosts(): Promise<void> {
+	// Drain in-flight spawns first: a host still inside spawnHost()/start()
+	// lives only in SPAWNING/EPHEMERAL_SPAWNING and would otherwise resolve
+	// into HOSTS/EPHEMERAL_HOSTS *after* the snapshot below, surviving as a
+	// live pwsh sidecar past a dispose-all that promised to reap everything.
+	// Loop: a spawn settling during the wait registers its host, and the next
+	// pass picks it up.
+	while (SPAWNING.size > 0 || EPHEMERAL_SPAWNING.size > 0) {
+		await Promise.allSettled([...SPAWNING.values(), ...EPHEMERAL_SPAWNING]);
+	}
 	const hosts = [...HOSTS.values()].map(entry => entry.host).concat([...EPHEMERAL_HOSTS]);
 	HOSTS.clear();
 	EPHEMERAL_HOSTS.clear();
