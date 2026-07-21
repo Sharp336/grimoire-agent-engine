@@ -14,7 +14,9 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import {
 	formatStyledTruncationWarning,
+	formatTruncationMetaNotice,
 	type OutputMeta,
+	outputMeta,
 	resolveOutputMaxColumns,
 	resolveOutputSinkHeadBytes,
 	stripOutputNotice,
@@ -189,12 +191,19 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		}
 		const summary = await sink.dump();
 		const outputText = summary.output || "(no output)";
+		// timedOut/cancelled below THROW instead of returning a builder result, so
+		// they bypass toolResult(...).truncationFromSummary(...) — without this,
+		// a timed-out command whose output exceeded the sink's in-memory window
+		// silently dropped the "Showing lines X-Y…"/artifact notice, making a
+		// truncated tail look like the command's complete output.
+		const truncation = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get()?.truncation;
+		const outputWithNotice = truncation ? `${outputText}\n\n${formatTruncationMetaNotice(truncation)}` : outputText;
 
 		if (result.timedOut) {
-			throw new ToolError(`${outputText}\n\nCommand timed out after ${timeoutSec} seconds`);
+			throw new ToolError(`${outputWithNotice}\n\nCommand timed out after ${timeoutSec} seconds`);
 		}
 		if (result.cancelled) {
-			throw new ToolAbortError(outputText === "(no output)" ? "Command aborted" : outputText);
+			throw new ToolAbortError(outputText === "(no output)" ? "Command aborted" : outputWithNotice);
 		}
 
 		const exitCode = result.exitCode ?? undefined;

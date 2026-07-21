@@ -199,6 +199,31 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(failedAgain.isError).toBe(true);
 		expect(textOf(failedAgain)).toContain("code 7");
 	});
+
+	test("a timed-out command with truncated output still surfaces the truncation notice", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-timeout-truncation-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Warm the host so its ~1s spawn doesn't eat into the tight timeout below.
+		await tool.execute("t0", { command: "'warm'" });
+
+		// Emit output well over the sink's 50KB in-memory window, then block past
+		// the deadline so the command times out with a truncated tail retained.
+		// Uses Write-Warning (not success-stream output): success output only
+		// reaches the sink via the wrapped script's trailing Out-String line,
+		// which never runs on a Stop mid-Start-Sleep — only data-stream output
+		// (Write-Warning/-Host/-Verbose/-Debug) is live-streamed via
+		// Publish-Streams before the pipeline completes (see pshost_bootstrap.ps1).
+		// Pre-fix, the thrown timeout message carried only the retained tail with
+		// no indication earlier output was elided.
+		const command = "1..2000 | ForEach-Object { Write-Warning ('x' * 100) }; Start-Sleep -Seconds 30";
+		// OutputSink retained head+tail here, so the notice is middle-elision
+		// shaped ("Showing lines A-B and C-D of N; … elided") rather than a pure
+		// tail range — match on the distinctive "Showing … of <total>" contract
+		// shared by every truncation shape instead of one specific wording.
+		await expect(tool.execute("t1", { command, timeout: 1 })).rejects.toThrow(/Showing .+ of \d+/);
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.
@@ -256,7 +281,7 @@ test("collapsed preview shows the output TAIL, not the first lines", async () =>
 		{ content: [{ type: "text", text: lines.join("\n") }], details: { host: "session" } as PowerShellToolDetails },
 		{ expanded: false } as Parameters<typeof powershellToolRenderer.renderResult>[1],
 		theme,
-		{ command: "1..30 | ForEach-Object { \"row-$_\" }" },
+		{ command: '1..30 | ForEach-Object { "row-$_" }' },
 	);
 	const plain = component
 		.render(80)
