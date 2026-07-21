@@ -908,6 +908,26 @@ function tComposite(objects: readonly ArkSchema[], opts?: Meta): ArkSchema {
 	return applyMeta(createArkSchema(validator, { allOf: objects.map(jsonSchemaOf) }), opts);
 }
 
+/**
+ * Accept a raw JSON Schema document as a tool/extension parameter schema.
+ *
+ * Real TypeBox exposes `Type.Unsafe(...)` for this. Plugins such as
+ * `pi-mcp-adapter` pass MCP `inputSchema` objects through it. Without this
+ * entry the OMP extension loader remaps `import { Type } from "typebox"` to
+ * this shim and crashes with `Type.Unsafe is not a function`.
+ *
+ * Wire + argument validation treat the result as plain JSON Schema (see
+ * `toolWireSchema` / `validateToolArguments`); the identity validator only
+ * satisfies the shim's `safeParse` surface.
+ */
+function tUnsafe(schema: Record<string, unknown>, opts?: Meta): ArkSchema {
+	const json =
+		schema && typeof schema === "object" && !Array.isArray(schema)
+			? (schemaJsonValue(schema) as Record<string, unknown>)
+			: {};
+	return applyMeta(createArkSchema((data: unknown) => data, json), opts);
+}
+
 // ---------------------------------------------------------------------------
 // Public `Type` namespace
 // ---------------------------------------------------------------------------
@@ -937,6 +957,7 @@ export const Type = {
 	Pick: tPick,
 	Omit: tOmit,
 	Composite: tComposite,
+	Unsafe: tUnsafe,
 } as const;
 
 export type TypeBuilder = typeof Type;
