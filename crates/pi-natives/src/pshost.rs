@@ -587,9 +587,7 @@ impl PsHost {
 			let result = core
 				.exec(command, cwd, cmd_env, width, cancel, chunk_tx)
 				.await;
-			if let Some(handle) = drain {
-				let _ = handle.await;
-			}
+			let _ = drain.await;
 			result
 		})
 	}
@@ -634,13 +632,26 @@ impl PsHost {
 
 /// Forward per-exec chunk text to the JS callback, coalescing bursts so the JS
 /// main thread never sees a multi-MB single call (mirrors
-/// `shell::bridge_chunks`).
+/// `shell::bridge_chunks`). Always spawns and drains `rx` to completion, even
+/// with no callback: dropping `rx` outright (as an early `on_chunk?` return
+/// once did) leaves every subsequent `chunk_tx.send()` in `read_events`
+/// failing fast and silently discarded rather than blocking — tokio's
+/// bounded `mpsc::Sender::send` errors immediately once every `Receiver` is
+/// dropped, it does not wait for one. No hang either way, but the public
+/// `on_chunk` parameter is optional, and a caller of `PsHost::run()` without
+/// one deserves the same delivery semantics (chunks actually consumed, not
+/// merely fail-fast-discarded) rather than depending on `read_events`
+/// continuing to discard the `Result` it gets back from a dead channel.
 fn spawn_chunk_forwarder(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	mut rx: mpsc::Receiver<String>,
-) -> Option<tokio::task::JoinHandle<()>> {
-	let on_chunk = on_chunk?;
-	Some(tokio::spawn(async move {
+) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(async move {
+		let Some(on_chunk) = on_chunk else {
+			// No callback: drain and discard so the bounded channel never fills.
+			while rx.recv().await.is_some() {}
+			return;
+		};
 		const MAX_BATCH_BYTES: usize = 64 * 1024;
 		const INITIAL_BATCH_CAP: usize = 8 * 1024;
 		let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
@@ -663,7 +674,7 @@ fn spawn_chunk_forwarder(
 				break;
 			}
 		}
-	}))
+	})
 }
 
 /// Supervisor: spawn the sidecar, wire stdio pumps, and route events until the
@@ -827,7 +838,7 @@ mod tests {
 
 	use tokio::sync::mpsc;
 
-	use super::{PsHost, PsHostOptions};
+	use super::{CHUNK_QUEUE_CHUNKS, PsHost, PsHostOptions, spawn_chunk_forwarder};
 	use crate::task;
 
 	/// Skip the suite when no `pwsh` is reachable (CI without PowerShell).
@@ -876,6 +887,43 @@ mod tests {
 			.expect("exec returns a result");
 		let output = collector.await.expect("chunk collector joins");
 		(output.trim().to_string(), result)
+	}
+
+	/// `on_chunk: None` must still drain (and discard) the bounded channel — no
+	/// pwsh required, this exercises spawn_chunk_forwarder() directly against a
+	/// synthetic producer standing in for read_events(). The review finding
+	/// this guards against claimed the pre-fix None-early-return would hang
+	/// `chunk_tx.send()` once the bounded channel filled; empirically that
+	/// specific mechanism did not reproduce here (tokio's bounded
+	/// `mpsc::Sender::send` fails FAST, not blocks, once every `Receiver` is
+	/// dropped — verified by simulating the pre-fix early-return and observing
+	/// an immediate `SendError` on the very first send, not a timeout). What
+	/// the pre-fix code actually did: `rx` dropped the instant
+	/// spawn_chunk_forwarder returned `None`, so read_events's
+	/// `let _ = chunk_tx.send(text).await;` silently discarded every chunk via
+	/// a failed send from the first call. No hang, but a caller of the public
+	/// PsHost.run() API without a callback got zero visibility into command
+	/// output — the fix makes that explicit (drain-and-discard) rather than
+	/// incidental, so it stays correct if read_events ever stops discarding
+	/// the send Result.
+	#[tokio::test]
+	async fn forwarder_drains_bounded_channel_with_no_callback() {
+		let (tx, rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
+		let drain = spawn_chunk_forwarder(None, rx);
+
+		let producer = tokio::time::timeout(Duration::from_secs(5), async move {
+			// Well past capacity: proves sends succeed (and are drained) rather
+			// than relying on discarded SendErrors from a dropped receiver.
+			for i in 0..(CHUNK_QUEUE_CHUNKS * 4) {
+				tx.send(format!("chunk-{i}")).await.expect("receiver alive");
+			}
+			// Dropping tx closes the channel, letting the drain loop exit.
+		})
+		.await;
+		assert!(producer.is_ok(), "producer must not block on an undrained bounded channel");
+
+		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
+		assert!(drained.is_ok(), "forwarder task must exit once the channel closes");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
