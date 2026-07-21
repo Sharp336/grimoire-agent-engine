@@ -360,6 +360,17 @@ function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
 	});
 }
 
+/**
+ * Qoder's curated seed is the authoritative catalog — the provider has no
+ * unauthenticated discovery. Previous bundled snapshots can resurrect pruned
+ * api3-only base ids (and their context aliases) via the fallback merge, so
+ * keep exactly the rows the current seed produces.
+ */
+function dropPrunedQoderWireIds(models: readonly ModelSpec[]): ModelSpec[] {
+	const curated = new Set(buildQoderStaticSeed().map(model => model.id));
+	return models.filter(model => model.provider !== "qoder" || curated.has(model.id));
+}
+
 function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
 		if (model.provider === "google-antigravity" && model.baseUrl) {
@@ -615,6 +626,7 @@ async function generateModels() {
 	allModels = dropFireworksWireIds(allModels);
 	allModels = dropUnusableZaiContextTierIds(allModels);
 	allModels = dropXiaomiAudioOnlyIds(allModels);
+	allModels = dropPrunedQoderWireIds(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

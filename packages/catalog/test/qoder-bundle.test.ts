@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	buildQoderStaticSeed,
 	QODER_CURATED_MODELS,
@@ -20,11 +20,25 @@ function expectModel(id: string): ModelSpec<"openai-completions"> {
 }
 
 describe("Qoder curated seed", () => {
-	it("has 15 base rows, 22 context aliases, and 37 unique ids", () => {
-		expect(QODER_CURATED_MODELS).toHaveLength(15);
+	it("has 9 base rows, 10 context aliases, and 19 unique ids", () => {
+		expect(QODER_CURATED_MODELS).toHaveLength(9);
 		const aliases = seed.filter(model => !QODER_CURATED_MODELS.some(base => base.id === model.id));
-		expect(aliases).toHaveLength(22);
-		expect(new Set(seed.map(model => model.id)).size).toBe(37);
+		expect(aliases).toHaveLength(10);
+		expect(new Set(seed.map(model => model.id)).size).toBe(19);
+	});
+
+	it("omits the six api3-only base ids that fail closed on api2-v2", () => {
+		const dropped = ["cmodel", "qmodel_preview", "qmodel_latest", "kmodel_latest", "gm51model", "dfmodel"];
+		const ids = new Set(seed.map(model => model.id));
+		const wireIds = new Set(seed.map(model => model.requestModelId ?? model.id));
+		for (const id of dropped) {
+			expect(ids.has(id), `qoder/${id} must not be advertised`).toBe(false);
+			expect(wireIds.has(id), `qoder/${id} must not be a wire target`).toBe(false);
+			expect(
+				[...ids].some(other => other.startsWith(`${id}-`)),
+				`qoder/${id} aliases must be gone`,
+			).toBe(false);
+		}
 	});
 
 	it("uses qoder openai-completions with 32k output and no store support", () => {
@@ -88,7 +102,7 @@ describe("Qoder curated seed", () => {
 	});
 
 	it("preserves Qoder thinking contracts through generator policy application", () => {
-		const configurableReasoningIds = ["ultimate", "cmodel", "gm51model", "dmodel", "dfmodel"];
+		const configurableReasoningIds = ["ultimate", "dmodel"];
 		for (const id of configurableReasoningIds) {
 			const before = { ...expectModel(id) };
 			expect(before.thinking, `expected ${id} to carry authored thinking`).toBeDefined();
@@ -96,31 +110,25 @@ describe("Qoder curated seed", () => {
 			applyGeneratedModelPolicies([clone]);
 			expect(clone.thinking).toEqual(before.thinking);
 		}
-
-		const previewSpec = expectModel("qmodel_preview");
-		const previewAliasSpec = expectModel("qmodel_preview-1m");
-		const preview = buildModel(previewSpec);
-		const previewAlias = buildModel(previewAliasSpec);
-		expect(preview.thinking).toEqual({
-			mode: "effort",
-			efforts: [Effort.High],
-			defaultLevel: Effort.High,
-			requiresEffort: true,
-		});
-		expect(previewAlias.thinking).toEqual(preview.thinking);
-		expect(preview.compat.supportsReasoningEffort).toBe(false);
-		expect(preview.compat.omitReasoningEffort).toBe(true);
-		expect(previewAlias.compat.supportsReasoningEffort).toBe(false);
 	});
 
 	it("bundles every curated row with alias wire metadata intact", () => {
 		const bundled = getBundledModels("qoder");
 		expect(bundled.map(model => model.id).sort()).toEqual(seed.map(model => model.id).sort());
-		const alias = getBundledModel<"openai-completions">("qoder", "qmodel_preview-1m");
-		expect(alias.requestModelId).toBe("qmodel_preview");
+		const alias = getBundledModel<"openai-completions">("qoder", "ultimate-1m");
+		expect(alias.requestModelId).toBe("ultimate");
 		expect(alias.contextWindow).toBe(1_000_000);
 		expect(alias.compat.extraBody).toEqual({ context_length: 1_000_000 });
-		expect(alias.thinking?.efforts).toEqual([Effort.High]);
+		expect(alias.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	});
+
+	it("registers the qoder catalog descriptor with oauth discovery", () => {
+		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "qoder");
+		expect(descriptor).toBeDefined();
+		expect(descriptor?.defaultModel).toBe("auto");
+		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["QODER_OAUTH_TOKEN"]);
+		expect(descriptor?.catalogDiscovery?.oauthProvider).toBe("qoder");
+		expect(DEFAULT_MODEL_PER_PROVIDER.qoder).toBe("auto");
 	});
 
 	it("exposes the offline seed without dynamic discovery", () => {
