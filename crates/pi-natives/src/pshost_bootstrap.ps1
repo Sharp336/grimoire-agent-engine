@@ -149,9 +149,14 @@ function Invoke-OnRunspace([string] $Script, [object[]] $Arguments) {
 }
 
 # Initialize the object-retention store inside the shared runspace. The
-# PostCommandLookupAction flags any Application (native executable) lookup so
+# PostCommandLookupAction flags Application (native executable) lookups so
 # per-invocation exit codes can be attributed without ever resetting
 # $LASTEXITCODE — user commands read the true persisted value at all times.
+# The action fires only on invocation-time lookups: Get-Command / availability
+# probes resolve Applications through CommandDiscovery without triggering it
+# (verified on pwsh 7.6.2, both standalone and through this runspace), so a
+# lookup-only command never inherits a stale exit code. The TS suite pins that
+# contract ("a lookup-only command after a failed native…").
 [void](Invoke-OnRunspace @'
 $global:__omp = [ordered]@{}
 $global:__omp.Last    = $null

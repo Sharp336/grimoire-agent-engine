@@ -172,6 +172,33 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(result)).toContain("git version");
 		expect(textOf(result)).not.toMatch(/timed out/i);
 	});
+
+	test("a lookup-only command after a failed native does not inherit its exit code", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-lookup-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		const nativeFail = process.platform === "win32" ? "cmd /c exit 7" : "/bin/sh -c 'exit 7'";
+		const failed = await tool.execute("l1", { command: nativeFail });
+		expect(failed.isError).toBe(true);
+
+		// Get-Command resolves an Application without running it; PowerShell's
+		// PostCommandLookupAction is NOT triggered by Get-Command discovery
+		// (verified on 7.6.2), so the stale $LASTEXITCODE must not be
+		// attributed to this lookup-only invocation. Guards against a pwsh
+		// behavior change silently re-introducing stale-exit attribution.
+		const lookup = await tool.execute("l2", {
+			command: "[bool](Get-Command pwsh -ErrorAction SilentlyContinue)",
+		});
+		expect(lookup.isError ?? false).toBe(false);
+		expect(textOf(lookup)).toContain("True");
+
+		// A real native re-run exiting with the SAME code is still attributed
+		// (the invocation-time lookup flag, not a value change, catches it).
+		const failedAgain = await tool.execute("l3", { command: nativeFail });
+		expect(failedAgain.isError).toBe(true);
+		expect(textOf(failedAgain)).toContain("code 7");
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.
