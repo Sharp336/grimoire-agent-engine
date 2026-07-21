@@ -15,7 +15,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import type { UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageHistoryEntry, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import * as opencodeGoUsage from "@oh-my-pi/pi-ai/usage/opencode-go";
 
@@ -185,6 +185,45 @@ describe("AuthStorage usage history recording", () => {
 		const sevenDay = rows.find(row => row.limitId === "anthropic:7d");
 		expect(sevenDay?.usedFraction).toBeCloseTo(0.84);
 		expect(sevenDay?.status).toBe("warning");
+	});
+	it("records history for reports merged across Devin credentials", async () => {
+		storage.close();
+		store.close();
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider =>
+				provider === "devin"
+					? ({
+							id: "devin",
+							async fetchUsage(params): Promise<UsageReport> {
+								const apiKey = params.credential.type === "api_key" ? params.credential.apiKey : "";
+								return {
+									provider: "devin",
+									fetchedAt: T0,
+									limits: [
+										{
+											id: `devin:${apiKey}`,
+											label: "ACUs",
+											scope: { provider: "devin", accountId: "org-shared" },
+											amount: { used: apiKey === "key-one" ? 3 : 5, unit: "acus" },
+											status: "ok",
+										},
+									],
+									metadata: { orgId: "org-shared", principalId: "service-shared" },
+								};
+							},
+						} satisfies UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		await storage.set("devin", [
+			{ type: "api_key", key: "key-one" },
+			{ type: "api_key", key: "key-two" },
+		]);
+		const reports = await storage.fetchUsageReports();
+		expect(reports).toHaveLength(1);
+		expect(reports?.[0]?.limits).toHaveLength(2);
+		expect(storage.listUsageHistory({ provider: "devin" })).toHaveLength(2);
 	});
 });
 

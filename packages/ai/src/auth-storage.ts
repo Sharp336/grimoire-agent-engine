@@ -3827,7 +3827,12 @@ export class AuthStorage {
 			const reportPairs = results.flatMap((report, index) => (report ? [{ report, request: requests[index] }] : []));
 			const deduped = this.#dedupeUsageReports(reportPairs.map(pair => pair.report));
 			for (const report of deduped) {
-				const pair = reportPairs.find(candidate => candidate.report === report);
+				const identifiers = new Set(this.#getUsageReportIdentifiers(report));
+				const pair = reportPairs.find(
+					candidate =>
+						candidate.report === report ||
+						this.#getUsageReportIdentifiers(candidate.report).some(identifier => identifiers.has(identifier)),
+				);
 				if (pair) this.#recordUsageHistory(pair.request, report);
 			}
 			const resolved = deduped;
