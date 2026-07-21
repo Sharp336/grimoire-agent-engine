@@ -127,6 +127,66 @@ describe("BtwController", () => {
 		expect(controller.hasActiveRequest()).toBe(true);
 	});
 
+	it("injects prior /btw Q&As into subsequent prompts, capped at three", async () => {
+		let counter = 0;
+		const runEphemeralTurn = vi.fn(async (_args: RunEphemeralTurnArgs) => {
+			counter++;
+			return {
+				replyText: `Answer ${counter}`,
+				assistantMessage: createAssistantMessage(`Answer ${counter}`),
+			};
+		});
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const controller = new BtwController(ctx);
+
+		await controller.start("Q1?");
+		await drainBtwRequest();
+		// First prompt has no prior context.
+		expect(runEphemeralTurn.mock.calls[0]?.[0]?.promptText).not.toContain("<btw-prior>");
+
+		await controller.start("Q2?");
+		await drainBtwRequest();
+		const secondPrompt = runEphemeralTurn.mock.calls[1]?.[0]?.promptText ?? "";
+		expect(secondPrompt).toContain("<btw-prior>");
+		expect(secondPrompt).toContain("Q: Q1?");
+		expect(secondPrompt).toContain("A: Answer 1");
+
+		await controller.start("Q3?");
+		await drainBtwRequest();
+		await controller.start("Q4?");
+		await drainBtwRequest();
+		await controller.start("Q5?");
+		await drainBtwRequest();
+		// Fifth prompt sees only the last three exchanges: Q2..Q4.
+		const fifthPrompt = runEphemeralTurn.mock.calls[4]?.[0]?.promptText ?? "";
+		expect(fifthPrompt).not.toContain("Q: Q1?");
+		expect(fifthPrompt).toContain("Q: Q2?");
+		expect(fifthPrompt).toContain("Q: Q3?");
+		expect(fifthPrompt).toContain("Q: Q4?");
+	});
+
+	it("keeps prior /btw context after the panel is dismissed via Escape", async () => {
+		const runEphemeralTurn = vi
+			.fn<(args: RunEphemeralTurnArgs) => Promise<RunEphemeralTurnResult>>()
+			.mockResolvedValueOnce({ replyText: "First answer", assistantMessage: createAssistantMessage("First answer") })
+			.mockResolvedValueOnce({
+				replyText: "Second answer",
+				assistantMessage: createAssistantMessage("Second answer"),
+			});
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const controller = new BtwController(ctx);
+
+		await controller.start("First?");
+		await drainBtwRequest();
+		expect(controller.handleEscape()).toBe(true);
+
+		await controller.start("Second?");
+		await drainBtwRequest();
+		const secondPrompt = runEphemeralTurn.mock.calls[1]?.[0]?.promptText ?? "";
+		expect(secondPrompt).toContain("Q: First?");
+		expect(secondPrompt).toContain("A: First answer");
+	});
+
 	it("renders completed /btw answers with copy and branch affordances", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "Answer",

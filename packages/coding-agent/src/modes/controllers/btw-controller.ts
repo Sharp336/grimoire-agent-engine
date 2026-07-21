@@ -12,6 +12,13 @@ interface BtwRequest {
 	leafId: string | null;
 }
 
+interface BtwHistoryEntry {
+	question: string;
+	answer: string;
+}
+
+const BTW_HISTORY_LIMIT = 3;
+
 function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
 	const content: AssistantMessage["content"] = [];
 	let replacedText = false;
@@ -42,6 +49,7 @@ export class BtwController {
 	#branchInFlight = false;
 	#lastCopyText: string | undefined;
 	#copyInFlight = false;
+	#history: BtwHistoryEntry[] = [];
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -133,7 +141,10 @@ export class BtwController {
 
 	async #runRequest(request: BtwRequest): Promise<void> {
 		try {
-			const promptText = prompt.render(btwUserPrompt, { question: request.question });
+			const promptText = prompt.render(btwUserPrompt, {
+				question: request.question,
+				previousQAs: this.#history.length > 0 ? this.#history : undefined,
+			});
 			const { replyText, assistantMessage } = await this.ctx.session.runEphemeralTurn({
 				promptText,
 				onTextDelta: delta => {
@@ -149,6 +160,12 @@ export class BtwController {
 			}
 			request.component.setAnswer(replyText);
 			request.component.markComplete();
+			if (replyText.trim()) {
+				this.#history.push({ question: request.question, answer: replyText });
+				if (this.#history.length > BTW_HISTORY_LIMIT) {
+					this.#history.splice(0, this.#history.length - BTW_HISTORY_LIMIT);
+				}
+			}
 			const copyText = request.component.getCopyText();
 			if (copyText !== undefined) {
 				this.#lastQuestion = request.question;
