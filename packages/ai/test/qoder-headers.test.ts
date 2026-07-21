@@ -54,7 +54,7 @@ describe("Qoder request headers", () => {
 		expect(requestHeaders).toBeDefined();
 		expect(requestHeaders?.get("Authorization")).toBe("Bearer qoder-test-token");
 		expect(requestHeaders?.get("Cosy-ClientType")).toBe("5");
-		expect(requestHeaders?.get("Cosy-Version")).toBe("1.1.1");
+		expect(requestHeaders?.get("Cosy-Version")).toBe("1.1.2");
 		const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
 		expect(requestHeaders?.get("Cosy-MachineOS")).toBe(`${arch}_${process.platform}`);
 		expect(requestBody).toBeDefined();
@@ -85,6 +85,29 @@ describe("Qoder request headers", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(requestBody?.model).toBe("ultimate");
 		expect(requestBody?.context_length).toBe(1_000_000);
+	});
+
+	it("ignores /fast priority for qoder/auto without highspeed metadata", async () => {
+		const model = getBundledModel<"openai-completions">("qoder", "auto");
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return sseResponse();
+		};
+		const context: Context = {
+			systemPrompt: [],
+			messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
+		};
+		const result = await streamOpenAICompletions(model as Model<"openai-completions">, context, {
+			apiKey: "qoder-test-token",
+			fetch: fetchMock,
+			serviceTier: "priority",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(requestBody?.model).toBe("auto");
+		expect(requestBody?.service_tier).toBeUndefined();
+		expect(requestBody?.metadata).toBeUndefined();
 	});
 
 	it("maps /fast priority to Qoder highspeed only for Kimi-K2.7-Code", async () => {

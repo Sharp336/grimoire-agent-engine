@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { createHash } from "node:crypto";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { isDefinitiveOAuthFailure } from "../../../error";
 import { getQoderCommonHeaders, loginQoder, refreshQoderToken } from "../qoder";
 
 const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
@@ -101,29 +102,34 @@ describe("loginQoder", () => {
 		expect(credentials.access).toBe("access-token");
 	});
 
-	it("bounds an in-flight poll request and maps its timeout", async () => {
+	it("bounds an in-flight poll request, retries after its timeout, and then succeeds", async () => {
+		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
 		const timeoutController = new AbortController();
 		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
 		const response = Promise.withResolvers<Response>();
 		let requestSignal: AbortSignal | undefined;
+		let polls = 0;
 		const fetchMock: FetchImpl = (_input, init) => {
+			polls += 1;
+			if (polls > 1) {
+				return Promise.resolve(jsonResponse({ token: "access-token", refresh_token: "refresh-token" }));
+			}
 			requestSignal = init?.signal ?? undefined;
 			requestSignal?.addEventListener("abort", () => response.reject(requestSignal?.reason), { once: true });
 			return response.promise;
 		};
 
 		const result = loginQoder({ fetch: fetchMock }).then(
-			() => null,
+			credentials => credentials,
 			error => error,
 		);
 		expect(requestSignal).toBe(timeoutController.signal);
 		expect(timeout).toHaveBeenCalledWith(20_000);
 		timeoutController.abort(new DOMException("timed out", "TimeoutError"));
-		await expect(result).resolves.toMatchObject({
-			name: "OAuthError",
-			kind: "polling",
-			provider: "qoder",
-		});
+
+		const credentials = await result;
+		expect(polls).toBe(2);
+		expect(credentials).toMatchObject({ access: "access-token", refresh: "refresh-token" });
 	});
 
 	it("maps in-flight poll cancellation to a login cancellation", async () => {
@@ -153,7 +159,7 @@ describe("refreshQoderToken", () => {
 		expect(requests).toHaveLength(1);
 		expect(requests[0]?.url).toBe(REFRESH_URL);
 		expect(requests[0]?.init?.method).toBe("POST");
-		expect(new Headers(requests[0]?.init?.headers).get("User-Agent")).toBe("qoder/1.1.1");
+		expect(new Headers(requests[0]?.init?.headers).get("User-Agent")).toBe("qoder/1.1.2");
 		expect(requests[0]?.init?.body).toBe(JSON.stringify({ refresh_token: "old-refresh" }));
 	});
 
@@ -180,6 +186,41 @@ describe("refreshQoderToken", () => {
 		}
 		await expect(result).resolves.toMatchObject({ name: "TimeoutError" });
 	});
+	it("includes a 400 invalid_grant body so the dead credential gets disabled", async () => {
+		const fetchMock: FetchImpl = async () =>
+			jsonResponse({ error: "invalid_grant", error_description: "Refresh token not found or invalid" }, 400);
+
+		const error = await refreshQoderToken("dead-refresh", fetchMock).then(
+			() => {
+				throw new Error("refresh must fail");
+			},
+			(thrown: unknown) => thrown,
+		);
+
+		expect(error).toMatchObject({ name: "OAuthError", kind: "token-refresh", provider: "qoder", status: 400 });
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain("invalid_grant");
+		expect(isDefinitiveOAuthFailure(message)).toBe(true);
+	});
+
+	it("keeps the HTTP status when the failure body cannot be read", async () => {
+		const brokenBody = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.error(new Error("stream exploded"));
+			},
+		});
+		const fetchMock: FetchImpl = async () => new Response(brokenBody, { status: 500 });
+
+		await expect(refreshQoderToken("old-refresh", fetchMock)).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "token-refresh",
+			provider: "qoder",
+			status: 500,
+			message: expect.stringContaining("(500)"),
+		});
+	});
+
 	it("rejects an empty access token returned by refresh", async () => {
 		const fetchMock: FetchImpl = async () => jsonResponse({ token: "" });
 
@@ -216,7 +257,7 @@ describe("getQoderCommonHeaders", () => {
 		expect(Object.isFrozen(first)).toBe(true);
 		expect(first).toEqual({
 			"Cosy-ClientType": "5",
-			"Cosy-Version": "1.1.1",
+			"Cosy-Version": "1.1.2",
 			"Cosy-MachineOS": `${arch}_${process.platform}`,
 		});
 	});

@@ -6,6 +6,10 @@
 
 - Added Qoder browser OAuth login, token refresh, client-attribution headers, provider-scoped folded-SSE repair, and `/fast` high-speed routing for Kimi-K2.7-Code.
 
+### Fixed
+
+- Fixed Qoder login polling aborting on transient request failures, refresh failures hiding `invalid_grant` details, stale 1.1.1 client attribution, and `/fast` tests missing the non-Kimi negative path.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed
