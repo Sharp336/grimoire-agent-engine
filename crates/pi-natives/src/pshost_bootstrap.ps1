@@ -286,28 +286,47 @@ while (`$global:__omp.History.Count -gt $HistoryDepth) {
 function Publish-Streams([hashtable] $Cur) {
     $s = $Cur.PS.Streams
 
+    # Info/Warning/Verbose/Debug records are released the instant they're
+    # published: a long-running high-volume command (e.g. Write-Host in a
+    # tight million-iteration loop) would otherwise retain every record for
+    # the command's full duration even though its text already left via
+    # Write-Chunk, growing the sidecar's memory unbounded. RemoveAt(0) `n`
+    # times shifts the collection so anything the pipeline appended AFTER
+    # `n` (concurrently, while we were reading/removing) is left untouched —
+    # appends only ever land at the end. The index resets to 0 to match the
+    # now-empty-up-to-`n` collection.
+    #
+    # Error records are the one exception: left retained (not released) so
+    # Complete-Exec's `$cur.PS.Streams.Error.Count -gt 0` hadErrors check
+    # keeps working without adding a separate "did we ever see one" flag —
+    # errors are comparatively rare, so this doesn't reintroduce the memory
+    # concern this function exists to close.
     $n = $s.Information.Count
     if ($n -gt $Cur.InfoIdx) {
         $lines = for ($i = $Cur.InfoIdx; $i -lt $n; $i++) { [string]$s.Information[$i].MessageData }
-        $Cur.InfoIdx = $n
+        for ($i = 0; $i -lt $n; $i++) { $s.Information.RemoveAt(0) }
+        $Cur.InfoIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'information' -Text (@($lines) -join $NL)
     }
     $n = $s.Warning.Count
     if ($n -gt $Cur.WarnIdx) {
         $lines = for ($i = $Cur.WarnIdx; $i -lt $n; $i++) { "WARNING: $($s.Warning[$i].Message)" }
-        $Cur.WarnIdx = $n
+        for ($i = 0; $i -lt $n; $i++) { $s.Warning.RemoveAt(0) }
+        $Cur.WarnIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'warning' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
     $n = $s.Verbose.Count
     if ($n -gt $Cur.VerboseIdx) {
         $lines = for ($i = $Cur.VerboseIdx; $i -lt $n; $i++) { "VERBOSE: $($s.Verbose[$i].Message)" }
-        $Cur.VerboseIdx = $n
+        for ($i = 0; $i -lt $n; $i++) { $s.Verbose.RemoveAt(0) }
+        $Cur.VerboseIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'verbose' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
     $n = $s.Debug.Count
     if ($n -gt $Cur.DebugIdx) {
         $lines = for ($i = $Cur.DebugIdx; $i -lt $n; $i++) { "DEBUG: $($s.Debug[$i].Message)" }
-        $Cur.DebugIdx = $n
+        for ($i = 0; $i -lt $n; $i++) { $s.Debug.RemoveAt(0) }
+        $Cur.DebugIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'debug' -Text (Format-AnsiText (@($lines) -join $NL) '33;1')
     }
     $n = $s.Error.Count

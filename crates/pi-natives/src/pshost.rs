@@ -656,6 +656,40 @@ fn spawn_chunk_forwarder(
 		const INITIAL_BATCH_CAP: usize = 8 * 1024;
 		let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
 		while let Some(first) = rx.recv().await {
+			// A single PowerShell frame can be up to ~4M chars (multiple MB —
+			// see Write-Chunk's $sliceChars in pshost_bootstrap.ps1). The
+			// coalescing loop below only bounds how many items get ADDED to an
+			// already-under-budget batch; it never SPLITS an individual
+			// oversized item, so without this an oversized `first` alone would
+			// sail straight through to `call_async` as one multi-MB call,
+			// silently breaking the "JS main thread never sees a multi-MB
+			// single call" contract for exactly the common case (any command
+			// whose total rendered output exceeds one batch).
+			if first.len() > MAX_BATCH_BYTES {
+				// Flush whatever was already pending first, so delivery order
+				// is preserved across the split.
+				if !batch.is_empty() {
+					let pending = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
+					if on_chunk.call_async(Ok(pending)).await.is_err() {
+						break;
+					}
+				}
+				let mut rest = first.as_str();
+				let mut js_gone = false;
+				while !rest.is_empty() {
+					let split = floor_char_boundary(rest, MAX_BATCH_BYTES);
+					let (piece, remainder) = rest.split_at(split);
+					if on_chunk.call_async(Ok(piece.to_string())).await.is_err() {
+						js_gone = true;
+						break;
+					}
+					rest = remainder;
+				}
+				if js_gone {
+					break;
+				}
+				continue;
+			}
 			batch.push_str(&first);
 			while batch.len() < MAX_BATCH_BYTES {
 				match rx.try_recv() {
@@ -675,6 +709,21 @@ fn spawn_chunk_forwarder(
 			}
 		}
 	})
+}
+
+/// Largest byte index `<= index` that lands on a UTF-8 char boundary in `s`.
+/// `str::floor_char_boundary` is nightly-only; this is the stable equivalent
+/// used to split an oversized chunk without slicing through a multi-byte
+/// codepoint (which would panic).
+const fn floor_char_boundary(s: &str, index: usize) -> usize {
+	if index >= s.len() {
+		return s.len();
+	}
+	let mut i = index;
+	while i > 0 && !s.is_char_boundary(i) {
+		i -= 1;
+	}
+	i
 }
 
 /// Supervisor: spawn the sidecar, wire stdio pumps, and route events until the
@@ -924,6 +973,65 @@ mod tests {
 
 		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
 		assert!(drained.is_ok(), "forwarder task must exit once the channel closes");
+	}
+
+	/// `floor_char_boundary` must never slice through a multi-byte UTF-8
+	/// codepoint (which panics `str::split_at`), and splitting on its result
+	/// repeatedly must reconstruct the original string exactly (no lost or
+	/// duplicated bytes) -- the property `spawn_chunk_forwarder`'s oversized-
+	/// chunk split depends on.
+	#[test]
+	fn floor_char_boundary_splits_without_corrupting_utf8() {
+		use super::floor_char_boundary;
+
+		assert_eq!(floor_char_boundary("hello", 3), 3, "pure-ASCII index is already a boundary");
+		assert_eq!(floor_char_boundary("hello", 100), 5, "clamps to the string length");
+		assert_eq!(floor_char_boundary("hello", 0), 0);
+
+		// "café" — 'é' is 2 bytes (U+00E9), so byte index 4 (mid-'é') is NOT a
+		// boundary; the floor must back off to 3 (right after 'f').
+		let s = "café";
+		assert_eq!(s.len(), 5, "café is 5 bytes: c-a-f-é(2 bytes)");
+		assert_eq!(floor_char_boundary(s, 4), 3, "backs off out of the middle of 'é'");
+		let (head, tail) = s.split_at(floor_char_boundary(s, 4));
+		assert_eq!(format!("{head}{tail}"), s, "split reconstructs the original exactly");
+
+		// Reassembling a full multi-byte string via repeated small-budget
+		// splits (as the forwarder's while-loop does) must lose nothing.
+		let text = "héllo wörld 🎉 more técxt".repeat(50);
+		let mut rest = text.as_str();
+		let mut pieces = Vec::new();
+		while !rest.is_empty() {
+			let split = floor_char_boundary(rest, 7); // tiny budget to force many splits
+			let (piece, remainder) = rest.split_at(split);
+			pieces.push(piece.to_string());
+			rest = remainder;
+		}
+		assert_eq!(pieces.concat(), text, "reassembled pieces equal the original text exactly");
+	}
+
+	/// A single oversized item (e.g. PowerShell's up-to-4M-char frames) must
+	/// be SPLIT into `<= MAX_BATCH_BYTES`-ish pieces before reaching the JS
+	/// callback, not forwarded whole. `call_async` needs a real N-API `Env`
+	/// (can't construct a `ThreadsafeFunction` in a plain unit test), so this
+	/// exercises the split path's producer/consumer plumbing around
+	/// `spawn_chunk_forwarder(None, ...)` -- proving an oversized single send
+	/// still completes promptly and every byte is drained -- while the actual
+	/// per-call payload-size bound is verified end-to-end from JS (host.run()
+	/// smoke test, see PR discussion).
+	#[tokio::test]
+	async fn forwarder_accepts_an_oversized_single_chunk() {
+		let (tx, rx) = mpsc::channel::<String>(CHUNK_QUEUE_CHUNKS);
+		let drain = spawn_chunk_forwarder(None, rx);
+
+		// Larger than MAX_BATCH_BYTES (64KiB) by construction.
+		let huge = "x".repeat(200 * 1024);
+		let sent = tokio::time::timeout(Duration::from_secs(5), tx.send(huge)).await;
+		assert!(sent.is_ok() && sent.unwrap().is_ok(), "oversized single send completes");
+		drop(tx);
+
+		let drained = tokio::time::timeout(Duration::from_secs(5), drain).await;
+		assert!(drained.is_ok(), "forwarder task must exit after draining the oversized item");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

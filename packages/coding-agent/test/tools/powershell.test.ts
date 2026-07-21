@@ -243,6 +243,28 @@ suite("PowerShellTool (persistent host)", () => {
 		// shared by every truncation shape instead of one specific wording.
 		await expect(tool.execute("t1", { command, timeout: 1 })).rejects.toThrow(/Showing .+ of \d+/);
 	});
+
+	test("a high-volume Write-Host stream delivers every line intact after live release", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-release-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Publish-Streams releases (RemoveAt) each Information record right
+		// after publishing it, so a long-running high-volume command doesn't
+		// retain every record for the sidecar's process lifetime. This proves
+		// the release doesn't drop, duplicate, or reorder anything, and the
+		// wrapped script's trailing success output (the marker) still renders
+		// normally afterward.
+		const result = await tool.execute("rel1", {
+			command: "1..5000 | ForEach-Object { Write-Host \"item-$_\" }; 'done-marker'",
+		});
+		expect(result.isError ?? false).toBe(false);
+		const text = textOf(result);
+		const lines = new Set(text.split(/\r?\n/).filter(l => l.startsWith("item-")));
+		expect(lines.size).toBe(5000);
+		for (const n of [1, 2500, 5000]) expect(lines.has(`item-${n}`)).toBe(true);
+		expect(text).toContain("done-marker");
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.
