@@ -4,7 +4,11 @@
 
 ### Added
 
-- Added Qoder's authenticated 15-model catalog, including 22 context-window aliases that route to their base model with the selected 400K or 1M window.
+- Added Qoder's authenticated nine-model catalog, including ten context-window aliases that route to their base model with the selected 400K or 1M window.
+
+### Fixed
+
+- Pruned six Qoder base models (`cmodel`, `qmodel_preview`, `qmodel_latest`, `kmodel_latest`, `gm51model`, `dfmodel`) and their context aliases from the curated catalog. These families require Qoder's api3 WASM transport and fail closed on the implemented legacy api2-v2 OpenAI endpoint, so advertising them guaranteed an empty completion. The catalog now lists only the nine base models proven live through api2-v2 (auto, ultimate, performance, efficient, lite, qmodel, kmodel, dmodel, mmodel) plus their ten retained context aliases.
 
 ## [17.0.6] - 2026-07-20
 
