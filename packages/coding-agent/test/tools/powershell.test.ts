@@ -8,7 +8,7 @@ import { loadPowerShellTool, type PowerShellToolDetails, powershellToolRenderer 
 import { acquirePsHost, disposeAllPsHosts } from "../../src/tools/pshost-manager";
 
 const hasPwsh = Boolean(await $which("pwsh"));
-const settings = await Settings.init();
+const settings = Settings.isolated({});
 const suite = hasPwsh ? describe : describe.skip;
 
 function fakeSession(sessionId = "ps-tool-test"): ToolSession {
