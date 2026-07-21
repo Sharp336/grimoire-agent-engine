@@ -20,7 +20,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
+import { type AgentRegistry, type AgentStatus, isReadOnlyAgentKind } from "../../registry/agent-registry";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
@@ -185,7 +185,7 @@ export class AgentTranscriptViewer implements Component {
 	/** Advisor transcripts are read-only; everything else may be messaged. */
 	get #sendable(): boolean {
 		const ref = this.deps.registry.get(this.deps.agentId);
-		if (!ref || ref.kind === "advisor") return false;
+		if (!ref || isReadOnlyAgentKind(ref.kind)) return false;
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 

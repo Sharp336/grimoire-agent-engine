@@ -16,7 +16,7 @@ import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, isReadOnlyAgentKind, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -91,14 +91,14 @@ export async function executeList(
 	senderId: string,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	let refs = registry.list();
-	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
+	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && !isReadOnlyAgentKind(ref.kind))) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
 		refs = registry.list();
 	}
 
 	const bus = IrcBus.global();
 	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && !isReadOnlyAgentKind(ref.kind))
 		.map(ref => ({
 			id: ref.id,
 			displayName: ref.displayName,

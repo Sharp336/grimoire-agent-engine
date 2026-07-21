@@ -17,7 +17,7 @@
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, isReadOnlyAgentKind, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -118,12 +118,11 @@ export class IrcBus {
 				error: `Agent "${message.to}" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
 			};
 		}
-		// Advisor refs are observability-only transcripts, never messageable peers.
-		if (ref.kind === "advisor") {
+		if (isReadOnlyAgentKind(ref.kind)) {
 			return {
 				to: message.to,
 				outcome: "failed",
-				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
+				error: `Agent "${message.to}" is a read-only ${ref.kind} transcript and cannot be messaged.`,
 			};
 		}
 

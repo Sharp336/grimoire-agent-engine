@@ -1,0 +1,1 @@
+This consultation is durable but read-only. The attached tool catalog exists only to preserve prompt-cache byte parity. Do not call tools. Any tool call you emit will be discarded without execution. Answer only from the supplied committed context; when none is supplied, state that clearly and answer from the question alone.

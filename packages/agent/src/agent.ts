@@ -728,21 +728,21 @@ export class Agent {
 	async buildSideRequestContext(
 		llmMessages: Message[],
 		systemPrompt: string[] = this.#state.systemPrompt,
+		options?: { model?: Model; tools?: AgentTool[]; applyProviderTransform?: boolean },
 	): Promise<Context> {
-		const model = this.#state.model;
+		const model = options?.model ?? this.#state.model;
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
+		const sourceTools = options?.tools ?? this.#toolsForModel(model);
 		const tools = ownedDialect
 			? []
-			: (normalizeTools(
-					this.#toolsForModel(model),
-					this.#intentTracing,
-					preferredDialect(model.id),
-					this.#pruneToolDescriptions,
-				) ?? []);
+			: (normalizeTools(sourceTools, this.#intentTracing, preferredDialect(model.id), this.#pruneToolDescriptions) ??
+				[]);
 		let context: Context = { systemPrompt, messages, tools };
-		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
+		if (options?.applyProviderTransform !== false && this.#transformProviderContext) {
+			context = await this.#transformProviderContext(context, model);
+		}
 		return context;
 	}
 

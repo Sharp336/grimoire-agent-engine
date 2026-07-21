@@ -203,8 +203,10 @@ export interface OverlayFocusOwner {
  * final (shell semantics).
  *
  * When several root children report a seam in the same frame, the topmost one
- * defines the boundary and pinning policy: commits are prefix-only, so
- * everything below the first seam is already excluded.
+ * defines the boundary: commits are prefix-only, so everything below it is
+ * already excluded. Pinning instead aggregates across those lower live
+ * siblings; any pinned mutable suffix must keep the whole excluded region
+ * viewport-local rather than let a sibling's repaint freeze it into history.
  */
 export interface NativeScrollbackLiveRegion {
 	getNativeScrollbackLiveRegionStart(): number | undefined;
@@ -1233,12 +1235,18 @@ export class TUI extends Container {
 			// Topmost seam wins. Commits are prefix-only: the first child that
 			// reports a live region already bounds everything below it, so a
 			// lower sibling's seam (e.g. a status loader under a streaming
-			// transcript) must never overwrite it — moving the boundary down
-			// would commit the earlier child's still-mutable rows as stale
-			// history.
-			if (liveLocalStart !== undefined && this.#nativeScrollbackLiveRegionStart === undefined) {
-				this.#nativeScrollbackLiveRegionStart = offset + liveLocalStart;
-				this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
+			// transcript) must never move the boundary down and commit the
+			// earlier child's still-mutable rows as stale history. Pinning is
+			// different: a lower pinned live sibling still belongs to that
+			// excluded suffix, so it must prevent frozen snapshot commits even
+			// when the earlier seam was reused by a component-scoped render.
+			if (liveLocalStart !== undefined) {
+				if (this.#nativeScrollbackLiveRegionStart === undefined) {
+					this.#nativeScrollbackLiveRegionStart = offset + liveLocalStart;
+					this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
+				} else if (liveRegionPinned) {
+					this.#nativeScrollbackLiveRegionPinned = true;
+				}
 			}
 			if (chainStable) {
 				if (previous !== undefined && previous.component === child && previous.start === offset) {

@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Side-request context construction can now use a captured model and tool catalog while explicitly bypassing parent-owned provider transforms.
+
 
 ### Added
 

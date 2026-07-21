@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added durable `/consult` read-only side questions and committed-boundary `/fork` creation while the parent response continues streaming.
+
+### Changed
+
+- Saved consultations now appear as parked read-only Agent Hub transcripts and remain hidden from messaging, collaboration, and `history://` peer surfaces.
+
 
 ### Added
 

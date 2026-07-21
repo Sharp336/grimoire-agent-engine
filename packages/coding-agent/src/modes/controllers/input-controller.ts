@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, matchesKey, routeSgrMouseInput, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
@@ -175,6 +175,7 @@ export class InputController {
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
+	#consultActionListenerInstalled = false;
 	// Tap counter for the double-← gesture; reset whenever a quiet gap
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
@@ -247,6 +248,7 @@ export class InputController {
 		if (!this.#btwBranchListenerInstalled) {
 			this.#btwBranchListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
+				if (this.ctx.isConsultComposerActive) return undefined;
 				if (!matchesKey(data, "b")) return undefined;
 				if (!this.ctx.canBranchBtw()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
@@ -258,6 +260,7 @@ export class InputController {
 		if (!this.#btwCopyListenerInstalled) {
 			this.#btwCopyListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
+				if (this.ctx.isConsultComposerActive) return undefined;
 				if (!matchesKey(data, "c")) return undefined;
 				if (!this.ctx.canCopyBtw()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
@@ -274,6 +277,58 @@ export class InputController {
 				if (!this.ctx.keybindings.matches(data, "app.clipboard.pasteImage")) return undefined;
 				void this.handleImagePaste();
 				return { consume: true };
+		if (!this.#consultActionListenerInstalled) {
+			this.#consultActionListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				// The consultation panel shares the editor's focus. Keep ordinary
+				// printable input for the next question; only navigation and the
+				// compact action menu reserve keys.
+				if (!this.ctx.isConsultComposerActive || this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (data.startsWith("\x1b[<")) {
+					const consumed = routeSgrMouseInput(data, event => {
+						if (event.wheel === null) return false;
+						this.ctx.scrollConsultAnswer(event.wheel * 3);
+						return true;
+					});
+					return consumed ? { consume: true } : undefined;
+				}
+				if (matchesKey(data, "alt+up")) {
+					void this.ctx.showPreviousConsultTurn();
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+down")) {
+					void this.ctx.showNextConsultTurn();
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+pageUp")) {
+					this.ctx.scrollConsultAnswerPage(-1);
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+pageDown")) {
+					this.ctx.scrollConsultAnswerPage(1);
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+home")) {
+					this.ctx.scrollConsultAnswerToStart();
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+end")) {
+					this.ctx.scrollConsultAnswerToEnd();
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+enter") && this.ctx.canAskMainAboutConsultationAnswer()) {
+					void this.ctx.askMainAboutConsultationAnswer();
+					return { consume: true };
+				}
+				if (
+					data === "\x1b/" ||
+					matchesKey(data, "alt+/") ||
+					(matchesKey(data, "?") && this.ctx.editor.getText().length === 0)
+				) {
+					void this.ctx.showConsultActionMenu();
+					return { consume: true };
+				}
+				return undefined;
 			});
 		}
 		this.ctx.editor.onEscape = () => {
@@ -295,6 +350,9 @@ export class InputController {
 			// stays cancellable from the main view (focused submit gates /compact
 			// and handoff, so manual maintenance is main-only anyway).
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+				return;
+			}
+			if (this.ctx.hasActiveConsult() && this.ctx.returnConsultToParent()) {
 				return;
 			}
 			if (this.ctx.hasActiveOmfg() && this.ctx.handleOmfgEscape()) {
@@ -434,6 +492,19 @@ export class InputController {
 		this.ctx.editor.onSelectModel = () => this.ctx.showModelSelector();
 		this.ctx.editor.setActionKeys("app.history.search", this.ctx.keybindings.getKeys("app.history.search"));
 		this.ctx.editor.onHistorySearch = () => this.ctx.showHistorySearch();
+		this.ctx.editor.setActionKeys("app.consult", this.ctx.keybindings.getKeys("app.consult"));
+		this.ctx.editor.onConsult = () => {
+			if (
+				this.ctx.isConsultComposerActive ||
+				this.ctx.hasActiveBtw() ||
+				this.ctx.hasActiveConsult() ||
+				this.ctx.hasActiveOmfg() ||
+				this.ctx.ui.getFocused() !== this.ctx.editor
+			) {
+				return;
+			}
+			void this.ctx.startNewConsultation();
+		};
 		this.ctx.editor.setActionKeys("app.thinking.toggle", this.ctx.keybindings.getKeys("app.thinking.toggle"));
 		this.ctx.editor.onToggleThinking = () => this.ctx.toggleThinkingBlockVisibility();
 		this.ctx.editor.setActionKeys("app.editor.external", this.ctx.keybindings.getKeys("app.editor.external"));
@@ -462,46 +533,52 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
-		// Wire up extension shortcuts
-		this.registerExtensionShortcuts();
-		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
-		for (const key of planModeKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
-		}
+		if (!this.ctx.isConsultComposerActive) {
+			// Wire up extension shortcuts
+			this.registerExtensionShortcuts();
+			const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
+			for (const key of planModeKeys) {
+				this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
+			}
 
-		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.session.tree")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showTreeSelector());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.session.fork")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showUserMessageSelector());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.session.resume")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showSessionSelector());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
-		}
-		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and toggles STT on hold start / release. Gated on `stt.enabled` so a
-		// disabled STT leaves the space bar typing normally.
-		this.ctx.editor.sttHoldEnabled = () => settings.get("stt.enabled");
-		this.ctx.editor.onSpaceHoldStart = () => void this.ctx.handleSTTToggle();
-		this.ctx.editor.onSpaceHoldEnd = () => void this.ctx.handleSTTToggle();
-		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
-		}
-		const hubKeys = new Set([
-			...this.ctx.keybindings.getKeys("app.agents.hub"),
-			...this.ctx.keybindings.getKeys("app.session.observe"),
-		]);
-		for (const key of hubKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+			for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.session.tree")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showTreeSelector());
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.session.fork")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showUserMessageSelector());
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.session.resume")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showSessionSelector());
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
+			}
+			// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
+			// the spam back out, and toggles STT on hold start / release. Gated on `stt.enabled` so a
+			// disabled STT leaves the space bar typing normally.
+			this.ctx.editor.sttHoldEnabled = () => !this.ctx.isConsultComposerActive && settings.get("stt.enabled");
+			this.ctx.editor.onSpaceHoldStart = () => {
+				if (!this.ctx.isConsultComposerActive) void this.ctx.handleSTTToggle();
+			};
+			this.ctx.editor.onSpaceHoldEnd = () => {
+				if (!this.ctx.isConsultComposerActive) void this.ctx.handleSTTToggle();
+			};
+			for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
+			}
+			const hubKeys = new Set([
+				...this.ctx.keybindings.getKeys("app.agents.hub"),
+				...this.ctx.keybindings.getKeys("app.session.observe"),
+			]);
+			for (const key of hubKeys) {
+				this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+			}
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the
@@ -512,6 +589,7 @@ export class InputController {
 		// tap state to the hub so the same ←← that opened it also arms its close —
 		// otherwise the hub's fresh detector demands a second ←← (issue #4780).
 		this.ctx.editor.onLeftAtStart = () => {
+			if (this.ctx.isConsultComposerActive) return;
 			if (this.ctx.focusedAgentId) {
 				this.#handleFocusedLeftTap();
 				return;
@@ -526,9 +604,16 @@ export class InputController {
 		this.ctx.editor.onChange = (text: string) => {
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
-			const trimmed = text.trimStart();
-			this.ctx.isBashMode = trimmed.startsWith("!");
-			this.ctx.isPythonMode = parsePythonCommandInput(trimmed) !== undefined;
+			if (this.ctx.isConsultComposerActive) {
+				// Consultation input is always plain text. Do not let a leading
+				// `!` or `$` recolor its labeled editor as a parent command mode.
+				this.ctx.isBashMode = false;
+				this.ctx.isPythonMode = false;
+			} else {
+				const trimmed = text.trimStart();
+				this.ctx.isBashMode = trimmed.startsWith("!");
+				this.ctx.isPythonMode = parsePythonCommandInput(trimmed) !== undefined;
+			}
 			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
 				this.ctx.updateEditorBorderColor();
 			}
@@ -606,6 +691,30 @@ export class InputController {
 			text = text.trim();
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+
+			// A focused consultation owns the shared editor. Its text is never
+			// interpreted as a parent command, queue action, or streaming steer.
+			if (this.ctx.isConsultComposerActive) {
+				if (hasPendingImages) {
+					this.ctx.editor.setText(text);
+					this.ctx.showStatus("Images are not supported in /consult.");
+					return;
+				}
+				if (!text) return;
+				const presentation = this.ctx.getConsultTurnPresentation();
+				if (presentation && !presentation.isLatest) {
+					this.ctx.showWarning(
+						`Viewing old consultation turn ${presentation.turnIndex}; your question will be appended to latest turn ${presentation.turnCount}.`,
+					);
+				}
+				try {
+					await this.ctx.handleConsultSubmit(text);
+				} catch (error) {
+					this.ctx.editor.setText(text);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (continue shortcuts, slash/bash/python, loop,
@@ -1289,6 +1398,21 @@ export class InputController {
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+		if (this.ctx.isConsultComposerActive) {
+			if (images) {
+				this.ctx.showStatus("Images are not supported in /consult.");
+				return;
+			}
+			if (!text) return;
+			this.ctx.editor.clearDraft(text);
+			try {
+				await this.ctx.handleConsultSubmit(text);
+			} catch (error) {
+				this.ctx.editor.setText(text);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
 		if (!text && !images) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
@@ -1981,6 +2105,7 @@ export class InputController {
 	}
 
 	registerExtensionShortcuts(): void {
+		if (this.ctx.isConsultComposerActive) return;
 		const runner = this.ctx.session.extensionRunner;
 		if (!runner) return;
 

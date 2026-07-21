@@ -1,5 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import { BtwPanelComponent } from "@oh-my-pi/pi-coding-agent/modes/components/btw-panel";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import { Markdown, type MarkdownTheme } from "@oh-my-pi/pi-tui/components/markdown";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
@@ -25,6 +27,20 @@ class MutableLiveBlock implements Component {
 	}
 	getTranscriptBlockSettledRows(): number {
 		return this.#settledRows;
+	}
+}
+
+class CountingStaticBlock implements Component {
+	#lines: string[];
+	renderCalls = 0;
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	render(width: number): string[] {
+		this.renderCalls++;
+		return this.#lines.map(line => line.slice(0, width));
 	}
 }
 
@@ -233,5 +249,71 @@ describe("transcript streaming commit (assistant text)", () => {
 
 		expect(fenceRow).toBeGreaterThanOrEqual(0);
 		expect(rows.slice(fenceRow, fenceRow + 5)).toEqual(["```diff", "", "  +done", "  -streaming", "```"]);
+	});
+
+	it("coalesces consultation deltas into one scoped render without repainting transcript or status siblings", async () => {
+		if (process.platform === "win32") return;
+		await initTheme();
+		const term = new VirtualTerminal(72, 20);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const chat = new TranscriptContainer();
+		const parent = new CountingStaticBlock(["parent transcript remains untouched"]);
+		const status = new CountingStaticBlock(["hub status: four subagents running"]);
+		const consultation = new BtwPanelComponent({
+			tui,
+			commandLabel: "/consult",
+			question: "Inspect the committed boundary",
+			consultation: {
+				threadId: "thread-render",
+				title: "Render isolation",
+				turnIndex: 1,
+				turnCount: 1,
+				status: "streaming-turn",
+				question: "Inspect the committed boundary",
+				answer: "",
+				isLatest: true,
+			},
+		});
+		const consultationRender = vi.spyOn(consultation, "render");
+		chat.addChild(parent);
+		tui.addChild(chat);
+		tui.addChild(consultation);
+		tui.addChild(status);
+
+		try {
+			tui.start();
+			await Promise.resolve();
+			await scheduler.drain(term);
+			parent.renderCalls = 0;
+			status.renderCalls = 0;
+			consultationRender.mockClear();
+
+			consultation.appendConsultationText("consult-token-a ");
+			consultation.appendConsultationText("consult-token-b ");
+			consultation.appendConsultationText("consult-token-c");
+			await Promise.resolve();
+			await scheduler.drain(term);
+
+			expect(consultationRender).toHaveBeenCalledTimes(1);
+			expect(parent.renderCalls).toBe(0);
+			expect(status.renderCalls).toBe(0);
+			const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+			expect(rows.filter(row => row.includes("consult-token-a consult-token-b consult-token-c"))).toHaveLength(1);
+			expect(rows.filter(row => row.includes("parent transcript remains untouched"))).toHaveLength(1);
+			expect(rows.filter(row => row.includes("hub status: four subagents running"))).toHaveLength(1);
+
+			consultationRender.mockClear();
+			consultation.appendConsultationText(" must not render after close");
+			consultation.close();
+			await Promise.resolve();
+			await scheduler.drain(term);
+
+			expect(consultationRender).not.toHaveBeenCalled();
+		} finally {
+			consultationRender.mockRestore();
+			tui.stop();
+			await term.flush();
+		}
 	});
 });

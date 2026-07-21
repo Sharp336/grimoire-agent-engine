@@ -408,4 +408,30 @@ describe("history:// protocol", () => {
 			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([]);
 		});
 	});
+	it("hides consultations and rejects path-qualified lookup without resolving Main", async () => {
+		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "main",
+			kind: "main",
+			session: fakeLiveSession([{ role: "user", content: "secret main", timestamp: 1 }]),
+			status: "idle",
+		});
+		AgentRegistry.global().register({
+			id: "Main/consult:1",
+			displayName: "consult:1",
+			kind: "consultation",
+			parentId: "Main",
+			session: null,
+			sessionFile: "/tmp/__consult.1.jsonl",
+			status: "parked",
+		});
+		const index = await InternalUrlRouter.instance().resolve("history://");
+		expect(index.content).not.toContain("consult:1");
+		await expect(InternalUrlRouter.instance().resolve("history://Main/consult:1")).rejects.toThrow("Unknown agent");
+		await expect(InternalUrlRouter.instance().resolve("history://Main%2Fconsult%3A1")).rejects.toThrow(
+			"Unknown agent",
+		);
+		const completions = await new HistoryProtocolHandler().complete();
+		expect(completions.map(entry => entry.value)).not.toContain("Main/consult:1");
+	});
 });

@@ -64,6 +64,7 @@ async function writeSessionFile(
 	const sessionDir = path.join(getSessionsDir(), folderSlug);
 	await fs.mkdir(sessionDir, { recursive: true });
 	const sessionFile = path.join(sessionDir, fileName);
+	await fs.mkdir(path.dirname(sessionFile), { recursive: true });
 	const headerEntry = {
 		type: "session",
 		version: 3,
@@ -138,6 +139,52 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(overall.totalInputTokens).toBe(100);
 		expect(overall.totalOutputTokens).toBe(50);
 		expect(overall.totalCost).toBeCloseTo(0.003, 8);
+	});
+
+	it("deduplicates the copied parent prefix while counting a consultation answer once", async () => {
+		const parentTs = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const parentUser = buildUserEntry("parent-user", parentTs, "review this design");
+		const parentAssistant = buildAssistantEntry({
+			entryId: "parent-assistant",
+			parentId: "parent-user",
+			timestamp: parentTs,
+		});
+		const parentFile = await writeSessionFile(
+			"--tmp--consult-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[parentUser, parentAssistant],
+		);
+
+		const consultationTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const consultationUser = buildUserEntry("consult-user", consultationTs, "give a second opinion");
+		const consultationAssistant = buildAssistantEntry({
+			entryId: "consult-assistant",
+			parentId: "consult-user",
+			timestamp: consultationTs,
+		});
+		const consultationFile = await writeSessionFile(
+			"--tmp--consult-dedup",
+			"01_parent/__consult.consult01.jsonl",
+			{ id: "consult01", cwd: "/tmp/project", parentSession: parentFile },
+			[parentUser, parentAssistant, consultationUser, consultationAssistant],
+		);
+
+		await syncAllSessions({ workers: 1 });
+
+		const requests = getRecentRequests(10);
+		expect(requests.filter(request => request.entryId === "parent-assistant")).toEqual([
+			expect.objectContaining({ sessionFile: parentFile }),
+		]);
+		expect(requests.filter(request => request.entryId === "consult-assistant")).toEqual([
+			expect.objectContaining({ sessionFile: consultationFile, agentType: "subagent" }),
+		]);
+		expect(getOverallStats()).toMatchObject({
+			totalRequests: 2,
+			totalInputTokens: 200,
+			totalOutputTokens: 100,
+		});
+		expect(getOverallStats().totalCost).toBeCloseTo(0.006, 8);
 	});
 
 	it("admits new entries appended in the forked session", async () => {

@@ -2899,6 +2899,39 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
 					)
 				: undefined;
+		const readOnlySnapcompactInline =
+			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
+				? new SnapcompactInlineTransformer(
+						{
+							renderSystemPrompt: snapcompactSystemPromptMode,
+							renderToolResults: settings.get("snapcompact.toolResults"),
+							shape: settings.get("snapcompact.shape"),
+						},
+						() => {},
+					)
+				: undefined;
+		const readOnlySideTransforms = {
+			convertMessages: (messages: AgentMessage[], transformModel: Model): Message[] => {
+				let converted = convertToLlm(wrapSteeringForModel(messages));
+				if (settings.get("images.blockImages")) {
+					converted = replaceLlmImagesWithText(converted, "Image reading is disabled.");
+				} else if (!transformModel.input.includes("image")) {
+					converted = replaceLlmImagesWithText(
+						converted,
+						"[image omitted: the active model does not support image input]",
+					);
+				}
+				converted = filterProviderReplayMessages(converted);
+				return obfuscator?.hasSecrets() ? obfuscateMessages(obfuscator, converted) : converted;
+			},
+			transformProviderContext: async (context: Context, transformModel: Model): Promise<Context> => {
+				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+				if (readOnlySnapcompactInline) {
+					transformed = await readOnlySnapcompactInline.transform(transformed, transformModel);
+				}
+				return clampProviderContextImages(transformed, transformModel);
+			},
+		};
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -3137,6 +3170,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			builtInToolNames: builtInRegistryToolNames,
 			transformContext,
 			transformProviderContext,
+			readOnlySideTransforms,
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,

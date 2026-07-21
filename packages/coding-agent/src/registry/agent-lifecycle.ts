@@ -26,6 +26,7 @@ import {
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
+	isReadOnlyAgentKind,
 	MAIN_AGENT_ID,
 	type RegistryEvent,
 } from "./agent-registry";
@@ -266,6 +267,13 @@ export class AgentLifecycleManager {
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
 	async ensureLive(id: string): Promise<AgentSession> {
+		const initialRef = this.#registry.get(id);
+		if (initialRef && isReadOnlyAgentKind(initialRef.kind)) {
+			if (initialRef.kind === "consultation") {
+				throw new Error(`"${id}" is a read-only consultation transcript — nothing to revive.`);
+			}
+			throw new Error(`"${id}" is a read-only advisor transcript — nothing to revive.`);
+		}
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -344,13 +352,20 @@ export class AgentLifecycleManager {
 		}
 	}
 
-	/**
+/**
 	 * Hard removal: dispose if live, unregister from registry, drop timers.
 	 * When `expected` is given, only a ref matching it is released; a stale
 	 * release can never take down a newer same-id ref. Returns true when a
 	 * matching ref was released.
 	 */
 	async release(id: string, expected?: AgentRefExpectation): Promise<boolean> {
+		const initialRef = this.#registry.get(id);
+		if (initialRef && isReadOnlyAgentKind(initialRef.kind)) {
+			if (initialRef.kind === "consultation") {
+				throw new Error(`"${id}" is a read-only consultation transcript — cannot be killed.`);
+			}
+			throw new Error(`"${id}" is a read-only advisor transcript — cannot be killed.`);
+		}
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =

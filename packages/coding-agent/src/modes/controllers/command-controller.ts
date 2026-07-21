@@ -40,7 +40,8 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
-import type { AsyncJobSnapshotItem } from "../../session/agent-session";
+import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import type { AsyncJobSnapshotItem, CommittedSessionFork } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -971,7 +972,50 @@ export class CommandController {
 
 	async handleForkCommand(): Promise<void> {
 		if (this.ctx.session.isStreaming) {
-			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
+			const session = this.ctx.session;
+			const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
+			const systemPrompt = [...session.agent.state.systemPrompt];
+			const tools = [...session.getActiveToolNames()];
+			const readSummarize = session.settings.get("read.summarize.enabled");
+			const inherited = session.sessionManager.peekSessionInit();
+			const outputSchema = structuredClone(inherited?.outputSchema);
+			const outputSchemaMode = structuredClone(inherited?.outputSchemaMode);
+			const restrictToolNames = structuredClone(inherited?.restrictToolNames);
+			const id = `Fork-${Snowflake.next()}`;
+			let child: CommittedSessionFork | undefined;
+			try {
+				child = await session.createCommittedChildSession(id);
+				child.manager.appendSessionInit({
+					systemPrompt: systemPrompt.join("\n\n"),
+					task: "Continue the forked session from its committed boundary.",
+					tools,
+					spawns: "",
+					readSummarize,
+					outputSchema,
+					outputSchemaMode,
+					restrictToolNames,
+				});
+				await child.manager.flush();
+				await child.manager.close();
+				AgentRegistry.global().register({
+					id,
+					displayName: id,
+					kind: "sub",
+					parentId: ownerId,
+					session: null,
+					sessionFile: child.sessionFile,
+					status: "parked",
+				});
+				this.ctx.showStatus(`Forked committed session to ${id}; open /hub to continue it.`);
+			} catch (error) {
+				if (child) await child.manager.dropSession(child.sessionFile).catch(() => {});
+				const message = error instanceof Error ? error.message : String(error);
+				this.ctx.showError(
+					message === "Committed child sessions require a persisted parent session"
+						? "Fork failed (session not persisted)"
+						: message,
+				);
+			}
 			return;
 		}
 		if (this.ctx.loadingAnimation) {

@@ -23,7 +23,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, isReadOnlyAgentKind } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -560,7 +560,7 @@ export class CollabHost {
 				// Advisor transcripts are local observability only; never mirror them to
 				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
 				// be able to chat/kill/revive them).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind !== "advisor")
+				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => !isReadOnlyAgentKind(ref.kind))
 				.map(ref => ({
 					id: ref.id,
 					displayName: ref.displayName,
@@ -589,8 +589,12 @@ export class CollabHost {
 		}
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		const targetRef = AgentRegistry.global().get(agentId);
+		if (targetRef && isReadOnlyAgentKind(targetRef.kind)) {
+			this.#socket?.send(
+				{ t: "error", message: `agent ${agentId}: ${targetRef.kind} transcripts are read-only` },
+				fromPeer,
+			);
 			return;
 		}
 		const fail = (err: unknown) => {
@@ -633,7 +637,12 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
+		const ref = AgentRegistry.global().get(agentId);
+		if (ref && isReadOnlyAgentKind(ref.kind)) {
+			reply("", fromByte, `${ref.kind} transcripts are read-only`);
+			return;
+		}
+		const file = ref?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
 			return;
