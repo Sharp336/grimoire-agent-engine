@@ -152,8 +152,7 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 }
 
 export function isQoderFastModel(model: ServiceTierModel): boolean {
-	const id = model.id.toLowerCase();
-	return model.provider === "qoder" && (id === "kmodel" || id === "kmodel-400k" || id === "kmodel-1m");
+	return model.provider === "qoder" && model.id.toLowerCase() === "kmodel";
 }
 
 /**

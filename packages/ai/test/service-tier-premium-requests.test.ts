@@ -37,8 +37,6 @@ const customOpenAIAliases = [
 
 const qoder = (api: Api, id: string) => m("qoder", api, id);
 const qoderKmodel = qoder("openai-completions", "kmodel");
-const qoderKmodel400k = qoder("openai-completions", "kmodel-400k");
-const qoderKmodel1m = qoder("openai-completions", "kmodel-1m");
 const qoderKmodelLatest = qoder("openai-completions", "kmodel_latest");
 const qoderAuto = qoder("openai-completions", "auto");
 const qoderUltimate = qoder("openai-completions", "ultimate");
@@ -70,10 +68,8 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(m("openrouter", "openai-completions", "z-ai/glm-4.7"))).toBeUndefined();
 	});
 
-	it("classifies qoder kmodel and its context aliases as qoder", () => {
+	it("classifies only qoder kmodel as qoder", () => {
 		expect(serviceTierFamily(qoderKmodel)).toBe("qoder");
-		expect(serviceTierFamily(qoderKmodel400k)).toBe("qoder");
-		expect(serviceTierFamily(qoderKmodel1m)).toBe("qoder");
 	});
 
 	it("leaves other qoder models unclassified", () => {
@@ -99,8 +95,6 @@ describe("resolveModelServiceTier", () => {
 	it("resolves qoder kmodel from the qoder family entry", () => {
 		const tiers = { qoder: "priority" } as const;
 		expect(resolveModelServiceTier(tiers, qoderKmodel)).toBe("priority");
-		expect(resolveModelServiceTier(tiers, qoderKmodel400k)).toBe("priority");
-		expect(resolveModelServiceTier(tiers, qoderKmodel1m)).toBe("priority");
 		expect(resolveModelServiceTier(tiers, qoderAuto)).toBeUndefined();
 		expect(resolveModelServiceTier({ openai: "priority" }, qoderKmodel)).toBeUndefined();
 	});
@@ -140,7 +134,6 @@ describe("shouldSendServiceTier", () => {
 	it("never sends an OpenAI service_tier field for qoder", () => {
 		for (const tier of ["auto", "default", "flex", "scale", "priority"] as const) {
 			expect(shouldSendServiceTier(tier, qoderKmodel)).toBe(false);
-			expect(shouldSendServiceTier(tier, qoderKmodel400k)).toBe(false);
 			expect(shouldSendServiceTier(tier, "qoder")).toBe(false);
 		}
 	});
@@ -173,10 +166,8 @@ describe("realizesPriorityServiceTier", () => {
 		expect(realizesPriorityServiceTier(undefined, openai)).toBe(false);
 	});
 
-	it("realizes priority only for qoder kmodel and its context aliases", () => {
+	it("realizes priority only for qoder kmodel", () => {
 		expect(realizesPriorityServiceTier("priority", qoderKmodel)).toBe(true);
-		expect(realizesPriorityServiceTier("priority", qoderKmodel400k)).toBe(true);
-		expect(realizesPriorityServiceTier("priority", qoderKmodel1m)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", qoderKmodelLatest)).toBe(false);
 		expect(realizesPriorityServiceTier("priority", qoderAuto)).toBe(false);
 		expect(realizesPriorityServiceTier("priority", qoderUltimate)).toBe(false);
