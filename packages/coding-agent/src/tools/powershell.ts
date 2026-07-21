@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { PsHost } from "@oh-my-pi/pi-natives";
+import type { PsHost, PsRunResult } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $which, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -164,7 +164,7 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		});
 
 		const pid = host.pid;
-		let result: Awaited<ReturnType<PsHost["run"]>>;
+		let result: PsRunResult;
 		try {
 			result = await host.run(
 				{ command, cwd: resolvedCwd, width, timeoutMs: timeoutSec * 1000, signal },

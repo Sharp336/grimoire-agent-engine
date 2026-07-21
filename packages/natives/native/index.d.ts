@@ -1687,26 +1687,6 @@ export interface ProcessWaitOptions {
   signal?: unknown
 }
 
-/** Options for running an executable and argument vector in a PTY session. */
-export interface PtyArgvStartOptions {
-  /** Executable name or path. */
-  application: string
-  /** Arguments passed directly to the executable. */
-  args: Array<string>
-  /** Working directory for command execution. */
-  cwd?: string
-  /** Environment variables for this command. */
-  env?: Record<string, string>
-  /** Timeout in milliseconds before cancelling. */
-  timeoutMs?: number
-  /** Abort signal for cancelling the operation. */
-  signal?: unknown
-  /** PTY column count. */
-  cols?: number
-  /** PTY row count. */
-  rows?: number
-}
-
 /** Options for spawning a persistent PowerShell host. */
 export interface PsHostOptions {
   /** PowerShell executable to launch. Defaults to `pwsh`. */
@@ -1763,6 +1743,26 @@ export interface PsRunResult {
   timedOut: boolean
   /** Monotonic id of this execution within the host. */
   execId: number
+}
+
+/** Options for running an executable and argument vector in a PTY session. */
+export interface PtyArgvStartOptions {
+  /** Executable name or path. */
+  application: string
+  /** Arguments passed directly to the executable. */
+  args: Array<string>
+  /** Working directory for command execution. */
+  cwd?: string
+  /** Environment variables for this command. */
+  env?: Record<string, string>
+  /** Timeout in milliseconds before cancelling. */
+  timeoutMs?: number
+  /** Abort signal for cancelling the operation. */
+  signal?: unknown
+  /** PTY column count. */
+  cols?: number
+  /** PTY row count. */
+  rows?: number
 }
 
 /** Result of a PTY command run. */

@@ -41,8 +41,46 @@ $ErrorActionPreference = 'Stop'
 # stream is desynced beyond recovery.
 $MaxFrameBytes = 64MB
 
+# Native executables spawned by user commands inherit this process's OS standard
+# input handle — which is the length-prefixed protocol pipe the Rust side writes
+# requests to. A child that reads stdin (most visibly Git for Windows' git.exe,
+# which blocks on it for every subcommand) hangs forever AND steals bytes from
+# the protocol stream, desyncing the reader. Detach it the same way Console.Out
+# is guarded below: keep the pipe for our own reader, and repoint the
+# inheritable STDIN slot at the null device so children observe immediate EOF.
+# (Console.SetIn only swaps this process's managed reader; the OS handle a child
+# inherits is a separate slot, so the redirect needs a P/Invoke.)
+Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] static extern System.IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int n, System.IntPtr h);
+[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern System.IntPtr CreateFileW(string name, uint access, uint share, System.IntPtr sec, uint disp, uint flags, System.IntPtr templ);
+[DllImport("libc", SetLastError=true)] static extern int open(string path, int flags);
+[DllImport("libc", SetLastError=true)] static extern int dup(int fd);
+[DllImport("libc", SetLastError=true)] static extern int dup2(int oldfd, int newfd);
+[DllImport("libc", SetLastError=true)] static extern int close(int fd);
+// Detach child-inheritable stdin from the protocol pipe; return the stream our
+// own framed reader should keep using.
+public static System.IO.Stream DetachStdin() {
+    if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)) {
+        // Wrap the original pipe handle (ownsHandle:false — the process still
+        // owns it), then point the inheritable STDIN slot at NUL.
+        System.IntPtr orig = GetStdHandle(-10);
+        var proto = new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(orig, false), System.IO.FileAccess.Read, 1);
+        System.IntPtr nul = CreateFileW("NUL", 0x80000000u, 0x3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);
+        SetStdHandle(-10, nul);
+        return proto;
+    }
+    // POSIX: dup the real stdin aside, then swap fd 0 to /dev/null so children
+    // inherit EOF while our reader keeps the pipe on the saved descriptor.
+    int saved = dup(0);
+    int nulFd = open("/dev/null", 0);
+    if (nulFd >= 0) { dup2(nulFd, 0); close(nulFd); }
+    return new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle((System.IntPtr)saved, true), System.IO.FileAccess.Read, 1);
+}
+'@
+
 # ── Binary framing over raw stdio ────────────────────────────────────────────
-$stdin  = [Console]::OpenStandardInput()
+$stdin  = [Omp.Stdio]::DetachStdin()
 $stdout = [Console]::OpenStandardOutput()
 
 # The framed protocol owns the raw stdout stream captured above. User commands
@@ -137,6 +175,11 @@ function Start-Exec([pscustomobject] $Request) {
     # fast instead of silently running the command in the previous directory.
     $requestedCwd = if ($Request.cwd) { [string]$Request.cwd } else { $null }
     $rs.SessionStateProxy.SetVariable('__ompCwd', $requestedCwd)
+    # Clear the per-invocation exit sentinel host-side (via the proxy) BEFORE
+    # $wrapped is built and parsed. A syntactically invalid user command throws
+    # at parse time, so the in-band reset would never run and Complete-Exec
+    # would read a stale __ompExit left by an earlier native command.
+    $rs.SessionStateProxy.SetVariable('__ompExit', $null)
     if ($Request.env) {
         foreach ($p in $Request.env.PSObject.Properties) {
             # Process-scoped and never unset: per-call env persists for the
@@ -165,7 +208,6 @@ function Start-Exec([pscustomobject] $Request) {
     # pipeline's output (captured in $out). Exit code is read afterwards via the
     # session-state proxy — a direct API call, not another pipeline.
     $wrapped = @"
-`$global:__ompExit = `$null
 if (`$__ompCwd) {
     try { Set-Location -LiteralPath `$__ompCwd -ErrorAction Stop }
     catch { Write-Error "Set-Location failed: `$(`$_.Exception.Message)"; return }

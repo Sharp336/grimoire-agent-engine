@@ -154,6 +154,24 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(warn)).toContain("WARNING: heads-up");
 		expect(warn.isError ?? false).toBe(false);
 	});
+
+	test("a spawned native reading stdin gets EOF instead of hanging on the protocol pipe", async () => {
+		// The reported repro: git.exe inherited the host's stdin — the JSON
+		// protocol pipe — and blocked on every subcommand until the tool timed
+		// out. git-gated so the suite still runs where git is absent.
+		const gitPath = await $which("git");
+		if (!gitPath) return;
+		const tool = await loadPowerShellTool(fakeSession("ps-native-stdin"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// A short timeout makes a regression fail fast rather than stalling the
+		// whole suite for the full default window.
+		const result = await tool.execute("g1", { command: "git --version", timeout: 15 });
+		expect(result.isError ?? false).toBe(false);
+		expect(textOf(result)).toContain("git version");
+		expect(textOf(result)).not.toMatch(/timed out/i);
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.
