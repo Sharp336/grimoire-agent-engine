@@ -984,7 +984,7 @@ export class CommandController {
 			const id = `Fork-${Snowflake.next()}`;
 			let child: CommittedSessionFork | undefined;
 			try {
-				child = await session.createCommittedChildSession(id);
+				child = await session.createCommittedChildSession(id, { materializeParent: true });
 				child.manager.appendSessionInit({
 					systemPrompt: systemPrompt.join("\n\n"),
 					task: "Continue the forked session from its committed boundary.",

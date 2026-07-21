@@ -8,18 +8,18 @@ function streamingContext(options: { persisted?: boolean } = {}) {
 	const flush = vi.fn(async () => {});
 	const close = vi.fn(async () => {});
 	const dropSession = vi.fn(async () => {});
-	const createCommittedChildSession =
-		options.persisted === false
-			? vi.fn(async () => {
-					throw new Error("Committed child sessions require a persisted parent session");
-				})
-			: vi.fn(async () => ({
-					manager: { appendSessionInit, flush, close, dropSession },
-					sessionFile: "/tmp/parent/Fork-child.jsonl",
-					parentSessionId: "parent",
-					parentLeafId: "leaf",
-					messages: [],
-				}));
+	const createCommittedChildSession = vi.fn(async (_id: string, childOptions?: { materializeParent?: boolean }) => {
+		if (options.persisted === false && !childOptions?.materializeParent) {
+			throw new Error("Committed child sessions require a persisted parent session");
+		}
+		return {
+			manager: { appendSessionInit, flush, close, dropSession },
+			sessionFile: "/tmp/parent/Fork-child.jsonl",
+			parentSessionId: "parent",
+			parentLeafId: "leaf",
+			messages: [],
+		};
+	});
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const fork = vi.fn();
@@ -94,11 +94,13 @@ describe("CommandController streaming /fork", () => {
 		expect(harness.session.agent.state.streamMessage).toBe(harness.streamMessage);
 	});
 
-	it("reports the exact in-memory failure and creates no ref", async () => {
+	it("materializes a lazy parent before parking the committed-boundary child", async () => {
 		const harness = streamingContext({ persisted: false });
 		await new CommandController(harness.ctx).handleForkCommand();
-		expect(harness.createCommittedChildSession).toHaveBeenCalledWith(expect.stringMatching(/^Fork-/));
-		expect(harness.showError).toHaveBeenCalledWith("Fork failed (session not persisted)");
-		expect(AgentRegistry.global().list()).toEqual([]);
+		expect(harness.createCommittedChildSession).toHaveBeenCalledWith(expect.stringMatching(/^Fork-/), {
+			materializeParent: true,
+		});
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(AgentRegistry.global().list()).toHaveLength(1);
 	});
 });
