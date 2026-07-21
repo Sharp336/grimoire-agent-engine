@@ -111,6 +111,66 @@ describe("browser tool schema", () => {
 				wait_until: null,
 				dialogs: null,
 				code: "return 1;",
+				domains: null,
+				timeout: null,
+				all: null,
+				kill: null,
+			}).success,
+		).toBe(true);
+	});
+
+	// INV-579 Task 4: the two recording actions join the closed action enum. The
+	// object stays closed (additionalProperties: false), so unknown fields and
+	// unknown actions are rejected while both recording variants validate.
+	it("accepts the recording actions and rejects unknown actions or fields", () => {
+		const tool = new BrowserTool(makeSession());
+		const wire = toolWireSchema(tool);
+		expect(
+			validateJsonSchemaValue(wire, {
+				action: "start_recording",
+				name: "docs",
+				domains: ["https://example.com"],
+			}).success,
+		).toBe(true);
+		expect(validateJsonSchemaValue(wire, { action: "stop_recording", name: "docs" }).success).toBe(true);
+		expect(validateJsonSchemaValue(wire, { action: "pause_recording", name: "docs" }).success).toBe(false);
+		expect(validateJsonSchemaValue(wire, { action: "start_recording", bogus: 1 }).success).toBe(false);
+	});
+
+	// Intent injection must keep both recording variants satisfiable, and the
+	// OpenAI strict-mode adaptation must stay compatible with the extended enum
+	// and the new `domains` field.
+	it("keeps the recording actions satisfiable under intent tracing and strict-mode enforcement", () => {
+		const normalized = normalizeTools([new BrowserTool(makeSession())], true)?.[0];
+		const schema = normalized?.parameters as Record<string, unknown>;
+
+		expect(
+			validateJsonSchemaValue(schema as TSchema, {
+				[INTENT_FIELD]: "Recording checkout traffic",
+				action: "start_recording",
+				name: "docs",
+				domains: ["https://shop.example"],
+			}).success,
+		).toBe(true);
+
+		const strict = adaptSchemaForStrict(schema, true);
+		expect(strict.strict).toBe(true);
+		const enforcement = validateStrictSchemaEnforcement(schema, strict);
+		expect(enforcement.compatible).toBe(true);
+		expect(enforcement.violations).toEqual([]);
+
+		expect(
+			validateJsonSchemaValue(strict.schema, {
+				[INTENT_FIELD]: "Persisting the HAR",
+				action: "stop_recording",
+				name: "docs",
+				url: null,
+				app: null,
+				viewport: null,
+				wait_until: null,
+				dialogs: null,
+				code: null,
+				domains: null,
 				timeout: null,
 				all: null,
 				kill: null,

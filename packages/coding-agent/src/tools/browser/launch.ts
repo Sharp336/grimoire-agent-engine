@@ -367,6 +367,25 @@ function resolvePageClient(page: Page): PuppeteerCdpClient | null {
 	return typeof pageWithClient._client === "function" ? pageWithClient._client() : pageWithClient._client;
 }
 
+/**
+ * A page-scoped CDP session for network recording, or `null` when the page is no longer live.
+ * Puppeteer's private `_client()` is not stable across target lifecycle transitions, so use the
+ * public Page.createCDPSession() API instead.
+ */
+export interface PageCdpClientHandle {
+	readonly client: CDPSession;
+	readonly dispose: () => Promise<void>;
+}
+
+export async function pageCdpClient(page: Page): Promise<PageCdpClientHandle | null> {
+	try {
+		const client = await page.createCDPSession();
+		return { client, dispose: () => client.detach() };
+	} catch {
+		return null;
+	}
+}
+
 const patchedClients = new WeakSet<object>();
 
 function patchSourceUrl(page: Page): void {

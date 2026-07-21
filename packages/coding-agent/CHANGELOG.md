@@ -336,6 +336,9 @@
 ### Removed
 
 - Removed the unreliable Bing and Yahoo HTML-scraping web search providers
+- Degraded Mnemopi extraction (missing tiny/smol model) now shows a once-per-session warning banner naming the remediation setting, plus an extraction status line in /memory stats.
+- memory_recall session entries + info-level success logs attribute every memory resurfacing to injection, tool, or compaction — capture:resurface ratios are now measurable from disk.
+- Added opt-in Puppeteer browser network recording with bounded, sanitized HAR-compatible session artifacts; CMUX is not supported in v1.
 
 ## [17.0.1] - 2026-07-16
 

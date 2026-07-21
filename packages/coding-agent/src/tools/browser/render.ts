@@ -11,16 +11,18 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import type { Theme } from "../../modes/theme/theme";
 import { Hasher, isFramedBlockComponent, markFramedBlockComponent, renderCodeCell, renderStatusLine } from "../../tui";
 import type { BrowserToolDetails } from "../browser";
+import { formatRecordingScopeForDisplay } from "../browser";
 import { formatStyledTruncationWarning, stripOutputNotice } from "../output-meta";
-import { replaceTabs, shortenPath } from "../render-utils";
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render-utils";
 
 const BROWSER_DEFAULT_PREVIEW_LINES = 10;
 
 interface BrowserRenderArgs {
-	action?: "open" | "close" | "run";
+	action?: "open" | "close" | "run" | "start_recording" | "stop_recording";
 	name?: string;
 	url?: string;
 	code?: string;
+	domains?: string[];
 	all?: boolean;
 	kill?: boolean;
 	app?: { path?: string; cdp_url?: string; target?: string; cmux?: boolean; surface?: string };
@@ -179,6 +181,44 @@ function renderOpenOrCloseLine(
 	return new Text([header, ...outputLines].join("\n"), 0, 0);
 }
 
+function renderRecordingLine(
+	args: BrowserRenderArgs,
+	details: BrowserToolDetails | undefined,
+	isPartial: boolean,
+	isError: boolean,
+	output: string,
+	theme: Theme,
+): Component {
+	const action = details?.action ?? args.action;
+	const status = cellStatus(isPartial, isError);
+	const icon =
+		status === "complete" ? "done" : status === "error" ? "error" : status === "running" ? "running" : "pending";
+
+	const verb = action === "stop_recording" ? "Stop recording" : "Start recording";
+	const title = `${verb} ${tabLabel(args, details)}`;
+
+	const meta: string[] = [];
+	const browserDesc = describeBrowser(args, details);
+	if (browserDesc) meta.push(browserDesc);
+	if (action === "stop_recording") {
+		if (details?.artifactId) meta.push(`artifact://${details.artifactId}`);
+	} else {
+		// Provider-controlled domains are normalized or replaced with a generic marker before rendering.
+		const scope = details?.scope ?? args.domains;
+		if (scope && scope.length > 0) {
+			meta.push(truncateToWidth(replaceTabs(formatRecordingScopeForDisplay(scope)), TRUNCATE_LENGTHS.CONTENT));
+		}
+	}
+
+	const header =
+		status === "complete"
+			? renderStatusLine({ iconOverride: theme.styledSymbol("tool.browser", "accent"), title, meta }, theme)
+			: renderStatusLine({ icon, title, meta }, theme);
+	if (!output) return new Text(header, 0, 0);
+	const outputLines = output.split("\n").map(line => theme.fg("toolOutput", replaceTabs(line)));
+	return new Text([header, ...outputLines].join("\n"), 0, 0);
+}
+
 function extractTextOutput(content: Array<{ type: string; text?: string }> | undefined): string {
 	if (!content) return "";
 	const text = content
@@ -195,6 +235,9 @@ export const browserToolRenderer = {
 		const action = args.action;
 		if (action === "run") {
 			return renderRunCell(args, undefined, options, "", false, theme);
+		}
+		if (action === "start_recording" || action === "stop_recording") {
+			return renderRecordingLine(args, undefined, options.isPartial, false, "", theme);
 		}
 		return renderOpenOrCloseLine(args, undefined, options.isPartial, false, "", theme);
 	},
@@ -217,6 +260,9 @@ export const browserToolRenderer = {
 				: undefined;
 			component = appendLine(component, truncationWarning);
 			return component;
+		}
+		if (action === "start_recording" || action === "stop_recording") {
+			return renderRecordingLine(argsObj, details, options.isPartial, isError, output, theme);
 		}
 		return renderOpenOrCloseLine(argsObj, details, options.isPartial, isError, output, theme);
 	},

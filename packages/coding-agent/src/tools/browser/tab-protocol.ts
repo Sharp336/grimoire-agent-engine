@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { RecordingLimits, RecordingSummary } from "./network-recorder";
 
 export type Transferable = Bun.Transferable;
 
@@ -74,6 +75,9 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
+	| { type: "recording-start"; id: string; domains?: readonly string[]; limits?: Partial<RecordingLimits> }
+	| { type: "recording-stop"; id: string; timeoutMs: number }
+	| { type: "recording-cancel"; id: string }
 	| { type: "close" };
 
 export interface ReadyInfo {
@@ -106,6 +110,10 @@ export type WorkerOutbound =
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
+	| { type: "recording-started"; id: string; scope: string[]; limits: RecordingLimits }
+	| { type: "recording-stopped"; id: string; summary: RecordingSummary }
+	| { type: "recording-canceled"; id: string }
+	| { type: "recording-error"; id: string; error: RunErrorPayload }
 	| { type: "closed" };
 
 export interface Transport {

@@ -14,6 +14,7 @@ import type {
 	ImageFormat,
 	KeyInput,
 	Page,
+	Protocol,
 	SerializedAXNode,
 	Target,
 } from "puppeteer-core";
@@ -35,7 +36,14 @@ import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
 	DEFAULT_VIEWPORT,
 	loadPuppeteerInWorker,
+	pageCdpClient,
 } from "./launch";
+import {
+	DEFAULT_RECORDING_LIMITS,
+	NetworkRecorder,
+	normalizeRecordingOrigins,
+	type RecordingLimits,
+} from "./network-recorder";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
 import {
 	bindBrowserRunFacade,
@@ -736,6 +744,86 @@ export function describeInflight(inflight: Map<number, InflightOp>): string {
 		.join(", ");
 }
 
+/**
+ * CDP client shape accepted from the injected `#pageCdpClient`. Unlike the exported owned
+ * `PageCdpClientHandle` (in ./launch), which always owns the session and REQUIRES `dispose`, an
+ * injected client may borrow a shared session, so here `dispose` is optional — its absence means
+ * the recorder does not own (and must not detach) the session.
+ */
+type MaybeOwnedCdpClientHandle = {
+	readonly client: CDPSession;
+	readonly dispose?: () => Promise<void> | void;
+};
+type PageCdpClientResult = CDPSession | MaybeOwnedCdpClientHandle | null;
+function isMaybeOwnedCdpClientHandle(value: PageCdpClientResult): value is MaybeOwnedCdpClientHandle {
+	return typeof value === "object" && value !== null && "client" in value;
+}
+
+/** Injected only by the in-process contract test; production construction passes nothing. */
+export interface WorkerCoreDependencies {
+	readonly page?: Page;
+	readonly browser?: Browser;
+	readonly targetId?: string;
+	readonly pageCdpClient?: (page: Page) => PageCdpClientResult | Promise<PageCdpClientResult>;
+}
+
+/** Poll cadence for the stop drain's liveness/deadline checks; completion itself wakes the drain via a signal. */
+const RECORDING_DRAIN_POLL_MS = 25;
+
+/**
+ * Live network-recording session state. `recorder`/`client`/`cleanup` are null only during the
+ * pre-`Network.enable` `starting` window; once `phase` is `active` they are set for the session's life.
+ */
+interface RecordingState {
+	id: string;
+	phase: "starting" | "active" | "stopping";
+	canceled: boolean;
+	closed: boolean;
+	stopping: boolean;
+	limits: RecordingLimits;
+	origins: ReadonlySet<string>;
+	recorder: NetworkRecorder | null;
+	client: CDPSession | null;
+	disposeClient: (() => Promise<void> | void) | null;
+	cleanup: (() => void) | null;
+	pendingRequests: Set<string>;
+	pendingReqExtra: Map<string, Record<string, string>>;
+	pendingResExtra: Map<string, Record<string, string>>;
+	requestUrls: Map<string, string>;
+	bodyReads: Set<Promise<void>>;
+	abort: AbortController;
+	cutoff: ReadonlySet<string> | null;
+	drain: PromiseWithResolvers<void> | null;
+}
+
+// ponytail: NetworkRecorder keeps its scope check private and is a frozen Task-1 file, so the
+// worker re-derives the identical exact-origin test here rather than widen that module's API.
+function inRecordingScope(url: string, origins: ReadonlySet<string>): boolean {
+	try {
+		const parsed = new URL(url);
+		return (parsed.protocol === "http:" || parsed.protocol === "https:") && origins.has(parsed.origin.toLowerCase());
+	} catch {
+		return false;
+	}
+}
+
+/** Merge a base CDP header map with an optional (ExtraInfo) overlay, lowercasing every key. */
+function mergeHeaderMaps(base: Protocol.Network.Headers, extra?: Protocol.Network.Headers): Record<string, string> {
+	const merged: Record<string, string> = {};
+	for (const [name, value] of Object.entries(base)) merged[name.toLowerCase()] = value;
+	if (extra) for (const [name, value] of Object.entries(extra)) merged[name.toLowerCase()] = value;
+	return merged;
+}
+
+/** Origin only — no path, query, fragment, or credentials — for safe failure logging. */
+function safeOrigin(url: string): string {
+	try {
+		return new URL(url).origin;
+	} catch {
+		return "[unparsable-url]";
+	}
+}
+
 export class WorkerCore {
 	#transport: Transport;
 	#browser?: Browser;
@@ -750,9 +838,15 @@ export class WorkerCore {
 	#dialogPolicy?: DialogPolicy;
 	#dialogHandler?: (dialog: Dialog) => void;
 	#openDialog?: OpenDialogInfo;
+	#pageCdpClient: (page: Page) => PageCdpClientResult | Promise<PageCdpClientResult>;
+	#recording?: RecordingState;
 
-	constructor(transport: Transport) {
+	constructor(transport: Transport, dependencies?: WorkerCoreDependencies) {
 		this.#transport = transport;
+		if (dependencies?.page) this.#page = dependencies.page;
+		if (dependencies?.browser) this.#browser = dependencies.browser;
+		if (dependencies?.targetId) this.#targetId = dependencies.targetId;
+		this.#pageCdpClient = dependencies?.pageCdpClient ?? pageCdpClient;
 		this.#unsub = this.#transport.onMessage(msg => {
 			void this.#handleMessage(msg as WorkerInbound);
 		});
@@ -785,6 +879,15 @@ export class WorkerCore {
 				return;
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
+				return;
+			case "recording-start":
+				await this.#startRecording(msg);
+				return;
+			case "recording-stop":
+				await this.#stopRecording(msg);
+				return;
+			case "recording-cancel":
+				await this.#cancelRecording(msg);
 				return;
 			case "close":
 				await this.#close();
@@ -1838,8 +1941,393 @@ export class WorkerCore {
 		}
 	}
 
+	async #startRecording(msg: Extract<WorkerInbound, { type: "recording-start" }>): Promise<void> {
+		if (this.#recording) {
+			this.#transport.send({
+				type: "recording-error",
+				id: msg.id,
+				error: errorPayload(new ToolError("A recording is already active")),
+			});
+			return;
+		}
+		const limits: RecordingLimits = { ...DEFAULT_RECORDING_LIMITS, ...(msg.limits ?? {}) };
+		const state: RecordingState = {
+			id: msg.id,
+			phase: "starting",
+			canceled: false,
+			closed: false,
+			stopping: false,
+			limits,
+			origins: new Set(),
+			recorder: null,
+			client: null,
+			disposeClient: null,
+			cleanup: null,
+			pendingRequests: new Set(),
+			pendingReqExtra: new Map(),
+			pendingResExtra: new Map(),
+			requestUrls: new Map(),
+			bodyReads: new Set(),
+			abort: new AbortController(),
+			cutoff: null,
+			drain: null,
+		};
+		// Sentinel installed before the first await so a concurrent start/stop/cancel cannot race in.
+		this.#recording = state;
+		try {
+			const page = this.#page;
+			if (!page || page.isClosed()) throw new ToolError("Recording requires a live page");
+			const acquired = await this.#pageCdpClient(page);
+			if (!acquired) throw new ToolError("Recording requires a page CDP session");
+			const client = isMaybeOwnedCdpClientHandle(acquired) ? acquired.client : acquired;
+			state.disposeClient = isMaybeOwnedCdpClientHandle(acquired) ? (acquired.dispose ?? null) : null;
+			const origins =
+				msg.domains && msg.domains.length > 0
+					? normalizeRecordingOrigins(msg.domains)
+					: normalizeRecordingOrigins([new URL(page.url()).origin]);
+			state.origins = origins;
+			state.client = client;
+			state.recorder = new NetworkRecorder({ ...limits, origins });
+			if (state.canceled || this.#recording !== state) {
+				await this.#disposeClient(state);
+				return;
+			}
+			try {
+				await client.send("Network.enable");
+			} catch (error) {
+				throw new ToolError("Failed to enable network capture for recording", { cause: error });
+			}
+			// A concurrent cancel/stop/close superseded this attempt: it already ran #disposeRecording
+			// (recorder disposed, state cleared), so bail silently — that operation owns the single
+			// terminal message and this start must not emit a late recording-started.
+			if (state.canceled || this.#recording !== state) {
+				await this.#disposeClient(state);
+				return;
+			}
+			state.cleanup = this.#installRecordingListeners(state, client);
+			state.phase = "active";
+			this.#transport.send({ type: "recording-started", id: msg.id, scope: [...origins], limits });
+		} catch (error) {
+			if (this.#recording === state) this.#recording = undefined;
+			await this.#disposeRecording(state);
+			this.#transport.send({ type: "recording-error", id: msg.id, error: errorPayload(error) });
+		}
+	}
+
+	#installRecordingListeners(state: RecordingState, client: CDPSession): () => void {
+		const onRequest = (event: Protocol.Network.RequestWillBeSentEvent): void =>
+			this.#onRequestWillBeSent(state, event);
+		const onRequestExtra = (event: Protocol.Network.RequestWillBeSentExtraInfoEvent): void =>
+			this.#onRequestExtraInfo(state, event);
+		const onResponse = (event: Protocol.Network.ResponseReceivedEvent): void =>
+			this.#onResponseReceived(state, event);
+		const onResponseExtra = (event: Protocol.Network.ResponseReceivedExtraInfoEvent): void =>
+			this.#onResponseExtraInfo(state, event);
+		const onFinished = (event: Protocol.Network.LoadingFinishedEvent): void => this.#onLoadingFinished(state, event);
+		const onFailed = (event: Protocol.Network.LoadingFailedEvent): void => this.#onLoadingFailed(state, event);
+		client.on("Network.requestWillBeSent", onRequest);
+		client.on("Network.requestWillBeSentExtraInfo", onRequestExtra);
+		client.on("Network.responseReceived", onResponse);
+		client.on("Network.responseReceivedExtraInfo", onResponseExtra);
+		client.on("Network.loadingFinished", onFinished);
+		client.on("Network.loadingFailed", onFailed);
+		return () => {
+			client.off("Network.requestWillBeSent", onRequest);
+			client.off("Network.requestWillBeSentExtraInfo", onRequestExtra);
+			client.off("Network.responseReceived", onResponse);
+			client.off("Network.responseReceivedExtraInfo", onResponseExtra);
+			client.off("Network.loadingFinished", onFinished);
+			client.off("Network.loadingFailed", onFailed);
+		};
+	}
+
+	#onRequestWillBeSent(state: RecordingState, event: Protocol.Network.RequestWillBeSentEvent): void {
+		const recorder = state.recorder;
+		if (!recorder || state.stopping) return;
+		const url = event.request.url;
+		if (!inRecordingScope(url, state.origins)) return;
+		const extra = state.pendingReqExtra.get(event.requestId);
+		if (extra) state.pendingReqExtra.delete(event.requestId);
+		recorder.recordRequest({
+			requestId: event.requestId,
+			url,
+			method: event.request.method,
+			headers: mergeHeaderMaps(event.request.headers, extra),
+			postData: event.request.postData,
+			timestamp: event.timestamp,
+			wallTime: event.wallTime,
+		});
+		state.requestUrls.set(event.requestId, url);
+		state.pendingRequests.add(event.requestId);
+	}
+
+	#onRequestExtraInfo(state: RecordingState, event: Protocol.Network.RequestWillBeSentExtraInfoEvent): void {
+		// Cookie data (`associatedCookies`) is intentionally dropped; only raw headers are retained.
+		if (state.stopping && !state.cutoff?.has(event.requestId)) return;
+		// A pre-cutoff request already recorded merges the late raw headers directly; otherwise the
+		// overlay is buffered until its base requestWillBeSent arrives.
+		if (state.recorder?.recordRequestExtraHeaders(event.requestId, event.headers)) return;
+		if (state.pendingReqExtra.size >= state.limits.maxEntries && !state.pendingReqExtra.has(event.requestId)) return;
+		state.pendingReqExtra.set(event.requestId, event.headers);
+	}
+
+	#onResponseReceived(state: RecordingState, event: Protocol.Network.ResponseReceivedEvent): void {
+		const recorder = state.recorder;
+		if (!recorder) return;
+		if (state.stopping && !state.cutoff?.has(event.requestId)) return;
+		const url = event.response.url;
+		if (!inRecordingScope(url, state.origins)) return;
+		const extra = state.pendingResExtra.get(event.requestId);
+		if (extra) state.pendingResExtra.delete(event.requestId);
+		recorder.recordResponse({
+			requestId: event.requestId,
+			url,
+			status: event.response.status,
+			statusText: event.response.statusText,
+			headers: mergeHeaderMaps(event.response.headers, extra),
+			contentType: event.response.mimeType,
+			timestamp: event.timestamp,
+		});
+		state.requestUrls.set(event.requestId, url);
+		if (!state.stopping) state.pendingRequests.add(event.requestId);
+	}
+
+	#onResponseExtraInfo(state: RecordingState, event: Protocol.Network.ResponseReceivedExtraInfoEvent): void {
+		// Set-Cookie only ever arrives as a redactable single-string header here; the recorder scrubs it.
+		if (state.stopping && !state.cutoff?.has(event.requestId)) return;
+		// Merge into an already-recorded response; otherwise buffer until responseReceived fires.
+		if (state.recorder?.recordResponseExtraHeaders(event.requestId, event.headers)) return;
+		if (state.pendingResExtra.size >= state.limits.maxEntries && !state.pendingResExtra.has(event.requestId)) return;
+		state.pendingResExtra.set(event.requestId, event.headers);
+	}
+
+	#onLoadingFinished(state: RecordingState, event: Protocol.Network.LoadingFinishedEvent): void {
+		const recorder = state.recorder;
+		if (!recorder || !state.pendingRequests.has(event.requestId)) return;
+		const url = state.requestUrls.get(event.requestId) ?? "";
+		this.#clearPendingRequest(state, event.requestId);
+		if (event.encodedDataLength > state.limits.maxBodyBytes) {
+			recorder.recordBodyOmitted(event.requestId, "size");
+			this.#settleDrain(state);
+			return;
+		}
+		const task = this.#readResponseBody(state, event.requestId, url);
+		state.bodyReads.add(task);
+		void task.finally(() => {
+			state.bodyReads.delete(task);
+			this.#settleDrain(state);
+		});
+	}
+
+	#onLoadingFailed(state: RecordingState, event: Protocol.Network.LoadingFailedEvent): void {
+		const recorder = state.recorder;
+		if (!recorder || !state.pendingRequests.has(event.requestId)) return;
+		this.#clearPendingRequest(state, event.requestId);
+		recorder.recordBodyOmitted(event.requestId, "unavailable");
+		this.#settleDrain(state);
+	}
+
+	#clearPendingRequest(state: RecordingState, requestId: string): void {
+		state.pendingRequests.delete(requestId);
+		state.pendingReqExtra.delete(requestId);
+		state.pendingResExtra.delete(requestId);
+		state.requestUrls.delete(requestId);
+	}
+
+	/**
+	 * Fetch one response body under a settled worker-side race against `maxBodyWaitMs`: a timeout
+	 * records a single omission and ignores the late CDP result; a late success cannot double-count;
+	 * an abort (cancel/close) silences the read. Failures log only requestId, origin (no path), and error name.
+	 */
+	#readResponseBody(state: RecordingState, requestId: string, url: string): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const client = state.client;
+		const recorder = state.recorder;
+		if (!client || !recorder) {
+			resolve();
+			return promise;
+		}
+		let settled = false;
+		const finish = (action?: () => void): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			state.abort.signal.removeEventListener("abort", onAbort);
+			if (action && !state.closed) {
+				try {
+					action();
+				} catch {
+					// Recorder finished/disposed under a concurrent stop or cancel: drop silently.
+				}
+			}
+			resolve();
+		};
+		const onAbort = (): void => finish();
+		const timer = setTimeout(
+			() => finish(() => recorder.recordBodyOmitted(requestId, "timeout")),
+			state.limits.maxBodyWaitMs,
+		);
+		state.abort.signal.addEventListener("abort", onAbort, { once: true });
+		void client.send("Network.getResponseBody", { requestId }).then(
+			result => {
+				const body = result as Protocol.Network.GetResponseBodyResponse | undefined;
+				finish(() => {
+					if (body && !body.base64Encoded && typeof body.body === "string") {
+						recorder.recordResponseBody(requestId, body.body);
+					} else {
+						recorder.recordBodyOmitted(requestId, "unavailable");
+					}
+				});
+			},
+			(error: unknown) => {
+				finish(() => {
+					this.#log("debug", "recording response body read failed", {
+						requestId,
+						origin: safeOrigin(url),
+						reason: "unavailable",
+						error: error instanceof Error ? error.name : "Error",
+					});
+					recorder.recordBodyOmitted(requestId, "unavailable");
+				});
+			},
+		);
+		return promise;
+	}
+
+	#settleDrain(state: RecordingState): void {
+		if (state.stopping && state.drain && state.pendingRequests.size === 0 && state.bodyReads.size === 0) {
+			state.drain.resolve();
+		}
+	}
+
+	async #stopRecording(msg: Extract<WorkerInbound, { type: "recording-stop" }>): Promise<void> {
+		const state = this.#recording;
+		if (state && state.phase === "starting") {
+			// Stop raced the start's Network.enable: settle the starting state so the resuming start
+			// suppresses its recording-started, and report a single terminal (nothing was captured yet).
+			await this.#disposeRecording(state);
+			this.#transport.send({
+				type: "recording-error",
+				id: msg.id,
+				error: errorPayload(new ToolError("Recording is still starting; nothing to stop")),
+			});
+			return;
+		}
+		if (state?.phase !== "active" || !state.recorder || !state.cleanup) {
+			this.#transport.send({
+				type: "recording-error",
+				id: msg.id,
+				error: errorPayload(new ToolError("No active recording to stop")),
+			});
+			return;
+		}
+		state.phase = "stopping";
+		state.stopping = true;
+		state.cutoff = new Set(state.pendingRequests);
+		state.drain = Promise.withResolvers<void>();
+		this.#settleDrain(state);
+		try {
+			await this.#drainRecording(state, msg.timeoutMs);
+			// A cancel or worker close during the drain already emitted the single terminal and cleared
+			// state; never follow it with a recording-stopped/HAR.
+			if (this.#recording !== state) return;
+			state.cleanup();
+			state.closed = true;
+			await Promise.allSettled([...state.bodyReads]);
+			await this.#disposeClient(state);
+			const summary = state.recorder.finish();
+			this.#recording = undefined;
+			this.#transport.send({ type: "recording-stopped", id: msg.id, summary });
+		} catch (error) {
+			// Superseded by cancel/close during the drain: that path owns the terminal, so stay silent.
+			if (this.#recording !== state) return;
+			await this.#disposeRecording(state);
+			this.#transport.send({ type: "recording-error", id: msg.id, error: errorPayload(error) });
+		}
+	}
+
+	/**
+	 * Wait, under the remaining stop deadline, until every pre-cutoff request has completed and every
+	 * in-flight body read has settled. Completion wakes the drain via `#settleDrain`; the poll only
+	 * bounds the deadline and runs a same-session liveness probe so a dead page cannot hang the drain.
+	 */
+	async #drainRecording(state: RecordingState, timeoutMs: number): Promise<void> {
+		const client = state.client;
+		const drain = state.drain;
+		if (!client || !drain) return;
+		const deadline = Date.now() + Math.max(0, timeoutMs);
+		// A cancel/close during the drain aborts this signal; racing it lets the loop exit promptly
+		// (via the `!state.closed` guard) instead of blocking to the deadline.
+		const superseded = this.#abortSignalPromise(state.abort.signal);
+		while (!state.closed && (state.pendingRequests.size > 0 || state.bodyReads.size > 0)) {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new ToolError(`Recording stop drain timed out after ${timeoutMs}ms`);
+			try {
+				await client.send("Page.getFrameTree");
+			} catch (error) {
+				if (state.closed) return;
+				throw new ToolError("Recording page session is no longer reachable", { cause: error });
+			}
+			await Promise.race([drain.promise, superseded, Bun.sleep(Math.min(remaining, RECORDING_DRAIN_POLL_MS))]);
+		}
+	}
+
+	#abortSignalPromise(signal: AbortSignal): Promise<void> {
+		if (signal.aborted) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		signal.addEventListener("abort", () => resolve(), { once: true });
+		return promise;
+	}
+
+	async #cancelRecording(msg: Extract<WorkerInbound, { type: "recording-cancel" }>): Promise<void> {
+		const state = this.#recording;
+		if (!state) {
+			this.#transport.send({
+				type: "recording-error",
+				id: msg.id,
+				error: errorPayload(new ToolError("No active recording to cancel")),
+			});
+			return;
+		}
+		const reads = [...state.bodyReads];
+		await this.#disposeRecording(state);
+		await Promise.allSettled(reads);
+		this.#transport.send({ type: "recording-canceled", id: msg.id });
+	}
+	/** Dispose the recording CDP session exactly once when the dependency owns it. */
+	async #disposeClient(state: RecordingState): Promise<void> {
+		const dispose = state.disposeClient;
+		state.disposeClient = null;
+		if (dispose) await Promise.resolve(dispose()).catch(() => undefined);
+	}
+
+	/** Shared teardown for cancel, drain failure, and worker close. */
+	async #disposeRecording(state: RecordingState): Promise<void> {
+		state.canceled = true;
+		state.closed = true;
+		state.stopping = true;
+		state.abort.abort();
+		state.cleanup?.();
+		state.recorder?.dispose();
+		await this.#disposeClient(state);
+		if (this.#recording === state) this.#recording = undefined;
+	}
+
 	async #close(): Promise<void> {
 		this.#unsub();
+		if (this.#recording) {
+			const state = this.#recording;
+			const reads = [...state.bodyReads];
+			await this.#disposeRecording(state);
+			// Let the aborted in-flight body reads settle before signalling closed so nothing races
+			// the transport teardown.
+			await Promise.allSettled(reads);
+			this.#transport.send({
+				type: "recording-error",
+				id: state.id,
+				error: errorPayload(new ToolError("Tab worker closed during an active recording")),
+			});
+		}
 		this.#clearElementCache();
 		const page = this.#page;
 		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);

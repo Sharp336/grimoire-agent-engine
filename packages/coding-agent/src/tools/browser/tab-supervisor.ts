@@ -9,6 +9,7 @@ import { pickElectronTarget } from "./attach";
 import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { DEFAULT_VIEWPORT } from "./launch";
+import type { RecordingLimits, RecordingSummary } from "./network-recorder";
 import {
 	type BrowserHandle,
 	type BrowserKindTag,
@@ -32,7 +33,7 @@ import type {
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 
-interface WorkerHandle {
+export interface WorkerHandle {
 	send(msg: WorkerInbound, transferList?: Transferable[]): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
@@ -60,6 +61,21 @@ export interface PendingRun {
 	closeAc?: AbortController;
 }
 
+/** Phase of a tab's single active network recording; undefined means no recording. */
+export type TabRecordingPhase = "starting" | "active" | "stopping";
+
+/**
+ * A recording control op (start/stop/cancel) awaiting its worker reply. Bound to the exact
+ * worker instance + generation that issued it so a reply from a superseded worker (after a
+ * recycle/replacement/kill) can never settle it or corrupt the current recording.
+ */
+interface PendingControl {
+	resolve(msg: WorkerOutbound): void;
+	reject(error: unknown): void;
+	worker: WorkerHandle;
+	generation: number;
+}
+
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	name: string;
 	browser: TBrowser;
@@ -81,6 +97,15 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle> {
 	backend: "worker";
 	worker: WorkerHandle;
+	/** Phase of this tab's single active/in-flight network recording, if any. */
+	recording?: TabRecordingPhase;
+}
+
+interface ManagedWorkerTabSession extends WorkerTabSession {
+	/** Monotonic counter bumped on every worker replacement/teardown; see {@link PendingControl}. */
+	workerGeneration: number;
+	/** Pending recording control ops keyed by controlId (`recording-<snowflake>`). */
+	controls: Map<string, PendingControl>;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -127,7 +152,7 @@ export interface ReleaseTabOptions {
 	timeoutMs?: number;
 }
 
-const tabs = new Map<string, TabSession>();
+const tabs = new Map<string, ManagedWorkerTabSession | CmuxTabSession>();
 // Per-name acquisition chain: serializes concurrent `acquireTab` calls for the
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
@@ -298,7 +323,7 @@ async function acquireTabImpl(
 
 	holdBrowser(browser);
 	if (tempHold) await releaseBrowser(browser, { kill: false });
-	const tab: WorkerTabSession = {
+	const tab: ManagedWorkerTabSession = {
 		name,
 		browser,
 		targetId: info.targetId,
@@ -310,8 +335,10 @@ async function acquireTabImpl(
 		dialogPolicy: opts.dialogs,
 		kindTag: browser.kind.kind,
 		ownerSessionId: opts.ownerSessionId,
+		workerGeneration: 0,
+		controls: new Map(),
 	};
-	worker.onMessage(msg => handleTabMessage(tab, msg));
+	attachLongLivedHandlers(tab, worker);
 	tabs.set(name, tab);
 	return { tab, created: true };
 }
@@ -525,6 +552,13 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
+	if (tab.backend === "worker") {
+		// Retire the worker generation and settle recording controls BEFORE the worker instance is
+		// terminated, so no late reply can resolve a control or revive recording state (issue INV-579).
+		bumpWorkerGeneration(tab);
+		tab.recording = undefined;
+		settleAllControlOps(tab, closeError);
+	}
 	for (const [id, pending] of tab.pending) {
 		if (tab.backend === "worker") {
 			try {
@@ -660,6 +694,377 @@ export function getTabsMapForTest(): ReadonlyMap<string, TabSession> {
 	return tabs;
 }
 
+// ---------------------------------------------------------------------------
+// Network recording control (INV-579)
+// ---------------------------------------------------------------------------
+
+/** Bound on the `recording-cancel` handshake after a control op is abandoned. */
+const RECORDING_CANCEL_MS = 250;
+
+export interface StartRecordingOptions {
+	domains?: readonly string[];
+	limits?: Partial<RecordingLimits>;
+	signal?: AbortSignal;
+	timeoutMs: number;
+}
+
+export interface StopRecordingOptions {
+	signal?: AbortSignal;
+	timeoutMs: number;
+}
+
+export interface StartRecordingResult {
+	scope: readonly string[];
+	backend: BrowserKindTag;
+	tabName: string;
+}
+
+export interface StopRecordingResult extends RecordingSummary {
+	backend: BrowserKindTag;
+	tabName: string;
+}
+
+/** Register both long-lived worker handlers (message dispatch + failure) for a tab's worker. */
+function attachLongLivedHandlers(tab: ManagedWorkerTabSession, worker: WorkerHandle): void {
+	worker.onMessage(msg => handleTabMessage(tab, worker, msg));
+	worker.onError(error => onWorkerFailure(tab, worker, error));
+}
+
+/**
+ * Long-lived worker `error`/`closed` handler. A worker that dies or closes outside an
+ * intentional release makes the tab unusable: settle every pending control, discard the
+ * active recording, and mark the tab dead so future runs/starts reject until it is
+ * reacquired. Messages from a superseded worker instance are ignored.
+ */
+function onWorkerFailure(tab: ManagedWorkerTabSession, sourceWorker: WorkerHandle, error: unknown): void {
+	if (sourceWorker !== tab.worker) return;
+	settleAllControlOps(tab, error);
+	tab.recording = undefined;
+	tab.state = "dead";
+}
+
+/** Reject and clear every pending recording control on a tab. */
+function settleAllControlOps(tab: ManagedWorkerTabSession, error: unknown): void {
+	if (tab.controls.size === 0) return;
+	const controls = [...tab.controls.values()];
+	tab.controls.clear();
+	for (const control of controls) control.reject(error);
+}
+
+/** Reject and clear only the controls at or below `generation` — the retired worker's ops. */
+function settleControlsUpToGeneration(tab: ManagedWorkerTabSession, generation: number, error: unknown): void {
+	const stale = [...tab.controls].filter(([, control]) => control.generation <= generation);
+	if (stale.length === 0) return;
+	for (const [id] of stale) tab.controls.delete(id);
+	for (const [, control] of stale) control.reject(error);
+}
+
+function bumpWorkerGeneration(tab: ManagedWorkerTabSession): void {
+	tab.workerGeneration += 1;
+}
+
+function requireWorkerTab(name: string): ManagedWorkerTabSession {
+	const tab = tabs.get(name);
+	if (!tab || tab.state === "dead") {
+		const killed = killedTabs.get(name);
+		throw new ToolError(
+			killed
+				? `Tab ${JSON.stringify(name)} was killed: ${killed}. Reopen it.`
+				: `Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`,
+		);
+	}
+	if (tab.backend !== "worker") {
+		throw new ToolError(`Network recording is not supported for the ${tab.kindTag} browser backend`);
+	}
+	return tab;
+}
+
+/**
+ * Validate an explicit recording domain as an exact HTTP(S) origin: reject credentials,
+ * paths, queries, fragments, wildcards, and non-HTTP(S)/opaque schemes. Returns the
+ * normalized (lowercased) origin. Omitted domains are resolved live by the worker instead.
+ */
+function validateRecordingOrigin(raw: string, index: number): string {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		throw new ToolError(`Invalid recording domain at index ${index}: expected an http(s) origin`);
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new ToolError(`Recording domain at index ${index} must use an http(s) scheme`);
+	}
+	if (url.username || url.password) {
+		throw new ToolError(`Recording domain at index ${index} must not include credentials`);
+	}
+	if (url.pathname !== "/") {
+		throw new ToolError(`Recording domain at index ${index} must not include a path`);
+	}
+	if (url.search) {
+		throw new ToolError(`Recording domain at index ${index} must not include a query string`);
+	}
+	if (url.hash) {
+		throw new ToolError(`Recording domain at index ${index} must not include a fragment`);
+	}
+	if (url.hostname.includes("*")) {
+		throw new ToolError(`Recording domain at index ${index} must not use wildcards`);
+	}
+	return url.origin.toLowerCase();
+}
+
+function validateRecordingDomains(domains: readonly string[]): string[] {
+	return domains.map((domain, index) => validateRecordingOrigin(domain, index));
+}
+
+/**
+ * Start a network recording on a worker-backed tab. Serializes via the per-tab `recording`
+ * sentinel: a start while `starting`/`active`/`stopping` rejects without disturbing the
+ * existing recording. Explicit domains are validated here; omitted domains are resolved live
+ * by the worker from `page.url()` (the cached `tab.info.url` is only used to fail fast when the
+ * tab has never left `about:blank`). Active state is retained only after `recording-started`.
+ */
+export async function startTabRecording(name: string, options: StartRecordingOptions): Promise<StartRecordingResult> {
+	const tab = requireWorkerTab(name);
+	if (tab.recording) throw new ToolError(`Tab ${JSON.stringify(name)} is already recording`);
+
+	let domains: string[] | undefined;
+	if (options.domains && options.domains.length > 0) {
+		domains = validateRecordingDomains(options.domains);
+	} else {
+		// `tab.info.url` is only an about:blank UX preflight here — never the recording scope source
+		// (the worker resolves scope live from page.url()); scope is never derived from this cached URL.
+		const url = tab.info.url;
+		if (!url || url === "about:blank") {
+			throw new ToolError(
+				`Tab ${JSON.stringify(name)} has no page to record; open a URL first or pass domains explicitly`,
+			);
+		}
+		domains = undefined;
+	}
+
+	// Install the starting sentinel BEFORE sending so a concurrent start observes it and rejects.
+	tab.recording = "starting";
+	try {
+		const reply = await runRecordingControl(
+			tab,
+			{ type: "recording-start", id: `recording-${Snowflake.next()}`, domains, limits: options.limits },
+			options.timeoutMs,
+			options.signal,
+		);
+		if (reply.type !== "recording-started") throw new ToolError(`Unexpected recording reply ${reply.type} for start`);
+		tab.recording = "active";
+		return { scope: reply.scope, backend: tab.kindTag, tabName: name };
+	} finally {
+		// Retain "active" only on success; discard any lingering "starting" on failure.
+		if (tab.recording === "starting") tab.recording = undefined;
+	}
+}
+
+/**
+ * Stop the active recording and return its summary. Rejects when nothing is active
+ * (`undefined`/`starting`) or a stop is already in flight (`already stopping`). The worker
+ * drains for `timeoutMs`; the supervisor allows an extra grace before abandoning the control.
+ */
+export async function stopTabRecording(name: string, options: StopRecordingOptions): Promise<StopRecordingResult> {
+	const tab = requireWorkerTab(name);
+	if (tab.recording === "stopping")
+		throw new ToolError(`Tab ${JSON.stringify(name)} is already stopping its recording`);
+	if (tab.recording !== "active") throw new ToolError(`Tab ${JSON.stringify(name)} is not recording`);
+
+	tab.recording = "stopping";
+	try {
+		const reply = await runRecordingControl(
+			tab,
+			{ type: "recording-stop", id: `recording-${Snowflake.next()}`, timeoutMs: options.timeoutMs },
+			options.timeoutMs + GRACE_MS,
+			options.signal,
+		);
+		if (reply.type !== "recording-stopped") throw new ToolError(`Unexpected recording reply ${reply.type} for stop`);
+		return { ...reply.summary, backend: tab.kindTag, tabName: name };
+	} finally {
+		if (tab.recording === "stopping") tab.recording = undefined;
+	}
+}
+
+function sendRecordingControl(
+	tab: ManagedWorkerTabSession,
+	msg: Extract<WorkerInbound, { type: "recording-start" | "recording-stop" | "recording-cancel" }>,
+): void {
+	if (tab.state !== "alive") throw new ToolError("Recording control worker unreachable: tab is not alive");
+	try {
+		tab.worker.send(msg);
+	} catch (error) {
+		throw new ToolError(
+			`Recording control worker unreachable: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/**
+ * Register a pending control, send its message, and race the worker reply against a wall-clock
+ * deadline and the caller's abort signal. A worker-delivered settle (resolve or reject) returns
+ * or throws directly; a deadline/abort abandons the control and drives the bounded cancel +
+ * recycle/kill cleanup before rethrowing the interrupt error.
+ */
+async function runRecordingControl(
+	tab: ManagedWorkerTabSession,
+	msg: Extract<WorkerInbound, { type: "recording-start" | "recording-stop" }>,
+	deadlineMs: number,
+	signal: AbortSignal | undefined,
+): Promise<WorkerOutbound> {
+	const controlId = msg.id;
+	const worker = tab.worker;
+	const generation = tab.workerGeneration;
+	const { promise, resolve, reject } = Promise.withResolvers<WorkerOutbound>();
+	void promise.catch(() => undefined);
+	tab.controls.set(controlId, { resolve, reject, worker, generation });
+	try {
+		if (tab.state !== "alive" || tab.worker !== worker || tab.workerGeneration !== generation) {
+			throw new ToolError("Recording control worker unreachable: worker changed before send");
+		}
+		sendRecordingControl(tab, msg);
+	} catch (error) {
+		tab.controls.delete(controlId);
+		reject(error);
+		throw error;
+	}
+
+	const { promise: interrupt, reject: interruptReject } = Promise.withResolvers<never>();
+	const timer = setTimeout(() => {
+		const label = msg.type === "recording-start" ? "start" : "stop";
+		interruptReject(new ToolError(`Recording ${label} timed out after ${deadlineMs}ms`));
+	}, deadlineMs);
+	const onAbort = (): void => interruptReject(new ToolAbortError("Recording operation aborted"));
+	if (signal) {
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	}
+	try {
+		return await Promise.race([promise, interrupt]);
+	} catch (error) {
+		if (tab.controls.has(controlId)) await abandonRecording(tab, error, deadlineMs, worker, generation);
+		throw error;
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+/**
+ * Abandon a timed-out/aborted control: retire the worker generation and settle only the controls
+ * from that retired generation, then run a bounded `recording-cancel` handshake. The recording
+ * sentinel stays set (the start/stop caller's `finally` clears it) so a concurrent start/stop
+ * rejects instead of registering a fresh control mid-handshake — and a fresh control that did slip
+ * in lives at the new generation and is never settled here. A rejected or timed-out cancel recycles
+ * (or, for inline workers, kills) the worker; a recycle/kill then settles every remaining control.
+ */
+async function abandonRecording(
+	tab: ManagedWorkerTabSession,
+	reason: unknown,
+	timeoutMs: number,
+	expectedWorker: WorkerHandle,
+	expectedGeneration: number,
+): Promise<void> {
+	if (tab.state !== "alive" || tab.worker !== expectedWorker || tab.workerGeneration !== expectedGeneration) {
+		settleControlsUpToGeneration(tab, expectedGeneration, reason);
+		return;
+	}
+	const retiredGeneration = tab.workerGeneration;
+	bumpWorkerGeneration(tab);
+	settleControlsUpToGeneration(tab, retiredGeneration, reason);
+	try {
+		await cancelWorkerRecording(tab, expectedWorker);
+	} catch (cancelError) {
+		if (
+			tab.state !== "alive" ||
+			tab.worker !== expectedWorker ||
+			(cancelError instanceof ToolError && /worker unreachable/i.test(cancelError.message))
+		) {
+			return;
+		}
+		logger.warn("Recording cancel was rejected or timed out; recycling browser tab worker", {
+			error: cancelError instanceof Error ? cancelError.message : String(cancelError),
+		});
+		await recycleOrKillTab(tab, timeoutMs, "Recording control was not acknowledged; tab recycled");
+	}
+}
+
+/**
+ * Send `recording-cancel` and wait, bounded by {@link RECORDING_CANCEL_MS}, for the worker's reply.
+ * `recording-canceled` resolves cleanly; `recording-error` rejects (the worker could not cancel) and
+ * a missed deadline throws — both propagate so {@link abandonRecording} recycles/kills rather than
+ * treating a failed cancel as an acknowledgement.
+ */
+async function cancelWorkerRecording(tab: ManagedWorkerTabSession, expectedWorker?: WorkerHandle): Promise<void> {
+	if (tab.state !== "alive") throw new ToolError("Recording control worker unreachable: tab is not alive");
+	const worker = expectedWorker ?? tab.worker;
+	const generation = tab.workerGeneration;
+	if (tab.worker !== worker) throw new ToolError("Recording control worker unreachable: worker changed before cancel");
+	const { promise, resolve, reject } = Promise.withResolvers<WorkerOutbound>();
+	const controlId = `recording-${Snowflake.next()}`;
+	tab.controls.set(controlId, { resolve, reject, worker, generation });
+	void promise.catch(() => undefined);
+	try {
+		if (tab.worker !== worker || tab.workerGeneration !== generation) {
+			throw new ToolError("Recording control worker unreachable: worker changed before cancel");
+		}
+		sendRecordingControl(tab, { type: "recording-cancel", id: controlId });
+	} catch (error) {
+		tab.controls.delete(controlId);
+		reject(error);
+		throw error;
+	}
+	await raceWithTimeout(promise, RECORDING_CANCEL_MS, "Recording cancel was not acknowledged in time");
+}
+
+/** Recycle a timed-out worker-backed tab (or force-kill an inline one) after a failed cancel. */
+async function recycleOrKillTab(tab: ManagedWorkerTabSession, timeoutMs: number, reason: string): Promise<void> {
+	if (tab.worker.mode === "inline") {
+		await forceKillTab(tab.name, reason);
+		return;
+	}
+	try {
+		await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS);
+	} catch {
+		await forceKillTab(tab.name, reason);
+	}
+}
+
+/** Test-only: install a worker-backed tab with an injected {@link WorkerHandle}. */
+export function registerWorkerTabForTest(options: {
+	name: string;
+	worker: WorkerHandle;
+	browser: PuppeteerBrowserHandle;
+	url?: string;
+	ownerSessionId?: string;
+	dialogPolicy?: DialogPolicy;
+}): WorkerTabSession {
+	const info: ReadyInfo = {
+		url: options.url ?? "https://example.test/",
+		viewport: { width: 1280, height: 800 },
+		targetId: `test-target-${options.name}`,
+	};
+	const tab: ManagedWorkerTabSession = {
+		name: options.name,
+		browser: options.browser,
+		targetId: info.targetId,
+		backend: "worker",
+		worker: options.worker,
+		state: "alive",
+		info,
+		pending: new Map(),
+		dialogPolicy: options.dialogPolicy,
+		kindTag: options.browser.kind.kind,
+		ownerSessionId: options.ownerSessionId,
+		workerGeneration: 0,
+		controls: new Map(),
+	};
+	holdBrowser(options.browser);
+	attachLongLivedHandlers(tab, options.worker);
+	tabs.set(options.name, tab);
+	return tab;
+}
+
 function isLastSurfaceCloseError(err: unknown): boolean {
 	const message = err instanceof Error ? err.message : String(err);
 	return /last/i.test(message);
@@ -692,31 +1097,48 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	};
 }
 
-function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
-	if (msg.type === "result") {
-		const pending = tab.pending.get(msg.id);
-		if (!pending) return;
-		tab.pending.delete(msg.id);
-		if (msg.ok) {
-			pending.resolve(msg.payload);
+function handleTabMessage(tab: ManagedWorkerTabSession, sourceWorker: WorkerHandle, msg: WorkerOutbound): void {
+	switch (msg.type) {
+		case "recording-started":
+		case "recording-stopped":
+		case "recording-canceled":
+		case "recording-error": {
+			// Ignore recording replies from a superseded worker before any control or state mutation.
+			if (sourceWorker !== tab.worker) return;
+			const control = tab.controls.get(msg.id);
+			if (!control || control.worker !== sourceWorker) return;
+			tab.controls.delete(msg.id);
+			if (msg.type === "recording-error") control.reject(errorFromPayload(msg.error));
+			else control.resolve(msg);
 			return;
 		}
-		pending.reject(errorFromPayload(msg.error));
-		return;
+		case "closed":
+			// An unexpected worker close (not driven by releaseTab, which bumps the generation first)
+			// leaves the tab unusable: settle controls, discard recording, and mark it dead.
+			onWorkerFailure(tab, sourceWorker, new ToolError(`Tab ${JSON.stringify(tab.name)} worker closed`));
+			return;
+		case "result": {
+			const pending = tab.pending.get(msg.id);
+			if (!pending) return;
+			tab.pending.delete(msg.id);
+			if (msg.ok) pending.resolve(msg.payload);
+			else pending.reject(errorFromPayload(msg.error));
+			return;
+		}
+		case "ready":
+			tab.info = msg.info;
+			return;
+		case "tool-call":
+			void dispatchToolCall(tab, msg);
+			return;
+		case "log":
+			logWorkerMessage(msg);
+			return;
 	}
-	if (msg.type === "ready") {
-		tab.info = msg.info;
-		return;
-	}
-	if (msg.type === "tool-call") {
-		void dispatchToolCall(tab, msg);
-		return;
-	}
-	if (msg.type === "log") logWorkerMessage(msg);
 }
 
 async function dispatchToolCall(
-	tab: WorkerTabSession,
+	tab: ManagedWorkerTabSession,
 	msg: Extract<WorkerOutbound, { type: "tool-call" }>,
 ): Promise<void> {
 	const pending = tab.pending.get(msg.runId);
@@ -754,7 +1176,7 @@ async function dispatchToolCall(
 	}
 }
 
-function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
+function safeSend(tab: ManagedWorkerTabSession, msg: WorkerInbound): void {
 	if (tab.state !== "alive") return;
 	try {
 		tab.worker.send(msg);
@@ -776,7 +1198,19 @@ function toErrorPayload(error: unknown): RunErrorPayload {
 	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
 }
 
-async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<void> {
+async function recycleTimedOutWorkerTab(tab: ManagedWorkerTabSession, timeoutMs: number): Promise<void> {
+	// A recycle retires the current worker: capture its generation, bump, and settle only the
+	// controls at/below the retired generation before the instance is torn down. A control that
+	// registers against the fresh (post-bump) worker survives; late replies from the old worker
+	// are ignored by the generation/instance guard.
+	const retiredGeneration = tab.workerGeneration;
+	bumpWorkerGeneration(tab);
+	settleControlsUpToGeneration(
+		tab,
+		retiredGeneration,
+		postmortem.markExpectedCleanupError(new ToolError("Browser tab worker recycled")),
+	);
+	tab.recording = undefined;
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
 	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
@@ -797,7 +1231,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		tab.worker = worker;
 		tab.info = info;
 		tab.state = "alive";
-		worker.onMessage(msg => handleTabMessage(tab, msg));
+		attachLongLivedHandlers(tab, worker);
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
 		worker = await spawnInlineWorker();
@@ -806,7 +1240,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 			tab.worker = worker;
 			tab.info = info;
 			tab.state = "alive";
-			worker.onMessage(msg => handleTabMessage(tab, msg));
+			attachLongLivedHandlers(tab, worker);
 		} catch (inlineError) {
 			await worker.terminate().catch(() => undefined);
 			const finalError = new ToolError(
@@ -824,6 +1258,11 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	killedTabs.set(name, reason);
 	tab.state = "dead";
 	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
+	if (tab.backend === "worker") {
+		bumpWorkerGeneration(tab);
+		tab.recording = undefined;
+		settleAllControlOps(tab, error);
+	}
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
 	if (tab.backend === "cmux") {
@@ -837,7 +1276,7 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	tabs.delete(name);
 }
 
-async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
+async function closeOrphanTarget(tab: ManagedWorkerTabSession): Promise<void> {
 	for (const target of tab.browser.browser.targets()) {
 		if ((await targetIdForTarget(target).catch(() => "")) !== tab.targetId) continue;
 		const page = await target.page().catch(() => null);
@@ -846,7 +1285,7 @@ async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
 	}
 }
 
-async function waitForClosed(tab: WorkerTabSession): Promise<void> {
+async function waitForClosed(tab: ManagedWorkerTabSession): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	const unsubscribe = tab.worker.onMessage(msg => {
 		if (msg.type === "closed") resolve();
@@ -919,7 +1358,17 @@ async function raceWithTimeout<T>(
 	}
 }
 
+/**
+ * Test-only override for the tab-worker factory. Lets a hermetic recycle test substitute an
+ * injected {@link WorkerHandle} for the real Bun worker without a parallel spawn path.
+ */
+let tabWorkerFactoryForTest: (() => Promise<WorkerHandle>) | undefined;
+export function setTabWorkerFactoryForTest(factory: (() => Promise<WorkerHandle>) | undefined): void {
+	tabWorkerFactoryForTest = factory;
+}
+
 async function spawnTabWorker(): Promise<WorkerHandle> {
+	if (tabWorkerFactoryForTest) return tabWorkerFactoryForTest();
 	try {
 		const hostEntry = workerHostEntry();
 		const worker = hostEntry
