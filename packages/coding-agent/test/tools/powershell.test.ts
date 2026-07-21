@@ -114,8 +114,13 @@ suite("PowerShellTool (persistent host)", () => {
 		const beforePid = Number(textOf(before).trim());
 		expect(beforePid).toBeGreaterThan(0);
 
-		// Kill the sidecar from inside the command: the run must reject…
-		await expect(tool.execute("d2", { command: "[Environment]::Exit(5)" })).rejects.toThrow();
+		// Kill the sidecar from inside the command, after it has already
+		// streamed diagnostic output: the run must reject, and the thrown
+		// message must still carry the pre-crash output rather than only the
+		// native "host terminated" rejection.
+		await expect(tool.execute("d2", { command: "Write-Host 'before-crash-marker'; [Environment]::Exit(5)" })).rejects.toThrow(
+			/before-crash-marker/,
+		);
 
 		// …and the next default call gets a fresh host, not the pooled corpse.
 		const after = await tool.execute("d3", { command: "$PID" });

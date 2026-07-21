@@ -185,7 +185,19 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 			// call has to trip over the dead host before the pool's alive
 			// check evicts it.
 			if (hostMode !== "ephemeral") await disposePsHostSession(sessionKey);
-			throw err;
+			// Chunks already streamed to `sink` before the crash are otherwise
+			// lost: the rethrown message carried only the native rejection
+			// ("host terminated"), discarding any diagnostic output the command
+			// printed before dying (and any truncation/artifact notice for it).
+			const crashSummary = await sink.dump();
+			const crashOutput = crashSummary.output;
+			const crashMessage = err instanceof Error ? err.message : String(err);
+			if (!crashOutput) throw new ToolError(crashMessage);
+			const crashTruncation = outputMeta().truncationFromSummary(crashSummary, { direction: "tail" }).get()?.truncation;
+			const crashOutputWithNotice = crashTruncation
+				? `${crashOutput}\n\n${formatTruncationMetaNotice(crashTruncation)}`
+				: crashOutput;
+			throw new ToolError(`${crashOutputWithNotice}\n\n${crashMessage}`);
 		} finally {
 			await teardown();
 		}
