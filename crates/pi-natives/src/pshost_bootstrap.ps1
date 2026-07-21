@@ -62,6 +62,7 @@ Add-Type -Namespace Omp -Name Stdio -MemberDefinition @'
 [DllImport("libc", SetLastError=true)] static extern int dup(int fd);
 [DllImport("libc", SetLastError=true)] static extern int dup2(int oldfd, int newfd);
 [DllImport("libc", SetLastError=true)] static extern int close(int fd);
+[DllImport("libc", SetLastError=true)] static extern int fcntl(int fd, int cmd, int arg);
 // Preserve the protocol stream on stdHandle/posixFd, then point the inheritable
 // slot at the null device so spawned children can't touch the protocol channel.
 static System.IO.Stream Detach(int stdHandle, int posixFd, bool forWrite) {
@@ -77,8 +78,15 @@ static System.IO.Stream Detach(int stdHandle, int posixFd, bool forWrite) {
         return keep;
     }
     // POSIX: dup the real descriptor aside, then swap the fd to /dev/null so
-    // children inherit EOF/discard while our stream keeps the pipe.
+    // children inherit EOF/discard while our stream keeps the pipe. dup(2)
+    // never carries FD_CLOEXEC to the duplicate (POSIX-specified), so without
+    // explicitly setting it here a forked native command still inherits this
+    // now-non-stdio fd; a long-lived orphaned child holding it open would
+    // then keep the pipe's write end alive after the host exits/crashes,
+    // hiding EOF from the Rust reader and stalling in-flight run() calls
+    // until their own timeout instead of promptly reporting host death.
     int saved = dup(posixFd);
+    fcntl(saved, 2 /* F_SETFD */, 1 /* FD_CLOEXEC */);
     int nulFd = open("/dev/null", forWrite ? 1 : 0); // O_WRONLY : O_RDONLY
     if (nulFd >= 0) { dup2(nulFd, posixFd); close(nulFd); }
     return new System.IO.FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle((System.IntPtr)saved, true), access, 1);
@@ -94,11 +102,17 @@ $stdout = [Omp.Stdio]::DetachStdout()
 # DetachStdout guards children that inherit the OS stdout slot, but managed
 # writes to [Console]::Out (e.g. [Console]::WriteLine from a loaded .NET
 # library) still target this process's stdout — the private protocol handle
-# above — and raw bytes there would desync the frame reader and kill the host.
-# Point Console.Out at a buffer instead; Complete-Exec drains it as ordinary
-# output after each command.
+# above — and raw bytes there would desync the frame reader and kill the
+# host. [Console]::Error targets the sidecar's separate OS stderr pipe, which
+# never carries protocol frames, so it can't desync the reader — but Rust
+# only retains that pipe as a startup-failure diagnostic tail (never routed
+# to a running exec's result), so an unredirected direct write there would
+# silently vanish instead of surfacing as command output. Point both at
+# buffers instead; Complete-Exec drains them as ordinary/error output.
 $script:consoleOut = [System.IO.StringWriter]::new()
+$script:consoleErr = [System.IO.StringWriter]::new()
 [Console]::SetOut($script:consoleOut)
+[Console]::SetError($script:consoleErr)
 
 function Write-Frame([hashtable] $Object) {
     $json  = $Object | ConvertTo-Json -Depth 8 -Compress
@@ -311,7 +325,8 @@ function Complete-Exec {
     try { $cur.PS.EndInvoke($cur.Async) | Out-Null }
     catch { } # terminating/stopped errors surface via HadErrors / Streams.Error
 
-    $hadErrors = [bool]$cur.PS.HadErrors -or ($cur.PS.Streams.Error.Count -gt 0)
+    $consoleErrText = if ($script:consoleErr.GetStringBuilder().Length -gt 0) { $script:consoleErr.ToString() } else { $null }
+    $hadErrors = [bool]$cur.PS.HadErrors -or ($cur.PS.Streams.Error.Count -gt 0) -or ($null -ne $consoleErrText)
 
     # Success output renders once, from the whole collection: per-object
     # rendering would break table formatting (columns are sized from every
@@ -325,6 +340,13 @@ function Complete-Exec {
     if ($script:consoleOut.GetStringBuilder().Length -gt 0) {
         Write-Chunk -Id $cur.Id -Stream 'output' -Text $script:consoleOut.ToString()
         [void]$script:consoleOut.GetStringBuilder().Clear()
+    }
+    # Drain direct [Console]::Error writes (redirected at startup) as error
+    # output, mirroring Console.Out — completion-only for the same
+    # StringBuilder-thread-safety reason.
+    if ($null -ne $consoleErrText) {
+        Write-Chunk -Id $cur.Id -Stream 'error' -Text (Format-AnsiText $consoleErrText '31;1')
+        [void]$script:consoleErr.GetStringBuilder().Clear()
     }
     Publish-Streams $cur
 

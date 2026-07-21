@@ -200,6 +200,20 @@ suite("PowerShellTool (persistent host)", () => {
 		expect(textOf(failedAgain)).toContain("code 7");
 	});
 
+	test("a direct [Console]::Error write surfaces as error output instead of vanishing", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-console-error-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Only PS.Streams.Error and HadErrors previously fed hadErrors/output; a
+		// .NET library (or user code) writing straight to [Console]::Error
+		// silently vanished — Rust only retains the sidecar's OS stderr as a
+		// startup-failure diagnostic tail, never routed to a running exec.
+		const result = await tool.execute("ce1", { command: "[Console]::Error.WriteLine('boom-from-console-error')" });
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("boom-from-console-error");
+	});
+
 	test("a timed-out command with truncated output still surfaces the truncation notice", async () => {
 		const tool = await loadPowerShellTool(fakeSession("ps-timeout-truncation-test"));
 		expect(tool).not.toBeNull();
