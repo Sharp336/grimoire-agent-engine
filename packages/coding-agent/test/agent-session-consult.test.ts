@@ -1327,6 +1327,7 @@ describe("AgentSession durable consultation side turn", () => {
 		const entered = new Promise<void>(resolve => {
 			sideTurnEntered = resolve;
 		});
+		let runningSignal: AbortSignal | undefined;
 		const session = {
 			getAgentId: () => "Main",
 			captureReadOnlySideRequestSnapshot: () => ({
@@ -1346,6 +1347,7 @@ describe("AgentSession durable consultation side turn", () => {
 			})),
 			generateConsultationTitle: vi.fn(async (question: string) => fallbackConsultationTitle(question)),
 			runReadOnlySideTurn: vi.fn(async (args: { onTextDelta?: (delta: string) => void; signal?: AbortSignal }) => {
+				runningSignal = args.signal;
 				args.onTextDelta?.("partial answer");
 				sideTurnEntered?.();
 				await new Promise<never>((_resolve, reject) => {
@@ -1438,6 +1440,7 @@ describe("AgentSession durable consultation side turn", () => {
 			sessionFile: otherSessionFile,
 			status: "parked",
 		});
+		const restoreParentEditorFromConsult = vi.fn(() => true);
 		const controller = new ConsultController({
 			session,
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
@@ -1446,10 +1449,16 @@ describe("AgentSession durable consultation side turn", () => {
 			setActiveConsultThread: vi.fn(),
 			showError: vi.fn(),
 			showStatus: vi.fn(),
+			restoreParentEditorFromConsult,
 		} as unknown as InteractiveModeContext);
 
 		await controller.start("question to cancel");
 		await entered;
+		expect(controller.handleEscape()).toBe(true);
+		expect(runningSignal?.aborted).toBe(false);
+		expect(restoreParentEditorFromConsult).toHaveBeenCalledTimes(1);
+		if (!createdConsultationId) throw new Error("consultation thread record was not persisted");
+		expect(consultationTurnStates(entries, createdConsultationId)[0]?.terminal).toBeUndefined();
 		events.length = 0;
 		await controller.resume("other");
 

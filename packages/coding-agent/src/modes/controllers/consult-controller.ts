@@ -239,7 +239,7 @@ export class ConsultController {
 
 	returnToParent(): boolean {
 		if (!this.#activeRequest) return false;
-		this.#closeActiveRequest(true);
+		this.#closeActiveRequest(false);
 		this.ctx.restoreParentEditorFromConsult();
 		return true;
 	}
