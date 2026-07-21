@@ -41,6 +41,8 @@ describe("Qoder bundled catalog", () => {
 			expect(bundledEntry.reasoning).toBe(seededModel.reasoning);
 			expect(bundledEntry.input).toEqual(seededModel.input);
 			expect(bundledEntry.cost).toEqual(seededModel.cost);
+			expect(seededModel.compat?.supportsStore).toBe(false);
+			expect(bundledEntry.compat).toEqual(seededModel.compat);
 		});
 	}
 });

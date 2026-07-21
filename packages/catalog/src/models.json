@@ -76792,6 +76792,9 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
+			"compat": {
+				"supportsStore": false
+			},
 			"contextWindow": 262144,
 			"maxTokens": 64000
 		}
