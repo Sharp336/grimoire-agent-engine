@@ -40,6 +40,7 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 	}, [draft]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+		if (e.nativeEvent.isComposing) return;
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			onSubmit(draft);
@@ -96,6 +97,7 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 	}, [client, live, readOnly, text]);
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+		if (e.nativeEvent.isComposing) return;
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			send();

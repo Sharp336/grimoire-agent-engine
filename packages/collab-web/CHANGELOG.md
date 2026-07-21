@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an issue where Korean/Japanese/Chinese IME users experienced the last character being duplicated when pressing Enter to confirm a composition in the collab composer.
+
 ## [17.0.1] - 2026-07-16
 
 ### Fixed
