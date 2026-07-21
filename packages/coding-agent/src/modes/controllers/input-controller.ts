@@ -475,23 +475,35 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.suspend", this.ctx.keybindings.getKeys("app.suspend"));
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
-		this.ctx.editor.onCycleThinkingLevel = () => this.cycleThinkingLevel();
+		this.ctx.editor.onCycleThinkingLevel = () => {
+			if (!this.ctx.isConsultComposerActive) this.cycleThinkingLevel();
+		};
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
-		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
+		this.ctx.editor.onCycleModelForward = () => {
+			if (!this.ctx.isConsultComposerActive) this.cycleRoleModel("forward");
+		};
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
-		this.ctx.editor.onCycleModelBackward = () => this.cycleRoleModel("backward");
+		this.ctx.editor.onCycleModelBackward = () => {
+			if (!this.ctx.isConsultComposerActive) this.cycleRoleModel("backward");
+		};
 		this.ctx.editor.setActionKeys(
 			"app.model.selectTemporary",
 			this.ctx.keybindings.getKeys("app.model.selectTemporary"),
 		);
-		this.ctx.editor.onSelectModelTemporary = () => this.ctx.showModelSelector({ temporaryOnly: true });
+		this.ctx.editor.onSelectModelTemporary = () => {
+			if (!this.ctx.isConsultComposerActive) this.ctx.showModelSelector({ temporaryOnly: true });
+		};
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
 		this.ctx.editor.setActionKeys("app.model.select", this.ctx.keybindings.getKeys("app.model.select"));
-		this.ctx.editor.onSelectModel = () => this.ctx.showModelSelector();
+		this.ctx.editor.onSelectModel = () => {
+			if (!this.ctx.isConsultComposerActive) this.ctx.showModelSelector();
+		};
 		this.ctx.editor.setActionKeys("app.history.search", this.ctx.keybindings.getKeys("app.history.search"));
-		this.ctx.editor.onHistorySearch = () => this.ctx.showHistorySearch();
+		this.ctx.editor.onHistorySearch = () => {
+			if (!this.ctx.isConsultComposerActive) this.ctx.showHistorySearch();
+		};
 		this.ctx.editor.setActionKeys("app.consult", this.ctx.keybindings.getKeys("app.consult"));
 		this.ctx.editor.onConsult = () => {
 			if (
@@ -506,9 +518,13 @@ export class InputController {
 			void this.ctx.startNewConsultation();
 		};
 		this.ctx.editor.setActionKeys("app.thinking.toggle", this.ctx.keybindings.getKeys("app.thinking.toggle"));
-		this.ctx.editor.onToggleThinking = () => this.ctx.toggleThinkingBlockVisibility();
+		this.ctx.editor.onToggleThinking = () => {
+			if (!this.ctx.isConsultComposerActive) this.ctx.toggleThinkingBlockVisibility();
+		};
 		this.ctx.editor.setActionKeys("app.editor.external", this.ctx.keybindings.getKeys("app.editor.external"));
-		this.ctx.editor.onExternalEditor = () => void this.openExternalEditor();
+		this.ctx.editor.onExternalEditor = () => {
+			if (!this.ctx.isConsultComposerActive) void this.openExternalEditor();
+		};
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteImage",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
@@ -531,7 +547,9 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
-		this.ctx.editor.onRetry = () => void this.handleRetry();
+		this.ctx.editor.onRetry = () => {
+			if (!this.ctx.isConsultComposerActive) void this.handleRetry();
+		};
 		this.ctx.editor.clearCustomKeyHandlers();
 		if (!this.ctx.isConsultComposerActive) {
 			// Wire up extension shortcuts

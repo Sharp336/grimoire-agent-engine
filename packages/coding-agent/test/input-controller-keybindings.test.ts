@@ -726,6 +726,24 @@ describe("InputController keybinding setup", () => {
 		expect(getFocused()).toBe(editor);
 	});
 
+	it("disables parent model, retry, and external-editor actions while composing a consultation", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.setText("consultation draft");
+		editor.onSelectModel?.();
+		editor.onSelectModelTemporary?.();
+		editor.onRetry?.();
+		editor.onExternalEditor?.();
+		await Promise.resolve();
+
+		expect(spies.showModelSelector).not.toHaveBeenCalled();
+		expect(spies.retry).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("consultation draft");
+	});
+
 	it("routes wheel, Alt page navigation, and Alt Home/End to the bounded answer viewport; Alt+End clears detached new-output state through its context action", async () => {
 		const { InputController, ctx, setConsultComposerActive, spies } = await createContext();
 		setConsultComposerActive(true);

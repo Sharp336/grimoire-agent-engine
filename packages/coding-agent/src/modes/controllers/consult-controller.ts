@@ -729,7 +729,7 @@ export class ConsultController {
 		let manager: SessionManager | undefined;
 		let threadRecord: ConsultationThreadRecord | undefined;
 		let partialAnswer = "";
-		let developerReminder = consultSideChannel;
+		const developerReminder = consultSideChannel;
 		try {
 			if (request.thread) {
 				manager = await SessionManager.open(request.thread.sessionFile, undefined, undefined, {
@@ -764,9 +764,7 @@ export class ConsultController {
 				};
 				manager.appendCustomEntry(CONSULTATION_THREAD_CUSTOM_TYPE, threadRecord);
 				if (!child.hasCommittedContext) {
-					const contextNotice = "No committed parent context";
-					developerReminder = `${consultSideChannel}\n\n${contextNotice} was available for this consultation. Answer directly from the question without assuming prior work.`;
-					this.#updateLatestView(request, { contextNotice });
+					this.#updateLatestView(request, { contextNotice: "No committed parent context" });
 				}
 			}
 			if (!threadRecord) throw new Error(`Consultation thread ${request.consultationId} not found`);
