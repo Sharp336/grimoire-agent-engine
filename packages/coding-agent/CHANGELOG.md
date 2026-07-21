@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed startup model selection ignoring the configured `modelRoles.default` when it points at a `models.yml` discovery provider (e.g. a custom OpenAI-compatible endpoint with `discovery: openai-models-list`). The background model discovery was still in flight when the default-role resolution ran, so the session silently fell back to an unrelated provider's default. Startup now awaits the in-flight background refresh before retrying the default-role lookup.
+
 ## [17.0.6] - 2026-07-20
 
 - Fixed failed plan-mode exits leaving the session on the restored execution model while plan mode remained active and silently changing ambient `xd://` tool presentation; rollback now restores the plan model, thinking level, and exact top-level-versus-mounted tool partition so exit can be retried safely ([#6013](https://github.com/can1357/oh-my-pi/pull/6013)).

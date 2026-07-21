@@ -2074,6 +2074,15 @@ export class ModelRegistry {
 			.map(provider => provider.provider);
 	}
 
+	/**
+	 * Await the in-flight background refresh, if any. Resolves immediately
+	 * when no refresh is running. Callers use this to wait for models.yml
+	 * discovery providers to finish before falling back to a different model.
+	 */
+	waitForBackgroundRefresh(): Promise<void> {
+		return this.#backgroundRefresh ?? Promise.resolve();
+	}
+
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {
 		return this.#providerDiscoveryStates.get(provider);
 	}

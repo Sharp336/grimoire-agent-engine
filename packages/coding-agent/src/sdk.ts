@@ -2204,7 +2204,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (!model && deferredModelPatterns.length === 0) {
 			// Re-resolve the allowed set: extension factories above may have
 			// registered providers/models that weren't visible at startup.
-			const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+			let fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 
 			// Retry the default-role lookup against the post-extension allowed
 			// set. Extension factories register providers AFTER the early
@@ -2215,6 +2215,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// default with a bundled provider's default whenever a stray
 			// `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issue #3569)
+			// When the configured default role points at a models.yml discovery
+			// provider (e.g. `alibaba-token-plan/qwen3.8-max-preview`), the model
+			// may not exist in the registry yet — the background refresh kicked
+			// off at startup is still in flight. Wait for it so the retry below
+			// sees freshly discovered models instead of falling through to
+			// pickDefaultAvailableModel with an unrelated provider.
+			if (!hasExplicitModel && !defaultRoleSpec.model && settings.getModelRole("default")) {
+				await modelRegistry.waitForBackgroundRefresh();
+				fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+			}
+
 			if (!hasExplicitModel && !defaultRoleSpec.model) {
 				const reResolvedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
 					settings,
