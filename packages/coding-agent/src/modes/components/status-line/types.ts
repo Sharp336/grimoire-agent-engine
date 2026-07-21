@@ -18,6 +18,8 @@ export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	/** Show the absolute used-token count next to the context percentage (`12.3% 157K/1M`). */
+	context?: { showTokens?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 

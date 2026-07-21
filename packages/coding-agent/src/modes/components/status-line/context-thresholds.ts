@@ -59,17 +59,22 @@ export function getContextUsageLevel(contextPercent: number, contextWindow: numb
  * Format context usage as `<percent>%/<window>` when the model window is known.
  * Unknown windows render as `<tokens>/?`, because `0.0%/0` suggests a real
  * empty context instead of missing provider metadata.
+ *
+ * With `showTokens`, the used-token count is inserted between percent and
+ * window (`12.3% 157K/1M`), giving the absolute number next to the ratio.
  */
 export function formatContextUsage(
 	contextPercent: number | null | undefined,
 	contextWindow: number,
 	usedTokens?: number,
+	showTokens = false,
 ): string {
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
 		return `${formatNumber(usedTokens ?? 0)}/?`;
 	}
 	const pct = contextPercent === null || contextPercent === undefined ? "?" : `${contextPercent.toFixed(1)}%`;
-	return `${pct}/${formatNumber(contextWindow)}`;
+	const used = showTokens && usedTokens !== undefined ? ` ${formatNumber(usedTokens)}` : "";
+	return `${pct}${used}/${formatNumber(contextWindow)}`;
 }
 
 export function getContextUsageThemeColor(level: ContextUsageLevel): ThemeColor {
