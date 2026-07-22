@@ -583,7 +583,11 @@ async function processApi3Stream(
 			state.errorMessage = `Qoder api3 stream error: ${bodyText.slice(0, 500)}`;
 			return;
 		}
-		if (!isRecord(chunk)) return;
+		if (!isRecord(chunk)) {
+			state.stopReason = "error";
+			state.errorMessage = `Qoder api3 stream error: ${bodyText.slice(0, 500)}`;
+			return;
+		}
 		handleChunk(chunk);
 		if (
 			typeof envelope.statusCodeValue === "number" &&
