@@ -71,6 +71,44 @@ has_bun() {
     command -v bun >/dev/null 2>&1
 }
 
+# Resolve the host architecture even when the installer itself runs under
+# Rosetta on Apple Silicon.
+host_arch() {
+    case "$(uname -s)" in
+        Darwin)
+            if [ "$(sysctl -in hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+                echo "arm64"
+            else
+                echo "x64"
+            fi
+            ;;
+        Linux)
+            case "$(uname -m)" in
+                x86_64|amd64) echo "x64" ;;
+                arm64|aarch64) echo "arm64" ;;
+                *) echo "Unsupported architecture: $(uname -m)" >&2; return 1 ;;
+            esac
+            ;;
+        *)
+            echo "Unsupported OS: $(uname -s)" >&2
+            return 1
+            ;;
+    esac
+}
+
+bun_arch() {
+    case "$(bun -e 'console.log(process.arch)' 2>/dev/null || true)" in
+        x64|x86_64) echo "x64" ;;
+        arm64|aarch64) echo "arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+has_compatible_bun() {
+    has_bun || return 1
+    [ "$(bun_arch)" = "$(host_arch)" ]
+}
+
 version_ge() {
     current="$1"
     minimum="$2"
@@ -187,7 +225,7 @@ install_via_bun() {
 install_binary() {
     # Detect platform
     OS="$(uname -s)"
-    ARCH="$(uname -m)"
+    ARCH="$(host_arch)"
 
     case "$OS" in
         Linux)  PLATFORM="linux" ;;
@@ -196,9 +234,8 @@ install_binary() {
     esac
 
     case "$ARCH" in
-        x86_64|amd64)  ARCH="x64" ;;
-        arm64|aarch64) ARCH="arm64" ;;
-        *)             echo "Unsupported architecture: $ARCH"; exit 1 ;;
+        x64|arm64) ;;
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
 
     BINARY="omp-${PLATFORM}-${ARCH}"
@@ -247,17 +284,24 @@ case "$MODE" in
             install_bun
         fi
         require_bun_version
+        if ! has_compatible_bun; then
+            echo "Bun is not native for this machine; install a native Bun before using --source."
+            exit 1
+        fi
         install_via_bun
         ;;
     binary)
         install_binary
         ;;
     *)
-        # Default: use bun if available, otherwise binary
-        if has_bun; then
+        # Default: use bun only when it matches the host architecture.
+        if has_compatible_bun; then
             require_bun_version
             install_via_bun
         else
+            if has_bun; then
+                echo "Existing Bun is not native for this machine; installing the prebuilt binary instead."
+            fi
             install_binary
         fi
         ;;
