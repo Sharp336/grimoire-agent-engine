@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for top-level sessions to the `history://` protocol, allowing `history://<sessionId>` (by full UUID or prefix), `history://<path>`, and the `history://` index to discover and view top-level session transcripts.
 ## [17.0.7] - 2026-07-21
 
 ### Fixed
