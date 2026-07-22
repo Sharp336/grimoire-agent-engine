@@ -10,6 +10,7 @@ import {
 	QODER_API3_BASE,
 	type QoderApi3ModelRoute,
 	type QoderApi3Transport,
+	type QoderApi3TransportDeps,
 	resolveApi3Effort,
 } from "@oh-my-pi/pi-ai/providers/qoder-api3";
 import { QODER_PRIVATE_DATA_POLICY, repairQoderSseBody } from "@oh-my-pi/pi-ai/registry/oauth/qoder";
@@ -364,7 +365,7 @@ async function runApi3Turn(
 }
 
 /** The deps every hand-built transport in this file shares. */
-function makeTransport(bridge: QoderWasmBridge): QoderApi3Transport {
+function makeTransport(bridge: QoderWasmBridge, overrides: Partial<QoderApi3TransportDeps> = {}): QoderApi3Transport {
 	return createQoderApi3Transport({
 		bridge,
 		machineId: "machine-test",
@@ -373,6 +374,7 @@ function makeTransport(bridge: QoderWasmBridge): QoderApi3Transport {
 		cosyVersion: "1.1.2",
 		clientName: "omp",
 		repair: repairQoderSseBody,
+		...overrides,
 	});
 }
 
@@ -1087,6 +1089,17 @@ describe("api3 stream termination", () => {
 		expect(result.content).toContainEqual({ type: "text", text: "OK" });
 		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 	});
+
+	it("treats a malformed outer envelope as terminal despite later success frames", async () => {
+		const malformedThenFinish = [
+			"data: not-json",
+			`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] })}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { result } = await runApi3Turn("qmodel_preview", () => sseResponse(malformedThenFinish));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Qoder api3 returned a malformed SSE envelope");
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1331,6 +1344,35 @@ describe("api3 context cache", () => {
 		expect(thirdResult.result.stopReason).toBe("toolUse");
 		expect(userinfoCalls).toBe(1);
 	});
+
+	it("evicts a timed-out shared identity chain so the next turn retries userinfo", async () => {
+		const { bridge } = fakeBridge();
+		const transport = makeTransport(bridge, { contextBuildTimeoutMs: 5 });
+		let userinfoCalls = 0;
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (!url.includes("/api/v1/userinfo")) return sseResponse(HAPPY_SSE);
+			userinfoCalls += 1;
+			const stalled = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			if (!signal) throw new Error("expected userinfo timeout signal");
+			if (signal.aborted) {
+				stalled.reject(signal.reason);
+			} else {
+				signal.addEventListener("abort", () => stalled.reject(signal.reason), { once: true });
+			}
+			return await stalled.promise;
+		};
+
+		for (let turn = 0; turn < 2; turn += 1) {
+			const { result } = await collectTurn(transport, "qmodel_preview", {
+				apiKey: "stalled-token",
+				fetch: fetchImpl,
+			});
+			expect(result.stopReason).toBe("error");
+		}
+		expect(userinfoCalls).toBe(2);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1395,6 +1437,12 @@ describe("streamQoderApi3 dispatch", () => {
 
 describe("buildQoderApi3Body request-shaping branches", () => {
 	const base = { route: api3Route("qmodel_preview"), context: userContext(), cosyVersion: "1.1.2", clientName: "omp" };
+
+	it("clamps explicit maxTokens to the model output cap", () => {
+		const shaped = buildQoderApi3Body({ ...base, options: { maxTokens: 100_000 } });
+		const parameters = asRecord(shaped.parameters, "parameters");
+		expect(parameters.max_tokens).toBe(base.route.openaiModel.maxTokens);
+	});
 
 	it("maps temperature and topP onto their api3 wire fields", () => {
 		const shaped = buildQoderApi3Body({ ...base, options: { temperature: 0.7, topP: 0.9 } });
