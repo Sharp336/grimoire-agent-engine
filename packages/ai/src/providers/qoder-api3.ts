@@ -62,6 +62,7 @@ export const QODER_API3_BASE = process.env.QODER_API3_BASE?.trim() || "https://a
 /** Output cap sent as `parameters.max_tokens` when the caller sets none. */
 const API3_DEFAULT_MAX_TOKENS = 32_768;
 const API3_MAX_ATTEMPTS = 6;
+const API3_CONTEXT_BUILD_TIMEOUT_MS = 20_000;
 
 /** Window assumed when a catalog row carries a null contextWindow (all api3 families are 200k-base). */
 const API3_DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -106,6 +107,8 @@ export interface QoderApi3TransportDeps {
 	clientName: string;
 	/** The folded-SSE repair from `../registry/oauth/qoder`, applied before envelope framing. */
 	repair: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
+	/** Bounds the shared userinfo identity-chain fetch; defaults to 20 seconds. */
+	contextBuildTimeoutMs?: number;
 	/** Fired once per newly built WASM context (drives the catalog overlay). */
 	onContext?: (ctx: QoderWasmContext, fetchImpl: FetchImpl | undefined) => void;
 }
@@ -203,8 +206,9 @@ export function buildQoderApi3Body(args: QoderApi3BodyArgs): Record<string, unkn
 	const system = context.systemPrompt !== undefined ? context.systemPrompt.join("\n\n") : "";
 	const promptText = lastUserText(context);
 	const effort = resolveApi3Effort(route, options);
+	const maxOutputTokens = route.openaiModel.maxTokens ?? API3_DEFAULT_MAX_TOKENS;
 	const parameters: Record<string, unknown> = {
-		max_tokens: options?.maxTokens ?? API3_DEFAULT_MAX_TOKENS,
+		max_tokens: Math.min(options?.maxTokens ?? maxOutputTokens, maxOutputTokens),
 		context_length: route.contextWindow,
 	};
 	if (effort !== undefined) {
@@ -543,6 +547,8 @@ async function processApi3Stream(
 		try {
 			envelope = JSON.parse(trimmed);
 		} catch {
+			state.stopReason = "error";
+			state.errorMessage = "Qoder api3 returned a malformed SSE envelope";
 			return;
 		}
 		if (!isRecord(envelope)) return;
@@ -648,6 +654,7 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 						Authorization: `Bearer ${apiKey}`,
 						Accept: "application/json",
 					},
+					signal: AbortSignal.timeout(deps.contextBuildTimeoutMs ?? API3_CONTEXT_BUILD_TIMEOUT_MS),
 				});
 				if (!response.ok) {
 					// Preserve the HTTP status on the thrown error so auth retry can
