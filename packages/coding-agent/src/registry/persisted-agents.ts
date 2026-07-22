@@ -11,12 +11,12 @@ import {
 	type ConsultationTurnRecord,
 	consultationAgentId,
 	consultationFirstTurnConversation,
-	consultationThreadMetadata,
 	consultationThreadTitle,
 	consultationThreadTitlePresentation,
 	consultationTurnStates,
 	formatConsultationDisplayName,
 	latestTerminalConsultationTurn,
+	lookupConsultationThread,
 	parseConsultationTranscriptName,
 } from "../session/consultation";
 import { loadEntriesFromFile } from "../session/session-loader";
@@ -280,9 +280,10 @@ async function registerPersistedTranscriptsFromDir(
 		const consultationId = parseConsultationTranscriptName(entry.name);
 		if (consultationId) {
 			const sessionEntries = await loadEntriesFromFile(sessionFile).catch(() => []);
-			const thread = consultationThreadMetadata(sessionEntries, consultationId);
+			const lookup = lookupConsultationThread(sessionEntries, consultationId);
+			const thread = lookup.hasCollision ? undefined : lookup.thread;
 			if (!thread) {
-				if (!options.includeAgents) continue;
+				if (lookup.hasCollision || !options.includeAgents) continue;
 			} else {
 				const turnStates = consultationTurnStates(sessionEntries, consultationId);
 				const latestTurn = latestTerminalConsultationTurn(sessionEntries, consultationId);

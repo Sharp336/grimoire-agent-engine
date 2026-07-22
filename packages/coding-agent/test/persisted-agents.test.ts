@@ -212,6 +212,7 @@ describe("persisted consultation discovery", () => {
 		await registerPersistedSubagents(registry, parentFile);
 		expect(registry.get("Main/consult:named")).toBeUndefined();
 		expect(registry.get("Main/consult:foreign")).toBeUndefined();
+		expect(registry.list()).toEqual([]);
 	});
 
 	it("keeps a parked subagent whose name resembles a consultation transcript", async () => {
