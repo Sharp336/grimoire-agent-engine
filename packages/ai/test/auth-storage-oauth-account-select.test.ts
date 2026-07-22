@@ -115,4 +115,58 @@ describe("AuthStorage OAuth account selection", () => {
 		// Target-only: no sibling credential was refreshed/rotated on the failure path.
 		expect(seen).toEqual(["access-b"]);
 	});
+
+	test("strict session pins never rotate to a sibling account", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		const seen: string[] = [];
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			if (!credential) return null;
+			seen.push(credential.access);
+			if (credential.access === "access-b") throw new Error("invalid_grant");
+			return { newCredentials: credential, apiKey: credential.access };
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "parent", 1)).toBe(true);
+
+		expect(await storage.getApiKey(PROVIDER, "parent")).toBeUndefined();
+		expect(seen).toEqual(["access-b"]);
+	});
+
+	test("copies strict pins to a child session and allows an explicit replacement", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "parent", 2)).toBe(true);
+		storage.copySessionOAuthAccountPins("parent", "child");
+
+		expect(await storage.getApiKey(PROVIDER, "child")).toBe("access-c");
+
+		storage.clearSessionOAuthAccountPin(PROVIDER, "child");
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "child", 0)).toBe(true);
+		expect(await storage.getApiKey(PROVIDER, "child")).toBe("access-a");
+	});
+
+	test("restores a strict account pin when the same session resumes", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "resumed-session", 1)).toBe(true);
+
+		store?.close();
+		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		authStorage = new AuthStorage(store);
+		await authStorage.reload();
+
+		expect(await authStorage.getApiKey(PROVIDER, "resumed-session")).toBe("access-b");
+	});
 });

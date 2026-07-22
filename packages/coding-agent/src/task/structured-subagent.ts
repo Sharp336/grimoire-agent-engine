@@ -407,6 +407,7 @@ function buildExecutorOptions(
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,
 		authStorage: session.authStorage,
+		providerAccountPinSourceSessionId: session.getProviderSessionId?.() ?? session.getSessionId?.() ?? undefined,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,

@@ -388,6 +388,8 @@ export interface ExecutorOptions {
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
+	/** Parent provider-facing session identity whose strict OAuth pins this run inherits. */
+	providerAccountPinSourceSessionId?: string;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	/**
@@ -2603,6 +2605,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					firstChatDispatchAt ??= performance.now();
 				},
 			});
+
+			if (options.providerAccountPinSourceSessionId) {
+				authStorage.copySessionOAuthAccountPins(
+					options.providerAccountPinSourceSessionId,
+					sessionManager.getSessionId(),
+				);
+			}
 
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager));
 			let session: AgentSession;

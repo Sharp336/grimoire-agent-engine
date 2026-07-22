@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added strict, persistent per-session OAuth account pins with explicit inheritance for child agent sessions.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

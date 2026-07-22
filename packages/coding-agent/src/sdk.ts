@@ -108,6 +108,7 @@ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memor
 import type { MnemopiSessionState } from "./mnemopi/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
+import { createProviderAccountSelectorExtension } from "./provider-account-selector";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -1687,6 +1688,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			getProviderSessionId: () => (hasSession ? session.sessionId : providerSessionId),
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
@@ -1930,6 +1932,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			inlineExtensions.push(createProviderAccountSelectorExtension);
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools));
 			}
@@ -2322,6 +2325,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
+			() => (hasSession ? session.sessionId : providerSessionId),
 		);
 
 		credentialDisabledTarget = extensionRunner;

@@ -20,6 +20,7 @@ import type {
 	Api,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	AuthStorage,
 	Context,
 	ImageContent,
 	Model,
@@ -422,6 +423,10 @@ export interface ExtensionContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
+	/** Shared provider credential store. */
+	authStorage: AuthStorage;
+	/** Provider-facing session identity used for credential affinity and strict account pins. */
+	providerSessionId: string;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Current model (may be undefined) */

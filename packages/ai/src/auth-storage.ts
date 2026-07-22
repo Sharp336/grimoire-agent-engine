@@ -1150,6 +1150,8 @@ export class AuthStorage {
 		string,
 		Map<string, { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number }>
 	> = new Map();
+	/** Strict OAuth account pins: provider -> session ID -> stable credential row ID. */
+	#sessionOAuthAccountPins: Map<string, Map<string, number>> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
@@ -1780,6 +1782,42 @@ export class AuthStorage {
 			this.#store.setCache(cacheKey, "", 0);
 		} catch (err) {
 			logger.debug("Failed to clear session sticky credential from persistent store cache", { err });
+		}
+	}
+
+	#getSessionOAuthAccountPin(provider: string, sessionId: string | undefined): number | undefined {
+		if (!sessionId) return undefined;
+		let sessionMap = this.#sessionOAuthAccountPins.get(provider);
+		const inMemory = sessionMap?.get(sessionId);
+		if (inMemory !== undefined) return inMemory;
+		try {
+			const raw = this.#store.getCache(`session:oauth-pin:${provider}:${sessionId}`);
+			if (!raw) return undefined;
+			const parsed = JSON.parse(raw) as { credentialId?: unknown };
+			if (!Number.isInteger(parsed.credentialId)) return undefined;
+			sessionMap ??= new Map();
+			sessionMap.set(sessionId, parsed.credentialId as number);
+			this.#sessionOAuthAccountPins.set(provider, sessionMap);
+			return parsed.credentialId as number;
+		} catch (err) {
+			logger.debug("Failed to read session OAuth account pin from persistent store cache", { err });
+			return undefined;
+		}
+	}
+
+	#setSessionOAuthAccountPin(provider: string, sessionId: string, credentialId: number): void {
+		const sessionMap = this.#sessionOAuthAccountPins.get(provider) ?? new Map();
+		sessionMap.set(sessionId, credentialId);
+		this.#sessionOAuthAccountPins.set(provider, sessionMap);
+		try {
+			const expiresAtSec = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
+			this.#store.setCache(
+				`session:oauth-pin:${provider}:${sessionId}`,
+				JSON.stringify({ credentialId }),
+				expiresAtSec,
+			);
+		} catch (err) {
+			logger.debug("Failed to write session OAuth account pin to persistent store cache", { err });
 		}
 	}
 
@@ -4133,6 +4171,18 @@ export class AuthStorage {
 		if (credentials.length === 0) return undefined;
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
+		const pinnedCredentialId = this.#getSessionOAuthAccountPin(provider, sessionId);
+		if (pinnedCredentialId !== undefined) {
+			const selection = credentials.find(candidate => {
+				return this.#getStoredCredentials(provider)[candidate.index]?.id === pinnedCredentialId;
+			});
+			if (!selection) return undefined;
+			return this.#tryOAuthCredential(provider, selection, providerKey, sessionId, options, {
+				checkUsage: false,
+				allowBlocked: true,
+				allowFallback: false,
+			});
+		}
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
@@ -4979,6 +5029,55 @@ export class AuthStorage {
 			orgId: selection.credential.orgId,
 			orgName: selection.credential.orgName,
 		}));
+	}
+
+	/** Provider IDs that currently have at least one selectable stored OAuth account. */
+	listOAuthProviderIds(): string[] {
+		const providers: string[] = [];
+		for (const provider of this.#data.keys()) {
+			if (this.listOAuthAccounts(provider).length > 0) providers.push(provider);
+		}
+		return providers.sort();
+	}
+
+	/**
+	 * Strictly pin a session to one stored OAuth account. Pinned resolution never
+	 * ranks, rotates to, or falls back to a sibling account.
+	 */
+	pinSessionOAuthAccount(provider: string, sessionId: string, position: number): boolean {
+		if (!sessionId || !Number.isInteger(position) || position < 0) return false;
+		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return false;
+		const selection = this.#getStoredOAuthSelections(provider)[position];
+		if (!selection) return false;
+		this.#setSessionOAuthAccountPin(provider, sessionId, selection.credentialId);
+		this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
+		return true;
+	}
+
+	/** Restore the provider's normal session-sticky/ranked account selection. */
+	clearSessionOAuthAccountPin(provider: string, sessionId: string): void {
+		const sessionMap = this.#sessionOAuthAccountPins.get(provider);
+		sessionMap?.delete(sessionId);
+		if (sessionMap?.size === 0) this.#sessionOAuthAccountPins.delete(provider);
+		this.#clearSessionCredential(provider, sessionId);
+		try {
+			this.#store.setCache(`session:oauth-pin:${provider}:${sessionId}`, "", 0);
+		} catch (err) {
+			logger.debug("Failed to clear session OAuth account pin from persistent store cache", { err });
+		}
+	}
+
+	/** Mirror all strict OAuth account pins from one live session identity to another. */
+	copySessionOAuthAccountPins(sourceSessionId: string, targetSessionId: string): void {
+		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return;
+		for (const provider of this.#data.keys()) {
+			const credentialId = this.#getSessionOAuthAccountPin(provider, sourceSessionId);
+			if (credentialId !== undefined) {
+				this.#setSessionOAuthAccountPin(provider, targetSessionId, credentialId);
+			} else if (this.#getSessionOAuthAccountPin(provider, targetSessionId) !== undefined) {
+				this.clearSessionOAuthAccountPin(provider, targetSessionId);
+			}
+		}
 	}
 
 	/**

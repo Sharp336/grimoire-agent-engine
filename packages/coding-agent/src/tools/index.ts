@@ -246,6 +246,8 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
+	/** Provider-facing session ID whose strict OAuth account pins subagents inherit. */
+	getProviderSessionId?: () => string | null;
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */

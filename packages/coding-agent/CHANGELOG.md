@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/provider` to pin the current session, advisors, and spawned subagents to an exact stored OAuth account, with an option to restore automatic ranked/round-robin selection.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

@@ -262,6 +262,8 @@ export class ExtensionRunner {
 		this.emitError({ extensionPath: "<timer>", event, error, stack }),
 	);
 
+	#getProviderSessionId: () => string;
+
 	constructor(
 		private readonly extensions: Extension[],
 		private readonly runtime: ExtensionRuntime,
@@ -271,9 +273,11 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
+		getProviderSessionId?: () => string,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
+		this.#getProviderSessionId = getProviderSessionId ?? (() => this.sessionManager.getSessionId());
 	}
 
 	initialize(
@@ -537,6 +541,7 @@ export class ExtensionRunner {
 	/** Creates an extension context, optionally scoped to a provider request model. */
 	createContext(model?: Model): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const getProviderSessionId = this.#getProviderSessionId;
 		return {
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -545,6 +550,10 @@ export class ExtensionRunner {
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
+			authStorage: this.modelRegistry.authStorage,
+			get providerSessionId() {
+				return getProviderSessionId();
+			},
 			get model() {
 				return getModel();
 			},

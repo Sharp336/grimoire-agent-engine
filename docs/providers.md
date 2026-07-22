@@ -45,6 +45,7 @@ Use the interactive slash commands inside a session:
 
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
 - `/logout` — opens the provider selector to remove stored credentials.
+- `/provider` — selects an exact stored OAuth account for the current session. The pin is strict (no sibling-account rotation) and is inherited by advisors and newly spawned subagents. Use `/provider <provider-id> <account-number>` for direct selection or `/provider <provider-id> auto` to restore ranked/round-robin routing.
 
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 

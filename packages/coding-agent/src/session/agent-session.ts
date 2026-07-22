@@ -3161,6 +3161,8 @@ export class AgentSession {
 				primaryProviderSessionId,
 				slug,
 			);
+			const advisorPinnedSessionId = advisorProviderSessionId ?? primaryProviderSessionId;
+			this.#modelRegistry.authStorage.copySessionOAuthAccountPins(primaryProviderSessionId, advisorPinnedSessionId);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -3218,7 +3220,13 @@ export class AgentSession {
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.sessionManager.getCwd(),
 				preferWebsockets: this.#preferWebsockets,
-				getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, advisorProviderSessionId),
+				getApiKey: requestModel => {
+					this.#modelRegistry.authStorage.copySessionOAuthAccountPins(
+						primaryProviderSessionId,
+						advisorPinnedSessionId,
+					);
+					return this.#modelRegistry.resolver(requestModel, advisorPinnedSessionId);
+				},
 				streamFn: this.#advisorStreamFn,
 				onPayload: this.#onPayload,
 				onResponse: this.#onResponse,
@@ -9088,6 +9096,8 @@ export class AgentSession {
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
+			authStorage: this.#modelRegistry.authStorage,
+			providerSessionId: this.#activeProviderSessionId(),
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
 			isIdle: () => !this.isStreaming,
