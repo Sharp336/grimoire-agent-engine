@@ -13,6 +13,7 @@ function createSpec<TApi extends Api>(overrides: {
 	priority?: number;
 	applyPatchToolType?: "freeform" | "function";
 	cost?: ModelSpec<TApi>["cost"];
+	compat?: ModelSpec<TApi>["compat"];
 	thinking?: ModelSpec<TApi>["thinking"];
 }): ModelSpec<TApi> {
 	return {
@@ -28,6 +29,7 @@ function createSpec<TApi extends Api>(overrides: {
 		contextWindow: overrides.contextWindow ?? 200000,
 		maxTokens: overrides.maxTokens ?? 32000,
 		priority: overrides.priority,
+		compat: overrides.compat,
 		applyPatchToolType: overrides.applyPatchToolType,
 	};
 }
@@ -84,6 +86,23 @@ describe("generated model policies", () => {
 		expect(models[2]?.contextWindow).toBe(272000);
 		expect(models[3]?.contextWindow).toBe(272000);
 		expect(models[3]?.priority).toBe(1);
+	});
+
+	it("repairs stale Kimi K3 thinking dialect metadata", () => {
+		const model = createSpec({
+			id: "k3",
+			api: "openai-completions",
+			provider: "kimi-code",
+			compat: {
+				thinkingFormat: "zai",
+				reasoningContentField: "reasoning_content",
+				supportsDeveloperRole: false,
+			},
+		});
+
+		applyGeneratedModelPolicies([model]);
+
+		expect(model.compat?.thinkingFormat).toBe("kimi");
 	});
 
 	it("pins GPT-5.6 Codex-transport context window to the 372K hard capacity (#5705)", () => {

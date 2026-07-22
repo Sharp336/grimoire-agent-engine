@@ -252,6 +252,14 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		};
 		delete model.compat.thinkingFormat;
 	}
+	// Kimi K3's Coding endpoint uses the native Kimi reasoning dialect. Pin the
+	// format so credential-free regeneration repairs stale bundled snapshots.
+	if (model.api === "openai-completions" && model.provider === "kimi-code" && model.id === "k3") {
+		model.compat = {
+			...(model.compat ?? {}),
+			thinkingFormat: "kimi",
+		};
+	}
 	if (model.api === "openai-completions" && model.provider === "wafer-serverless" && model.reasoning) {
 		const thinkingFormat = resolveWaferServerlessThinkingFormat(model.id, undefined);
 		if (thinkingFormat === "zai") {
