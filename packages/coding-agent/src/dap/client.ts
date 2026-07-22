@@ -872,8 +872,10 @@ async function waitForTcpTransport(
  * an adapter that never prints a banner still proceeds (just without the gate).
  * Also drains stdout for the wait's duration: in tcp mode the DAP protocol
  * flows over the socket, so nothing else consumes the adapter's stdout.
+ *
+ * Exported so tests can drive the gate deterministically with a synthetic stdout.
  */
-async function waitForTcpServerListening(
+export async function waitForTcpServerListening(
 	proc: { stdout: ReadableStream<Uint8Array>; exitCode: number | null },
 	port: number,
 	timeoutMs: number,

@@ -264,10 +264,9 @@ describe("Recovery — colliding snapshot tags", () => {
 });
 
 describe("Recovery — ill-formed UTF-16 content", () => {
-	it("remaps line anchors through the JS diff fallback when the file contains lone surrogates", () => {
-		// The native diffLineRuns binding rejects unpaired surrogates; the
-		// isWellFormed() guard must fall back to jsdiff so recovery still
-		// remaps anchors instead of throwing or refusing.
+	it("remaps line anchors natively when the file contains lone surrogates", () => {
+		// Native diffLineRuns operates directly over UTF-16 code units, so
+		// recovery remaps anchors natively when files contain lone surrogates.
 		const store = new InMemorySnapshotStore();
 		const snapshotText = lines("head", "lone \ud800 surrogate", "target line", "tail");
 		const hash = store.record(PATH, snapshotText);

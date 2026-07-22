@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as dapModule from "@oh-my-pi/pi-coding-agent/dap";
-import { DapClient } from "@oh-my-pi/pi-coding-agent/dap/client";
+import { DapClient, waitForTcpServerListening } from "@oh-my-pi/pi-coding-agent/dap/client";
 import { DapSessionManager } from "@oh-my-pi/pi-coding-agent/dap/session";
 import type {
 	DapCapabilities,
@@ -508,38 +508,6 @@ console.log("Debug server listening at 127.0.0.1:" + port);
 await Bun.sleep(60_000);
 `;
 
-	// Adapter that binds only after a delay, prints the listening banner from
-	// inside its listen callback, then answers initialize over the socket.
-	const DELAYED_BANNER_ADAPTER = `
-const port = Number(process.argv[2]);
-await Bun.sleep(150);
-const buffers = new WeakMap();
-const server = Bun.listen({ hostname: "127.0.0.1", port, socket: {
-	open(s){ buffers.set(s, Buffer.alloc(0)); },
-	data(s, data){
-		let buffered = Buffer.concat([buffers.get(s) ?? Buffer.alloc(0), Buffer.from(data)]);
-		while (buffered.length > 0) {
-			const headerEnd = buffered.indexOf("\\r\\n\\r\\n");
-			if (headerEnd < 0) { buffers.set(s, buffered); return; }
-			const header = buffered.subarray(0, headerEnd).toString();
-			const m = /Content-Length: (\\d+)/i.exec(header);
-			if (!m) { buffers.delete(s); return; }
-			const bodyStart = headerEnd + 4;
-			const bodyEnd = bodyStart + Number(m[1]);
-			if (buffered.length < bodyEnd) { buffers.set(s, buffered); return; }
-			const req = JSON.parse(buffered.subarray(bodyStart, bodyEnd).toString());
-			buffered = buffered.subarray(bodyEnd);
-			const resp = JSON.stringify({ seq: 1, type: "response", request_seq: req.seq, success: true, command: req.command, body: { supportsConfigurationDoneRequest: true } });
-			s.write(\`Content-Length: \${Buffer.byteLength(resp)}\\r\\n\\r\\n\${resp}\`);
-		}
-		buffers.delete(s);
-	},
-	close(){}, error(){},
-}});
-console.log("Debug server listening at 127.0.0.1:" + port);
-await Bun.sleep(60_000);
-`;
-
 	async function withTcpAdapter(
 		source: string,
 		run: (adapter: DapResolvedAdapter, cwd: string) => Promise<void>,
@@ -563,44 +531,75 @@ await Bun.sleep(60_000);
 		await withTcpAdapter(GHOST_ADAPTER, async (adapter, cwd) => {
 			const client = await DapClient.spawn({ adapter, cwd, socketReadyTimeoutMs: 5_000 });
 			try {
-				const start = Date.now();
-				// The ghost socket ends the read stream cleanly. Before the fix the
-				// request sat pending until its own 5s timeout; now the reader wakes
-				// it with a descriptive connection-closed error well before then.
-				await expect(client.sendRequest("initialize", {}, undefined, 5_000)).rejects.toThrow(
+				// The ghost socket ends the read stream cleanly. The reader must wake
+				// the pending request with a connection-closed error; a wake regression
+				// rejects with `DAP request initialize timed out` instead.
+				await expect(client.sendRequest("initialize", {}, undefined, 60_000)).rejects.toThrow(
 					/DAP connection closed/,
 				);
-				expect(Date.now() - start).toBeLessThan(2_000);
 			} finally {
 				await client.dispose();
 			}
 		});
-	});
+	}, 20_000);
 
 	it("wakes an event waiter when the transport closes instead of waiting out its timeout", async () => {
 		await withTcpAdapter(GHOST_ADAPTER, async (adapter, cwd) => {
 			const client = await DapClient.spawn({ adapter, cwd, socketReadyTimeoutMs: 5_000 });
 			try {
-				const start = Date.now();
-				await expect(client.waitForEvent("stopped", undefined, undefined, 5_000)).rejects.toThrow(
+				// A close must wake the event waiter with the connection error rather
+				// than letting it wait out its own timeout.
+				await expect(client.waitForEvent("stopped", undefined, undefined, 60_000)).rejects.toThrow(
 					/DAP connection closed/,
 				);
-				expect(Date.now() - start).toBeLessThan(2_000);
 			} finally {
 				await client.dispose();
 			}
 		});
-	});
+	}, 20_000);
 
-	it("defers the first connect until the adapter announces its listening port", async () => {
-		await withTcpAdapter(DELAYED_BANNER_ADAPTER, async (adapter, cwd) => {
-			const client = await DapClient.spawn({ adapter, cwd, socketReadyTimeoutMs: 5_000 });
-			try {
-				const caps = await client.initialize({ clientID: "omp", adapterID: "js-debug-adapter" }, undefined, 5_000);
-				expect(caps).toMatchObject({ supportsConfigurationDoneRequest: true });
-			} finally {
-				await client.dispose();
-			}
+	// Deterministic gate contract: the client must not open its first connect
+	// until the adapter's stdout mentions the reserved port. Driven with a
+	// synthetic stdout stream — no subprocess, no wall-clock dependence.
+	describe("waitForTcpServerListening", () => {
+		function fakeStdout() {
+			let controller!: ReadableStreamDefaultController<Uint8Array>;
+			const stdout = new ReadableStream<Uint8Array>({
+				start(c) {
+					controller = c;
+				},
+			});
+			const encoder = new TextEncoder();
+			return {
+				proc: { stdout, exitCode: null },
+				push: (text: string) => controller.enqueue(encoder.encode(text)),
+				end: () => controller.close(),
+			};
+		}
+
+		it("holds the gate until stdout announces the port, even split across chunks", async () => {
+			const { proc, push, end } = fakeStdout();
+			let open = false;
+			const gate = waitForTcpServerListening(proc, 43210, 60_000).then(() => {
+				open = true;
+			});
+			push("Starting inspector...\n");
+			push("Debug server listening at 127.0.0.1:43");
+			// Single event-loop turn so the gate's reader consumes the queued
+			// chunks — a scheduling flush, not a tuned wall-clock delay.
+			await Bun.sleep(0);
+			expect(open).toBe(false);
+			push("210\n");
+			await gate;
+			end();
+		});
+
+		it("opens the gate when stdout ends without a banner so the connect loop surfaces the real failure", async () => {
+			const { proc, push, end } = fakeStdout();
+			const gate = waitForTcpServerListening(proc, 43210, 60_000);
+			push("adapter crashed before binding\n");
+			end();
+			await gate;
 		});
 	});
 });

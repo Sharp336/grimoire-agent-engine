@@ -79,7 +79,6 @@
     "@xterm/headless": "catalog:",
     "arktype": "catalog:",
     "chalk": "catalog:",
-    "diff": "catalog:",
     "fast-xml-parser": "catalog:",
     "handlebars": "catalog:",
     "header-generator": "catalog:",
