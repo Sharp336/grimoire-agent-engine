@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ST-terminated OSC 8 hyperlinks corrupting Markdown table column widths when linked text started with inline markup.
+- Prevented canonical slash commands and their matching aliases from appearing as duplicate autocomplete rows ([#6131](https://github.com/can1357/oh-my-pi/issues/6131)).
+- Fixed Ctrl+L appearance refreshes inside tmux reading tmux's stale OSC 11 background cache instead of querying the outer terminal when passthrough is enabled ([#6066](https://github.com/can1357/oh-my-pi/issues/6066)).
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

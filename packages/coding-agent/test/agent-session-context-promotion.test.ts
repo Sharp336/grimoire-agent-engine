@@ -21,6 +21,10 @@ describe("AgentSession context promotion", () => {
 		// constructor (~100ms). The catalog and auth fixture never change between
 		// tests here (tests only read models and add benign extra runtime keys),
 		// so build them once instead of paying ~950ms across the 9 cases.
+		//
+		// Register controlled windows so promotion behavior does not depend on
+		// account-scoped catalog rows. The source stays text-only so the
+		// snapcompact-fallback case cannot use vision-based compaction.
 		tempDir = TempDir.createSync("@pi-context-promotion-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
@@ -574,7 +578,7 @@ describe("AgentSession context promotion", () => {
 			modelRegistry,
 		});
 
-		// Stale incomplete from the smaller model — current session is already on codex.
+		// Stale incomplete from the smaller model — current session is already on the large model.
 		const staleIncomplete = createIncompleteMessage(sparkModel);
 		session.agent.emitExternalEvent({ type: "message_end", message: staleIncomplete });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [staleIncomplete] });

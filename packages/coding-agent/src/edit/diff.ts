@@ -4,12 +4,27 @@
  * Provides diff string generation and the replace-mode edit logic
  * used when not in patch mode.
  */
-import * as Diff from "diff";
+import { diffLines as nativeDiffLines, structuredPatchHunks as nativeStructuredPatchHunks } from "@oh-my-pi/pi-natives";
+import { diffLines as jsDiffLines, structuredPatch as jsStructuredPatch } from "diff";
 import { resolveToCwd } from "../tools/path-utils";
 import { type BlockContextSource, findBlockContextLines } from "../utils/block-context";
 import { DEFAULT_FUZZY_THRESHOLD, EditMatchError, findMatch } from "./modes/replace";
 import { adjustIndentation, normalizeToLF, stripBom } from "./normalize";
 import { readEditFileText } from "./read-file";
+
+/** Native line diff when both inputs are well-formed UTF-16; the native binding rejects unpaired surrogates, so ill-formed inputs fall back to jsdiff. */
+function diffLines(oldContent: string, newContent: string) {
+	return oldContent.isWellFormed() && newContent.isWellFormed()
+		? nativeDiffLines(oldContent, newContent)
+		: jsDiffLines(oldContent, newContent);
+}
+
+/** Native structured-patch hunks with the same ill-formed-UTF-16 fallback as {@link diffLines}. */
+function structuredPatchHunks(oldContent: string, newContent: string, context: number) {
+	return oldContent.isWellFormed() && newContent.isWellFormed()
+		? nativeStructuredPatchHunks(oldContent, newContent, context)
+		: jsStructuredPatch("", "", oldContent, newContent, "", "", { context }).hunks;
+}
 
 export interface DiffResult {
 	diff: string;
@@ -235,7 +250,7 @@ export function generateDiffString(
 	contextLines = 2,
 	source: BlockContextSource = {},
 ): DiffResult {
-	const parts = Diff.diffLines(oldContent, newContent);
+	const parts = diffLines(oldContent, newContent);
 	const output: string[] = [];
 
 	let oldLineNum = 1;
@@ -373,10 +388,10 @@ export function generateUnifiedDiffString(
 	contextLines = 3,
 	source: BlockContextSource = {},
 ): DiffResult {
-	const patch = Diff.structuredPatch("", "", oldContent, newContent, "", "", { context: contextLines });
+	const hunks = structuredPatchHunks(oldContent, newContent, contextLines);
 	const output: string[] = [];
 	let firstChangedLine: number | undefined;
-	for (const hunk of patch.hunks) {
+	for (const hunk of hunks) {
 		output.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
 		let oldLine = hunk.oldStart;
 		let newLine = hunk.newStart;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recovered completed tool calls after transient stream JSON parse failures while keeping incomplete, unknown, refused, and sensitive calls non-executable.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

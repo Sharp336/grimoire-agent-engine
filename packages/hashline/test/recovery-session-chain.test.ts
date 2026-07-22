@@ -262,3 +262,26 @@ describe("Recovery — colliding snapshot tags", () => {
 		expect(recovered?.text).toBe(lines("shared head", "model payload", "shared tail", "drifted trailer"));
 	});
 });
+
+describe("Recovery — ill-formed UTF-16 content", () => {
+	it("remaps line anchors through the JS diff fallback when the file contains lone surrogates", () => {
+		// The native diffLineRuns binding rejects unpaired surrogates; the
+		// isWellFormed() guard must fall back to jsdiff so recovery still
+		// remaps anchors instead of throwing or refusing.
+		const store = new InMemorySnapshotStore();
+		const snapshotText = lines("head", "lone \ud800 surrogate", "target line", "tail");
+		const hash = store.record(PATH, snapshotText);
+		// Current text gained one line above the target; the anchor must shift.
+		const currentText = lines("inserted above", "head", "lone \ud800 surrogate", "target line", "tail");
+
+		const recovered = new Recovery(store).tryRecover({
+			path: PATH,
+			currentText,
+			fileHash: hash,
+			edits: parsePatch("SWAP 3.=3:\n+model payload").edits,
+		});
+
+		expect(recovered).not.toBeNull();
+		expect(recovered?.text).toBe(lines("inserted above", "head", "lone \ud800 surrogate", "model payload", "tail"));
+	});
+});
