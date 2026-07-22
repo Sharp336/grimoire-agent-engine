@@ -1,10 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	buildApi3Route,
 	buildQoderApi3Body,
 	createQoderApi3Transport,
 	QODER_API3_BASE,
 	type QoderApi3ModelRoute,
+	type QoderApi3Transport,
 	resolveApi3Effort,
 } from "@oh-my-pi/pi-ai/providers/qoder-api3";
 import { QODER_PRIVATE_DATA_POLICY, repairQoderSseBody } from "@oh-my-pi/pi-ai/registry/oauth/qoder";
@@ -231,7 +236,7 @@ interface FakeFetch {
 }
 
 /** Serves the userinfo identity lookup, then the canned SSE inference stream. */
-function fakeApi3Fetch(respond: () => Response): FakeFetch {
+function fakeApi3Fetch(respond: () => Response, userinfo?: () => Response): FakeFetch {
 	const userinfoRequests: CapturedRequest[] = [];
 	const inferRequests: CapturedRequest[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
@@ -242,10 +247,13 @@ function fakeApi3Fetch(respond: () => Response): FakeFetch {
 		};
 		if (captured.url.includes("/api/v1/userinfo")) {
 			userinfoRequests.push(captured);
-			return new Response(JSON.stringify({ id: "uid-test-account" }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
+			return (
+				userinfo?.() ??
+				new Response(JSON.stringify({ id: "uid-test-account" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				})
+			);
 		}
 		inferRequests.push(captured);
 		return respond();
@@ -352,6 +360,31 @@ async function runApi3Turn(
 	for await (const event of stream) events.push(event);
 	const result = await stream.result();
 	return { events, result, bridgeState: state, fetches };
+}
+
+/** The deps every hand-built transport in this file shares. */
+function makeTransport(bridge: QoderWasmBridge): QoderApi3Transport {
+	return createQoderApi3Transport({
+		bridge,
+		machineId: "machine-test",
+		openapiBase: "https://openapi.qoder.sh",
+		api3Base: QODER_API3_BASE,
+		cosyVersion: "1.1.2",
+		clientName: "omp",
+		repair: repairQoderSseBody,
+	});
+}
+
+/** Drain one turn over an existing transport (context-cache tests reuse it across turns). */
+async function collectTurn(
+	transport: QoderApi3Transport,
+	modelId: string,
+	options?: SimpleStreamOptions,
+): Promise<{ events: AssistantMessageEvent[]; result: AssistantMessage }> {
+	const stream = transport.stream(api3Route(modelId), api3Model(specById(modelId)), userContext(), options);
+	const events: AssistantMessageEvent[] = [];
+	for await (const event of stream) events.push(event);
+	return { events, result: await stream.result() };
 }
 
 // ---------------------------------------------------------------------------
@@ -819,11 +852,25 @@ describe("buildApi3Route", () => {
 		expect(route.openaiModel).toBe(model);
 	});
 
-	it("signs aliases with the base wire id and the base window", () => {
-		const route = buildApi3Route(getBundledModel<"openai-completions">("qoder", "dmodel-1m"));
+	it("signs aliases with the base wire id, base display name, and alias window", () => {
+		const alias = getBundledModel<"openai-completions">("qoder", "dmodel-1m");
+		expect(alias.name).toBe("DeepSeek-V4-Pro (1M)");
+		const route = buildApi3Route(alias);
 		expect(route.wireId).toBe("dmodel");
+		// Aliases sign model_config.display_name with the base bundled name while
+		// parameters.context_length (route.contextWindow) carries the alias window.
+		expect(route.displayName).toBe("DeepSeek-V4-Pro");
 		expect(route.contextWindow).toBe(1_000_000);
 		expect(route.maxInputTokens).toBe(200_000);
+
+		const body = buildQoderApi3Body({
+			route,
+			context: userContext(),
+			cosyVersion: "1.1.2",
+			clientName: "omp",
+		});
+		expect(asRecord(body.model_config, "model_config").display_name).toBe("DeepSeek-V4-Pro");
+		expect(asRecord(body.parameters, "parameters").context_length).toBe(1_000_000);
 	});
 });
 
@@ -840,5 +887,452 @@ describe("isQoderApi3Model", () => {
 
 		const wrongProvider = { ...flagged, provider: "openai" } as Model<"openai-completions">;
 		expect(isQoderApi3Model(wrongProvider)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (h) failure contracts: pre-stream HTTP errors and the missing credential
+// ---------------------------------------------------------------------------
+
+describe("api3 failure contracts", () => {
+	it("fails before the stream on an HTTP error: errorStatus, detail, and no start event", async () => {
+		const { events, result } = await runApi3Turn(
+			"qmodel_preview",
+			() => new Response("Signature invalid", { status: 401 }),
+		);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(401);
+		expect(result.errorMessage).toContain("(401)");
+		expect(result.errorMessage).toContain("Signature invalid");
+		// The start event is only pushed once the response is streamable, so a
+		// pre-stream rejection surfaces as a lone terminal error, never a done.
+		expect(events.map(event => event.type)).toEqual(["error"]);
+		const terminal = events[events.length - 1];
+		if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+		expect(terminal.reason).toBe("error");
+		expect(terminal.error.stopReason).toBe("error");
+	});
+
+	it("refuses a turn without an OAuth credential before touching the identity chain", async () => {
+		const { bridge, state } = fakeBridge();
+		const fetches = fakeApi3Fetch(() => sseResponse(HAPPY_SSE));
+		const transport = makeTransport(bridge);
+		const { events, result } = await collectTurn(transport, "qmodel_preview", { fetch: fetches.fetchImpl });
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("requires a Qoder OAuth credential");
+		expect(events.map(event => event.type)).toEqual(["error"]);
+		// Fail-fast: no userinfo lookup and no WASM context was built.
+		expect(fetches.userinfoRequests).toHaveLength(0);
+		expect(state.identities).toHaveLength(0);
+	});
+
+	it("preserves userinfo 401/403 into errorStatus for auth retry", async () => {
+		for (const status of [401, 403] as const) {
+			const { bridge } = fakeBridge();
+			const fetches = fakeApi3Fetch(
+				() => sseResponse(HAPPY_SSE),
+				() => new Response("unauthorized", { status }),
+			);
+			const transport = makeTransport(bridge);
+			const { events, result } = await collectTurn(transport, "qmodel_preview", {
+				apiKey: "qoder-test-token",
+				fetch: fetches.fetchImpl,
+			});
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(status);
+			expect(result.errorMessage).toContain(`userinfo failed (${status})`);
+			expect(events.map(event => event.type)).toEqual(["error"]);
+			// Status must ride the structured field, not rely on message parsing.
+			expect(result.errorStatus).not.toBeUndefined();
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (i) termination contract: truncation is an error; success needs BOTH markers
+// ---------------------------------------------------------------------------
+
+describe("api3 stream termination", () => {
+	it("treats EOF before a finish_reason and [DONE] as truncation, not a silent complete", async () => {
+		const truncated = `data: ${chunkEnvelope({ choices: [{ delta: { content: "partial" }, index: 0 }] })}`;
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(truncated));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("ended before a terminal frame");
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "error"]);
+		const terminal = events[events.length - 1];
+		if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+		expect(terminal.reason).toBe("error");
+	});
+
+	it("accepts a bare data: [DONE] line after a finish_reason as a clean termination", async () => {
+		const bareDone = [
+			`data: ${chunkEnvelope({ choices: [{ delta: { content: "hello" }, index: 0 }] })}`,
+			`data: ${chunkEnvelope({
+				choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+				usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+			})}`,
+			"data: [DONE]",
+			FINISH_METRICS_FRAME,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(bareDone));
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+		const terminal = events[events.length - 1];
+		if (terminal?.type !== "done") throw new Error("expected a terminal done event");
+		expect(terminal.reason).toBe("stop");
+	});
+
+	it("treats finish_reason without [DONE] as truncation", async () => {
+		const finishWithoutDone = [
+			`data: ${chunkEnvelope({ choices: [{ delta: { content: "hello" }, index: 0 }] })}`,
+			`data: ${chunkEnvelope({
+				choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+			})}`,
+			FINISH_METRICS_FRAME,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(finishWithoutDone));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("ended before a terminal frame");
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "error"]);
+	});
+
+	it("treats [DONE] without finish_reason as truncation", async () => {
+		const doneWithoutFinish = [
+			`data: ${chunkEnvelope({ choices: [{ delta: { content: "hello" }, index: 0 }] })}`,
+			`data: ${envelope("[DONE]")}`,
+			FINISH_METRICS_FRAME,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(doneWithoutFinish));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("ended before a terminal frame");
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "error"]);
+	});
+
+	it("keeps an exceeded-quota sentinel terminal when later frames report success", async () => {
+		const quotaThenFinish = [
+			`data: ${envelope("[EXCEED_QUOTA]")}`,
+			`data: ${chunkEnvelope({
+				choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+			})}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(quotaThenFinish));
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Qoder api3 quota exceeded");
+		expect(events.map(event => event.type)).toEqual(["start", "error"]);
+	});
+
+	it("ignores quota-status and notification sentinels without disrupting a normal turn", async () => {
+		const sentinelsThenSuccess = [
+			`data: ${envelope("[NOT_EXCEED_QUOTA]")}`,
+			`data: ${envelope("[NOTIFICATIONS]#catalog-refreshed")}`,
+			`data: ${chunkEnvelope({ choices: [{ delta: { content: "OK" }, index: 0 }] })}`,
+			`data: ${chunkEnvelope({
+				choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+			})}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(sentinelsThenSuccess));
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toContainEqual({ type: "text", text: "OK" });
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (j) abort mid-stream: pull-driven body, blocks closed before the terminal
+// ---------------------------------------------------------------------------
+
+describe("api3 abort", () => {
+	it("aborts after the first delta: stopReason aborted and no orphaned blocks", async () => {
+		const controller = new AbortController();
+		const encoder = new TextEncoder();
+		let delivered = false;
+		const aborted = Promise.withResolvers<never>();
+		controller.signal.addEventListener("abort", () => {
+			aborted.reject(new DOMException("The operation was aborted.", "AbortError"));
+		});
+		const abortableBody = new ReadableStream<Uint8Array>({
+			async pull(streamController) {
+				if (!delivered) {
+					delivered = true;
+					streamController.enqueue(
+						encoder.encode(
+							`data: ${chunkEnvelope({ choices: [{ delta: { content: "partial" }, index: 0 }] })}\n\n`,
+						),
+					);
+					return;
+				}
+				// Park like a real socket; the abort errors the body exactly as a
+				// fetch response stream rejects its pending read on abort.
+				await aborted.promise;
+			},
+		});
+		const { bridge } = fakeBridge();
+		const fetches = fakeApi3Fetch(
+			() => new Response(abortableBody, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+		const transport = makeTransport(bridge);
+		const stream = transport.stream(
+			api3Route("qmodel_preview"),
+			api3Model(specById("qmodel_preview")),
+			userContext(),
+			{
+				apiKey: "qoder-test-token",
+				fetch: fetches.fetchImpl,
+				signal: controller.signal,
+			},
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+			if (event.type === "text_delta") controller.abort();
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("aborted");
+		const types = events.map(event => event.type);
+		const terminal = events[events.length - 1];
+		if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+		expect(terminal.reason).toBe("aborted");
+		// The open text block was closed before the terminal event fired.
+		expect(types.indexOf("text_start")).toBeGreaterThan(-1);
+		expect(types.indexOf("text_end")).toBeGreaterThan(-1);
+		expect(types.indexOf("text_end")).toBeLessThan(types.indexOf("error"));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (k) context cache: rejection evicts, shared lease, free only when idle
+// ---------------------------------------------------------------------------
+
+describe("api3 context cache", () => {
+	it("evicts a rejected identity chain so the next turn retries it", async () => {
+		const { bridge, state } = fakeBridge();
+		let userinfoCalls = 0;
+		const fetches = fakeApi3Fetch(
+			() => sseResponse(HAPPY_SSE),
+			() => {
+				userinfoCalls += 1;
+				if (userinfoCalls === 1) return new Response("gateway error", { status: 500 });
+				return new Response(JSON.stringify({ id: "uid-test-account" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			},
+		);
+		const transport = makeTransport(bridge);
+		const options: SimpleStreamOptions = { apiKey: "qoder-test-token", fetch: fetches.fetchImpl };
+		const first = await collectTurn(transport, "qmodel_preview", options);
+		expect(first.result.stopReason).toBe("error");
+		expect(first.result.errorStatus).toBe(500);
+		expect(first.result.errorMessage).toContain("userinfo failed (500)");
+		expect(first.events.map(event => event.type)).toEqual(["error"]);
+		const second = await collectTurn(transport, "qmodel_preview", options);
+		expect(second.result.stopReason).toBe("toolUse");
+		// The 500 evicted the cache entry so the next turn retried userinfo.
+		expect(fetches.userinfoRequests).toHaveLength(2);
+		// The identity chain (generateRuntimeAuthFields → createContext) only
+		// completes on a successful userinfo: the 500 turn recorded none, the
+		// retry recorded exactly one. The cached rejection never poisoned the
+		// next turn's identity.
+		expect(state.identities).toHaveLength(1);
+		expect(state.userInfos).toHaveLength(1);
+	});
+
+	it("fails the turn when userinfo returns no account id", async () => {
+		const { bridge, state } = fakeBridge();
+		const fetches = fakeApi3Fetch(
+			() => sseResponse(HAPPY_SSE),
+			() => new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } }),
+		);
+		const transport = makeTransport(bridge);
+		const { events, result } = await collectTurn(transport, "qmodel_preview", {
+			apiKey: "qoder-test-token",
+			fetch: fetches.fetchImpl,
+		});
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("returned no account id");
+		expect(events.map(event => event.type)).toEqual(["error"]);
+		// The chain stopped before the WASM auth fields were generated.
+		expect(state.identities).toHaveLength(0);
+	});
+
+	it("shares one context across concurrent same-credential turns and frees it only after both release", async () => {
+		const freed: string[] = [];
+		const identities: string[] = [];
+		const bridge: QoderWasmBridge = {
+			createContext(_machineId, _cosyVersion, userInfoJson) {
+				const parsed: unknown = JSON.parse(userInfoJson);
+				const uid = asRecord(parsed, "userInfo").uid;
+				if (typeof uid !== "string") throw new Error("userInfo missing uid");
+				return {
+					prepareInferRequest(endpoint, bodyJson, modelKey, modelSource) {
+						const prepared: QoderPreparedRequest = {
+							url: `${endpoint}/infer`,
+							headers: { "Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY },
+							body: bodyJson,
+						};
+						void modelKey;
+						void modelSource;
+						return prepared;
+					},
+					prepareRequest() {
+						throw new Error("out of scope");
+					},
+					decryptServerResponse(encrypted) {
+						return encrypted;
+					},
+					free() {
+						freed.push(uid);
+					},
+				};
+			},
+			decryptServerResponse(encrypted) {
+				return encrypted;
+			},
+			generateRuntimeAuthFields(identityJson) {
+				identities.push(identityJson);
+				return { encrypt_user_info: "e", key: "k" };
+			},
+		};
+		const transport = makeTransport(bridge);
+		// Gate the first two inference requests (the two token-a turns) until a
+		// token-b turn has rotated the credential underneath them.
+		let inferSeen = 0;
+		const aInferGate = Promise.withResolvers<void>();
+		const bothAStarted = Promise.withResolvers<void>();
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url.includes("/api/v1/userinfo")) {
+				const auth = new Headers(init?.headers).get("Authorization") ?? "";
+				const id = auth.includes("token-b") ? "uid-b" : "uid-a";
+				return new Response(JSON.stringify({ id }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			inferSeen += 1;
+			if (inferSeen === 2) bothAStarted.resolve();
+			if (inferSeen <= 2) await aInferGate.promise;
+			return sseResponse(HAPPY_SSE);
+		};
+		const a1 = collectTurn(transport, "qmodel_preview", { apiKey: "token-a", fetch: fetchImpl });
+		const a2 = collectTurn(transport, "qmodel_preview", { apiKey: "token-a", fetch: fetchImpl });
+		await bothAStarted.promise;
+		// Both token-a turns leased ONE shared context: a single identity chain.
+		expect(identities).toHaveLength(1);
+		const b = await collectTurn(transport, "qmodel_preview", { apiKey: "token-b", fetch: fetchImpl });
+		expect(b.result.stopReason).toBe("toolUse");
+		// The rotation marked the token-a context stale, but its two live turns
+		// still hold the lease: nothing freed yet.
+		expect(freed).toEqual([]);
+		aInferGate.resolve();
+		const [r1, r2] = await Promise.all([a1, a2]);
+		expect(r1.result.stopReason).toBe("toolUse");
+		expect(r2.result.stopReason).toBe("toolUse");
+		// Freed exactly once, after the last of the two turns released (the free
+		// microtask is queued by release() before the stream's result settles).
+		expect(freed).toEqual(["uid-a"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (l) dispatch fail-closed: no usable bridge → honest error stream
+// ---------------------------------------------------------------------------
+
+const noBridgeChildScript = `
+import { streamQoderApi3 } from ${JSON.stringify(
+	pathToFileURL(join(import.meta.dir, "../src/providers/qoder-api3.ts")).href,
+)};
+const model = { api: "openai-completions", provider: "qoder", id: "dmodel", name: "DeepSeek-V4-Pro" };
+const context = {
+	systemPrompt: ["You are terse."],
+	messages: [{ role: "user", content: "Reply exactly with OK.", timestamp: 1 }],
+};
+const stream = streamQoderApi3(model, context, { apiKey: "token" });
+const events = [];
+for await (const event of stream) events.push(event.type);
+const result = await stream.result();
+process.stdout.write(JSON.stringify({ events, stopReason: result.stopReason, errorMessage: result.errorMessage }));
+`;
+
+describe("streamQoderApi3 dispatch", () => {
+	it("fails closed with an honest error stream when no auth WASM is available", async () => {
+		// Every WASM candidate unresolvable: nonexistent explicit override,
+		// sandboxed HOME (hides ~/.qoder), sandboxed XDG cache (hides the
+		// verified-module cache). Runs in a child so the sandbox never touches
+		// this process's environment.
+		const sandbox = mkdtempSync(join(tmpdir(), "qoder-no-wasm-"));
+		try {
+			const child = Bun.spawn([process.execPath, "--eval", noBridgeChildScript], {
+				cwd: join(import.meta.dir, ".."),
+				env: {
+					...process.env,
+					HOME: sandbox,
+					XDG_CACHE_HOME: join(sandbox, "xdg-cache"),
+					QODER_HOME: join(sandbox, "qoder-home"),
+					QODER_WASM_PATH: join(sandbox, "missing.wasm"),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect(exitCode, stderr).toBe(0);
+			const outcome = JSON.parse(stdout) as { events: string[]; stopReason: string; errorMessage?: string };
+			expect(outcome.events).toEqual(["start", "error"]);
+			expect(outcome.stopReason).toBe("error");
+			expect(outcome.errorMessage).toContain("qodercli");
+		} finally {
+			rmSync(sandbox, { recursive: true, force: true });
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// (m) body shaping branches: sampling params, stop sequences, tool choice
+// ---------------------------------------------------------------------------
+
+describe("buildQoderApi3Body request-shaping branches", () => {
+	const base = { route: api3Route("qmodel_preview"), context: userContext(), cosyVersion: "1.1.2", clientName: "omp" };
+
+	it("maps temperature and topP onto their api3 wire fields", () => {
+		const shaped = buildQoderApi3Body({ ...base, options: { temperature: 0.7, topP: 0.9 } });
+		expect(shaped.temperature).toBe(0.7);
+		expect(shaped.top_p).toBe(0.9);
+	});
+
+	it("does not invent sampling defaults when the caller leaves them unset", () => {
+		const defaults = buildQoderApi3Body(base);
+		expect(defaults.temperature).toBeUndefined();
+		expect(defaults.top_p).toBeUndefined();
+	});
+
+	it("shapes stop sequences: a single one as a string, several as an array", () => {
+		const single = buildQoderApi3Body({ ...base, options: { stopSequences: ["END"] } });
+		expect(single.stop).toBe("END");
+		const multiple = buildQoderApi3Body({ ...base, options: { stopSequences: ["END", "STOP"] } });
+		expect(multiple.stop).toEqual(["END", "STOP"]);
+		expect(buildQoderApi3Body(base).stop).toBeUndefined();
+	});
+
+	it("maps tool choices onto the OpenAI wire forms", () => {
+		const any = buildQoderApi3Body({ ...base, options: { toolChoice: "any" } });
+		expect(any.tool_choice).toBe("required");
+		const named = buildQoderApi3Body({
+			...base,
+			options: { toolChoice: { type: "function", name: "get_weather" } },
+		});
+		expect(named.tool_choice).toEqual({ type: "function", function: { name: "get_weather" } });
+		const passthrough = buildQoderApi3Body({ ...base, options: { toolChoice: "auto" } });
+		expect(passthrough.tool_choice).toBe("auto");
+		expect(buildQoderApi3Body(base).tool_choice).toBeUndefined();
 	});
 });

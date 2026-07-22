@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { createHash } from "node:crypto";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { isDefinitiveOAuthFailure } from "../../../error";
-import { getQoderCommonHeaders, loginQoder, refreshQoderToken } from "../qoder";
+import { getQoderCommonHeaders, loginQoder, refreshQoderToken, wrapQoderSseFetch } from "../qoder";
 
 const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
 const POLL_URL = "https://openapi.qoder.sh/api/v1/deviceToken/poll";
 const REFRESH_URL = "https://openapi.qoder.sh/api/v1/deviceToken/refresh";
+const USERINFO_URL = "https://openapi.qoder.sh/api/v1/userinfo";
 
 type RecordedRequest = {
 	url: string;
@@ -24,6 +25,19 @@ function urlOf(input: string | URL | Request): string {
 	return typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 }
 
+function tokenPollResponse(overrides: Record<string, unknown> = {}): Response {
+	return jsonResponse({
+		token: "access-token",
+		refresh_token: "refresh-token",
+		expires_at: 1_800_000_000_000 / 1000 + 3600,
+		...overrides,
+	});
+}
+
+function userinfoResponse(id = "qoder-user-1"): Response {
+	return jsonResponse({ id });
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -38,6 +52,10 @@ describe("loginQoder", () => {
 		const fetchMock: FetchImpl = async (input, init) => {
 			const url = urlOf(input);
 			requests.push({ url, init });
+			if (url === USERINFO_URL) {
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access-token");
+				return userinfoResponse("acct-42");
+			}
 			if (!url.startsWith(POLL_URL)) throw new Error(`Unexpected URL: ${url}`);
 			polls += 1;
 			return polls === 1
@@ -57,7 +75,7 @@ describe("loginQoder", () => {
 		expect(authUrl.searchParams.get("nonce")).toMatch(/^[0-9a-f-]{36}$/);
 		expect(authUrl.searchParams.get("machine_id")).toMatch(/^[0-9a-f-]{36}$/);
 
-		expect(requests).toHaveLength(2);
+		expect(requests).toHaveLength(3);
 		const poll = new URL(requests[0]?.url ?? "");
 		const verifier = poll.searchParams.get("verifier") ?? "";
 		const expectedChallenge = createHash("sha256").update(verifier).digest("base64url");
@@ -65,8 +83,40 @@ describe("loginQoder", () => {
 		expect(poll.origin + poll.pathname).toBe(POLL_URL);
 		expect(poll.searchParams.get("challenge_method")).toBe("S256");
 		expect(poll.searchParams.get("verifier")).toMatch(/^[A-Za-z0-9_-]{86}$/);
-		expect(requests.map(request => request.init?.method)).toEqual(["GET", "GET"]);
-		expect(credentials).toEqual({ access: "access-token", refresh: "refresh-token", expires: now + 3_540_000 });
+		expect(requests.map(request => request.init?.method)).toEqual(["GET", "GET", "GET"]);
+		expect(requests[2]?.url).toBe(USERINFO_URL);
+		expect(credentials).toEqual({
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: now + 3_540_000,
+			accountId: "acct-42",
+		});
+	});
+
+	it("treats HTTP 202 as pending before parsing a body", async () => {
+		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		let polls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = urlOf(input);
+			if (url === USERINFO_URL) return userinfoResponse();
+			polls += 1;
+			if (polls === 1) {
+				return new Response(JSON.stringify({ error: "authorization_pending" }), {
+					status: 202,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return tokenPollResponse();
+		};
+
+		const credentials = await loginQoder({ fetch: fetchMock });
+
+		expect(polls).toBe(2);
+		expect(credentials).toMatchObject({
+			access: "access-token",
+			refresh: "refresh-token",
+			accountId: "qoder-user-1",
+		});
 	});
 
 	it("maps non-pending HTTP failures to polling errors", async () => {
@@ -91,28 +141,83 @@ describe("loginQoder", () => {
 	it("keeps polling after an empty access token", async () => {
 		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
 		let polls = 0;
-		const fetchMock: FetchImpl = async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = urlOf(input);
+			if (url === USERINFO_URL) return userinfoResponse();
 			polls += 1;
-			return polls === 1 ? jsonResponse({ token: "" }) : jsonResponse({ token: "access-token" });
+			return polls === 1
+				? jsonResponse({ token: "" })
+				: jsonResponse({ token: "access-token", refresh_token: "refresh-token" });
 		};
 
 		const credentials = await loginQoder({ fetch: fetchMock });
 
 		expect(polls).toBe(2);
 		expect(credentials.access).toBe("access-token");
+		expect(credentials.refresh).toBe("refresh-token");
+		expect(credentials.accountId).toBe("qoder-user-1");
+	});
+
+	it("rejects a token-only poll response instead of looping forever", async () => {
+		const fetchMock: FetchImpl = async () => jsonResponse({ token: "access-token" });
+
+		await expect(loginQoder({ fetch: fetchMock })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "qoder",
+			message: expect.stringContaining("refresh_token"),
+		});
+	});
+
+	it("fails login when userinfo is non-OK or missing a stable id", async () => {
+		const missingId: FetchImpl = async input => {
+			const url = urlOf(input);
+			if (url.startsWith(POLL_URL)) return tokenPollResponse();
+			if (url === USERINFO_URL) return jsonResponse({ name: "no-id" });
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		await expect(loginQoder({ fetch: missingId })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "qoder",
+			message: expect.stringContaining("account id"),
+		});
+
+		const unauthorized: FetchImpl = async input => {
+			const url = urlOf(input);
+			if (url.startsWith(POLL_URL)) return tokenPollResponse();
+			if (url === USERINFO_URL) return new Response(null, { status: 401 });
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		await expect(loginQoder({ fetch: unauthorized })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "qoder",
+			status: 401,
+		});
 	});
 
 	it("bounds an in-flight poll request, retries after its timeout, and then succeeds", async () => {
 		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
 		const timeoutController = new AbortController();
-		const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+		let timeoutCalls = 0;
+		const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+			timeoutCalls += 1;
+			// Only the first poll uses the aborted controller; later polls and
+			// the userinfo fetch need a live timeout signal.
+			return timeoutCalls === 1 ? timeoutController.signal : new AbortController().signal;
+		});
 		const response = Promise.withResolvers<Response>();
 		let requestSignal: AbortSignal | undefined;
 		let polls = 0;
-		const fetchMock: FetchImpl = (_input, init) => {
+		const fetchMock: FetchImpl = (input, init) => {
+			const url = urlOf(input);
+			if (url === USERINFO_URL) {
+				return Promise.resolve(userinfoResponse());
+			}
 			polls += 1;
 			if (polls > 1) {
-				return Promise.resolve(jsonResponse({ token: "access-token", refresh_token: "refresh-token" }));
+				return Promise.resolve(tokenPollResponse());
 			}
 			requestSignal = init?.signal ?? undefined;
 			requestSignal?.addEventListener("abort", () => response.reject(requestSignal?.reason), { once: true });
@@ -129,7 +234,11 @@ describe("loginQoder", () => {
 
 		const credentials = await result;
 		expect(polls).toBe(2);
-		expect(credentials).toMatchObject({ access: "access-token", refresh: "refresh-token" });
+		expect(credentials).toMatchObject({
+			access: "access-token",
+			refresh: "refresh-token",
+			accountId: "qoder-user-1",
+		});
 	});
 
 	it("maps in-flight poll cancellation to a login cancellation", async () => {
@@ -161,6 +270,28 @@ describe("refreshQoderToken", () => {
 		expect(requests[0]?.init?.method).toBe("POST");
 		expect(new Headers(requests[0]?.init?.headers).get("User-Agent")).toBe("qoder/1.1.2");
 		expect(requests[0]?.init?.body).toBe(JSON.stringify({ refresh_token: "old-refresh" }));
+	});
+
+	it("prefers device_token over token when both are present", async () => {
+		const fetchMock: FetchImpl = async () =>
+			jsonResponse({
+				token: "legacy-access",
+				device_token: "device-access",
+				refresh_token: "new-refresh",
+			});
+
+		const credentials = await refreshQoderToken("old-refresh", fetchMock);
+
+		expect(credentials.access).toBe("device-access");
+		expect(credentials.refresh).toBe("new-refresh");
+	});
+
+	it("accepts device_token alone as the refreshed access token", async () => {
+		const fetchMock: FetchImpl = async () => jsonResponse({ device_token: "device-only-access" });
+
+		const credentials = await refreshQoderToken("old-refresh", fetchMock);
+
+		expect(credentials).toMatchObject({ access: "device-only-access", refresh: "old-refresh" });
 	});
 
 	it("bounds an in-flight refresh request", async () => {
@@ -261,5 +392,26 @@ describe("getQoderCommonHeaders", () => {
 			"Cosy-MachineOS": `${arch}_${process.platform}`,
 			"Cosy-Data-Policy": "disagree",
 		});
+	});
+});
+
+describe("wrapQoderSseFetch", () => {
+	it("repairs SSE bodies when the content-type MIME is mixed-case", async () => {
+		const broken = ['data: {"choices"', ':[{"delta":{"content":"ok"},"index":0}]}', "", "data: [DONE]", ""].join(
+			"\n",
+		);
+		const wrapped = wrapQoderSseFetch(
+			async () =>
+				new Response(broken, {
+					status: 200,
+					headers: { "Content-Type": "Text/Event-Stream; charset=utf-8" },
+				}),
+		);
+
+		const response = await wrapped("https://example.test/sse");
+		const text = await response.text();
+
+		expect(text).toContain('data: {"choices":[{"delta":{"content":"ok"},"index":0}]}');
+		expect(text).toContain("data: [DONE]");
 	});
 });

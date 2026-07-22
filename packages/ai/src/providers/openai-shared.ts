@@ -139,6 +139,8 @@ export interface OpenAIRequestSetupOptions {
 	messages: Message[];
 	defaultBaseUrl?: string;
 	prependHeaders?: () => Record<string, string>;
+	/** Headers that MUST win after model and caller header merging. */
+	enforcedHeaders?: Record<string, string>;
 	alibabaCodingPlanAuth?: boolean;
 	azureChatCompletions?: {
 		apiVersion: string;
@@ -212,7 +214,20 @@ export function resolveOpenAIRequestSetup(
 	if (options.prependHeaders) {
 		headers = { ...options.prependHeaders(), ...headers };
 	}
-
+	// Enforced headers are invariants, not defaults. Remove case-variant
+	// duplicates before applying the canonical names so Headers cannot combine
+	// a caller override with the enforced value.
+	if (options.enforcedHeaders) {
+		for (const [name, value] of Object.entries(options.enforcedHeaders)) {
+			const normalizedName = name.toLowerCase();
+			for (const key of Object.keys(headers)) {
+				if (key.toLowerCase() === normalizedName) {
+					delete headers[key as keyof typeof headers];
+				}
+			}
+			headers[name] = value;
+		}
+	}
 	let copilotPremiumRequests: number | undefined;
 	let baseUrl = model.baseUrl;
 	if (model.provider === "moonshot") {
