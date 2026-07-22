@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Prevented credential-scoped Devin discovery from rewriting the bundled catalog during generation; per-credential runtime discovery remains authoritative.
 - Added MiniMax M3 model with reasoning and multi-modal support
 - Added Gemini 3.5 Flash Lite model across multiple providers
 - Added Gemini 3.6 Flash model across multiple providers with thinking support
