@@ -134,7 +134,8 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["DEVIN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => devinModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
-		catalogDiscovery: { label: "Devin", envVars: ["DEVIN_API_KEY"], oauthProvider: "devin" },
+		// Devin discovery is credential/account-scoped. Keep it runtime-only so
+		// catalog generation cannot publish one account's authoritative model set.
 	},
 	{
 		id: "firepass",
