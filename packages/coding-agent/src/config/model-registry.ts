@@ -667,10 +667,14 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
-	// requestModelId rewrites the wire id, so inherit it only from an exact id
-	// match — a fuzzy proxy/affix reference must not reroute the request.
+	// requestModelId rewrites the wire id, so inherit it only from an exact
+	// provider/id match — cross-provider and fuzzy references must not reroute.
 	const exactReference =
-		reference && reference.id.trim().toLowerCase() === resolvedModel.id.trim().toLowerCase() ? reference : undefined;
+		reference &&
+		reference.provider === resolvedModel.provider &&
+		reference.id.trim().toLowerCase() === resolvedModel.id.trim().toLowerCase()
+			? reference
+			: undefined;
 	return buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),

@@ -276,6 +276,30 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(proxied?.id).toBe("vendor/ultimate-1m");
 		expect(proxied?.requestModelId).toBeUndefined();
 
+		registry.registerProvider(
+			"other-provider",
+			{
+				baseUrl: "https://example.test/v1",
+				apiKey: "OTHER_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "ultimate-1m",
+						name: "Other Ultimate (1M)",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_000_000,
+						maxTokens: 32_768,
+					},
+				],
+			},
+			"ext://other-runtime",
+		);
+		const crossProvider = registry.find("other-provider", "ultimate-1m");
+		expect(crossProvider).toBeDefined();
+		expect(crossProvider?.requestModelId).toBeUndefined();
+
 		await registry.refresh("offline");
 		const aliasAfterRefresh = registry.find(providerName, "ultimate-1m");
 		expect(aliasAfterRefresh?.id).toBe("ultimate-1m");
