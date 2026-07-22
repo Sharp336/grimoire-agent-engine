@@ -282,6 +282,12 @@ while (`$global:__omp.History.Count -gt $HistoryDepth) {
         Id = $id; PS = $ps; Async = $async; Out = $out; Width = $width; Stopped = $false
         # High-water marks for incremental stream publishing (Publish-Streams).
         InfoIdx = 0; WarnIdx = 0; VerboseIdx = 0; DebugIdx = 0; ErrorIdx = 0
+        # Sticky flag: Error records are released like the other streams
+        # (see Publish-Streams) so a high-volume error loop can't retain
+        # every record for the command's full duration; Complete-Exec reads
+        # this instead of Streams.Error.Count, which would go back to 0
+        # once records are removed.
+        HadErrorRecords = $false
     }
 }
 
@@ -307,11 +313,13 @@ function Publish-Streams([hashtable] $Cur) {
     # appends only ever land at the end. The index resets to 0 to match the
     # now-empty-up-to-`n` collection.
     #
-    # Error records are the one exception: left retained (not released) so
-    # Complete-Exec's `$cur.PS.Streams.Error.Count -gt 0` hadErrors check
-    # keeps working without adding a separate "did we ever see one" flag —
-    # errors are comparatively rare, so this doesn't reintroduce the memory
-    # concern this function exists to close.
+    # Error records are released the same way as the streams above: a
+    # high-volume error loop (e.g. Write-Error ... -ErrorAction Continue in
+    # a tight loop) would otherwise retain every ErrorRecord for the
+    # command's full duration even though its text already left via
+    # Write-Chunk. Complete-Exec's hadErrors check reads the sticky
+    # HadErrorRecords flag set below instead of Streams.Error.Count (which
+    # would read back 0 once records are removed).
     $n = $s.Information.Count
     if ($n -gt $Cur.InfoIdx) {
         $lines = for ($i = $Cur.InfoIdx; $i -lt $n; $i++) { [string]$s.Information[$i].MessageData }
@@ -342,8 +350,10 @@ function Publish-Streams([hashtable] $Cur) {
     }
     $n = $s.Error.Count
     if ($n -gt $Cur.ErrorIdx) {
+        $Cur.HadErrorRecords = $true
         $text = $(for ($i = $Cur.ErrorIdx; $i -lt $n; $i++) { $s.Error[$i] }) | Out-String -Width $Cur.Width
-        $Cur.ErrorIdx = $n
+        for ($i = 0; $i -lt $n; $i++) { $s.Error.RemoveAt(0) }
+        $Cur.ErrorIdx = 0
         Write-Chunk -Id $Cur.Id -Stream 'error' -Text (Format-AnsiText $text '31;1')
     }
 }
@@ -356,7 +366,7 @@ function Complete-Exec {
     catch { } # terminating/stopped errors surface via HadErrors / Streams.Error
 
     $consoleErrText = if ($script:consoleErr.GetStringBuilder().Length -gt 0) { $script:consoleErr.ToString() } else { $null }
-    $hadErrors = [bool]$cur.PS.HadErrors -or ($cur.PS.Streams.Error.Count -gt 0) -or ($null -ne $consoleErrText)
+    $hadErrors = [bool]$cur.PS.HadErrors -or $cur.HadErrorRecords -or ($null -ne $consoleErrText)
 
     # Success output renders once, from the whole collection: per-object
     # rendering would break table formatting (columns are sized from every

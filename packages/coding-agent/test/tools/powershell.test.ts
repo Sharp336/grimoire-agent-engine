@@ -265,6 +265,27 @@ suite("PowerShellTool (persistent host)", () => {
 		for (const n of [1, 2500, 5000]) expect(lines.has(`item-${n}`)).toBe(true);
 		expect(text).toContain("done-marker");
 	});
+
+	test("a high-volume Write-Error stream delivers every error intact after live release", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-error-release-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Publish-Streams (round 27) now releases Error records the same way
+		// as Information/Warning/Verbose/Debug, instead of retaining every
+		// ErrorRecord for the command's full duration. This proves the
+		// release doesn't drop, duplicate, or reorder error text, and that
+		// hadErrors still reflects the sticky HadErrorRecords flag once the
+		// underlying Streams.Error collection has been drained to empty.
+		const result = await tool.execute("err-rel1", {
+			command: "1..2000 | ForEach-Object { Write-Error \"boom-$_\" -ErrorAction Continue }; 'done-marker'",
+		});
+		expect(result.isError ?? true).toBe(true);
+		const text = textOf(result);
+		const lines = new Set(text.split(/\r?\n/).filter(l => l.includes("boom-")));
+		for (const n of [1, 1000, 2000]) expect([...lines].some(l => l.includes(`boom-${n}`))).toBe(true);
+		expect(text).toContain("done-marker");
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.

@@ -885,7 +885,7 @@ async fn pump_stderr(mut stderr: tokio::process::ChildStderr, core: Arc<HostCore
 				let mut tail = core.stderr_tail.lock();
 				tail.push_str(&String::from_utf8_lossy(&buf[..n]));
 				if tail.len() > 8192 {
-					let cut = tail.len() - 8192;
+					let cut = floor_char_boundary(&tail, tail.len() - 8192);
 					*tail = tail.split_off(cut);
 				}
 			},
@@ -1166,6 +1166,50 @@ mod tests {
 			rest = remainder;
 		}
 		assert_eq!(pieces.concat(), text, "reassembled pieces equal the original text exactly");
+	}
+
+	/// `pump_stderr`'s 8KiB cap computes a raw byte offset (`tail.len() -
+	/// 8192`); with non-ASCII stderr content that offset can land inside a
+	/// multi-byte codepoint, and the pre-fix `String::split_off` panics on a
+	/// non-boundary index -- silently killing the stderr pump task, after
+	/// which inherited-child stderr stops being captured for the rest of the
+	/// host's life. Reproduces the exact panic, then proves
+	/// `floor_char_boundary` (already used by the chunk-forwarder split)
+	/// closes it by rounding the cut down to a valid boundary first.
+	#[test]
+	fn stderr_tail_trim_does_not_panic_on_a_multibyte_boundary() {
+		use super::floor_char_boundary;
+
+		// 4200 two-byte 'é' codepoints (8400 bytes) plus one trailing ASCII
+		// byte: the odd total length forces `len - 8192` to land on an odd
+		// byte index, which is the second (interior) byte of one of the
+		// 'é's -- never a codepoint start.
+		let mut tail = "é".repeat(4200);
+		tail.push('x');
+		assert_eq!(tail.len(), 8401);
+
+		let naive_cut = tail.len() - 8192;
+		assert!(!tail.is_char_boundary(naive_cut), "test setup: the cut must land mid-codepoint");
+
+		let _silence = crate::testing::SilenceHook::new();
+		let panicked = std::panic::catch_unwind({
+			let mut probe = tail.clone();
+			move || probe.split_off(naive_cut)
+		})
+		.is_err();
+		assert!(
+			panicked,
+			"pre-fix split_off must panic on a mid-codepoint cut (confirms the repro is real)"
+		);
+
+		let cut = floor_char_boundary(&tail, naive_cut);
+		let trimmed = tail.split_off(cut);
+		assert!(trimmed.len() <= 8192 + 1, "kept roughly the last 8192 bytes: {}", trimmed.len());
+		assert_eq!(
+			trimmed,
+			std::str::from_utf8(trimmed.as_bytes()).unwrap(),
+			"result is valid UTF-8"
+		);
 	}
 
 	/// A single oversized item (e.g. PowerShell's up-to-4M-char frames) must
