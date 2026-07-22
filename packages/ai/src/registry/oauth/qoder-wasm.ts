@@ -22,9 +22,9 @@
  * the identity's `data_policy_agreed: false`; do not duplicate it here.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -112,7 +112,7 @@ function isKnownGoodWasm(bytes: Buffer): boolean {
 /** Core-owned cache root for verified WASM bytes and the persisted machine id. */
 export function getQoderCacheDir(): string {
 	const xdg = process.env.XDG_CACHE_HOME?.trim();
-	return join(xdg !== undefined && xdg.length > 0 ? xdg : join(homedir(), ".cache"), "omp-qoder");
+	return path.join(xdg !== undefined && xdg.length > 0 ? xdg : path.join(os.homedir(), ".cache"), "omp-qoder");
 }
 
 /**
@@ -125,7 +125,7 @@ function readPayloadAt(fd: number, payloadStart: number): Buffer | null {
 	let total = 0;
 	let position = payloadStart;
 	while (total < window.length) {
-		const bytesRead = readSync(fd, window, total, window.length - total, position);
+		const bytesRead = fs.readSync(fd, window, total, window.length - total, position);
 		if (bytesRead === 0) break;
 		// Only [0, total + bytesRead) holds real file data; allocUnsafe leaves
 		// garbage beyond it, and a stray quote byte there must not end the
@@ -152,7 +152,7 @@ function readPayloadAt(fd: number, payloadStart: number): Buffer | null {
 function scanWasmPayloads(filePath: string, accept: (bytes: Buffer) => boolean): Buffer | null {
 	let fd: number;
 	try {
-		fd = openSync(filePath, "r");
+		fd = fs.openSync(filePath, "r");
 	} catch {
 		return null;
 	}
@@ -161,7 +161,7 @@ function scanWasmPayloads(filePath: string, accept: (bytes: Buffer) => boolean):
 		let position = 0;
 		let buffered = 0;
 		while (true) {
-			const bytesRead = readSync(fd, chunk, buffered, chunk.length - buffered, position);
+			const bytesRead = fs.readSync(fd, chunk, buffered, chunk.length - buffered, position);
 			if (bytesRead === 0 && buffered === 0) return null;
 			position += bytesRead;
 			buffered += bytesRead;
@@ -185,7 +185,7 @@ function scanWasmPayloads(filePath: string, accept: (bytes: Buffer) => boolean):
 	} catch {
 		return null;
 	} finally {
-		closeSync(fd);
+		fs.closeSync(fd);
 	}
 }
 
@@ -211,13 +211,14 @@ function compareCliVersions(a: string, b: string): number {
 /** `qodercli-*` files under a qodercli bin directory, newest version first. */
 function qoderCliCandidates(dir: string): string[] {
 	try {
-		return readdirSync(dir)
+		return fs
+			.readdirSync(dir)
 			.filter(name => name.startsWith("qodercli-"))
 			.sort((a, b) => compareCliVersions(b, a))
-			.map(name => join(dir, name))
-			.filter(path => {
+			.map(name => path.join(dir, name))
+			.filter(filePath => {
 				try {
-					return statSync(path).isFile();
+					return fs.statSync(filePath).isFile();
 				} catch {
 					return false;
 				}
@@ -237,12 +238,12 @@ function qoderCliCandidates(dir: string): string[] {
 function candidateFiles(): string[] {
 	const files: string[] = [];
 	const seen = new Set<string>();
-	const pushFile = (path: string): void => {
-		if (seen.has(path)) return;
+	const pushFile = (filePath: string): void => {
+		if (seen.has(filePath)) return;
 		try {
-			if (statSync(path).isFile()) {
-				seen.add(path);
-				files.push(path);
+			if (fs.statSync(filePath).isFile()) {
+				seen.add(filePath);
+				files.push(filePath);
 			}
 		} catch {
 			// missing candidate: not an error
@@ -255,10 +256,10 @@ function candidateFiles(): string[] {
 	const qoderHome = process.env.QODER_HOME?.trim();
 	if (qoderHome !== undefined && qoderHome.length > 0) {
 		pushFile(qoderHome);
-		for (const cli of qoderCliCandidates(join(qoderHome, "bin", "qodercli"))) pushFile(cli);
+		for (const cli of qoderCliCandidates(path.join(qoderHome, "bin", "qodercli"))) pushFile(cli);
 	}
 
-	for (const cli of qoderCliCandidates(join(homedir(), ".qoder", "bin", "qodercli"))) {
+	for (const cli of qoderCliCandidates(path.join(os.homedir(), ".qoder", "bin", "qodercli"))) {
 		pushFile(cli);
 	}
 
@@ -266,20 +267,20 @@ function candidateFiles(): string[] {
 	try {
 		// This file lives at src/registry/oauth/, so four dirnames land on the
 		// package root whose node_modules may host the qodercli bundle.
-		root = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
+		root = path.dirname(path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))));
 	} catch {
 		// not a file-backed module: cwd is the best available anchor
 	}
-	const bundleRelative = join("@qoder-ai", "qodercli", "bundle", "qoder-worker-runtime.mjs");
+	const bundleRelative = path.join("@qoder-ai", "qodercli", "bundle", "qoder-worker-runtime.mjs");
 	for (const base of [
-		join(root, "node_modules"),
-		join(process.cwd(), "node_modules"),
-		join(homedir(), ".bun", "install", "global", "node_modules"),
-		join(homedir(), ".npm-global", "lib", "node_modules"),
+		path.join(root, "node_modules"),
+		path.join(process.cwd(), "node_modules"),
+		path.join(os.homedir(), ".bun", "install", "global", "node_modules"),
+		path.join(os.homedir(), ".npm-global", "lib", "node_modules"),
 		"/usr/local/lib/node_modules",
 		"/usr/lib/node_modules",
 	]) {
-		pushFile(join(base, bundleRelative));
+		pushFile(path.join(base, bundleRelative));
 	}
 	return files;
 }
@@ -312,11 +313,11 @@ function parseManifest(raw: unknown): WasmSourceManifest | null {
  */
 function readCachedWasm(cacheDir: string): Buffer | null {
 	try {
-		const manifest = parseManifest(JSON.parse(readFileSync(join(cacheDir, "wasm-source.json"), "utf8")));
+		const manifest = parseManifest(JSON.parse(fs.readFileSync(path.join(cacheDir, "wasm-source.json"), "utf8")));
 		if (manifest === null) return null;
-		const stat = statSync(manifest.sourcePath);
+		const stat = fs.statSync(manifest.sourcePath);
 		if (stat.size !== manifest.size || stat.mtimeMs !== manifest.mtimeMs) return null;
-		const bytes = readFileSync(join(cacheDir, `wasm-${manifest.sha256}.wasm`));
+		const bytes = fs.readFileSync(path.join(cacheDir, `wasm-${manifest.sha256}.wasm`));
 		if (bytes.length > MAX_WASM_BYTES || !isKnownGoodWasm(bytes)) return null;
 		return bytes;
 	} catch {
@@ -326,16 +327,16 @@ function readCachedWasm(cacheDir: string): Buffer | null {
 
 function writeCachedWasm(cacheDir: string, sourcePath: string, sha256: string, bytes: Buffer): void {
 	try {
-		const stat = statSync(sourcePath);
-		mkdirSync(cacheDir, { recursive: true });
-		writeFileSync(join(cacheDir, `wasm-${sha256}.wasm`), bytes);
+		const stat = fs.statSync(sourcePath);
+		fs.mkdirSync(cacheDir, { recursive: true });
+		fs.writeFileSync(path.join(cacheDir, `wasm-${sha256}.wasm`), bytes);
 		const manifest: WasmSourceManifest = {
 			sourcePath,
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
 			sha256,
 		};
-		writeFileSync(join(cacheDir, "wasm-source.json"), `${JSON.stringify(manifest)}\n`);
+		fs.writeFileSync(path.join(cacheDir, "wasm-source.json"), `${JSON.stringify(manifest)}\n`);
 	} catch {
 		// cache is an optimization; never fail the bridge on a write error
 	}
@@ -348,9 +349,9 @@ function writeCachedWasm(cacheDir: string, sourcePath: string, sha256: string, b
  */
 function readCandidateWasm(filePath: string): Buffer | null {
 	try {
-		const stat = statSync(filePath);
+		const stat = fs.statSync(filePath);
 		if (stat.size <= MAX_WASM_BYTES) {
-			const bytes = readFileSync(filePath);
+			const bytes = fs.readFileSync(filePath);
 			if (hasWasmMagic(bytes)) return bytes;
 		}
 	} catch {
@@ -973,9 +974,9 @@ export function loadQoderWasmBridge(candidates?: readonly string[]): QoderWasmBr
  */
 export function getQoderMachineId(): string {
 	const cacheDir = getQoderCacheDir();
-	const idPath = join(cacheDir, "machine-id");
+	const idPath = path.join(cacheDir, "machine-id");
 	try {
-		const existing = readFileSync(idPath, "utf8").trim();
+		const existing = fs.readFileSync(idPath, "utf8").trim();
 		if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(existing)) {
 			return existing;
 		}
@@ -984,8 +985,8 @@ export function getQoderMachineId(): string {
 	}
 	const id = randomUUID();
 	try {
-		mkdirSync(cacheDir, { recursive: true });
-		writeFileSync(idPath, `${id}\n`, { mode: 0o600 });
+		fs.mkdirSync(cacheDir, { recursive: true });
+		fs.writeFileSync(idPath, `${id}\n`, { mode: 0o600 });
 	} catch {
 		// an unpersisted id still works for the session; persistence is best-effort
 	}
