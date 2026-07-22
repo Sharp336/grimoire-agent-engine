@@ -11,6 +11,11 @@ const WEB_BASE = process.env.QODER_WEB_BASE?.trim() || "https://qoder.com";
 const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
 const SKEW_MS = 60_000;
 const TOKEN_REQUEST_TIMEOUT_MS = 20_000;
+/**
+ * Qoder Privacy Mode wire value: the official client maps `data_policy_agreed: false`
+ * to `Cosy-Data-Policy: disagree` (opt-out). Enforced on every request, non-overridable.
+ */
+export const QODER_PRIVATE_DATA_POLICY = "disagree";
 
 const b64url = (buffer: Buffer) => buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -149,6 +154,7 @@ export let getQoderCommonHeaders = (): Record<string, string> => {
 		"Cosy-ClientType": "5",
 		"Cosy-Version": CLI_VERSION,
 		"Cosy-MachineOS": `${arch}_${process.platform}`,
+		"Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY,
 	});
 	getQoderCommonHeaders = () => headers;
 	return headers;

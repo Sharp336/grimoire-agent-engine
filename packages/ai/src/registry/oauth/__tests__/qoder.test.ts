@@ -259,6 +259,7 @@ describe("getQoderCommonHeaders", () => {
 			"Cosy-ClientType": "5",
 			"Cosy-Version": "1.1.2",
 			"Cosy-MachineOS": `${arch}_${process.platform}`,
+			"Cosy-Data-Policy": "disagree",
 		});
 	});
 });
