@@ -719,6 +719,9 @@ export class InputController {
 			if (this.ctx.isConsultComposerActive) {
 				if (hasPendingImages) {
 					this.ctx.editor.setText(text);
+					this.ctx.editor.pendingImages = [];
+					this.ctx.editor.pendingImageLinks = [];
+					this.ctx.editor.imageLinks = undefined;
 					this.ctx.showStatus("Images are not supported in /consult.");
 					return;
 				}

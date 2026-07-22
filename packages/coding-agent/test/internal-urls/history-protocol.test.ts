@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CONSULTATION_THREAD_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/consultation";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -348,6 +349,49 @@ describe("history:// protocol", () => {
 			expect(index.content).toContain("| __consult.named | on disk |");
 			const completions = await new HistoryProtocolHandler().complete();
 			expect(completions.map(entry => entry.value)).toContain("__consult.named");
+		});
+	});
+
+	it("quarantines a reserved transcript whose consultation identity conflicts", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "session.jsonl");
+			const artifactsDir = sessionFile.slice(0, -6);
+			await fs.mkdir(artifactsDir, { recursive: true });
+			const reservedFile = path.join(artifactsDir, "__consult.named.jsonl");
+			const conflictingRecord = {
+				type: "custom",
+				id: "consult-thread",
+				parentId: "m2",
+				timestamp: new Date().toISOString(),
+				customType: CONSULTATION_THREAD_CUSTOM_TYPE,
+				data: {
+					version: 1,
+					consultationId: "different",
+					parentSessionId: "parent",
+					parentLeafId: "leaf",
+					createdAt: 1,
+				},
+			};
+			await Bun.write(reservedFile, `${sessionFixtureJsonl()}${JSON.stringify(conflictingRecord)}\n`);
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: {
+					messages: [],
+					sessionManager: { getArtifactsDir: () => artifactsDir },
+				} as unknown as AgentSession,
+				sessionFile,
+				status: "idle",
+			});
+
+			await expect(InternalUrlRouter.instance().resolve("history://__consult.named")).rejects.toThrow(
+				/Unknown agent: __consult\.named/,
+			);
+			const index = await InternalUrlRouter.instance().resolve("history://");
+			expect(index.content).not.toContain("__consult.named");
+			const completions = await new HistoryProtocolHandler().complete();
+			expect(completions.map(entry => entry.value)).not.toContain("__consult.named");
 		});
 	});
 

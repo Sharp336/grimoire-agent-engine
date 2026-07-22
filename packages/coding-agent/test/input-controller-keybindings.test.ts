@@ -828,6 +828,26 @@ describe("InputController keybinding setup", () => {
 		expect(spies.prompt).not.toHaveBeenCalled();
 	});
 
+	it("clears rejected images from the consultation composer", async () => {
+		const { InputController, ctx, editor, setConsultComposerActive, spies } = await createContext();
+		setConsultComposerActive(true);
+		const image = { type: "image", data: "base64-data", mimeType: "image/png" } as const;
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["local://draft.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("retry without image");
+
+		expect(editor.getText()).toBe("retry without image");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+		expect(editor.imageLinks).toBeUndefined();
+		expect(spies.handleConsultSubmit).not.toHaveBeenCalled();
+		expect(ctx.showStatus).toHaveBeenCalledWith("Images are not supported in /consult.");
+	});
+
 	it("continue shortcuts submit a hidden synthetic developer directive", async () => {
 		for (const shortcut of [".", "c"]) {
 			const { InputController, ctx, editor } = await createContext();

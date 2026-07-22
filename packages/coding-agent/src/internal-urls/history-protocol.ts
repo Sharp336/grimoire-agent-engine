@@ -19,7 +19,7 @@ import * as path from "node:path";
  */
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry, isReadOnlyAgentKind } from "../registry/agent-registry";
-import { consultationThreadMetadata, parseConsultationTranscriptName } from "../session/consultation";
+import { lookupConsultationThread, parseConsultationTranscriptName } from "../session/consultation";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadEntriesFromFile, loadSessionMessagesReadOnly } from "../session/session-loader";
 import { sessionFilesFromDisk } from "./registry-helpers";
@@ -130,7 +130,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const consultationId = parseConsultationTranscriptName(path.basename(sessionFile));
 		if (!consultationId) return false;
 		const entries = await loadEntriesFromFile(sessionFile).catch(() => []);
-		return consultationThreadMetadata(entries, consultationId) !== undefined;
+		const lookup = lookupConsultationThread(entries, consultationId);
+		return lookup.thread !== undefined || lookup.hasCollision;
 	}
 
 	async #resolveFromDisk(agentId: string): Promise<InternalResource | undefined> {
