@@ -156,6 +156,23 @@ export function isQoderFastModel(model: ServiceTierModel): boolean {
 }
 
 /**
+ * Whether {@link model} is a Qoder api3-only family (Cantus, Qwen3.8-Max-Preview,
+ * Qwen3.7-Max, Kimi-K3, GLM-5.2, DeepSeek-V4-Flash). The flag rides the resolved
+ * OpenAI-compat record (`compat.api3 === true`); read defensively so a model
+ * built from a catalog without the field simply routes to the legacy transport.
+ */
+export function isQoderApi3Model(model: Pick<Model<Api>, "provider" | "compat">): boolean {
+	if (model.provider !== "qoder") return false;
+	const compat: unknown = model.compat;
+	return (
+		typeof compat === "object" &&
+		compat !== null &&
+		!Array.isArray(compat) &&
+		(compat as Record<string, unknown>).api3 === true
+	);
+}
+
+/**
  * Classify a model into the service-tier family whose knob governs it, or
  * `undefined` when the model exposes no serving-priority control.
  *
