@@ -1090,6 +1090,17 @@ describe("api3 stream termination", () => {
 		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 	});
 
+	it("treats a non-object body chunk as terminal despite later success frames", async () => {
+		const malformedThenFinish = [
+			`data: ${envelope('["invalid"]')}`,
+			`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] })}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { result } = await runApi3Turn("qmodel_preview", () => sseResponse(malformedThenFinish));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe('Qoder api3 stream error: ["invalid"]');
+	});
+
 	it("treats a malformed outer envelope as terminal despite later success frames", async () => {
 		const malformedThenFinish = [
 			"data: not-json",
