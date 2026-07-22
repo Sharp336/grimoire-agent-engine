@@ -417,6 +417,9 @@
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
 
+### Added
+
+- Added support for top-level sessions to the `history://` protocol, allowing `history://<sessionId>` (by full UUID or prefix), `history://<path>`, and the `history://` index to discover and view top-level session transcripts.
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

@@ -24,7 +24,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -55,12 +55,12 @@ function makeToolSession(cwd: string): ToolSession {
 }
 
 /** Minimal current-version session JSONL: header + a linear user/assistant chain. */
-function sessionFixtureJsonl(): string {
+function sessionFixtureJsonl(id = "fixture-session"): string {
 	const timestamp = new Date().toISOString();
 	const header = {
 		type: "session",
 		version: CURRENT_SESSION_VERSION,
-		id: "fixture-session",
+		id,
 		timestamp,
 		cwd: "/tmp",
 	};
@@ -406,6 +406,43 @@ describe("history:// protocol", () => {
 			registerArtifactsDir(candidate);
 
 			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([]);
+		});
+	});
+	it("resolves a top-level session transcript by session ID and prefix", async () => {
+		await withTempDir(async dir => {
+			const agentDir = path.join(dir, "agent");
+			const sessionsDir = path.join(agentDir, "sessions", "project");
+			await fs.mkdir(sessionsDir, { recursive: true });
+
+			const sessionId = "019f0000-aaaa-7000-8000-000000000001";
+			const sessionFile = path.join(sessionsDir, `2026-07-21T12-00-00-000Z_${sessionId}.jsonl`);
+			await Bun.write(sessionFile, sessionFixtureJsonl(sessionId));
+
+			const previousAgentDir = getAgentDir();
+			setAgentDir(agentDir);
+			try {
+				const fullRes = await InternalUrlRouter.instance().resolve(`history://${sessionId}`);
+				expect(fullRes.content).toContain(sessionId);
+				expect(fullRes.content).toContain("parked hello");
+				expect(fullRes.sourcePath).toBe(sessionFile);
+
+				const prefixRes = await InternalUrlRouter.instance().resolve("history://019f0000-aaaa");
+				expect(prefixRes.content).toContain("parked hello");
+				expect(prefixRes.sourcePath).toBe(sessionFile);
+			} finally {
+				setAgentDir(previousAgentDir);
+			}
+		});
+	});
+
+	it("resolves a session transcript by direct file path", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "custom-session.jsonl");
+			await Bun.write(sessionFile, sessionFixtureJsonl());
+
+			const resource = await InternalUrlRouter.instance().resolve(`history://${sessionFile}`);
+			expect(resource.content).toContain("parked hello");
+			expect(resource.sourcePath).toBe(sessionFile);
 		});
 	});
 });

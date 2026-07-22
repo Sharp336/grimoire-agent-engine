@@ -16,12 +16,15 @@
  * - history:// - Index of all registry + on-disk agents (id, status, kind, last activity)
  * - history://<agentId> - Concise markdown transcript of that agent
  */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
+import { resolveResumableSession } from "../session/session-listing";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { sessionFilesFromDisk } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /** Humanize a last-activity timestamp as `Ns/Nm/Nh/Nd ago`. */
 function formatAgo(timestamp: number): string {
@@ -55,8 +58,16 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "history";
 	readonly immutable = false;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
-		const agentId = url.rawHost || url.hostname;
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const host = url.rawHost || url.hostname;
+		const rawPathname = url.rawPathname || "";
+		let agentId = "";
+		if (rawPathname.startsWith("/")) {
+			agentId = host ? `${host}${rawPathname}` : rawPathname;
+		} else {
+			agentId = host ? (rawPathname ? `${host}/${rawPathname}` : host) : rawPathname;
+		}
+		agentId = agentId.trim();
 		const registry = AgentRegistry.global();
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
 		// in the agent-facing roster. Hide them from the index, lookup, and completions.
@@ -83,7 +94,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(agentId);
+			const disk = await this.#resolveFromDisk(agentId, context);
 			if (disk) return { ...disk, url: url.href };
 
 			const known = visible.map(candidate => candidate.id);
@@ -102,7 +113,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(ref.id);
+			const disk = await this.#resolveFromDisk(ref.id, context);
 			if (disk) return { ...disk, url: url.href };
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
@@ -119,14 +130,17 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	/**
-	 * Load a transcript for `agentId` from an on-disk `.jsonl` session file,
-	 * matched case-insensitively. Returns `undefined` when no file is found.
+	 * Load a transcript for `agentId` from an on-disk `.jsonl` session file.
+	 * Matches exact, case-insensitive, prefix, resumable session lookup, or direct path.
+	 * Returns `undefined` when no file is found.
 	 */
-	async #resolveFromDisk(agentId: string): Promise<InternalResource | undefined> {
+	async #resolveFromDisk(agentId: string, context?: ResolveContext): Promise<InternalResource | undefined> {
 		const files = await sessionFilesFromDisk();
 		const lower = agentId.toLowerCase();
 		let matchedId: string | undefined;
 		let sessionFile: string | undefined;
+
+		// 1. Exact or case-insensitive match in sessionFilesFromDisk()
 		for (const [id, file] of files) {
 			if (id === agentId || id.toLowerCase() === lower) {
 				matchedId = id;
@@ -134,6 +148,44 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				if (id === agentId) break;
 			}
 		}
+
+		// 2. Case-insensitive prefix match in sessionFilesFromDisk()
+		if (!sessionFile) {
+			for (const [id, file] of files) {
+				if (id.toLowerCase().startsWith(lower)) {
+					matchedId = id;
+					sessionFile = file;
+					break;
+				}
+			}
+		}
+
+		// 3. Fallback to resolveResumableSession
+		if (!sessionFile) {
+			const cwd = context?.cwd ?? process.cwd();
+			const match = await resolveResumableSession(agentId, cwd, undefined, undefined, {
+				allowGlobalFallback: true,
+			});
+			if (match) {
+				matchedId = match.session.id;
+				sessionFile = match.session.path;
+			}
+		}
+
+		// 4. Direct file path check
+		if (!sessionFile && (agentId.endsWith(".jsonl") || agentId.includes("/") || agentId.includes("\\"))) {
+			const resolvedPath = path.resolve(context?.cwd ?? process.cwd(), agentId);
+			try {
+				const stat = await fs.stat(resolvedPath);
+				if (stat.isFile()) {
+					matchedId = path.basename(resolvedPath, ".jsonl");
+					sessionFile = resolvedPath;
+				}
+			} catch {
+				// Not a file
+			}
+		}
+
 		if (!matchedId || !sessionFile) return undefined;
 		const messages = await loadSessionMessagesReadOnly(sessionFile);
 		const content = formatSessionHistoryMarkdown(messages, { title: `${matchedId} (on disk)` });
@@ -155,11 +207,23 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			parent: ref.parentId ?? "—",
 			lastActivity: formatAgo(ref.lastActivity),
 		}));
-		// Merge on-disk transcripts for agents absent from the registry.
-		const registered = new Set(refs.map(ref => ref.id));
+
+		const registeredIds = new Set(refs.map(ref => ref.id));
+		const registeredFiles = new Set(refs.map(ref => ref.sessionFile).filter((f): f is string => Boolean(f)));
 		const disk = await sessionFilesFromDisk();
-		for (const id of disk.keys()) {
-			if (registered.has(id)) continue;
+
+		// Deduplicate disk entries by session file path
+		const fileToId = new Map<string, string>();
+		for (const [id, file] of disk) {
+			if (registeredFiles.has(file)) continue;
+			const existing = fileToId.get(file);
+			if (!existing || (id.length < existing.length && !id.includes("T"))) {
+				fileToId.set(file, id);
+			}
+		}
+
+		for (const [, id] of fileToId) {
+			if (registeredIds.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
 		}
 
@@ -178,19 +242,32 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 	async complete(): Promise<UrlCompletion[]> {
 		const completions: UrlCompletion[] = [];
-		const seen = new Set<string>();
+		const seenIds = new Set<string>();
+		const seenFiles = new Set<string>();
+
 		for (const ref of AgentRegistry.global().list()) {
 			if (ref.kind === "advisor") continue;
-			seen.add(ref.id);
+			seenIds.add(ref.id);
+			if (ref.sessionFile) seenFiles.add(ref.sessionFile);
 			completions.push({
 				value: ref.id,
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
 		}
+
 		const disk = await sessionFilesFromDisk();
-		for (const id of disk.keys()) {
-			if (seen.has(id)) continue;
-			seen.add(id);
+		const fileToId = new Map<string, string>();
+		for (const [id, file] of disk) {
+			if (seenFiles.has(file)) continue;
+			const existing = fileToId.get(file);
+			if (!existing || (id.length < existing.length && !id.includes("T"))) {
+				fileToId.set(file, id);
+			}
+		}
+
+		for (const [, id] of fileToId) {
+			if (seenIds.has(id)) continue;
+			seenIds.add(id);
 			completions.push({ value: id, description: "on disk" });
 		}
 		return completions;
