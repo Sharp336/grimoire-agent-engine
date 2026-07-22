@@ -1086,6 +1086,53 @@ mod tests {
 		host.dispose().await.expect("host disposes");
 	}
 
+	/// A previous command's fire-and-forget background PowerShell runspace
+	/// (started without waiting for it -- e.g. `$ps.BeginInvoke()`) can keep
+	/// writing to the redirected [Console]::Out/Error `StringWriter`s AFTER
+	/// that command's own exec has already completed and been drained.
+	/// [Console]::Out is process-static, so a write from any runspace in
+	/// this process lands in the same buffer. Reproduces the finding's exact
+	/// complaint: those idle-period bytes must NOT surface as a LATER,
+	/// unrelated exec's output. (A plain `Task.Run` delegate can't reproduce
+	/// this: PowerShell scriptblocks require a runspace on the invoking
+	/// thread, which a bare threadpool thread doesn't have -- a background
+	/// runspace is the realistic vector, matching e.g. `Start-ThreadJob`.)
+	#[tokio::test(flavor = "multi_thread")]
+	async fn idle_period_console_writes_do_not_leak_into_a_later_exec() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Fire-and-forget a background runspace that sleeps, THEN writes
+		// directly to [Console]::Out -- guaranteed to write well after this
+		// command's own exec (which does not wait for it) has already
+		// completed.
+		let spawn_cmd = "$rs2 = [runspacefactory]::CreateRunspace(); $rs2.Open(); $ps2 = \
+		                 [powershell]::Create(); $ps2.Runspace = $rs2; \
+		                 [void]$ps2.AddScript('Start-Sleep -Milliseconds 700; \
+		                 [Console]::Out.Write(\"idle-console-marker\")'); [void]$ps2.BeginInvoke(); \
+		                 'spawner-done'";
+		let (out, _) = run_cmd(&host, spawn_cmd, task::CancelToken::default()).await;
+		assert!(out.contains("spawner-done"), "spawner returns without waiting: {out:?}");
+		assert!(!out.contains("idle-console-marker"), "runspace hasn't written yet: {out:?}");
+
+		// Genuinely idle: no exec running while the task sleeps, then writes.
+		tokio::time::sleep(Duration::from_millis(1400)).await;
+
+		let (out2, _) = run_cmd(&host, "'unrelated-command'", task::CancelToken::default()).await;
+		assert!(out2.contains("unrelated-command"), "unrelated exec's own output present: {out2:?}");
+		assert!(
+			!out2.contains("idle-console-marker"),
+			"a later exec must not inherit a previous command's idle-period console write: {out2:?}"
+		);
+
+		host.dispose().await.expect("host disposes");
+	}
+
 	/// `floor_char_boundary` must never slice through a multi-byte UTF-8
 	/// codepoint (which panics `str::split_at`), and splitting on its result
 	/// repeatedly must reconstruct the original string exactly (no lost or

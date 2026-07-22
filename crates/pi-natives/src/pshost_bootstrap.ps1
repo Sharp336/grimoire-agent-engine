@@ -197,6 +197,17 @@ function Start-Exec([pscustomobject] $Request) {
     $command = [string]$Request.command
     $width   = if ($Request.width) { [int]$Request.width } else { 120 }
 
+    # Clear stale [Console]::Out/Error content before this exec begins: a
+    # background .NET task/thread spawned by a PREVIOUS command can keep
+    # writing to these process-global buffers after that command's pipeline
+    # has already completed and been drained. Without this, Complete-Exec
+    # would attach that late, unrelated text to THIS exec's result. Mirrors
+    # the Rust-side stderr_tail clear-at-start-of-exec fix (round 25) — a
+    # background writer racing this exact clear remains a possible few-ms
+    # window, but idle-period leakage is no longer unbounded.
+    [void]$script:consoleOut.GetStringBuilder().Clear()
+    [void]$script:consoleErr.GetStringBuilder().Clear()
+
     # cwd + env are injected as data (a session-state variable / the process env),
     # never string-interpolated, so user values cannot inject code. cwd is applied
     # via Set-Location inside the pipeline (see $wrapped): a bad path fails the run
