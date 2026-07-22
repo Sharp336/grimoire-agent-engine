@@ -14,6 +14,8 @@
 ### Fixed
 
 - Fixed Qoder login polling on transient failures, preserved `invalid_grant` refresh details, refreshed client attribution, covered `/fast` non-Kimi routing, and hardened api3 against stalled identity lookup, oversized output limits, and malformed or truncated envelopes.
+## [17.0.8] - 2026-07-22
+
 ### Fixed
 
 - Fixed Gemini Flash Cloud Code Assist empty-response retries when responses contain only intercepted planning-leak JSON.

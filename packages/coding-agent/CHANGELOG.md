@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.0.8] - 2026-07-22
+
 ### Added
 
 - Added extension-model `requestModelId` support so provider plugins can expose local model aliases while preserving the upstream wire model id.
