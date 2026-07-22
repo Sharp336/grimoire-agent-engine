@@ -110,6 +110,27 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote!.snapshot.credentials[0].id).not.toBe(bId);
 	});
 
+	test("round-trips active OAuth client profiles through snapshots, operations, and SSE", async () => {
+		storage!.upsertCredential("anthropic", {
+			...mintOAuthCredential("cowork", Date.now() + 120_000),
+			clientProfile: "cowork",
+		});
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({ client });
+		await waitUntil(() => remote!.snapshot.credentials.length === 2);
+		expect(remote.getActiveOAuthClientProfile("anthropic")).toBe("claude-code");
+
+		await remote.setActiveOAuthClientProfileRemote("anthropic", "cowork");
+		expect(remote.getActiveOAuthClientProfile("anthropic")).toBe("cowork");
+		expect(storage!.getActiveOAuthClientProfile("anthropic")).toBe("cowork");
+		const fetched = await client.fetchSnapshot();
+		if (fetched.status !== 200) throw new Error("expected active-profile snapshot");
+		expect(fetched.snapshot.activeOAuthClientProfiles).toEqual({ anthropic: "cowork" });
+
+		await storage!.setActiveOAuthClientProfile("anthropic", "claude-code");
+		await waitUntil(() => remote!.getActiveOAuthClientProfile("anthropic") === "claude-code");
+	});
+
 	test("calls onSnapshot for broker snapshots but not the constructor snapshot", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();

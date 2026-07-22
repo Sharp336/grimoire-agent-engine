@@ -23,6 +23,7 @@ function makeSnapshot(generatedAt: number): SnapshotResponse {
 			skewMs: 300_000,
 			nextSweepInMs: 10_000,
 		},
+		activeOAuthClientProfiles: {},
 		credentials: [
 			{
 				id: 1,

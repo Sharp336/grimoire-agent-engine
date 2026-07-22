@@ -92,8 +92,8 @@ describe("anthropic org-scoped credential identity", () => {
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
 
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 
 		// Same-org re-login: replaces the matching row instead of adding a third.
@@ -102,8 +102,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "team-renewed", orgId: TEAM_ORG }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 		const teamRow = rows.find(row => row.credential.type === "oauth" && row.credential.orgId === TEAM_ORG);
 		expect(teamRow?.credential.type).toBe("oauth");
@@ -116,11 +116,13 @@ describe("anthropic org-scoped credential identity", () => {
 		if (!store) throw new Error("test setup failed");
 
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy" }));
-		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: `email:${EMAIL}`, disabled_cause: null }]);
+		expect(readIdentityRows(dbPath)).toEqual([
+			{ identity_key: `email:${EMAIL}|client-profile:claude-code`, disabled_cause: null },
+		]);
 
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 
@@ -132,9 +134,9 @@ describe("anthropic org-scoped credential identity", () => {
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "orgless" }));
 
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
-			{ identity_key: `email:${EMAIL}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 
@@ -152,8 +154,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "max", orgId: MAX_ORG, omitEmail: true }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `account:account-shared|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 
 		// Same-org no-email re-login still replaces its own row in place.
@@ -172,9 +174,9 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "claimed", orgId: "org-third-3333", omitEmail: true }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `account:account-shared|org:${MAX_ORG}`, disabled_cause: null },
-			{ identity_key: "account:account-shared|org:org-third-3333", disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: "account:account-shared|org:org-third-3333|client-profile:claude-code", disabled_cause: null },
 		]);
 	});
 
@@ -186,13 +188,15 @@ describe("anthropic org-scoped credential identity", () => {
 			"anthropic",
 			orgCredential({ suffix: "anon", orgId: TEAM_ORG, omitEmail: true, omitAccountId: true }),
 		);
-		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: `org:${TEAM_ORG}`, disabled_cause: null }]);
+		expect(readIdentityRows(dbPath)).toEqual([
+			{ identity_key: `org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+		]);
 
 		// Same org, identity recovered: claims the org-only row in place instead
 		// of duplicating the subscription.
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "named", orgId: TEAM_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 
 		// One-way: a later org-only login of the same org must not claim the now
@@ -202,8 +206,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "anon-again", orgId: TEAM_ORG, omitEmail: true, omitAccountId: true }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `org:${TEAM_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 
@@ -229,8 +233,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "team-with-email", orgId: TEAM_ORG }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `account:account-shared|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 		const teamRow = rows.find(row => row.credential.type === "oauth" && row.credential.orgId === TEAM_ORG);
 		expect(teamRow?.credential.type).toBe("oauth");
@@ -244,13 +248,15 @@ describe("anthropic org-scoped credential identity", () => {
 
 		// Pre-org row, email never recovered: keyed by the bare account.
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
-		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: "account:account-shared", disabled_cause: null }]);
+		expect(readIdentityRows(dbPath)).toEqual([
+			{ identity_key: "account:account-shared|client-profile:claude-code", disabled_cause: null },
+		]);
 
 		// Org-scoped login carrying the same account AND an email: the key is
 		// email-based, but the shared account still claims the legacy row.
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "upgraded", orgId: TEAM_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 
@@ -268,9 +274,9 @@ describe("anthropic org-scoped credential identity", () => {
 		// the bare account row via the shared account base.
 		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "orgless" }));
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: "account:account-shared", disabled_cause: null },
-			{ identity_key: `email:${EMAIL}`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: "account:account-shared|client-profile:claude-code", disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 
@@ -291,8 +297,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "team-lost-email", orgId: TEAM_ORG, omitEmail: true }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 		const teamRow = rows.find(row => row.credential.type === "oauth" && row.credential.orgId === TEAM_ORG);
 		expect(teamRow?.credential.type).toBe("oauth");
@@ -314,8 +320,8 @@ describe("anthropic org-scoped credential identity", () => {
 			orgCredential({ suffix: "max-lost-email", orgId: MAX_ORG, omitEmail: true }),
 		);
 		expect(readIdentityRows(dbPath)).toEqual([
-			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
-			{ identity_key: `account:account-shared|org:${MAX_ORG}`, disabled_cause: null },
+			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}|client-profile:claude-code`, disabled_cause: null },
+			{ identity_key: `account:account-shared|org:${MAX_ORG}|client-profile:claude-code`, disabled_cause: null },
 		]);
 	});
 });

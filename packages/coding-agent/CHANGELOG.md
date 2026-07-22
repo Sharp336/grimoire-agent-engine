@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added profile-aware Anthropic login and logout handling so Claude Code and Cowork credentials can coexist while the most recently logged-in profile remains active.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

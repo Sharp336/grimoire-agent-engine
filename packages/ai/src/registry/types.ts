@@ -30,8 +30,8 @@ export type KeyResolver = string | (() => string | undefined);
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *
- * Heavy OAuth flow modules MUST be reached through dynamic-import thunks in
- * `login`/`refreshToken` so they stay out of the eager startup graph.
+ * Provider modules MUST use top-level imports; inline and dynamic imports are
+ * prohibited by the repository-wide module conventions.
  */
 export interface ProviderDefinition {
 	readonly id: string;

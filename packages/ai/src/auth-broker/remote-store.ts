@@ -13,6 +13,7 @@ import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
 	type AuthCredentialStore,
+	type OAuthClientProfile,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
@@ -121,6 +122,7 @@ function emptySnapshot(): SnapshotResponse {
 			skewMs: 0,
 			nextSweepInMs: Number.MAX_SAFE_INTEGER,
 		},
+		activeOAuthClientProfiles: {},
 		credentials: [],
 	};
 }
@@ -258,7 +260,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const credentials = snapshot.credentials.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
 		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
 		if (protectNewBlocks) this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
-		this.#snapshot = { ...snapshot, credentials };
+		this.#snapshot = {
+			...snapshot,
+			activeOAuthClientProfiles: snapshot.activeOAuthClientProfiles ?? {},
+			credentials,
+		};
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
 		const onSnapshot = this.#onSnapshot;
@@ -412,6 +418,15 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const result = await this.#client.fetchSnapshot();
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#snapshot;
+	}
+
+	getActiveOAuthClientProfile(provider: string): OAuthClientProfile | undefined {
+		return this.#snapshot.activeOAuthClientProfiles?.[provider];
+	}
+
+	async setActiveOAuthClientProfileRemote(provider: string, profile: OAuthClientProfile | undefined): Promise<void> {
+		const { snapshot } = await this.#client.setActiveOAuthClientProfile(provider, profile);
+		this.#applySnapshot(snapshot, snapshot.generation);
 	}
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {

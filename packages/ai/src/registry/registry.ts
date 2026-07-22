@@ -2,7 +2,7 @@ import type { KnownProvider } from "@oh-my-pi/pi-catalog";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
-import { anthropicProvider } from "./anthropic";
+import { anthropicCoworkProvider, anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { cerebrasProvider } from "./cerebras";
@@ -79,6 +79,7 @@ const ALL = [
 	azureProvider,
 	openaiCodexProvider,
 	anthropicProvider,
+	anthropicCoworkProvider,
 	zaiProvider,
 	kimiCodeProvider,
 	openrouterProvider,

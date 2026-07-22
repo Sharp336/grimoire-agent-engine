@@ -23,7 +23,12 @@ function createEditorContainer(): TestEditorContainer {
 	};
 }
 
-function createStoredCredential(id: number, email: string, accountId: string): StoredAuthCredential {
+function createStoredCredential(
+	id: number,
+	email: string,
+	accountId: string,
+	clientProfile: "claude-code" | "cowork",
+): StoredAuthCredential {
 	return {
 		id,
 		provider: "anthropic",
@@ -35,6 +40,7 @@ function createStoredCredential(id: number, email: string, accountId: string): S
 			expires: Date.now() + 60_000,
 			email,
 			accountId,
+			clientProfile,
 		},
 	};
 }
@@ -44,11 +50,12 @@ beforeAll(async () => {
 });
 
 describe("SelectorController logout", () => {
-	it("opens an account picker and removes only the selected credential", async () => {
+	it("Cowork logout lists and removes only Cowork credentials", async () => {
 		const editorContainer = createEditorContainer();
 		const credentials = [
-			createStoredCredential(21, "a@example.com", "acct-a"),
-			createStoredCredential(22, "b@example.com", "acct-b"),
+			createStoredCredential(20, "claude@example.com", "acct-claude", "claude-code"),
+			createStoredCredential(21, "cowork-a@example.com", "acct-cowork-a", "cowork"),
+			createStoredCredential(22, "cowork-b@example.com", "acct-cowork-b", "cowork"),
 		];
 		const removeCredential = vi.fn(async (_provider: string, credentialId: number) => {
 			const index = credentials.findIndex(row => row.id === credentialId);
@@ -58,10 +65,15 @@ describe("SelectorController logout", () => {
 		});
 		const authStorage = {
 			reload: vi.fn(async () => undefined),
-			listStoredCredentials: (_provider?: string) => credentials,
-			getOAuthAccountIdentity: (_provider: string, _sessionId?: string) => ({ accountId: "acct-a" }),
+			listStoredCredentials: (_provider?: string, options?: { clientProfile?: "claude-code" | "cowork" }) =>
+				options?.clientProfile
+					? credentials.filter(
+							row => row.credential.type === "oauth" && row.credential.clientProfile === options.clientProfile,
+						)
+					: credentials,
+			getActiveOAuthClientProfile: (_provider: string) => "cowork",
+			getOAuthAccountIdentity: (_provider: string, _sessionId?: string) => ({ accountId: "acct-cowork-a" }),
 			getCredentialOrigin: (_provider: string) => ({ kind: "oauth" }),
-			describeCredentialSource: (_provider: string, _sessionId?: string) => undefined,
 			removeCredential,
 		} as unknown as AuthStorage;
 		const refreshProvider = vi.fn(async (_providerId: string, _mode: string) => undefined);
@@ -87,18 +99,25 @@ describe("SelectorController logout", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new SelectorController(ctx);
 
-		await controller.showOAuthSelector("logout", "anthropic");
+		await controller.showOAuthSelector("logout", "anthropic-cowork");
 
 		const selector = editorContainer.children[0];
 		if (!(selector instanceof LogoutAccountSelectorComponent)) {
 			throw new Error("Expected logout account selector");
 		}
+		const rendered = selector
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(rendered).toContain("cowork-a@example.com");
+		expect(rendered).toContain("cowork-b@example.com");
+		expect(rendered).not.toContain("claude@example.com");
 		selector.handleInput("\x1b[B");
 		selector.handleInput("\n");
 		await presented.promise;
 
 		expect(removeCredential).toHaveBeenCalledWith("anthropic", 22);
-		expect(credentials.map(row => row.id)).toEqual([21]);
+		expect(credentials.map(row => row.id)).toEqual([20, 21]);
 		expect(refreshProvider).toHaveBeenCalledWith("anthropic", "online");
 		expect(ctx.showError).not.toHaveBeenCalled();
 		expect(ctx.present).toHaveBeenCalled();

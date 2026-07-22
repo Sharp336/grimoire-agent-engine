@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a separate Anthropic Cowork OAuth login profile with Cowork-scoped credentials and request fingerprinting. Claude Code and Cowork credentials are retained independently, with the most recently completed login selecting the active profile for account selection and rotation.
+
 ## [17.0.6] - 2026-07-20
 
 ### Fixed

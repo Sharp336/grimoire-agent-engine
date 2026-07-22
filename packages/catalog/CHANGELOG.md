@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic model discovery to unwrap profile-aware OAuth credentials before constructing authorization headers.
+
 ## [17.0.6] - 2026-07-20
 
 ### Added

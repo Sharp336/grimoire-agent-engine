@@ -144,24 +144,31 @@ export async function getOAuthApiKey(
 			{ kind: "validation", provider },
 		);
 	}
-	// For providers that need request-time credential metadata, return JSON.
+	// Anthropic Cowork only needs the bearer and request-fingerprint profile at
+	// request time. Keep the refresh token inside AuthStorage/the broker instead
+	// of copying it into the API-key value handed to provider and discovery code.
+	const isAnthropicCowork = provider === "anthropic" && creds.clientProfile === "cowork";
 	const needsStructuredApiKey =
+		isAnthropicCowork ||
 		provider === "github-copilot" ||
 		provider === "google-gemini-cli" ||
 		provider === "google-antigravity" ||
 		provider === "alibaba-coding-plan";
-	const apiKey = needsStructuredApiKey
-		? JSON.stringify({
-				apiEndpoint: creds.apiEndpoint,
-				token: creds.access,
-				enterpriseUrl: creds.enterpriseUrl,
-				projectId: creds.projectId,
-				refreshToken: creds.refresh,
-				expiresAt: creds.expires,
-				email: creds.email,
-				accountId: creds.accountId,
-			})
-		: creds.access;
+	const apiKey = isAnthropicCowork
+		? JSON.stringify({ token: creds.access, clientProfile: creds.clientProfile })
+		: needsStructuredApiKey
+			? JSON.stringify({
+					apiEndpoint: creds.apiEndpoint,
+					token: creds.access,
+					enterpriseUrl: creds.enterpriseUrl,
+					projectId: creds.projectId,
+					refreshToken: creds.refresh,
+					expiresAt: creds.expires,
+					email: creds.email,
+					accountId: creds.accountId,
+					clientProfile: creds.clientProfile,
+				})
+			: creds.access;
 	return { newCredentials: creds, apiKey };
 }
 

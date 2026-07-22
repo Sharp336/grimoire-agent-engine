@@ -13,6 +13,7 @@ import {
 	claudeCodeSystemInstruction,
 	claudeCodeVersion,
 	claudeToolPrefix,
+	coworkClaudeCodeVersion,
 	deriveClaudeDeviceId,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
@@ -196,6 +197,35 @@ describe("Anthropic request fingerprint alignment", () => {
 		);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+	});
+
+	it("uses the Cowork local-agent fingerprint for Cowork credentials", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: JSON.stringify({ token: "sk-ant-oat-cowork", clientProfile: "cowork" }),
+			stream: true,
+			claudeCodeSessionId: "167ec5b4-e711-4169-879f-84fa52679d9c",
+		});
+
+		expect(headers.Authorization).toBe("Bearer sk-ant-oat-cowork");
+		expect(headers["User-Agent"]).toBe(`claude-cli/${coworkClaudeCodeVersion} (external, local-agent)`);
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Timeout"]).toBe("600");
+		expect(headers["anthropic-client-platform"]).toBeUndefined();
+		expect(headers["anthropic-client-version"]).toBeUndefined();
+		expect(headers["x-client-request-id"]).toBeUndefined();
+		expect(headers["anthropic-beta"]?.split(",")).toEqual([
+			"claude-code-20250219",
+			"oauth-2025-04-20",
+			"context-1m-2025-08-07",
+			"interleaved-thinking-2025-05-14",
+			"thinking-token-count-2026-05-13",
+			"context-management-2025-06-27",
+			"prompt-caching-scope-2026-01-05",
+			"mid-conversation-system-2026-04-07",
+			"advisor-tool-2026-03-01",
+			"effort-2025-11-24",
+			"structured-outputs-2025-12-15",
+		]);
 	});
 
 	it("sends redact-thinking beta only when thinking display is omitted", () => {

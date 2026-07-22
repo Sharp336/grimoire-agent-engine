@@ -401,7 +401,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 			const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
 			try {
 				expect(readStoredIdentityRows(legacyDbPath, "anthropic")).toEqual([
-					{ identity_key: "email:legacy-anthropic@example.com", disabled_cause: null },
+					{ identity_key: "email:legacy-anthropic@example.com|client-profile:claude-code", disabled_cause: null },
 				]);
 			} finally {
 				migratedStore.close();

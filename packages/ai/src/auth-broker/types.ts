@@ -10,6 +10,7 @@ import type {
 	AuthCredential,
 	AuthCredentialSnapshot,
 	AuthCredentialSnapshotEntry,
+	OAuthClientProfile,
 	StoredCredentialBlock,
 } from "../auth-storage";
 import type { UsageReport } from "../usage";
@@ -92,6 +93,14 @@ export interface CredentialUploadRequest {
 /** POST /v1/credential response body — redacted snapshot of the provider's rows after upsert. */
 export interface CredentialUploadResponse {
 	entries: AuthCredentialSnapshotEntry[];
+}
+export interface ActiveOAuthClientProfileRequest {
+	provider: string;
+	profile?: OAuthClientProfile;
+}
+
+export interface ActiveOAuthClientProfileResponse {
+	snapshot: SnapshotResponse;
 }
 
 /**

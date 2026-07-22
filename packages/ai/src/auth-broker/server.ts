@@ -15,6 +15,7 @@ import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
+	ActiveOAuthClientProfileResponse,
 	CredentialBlockResponse,
 	CredentialBlockSnapshot,
 	CredentialBlocksDeleteResponse,
@@ -37,6 +38,7 @@ import {
 	DEFAULT_STREAM_KEEPALIVE_MS,
 } from "./types";
 import {
+	activeOAuthClientProfileRequestSchema,
 	credentialBlockRequestSchema,
 	credentialDisableRequestSchema,
 	credentialUploadRequestSchema,
@@ -319,6 +321,7 @@ function buildSnapshot(storage: AuthStorage, refresher: AuthBrokerRefresher | un
 		generatedAt: base.generatedAt,
 		serverNowMs,
 		refresher: wire,
+		activeOAuthClientProfiles: base.activeOAuthClientProfiles ?? {},
 		credentials,
 	};
 }
@@ -412,6 +415,7 @@ function serveSnapshotStream(
 	let pendingBumps = 0;
 	let closed = false;
 	let lastGeneration = -1;
+	let lastActiveProfilesFingerprint = "";
 
 	const cleanup = (): void => {
 		if (closed) return;
@@ -471,6 +475,9 @@ function serveSnapshotStream(
 					});
 				}
 				lastGeneration = snapshot.generation;
+				const activeProfilesFingerprint = JSON.stringify(snapshot.activeOAuthClientProfiles ?? {});
+				const activeProfilesChanged = activeProfilesFingerprint !== lastActiveProfilesFingerprint;
+				if (activeProfilesChanged) lastActiveProfilesFingerprint = activeProfilesFingerprint;
 				const seenIds = new Set<number>();
 				for (const entry of snapshot.credentials) {
 					seenIds.add(entry.id);
@@ -505,6 +512,10 @@ function serveSnapshotStream(
 					if (!write(sseEvent("removed", payload))) return;
 					logger.debug("auth-broker stream removed", { peer, id, generation: snapshot.generation });
 				}
+				if (activeProfilesChanged) {
+					const payload: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...snapshot };
+					if (!write(sseEvent("snapshot", payload))) return;
+				}
 			} while (pendingBumps > 0 && !closed);
 		} finally {
 			processing = false;
@@ -517,6 +528,7 @@ function serveSnapshotStream(
 			await storage.reload();
 			const initial = buildSnapshot(storage, refresher);
 			lastGeneration = initial.generation;
+			lastActiveProfilesFingerprint = JSON.stringify(initial.activeOAuthClientProfiles ?? {});
 			for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
 			const initialEvent: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...initial };
 			if (!write(sseEvent("snapshot", initialEvent))) return;
@@ -707,6 +719,26 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(status, { error: message });
 					}
 				}
+				if (req.method === "POST" && pathname === "/v1/active-oauth-client-profile") {
+					const parsed = await parseBody(req, activeOAuthClientProfileRequestSchema);
+					if (!parsed.ok) return parsed.response;
+					try {
+						await opts.storage.setActiveOAuthClientProfile(parsed.data.provider, parsed.data.profile);
+						const response: ActiveOAuthClientProfileResponse = {
+							snapshot: buildSnapshot(opts.storage, refresher),
+						};
+						return json(200, response);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						logger.warn("auth-broker active OAuth client profile update failed", {
+							provider: parsed.data.provider,
+							peer,
+							error: message,
+						});
+						return json(500, { error: message });
+					}
+				}
+
 				if (req.method === "POST" && pathname === "/v1/credential") {
 					const parsed = await parseBody(req, credentialUploadRequestSchema);
 					if (!parsed.ok) return parsed.response;

@@ -7,8 +7,10 @@
  */
 import { readSseEvents } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import type { AuthCredential } from "../auth-storage";
+import type { AuthCredential, OAuthClientProfile } from "../auth-storage";
 import type {
+	ActiveOAuthClientProfileRequest,
+	ActiveOAuthClientProfileResponse,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlocksDeleteResponse,
@@ -24,6 +26,7 @@ import type {
 	UsageStaleResponse,
 } from "./types";
 import {
+	activeOAuthClientProfileResponseSchema,
 	credentialBlockResponseSchema,
 	credentialBlocksDeleteResponseSchema,
 	credentialDisableResponseSchema,
@@ -276,6 +279,18 @@ export class AuthBrokerClient {
 		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
 			body,
 			schema: credentialUploadResponseSchema,
+			signal,
+		});
+	}
+	async setActiveOAuthClientProfile(
+		provider: string,
+		profile: OAuthClientProfile | undefined,
+		signal?: AbortSignal,
+	): Promise<ActiveOAuthClientProfileResponse> {
+		const body: ActiveOAuthClientProfileRequest = { provider, profile };
+		return this.#request<ActiveOAuthClientProfileResponse>("POST", "/v1/active-oauth-client-profile", {
+			body,
+			schema: activeOAuthClientProfileResponseSchema,
 			signal,
 		});
 	}

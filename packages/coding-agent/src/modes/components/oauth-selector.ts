@@ -14,6 +14,7 @@ import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { AuthStorage, CredentialOriginKind } from "../../session/auth-storage";
+import { resolveOAuthProviderStorage } from "../oauth-provider-storage";
 import { DynamicBorder } from "./dynamic-border";
 
 const OAUTH_SELECTOR_MAX_VISIBLE = 10;
@@ -112,7 +113,21 @@ export class OAuthSelectorComponent extends Container {
 		this.#stopSpinner();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
-		return this.#mode === "logout" ? this.#authStorage.has(providerId) : this.#authStorage.hasAuth(providerId);
+		const target = resolveOAuthProviderStorage(providerId);
+		if (target.clientProfile) {
+			return this.#authStorage.hasOAuthClientProfile(target.provider, target.clientProfile);
+		}
+		return this.#mode === "logout"
+			? this.#authStorage.has(target.provider)
+			: this.#authStorage.hasAuth(target.provider);
+	}
+
+	#isActiveProfile(providerId: string): boolean {
+		const target = resolveOAuthProviderStorage(providerId);
+		return (
+			target.clientProfile === undefined ||
+			this.#authStorage.getActiveOAuthClientProfile(target.provider) === target.clientProfile
+		);
 	}
 
 	#loadProviders(): void {
@@ -143,7 +158,7 @@ export class OAuthSelectorComponent extends Container {
 
 		let pending = 0;
 		for (const provider of this.#allProviders) {
-			if (!this.#hasSelectableAuth(provider.id)) {
+			if (!this.#hasSelectableAuth(provider.id) || !this.#isActiveProfile(provider.id)) {
 				this.#authState.delete(provider.id);
 				continue;
 			}
@@ -201,7 +216,13 @@ export class OAuthSelectorComponent extends Container {
 	 * the list distinguishes a real login from an env var aliasing the provider.
 	 */
 	#getSourceLabel(providerId: string): string {
-		const origin = this.#authStorage.getCredentialOrigin(providerId);
+		const target = resolveOAuthProviderStorage(providerId);
+		if (target.clientProfile) {
+			return this.#authStorage.hasOAuthClientProfile(target.provider, target.clientProfile)
+				? theme.fg("muted", ` (${ORIGIN_LABELS.oauth})`)
+				: "";
+		}
+		const origin = this.#authStorage.getCredentialOrigin(target.provider);
 		if (!origin) return "";
 		const detail = origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind];
 		return theme.fg("muted", ` (${detail})`);
@@ -221,9 +242,9 @@ export class OAuthSelectorComponent extends Container {
 		if (state === "valid") {
 			return theme.fg("success", ` ${theme.status.enabled} logged in`) + source;
 		}
-		return this.#hasSelectableAuth(providerId)
-			? theme.fg("success", ` ${theme.status.enabled} logged in`) + source
-			: "";
+		if (!this.#hasSelectableAuth(providerId)) return "";
+		const label = this.#isActiveProfile(providerId) ? "logged in" : "stored";
+		return theme.fg("success", ` ${theme.status.enabled} ${label}`) + source;
 	}
 
 	#isSearchEnabled(): boolean {
@@ -242,10 +263,17 @@ export class OAuthSelectorComponent extends Container {
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
 		let text = `${provider.name} ${provider.id}`;
-		const origin = this.#authStorage.getCredentialOrigin(provider.id);
-		if (origin) {
-			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
-			if (origin.envVar) text += ` ${origin.envVar}`;
+		const target = resolveOAuthProviderStorage(provider.id);
+		if (target.clientProfile) {
+			if (this.#authStorage.hasOAuthClientProfile(target.provider, target.clientProfile)) {
+				text += ` stored authenticated ${ORIGIN_LABELS.oauth}`;
+			}
+		} else {
+			const origin = this.#authStorage.getCredentialOrigin(target.provider);
+			if (origin) {
+				text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
+				if (origin.envVar) text += ` ${origin.envVar}`;
+			}
 		}
 		if (!provider.available) {
 			text += " unavailable";

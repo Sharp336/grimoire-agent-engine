@@ -34,6 +34,7 @@ export const oauthCredentialSchema = type({
 	"accountId?": "string",
 	"orgId?": "string",
 	"orgName?": "string",
+	"clientProfile?": "'claude-code' | 'cowork'",
 });
 
 /** OAuth credential as it appears in broker snapshots — refresh replaced with sentinel. */
@@ -49,6 +50,7 @@ export const remoteOauthCredentialSchema = type({
 	"accountId?": "string",
 	"orgId?": "string",
 	"orgName?": "string",
+	"clientProfile?": "'claude-code' | 'cowork'",
 });
 
 export const apiKeyCredentialSchema = type({
@@ -106,6 +108,7 @@ export const snapshotResponseSchema = type({
 	generatedAt: "number",
 	serverNowMs: "number",
 	refresher: refresherScheduleSchema,
+	"activeOAuthClientProfiles?": { "[string]": "'claude-code' | 'cowork'" },
 	credentials: snapshotEntrySchema.array(),
 });
 
@@ -118,6 +121,7 @@ export const snapshotStreamSnapshotEventSchema = type({
 	generatedAt: "number",
 	serverNowMs: "number",
 	refresher: refresherScheduleSchema,
+	"activeOAuthClientProfiles?": { "[string]": "'claude-code' | 'cowork'" },
 	credentials: snapshotEntrySchema.array(),
 	kind: "'snapshot'",
 });
@@ -279,4 +283,14 @@ export const credentialUploadRequestSchema = type({
 export const credentialUploadResponseSchema = type({
 	"+": "reject",
 	entries: credentialSnapshotEntrySchema.array(),
+});
+export const activeOAuthClientProfileRequestSchema = type({
+	"+": "reject",
+	provider: type("string").atLeastLength(1),
+	"profile?": "'claude-code' | 'cowork'",
+});
+
+export const activeOAuthClientProfileResponseSchema = type({
+	"+": "reject",
+	snapshot: snapshotResponseSchema,
 });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
 import { AnthropicOAuthFlow, refreshAnthropicToken } from "@oh-my-pi/pi-ai/registry/oauth/anthropic";
 import {
 	buildAnthropicAuthConfig,
@@ -28,6 +29,16 @@ describe("anthropic oauth alignment", () => {
 		expect(authUrl.searchParams.get("state")).toBe(state);
 		expect(authUrl.searchParams.get("redirect_uri")).toBe(redirectUri);
 		expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+	});
+
+	it("generates the Cowork client authorization contract", async () => {
+		const flow = new AnthropicOAuthFlow({}, "cowork");
+		const { url } = await flow.generateAuthUrl("cowork-state", flow.redirectUri ?? "");
+		const authUrl = new URL(url);
+
+		expect(authUrl.searchParams.get("client_id")).toBe("a473d7bb-17ac-43a7-abc0-a1343d7c2805");
+		expect(authUrl.searchParams.get("scope")).toBe("user:inference user:file_upload user:profile");
+		expect(authUrl.searchParams.get("redirect_uri")).toBe("https://console.anthropic.com/oauth/code/callback");
 	});
 
 	it("uses api.anthropic.com token URL for code exchange", async () => {
@@ -119,13 +130,31 @@ describe("anthropic oauth alignment", () => {
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
-	it("uses api.anthropic.com token URL and CC headers for refresh", async () => {
+	it.each([
+		{
+			name: "Claude Code",
+			profile: "claude-code" as const,
+			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+		},
+		{
+			name: "Cowork",
+			profile: "cowork" as const,
+			clientId: "a473d7bb-17ac-43a7-abc0-a1343d7c2805",
+		},
+	])("uses the exact $name refresh contract", async ({ profile, clientId }) => {
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			expect(typeof input === "string" ? input : input.toString()).toBe("https://api.anthropic.com/v1/oauth/token");
 			expect(init?.method).toBe("POST");
-			const headers = init?.headers as Record<string, string> | undefined;
-			expect(headers?.["anthropic-beta"]).toBe("oauth-2025-04-20");
-			expect(headers?.["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
+			expect(init?.headers).toEqual({
+				"anthropic-beta": "oauth-2025-04-20",
+				"User-Agent": "anthropic-sdk-typescript/0.94.0 userOAuthProvider",
+				"Content-Type": "application/json",
+			});
+			expect(JSON.parse(String(init?.body))).toEqual({
+				grant_type: "refresh_token",
+				client_id: clientId,
+				refresh_token: "refresh-123",
+			});
 			return new Response(
 				JSON.stringify({
 					access_token: "new-access-token",
@@ -140,10 +169,11 @@ describe("anthropic oauth alignment", () => {
 			);
 		});
 
-		const result = await refreshAnthropicToken("refresh-123", fetchMock as unknown as typeof fetch);
+		const result = await refreshAnthropicToken("refresh-123", fetchMock as unknown as typeof fetch, profile);
 
 		expect(result.access).toBe("new-access-token");
 		expect(result.refresh).toBe("new-refresh-token");
+		expect(result.clientProfile).toBe(profile);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
@@ -268,6 +298,23 @@ describe("anthropic oauth alignment", () => {
 		expect(result.accountId).toBeUndefined();
 		expect(result.email).toBeUndefined();
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("keeps the Cowork refresh token out of the request-facing structured credential", async () => {
+		const result = await getOAuthApiKey("anthropic", {
+			anthropic: {
+				access: "sk-ant-oat-cowork",
+				refresh: "cowork-refresh-secret",
+				expires: Date.now() + 60_000,
+				clientProfile: "cowork",
+			},
+		});
+
+		expect(result).not.toBeNull();
+		expect(JSON.parse(result!.apiKey)).toEqual({
+			token: "sk-ant-oat-cowork",
+			clientProfile: "cowork",
+		});
+		expect(result!.apiKey).not.toContain("cowork-refresh-secret");
 	});
 });
 

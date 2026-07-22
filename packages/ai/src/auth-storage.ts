@@ -19,11 +19,15 @@ import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
 import type {
 	OAuthAuthInfo,
+	OAuthClientProfile,
 	OAuthController,
 	OAuthCredentials,
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
+
+export type { OAuthClientProfile } from "./registry/oauth/types";
+
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -320,6 +324,7 @@ export interface AuthCredentialSnapshot {
 	generation: number;
 	generatedAt: number;
 	credentials: AuthCredentialSnapshotEntry[];
+	activeOAuthClientProfiles?: Record<string, OAuthClientProfile>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,6 +350,9 @@ export interface AuthCredentialStore {
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
+	/** Explicit provider-level OAuth client profile activation. */
+	getActiveOAuthClientProfile?(provider: string): OAuthClientProfile | undefined;
+	setActiveOAuthClientProfile?(provider: string, profile: OAuthClientProfile | undefined): void;
 	updateAuthCredential(id: number, credential: AuthCredential): void;
 	deleteAuthCredential(id: number, disabledCause: string): void;
 	tryDisableAuthCredentialIfMatches(
@@ -488,6 +496,8 @@ export interface AuthCredentialStore {
 	 * of the sync `deleteAuthCredentialsForProvider`.
 	 */
 	deleteAuthCredentialsRemote?(provider: string, disabledCause: string): Promise<void>;
+	/** Optional remote mutation hook for provider-level OAuth client profile activation. */
+	setActiveOAuthClientProfileRemote?(provider: string, profile: OAuthClientProfile | undefined): Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1046,7 +1056,8 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&
-		left.enterpriseUrl === right.enterpriseUrl
+		left.enterpriseUrl === right.enterpriseUrl &&
+		left.clientProfile === right.clientProfile
 	);
 }
 
@@ -1096,6 +1107,24 @@ class AuthStorageUsageCache implements UsageCache {
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory representation
 // ─────────────────────────────────────────────────────────────────────────────
+function normalizeOAuthClientProfile(provider: string, credential: OAuthCredential): OAuthClientProfile | undefined {
+	if (provider !== "anthropic") return credential.clientProfile;
+	return credential.clientProfile === "cowork" ? "cowork" : "claude-code";
+}
+
+function withOAuthClientProfileIdentity(
+	provider: string,
+	identityKey: string | null,
+	credential: OAuthCredential,
+): string | null {
+	if (identityKey === null || provider !== "anthropic") return identityKey;
+	return `${identityKey}|client-profile:${normalizeOAuthClientProfile(provider, credential)}`;
+}
+
+function withoutOAuthClientProfileIdentity(provider: string, identityKey: string | null): string | null {
+	if (identityKey === null || provider !== "anthropic") return identityKey;
+	return identityKey.replace(/\|client-profile:(?:claude-code|cowork)$/, "");
+}
 
 type StoredCredential = { id: number; credential: AuthCredential };
 type CredentialSelection<T extends AuthCredential> = { credential: T; index: number };
@@ -1377,6 +1406,21 @@ export class AuthStorage {
 			}
 		}
 
+		const anthropicEntries = dedupedGrouped.get("anthropic");
+		if (anthropicEntries?.some(entry => entry.credential.type === "oauth")) {
+			const activeProfile = this.#store.getActiveOAuthClientProfile?.("anthropic");
+			if (activeProfile === undefined) {
+				const initialProfile: OAuthClientProfile = anthropicEntries.some(
+					entry =>
+						entry.credential.type === "oauth" &&
+						normalizeOAuthClientProfile("anthropic", entry.credential) === "claude-code",
+				)
+					? "claude-code"
+					: "cowork";
+				this.#store.setActiveOAuthClientProfile?.("anthropic", initialProfile);
+			}
+		}
+
 		const removedProviders = new Set(this.#data.keys());
 		for (const [provider, entries] of dedupedGrouped) {
 			this.#setStoredCredentials(provider, entries);
@@ -1394,6 +1438,24 @@ export class AuthStorage {
 	 */
 	#getStoredCredentials(provider: string): StoredCredential[] {
 		return this.#data.get(provider) ?? [];
+	}
+	#getActiveProfileForSelection(provider: string): OAuthClientProfile | undefined {
+		if (provider !== "anthropic") return undefined;
+		const persisted = this.#store.getActiveOAuthClientProfile?.(provider);
+		if (persisted !== undefined) return persisted;
+		const oauth = this.#getStoredCredentials(provider).filter(
+			(entry): entry is StoredCredential & { credential: OAuthCredential } => entry.credential.type === "oauth",
+		);
+		if (oauth.some(entry => normalizeOAuthClientProfile(provider, entry.credential) === "claude-code")) {
+			return "claude-code";
+		}
+		return oauth.length > 0 ? "cowork" : undefined;
+	}
+
+	#isOAuthCredentialInActiveProfile(provider: string, credential: OAuthCredential): boolean {
+		if (provider !== "anthropic") return true;
+		const activeProfile = this.#getActiveProfileForSelection(provider);
+		return activeProfile !== undefined && normalizeOAuthClientProfile(provider, credential) === activeProfile;
 	}
 
 	/**
@@ -1419,6 +1481,32 @@ export class AuthStorage {
 			this.#data.delete(provider);
 		} else {
 			this.#data.set(provider, credentials);
+		}
+		if (provider === "anthropic") {
+			const activeProfile = this.#store.getActiveOAuthClientProfile?.(provider);
+			if (
+				activeProfile !== undefined &&
+				!credentials.some(
+					entry =>
+						entry.credential.type === "oauth" &&
+						normalizeOAuthClientProfile(provider, entry.credential) === activeProfile,
+				)
+			) {
+				const fallbackProfile: OAuthClientProfile | undefined = credentials.some(
+					entry =>
+						entry.credential.type === "oauth" &&
+						normalizeOAuthClientProfile(provider, entry.credential) === "claude-code",
+				)
+					? "claude-code"
+					: credentials.some(
+								entry =>
+									entry.credential.type === "oauth" &&
+									normalizeOAuthClientProfile(provider, entry.credential) === "cowork",
+							)
+						? "cowork"
+						: undefined;
+				this.#store.setActiveOAuthClientProfile?.(provider, fallbackProfile);
+			}
 		}
 		this.#bumpGeneration("credentials");
 	}
@@ -1798,6 +1886,12 @@ export class AuthStorage {
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: Extract<AuthCredential, { type: T }>; index: number } => {
 				if (entry.credential.type !== type) return false;
+				if (
+					entry.credential.type === "oauth" &&
+					!this.#isOAuthCredentialInActiveProfile(provider, entry.credential)
+				) {
+					return false;
+				}
 				return filter?.(entry.credential) ?? true;
 			});
 
@@ -2137,20 +2231,29 @@ export class AuthStorage {
 	}
 
 	/**
-	 * List stored credential rows, optionally filtered by provider.
+	 * List stored credential rows, optionally filtered by provider and OAuth
+	 * client profile. Anthropic credentials written before profiles existed are
+	 * exposed as Claude Code credentials for filtering.
 	 */
-	listStoredCredentials(provider?: string): StoredAuthCredential[] {
+	listStoredCredentials(provider?: string, options?: { clientProfile?: OAuthClientProfile }): StoredAuthCredential[] {
+		const matchesProfile = (storedProvider: string, credential: AuthCredential): boolean =>
+			options?.clientProfile === undefined ||
+			(credential.type === "oauth" &&
+				normalizeOAuthClientProfile(storedProvider, credential) === options.clientProfile);
 		if (provider !== undefined) {
-			return this.#getStoredCredentials(provider).map(entry => ({
-				id: entry.id,
-				provider,
-				credential: entry.credential,
-				disabledCause: null,
-			}));
+			return this.#getStoredCredentials(provider)
+				.filter(entry => matchesProfile(provider, entry.credential))
+				.map(entry => ({
+					id: entry.id,
+					provider,
+					credential: entry.credential,
+					disabledCause: null,
+				}));
 		}
 		const rows: StoredAuthCredential[] = [];
 		for (const [storedProvider, entries] of this.#data) {
 			for (const entry of entries) {
+				if (!matchesProfile(storedProvider, entry.credential)) continue;
 				rows.push({
 					id: entry.id,
 					provider: storedProvider,
@@ -2160,6 +2263,27 @@ export class AuthStorage {
 			}
 		}
 		return rows;
+	}
+
+	getActiveOAuthClientProfile(provider: string): OAuthClientProfile | undefined {
+		return this.#getActiveProfileForSelection(provider);
+	}
+
+	hasOAuthClientProfile(provider: string, profile: OAuthClientProfile): boolean {
+		return this.#getStoredCredentials(provider).some(
+			entry =>
+				entry.credential.type === "oauth" && normalizeOAuthClientProfile(provider, entry.credential) === profile,
+		);
+	}
+
+	async setActiveOAuthClientProfile(provider: string, profile: OAuthClientProfile | undefined): Promise<void> {
+		if (this.#store.setActiveOAuthClientProfileRemote) {
+			await this.#store.setActiveOAuthClientProfileRemote(provider, profile);
+		} else {
+			this.#store.setActiveOAuthClientProfile?.(provider, profile);
+		}
+		this.#resetProviderAssignments(provider);
+		this.#bumpGeneration("active-oauth-client-profile");
 	}
 
 	/**
@@ -2391,6 +2515,19 @@ export class AuthStorage {
 		);
 		this.#resetProviderAssignments(provider);
 	}
+	async #reconcileOAuthClientProfileAfterRemoval(provider: string, removedCredential: AuthCredential): Promise<void> {
+		if (provider !== "anthropic" || removedCredential.type !== "oauth") return;
+		const removedProfile = normalizeOAuthClientProfile(provider, removedCredential);
+		if (removedProfile === undefined) return;
+		if (this.getActiveOAuthClientProfile(provider) !== removedProfile) return;
+		if (this.hasOAuthClientProfile(provider, removedProfile)) return;
+		const fallbackProfile: OAuthClientProfile | undefined = this.hasOAuthClientProfile(provider, "claude-code")
+			? "claude-code"
+			: this.hasOAuthClientProfile(provider, "cowork")
+				? "cowork"
+				: undefined;
+		await this.setActiveOAuthClientProfile(provider, fallbackProfile);
+	}
 
 	/**
 	 * Remove credential for a provider.
@@ -2402,7 +2539,7 @@ export class AuthStorage {
 			this.#store.deleteAuthCredentialsForProvider(provider, "deleted by user");
 		}
 		this.#setStoredCredentials(provider, []);
-		this.#resetProviderAssignments(provider);
+		await this.setActiveOAuthClientProfile(provider, undefined);
 	}
 
 	/**
@@ -2424,6 +2561,7 @@ export class AuthStorage {
 			entries.filter((_entry, entryIndex) => entryIndex !== index),
 		);
 		this.#resetProviderAssignments(provider);
+		await this.#reconcileOAuthClientProfileAfterRemoval(provider, entries[index]!.credential);
 		return true;
 	}
 
@@ -2507,13 +2645,16 @@ export class AuthStorage {
 	 */
 	getOAuthCredential(provider: string): OAuthCredential | undefined {
 		return this.#getCredentialsForProvider(provider).find(
-			(credential): credential is OAuthCredential => credential.type === "oauth",
+			(credential): credential is OAuthCredential =>
+				credential.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, credential),
 		);
 	}
 
 	#resolveActiveOAuthCredential(provider: string, sessionId?: string): OAuthCredential | undefined {
 		const allCredentials = this.#getCredentialsForProvider(provider);
-		const oauthCredentials = allCredentials.filter((c): c is OAuthCredential => c.type === "oauth");
+		const oauthCredentials = allCredentials.filter(
+			(c): c is OAuthCredential => c.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, c),
+		);
 		if (oauthCredentials.length === 0) return undefined;
 
 		// Runtime / config overrides bypass OAuth account_uuid attribution — the
@@ -2538,7 +2679,9 @@ export class AuthStorage {
 		// filtered array would be off-by-N when any non-OAuth credential precedes the
 		// OAuth ones (e.g. [api_key, oauth_A, oauth_B] stored order).
 		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
-		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
+		return stickyCredential?.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, stickyCredential)
+			? stickyCredential
+			: oauthCredentials[0];
 	}
 
 	/**
@@ -2657,7 +2800,14 @@ export class AuthStorage {
 		// Use #upsertOAuthCredential to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
+		const storedProvider = def.storeCredentialsAs ?? provider;
+		await this.#upsertOAuthCredential(storedProvider, newCredential);
+		if (storedProvider === "anthropic") {
+			await this.setActiveOAuthClientProfile(
+				storedProvider,
+				normalizeOAuthClientProfile(storedProvider, newCredential),
+			);
+		}
 		return {
 			type: "oauth",
 			email: newCredential.email,
@@ -3773,12 +3923,23 @@ export class AuthStorage {
 			const stored = this.#getStoredCredentials(provider);
 			const index = stored.findIndex(entry => entry.id === options.credentialId);
 			const entry = index === -1 ? undefined : stored[index];
-			if (entry) return { type: entry.credential.type, index, explicit: true };
+			if (
+				entry &&
+				(entry.credential.type !== "oauth" || this.#isOAuthCredentialInActiveProfile(provider, entry.credential))
+			) {
+				return { type: entry.credential.type, index, explicit: true };
+			}
 		}
 		if (options?.apiKey !== undefined) {
 			const stored = this.#getStoredCredentials(provider);
 			for (let index = 0; index < stored.length; index++) {
 				const entry = stored[index];
+				if (
+					entry?.credential.type === "oauth" &&
+					!this.#isOAuthCredentialInActiveProfile(provider, entry.credential)
+				) {
+					continue;
+				}
 				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
 					return { type: entry.credential.type, index, explicit: true };
 				}
@@ -3786,7 +3947,12 @@ export class AuthStorage {
 		}
 		if (explicit) return undefined;
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
-		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
+		if (!sessionCredential) return undefined;
+		const storedCredential = this.#getStoredCredentials(provider)[sessionCredential.index]?.credential;
+		if (storedCredential?.type === "oauth" && !this.#isOAuthCredentialInActiveProfile(provider, storedCredential)) {
+			return undefined;
+		}
+		return { ...sessionCredential, explicit: false };
 	}
 
 	/**
@@ -3821,7 +3987,10 @@ export class AuthStorage {
 				credentialId === undefined
 					? -1
 					: this.#getStoredCredentials(provider).findIndex(
-							entry => entry.id === credentialId && entry.credential.type === "oauth",
+							entry =>
+								entry.id === credentialId &&
+								entry.credential.type === "oauth" &&
+								this.#isOAuthCredentialInActiveProfile(provider, entry.credential),
 						);
 			if (index >= 0) sessionCredential = { type: "oauth", index, explicit: true };
 		}
@@ -3864,7 +4033,10 @@ export class AuthStorage {
 			.map((credential, index) => ({ credential, index }))
 			.filter(
 				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType && entry.index !== targetIndex,
+					entry.credential.type === credentialType &&
+					(entry.credential.type !== "oauth" ||
+						this.#isOAuthCredentialInActiveProfile(provider, entry.credential)) &&
+					entry.index !== targetIndex,
 			);
 
 		let retryAtMs: number | undefined;
@@ -4128,7 +4300,10 @@ export class AuthStorage {
 	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+			.filter(
+				(entry): entry is { credential: OAuthCredential; index: number } =>
+					entry.credential.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, entry.credential),
+			);
 
 		if (credentials.length === 0) return undefined;
 
@@ -4623,6 +4798,7 @@ export class AuthStorage {
 				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
+				clientProfile: result.newCredentials.clientProfile ?? selection.credential.clientProfile,
 			};
 			if (credentialId !== undefined) {
 				const idx = this.#replaceCredentialById(provider, credentialId, updated);
@@ -4720,7 +4896,12 @@ export class AuthStorage {
 					await this.reload();
 					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
 				}
-				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
+				if (
+					this.#getCredentialsForProvider(provider).some(
+						credential =>
+							credential.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, credential),
+					)
+				) {
 					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
 				}
 			} else {
@@ -4900,7 +5081,10 @@ export class AuthStorage {
 	#getStoredOAuthSelections(provider: string): StoredOAuthSelection[] {
 		return this.#getStoredCredentials(provider)
 			.map((entry, index) => ({ credentialId: entry.id, credential: entry.credential, index }))
-			.filter((entry): entry is StoredOAuthSelection => entry.credential.type === "oauth");
+			.filter(
+				(entry): entry is StoredOAuthSelection =>
+					entry.credential.type === "oauth" && this.#isOAuthCredentialInActiveProfile(provider, entry.credential),
+			);
 	}
 
 	/** Refresh one stored OAuth selection and shape it as an {@link OAuthAccessResolution}. */
@@ -5437,6 +5621,7 @@ export class AuthStorage {
 		const hasSibling = this.#getCredentialsForProvider(provider).some(
 			(credential, index) =>
 				credential.type === sessionCredential.type &&
+				(credential.type !== "oauth" || this.#isOAuthCredentialInActiveProfile(provider, credential)) &&
 				index !== sessionCredential.index &&
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
@@ -5550,7 +5735,17 @@ export class AuthStorage {
 				});
 			}
 		}
-		return { generation: this.#generation, generatedAt: Date.now(), credentials: entries };
+		const activeOAuthClientProfiles: Record<string, OAuthClientProfile> = {};
+		for (const provider of this.#data.keys()) {
+			const profile = this.#store.getActiveOAuthClientProfile?.(provider);
+			if (profile !== undefined) activeOAuthClientProfiles[provider] = profile;
+		}
+		return {
+			generation: this.#generation,
+			generatedAt: Date.now(),
+			credentials: entries,
+			activeOAuthClientProfiles,
+		};
 	}
 
 	/**
@@ -5643,6 +5838,7 @@ export class AuthStorage {
 				apiEndpoint: refreshed.apiEndpoint ?? attempted.apiEndpoint,
 				orgId: refreshed.orgId ?? attempted.orgId,
 				orgName: refreshed.orgName ?? attempted.orgName,
+				clientProfile: refreshed.clientProfile ?? attempted.clientProfile,
 			};
 			// Persist by id: the array may have been reordered/shrunk while the
 			// refresh was in flight, so the pre-await positional index is unsafe. A
@@ -5673,6 +5869,23 @@ export class AuthStorage {
 			this.#store.deleteAuthCredential(id, disabledCause);
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
+			const removedCredential = entries[index]!.credential;
+			if (
+				provider === "anthropic" &&
+				removedCredential.type === "oauth" &&
+				this.getActiveOAuthClientProfile(provider) === normalizeOAuthClientProfile(provider, removedCredential) &&
+				!this.hasOAuthClientProfile(
+					provider,
+					normalizeOAuthClientProfile(provider, removedCredential) ?? "claude-code",
+				)
+			) {
+				const fallbackProfile: OAuthClientProfile | undefined = this.hasOAuthClientProfile(provider, "claude-code")
+					? "claude-code"
+					: this.hasOAuthClientProfile(provider, "cowork")
+						? "cowork"
+						: undefined;
+				this.#store.setActiveOAuthClientProfile?.(provider, fallbackProfile);
+			}
 			this.#resetProviderAssignments(provider);
 			this.#emitCredentialDisabled({ provider, disabledCause });
 			return true;
@@ -5938,7 +6151,8 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
 
 function resolveCredentialIdentityKey(provider: string, credential: AuthCredential): string | null {
 	if (credential.type === "api_key") return null;
-	return resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
+	const identityKey = resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
+	return withOAuthClientProfileIdentity(provider, identityKey, credential);
 }
 
 function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string | null {
@@ -5958,11 +6172,16 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		return existing.type === "api_key" && existing.key === incoming.key;
 	}
+	if (provider === "anthropic" && existing.type === "oauth") {
+		if (normalizeOAuthClientProfile(provider, existing) !== normalizeOAuthClientProfile(provider, incoming))
+			return false;
+	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
 	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
 	if (incomingIdentityKey === null) return false;
-	if (incomingIdentityKey === existingIdentityKey) return true;
-	if (existingIdentityKey === null) return false;
+	const existingBaseIdentityKey = withoutOAuthClientProfileIdentity(provider, existingIdentityKey);
+	if (incomingIdentityKey === existingBaseIdentityKey) return true;
+	if (existingBaseIdentityKey === null) return false;
 	// One-way upgrade, applied only when the INCOMING identity key carries the
 	// org qualifier (only anthropic and openai-codex keys do, so other
 	// providers never reach the checks below). An org-scoped login `org:<o>`
@@ -5985,9 +6204,9 @@ function matchesReplacementCredential(
 	const orgIdentifier = incomingIdentifiers.find(identifier => identifier.startsWith("org:"));
 	if (orgIdentifier === undefined) return false;
 	if (incomingIdentityKey !== orgIdentifier && !incomingIdentityKey.endsWith(`|${orgIdentifier}`)) return false;
-	if (existingIdentityKey === orgIdentifier) return true;
+	if (existingBaseIdentityKey === orgIdentifier) return true;
 	const existingIdentifiers =
-		existing.type === "oauth" && existingIdentityKey.endsWith(`|${orgIdentifier}`)
+		existing.type === "oauth" && existingBaseIdentityKey.endsWith(`|${orgIdentifier}`)
 			? extractOAuthCredentialIdentifiers(existing)
 			: null;
 	// A base identifier that merely repeats the org qualifier's id carries no
@@ -6000,8 +6219,8 @@ function matchesReplacementCredential(
 			identifier.startsWith("email:") || identifier.startsWith("account:") || identifier.startsWith("project:");
 		if (!isBase) continue;
 		if (identifier.slice(identifier.indexOf(":") + 1) === orgQualifierId) continue;
-		if (existingIdentityKey === identifier) return true;
-		if (existingIdentityKey === `${identifier}|${orgIdentifier}`) return true;
+		if (existingBaseIdentityKey === identifier) return true;
+		if (existingBaseIdentityKey === `${identifier}|${orgIdentifier}`) return true;
 		if (existingIdentifiers?.includes(identifier)) return true;
 	}
 	return false;
@@ -6329,6 +6548,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
+			CREATE TABLE IF NOT EXISTS auth_provider_state (
+				provider TEXT PRIMARY KEY,
+				active_oauth_client_profile TEXT
+			);
 		`);
 
 		if (!this.#authCredentialsTableExists()) {
@@ -6341,6 +6564,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		const recordedVersion = this.#readAuthSchemaVersion();
 		const schemaVersion = recordedVersion ?? this.#inferAuthSchemaVersion();
+
 		if (schemaVersion > AUTH_SCHEMA_VERSION) {
 			logger.warn("SqliteAuthCredentialStore schema version mismatch", {
 				current: schemaVersion,
@@ -6572,7 +6796,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	#backfillCredentialIdentityKeys(): void {
 		const selectRowsStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
+			`SELECT id, provider, credential_type, data, disabled_cause, identity_key
+			 FROM auth_credentials
+			 WHERE identity_key IS NULL
+			    OR (provider = 'anthropic' AND identity_key NOT LIKE '%|client-profile:claude-code'
+			        AND identity_key NOT LIKE '%|client-profile:cowork')
+			 ORDER BY id ASC`,
 		);
 		let rows: AuthRow[];
 		try {
@@ -6612,6 +6841,34 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			results.push(toStoredAuthCredential(row, credential));
 		}
 		return results;
+	}
+	getActiveOAuthClientProfile(provider: string): OAuthClientProfile | undefined {
+		const stmt = this.#db.prepare("SELECT active_oauth_client_profile FROM auth_provider_state WHERE provider = ?");
+		try {
+			const row = stmt.get(provider) as { active_oauth_client_profile?: unknown } | undefined;
+			return row?.active_oauth_client_profile === "claude-code" || row?.active_oauth_client_profile === "cowork"
+				? row.active_oauth_client_profile
+				: undefined;
+		} finally {
+			stmt.finalize();
+		}
+	}
+
+	setActiveOAuthClientProfile(provider: string, profile: OAuthClientProfile | undefined): void {
+		const stmt =
+			profile === undefined
+				? this.#db.prepare("DELETE FROM auth_provider_state WHERE provider = ?")
+				: this.#db.prepare(
+						`INSERT INTO auth_provider_state (provider, active_oauth_client_profile)
+						 VALUES (?, ?)
+						 ON CONFLICT(provider) DO UPDATE SET active_oauth_client_profile = excluded.active_oauth_client_profile`,
+					);
+		try {
+			if (profile === undefined) stmt.run(provider);
+			else stmt.run(provider, profile);
+		} finally {
+			stmt.finalize();
+		}
 	}
 
 	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {

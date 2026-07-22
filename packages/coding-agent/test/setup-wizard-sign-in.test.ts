@@ -26,6 +26,8 @@ describe("SignInTab", () => {
 		const authStorage = {
 			has: (_providerId: string) => false,
 			hasAuth: (_providerId: string) => false,
+			hasOAuthClientProfile: (_providerId: string, _profile: "claude-code" | "cowork") => false,
+			getActiveOAuthClientProfile: (_providerId: string) => undefined,
 			getCredentialOrigin: (_providerId: string) => undefined,
 			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
 				ctrl.onAuth({ url });
@@ -98,6 +100,8 @@ describe("SignInTab", () => {
 		const authStorage = {
 			has: (_providerId: string) => false,
 			hasAuth: (_providerId: string) => false,
+			hasOAuthClientProfile: (_providerId: string, _profile: "claude-code" | "cowork") => false,
+			getActiveOAuthClientProfile: (_providerId: string) => undefined,
 			getCredentialOrigin: (_providerId: string) => undefined,
 			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
 				ctrl.onAuth({ url });

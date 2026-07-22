@@ -144,7 +144,27 @@ function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"an
 	return models;
 }
 
-function buildAnthropicDiscoveryHeaders(apiKey: string): Record<string, string> {
+type StructuredAnthropicCredential = {
+	token?: unknown;
+	clientProfile?: unknown;
+};
+
+function unwrapAnthropicCredential(apiKey: string): string {
+	if (!apiKey.startsWith("{")) return apiKey;
+	try {
+		const credential = JSON.parse(apiKey) as StructuredAnthropicCredential;
+		if (
+			typeof credential.token === "string" &&
+			(credential.clientProfile === "claude-code" || credential.clientProfile === "cowork")
+		) {
+			return credential.token;
+		}
+	} catch {}
+	return apiKey;
+}
+
+function buildAnthropicDiscoveryHeaders(apiKeyRaw: string): Record<string, string> {
+	const apiKey = unwrapAnthropicCredential(apiKeyRaw);
 	const oauthToken = isAnthropicOAuthToken(apiKey);
 	const headers: Record<string, string> = {
 		"anthropic-version": "2023-06-01",

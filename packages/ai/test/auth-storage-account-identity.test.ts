@@ -112,6 +112,35 @@ describe("AuthStorage.getOAuthAccountIdentity", () => {
 		expect(rotatedIdentity?.accountId).toBe(retryKey === "access-a" ? "acc-a" : "acc-b");
 	});
 
+	test("preserves the Anthropic Cowork profile across repeated credential resolution", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const storage = authStorage;
+		await storage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "sk-ant-oat-cowork",
+				refresh: "refresh-cowork",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "cowork-account",
+				email: "cowork@example.com",
+				clientProfile: "cowork",
+			},
+		]);
+
+		const first = await storage.getApiKey("anthropic", "cowork-session");
+		const second = await storage.getApiKey("anthropic", "cowork-session");
+
+		expect(JSON.parse(first ?? "{}")).toMatchObject({
+			token: "sk-ant-oat-cowork",
+			clientProfile: "cowork",
+		});
+		expect(JSON.parse(second ?? "{}")).toMatchObject({
+			token: "sk-ant-oat-cowork",
+			clientProfile: "cowork",
+		});
+		expect(storage.getOAuthCredential("anthropic")?.clientProfile).toBe("cowork");
+	});
+
 	test("config override suppresses OAuth identity attribution", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		await authStorage.set(PROVIDER, [

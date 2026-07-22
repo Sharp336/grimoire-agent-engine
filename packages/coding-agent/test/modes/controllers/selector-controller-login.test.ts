@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 
 describe("SelectorController login", () => {
-	it("awaits a provider-scoped online refresh, then presents OAuth success", async () => {
+	it("refreshes canonical Anthropic after a Cowork login, then presents success", async () => {
 		const loginSaved = Promise.withResolvers<void>();
 		const presentedBlocks: unknown[] = [];
 		const authStorage = {
@@ -60,17 +60,16 @@ describe("SelectorController login", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new SelectorController(ctx);
 
-		void controller.showOAuthSelector("login", "xai-oauth");
+		void controller.showOAuthSelector("login", "anthropic-cowork");
 		await loginSaved.promise;
 		// Let the awaited refreshProvider settle before the success block is presented.
 		await Promise.resolve();
 		await Promise.resolve();
 
-		expect(renderPresented(presentedBlocks)).toContain("Successfully logged in to xai-oauth");
-		// Post-login refresh is scoped to the just-authenticated provider with the
-		// `online` strategy (#5780) — not the all-provider default refresh.
+		expect(renderPresented(presentedBlocks)).toContain("Successfully logged in to anthropic-cowork");
+		// Cowork credentials are stored and consumed under canonical Anthropic.
 		expect(refreshProvider).toHaveBeenCalledTimes(1);
-		expect(refreshProvider).toHaveBeenCalledWith("xai-oauth", "online");
+		expect(refreshProvider).toHaveBeenCalledWith("anthropic", "online");
 		expect(refresh).not.toHaveBeenCalled();
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});

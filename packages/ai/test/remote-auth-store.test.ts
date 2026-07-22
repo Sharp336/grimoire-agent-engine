@@ -348,6 +348,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			streamSnapshots: false,
 			initialSnapshot,
 		});
+		expect(remoteStore.snapshot.activeOAuthClientProfiles).toEqual({});
 		try {
 			const first = await remoteStore.fetchUsageReports();
 			expect(fetchUsageSpy).toHaveBeenCalledTimes(1);
@@ -462,6 +463,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 		expect(validated).not.toBeInstanceOf(type.errors);
 		if (validated instanceof type.errors) throw new Error("expected valid snapshot");
+		expect(validated.activeOAuthClientProfiles).toBeUndefined();
 		expect(validated.credentials[0]!.blocks).toBeUndefined();
 		expect(validated.credentials[1]!.blocks).toEqual([
 			{ providerKey: "anthropic:oauth", blockScope: "tier:fable", blockedUntilMs: futureBlock },

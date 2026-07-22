@@ -12,6 +12,7 @@ beforeAll(async () => {
 const authStorage = {
 	has: (_providerId: string) => false,
 	hasAuth: (_providerId: string) => false,
+	hasOAuthClientProfile: (_providerId: string, _profile: string) => false,
 	getCredentialOrigin: (_providerId: string) => undefined,
 } as unknown as AuthStorage;
 
@@ -56,6 +57,7 @@ describe("OAuthSelectorComponent", () => {
 			{
 				has: (_providerId: string) => false,
 				hasAuth: (providerId: string) => providerId === "opencode-go" || providerId === "opencode-zen",
+				hasOAuthClientProfile: (_providerId: string, _profile: string) => false,
 				getCredentialOrigin: (_providerId: string) => undefined,
 			} as unknown as AuthStorage,
 			providerId => selected.push(providerId),
@@ -83,6 +85,7 @@ describe("OAuthSelectorComponent", () => {
 			{
 				has: (providerId: string) => providerId === "opencode-go",
 				hasAuth: (providerId: string) => providerId === "opencode-go",
+				hasOAuthClientProfile: (_providerId: string, _profile: string) => false,
 				getCredentialOrigin: (_providerId: string) => undefined,
 			} as unknown as AuthStorage,
 			providerId => selected.push(providerId),
@@ -102,6 +105,34 @@ describe("OAuthSelectorComponent", () => {
 
 		component.handleInput("\n");
 		expect(selected).toEqual(["opencode-go"]);
+	});
+
+	it("shows Anthropic profiles independently from canonical stored credentials", () => {
+		const profiles: Record<string, true> = { "claude-code": true, cowork: true };
+		const profileStorage = {
+			has: (providerId: string) => providerId === "anthropic",
+			hasAuth: (providerId: string) => providerId === "anthropic",
+			hasOAuthClientProfile: (providerId: string, profile: string) =>
+				providerId === "anthropic" && profile in profiles,
+			getActiveOAuthClientProfile: (providerId: string) => (providerId === "anthropic" ? "cowork" : undefined),
+			getCredentialOrigin: (providerId: string) => (providerId === "anthropic" ? { kind: "oauth" } : undefined),
+		} as unknown as AuthStorage;
+
+		const component = new OAuthSelectorComponent(
+			"logout",
+			profileStorage,
+			() => {},
+			() => {},
+		);
+		const rendered = component
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+
+		expect(rendered).toContain("Anthropic (Claude Pro/Max)");
+		expect(rendered).toContain("Anthropic (Cowork)");
+		expect(rendered).toMatch(/Cowork\).*logged in/);
+		expect(rendered).toMatch(/Claude Pro\/Max\).*stored/);
 	});
 
 	describe("disabledProviders", () => {
@@ -172,6 +203,7 @@ describe("OAuthSelectorComponent", () => {
 				{
 					has: (providerId: string) => providerId === "opencode-go",
 					hasAuth: (providerId: string) => providerId === "opencode-go",
+					hasOAuthClientProfile: (_providerId: string, _profile: string) => false,
 					getCredentialOrigin: (_providerId: string) => undefined,
 				} as unknown as AuthStorage,
 				providerId => selected.push(providerId),

@@ -3,26 +3,36 @@
  */
 
 import * as AIError from "../../error";
-import { claudeCodeVersion } from "../../providers/anthropic";
 import type { FetchImpl } from "../../types";
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const decode = (s: string) => atob(s);
-const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
+const CLAUDE_CODE_CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
+const COWORK_CLIENT_ID = decode("YTQ3M2Q3YmItMTdhYy00M2E3LWFiYzAtYTEzNDNkN2MyODA1");
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap";
 const CLAUDE_CODE_BOOTSTRAP_MODEL = "claude-opus-4-8";
-const CLAUDE_CODE_BOOTSTRAP_USER_AGENT = `claude-code/${claudeCodeVersion}`;
+const CLAUDE_CODE_BOOTSTRAP_USER_AGENT = "claude-code/2.1.165";
 const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
+const COWORK_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
 // Scopes required for direct OAuth-token inference (user:inference) plus account/session management.
 // platform.claude.com/oauth/authorize issues console tokens (org:create_api_key only) and does not
 // grant user:inference — the claude.ai endpoint is required for direct inference access.
-const SCOPES =
+const CLAUDE_CODE_SCOPES =
 	"org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+const COWORK_SCOPES = "user:inference user:file_upload user:profile";
+
+type AnthropicOAuthProfile = "claude-code" | "cowork";
+
+function oauthProfileConfig(profile: AnthropicOAuthProfile): { clientId: string; scopes: string } {
+	return profile === "cowork"
+		? { clientId: COWORK_CLIENT_ID, scopes: COWORK_SCOPES }
+		: { clientId: CLAUDE_CODE_CLIENT_ID, scopes: CLAUDE_CODE_SCOPES };
+}
 
 function formatErrorDetails(error: unknown): string {
 	if (error instanceof Error) {
@@ -205,10 +215,23 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 	#verifier: string = "";
 	#challenge: string = "";
 	#fetch: FetchImpl;
+	#profile: AnthropicOAuthProfile;
 
-	constructor(ctrl: OAuthController) {
-		super(ctrl, CALLBACK_PORT, CALLBACK_PATH);
+	constructor(ctrl: OAuthController, profile: AnthropicOAuthProfile = "claude-code") {
+		super(
+			ctrl,
+			profile === "cowork"
+				? {
+						preferredPort: CALLBACK_PORT,
+						callbackPath: CALLBACK_PATH,
+						redirectUri: COWORK_REDIRECT_URI,
+						manualInputOnly: true,
+					}
+				: CALLBACK_PORT,
+			CALLBACK_PATH,
+		);
 		this.#fetch = ctrl.fetch ?? fetch;
+		this.#profile = profile;
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
@@ -216,12 +239,13 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 		this.#verifier = pkce.verifier;
 		this.#challenge = pkce.challenge;
 
+		const config = oauthProfileConfig(this.#profile);
 		const authParams = new URLSearchParams({
 			code: "true",
-			client_id: CLIENT_ID,
+			client_id: config.clientId,
 			response_type: "code",
 			redirect_uri: redirectUri,
-			scope: SCOPES,
+			scope: config.scopes,
 			code_challenge: this.#challenge,
 			code_challenge_method: "S256",
 			state,
@@ -231,11 +255,14 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 		return {
 			url,
 			instructions:
-				"Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
+				this.#profile === "cowork"
+					? "Complete login in your browser, then paste the authorization code or final redirect URL when prompted."
+					: "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
 		};
 	}
 
 	async exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials> {
+		const config = oauthProfileConfig(this.#profile);
 		let exchangeCode = code;
 		let exchangeState = state;
 		const codeFragmentIndex = code.indexOf("#");
@@ -253,7 +280,7 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 				TOKEN_URL,
 				{
 					grant_type: "authorization_code",
-					client_id: CLIENT_ID,
+					client_id: config.clientId,
 					code: exchangeCode,
 					state: exchangeState,
 					redirect_uri: redirectUri,
@@ -281,6 +308,7 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 			email,
 			orgId,
 			orgName,
+			clientProfile: this.#profile,
 		};
 	}
 }
@@ -293,21 +321,28 @@ export async function loginAnthropic(ctrl: OAuthController): Promise<OAuthCreden
 	return flow.login();
 }
 
+export async function loginAnthropicCowork(ctrl: OAuthController): Promise<OAuthCredentials> {
+	const flow = new AnthropicOAuthFlow(ctrl, "cowork");
+	return flow.login();
+}
+
 /**
  * Refresh Anthropic OAuth token
  */
 export async function refreshAnthropicToken(
 	refreshToken: string,
 	fetchOverride?: FetchImpl,
+	profile: AnthropicOAuthProfile = "claude-code",
 ): Promise<OAuthCredentials> {
 	const fetchImpl = fetchOverride ?? fetch;
+	const config = oauthProfileConfig(profile);
 	let responseBody: string;
 	try {
 		responseBody = await postJson(
 			TOKEN_URL,
 			{
 				grant_type: "refresh_token",
-				client_id: CLIENT_ID,
+				client_id: config.clientId,
 				refresh_token: refreshToken,
 			},
 			fetchImpl,
@@ -340,5 +375,6 @@ export async function refreshAnthropicToken(
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
 		accountId,
 		email,
+		clientProfile: profile,
 	};
 }

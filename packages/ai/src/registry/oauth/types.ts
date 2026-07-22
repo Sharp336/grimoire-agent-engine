@@ -1,6 +1,8 @@
 import type { FetchImpl } from "../../types";
 import type { OAuthProviderUnion } from "../registry";
 
+export type OAuthClientProfile = "claude-code" | "cowork";
+
 export type OAuthCredentials = {
 	refresh: string;
 	access: string;
@@ -19,6 +21,8 @@ export type OAuthCredentials = {
 	orgId?: string;
 	/** Human-readable organization name for display (may embed the email). */
 	orgName?: string;
+	/** Request-fingerprint profile associated with this credential. */
+	clientProfile?: OAuthClientProfile;
 };
 
 export type OAuthProvider = OAuthProviderUnion;

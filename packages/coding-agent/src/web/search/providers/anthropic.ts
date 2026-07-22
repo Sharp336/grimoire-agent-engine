@@ -64,6 +64,7 @@ function getModel(): string {
 function buildSystemBlocks(
 	auth: AnthropicAuthConfig,
 	model: string,
+	firstUserMessageText: string,
 	systemPrompt?: string,
 ): AnthropicSystemBlock[] | undefined {
 	// Match the streaming path: the CC billing header + system instruction are
@@ -74,6 +75,8 @@ function buildSystemBlocks(
 	return buildAnthropicSystemBlocks(systemPrompt ? [systemPrompt] : undefined, {
 		includeClaudeCodeInstruction: includeClaudeCode,
 		extraInstructions,
+		firstUserMessageText,
+		clientProfile: auth.clientProfile,
 		cacheControl: { type: "ephemeral" },
 	});
 }
@@ -102,7 +105,7 @@ async function callSearch(
 	const url = buildAnthropicUrl(auth);
 	const headers = buildAnthropicSearchHeaders(auth);
 
-	const systemBlocks = buildSystemBlocks(auth, model, systemPrompt);
+	const systemBlocks = buildSystemBlocks(auth, model, query, systemPrompt);
 
 	const body: Record<string, unknown> = {
 		model,

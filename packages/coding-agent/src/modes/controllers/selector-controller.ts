@@ -89,6 +89,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
+import { resolveOAuthProviderStorage } from "../oauth-provider-storage";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
 
@@ -107,11 +108,13 @@ export class SelectorController {
 	}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
-		const oauthProviders = getOAuthProviders();
+		const storageProviders = new Set(
+			getOAuthProviders().map(provider => resolveOAuthProviderStorage(provider.id).provider),
+		);
 		await Promise.all(
-			oauthProviders.map(provider =>
+			[...storageProviders].map(provider =>
 				this.ctx.session.modelRegistry
-					.getApiKeyForProvider(provider.id, this.ctx.session.sessionId)
+					.getApiKeyForProvider(provider, this.ctx.session.sessionId)
 					.catch(() => undefined),
 			),
 		);
@@ -1485,14 +1488,11 @@ export class SelectorController {
 				// focus (#5339).
 				onManualCodeInput: useManualInput ? () => dialog.showManualInput(MANUAL_LOGIN_PROMPT) : undefined,
 			});
-			// Scope the post-login refresh to the just-authenticated provider with an
-			// `online` strategy: the default all-provider `online-if-uncached` reuses
-			// a fresh authoritative cache row (e.g. an empty result fetched before
-			// login), so newly persisted credentials would never re-run discovery and
-			// models would stay unavailable in-session (#5780). Unrelated providers
-			// are left untouched. `refreshProvider` swallows discovery failures, so
-			// awaiting cannot reject the login.
-			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			// Scope the post-login refresh to the credential's canonical storage
+			// provider. Login aliases such as Anthropic Cowork and headless Codex
+			// do not have their own model registry namespace.
+			const target = resolveOAuthProviderStorage(providerId);
+			await this.ctx.session.modelRegistry.refreshProvider(target.provider, "online");
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -1526,7 +1526,8 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			const removed = await authStorage.removeCredential(providerId, account.credentialId);
+			const target = resolveOAuthProviderStorage(providerId);
+			const removed = await authStorage.removeCredential(target.provider, account.credentialId);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
 				return;
@@ -1537,7 +1538,7 @@ export class SelectorController {
 			// default all-provider `online-if-uncached` would reuse the fresh
 			// authoritative cache row and keep showing models the credential
 			// unlocked (#5780). Other providers are left untouched.
-			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
+			await this.ctx.session.modelRegistry.refreshProvider(target.provider, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
@@ -1550,7 +1551,10 @@ export class SelectorController {
 				),
 			);
 			block.addChild(new Text(theme.fg("dim", `Credential removed from ${getAgentDbPath()}`), 1, 0));
-			const remainingSource = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
+			const remainingSource =
+				target.clientProfile === undefined
+					? authStorage.describeCredentialSource(target.provider, this.ctx.session.sessionId)
+					: undefined;
 			if (remainingSource) {
 				block.addChild(
 					new Text(theme.fg("warning", `${providerId} is still authenticated via ${remainingSource}`), 1, 0),
@@ -1573,12 +1577,29 @@ export class SelectorController {
 			return;
 		}
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
-		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
-			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
-			activeApiKey: authStorage.getCredentialOrigin(providerId)?.kind === "api_key",
-		});
+		const target = resolveOAuthProviderStorage(providerId);
+		const activeProfile = target.clientProfile ? authStorage.getActiveOAuthClientProfile(target.provider) : undefined;
+		const accounts = toLogoutAccounts(
+			providerId,
+			authStorage.listStoredCredentials(
+				target.provider,
+				target.clientProfile ? { clientProfile: target.clientProfile } : undefined,
+			),
+			{
+				activeIdentity:
+					target.clientProfile === undefined || activeProfile === target.clientProfile
+						? authStorage.getOAuthAccountIdentity(target.provider, this.ctx.session.sessionId)
+						: undefined,
+				activeApiKey:
+					target.clientProfile === undefined &&
+					authStorage.getCredentialOrigin(target.provider)?.kind === "api_key",
+			},
+		);
 		if (accounts.length === 0) {
-			const source = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);
+			const source =
+				target.clientProfile === undefined
+					? authStorage.describeCredentialSource(target.provider, this.ctx.session.sessionId)
+					: undefined;
 			const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
 			this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
 			return;
@@ -1614,9 +1635,12 @@ export class SelectorController {
 		if (mode === "logout") {
 			await this.#refreshOAuthProviderAuthState();
 			const oauthProviders = getOAuthProviders();
-			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.has(provider.id),
-			);
+			const loggedInProviders = oauthProviders.filter(provider => {
+				const target = resolveOAuthProviderStorage(provider.id);
+				return target.clientProfile
+					? this.ctx.session.modelRegistry.authStorage.hasOAuthClientProfile(target.provider, target.clientProfile)
+					: this.ctx.session.modelRegistry.authStorage.has(target.provider);
+			});
 			if (loggedInProviders.length === 0) {
 				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
 				return;
@@ -1644,8 +1668,18 @@ export class SelectorController {
 				},
 				{
 					validateAuth: async (selectedProviderId: string) => {
+						const target = resolveOAuthProviderStorage(selectedProviderId);
+						if (
+							target.clientProfile &&
+							!this.ctx.session.modelRegistry.authStorage.hasOAuthClientProfile(
+								target.provider,
+								target.clientProfile,
+							)
+						) {
+							return false;
+						}
 						const apiKey = await this.ctx.session.modelRegistry.getApiKeyForProvider(
-							selectedProviderId,
+							target.provider,
 							this.ctx.session.sessionId,
 						);
 						return !!apiKey;

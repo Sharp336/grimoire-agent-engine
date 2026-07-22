@@ -10,8 +10,10 @@
  */
 import { $env } from "@oh-my-pi/pi-utils";
 import {
+	type AnthropicClientProfile,
 	buildAnthropicHeaders as buildProviderAnthropicHeaders,
 	normalizeAnthropicBaseUrl,
+	resolveAnthropicClientProfile,
 	resolveAnthropicCustomHeadersForBaseUrl,
 } from "../providers/anthropic";
 import { isFoundryEnabled } from "./foundry";
@@ -21,6 +23,7 @@ export interface AnthropicAuthConfig {
 	apiKey: string;
 	baseUrl: string;
 	isOAuth: boolean;
+	clientProfile?: AnthropicClientProfile;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -43,7 +46,14 @@ export function resolveAnthropicBaseUrlFromEnv(): string | undefined {
  * Checks if a token is an OAuth token by looking for sk-ant-oat prefix.
  */
 export function isOAuthToken(apiKey: string): boolean {
-	return apiKey.includes("sk-ant-oat");
+	if (apiKey.includes("sk-ant-oat")) return true;
+	if (!apiKey.startsWith("{")) return false;
+	try {
+		const credential = JSON.parse(apiKey) as Record<string, unknown>;
+		return credential.clientProfile === "cowork" && typeof credential.token === "string";
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -62,6 +72,7 @@ export function buildAnthropicAuthConfig(apiKey: string, baseUrl?: string): Anth
 		apiKey,
 		baseUrl: normalizeBaseUrl(baseUrl) ?? resolveAnthropicBaseUrlFromEnv() ?? DEFAULT_BASE_URL,
 		isOAuth: isOAuthToken(apiKey),
+		clientProfile: resolveAnthropicClientProfile(apiKey),
 	};
 }
 
@@ -77,6 +88,7 @@ export function buildAnthropicSearchHeaders(auth: AnthropicAuthConfig): Record<s
 		apiKey: auth.apiKey,
 		baseUrl: auth.baseUrl,
 		isOAuth: auth.isOAuth,
+		clientProfile: auth.clientProfile,
 		extraBetas: ["web-search-2025-03-05"],
 		stream: false,
 		modelHeaders: resolveAnthropicCustomHeadersForBaseUrl(auth.baseUrl),

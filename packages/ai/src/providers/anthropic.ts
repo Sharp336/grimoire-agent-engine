@@ -95,13 +95,15 @@ export type AnthropicHeaderOptions = {
 	baseUrl?: string;
 	isOAuth?: boolean;
 	extraBetas?: string[];
+	claudeCodeBetas?: readonly string[];
 	stream?: boolean;
 	modelHeaders?: Record<string, string>;
-	isCloudflareAiGateway?: boolean;
 	claudeCodeSessionId?: string;
-	claudeCodeBetas?: readonly string[];
-	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
+	isCloudflareAiGateway?: boolean;
+	/** Allow caller-provided headers to replace enforced OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
+	/** Parsed client identity for callers that already resolved a structured credential. */
+	clientProfile?: AnthropicClientProfile;
 };
 
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -148,6 +150,32 @@ const claudeCodeAgentBetaDefaults = [
 ] as const;
 const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
 const claudeCodeAgentPostEffortBetas = [extendedCacheTtlBeta] as const;
+const coworkUtilityBetaDefaults = [
+	"claude-code-20250219",
+	"oauth-2025-04-20",
+	"context-1m-2025-08-07",
+	"interleaved-thinking-2025-05-14",
+	"thinking-token-count-2026-05-13",
+	contextManagementBeta,
+	"prompt-caching-scope-2026-01-05",
+	midConversationSystemBeta,
+	"advisor-tool-2026-03-01",
+	"effort-2025-11-24",
+	structuredOutputsBeta,
+] as const;
+const coworkAgentBetaDefaults = [
+	"claude-code-20250219",
+	"oauth-2025-04-20",
+	"context-1m-2025-08-07",
+	"interleaved-thinking-2025-05-14",
+	"thinking-token-count-2026-05-13",
+	contextManagementBeta,
+	"prompt-caching-scope-2026-01-05",
+	midConversationSystemBeta,
+	"advisor-tool-2026-03-01",
+	"effort-2025-11-24",
+	extendedCacheTtlBeta,
+] as const;
 const fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
 const interleavedThinkingBeta = "interleaved-thinking-2025-05-14";
 // Asks the API to redact thinking blocks from responses. Only sent when the
@@ -179,6 +207,10 @@ function buildClaudeCodeBetas(
 	return betas;
 }
 
+function buildCoworkBetas(agentRequest: boolean): readonly string[] {
+	return agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults;
+}
+
 function getHeaderCaseInsensitive(headers: Record<string, string> | undefined, headerName: string): string | undefined {
 	if (!headers) return undefined;
 	const normalizedName = headerName.toLowerCase();
@@ -193,6 +225,36 @@ function isClaudeCodeClientUserAgent(userAgent: string | undefined): userAgent i
 	return userAgent.toLowerCase().startsWith("claude-cli");
 }
 
+export type AnthropicClientProfile = "claude-code" | "cowork";
+
+interface StructuredAnthropicCredential {
+	token: string;
+	clientProfile: AnthropicClientProfile;
+}
+
+function parseStructuredAnthropicCredential(apiKey: string): StructuredAnthropicCredential | undefined {
+	if (!apiKey.startsWith("{")) return undefined;
+	try {
+		const value = JSON.parse(apiKey) as Record<string, unknown>;
+		if (
+			typeof value.token === "string" &&
+			(value.clientProfile === "claude-code" || value.clientProfile === "cowork")
+		) {
+			return { token: value.token, clientProfile: value.clientProfile };
+		}
+	} catch {}
+	return undefined;
+}
+
+export function resolveAnthropicClientProfile(apiKey: string): AnthropicClientProfile | undefined {
+	return parseStructuredAnthropicCredential(apiKey)?.clientProfile;
+}
+
+function isAnthropicCredentialOAuth(apiKey: string): boolean {
+	const credential = parseStructuredAnthropicCredential(apiKey);
+	return credential !== undefined || isAnthropicOAuthToken(apiKey);
+}
+
 const sharedHeaders = {
 	"Accept-Encoding": "gzip, deflate, br, zstd",
 	Connection: "keep-alive",
@@ -203,8 +265,17 @@ const sharedHeaders = {
 };
 
 export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<string, string> {
-	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
-	const extraBetas = options.extraBetas ?? [];
+	const structuredCredential = parseStructuredAnthropicCredential(options.apiKey);
+	const apiKey = structuredCredential?.token ?? options.apiKey;
+	const clientProfile = options.clientProfile ?? structuredCredential?.clientProfile ?? "claude-code";
+	const oauthToken = options.isOAuth ?? isAnthropicCredentialOAuth(apiKey);
+	const baseBetas =
+		options.claudeCodeBetas ??
+		(oauthToken
+			? clientProfile === "cowork"
+				? buildCoworkBetas(false)
+				: buildClaudeCodeBetas(true, true, false)
+			: []);
 	const stream = options.stream ?? false;
 	// `enforcedHeaderKeys` strips User-Agent / X-Api-Key / Authorization out of
 	// modelHeaders so a case-insensitive spread can't produce duplicate keys; each
@@ -221,10 +292,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	// Claude Code betas (oauth-2025-04-20, claude-code-20250219, …) are part of
 	// the OAuth fingerprint; API-key requests default to extras only, matching
 	// the streaming path (buildAnthropicClientOptions passes [] for non-OAuth).
-	const betaHeader = buildBetaHeader(
-		options.claudeCodeBetas ?? (oauthToken ? buildClaudeCodeBetas(true, true, false) : []),
-		extraBetas,
-	);
+	const betaHeader = buildBetaHeader(baseBetas, options.extraBetas ?? []);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
 	const isCloudflare = options.isCloudflareAiGateway ?? false;
 	const honorAuthorization = !oauthToken && !isCloudflare;
@@ -280,18 +348,21 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	}
 
 	if (oauthToken) {
+		const fingerprintHeaders = clientProfile === "cowork" ? coworkHeaders : claudeCodeHeaders;
 		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent)
 			? incomingUserAgent
-			: `claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`;
+			: clientProfile === "cowork"
+				? `claude-cli/${coworkClaudeCodeVersion} (external, local-agent)`
+				: `claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`;
 		const headers = {
 			...modelHeaders,
-			...claudeCodeHeaders,
+			...fingerprintHeaders,
 			Accept: acceptHeader,
-			Authorization: `Bearer ${options.apiKey}`,
+			Authorization: `Bearer ${apiKey}`,
 			...sharedHeaders,
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			...(options.claudeCodeSessionId ? { "X-Claude-Code-Session-Id": options.claudeCodeSessionId } : {}),
-			"x-client-request-id": nodeCrypto.randomUUID(),
+			...(clientProfile === "claude-code" ? { "x-client-request-id": nodeCrypto.randomUUID() } : {}),
 			"User-Agent": userAgent,
 			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
 		};
@@ -463,6 +534,7 @@ function getCacheControl(
 
 // Stealth mode: mimic Claude Code's request fingerprint.
 export const claudeCodeVersion = "2.1.165";
+export const coworkClaudeCodeVersion = "2.1.217";
 export const claudeAgentSdkVersion = "0.3.165";
 export const claudeClientVersion = "1.11187.4";
 export const claudeToolPrefix: string = "_";
@@ -518,9 +590,21 @@ export const claudeCodeHeaders = {
 	"anthropic-client-version": claudeClientVersion,
 };
 
+export const coworkHeaders = {
+	"X-Stainless-Retry-Count": "0",
+	"X-Stainless-Runtime-Version": "v26.3.0",
+	"X-Stainless-Package-Version": "0.94.0",
+	"X-Stainless-Runtime": "node",
+	"X-Stainless-Lang": "js",
+	"X-Stainless-Arch": mapStainlessArch(process.arch),
+	"X-Stainless-OS": mapStainlessOs(process.platform),
+	"X-Stainless-Timeout": "600",
+};
+
 const enforcedHeaderKeys = new Set(
 	[
 		...Object.keys(claudeCodeHeaders),
+		...Object.keys(coworkHeaders),
 		"Accept",
 		"Accept-Encoding",
 		"Connection",
@@ -544,19 +628,16 @@ const overridableAnthropicHeaderKeys = new Set(
 
 const CLAUDE_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 
-function createClaudeBillingHeader(firstUserMessageText: string): string {
+function createClaudeBillingHeader(firstUserMessageText: string, clientProfile: AnthropicClientProfile): string {
+	const version = clientProfile === "cowork" ? coworkClaudeCodeVersion : claudeCodeVersion;
 	// Fingerprint: SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]
 	// Matches CC's computeFingerprint in utils/fingerprint.ts.
 	// Uses chars from the first user message (not the system prompt).
 	const k = [4, 7, 20].map(i => firstUserMessageText[i] ?? "0").join("");
-	const versionSuffix = nodeCrypto
-		.createHash("sha256")
-		.update(`59cf53e54c78${k}${claudeCodeVersion}`)
-		.digest("hex")
-		.slice(0, 3);
+	const versionSuffix = nodeCrypto.createHash("sha256").update(`59cf53e54c78${k}${version}`).digest("hex").slice(0, 3);
 	// cch=00000: placeholder replaced with the real attestation hash by wrapFetchForCch
 	// before the request hits the wire (see below).
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=local-agent; ${CCH_PLACEHOLDER_STR};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=local-agent; ${CCH_PLACEHOLDER_STR};`;
 }
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
@@ -1789,6 +1870,7 @@ const streamAnthropicOnce = (
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
+			const clientProfile = parseStructuredAnthropicCredential(apiKey)?.clientProfile ?? "claude-code";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
@@ -1888,7 +1970,7 @@ const streamAnthropicOnce = (
 				// already carry it in the Claude Code beta list, and utility
 				// requests must not deviate from CC's header fingerprint.
 				if (
-					!(options?.isOAuth ?? isAnthropicOAuthToken(apiKey)) &&
+					!(options?.isOAuth ?? isAnthropicCredentialOAuth(apiKey)) &&
 					getCacheControl(model, options?.cacheRetention, false).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
@@ -1943,6 +2025,7 @@ const streamAnthropicOnce = (
 					forceDemoteUnsignedThinking,
 					supportsEagerToolInputStreaming,
 					fallbacks,
+					clientProfile,
 				});
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
@@ -2685,6 +2768,7 @@ type SystemBlockOptions = {
 	/** Text of the first user message — used as fingerprint seed for the billing header. */
 	firstUserMessageText?: string;
 	cacheControl?: AnthropicCacheControl;
+	clientProfile?: AnthropicClientProfile;
 };
 
 function applyClaudeCodeSystemCache(
@@ -2702,14 +2786,20 @@ export function buildAnthropicSystemBlocks(
 	systemPrompt: readonly string[] | undefined,
 	options: SystemBlockOptions = {},
 ): AnthropicSystemBlock[] | undefined {
-	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText, cacheControl } = options;
+	const {
+		includeClaudeCodeInstruction = false,
+		extraInstructions = [],
+		firstUserMessageText,
+		cacheControl,
+		clientProfile = "claude-code",
+	} = options;
 	const sanitizedPrompts = normalizeSystemPrompts(systemPrompt);
 	const trimmedInstructions = extraInstructions.map(instruction => instruction.trim()).filter(Boolean);
 	const hasBillingHeader = sanitizedPrompts.some(prompt => prompt.startsWith(CLAUDE_BILLING_HEADER_PREFIX));
 
 	if (includeClaudeCodeInstruction && !hasBillingHeader) {
 		const blocks: AnthropicSystemBlock[] = [
-			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "") },
+			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "", clientProfile) },
 			{ type: "text", text: claudeCodeSystemInstruction },
 		];
 
@@ -2760,11 +2850,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		claudeCodeSessionId,
 		disableStrictTools: disableStrictToolsOverride,
 	} = args;
+	const structuredCredential = parseStructuredAnthropicCredential(apiKey);
+	const bearer = structuredCredential?.token ?? apiKey;
 	const compat = model.compat;
 	const disableStrictTools = disableStrictToolsOverride ?? compat.disableStrictTools;
 	const needsInterleavedBeta = interleavedThinking && !model.thinking?.supportsDisplay;
-	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
-	const baseUrl = resolveAnthropicBaseUrl(model, apiKey);
+	const oauthToken = isOAuth ?? isAnthropicOAuthToken(bearer);
+	const baseUrl = resolveAnthropicBaseUrl(model, bearer);
 	const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 	const needsFineGrainedToolStreamingBeta =
 		hasTools && isOfficialAnthropicApiUrl(baseUrl) && !supportsEagerToolInputStreaming;
@@ -2835,12 +2927,14 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
 		claudeCodeSessionId,
 		claudeCodeBetas: oauthToken
-			? buildClaudeCodeBetas(
-					hasTools || thinkingEnabled,
-					thinkingEnabled,
-					thinkingDisplay === "omitted",
-					disableStrictTools,
-				)
+			? structuredCredential?.clientProfile === "cowork"
+				? buildCoworkBetas(hasTools || thinkingEnabled)
+				: buildClaudeCodeBetas(
+						hasTools || thinkingEnabled,
+						thinkingEnabled,
+						thinkingDisplay === "omitted",
+						disableStrictTools,
+					)
 			: [],
 	});
 
@@ -2900,7 +2994,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	return {
 		isOAuthToken: oauthToken,
 		apiKey: oauthToken || shouldSuppressClientApiKey ? null : apiKey,
-		authToken: oauthToken ? apiKey : undefined,
+		authToken: oauthToken ? bearer : undefined,
 		baseURL: baseUrl,
 		maxRetries: 5,
 		defaultHeaders,
@@ -3218,6 +3312,7 @@ type AnthropicParamBuildOptions = {
 	supportsEagerToolInputStreaming: boolean;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
+	clientProfile: AnthropicClientProfile;
 };
 
 function buildParams(
@@ -3233,6 +3328,7 @@ function buildParams(
 		forceDemoteUnsignedThinking,
 		supportsEagerToolInputStreaming,
 		fallbacks = options?.fallbacks,
+		clientProfile,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
 	// resolved compat with `replayUnsignedThinking: false` so every subsequent
@@ -3252,6 +3348,7 @@ function buildParams(
 	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
+		clientProfile,
 	});
 
 	// Pre-compute tools.
