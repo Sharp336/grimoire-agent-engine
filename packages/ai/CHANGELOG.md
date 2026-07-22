@@ -5,6 +5,7 @@
 ### Added
 
 - Added Qoder browser OAuth login, token refresh, client-attribution headers, provider-scoped folded-SSE repair, and `/fast` high-speed routing for Kimi-K2.7-Code.
+- Added Qoder's WASM-signed api3 transport: the six api3-only families stream through the user's installed qodercli auth module (runtime-located, SHA-256 pinned, fail-closed, never bundled), with per-credential identity resolution and context leases.
 
 ### Changed
 

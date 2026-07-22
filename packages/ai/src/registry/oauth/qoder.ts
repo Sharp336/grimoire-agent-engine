@@ -5,10 +5,12 @@ import type { FetchImpl } from "../../types";
 import { pollOAuthDeviceCodeFlow } from "./device-code";
 import type { OAuthController, OAuthCredentials } from "./types";
 
-const CLI_VERSION = "1.1.2";
+/** Qoder CLI version advertised in `Cosy-Version` and the token `User-Agent`. */
+export const QODER_CLI_VERSION = "1.1.2";
 const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
 const WEB_BASE = process.env.QODER_WEB_BASE?.trim() || "https://qoder.com";
-const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
+/** OpenAPI host: device-token flow, and `/api/v1/userinfo` for the api3 identity chain. */
+export const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
 const SKEW_MS = 60_000;
 const TOKEN_REQUEST_TIMEOUT_MS = 20_000;
 /**
@@ -110,7 +112,7 @@ export async function refreshQoderToken(refresh: string, fetchOverride?: FetchIm
 		headers: {
 			"Content-Type": "application/json",
 			Accept: "application/json",
-			"User-Agent": `qoder/${CLI_VERSION}`,
+			"User-Agent": `qoder/${QODER_CLI_VERSION}`,
 		},
 		body: JSON.stringify({ refresh_token: refresh }),
 		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
@@ -152,7 +154,7 @@ export let getQoderCommonHeaders = (): Record<string, string> => {
 	const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
 	const headers = Object.freeze({
 		"Cosy-ClientType": "5",
-		"Cosy-Version": CLI_VERSION,
+		"Cosy-Version": QODER_CLI_VERSION,
 		"Cosy-MachineOS": `${arch}_${process.platform}`,
 		"Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY,
 	});

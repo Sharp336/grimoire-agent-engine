@@ -370,6 +370,16 @@ export interface OpenAICompat {
 	/** Normalize tool call ids to OpenAI's 40-character limit. Default: auto-detected. */
 	usesOpenAIToolCallIdLimit?: boolean;
 	/**
+	 * The model is served only by Qoder's WASM-signed api3 transport (the six
+	 * api3-only families: cmodel, qmodel_preview, qmodel_latest, kmodel_latest,
+	 * gm51model, dfmodel, plus their context aliases). Authored by the Qoder
+	 * curated seed; never auto-detected. Stream dispatch routes these rows to
+	 * the api3 transport, and the coding-agent gates them out of the effective
+	 * model list when the user's installed auth WASM is unavailable. Default:
+	 * false.
+	 */
+	api3?: boolean;
+	/**
 	 * Compat deltas applied when a request actually engages thinking mode
 	 * (reasoning requested and not disabled, model reasoning-capable, and not
 	 * suppressed by a forced tool choice). `buildModel` materializes the full
@@ -597,6 +607,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
 			| "enableGeminiThinkingLoopGuard"
+			| "api3"
 			| "whenThinking"
 		>
 	> & {
@@ -609,6 +620,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
+		/** See {@link OpenAICompat.api3}. Materialized from the spec; never detected. */
+		api3?: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
 	};

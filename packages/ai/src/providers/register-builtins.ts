@@ -20,6 +20,7 @@ import type {
 	Context,
 	Model,
 	OptionsForApi,
+	SimpleStreamOptions,
 } from "../types";
 import { type AbortSourceTracker, createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream as EventStreamImpl } from "../utils/event-stream";
@@ -107,6 +108,14 @@ interface OpenAICompletionsProviderModule {
 	) => AssistantMessageEventStream;
 }
 
+interface QoderApi3ProviderModule {
+	streamQoderApi3: (
+		model: Model<"openai-completions">,
+		context: Context,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream;
+}
+
 interface OpenAIResponsesProviderModule {
 	streamOpenAIResponses: (
 		model: Model<"openai-responses">,
@@ -154,6 +163,7 @@ let googleGeminiCliProviderModulePromise: Promise<LazyProviderModule<"google-gem
 let googleVertexProviderModulePromise: Promise<LazyProviderModule<"google-vertex">> | undefined;
 let openAICodexResponsesProviderModulePromise: Promise<LazyProviderModule<"openai-codex-responses">> | undefined;
 let openAICompletionsProviderModulePromise: Promise<LazyProviderModule<"openai-completions">> | undefined;
+let qoderApi3ProviderModulePromise: Promise<LazyProviderModule<"openai-completions">> | undefined;
 let openAIResponsesProviderModulePromise: Promise<LazyProviderModule<"openai-responses">> | undefined;
 let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | undefined;
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
@@ -406,6 +416,17 @@ function loadOpenAICompletionsProviderModule(): Promise<LazyProviderModule<"open
 	return openAICompletionsProviderModulePromise;
 }
 
+function loadQoderApi3ProviderModule(): Promise<LazyProviderModule<"openai-completions">> {
+	qoderApi3ProviderModulePromise ||= import("./qoder-api3").then(module => {
+		const provider = module as QoderApi3ProviderModule;
+		return {
+			stream: (model, context, options) =>
+				provider.streamQoderApi3(model, context, options as SimpleStreamOptions | undefined),
+		};
+	});
+	return qoderApi3ProviderModulePromise;
+}
+
 function loadOpenAIResponsesProviderModule(): Promise<LazyProviderModule<"openai-responses">> {
 	openAIResponsesProviderModulePromise ||= import("./openai-responses").then(module => {
 		const provider = module as OpenAIResponsesProviderModule;
@@ -479,6 +500,9 @@ export const streamOpenAICompletions = createLazyStream(
 	loadOpenAICompletionsProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
+// The api3 transport has no idle watchdog of its own, so the generic lazy-stream
+// first-event/idle limits apply (unlike the self-policing openai-completions).
+export const streamQoderApi3 = createLazyStream(loadQoderApi3ProviderModule);
 export const streamOpenAIResponses = createLazyStream(
 	loadOpenAIResponsesProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
