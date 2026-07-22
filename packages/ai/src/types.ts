@@ -135,7 +135,7 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google" | "qoder";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "id">;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "id" | "requestModelId">;
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
@@ -152,7 +152,10 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 }
 
 export function isQoderFastModel(model: ServiceTierModel): boolean {
-	return model.provider === "qoder" && model.id.toLowerCase() === "kmodel";
+	// Prefer the wire id so local aliases that rewrite to kmodel still classify
+	// as the Qoder fast/priority family (matches highspeed injection).
+	const wireId = (model.requestModelId ?? model.id).toLowerCase();
+	return model.provider === "qoder" && wireId === "kmodel";
 }
 
 /**
@@ -205,7 +208,7 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
  */
 export function resolveModelServiceTier(
 	tiers: ServiceTierByFamily | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): ServiceTier | undefined {
 	if (!tiers) return undefined;
 	const family = serviceTierFamily(model);
@@ -253,7 +256,7 @@ export function shouldSendServiceTier(
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;

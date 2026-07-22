@@ -1106,6 +1106,49 @@ describe("ModelRegistry", () => {
 			expect(compat?.extraBody).toEqual({ source: "proxy" });
 		});
 
+		test("replace-mode same-id overlay clears omitted requestModelId wire rewrite", () => {
+			expect(sharedBuiltin.find("qoder", "ultimate-1m")?.requestModelId).toBe("ultimate");
+			const registry = readonlyRegistry({
+				providers: {
+					qoder: {
+						baseUrl: "https://api2-v2.qoder.sh/model/v1",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						models: [
+							{
+								id: "ultimate-1m",
+								name: "Ultimate Real",
+								reasoning: true,
+								input: ["text", "image"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 32_768,
+							},
+						],
+					},
+				},
+			});
+			expect(registry.find("qoder", "ultimate-1m")?.requestModelId).toBeUndefined();
+		});
+
+		test("merge-mode modelOverrides retain bundled requestModelId when omitted", () => {
+			expect(sharedBuiltin.find("openai", "gpt-5.6-luna-pro")?.requestModelId).toBe("gpt-5.6-luna");
+			const registry = readonlyRegistry({
+				providers: {
+					openai: {
+						modelOverrides: {
+							"gpt-5.6-luna-pro": {
+								name: "Luna Pro Override",
+							},
+						},
+					},
+				},
+			});
+			const model = registry.find("openai", "gpt-5.6-luna-pro");
+			expect(model?.name).toBe("Luna Pro Override");
+			expect(model?.requestModelId).toBe("gpt-5.6-luna");
+		});
+
 		test("removing custom models from models.json keeps built-in provider models", async () => {
 			writeModelsJson({
 				anthropic: providerConfig("https://proxy.example.com/v1", [{ id: "claude-custom" }]),

@@ -9,10 +9,16 @@ import {
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
 
-const m = (provider: string, api: Api, id: string): { provider: string; api: Api; id: string } => ({
+const m = (
+	provider: string,
+	api: Api,
+	id: string,
+	requestModelId?: string,
+): { provider: string; api: Api; id: string; requestModelId?: string } => ({
 	provider,
 	api,
 	id,
+	...(requestModelId !== undefined ? { requestModelId } : {}),
 });
 
 const openai = m("openai", "openai-responses", "gpt-5");
@@ -72,10 +78,19 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(qoderKmodel)).toBe("qoder");
 	});
 
+	it("classifies local aliases whose wire id is kmodel as qoder", () => {
+		const alias = m("qoder", "openai-completions", "kimi-local", "kmodel");
+		expect(serviceTierFamily(alias)).toBe("qoder");
+		expect(resolveModelServiceTier({ qoder: "priority" }, alias)).toBe("priority");
+		expect(realizesPriorityServiceTier("priority", alias)).toBe(true);
+	});
+
 	it("leaves other qoder models unclassified", () => {
 		expect(serviceTierFamily(qoderAuto)).toBeUndefined();
 		expect(serviceTierFamily(qoderUltimate)).toBeUndefined();
 		expect(serviceTierFamily(qoderKmodelLatest)).toBeUndefined();
+		// Local id kmodel with a non-kmodel wire id must not classify as qoder.
+		expect(serviceTierFamily(m("qoder", "openai-completions", "kmodel", "kmodel_latest"))).toBeUndefined();
 	});
 });
 

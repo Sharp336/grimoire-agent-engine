@@ -45,6 +45,8 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	SERVICE_TIER_QODER_OPTIONS,
+	SERVICE_TIER_QODER_VALUES,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -1382,6 +1384,20 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.",
 			options: SERVICE_TIER_GOOGLE_OPTIONS,
+		},
+	},
+
+	"tier.qoder": {
+		type: "enum",
+		values: SERVICE_TIER_QODER_VALUES,
+		default: "none",
+		ui: {
+			tab: "model",
+			group: "Sampling",
+			label: "Service Tier — Qoder",
+			description:
+				"Processing tier for Qoder Kimi-K2.7-Code (`kmodel`). `priority` realizes highspeed metadata; ignored on other Qoder models.",
+			options: SERVICE_TIER_QODER_OPTIONS,
 		},
 	},
 
