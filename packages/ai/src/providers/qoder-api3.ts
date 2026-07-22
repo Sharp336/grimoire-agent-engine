@@ -21,11 +21,13 @@
 
 import { randomUUID } from "node:crypto";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { fetchWithRetry, readSseEvents } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
 import { OPENAPI_BASE, QODER_CLI_VERSION, repairQoderSseBody } from "../registry/oauth/qoder";
 import {
 	getQoderMachineId,
 	getQoderWasmBridge,
+	type QoderPreparedRequest,
 	type QoderWasmBridge,
 	type QoderWasmContext,
 } from "../registry/oauth/qoder-wasm";
@@ -35,6 +37,7 @@ import type {
 	Context,
 	FetchImpl,
 	Model,
+	RawSseEvent,
 	SimpleStreamOptions,
 	StopReason,
 	TextContent,
@@ -43,8 +46,10 @@ import type {
 	ToolChoice,
 	Usage,
 } from "../types";
+import { raceWithSignal } from "../utils/abort";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
+import { notifyRawSseEvent } from "../utils/sse-debug";
 import { convertMessages, parseChunkUsage } from "./openai-completions";
 
 /**
@@ -56,6 +61,7 @@ export const QODER_API3_BASE = process.env.QODER_API3_BASE?.trim() || "https://a
 
 /** Output cap sent as `parameters.max_tokens` when the caller sets none. */
 const API3_DEFAULT_MAX_TOKENS = 32_768;
+const API3_MAX_ATTEMPTS = 6;
 
 /** Window assumed when a catalog row carries a null contextWindow (all api3 families are 200k-base). */
 const API3_DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -358,6 +364,7 @@ async function processApi3Stream(
 	stream: AssistantMessageEventStream,
 	onFirstToken: () => void,
 	signal: AbortSignal | undefined,
+	onSseEvent: ((event: RawSseEvent) => void) | undefined,
 ): Promise<void> {
 	const { output } = state;
 
@@ -573,42 +580,22 @@ async function processApi3Stream(
 		if (!isRecord(chunk)) return;
 		handleChunk(chunk);
 		if (
-			state.errorMessage === undefined &&
 			typeof envelope.statusCodeValue === "number" &&
 			envelope.statusCodeValue >= 400 &&
 			!Array.isArray(chunk.choices)
 		) {
+			state.output.errorStatus = envelope.statusCodeValue;
 			state.stopReason = "error";
-			state.errorMessage = `Qoder api3 request failed (${envelope.statusCodeValue}): ${bodyText.slice(0, 500)}`;
+			state.errorMessage ??= `Qoder api3 request failed (${envelope.statusCodeValue}): ${bodyText.slice(0, 500)}`;
 		}
 	};
 
-	const reader = deps.repair(body).getReader();
-	const decoder = new TextDecoder();
-	let buffered = "";
-	try {
-		while (true) {
-			if (signal?.aborted === true) throw new DOMException("The operation was aborted.", "AbortError");
-			const { done, value } = await reader.read();
-			buffered += decoder.decode(value, { stream: !done });
-			let frameEnd = buffered.indexOf("\n\n");
-			while (frameEnd !== -1) {
-				const frame = buffered.slice(0, frameEnd);
-				buffered = buffered.slice(frameEnd + 2);
-				for (const line of frame.split("\n")) {
-					if (line.startsWith("data:")) handleDataPayload(line.slice(5));
-				}
-				frameEnd = buffered.indexOf("\n\n");
-			}
-			if (done) break;
-		}
-		if (buffered.trim().length > 0) {
-			for (const line of buffered.split("\n")) {
-				if (line.startsWith("data:")) handleDataPayload(line.slice(5));
-			}
-		}
-	} finally {
-		await reader.cancel().catch(() => {});
+	for await (const event of readSseEvents(deps.repair(body), signal)) {
+		notifyRawSseEvent(onSseEvent, event);
+		handleDataPayload(event.data);
+	}
+	if (signal?.aborted === true && (!state.sawDone || !state.sawFinishReason)) {
+		throw new DOMException("The operation was aborted.", "AbortError");
 	}
 }
 
@@ -642,7 +629,6 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 	const acquireContext = (
 		apiKey: string,
 		fetchImpl: FetchImpl,
-		signal: AbortSignal | undefined,
 	): { promise: Promise<QoderWasmContext>; release: () => void } => {
 		const cached = contexts.get(apiKey);
 		if (cached !== undefined) {
@@ -662,7 +648,6 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 						Authorization: `Bearer ${apiKey}`,
 						Accept: "application/json",
 					},
-					signal: signal ?? null,
 				});
 				if (!response.ok) {
 					// Preserve the HTTP status on the thrown error so auth retry can
@@ -827,9 +812,9 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			emitTerminalError("error", "Qoder api3 requires a Qoder OAuth credential");
 			return;
 		}
-		const lease = acquireContext(apiKey, fetchImpl, options?.signal);
+		const lease = acquireContext(apiKey, fetchImpl);
 		try {
-			const ctx = await lease.promise;
+			const ctx = await raceWithSignal(lease.promise, options?.signal);
 			deps.onContext?.(ctx, options?.fetch);
 
 			let body = buildQoderApi3Body({
@@ -843,13 +828,25 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 				const mutated = await options.onPayload(body, model);
 				if (isRecord(mutated)) body = mutated;
 			}
-			const prepared = ctx.prepareInferRequest(deps.api3Base, JSON.stringify(body), route.wireId, "system");
-			const response = await fetchImpl(prepared.url, {
-				method: "POST",
-				headers: prepared.headers,
-				body: prepared.body ?? "",
-				signal: options?.signal ?? null,
-			});
+			const plaintext = JSON.stringify(body);
+			let prepared: QoderPreparedRequest | undefined;
+			const response = await fetchWithRetry(
+				() => {
+					prepared = ctx.prepareInferRequest(deps.api3Base, plaintext, route.wireId, "system");
+					return prepared.url;
+				},
+				{
+					method: "POST",
+					signal: options?.signal,
+					fetch: fetchImpl,
+					maxAttempts: API3_MAX_ATTEMPTS,
+					timeout: false,
+					prepareInit: () => {
+						if (prepared === undefined) throw new Error("Qoder api3 request was not prepared");
+						return { headers: prepared.headers, body: prepared.body ?? "" };
+					},
+				},
+			);
 			if (options?.onResponse !== undefined) {
 				const headers: Record<string, string> = {};
 				response.headers.forEach((value, key) => {
@@ -868,7 +865,16 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			}
 
 			stream.push({ type: "start", partial: output });
-			await processApi3Stream(response.body, deps, route, state, stream, onFirstToken, options?.signal);
+			await processApi3Stream(
+				response.body,
+				deps,
+				route,
+				state,
+				stream,
+				onFirstToken,
+				options?.signal,
+				options?.onSseEvent ? event => options.onSseEvent?.(event, model) : undefined,
+			);
 
 			// Terminal: close any open block, finish pending tool calls, then
 			// promote a natural stop with tool calls to toolUse (mirrors the
