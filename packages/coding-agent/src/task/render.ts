@@ -709,29 +709,6 @@ function agentTypeBadge(agent: string | undefined, theme: Theme): string {
 	return ` ${theme.fg("dim", `${theme.format.bracketLeft}${trimmed}${theme.format.bracketRight}`)}`;
 }
 
-type IsolationDisplayInput = { isolated?: boolean; apply?: boolean };
-
-function isolationMeta(input: IsolationDisplayInput | undefined): string | undefined {
-	if (input?.isolated !== true) return undefined;
-	return input.apply === false ? "isolated · capture-only" : "isolated";
-}
-
-function isolationBadge(input: IsolationDisplayInput | undefined, theme: Theme): string {
-	const meta = isolationMeta(input);
-	return meta ? theme.fg("dim", ` [${meta.replace(" · ", ", ")}]`) : "";
-}
-
-function appendIsolationBadge(
-	lines: string[],
-	args: Partial<TaskParams> | undefined,
-	index: number,
-	theme: Theme,
-): void {
-	if (lines.length === 0) return;
-	const input = Array.isArray(args?.tasks) ? args.tasks[index] : args;
-	lines[0] += isolationBadge(input, theme);
-}
-
 /**
  * Render the call preview lines for the single spawned agent. The
  * args stream in token by token, so every field access is defensive.
@@ -784,7 +761,9 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
-		line += isolationBadge(item, theme);
+		if (item?.isolated === true) {
+			line += theme.fg("dim", " [isolated]");
+		}
 		lines.push(line);
 	}
 	if (cap < tasks.length) {
@@ -850,7 +829,6 @@ function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSe
  */
 export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: Theme): Component {
 	const showIsolated = "isolated" in args && args.isolated === true;
-	const captureOnly = showIsolated && args.apply === false;
 	// Dispatch glyph from the first frame: spawning is non-blocking, so a
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
@@ -888,7 +866,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 
 		return {
 			header,
-			headerMeta: captureOnly ? "isolated · capture-only" : showIsolated ? "isolated" : undefined,
+			headerMeta: showIsolated ? "isolated" : undefined,
 			sections,
 			state: "pending",
 			borderColor: "borderMuted",
@@ -1504,27 +1482,17 @@ export function renderResult(
 	const agentLabel = formatAgentHeaderLabel(args);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
 	const contextSection = createContextSectionRenderer(args, theme);
-	const flatIsolationMeta = Array.isArray(args?.tasks) ? undefined : isolationMeta(args);
 
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
 		const header = errored
-			? renderStatusLine(
-					{
-						icon: "error",
-						title: "Task",
-						description: agentLabel,
-						meta: flatIsolationMeta ? [flatIsolationMeta] : undefined,
-					},
-					theme,
-				)
+			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
 			: renderStatusLine(
 					{
 						iconOverride: theme.styledSymbol("status.done", "accent"),
 						title: "Task",
 						description: agentLabel,
-						meta: flatIsolationMeta ? [flatIsolationMeta] : undefined,
 					},
 					theme,
 				);
@@ -1584,7 +1552,7 @@ export function renderResult(
 						? theme.styledSymbol("status.done", "accent")
 						: undefined,
 			title: "Task",
-			meta: [metaLabel, flatIsolationMeta].filter((label): label is string => label !== undefined),
+			meta: metaLabel ? [metaLabel] : undefined,
 		},
 		theme,
 	);
@@ -1609,17 +1577,13 @@ export function renderResult(
 				lines.push(formatHiddenProgressLine(ordered.slice(0, ordered.length - visible.length), theme));
 			}
 			for (const progress of visible) {
-				const rendered = renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen);
-				appendIsolationBadge(rendered, args, progress.index, theme);
-				lines.push(...rendered);
+				lines.push(...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen));
 			}
 		} else if (details.results && details.results.length > 0) {
 			const ordered = orderResultsForDisplay(details.results);
 			const visible = expanded ? ordered : selectCollapsedResults(ordered);
 			for (const res of visible) {
-				const rendered = renderAgentResult(res, "", "  ", expanded, theme);
-				appendIsolationBadge(rendered, args, res.index, theme);
-				lines.push(...rendered);
+				lines.push(...renderAgentResult(res, "", "  ", expanded, theme));
 			}
 			if (visible.length < ordered.length) {
 				const hint = formatExpandHint(theme, false, true);
@@ -1638,9 +1602,7 @@ export function renderResult(
 					)
 				: [];
 			for (const progress of supplementalProgress) {
-				const rendered = renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen);
-				appendIsolationBadge(rendered, args, progress.index, theme);
-				lines.push(...rendered);
+				lines.push(...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen));
 			}
 
 			const summaryParts: string[] = [];

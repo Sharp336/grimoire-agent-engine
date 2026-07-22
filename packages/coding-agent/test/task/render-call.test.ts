@@ -88,25 +88,20 @@ describe("task renderer: streaming call preview", () => {
 		expect(expanded).toContain("Step 6");
 	});
 
-	it("surfaces isolated and capture-only intent in call previews", () => {
-		const isolated: TaskParams = {
+	it("surfaces the isolation flag in the header bar", () => {
+		const args: TaskParams = {
 			agent: "task",
 			isolated: true,
 			name: "Only",
 			task: "...",
 		};
-		const isolatedLines = render(isolated).split("\n");
-		expect(isolatedLines[0]).toContain("isolated");
-		expect(isolatedLines[0]).not.toContain("capture-only");
+		const out = render(args);
+		const lines = out.split("\n");
 
-		const capturedLines = render({ ...isolated, apply: false }).split("\n");
-		expect(capturedLines[0]).toContain("isolated · capture-only");
-
-		const batch = render({
-			context: "ctx",
-			tasks: [{ name: "Captured", task: "inspect", isolated: true, apply: false }],
-		});
-		expect(batch).toContain("[isolated, capture-only]");
+		expect(out).toContain("Only");
+		// Isolation is surfaced as header meta in the frame's top bar (first line),
+		// not as a trailing child row under the task list.
+		expect(lines[0]).toContain("isolated");
 	});
 
 	// The batch schema streams `context` before `tasks`, and `renderResult`
