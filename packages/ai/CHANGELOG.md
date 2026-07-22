@@ -6,6 +6,10 @@
 
 - Added Qoder browser OAuth login, token refresh, client-attribution headers, provider-scoped folded-SSE repair, and `/fast` high-speed routing for Kimi-K2.7-Code.
 
+### Changed
+
+- Enforced Qoder Privacy Mode on every request: the api2-v2 transport now sends Cosy-Data-Policy: disagree (matching the official client's opt-out wire value) alongside the existing Cosy-* client-attribution headers.
+
 ### Fixed
 
 - Fixed Qoder login polling aborting on transient request failures, refresh failures hiding `invalid_grant` details, stale 1.1.1 client attribution, and `/fast` tests missing the non-Kimi negative path.

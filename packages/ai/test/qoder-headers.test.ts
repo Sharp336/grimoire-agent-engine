@@ -57,6 +57,7 @@ describe("Qoder request headers", () => {
 		expect(requestHeaders?.get("Cosy-Version")).toBe("1.1.2");
 		const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
 		expect(requestHeaders?.get("Cosy-MachineOS")).toBe(`${arch}_${process.platform}`);
+		expect(requestHeaders?.get("Cosy-Data-Policy")).toBe("disagree");
 		expect(requestBody).toBeDefined();
 		expect(requestBody?.store).toBeUndefined();
 		expect(requestBody?.metadata).toBeUndefined();
