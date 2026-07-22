@@ -1502,6 +1502,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "prune",
+		description: "Pick individual tool outputs to drop from context",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showPruneSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "handoff",
 		description: "Hand off session context to a new session",
 		inlineHint: "[focus instructions]",

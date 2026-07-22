@@ -74,6 +74,7 @@ import {
 	type SummaryOptions,
 	shouldCompact,
 	shouldUseOpenAiRemoteCompaction,
+	type ToolResultShakeRegion,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -81,7 +82,12 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
+import {
+	collectToolCallsById,
+	isProtectedToolResult,
+	isSkillReadToolResult,
+	type ProtectedToolMatcher,
+} from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -105,6 +111,7 @@ import type {
 	TextContent,
 	ToolCall,
 	ToolChoice,
+	ToolResultMessage,
 	Usage,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
@@ -10848,6 +10855,22 @@ export class AgentSession {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
+		const r = await this.#elideRegions(regions);
+		return { mode, ...r };
+	}
+
+	/**
+	 * Replace the given shake regions in place with artifact-backed elide
+	 * placeholders, persist, and replay through the agent. Shared by
+	 * {@link shake}'s `elide` mode and {@link pruneToolResults}'s per-item
+	 * selection — both just gather a different `ShakeRegion[]` up front.
+	 */
+	async #elideRegions(regions: ShakeRegion[]): Promise<{
+		toolResultsDropped: number;
+		blocksDropped: number;
+		tokensFreed: number;
+		artifactId?: string;
+	}> {
 		const artifactId = await this.#saveShakeArtifact(regions);
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
@@ -10873,12 +10896,79 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
-			mode,
 			toolResultsDropped,
 			blocksDropped,
 			tokensFreed: Math.max(0, originalTokens - replacementTokens),
 			artifactId,
 		};
+	}
+
+	/**
+	 * Enumerate every tool result currently in context that is eligible for
+	 * `/prune` — unlike {@link collectShakeRegions}, this ignores shake's
+	 * size/threshold gates: every non-protected, non-empty tool result on the
+	 * branch (after the latest compaction boundary) is offered, regardless of
+	 * token size. Skill and active-plan reads are always excluded, matching
+	 * shake's always-on skill protection.
+	 */
+	#collectPrunableToolResults(): Array<{ toolCallId: string; region: ToolResultShakeRegion }> {
+		const branchEntries = this.sessionManager.getBranch();
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const boundaryIndex =
+			keepBoundaryId === undefined ? 0 : Math.max(0, branchEntries.findIndex(e => e.id === keepBoundaryId));
+		const toolCallsById = collectToolCallsById(branchEntries);
+		// Match /shake's manual behavior: never offer skill/plan reads for pruning.
+		const protectedTools = this.#withPlanProtection({ protectedTools: ["skill", isSkillReadToolResult] })
+			.protectedTools;
+		const out: Array<{ toolCallId: string; region: ToolResultShakeRegion }> = [];
+		for (let i = boundaryIndex; i < branchEntries.length; i++) {
+			const entry = branchEntries[i];
+			if (entry.type !== "message") continue;
+			const msg = entry.message as AgentMessage;
+			if (msg.role !== "toolResult") continue;
+			const tr = msg as ToolResultMessage;
+			if (tr.prunedAt !== undefined) continue;
+			if (isProtectedToolResult(tr, toolCallsById.get(tr.toolCallId), protectedTools)) continue;
+			const text = tr.content
+				.filter((b): b is TextContent => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			if (text.length === 0) continue;
+			out.push({
+				toolCallId: tr.toolCallId,
+				region: {
+					kind: "toolResult",
+					entry: entry as SessionMessageEntry,
+					tokens: estimateTokens(tr as AgentMessage),
+					originalText: text,
+					label: tr.toolName,
+				},
+			});
+		}
+		return out;
+	}
+
+	/** Display list for the /prune picker: every tool output currently in context, chronological. */
+	listPrunableToolResults(): Array<{ id: string; toolName: string; tokens: number; preview: string }> {
+		const PREVIEW_CHARS = 4000;
+		return this.#collectPrunableToolResults().map(({ toolCallId, region }) => ({
+			id: toolCallId,
+			toolName: region.label,
+			tokens: region.tokens,
+			preview: region.originalText.slice(0, PREVIEW_CHARS),
+		}));
+	}
+
+	/** Elide the selected tool outputs (by toolCallId) in place, artifact-backed. */
+	async pruneToolResults(ids: string[]): Promise<{ prunedCount: number; tokensFreed: number; artifactId?: string }> {
+		if (ids.length === 0) return { prunedCount: 0, tokensFreed: 0 };
+		const idSet = new Set(ids);
+		const regions = this.#collectPrunableToolResults()
+			.filter(p => idSet.has(p.toolCallId))
+			.map(p => p.region);
+		if (regions.length === 0) return { prunedCount: 0, tokensFreed: 0 };
+		const r = await this.#elideRegions(regions);
+		return { prunedCount: r.toolResultsDropped, tokensFreed: r.tokensFreed, artifactId: r.artifactId };
 	}
 
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {

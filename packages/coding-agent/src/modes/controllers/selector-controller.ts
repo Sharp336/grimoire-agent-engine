@@ -81,6 +81,7 @@ import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/m
 import { ModelPickerComponent } from "../components/model-picker";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
+import { PruneSelectorComponent } from "../components/prune-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionSelectorComponent } from "../components/session-selector";
@@ -1109,6 +1110,55 @@ export class SelectorController {
 				if (target.content === undefined) return;
 				void copyToClipboard(target.content);
 				this.ctx.showStatus(target.copyMessage ?? "Copied to clipboard");
+			},
+			onCancel: done,
+		});
+
+		overlayHandle = this.ctx.ui.showOverlay(selector, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	showPruneSelector(): void {
+		const items = this.ctx.session.listPrunableToolResults();
+		if (items.length === 0) {
+			this.ctx.showStatus("No tool outputs to prune.");
+			return;
+		}
+
+		let overlayHandle: OverlayHandle | undefined;
+		const done = () => {
+			overlayHandle?.hide();
+			this.ctx.ui.requestRender();
+		};
+		const selector = new PruneSelectorComponent(items, {
+			onConfirm: async ids => {
+				done();
+				if (ids.length === 0) {
+					this.ctx.showStatus("Nothing selected to prune.");
+					return;
+				}
+				let result: { prunedCount: number; tokensFreed: number; artifactId?: string };
+				try {
+					result = await this.ctx.session.pruneToolResults(ids);
+				} catch (error) {
+					this.ctx.showError(`Prune failed: ${error instanceof Error ? error.message : String(error)}`);
+					return;
+				}
+				if (result.prunedCount === 0) {
+					this.ctx.showStatus("Nothing to prune.");
+					return;
+				}
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+				const n = result.prunedCount;
+				this.ctx.showStatus(`Pruned ${n} tool output${n === 1 ? "" : "s"} (~${result.tokensFreed} tokens freed).`);
 			},
 			onCancel: done,
 		});
