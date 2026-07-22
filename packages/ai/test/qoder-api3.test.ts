@@ -969,6 +969,29 @@ describe("api3 failure contracts", () => {
 		}
 	});
 
+	it("preserves malformed in-stream status and cancels after the terminal error", async () => {
+		const encoder = new TextEncoder();
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(`data: ${envelope("Signature invalid", 401)}\n\n`));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const { events, result } = await runApi3Turn(
+			"qmodel_preview",
+			() => new Response(body, { headers: { "content-type": "text/event-stream" } }),
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(401);
+		expect(result.errorMessage).toContain("Signature invalid");
+		expect(events.map(event => event.type)).toEqual(["start", "error"]);
+		expect(cancelled).toBe(true);
+	});
+
 	it("preserves in-stream envelope status for OAuth retry", async () => {
 		for (const status of [401, 403]) {
 			const errorSse = `data: ${envelope(JSON.stringify({ code: "AUTH", message: "Signature invalid" }), status)}`;

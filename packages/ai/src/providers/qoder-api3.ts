@@ -558,6 +558,10 @@ async function processApi3Stream(
 		}
 		if (typeof envelope.body !== "string") return;
 		const bodyText = envelope.body;
+		const errorStatus =
+			typeof envelope.statusCodeValue === "number" && envelope.statusCodeValue >= 400
+				? envelope.statusCodeValue
+				: undefined;
 		if (bodyText === "[DONE]") {
 			state.sawDone = true;
 			return;
@@ -579,30 +583,29 @@ async function processApi3Stream(
 		try {
 			chunk = JSON.parse(bodyText);
 		} catch {
+			if (errorStatus !== undefined) state.output.errorStatus = errorStatus;
 			state.stopReason = "error";
 			state.errorMessage = `Qoder api3 stream error: ${bodyText.slice(0, 500)}`;
 			return;
 		}
 		if (!isRecord(chunk)) {
+			if (errorStatus !== undefined) state.output.errorStatus = errorStatus;
 			state.stopReason = "error";
 			state.errorMessage = `Qoder api3 stream error: ${bodyText.slice(0, 500)}`;
 			return;
 		}
 		handleChunk(chunk);
-		if (
-			typeof envelope.statusCodeValue === "number" &&
-			envelope.statusCodeValue >= 400 &&
-			!Array.isArray(chunk.choices)
-		) {
-			state.output.errorStatus = envelope.statusCodeValue;
+		if (errorStatus !== undefined && !Array.isArray(chunk.choices)) {
+			state.output.errorStatus = errorStatus;
 			state.stopReason = "error";
-			state.errorMessage ??= `Qoder api3 request failed (${envelope.statusCodeValue}): ${bodyText.slice(0, 500)}`;
+			state.errorMessage ??= `Qoder api3 request failed (${errorStatus}): ${bodyText.slice(0, 500)}`;
 		}
 	};
 
 	for await (const event of readSseEvents(deps.repair(body), signal)) {
 		notifyRawSseEvent(onSseEvent, event);
 		handleDataPayload(event.data);
+		if (state.errorMessage !== undefined) break;
 	}
 	if (signal?.aborted === true && (!state.sawDone || !state.sawFinishReason)) {
 		throw new DOMException("The operation was aborted.", "AbortError");
