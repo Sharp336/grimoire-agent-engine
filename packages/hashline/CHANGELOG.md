@@ -7,7 +7,11 @@
 ### Changed
 
 - Improved snapshot recovery line remapping by utilizing native line diffing.
+- Switched line anchor recovery diffs to native `diffLineRuns`, processing UTF-16 code units directly and removing JS diff fallback.
 
+### Removed
+
+- Removed npm `diff` dependency.
 ## [17.0.4] - 2026-07-18
 
 ### Fixed

@@ -8,6 +8,12 @@
 //! (`minDiagonalToConsider` / `maxDiagonalToConsider`), so change coalescing
 //! matches jsdiff run-for-run rather than merely being "a" minimal diff.
 //!
+//! Everything operates on UTF-16 code units end to end — [`Utf16String`] at
+//! the N-API boundary, `&[u16]` internally — which is the exact value space of
+//! JS strings. Ill-formed input (unpaired surrogates) is legal content that
+//! diffs code-unit-for-code-unit like jsdiff, so callers never need a JS
+//! fallback, and no UTF-8 conversion happens in either direction.
+//!
 //! # Example
 //! ```ignore
 //! // JS: native.diffLines("a\nb\n", "a\nc\n")
@@ -18,32 +24,17 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use napi::{JsString, bindgen_prelude::*};
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-/// Decode a JS string strictly: unpaired surrogates are rejected instead of
-/// being replaced with U+FFFD, so callers can fall back to a UTF-16-aware
-/// JS diff and both sides keep byte-identical jsdiff semantics.
-fn strict_utf16_to_string(text: JsString) -> Result<String> {
-	let utf16 = text.into_utf16()?;
-	// `as_slice` includes the trailing NUL terminator; drop it like napi's
-	// own `as_str` does (a legitimate U+0000 in the content sits before it).
-	let Some((_, units)) = utf16.as_slice().split_last() else {
-		return Ok(String::new());
-	};
-	String::from_utf16(units).map_err(|_| {
-		Error::new(
-			Status::InvalidArg,
-			"ill-formed UTF-16 input (unpaired surrogate); caller must fall back to a JS diff",
-		)
-	})
-}
+/// UTF-16 code unit for `\n`.
+const LF: u16 = 0x000a;
 
 /// One jsdiff change object: a run of added, removed, or common tokens.
 #[napi(object)]
 pub struct DiffChange {
 	/// Joined token text for this run (lines keep their `\n` terminators).
-	pub value:   String,
+	pub value:   Utf16String,
 	/// Number of tokens in this run.
 	pub count:   u32,
 	/// True when this run exists only in the new text.
@@ -76,7 +67,7 @@ pub struct PatchHunk {
 	pub new_lines: u32,
 	/// Hunk body: `+`/`-`/` `-prefixed lines without trailing newlines, plus
 	/// `\ No newline at end of file` markers where applicable.
-	pub lines:     Vec<String>,
+	pub lines:     Vec<Utf16String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -257,14 +248,15 @@ fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 	unreachable!("Myers diff terminates within oldLen + newLen edits")
 }
 
-/// Intern each token as a dense id under exact string equality, so the Myers
-/// core compares `u32`s instead of re-hashing strings per probe.
-fn intern_exact<'a>(old_tokens: &[&'a str], new_tokens: &[&'a str]) -> (Vec<u32>, Vec<u32>) {
-	fn assign<'a>(ids: &mut HashMap<&'a str, u32>, token: &'a str) -> u32 {
+/// Intern each token as a dense id under exact code-unit equality, so the
+/// Myers core compares `u32`s instead of re-hashing slices per probe.
+fn intern_exact<'a>(old_tokens: &[&'a [u16]], new_tokens: &[&'a [u16]]) -> (Vec<u32>, Vec<u32>) {
+	fn assign<'a>(ids: &mut HashMap<&'a [u16], u32>, token: &'a [u16]) -> u32 {
 		let next = ids.len() as u32;
 		*ids.entry(token).or_insert(next)
 	}
-	let mut ids: HashMap<&'a str, u32> = HashMap::with_capacity(old_tokens.len() + new_tokens.len());
+	let mut ids: HashMap<&'a [u16], u32> =
+		HashMap::with_capacity(old_tokens.len() + new_tokens.len());
 	let old_ids = old_tokens
 		.iter()
 		.map(|token| assign(&mut ids, token))
@@ -281,9 +273,9 @@ fn intern_exact<'a>(old_tokens: &[&'a str], new_tokens: &[&'a str]) -> (Vec<u32>
 /// `buildValues` with `useLongestToken == false`.
 fn build_changes(
 	runs: &[Run],
-	old_tokens: &[&str],
-	new_tokens: &[&str],
-	join: impl Fn(&[&str]) -> String,
+	old_tokens: &[&[u16]],
+	new_tokens: &[&[u16]],
+	join: impl Fn(&[&[u16]]) -> Vec<u16>,
 ) -> Vec<DiffChange> {
 	let mut old_pos = 0usize;
 	let mut new_pos = 0usize;
@@ -302,7 +294,12 @@ fn build_changes(
 				}
 				value
 			};
-			DiffChange { value, count: run.count as u32, added: run.added, removed: run.removed }
+			DiffChange {
+				value:   value.into(),
+				count:   run.count as u32,
+				added:   run.added,
+				removed: run.removed,
+			}
 		})
 		.collect()
 }
@@ -314,44 +311,53 @@ fn build_changes(
 /// jsdiff line tokenization under default options: each token is a line
 /// including its `\n` (or `\r\n`) terminator; a final line without a newline
 /// is kept as-is; a lone `\r` never terminates a line.
-fn line_tokens(text: &str) -> Vec<&str> {
-	text.split_inclusive('\n').collect()
+fn line_tokens(text: &[u16]) -> Vec<&[u16]> {
+	text.split_inclusive(|&unit| unit == LF).collect()
 }
 
-fn diff_line_tokens<'a>(old_tokens: &[&'a str], new_tokens: &[&'a str]) -> Vec<Run> {
+fn diff_line_tokens(old_tokens: &[&[u16]], new_tokens: &[&[u16]]) -> Vec<Run> {
 	let (old_ids, new_ids) = intern_exact(old_tokens, new_tokens);
 	myers_diff(&old_ids, &new_ids)
+}
+
+/// Concatenate token slices (jsdiff line `join`).
+fn concat_tokens(tokens: &[&[u16]]) -> Vec<u16> {
+	let mut out = Vec::with_capacity(tokens.iter().map(|token| token.len()).sum());
+	for token in tokens {
+		out.extend_from_slice(token);
+	}
+	out
 }
 
 /// Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
 /// options). Change values keep line terminators, and common runs are joined
 /// from the new text.
 #[napi]
-pub fn diff_lines(old_text: JsString, new_text: JsString) -> Result<Vec<DiffChange>> {
-	Ok(diff_lines_impl(&strict_utf16_to_string(old_text)?, &strict_utf16_to_string(new_text)?))
+pub fn diff_lines(old_text: Utf16String, new_text: Utf16String) -> Vec<DiffChange> {
+	diff_lines_impl(&old_text, &new_text)
 }
 
-fn diff_lines_impl(old_text: &str, new_text: &str) -> Vec<DiffChange> {
+fn diff_lines_impl(old_text: &[u16], new_text: &[u16]) -> Vec<DiffChange> {
 	let old_tokens = line_tokens(old_text);
 	let new_tokens = line_tokens(new_text);
 	let runs = diff_line_tokens(&old_tokens, &new_tokens);
-	build_changes(&runs, &old_tokens, &new_tokens, |tokens| tokens.concat())
+	build_changes(&runs, &old_tokens, &new_tokens, concat_tokens)
 }
 
 /// Diff `oldText.split("\n")` against `newText.split("\n")` with jsdiff
-/// `diffArrays` semantics (exact string equality, empty lines preserved),
+/// `diffArrays` semantics (exact code-unit equality, empty lines preserved),
 /// returning only run lengths.
 ///
 /// Callers that map line numbers — like hashline recovery — need the counts,
 /// not another copy of the text.
 #[napi]
-pub fn diff_line_runs(old_text: JsString, new_text: JsString) -> Result<Vec<DiffRun>> {
-	Ok(diff_line_runs_impl(&strict_utf16_to_string(old_text)?, &strict_utf16_to_string(new_text)?))
+pub fn diff_line_runs(old_text: Utf16String, new_text: Utf16String) -> Vec<DiffRun> {
+	diff_line_runs_impl(&old_text, &new_text)
 }
 
-fn diff_line_runs_impl(old_text: &str, new_text: &str) -> Vec<DiffRun> {
-	let old_tokens: Vec<&str> = old_text.split('\n').collect();
-	let new_tokens: Vec<&str> = new_text.split('\n').collect();
+fn diff_line_runs_impl(old_text: &[u16], new_text: &[u16]) -> Vec<DiffRun> {
+	let old_tokens: Vec<&[u16]> = old_text.split(|&unit| unit == LF).collect();
+	let new_tokens: Vec<&[u16]> = new_text.split(|&unit| unit == LF).collect();
 	let (old_ids, new_ids) = intern_exact(&old_tokens, &new_tokens);
 	myers_diff(&old_ids, &new_ids)
 		.into_iter()
@@ -363,25 +369,34 @@ fn diff_line_runs_impl(old_text: &str, new_text: &str) -> Vec<DiffRun> {
 // Structured patch (port of jsdiff patch/create.ts hunk builder)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Prepend a `+`/`-`/` ` marker to a line's code units.
+fn prefixed_line(prefix: u8, line: &[u16]) -> Vec<u16> {
+	let mut out = Vec::with_capacity(1 + line.len());
+	out.push(u16::from(prefix));
+	out.extend_from_slice(line);
+	out
+}
+
+/// `\ No newline at end of file`, as UTF-16 code units.
+fn no_newline_marker() -> Vec<u16> {
+	"\\ No newline at end of file".encode_utf16().collect()
+}
+
 /// Unified-diff hunks with jsdiff
 /// `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
 /// semantics. `context` defaults to 4 like jsdiff.
 #[napi]
 pub fn structured_patch_hunks(
-	old_text: JsString,
-	new_text: JsString,
+	old_text: Utf16String,
+	new_text: Utf16String,
 	context: Option<u32>,
-) -> Result<Vec<PatchHunk>> {
-	Ok(structured_patch_hunks_impl(
-		&strict_utf16_to_string(old_text)?,
-		&strict_utf16_to_string(new_text)?,
-		context,
-	))
+) -> Vec<PatchHunk> {
+	structured_patch_hunks_impl(&old_text, &new_text, context)
 }
 
 fn structured_patch_hunks_impl(
-	old_text: &str,
-	new_text: &str,
+	old_text: &[u16],
+	new_text: &[u16],
 	context: Option<u32>,
 ) -> Vec<PatchHunk> {
 	let context = context.map_or(4usize, |value| value as usize);
@@ -394,13 +409,13 @@ fn structured_patch_hunks_impl(
 	struct ChangeLines<'a> {
 		added:   bool,
 		removed: bool,
-		lines:   &'a [&'a str],
+		lines:   &'a [&'a [u16]],
 	}
 	let mut list: Vec<ChangeLines> = Vec::with_capacity(runs.len() + 1);
 	let mut old_pos = 0usize;
 	let mut new_pos = 0usize;
 	for run in &runs {
-		let lines: &[&str] = if run.removed {
+		let lines: &[&[u16]] = if run.removed {
 			let slice = &old_tokens[old_pos..old_pos + run.count];
 			old_pos += run.count;
 			slice
@@ -416,10 +431,19 @@ fn structured_patch_hunks_impl(
 	}
 	list.push(ChangeLines { added: false, removed: false, lines: &[] });
 
-	let mut hunks: Vec<PatchHunk> = Vec::new();
+	// Hunk skeleton before the trailing-newline post-pass; lines stay `Vec<u16>`
+	// so the pass below can pop terminators in place.
+	struct RawHunk {
+		old_start: usize,
+		old_lines: usize,
+		new_start: usize,
+		new_lines: usize,
+		lines:     Vec<Vec<u16>>,
+	}
+	let mut hunks: Vec<RawHunk> = Vec::new();
 	let mut old_range_start = 0usize;
 	let mut new_range_start = 0usize;
-	let mut cur_range: Vec<String> = Vec::new();
+	let mut cur_range: Vec<Vec<u16>> = Vec::new();
 	let mut old_line = 1usize;
 	let mut new_line = 1usize;
 	for i in 0..list.len() {
@@ -435,15 +459,15 @@ fn structured_patch_hunks_impl(
 					let take = prev_lines.len().min(context);
 					cur_range = prev_lines[prev_lines.len() - take..]
 						.iter()
-						.map(|line| format!(" {line}"))
+						.map(|line| prefixed_line(b' ', line))
 						.collect();
 					old_range_start -= cur_range.len();
 					new_range_start -= cur_range.len();
 				}
 			}
-			let marker = if current.added { '+' } else { '-' };
+			let marker = if current.added { b'+' } else { b'-' };
 			for line in current.lines {
-				cur_range.push(format!("{marker}{line}"));
+				cur_range.push(prefixed_line(marker, line));
 			}
 			if current.added {
 				new_line += current.lines.len();
@@ -455,19 +479,19 @@ fn structured_patch_hunks_impl(
 				if current.lines.len() <= context * 2 && i + 2 < list.len() {
 					// Common run small enough to join adjacent hunks.
 					for line in current.lines {
-						cur_range.push(format!(" {line}"));
+						cur_range.push(prefixed_line(b' ', line));
 					}
 				} else {
 					// Close the hunk with leading context.
 					let context_size = current.lines.len().min(context);
 					for line in &current.lines[..context_size] {
-						cur_range.push(format!(" {line}"));
+						cur_range.push(prefixed_line(b' ', line));
 					}
-					hunks.push(PatchHunk {
-						old_start: old_range_start as u32,
-						old_lines: (old_line - old_range_start + context_size) as u32,
-						new_start: new_range_start as u32,
-						new_lines: (new_line - new_range_start + context_size) as u32,
+					hunks.push(RawHunk {
+						old_start: old_range_start,
+						old_lines: old_line - old_range_start + context_size,
+						new_start: new_range_start,
+						new_lines: new_line - new_range_start + context_size,
 						lines:     std::mem::take(&mut cur_range),
 					});
 					old_range_start = 0;
@@ -483,94 +507,148 @@ fn structured_patch_hunks_impl(
 	for hunk in &mut hunks {
 		let mut i = 0;
 		while i < hunk.lines.len() {
-			if hunk.lines[i].ends_with('\n') {
+			if hunk.lines[i].last() == Some(&LF) {
 				hunk.lines[i].pop();
 			} else {
-				hunk
-					.lines
-					.insert(i + 1, "\\ No newline at end of file".to_string());
+				hunk.lines.insert(i + 1, no_newline_marker());
 				i += 1;
 			}
 			i += 1;
 		}
 	}
 	hunks
+		.into_iter()
+		.map(|hunk| PatchHunk {
+			old_start: hunk.old_start as u32,
+			old_lines: hunk.old_lines as u32,
+			new_start: hunk.new_start as u32,
+			new_lines: hunk.new_lines as u32,
+			lines:     hunk.lines.into_iter().map(Utf16String::from).collect(),
+		})
+		.collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Word diff (port of jsdiff word.ts, default options)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// jsdiff's `extendedWordChars` class: Latin-script word characters.
-const fn is_word_char(c: char) -> bool {
-	matches!(c,
-		'a'..='z'
-		| 'A'..='Z'
-		| '0'..='9'
-		| '_'
-		| '\u{ad}'
-		| '\u{c0}'..='\u{d6}'
-		| '\u{d8}'..='\u{f6}'
-		| '\u{f8}'..='\u{2c6}'
-		| '\u{2c8}'..='\u{2d7}'
-		| '\u{2de}'..='\u{2ff}'
-		| '\u{1e00}'..='\u{1eff}')
+/// jsdiff's `extendedWordChars` class: Latin-script word characters. Takes a
+/// code point so astral input classifies like a JS regex with the `u` flag —
+/// never a word character (every member is BMP).
+const fn is_word_char(cp: u32) -> bool {
+	matches!(cp,
+		0x30..=0x39 // 0-9
+		| 0x41..=0x5A // A-Z
+		| 0x5F // _
+		| 0x61..=0x7A // a-z
+		| 0xAD
+		| 0xC0..=0xD6
+		| 0xD8..=0xF6
+		| 0xF8..=0x2C6
+		| 0x2C8..=0x2D7
+		| 0x2DE..=0x2FF
+		| 0x1E00..=0x1EFF)
 }
 
 /// JavaScript's `\s` / `String.prototype.trim` whitespace set (`WhiteSpace` +
-/// `LineTerminator` productions). Every member is a single UTF-16 code unit, so
-/// char-level scans here match jsdiff's code-unit-level scans exactly.
-const fn is_js_whitespace(c: char) -> bool {
+/// `LineTerminator` productions). Every member is a single UTF-16 code unit,
+/// so unit-level scans here match jsdiff's code-unit-level scans exactly.
+const fn is_js_whitespace(cp: u32) -> bool {
 	matches!(
-		c,
-		'\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-			..='\u{200a}'
-				| '\u{2028}'
-				| '\u{2029}'
-				| '\u{202f}'
-				| '\u{205f}'
-				| '\u{3000}'
-				| '\u{feff}'
+		cp,
+		0x09 | 0x0a | 0x0b | 0x0c | 0x0d | 0x20 | 0xa0 | 0x1680 | 0x2000
+			..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
 	)
 }
 
-fn leading_ws(s: &str) -> &str {
-	&s[..s.len() - s.trim_start_matches(is_js_whitespace).len()]
+const fn is_ws_unit(unit: u16) -> bool {
+	is_js_whitespace(unit as u32)
 }
 
-fn trailing_ws(s: &str) -> &str {
-	&s[s.trim_end_matches(is_js_whitespace).len()..]
+fn trim_leading_ws(s: &[u16]) -> &[u16] {
+	let start = s
+		.iter()
+		.position(|&unit| !is_ws_unit(unit))
+		.unwrap_or(s.len());
+	&s[start..]
 }
 
-fn js_trim(s: &str) -> &str {
-	s.trim_matches(is_js_whitespace)
+fn trim_trailing_ws(s: &[u16]) -> &[u16] {
+	let end = s
+		.iter()
+		.rposition(|&unit| !is_ws_unit(unit))
+		.map_or(0, |i| i + 1);
+	&s[..end]
+}
+
+fn leading_ws(s: &[u16]) -> &[u16] {
+	&s[..s.len() - trim_leading_ws(s).len()]
+}
+
+fn trailing_ws(s: &[u16]) -> &[u16] {
+	&s[trim_trailing_ws(s).len()..]
+}
+
+fn js_trim(s: &[u16]) -> &[u16] {
+	trim_trailing_ws(trim_leading_ws(s))
+}
+
+/// Iterator over `(start, code_point, unit_len)` that pairs surrogates and
+/// passes unpaired surrogates through as their own code points, exactly like
+/// JS regex scanning under the `u` flag.
+struct CodePoints<'a> {
+	text: &'a [u16],
+	pos:  usize,
+}
+
+impl Iterator for CodePoints<'_> {
+	type Item = (usize, u32, usize);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let &unit = self.text.get(self.pos)?;
+		let start = self.pos;
+		if matches!(unit, 0xd800..=0xdbff)
+			&& let Some(&low) = self.text.get(start + 1)
+			&& matches!(low, 0xdc00..=0xdfff)
+		{
+			self.pos += 2;
+			let cp = 0x10000 + ((u32::from(unit & 0x3ff) << 10) | u32::from(low & 0x3ff));
+			return Some((start, cp, 2));
+		}
+		self.pos += 1;
+		Some((start, u32::from(unit), 1))
+	}
+}
+
+const fn code_points(text: &[u16]) -> CodePoints<'_> {
+	CodePoints { text, pos: 0 }
 }
 
 /// Raw regex-equivalent scan: word runs, whitespace runs, or single other
 /// code points (jsdiff `tokenizeIncludingWhitespace` with the `u` flag).
-fn word_parts(text: &str) -> Vec<&str> {
+fn word_parts(text: &[u16]) -> Vec<&[u16]> {
 	let mut parts = Vec::new();
-	let mut iter = text.char_indices().peekable();
-	while let Some((start, c)) = iter.next() {
-		let class = if is_word_char(c) {
+	let mut iter = code_points(text).peekable();
+	while let Some((start, cp, len)) = iter.next() {
+		let class = if is_word_char(cp) {
 			1u8
-		} else if is_js_whitespace(c) {
+		} else if is_js_whitespace(cp) {
 			2u8
 		} else {
 			0u8
 		};
-		let mut end = start + c.len_utf8();
+		let mut end = start + len;
 		if class != 0 {
-			while let Some(&(next_start, next)) = iter.peek() {
+			while let Some(&(_, next_cp, next_len)) = iter.peek() {
 				let same = if class == 1 {
-					is_word_char(next)
+					is_word_char(next_cp)
 				} else {
-					is_js_whitespace(next)
+					is_js_whitespace(next_cp)
 				};
 				if !same {
 					break;
 				}
-				end = next_start + next.len_utf8();
+				end += next_len;
 				iter.next();
 			}
 		}
@@ -581,32 +659,35 @@ fn word_parts(text: &str) -> Vec<&str> {
 
 /// jsdiff `WordDiff.tokenize`: stitch whitespace runs onto adjacent word or
 /// punctuation parts, duplicating interior whitespace into both neighbors.
-fn word_tokens(text: &str) -> Vec<String> {
+fn word_tokens(text: &[u16]) -> Vec<Vec<u16>> {
 	let parts = word_parts(text);
-	let mut tokens: Vec<String> = Vec::with_capacity(parts.len());
-	let mut prev_part: Option<&str> = None;
+	let mut tokens: Vec<Vec<u16>> = Vec::with_capacity(parts.len());
+	let mut prev_part: Option<&[u16]> = None;
 	for part in parts {
-		let part_is_ws = part.chars().next().is_some_and(is_js_whitespace);
+		let part_is_ws = part.first().is_some_and(|&unit| is_ws_unit(unit));
 		if part_is_ws {
 			if prev_part.is_none() {
-				tokens.push(part.to_string());
+				tokens.push(part.to_vec());
 			} else {
 				let last = tokens
 					.last_mut()
 					.expect("tokens non-empty after first part");
-				last.push_str(part);
+				last.extend_from_slice(part);
 			}
 		} else if let Some(prev) =
-			prev_part.filter(|p| p.chars().next().is_some_and(is_js_whitespace))
+			prev_part.filter(|p| p.first().is_some_and(|&unit| is_ws_unit(unit)))
 		{
-			if tokens.last().is_some_and(|last| last == prev) {
+			if tokens.last().is_some_and(|last| last.as_slice() == prev) {
 				let last = tokens.last_mut().expect("checked non-empty");
-				last.push_str(part);
+				last.extend_from_slice(part);
 			} else {
-				tokens.push(format!("{prev}{part}"));
+				let mut token = Vec::with_capacity(prev.len() + part.len());
+				token.extend_from_slice(prev);
+				token.extend_from_slice(part);
+				tokens.push(token);
 			}
 		} else {
-			tokens.push(part.to_string());
+			tokens.push(part.to_vec());
 		}
 		prev_part = Some(part);
 	}
@@ -615,102 +696,98 @@ fn word_tokens(text: &str) -> Vec<String> {
 
 /// jsdiff `WordDiff.join`: concatenate, stripping leading whitespace from
 /// every token after the first.
-fn word_join(tokens: &[&str]) -> String {
-	let mut out = String::new();
+fn word_join(tokens: &[&[u16]]) -> Vec<u16> {
+	let mut out = Vec::new();
 	for (i, token) in tokens.iter().enumerate() {
 		if i == 0 {
-			out.push_str(token);
+			out.extend_from_slice(token);
 		} else {
-			out.push_str(token.trim_start_matches(is_js_whitespace));
+			out.extend_from_slice(trim_leading_ws(token));
 		}
 	}
 	out
 }
 
-fn longest_common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
-	let mut end = 0;
-	for (ca, cb) in a.chars().zip(b.chars()) {
-		if ca != cb {
-			break;
-		}
-		end += ca.len_utf8();
-	}
-	&a[..end]
+fn longest_common_prefix<'a>(a: &'a [u16], b: &[u16]) -> &'a [u16] {
+	let len = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+	&a[..len]
 }
 
-fn longest_common_suffix<'a>(a: &'a str, b: &str) -> &'a str {
-	let mut start = a.len();
-	for (ca, cb) in a.chars().rev().zip(b.chars().rev()) {
-		if ca != cb {
-			break;
-		}
-		start -= ca.len_utf8();
-	}
-	&a[start..]
+fn longest_common_suffix<'a>(a: &'a [u16], b: &[u16]) -> &'a [u16] {
+	let len = a
+		.iter()
+		.rev()
+		.zip(b.iter().rev())
+		.take_while(|(x, y)| x == y)
+		.count();
+	&a[a.len() - len..]
 }
 
-fn remove_prefix(s: &str, prefix: &str) -> String {
+fn remove_prefix(s: &[u16], prefix: &[u16]) -> Vec<u16> {
 	s.strip_prefix(prefix)
 		.expect("value must start with recorded prefix")
-		.to_string()
+		.to_vec()
 }
 
-fn remove_suffix(s: &str, suffix: &str) -> String {
+fn remove_suffix(s: &[u16], suffix: &[u16]) -> Vec<u16> {
 	s.strip_suffix(suffix)
 		.expect("value must end with recorded suffix")
-		.to_string()
+		.to_vec()
 }
 
-fn replace_prefix(s: &str, old_prefix: &str, new_prefix: &str) -> String {
+fn replace_prefix(s: &[u16], old_prefix: &[u16], new_prefix: &[u16]) -> Vec<u16> {
 	let rest = s
 		.strip_prefix(old_prefix)
 		.expect("value must start with recorded prefix");
-	format!("{new_prefix}{rest}")
+	let mut out = Vec::with_capacity(new_prefix.len() + rest.len());
+	out.extend_from_slice(new_prefix);
+	out.extend_from_slice(rest);
+	out
 }
 
-fn replace_suffix(s: &str, old_suffix: &str, new_suffix: &str) -> String {
+fn replace_suffix(s: &[u16], old_suffix: &[u16], new_suffix: &[u16]) -> Vec<u16> {
 	let rest = s
 		.strip_suffix(old_suffix)
 		.expect("value must end with recorded suffix");
-	format!("{rest}{new_suffix}")
+	let mut out = Vec::with_capacity(rest.len() + new_suffix.len());
+	out.extend_from_slice(rest);
+	out.extend_from_slice(new_suffix);
+	out
 }
 
 /// jsdiff `maximumOverlap`: the longest prefix of `b` that is also a suffix
-/// of `a`, via the KMP failure function.
-fn maximum_overlap<'a>(a: &str, b: &'a str) -> &'a str {
-	let a_chars: Vec<char> = a.chars().collect();
-	let b_chars: Vec<char> = b.chars().collect();
-	let start_a = a_chars.len().saturating_sub(b_chars.len());
-	let end_b = b_chars.len().min(a_chars.len());
+/// of `a`, via the KMP failure function over code units.
+fn maximum_overlap<'a>(a: &[u16], b: &'a [u16]) -> &'a [u16] {
+	let start_a = a.len().saturating_sub(b.len());
+	let end_b = b.len().min(a.len());
 	if end_b == 0 {
-		return "";
+		return &[];
 	}
 	let mut map = vec![0usize; end_b];
 	let mut k = 0usize;
 	for j in 1..end_b {
-		if b_chars[j] == b_chars[k] {
+		if b[j] == b[k] {
 			map[j] = map[k];
 		} else {
 			map[j] = k;
 		}
-		while k > 0 && b_chars[j] != b_chars[k] {
+		while k > 0 && b[j] != b[k] {
 			k = map[k];
 		}
-		if b_chars[j] == b_chars[k] {
+		if b[j] == b[k] {
 			k += 1;
 		}
 	}
 	k = 0;
-	for &c in &a_chars[start_a..] {
-		while k > 0 && c != b_chars[k] {
+	for &unit in &a[start_a..] {
+		while k > 0 && unit != b[k] {
 			k = map[k];
 		}
-		if c == b_chars[k] {
+		if unit == b[k] {
 			k += 1;
 		}
 	}
-	let byte_end: usize = b_chars[..k].iter().map(|c| c.len_utf8()).sum();
-	&b[..byte_end]
+	&b[..k]
 }
 
 /// jsdiff `dedupeWhitespaceInChangeObjects` (no segmenter): trim whitespace
@@ -724,62 +801,62 @@ fn dedupe_whitespace(
 ) {
 	match (deletion, insertion) {
 		(Some(del), Some(ins)) => {
-			let old_ws_prefix = leading_ws(&changes[del].value).to_string();
-			let old_ws_suffix = trailing_ws(&changes[del].value).to_string();
-			let new_ws_prefix = leading_ws(&changes[ins].value).to_string();
-			let new_ws_suffix = trailing_ws(&changes[ins].value).to_string();
+			let old_ws_prefix = leading_ws(&changes[del].value).to_vec();
+			let old_ws_suffix = trailing_ws(&changes[del].value).to_vec();
+			let new_ws_prefix = leading_ws(&changes[ins].value).to_vec();
+			let new_ws_suffix = trailing_ws(&changes[ins].value).to_vec();
 			if let Some(start) = start_keep {
-				let common_ws_prefix =
-					longest_common_prefix(&old_ws_prefix, &new_ws_prefix).to_string();
+				let common_ws_prefix = longest_common_prefix(&old_ws_prefix, &new_ws_prefix).to_vec();
 				changes[start].value =
-					replace_suffix(&changes[start].value, &new_ws_prefix, &common_ws_prefix);
-				changes[del].value = remove_prefix(&changes[del].value, &common_ws_prefix);
-				changes[ins].value = remove_prefix(&changes[ins].value, &common_ws_prefix);
+					replace_suffix(&changes[start].value, &new_ws_prefix, &common_ws_prefix).into();
+				changes[del].value = remove_prefix(&changes[del].value, &common_ws_prefix).into();
+				changes[ins].value = remove_prefix(&changes[ins].value, &common_ws_prefix).into();
 			}
 			if let Some(end) = end_keep {
-				let common_ws_suffix =
-					longest_common_suffix(&old_ws_suffix, &new_ws_suffix).to_string();
+				let common_ws_suffix = longest_common_suffix(&old_ws_suffix, &new_ws_suffix).to_vec();
 				changes[end].value =
-					replace_prefix(&changes[end].value, &new_ws_suffix, &common_ws_suffix);
-				changes[del].value = remove_suffix(&changes[del].value, &common_ws_suffix);
-				changes[ins].value = remove_suffix(&changes[ins].value, &common_ws_suffix);
+					replace_prefix(&changes[end].value, &new_ws_suffix, &common_ws_suffix).into();
+				changes[del].value = remove_suffix(&changes[del].value, &common_ws_suffix).into();
+				changes[ins].value = remove_suffix(&changes[ins].value, &common_ws_suffix).into();
 			}
 		},
 		(None, Some(ins)) => {
 			if start_keep.is_some() {
-				let ws = leading_ws(&changes[ins].value).to_string();
-				changes[ins].value = changes[ins].value[ws.len()..].to_string();
+				let ws_len = leading_ws(&changes[ins].value).len();
+				changes[ins].value = changes[ins].value[ws_len..].to_vec().into();
 			}
 			if let Some(end) = end_keep {
-				let ws = leading_ws(&changes[end].value).to_string();
-				changes[end].value = changes[end].value[ws.len()..].to_string();
+				let ws_len = leading_ws(&changes[end].value).len();
+				changes[end].value = changes[end].value[ws_len..].to_vec().into();
 			}
 		},
 		(Some(del), None) => match (start_keep, end_keep) {
 			(Some(start), Some(end)) => {
-				let new_ws_full = leading_ws(&changes[end].value).to_string();
-				let del_ws_start = leading_ws(&changes[del].value).to_string();
-				let del_ws_end = trailing_ws(&changes[del].value).to_string();
-				let new_ws_start = longest_common_prefix(&new_ws_full, &del_ws_start).to_string();
-				changes[del].value = remove_prefix(&changes[del].value, &new_ws_start);
+				let new_ws_full = leading_ws(&changes[end].value).to_vec();
+				let del_ws_start = leading_ws(&changes[del].value).to_vec();
+				let del_ws_end = trailing_ws(&changes[del].value).to_vec();
+				let new_ws_start = longest_common_prefix(&new_ws_full, &del_ws_start).to_vec();
+				changes[del].value = remove_prefix(&changes[del].value, &new_ws_start).into();
 				let new_ws_end =
-					longest_common_suffix(&new_ws_full[new_ws_start.len()..], &del_ws_end).to_string();
-				changes[del].value = remove_suffix(&changes[del].value, &new_ws_end);
-				changes[end].value = replace_prefix(&changes[end].value, &new_ws_full, &new_ws_end);
+					longest_common_suffix(&new_ws_full[new_ws_start.len()..], &del_ws_end).to_vec();
+				changes[del].value = remove_suffix(&changes[del].value, &new_ws_end).into();
+				changes[end].value =
+					replace_prefix(&changes[end].value, &new_ws_full, &new_ws_end).into();
 				let start_ws = &new_ws_full[..new_ws_full.len() - new_ws_end.len()];
-				changes[start].value = replace_suffix(&changes[start].value, &new_ws_full, start_ws);
+				changes[start].value =
+					replace_suffix(&changes[start].value, &new_ws_full, start_ws).into();
 			},
 			(None, Some(end)) => {
-				let end_keep_ws_prefix = leading_ws(&changes[end].value).to_string();
-				let deletion_ws_suffix = trailing_ws(&changes[del].value).to_string();
-				let overlap = maximum_overlap(&deletion_ws_suffix, &end_keep_ws_prefix).to_string();
-				changes[del].value = remove_suffix(&changes[del].value, &overlap);
+				let end_keep_ws_prefix = leading_ws(&changes[end].value).to_vec();
+				let deletion_ws_suffix = trailing_ws(&changes[del].value).to_vec();
+				let overlap = maximum_overlap(&deletion_ws_suffix, &end_keep_ws_prefix).to_vec();
+				changes[del].value = remove_suffix(&changes[del].value, &overlap).into();
 			},
 			(Some(start), None) => {
-				let start_keep_ws_suffix = trailing_ws(&changes[start].value).to_string();
-				let deletion_ws_prefix = leading_ws(&changes[del].value).to_string();
-				let overlap = maximum_overlap(&start_keep_ws_suffix, &deletion_ws_prefix).to_string();
-				changes[del].value = remove_prefix(&changes[del].value, &overlap);
+				let start_keep_ws_suffix = trailing_ws(&changes[start].value).to_vec();
+				let deletion_ws_prefix = leading_ws(&changes[del].value).to_vec();
+				let overlap = maximum_overlap(&start_keep_ws_suffix, &deletion_ws_prefix).to_vec();
+				changes[del].value = remove_prefix(&changes[del].value, &overlap).into();
 			},
 			(None, None) => {},
 		},
@@ -817,18 +894,18 @@ fn word_post_process(changes: &mut [DiffChange]) {
 /// Tokens carry surrounding whitespace, equality ignores it, and the
 /// post-pass dedupes whitespace across change boundaries.
 #[napi]
-pub fn diff_words(old_text: JsString, new_text: JsString) -> Result<Vec<DiffChange>> {
-	Ok(diff_words_impl(&strict_utf16_to_string(old_text)?, &strict_utf16_to_string(new_text)?))
+pub fn diff_words(old_text: Utf16String, new_text: Utf16String) -> Vec<DiffChange> {
+	diff_words_impl(&old_text, &new_text)
 }
 
-fn diff_words_impl(old_text: &str, new_text: &str) -> Vec<DiffChange> {
+fn diff_words_impl(old_text: &[u16], new_text: &[u16]) -> Vec<DiffChange> {
 	let old_tokens = word_tokens(old_text);
 	let new_tokens = word_tokens(new_text);
-	let old_refs: Vec<&str> = old_tokens.iter().map(String::as_str).collect();
-	let new_refs: Vec<&str> = new_tokens.iter().map(String::as_str).collect();
+	let old_refs: Vec<&[u16]> = old_tokens.iter().map(Vec::as_slice).collect();
+	let new_refs: Vec<&[u16]> = new_tokens.iter().map(Vec::as_slice).collect();
 	// Equality is whitespace-insensitive: intern by trimmed text.
-	let old_keys: Vec<&str> = old_refs.iter().map(|token| js_trim(token)).collect();
-	let new_keys: Vec<&str> = new_refs.iter().map(|token| js_trim(token)).collect();
+	let old_keys: Vec<&[u16]> = old_refs.iter().map(|token| js_trim(token)).collect();
+	let new_keys: Vec<&[u16]> = new_refs.iter().map(|token| js_trim(token)).collect();
 	let (old_ids, new_ids) = intern_exact(&old_keys, &new_keys);
 	let runs = myers_diff(&old_ids, &new_ids);
 	let mut changes = build_changes(&runs, &old_refs, &new_refs, word_join);
@@ -840,10 +917,14 @@ fn diff_words_impl(old_text: &str, new_text: &str) -> Vec<DiffChange> {
 mod tests {
 	use super::*;
 
+	fn u16s(text: &str) -> Vec<u16> {
+		text.encode_utf16().collect()
+	}
+
 	fn lines(old: &str, new: &str) -> Vec<(String, bool, bool)> {
-		diff_lines_impl(old, new)
+		diff_lines_impl(&u16s(old), &u16s(new))
 			.into_iter()
-			.map(|c| (c.value, c.added, c.removed))
+			.map(|c| (String::from_utf16(&c.value).unwrap(), c.added, c.removed))
 			.collect()
 	}
 
@@ -868,9 +949,14 @@ mod tests {
 
 	#[test]
 	fn structured_patch_marks_missing_eof_newline() {
-		let hunks = structured_patch_hunks_impl("a\nb", "a\nc", Some(3));
+		let hunks = structured_patch_hunks_impl(&u16s("a\nb"), &u16s("a\nc"), Some(3));
 		assert_eq!(hunks.len(), 1);
-		assert_eq!(hunks[0].lines, vec![
+		let body: Vec<String> = hunks[0]
+			.lines
+			.iter()
+			.map(|line| String::from_utf16(line).unwrap())
+			.collect();
+		assert_eq!(body, vec![
 			" a",
 			"-b",
 			"\\ No newline at end of file",
@@ -882,10 +968,10 @@ mod tests {
 	#[test]
 	fn word_diff_dedupes_boundary_whitespace() {
 		// jsdiff's documented example 2: K:'foo ' D:'bar' I:'qux' K:' baz'.
-		let changes = diff_words_impl("foo bar baz", "foo qux baz");
+		let changes = diff_words_impl(&u16s("foo bar baz"), &u16s("foo qux baz"));
 		let shaped: Vec<(String, bool, bool)> = changes
 			.into_iter()
-			.map(|c| (c.value, c.added, c.removed))
+			.map(|c| (String::from_utf16(&c.value).unwrap(), c.added, c.removed))
 			.collect();
 		assert_eq!(shaped, vec![
 			("foo ".into(), false, false),
@@ -897,11 +983,43 @@ mod tests {
 
 	#[test]
 	fn line_runs_preserve_empty_lines() {
-		let runs = diff_line_runs_impl("a\n\nb", "a\n\nc");
+		let runs = diff_line_runs_impl(&u16s("a\n\nb"), &u16s("a\n\nc"));
 		let shaped: Vec<(u32, bool, bool)> = runs
 			.into_iter()
 			.map(|r| (r.count, r.added, r.removed))
 			.collect();
 		assert_eq!(shaped, vec![(2, false, false), (1, false, true), (1, true, false)]);
+	}
+
+	#[test]
+	fn unpaired_surrogates_diff_as_distinct_content() {
+		// Lone surrogates are legal JS string content; they must compare by
+		// code unit instead of failing (or lossily surviving) a UTF-8 round
+		// trip.
+		let old = [0x61, 0xd800, LF];
+		let new = [0x61, 0xd801, LF];
+		let shaped: Vec<(Vec<u16>, bool, bool)> = diff_lines_impl(&old, &new)
+			.into_iter()
+			.map(|c| (c.value.to_vec(), c.added, c.removed))
+			.collect();
+		assert_eq!(shaped, vec![(old.to_vec(), false, true), (new.to_vec(), true, false)]);
+	}
+
+	#[test]
+	fn word_scan_keeps_lone_surrogate_before_astral_pair_separate() {
+		// "\u{D800}🚀" is a lone high surrogate directly followed by a valid
+		// pair; the `u`-flag scan must yield two "other" tokens, so replacing
+		// only the rocket leaves the lone surrogate as common content.
+		let old: Vec<u16> = [0xd800, 0xd83d, 0xde80].to_vec(); // "\u{D800}🚀"
+		let new: Vec<u16> = [0xd800, 0x78].to_vec(); // "\u{D800}x"
+		let shaped: Vec<(Vec<u16>, bool, bool)> = diff_words_impl(&old, &new)
+			.into_iter()
+			.map(|c| (c.value.to_vec(), c.added, c.removed))
+			.collect();
+		assert_eq!(shaped, vec![
+			(vec![0xd800], false, false),
+			(vec![0xd83d, 0xde80], false, true),
+			(vec![0x78], true, false),
+		]);
 	}
 }

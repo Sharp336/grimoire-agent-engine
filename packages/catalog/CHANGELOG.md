@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed `codex-auto-review` model to `GPT-5.3 Codex Spark` with updated pricing and capabilities
+- Removed image input support from GPT-5.3 Codex Spark (text-only)
+- Reduced GPT-5.3 Codex Spark context window from 272K to 128K tokens
+- Changed GPT-5.3 Codex Spark thinking efforts from `["minimal", "low", "medium", "high", "xhigh"]` to `["low", "medium", "high", "xhigh"]`
+- Updated pricing for multiple AI models across providers (costs adjusted in models.json)
+- Reduced max output tokens for an unspecified model from 16384 to 8192
+- Added image input support to Venice AI text model
+
 ## [17.0.8] - 2026-07-22
 
 ### Added

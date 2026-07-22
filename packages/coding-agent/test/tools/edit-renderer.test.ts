@@ -602,10 +602,9 @@ describe("editToolRenderer diff line wrapping", () => {
 		for (const row of rows.slice(1, -1)) expect(row).toMatch(/^│\s*[+-]?\s*\d*│/);
 	});
 
-	it("renders ill-formed UTF-16 replacements through the JS word-diff fallback", async () => {
-		// Lone surrogates are rejected by the native diffWords binding; the
-		// component's isWellFormed() guard must route to jsdiff instead of
-		// throwing mid-render.
+	it("renders ill-formed UTF-16 replacements natively", async () => {
+		// Native word diffs operate directly over UTF-16 code units, so lone
+		// surrogates render and highlight without throwing mid-render.
 		const rows = (await renderSingleLineReplacement("alpha \ud800 beta", "alpha \ud801 beta", 100)).map(row =>
 			Bun.stripANSI(row),
 		);

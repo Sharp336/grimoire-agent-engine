@@ -21,8 +21,11 @@
 ### Changed
 
 - Optimized edit-tool previews, diff components, and intra-line word highlighting to compute line and word diffs natively, reducing synchronous diff times by 2-10x on large inputs.
+- Updated diff generation and rendering components to rely exclusively on native UTF-16 diff bindings, removing `isWellFormed()` guards and JS fallback code paths.
 
-### Fixed
+### Removed
+
+- Removed npm `diff` dependency.
 
 - Fixed an issue where `Ctrl+V` clipboard paste was ignored while API-key and other modal prompts had focus.
 - Fixed `scripts/install.sh` incorrectly installing an x86_64 build on Apple Silicon when running under Rosetta.

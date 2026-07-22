@@ -518,7 +518,7 @@ export interface DiffChange {
  * Diff `oldText.split("
 ")` against `newText.split("
 ")` with jsdiff
- * `diffArrays` semantics (exact string equality, empty lines preserved),
+ * `diffArrays` semantics (exact code-unit equality, empty lines preserved),
  * returning only run lengths.
  *
  * Callers that map line numbers — like hashline recovery — need the counts,

@@ -167,10 +167,10 @@ describe("generateDiffString", () => {
 		expect(diffLines.filter(line => line.includes("|  const keep = 2;"))).toEqual([" 3|  const keep = 2;"]);
 	});
 
-	it("detects changes between ill-formed UTF-16 inputs via the JS diff fallback", () => {
-		// The native binding rejects unpaired surrogates; the isWellFormed()
-		// guard must fall back to jsdiff instead of reporting no change (or
-		// throwing) for two distinct ill-formed lines.
+	it("detects changes between ill-formed UTF-16 inputs natively", () => {
+		// Native diffs operate directly over UTF-16 code units, so lone
+		// surrogates compare code-unit for code-unit without throwing or
+		// collapsing distinct lines.
 		const result = generateDiffString("a\ud800b", "a\ud801b", 3);
 		const rows = result.diff.split("\n");
 		expect(rows.some(row => row.startsWith("-1|"))).toBe(true);
