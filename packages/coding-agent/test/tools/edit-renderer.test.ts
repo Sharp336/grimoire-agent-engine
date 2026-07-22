@@ -602,6 +602,17 @@ describe("editToolRenderer diff line wrapping", () => {
 		for (const row of rows.slice(1, -1)) expect(row).toMatch(/^│\s*[+-]?\s*\d*│/);
 	});
 
+	it("renders ill-formed UTF-16 replacements through the JS word-diff fallback", async () => {
+		// Lone surrogates are rejected by the native diffWords binding; the
+		// component's isWellFormed() guard must route to jsdiff instead of
+		// throwing mid-render.
+		const rows = (await renderSingleLineReplacement("alpha \ud800 beta", "alpha \ud801 beta", 100)).map(row =>
+			Bun.stripANSI(row),
+		);
+		expect(rows.some(row => row.includes("-42"))).toBe(true);
+		expect(rows.some(row => row.includes("+"))).toBe(true);
+	});
+
 	it("closes inverse video at every wrapped row end so frame padding stays uninverted", async () => {
 		// A long contiguous rewritten phrase forces the wrap boundary to land
 		// inside an inverse-highlighted span; the frame pads each row with spaces,

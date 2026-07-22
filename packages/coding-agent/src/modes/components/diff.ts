@@ -1,7 +1,15 @@
+import { diffWords as nativeDiffWords } from "@oh-my-pi/pi-natives";
 import { DEFAULT_TAB_WIDTH, sanitizeText } from "@oh-my-pi/pi-utils";
-import * as Diff from "diff";
+import { diffWords as jsDiffWords } from "diff";
 import { getLanguageFromPath, highlightCode, theme } from "../../modes/theme/theme";
 import { type CodeFrameMarker, formatCodeFrameLine, replaceTabs } from "../../tools/render-utils";
+
+/** Native word diff when both inputs are well-formed UTF-16; the native binding rejects unpaired surrogates, so ill-formed inputs fall back to jsdiff. */
+function diffWords(oldContent: string, newContent: string) {
+	return oldContent.isWellFormed() && newContent.isWellFormed()
+		? nativeDiffWords(oldContent, newContent)
+		: jsDiffWords(oldContent, newContent);
+}
 
 /** SGR dim on / normal intensity — additive, preserves fg/bg colors. */
 const DIM = "\x1b[2m";
@@ -53,7 +61,7 @@ function parseDiffLine(line: string): { prefix: CodeFrameMarker; lineNum: string
  * Strips leading whitespace from inverse to avoid highlighting indentation.
  */
 function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
-	const wordDiff = Diff.diffWords(oldContent, newContent);
+	const wordDiff = diffWords(oldContent, newContent);
 
 	let removedLine = "";
 	let addedLine = "";

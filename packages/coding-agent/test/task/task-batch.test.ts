@@ -125,19 +125,30 @@ describe("task.batch schema gating", () => {
 		expect(items?.properties?.schemaMode).toBeDefined();
 	});
 
-	it("places isolated per item in the batch shape when isolation is enabled", async () => {
+	it("places isolation controls per item in the batch shape and top-level in the flat shape", async () => {
 		mockDiscovery();
 
-		const tool = await TaskTool.create(
+		const batch = await TaskTool.create(
 			createSession({ settings: { "task.batch": true, "task.isolation.mode": "auto" } }),
 		);
-		const properties = getSchemaProperties(tool);
-		expect(properties.isolated).toBeUndefined();
-		const items = (properties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
+		const batchProperties = getSchemaProperties(batch);
+		expect(batchProperties.isolated).toBeUndefined();
+		expect(batchProperties.apply).toBeUndefined();
+		const items = (batchProperties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
 		expect(items?.properties?.isolated).toBeDefined();
+		expect(items?.properties?.apply).toBeDefined();
+		expect(batch.description).toContain("`apply`");
+		expect(batch.description).toContain("without modifying the parent");
+
+		const flat = await TaskTool.create(
+			createSession({ settings: { "task.batch": false, "task.isolation.mode": "auto" } }),
+		);
+		const flatProperties = getSchemaProperties(flat);
+		expect(flatProperties.isolated).toBeDefined();
+		expect(flatProperties.apply).toBeDefined();
 	});
 
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
+	it("hides isolation controls from the dynamic batch schema in plan mode", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(
 			createSession({
@@ -148,7 +159,9 @@ describe("task.batch schema gating", () => {
 		const properties = getSchemaProperties(tool);
 		const items = (properties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
 		expect(items?.properties?.isolated).toBeUndefined();
+		expect(items?.properties?.apply).toBeUndefined();
 		expect(tool.description).not.toContain("`isolated`");
+		expect(tool.description).not.toContain("`apply`");
 	});
 
 	it("exposes outputSchema but never the stale schema field", async () => {
@@ -212,6 +225,22 @@ describe("task.batch validation", () => {
 		expect(text).toContain("Missing `context`");
 	});
 
+	it("rejects apply without effective isolation before spawning", async () => {
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess");
+		const flat = await executeText(
+			{ agent: "task", task: "Work.", apply: false },
+			{ "task.batch": false, "task.isolation.mode": "worktree" },
+		);
+		expect(flat).toContain("`apply` control requires `isolated: true`");
+
+		const batch = await executeText(
+			{ context: "Shared.", tasks: [{ task: "Work.", isolated: false, apply: false }] },
+			{ "task.batch": true, "task.isolation.mode": "worktree" },
+		);
+		expect(batch).toContain("`apply` control requires `isolated: true`");
+		expect(runSubprocess).not.toHaveBeenCalled();
+	});
+
 	it("rejects duplicate provided names case-insensitively", async () => {
 		const text = await executeText(
 			{
@@ -223,6 +252,26 @@ describe("task.batch validation", () => {
 			{ "task.batch": true },
 		);
 		expect(text).toContain("Duplicate task name");
+	});
+
+	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
+		// Regression (#6039): the flat single-spawn wire schema carries
+		// `"+": "delete"`, so a batch `{ context, tasks[] }` payload is stripped
+		// by arktype and rejected as `task must be a string (was missing)` in the
+		// agent loop — preempting the tool's own actionable message. The lenient
+		// flag makes the loop forward the raw args to execute() on that failure.
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(tool.lenientArgValidation).toBe(true);
+
+		// The raw batch payload the loop would forward reaches execute() and
+		// yields the actionable reason, never arktype's misleading missing-`task`.
+		const text = await executeText(
+			{ context: "Background.", tasks: [{ name: "Alpha", task: "Work." }] },
+			{ "task.batch": false },
+		);
+		expect(text).toContain("task.batch is disabled");
+		expect(text).not.toContain("was missing");
 	});
 });
 

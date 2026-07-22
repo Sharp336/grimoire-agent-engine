@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Snapshot recovery line remapping now uses the native line diff ([#6279](https://github.com/can1357/oh-my-pi/pull/6279) by [@wolfiesch](https://github.com/wolfiesch)).
+
 ## [17.0.4] - 2026-07-18
 
 ### Fixed

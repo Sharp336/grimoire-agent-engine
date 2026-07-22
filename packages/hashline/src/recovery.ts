@@ -6,7 +6,8 @@
  * Recovery fails closed when the target changed or became ambiguous. The
  * patcher then returns a mismatch with fresh context instead of guessing.
  */
-import * as Diff from "diff";
+import { diffLineRuns as nativeDiffLineRuns } from "@oh-my-pi/pi-natives";
+import { diffArrays } from "diff";
 import { applyEdits } from "./apply";
 import { RECOVERY_EXTERNAL_WARNING, RECOVERY_LINE_REMAP_WARNING, RECOVERY_SESSION_CHAIN_WARNING } from "./messages";
 import type { SnapshotStore } from "./snapshots";
@@ -44,16 +45,29 @@ function getEditAnchors(edit: Edit): Anchor[] {
 	return edit.cursor.kind === "before_anchor" || edit.cursor.kind === "after_anchor" ? [edit.cursor.anchor] : [];
 }
 
+/** Native line-run diff when both inputs are well-formed UTF-16; the native binding rejects unpaired surrogates, so ill-formed inputs fall back to jsdiff. */
+function diffLineRuns(
+	previousText: string,
+	currentText: string,
+): { count: number; added: boolean; removed: boolean }[] {
+	if (previousText.isWellFormed() && currentText.isWellFormed()) {
+		return nativeDiffLineRuns(previousText, currentText);
+	}
+	return diffArrays(previousText.split("\n"), currentText.split("\n")).map(change => ({
+		count: change.count,
+		added: change.added,
+		removed: change.removed,
+	}));
+}
+
 function buildLineMap(previousText: string, currentText: string): Map<number, number> {
-	const previousLines = previousText.split("\n");
-	const currentLines = currentText.split("\n");
-	const changes = Diff.diffArrays(previousLines, currentLines);
+	const changes = diffLineRuns(previousText, currentText);
 	const map = new Map<number, number>();
 	let previousLine = 1;
 	let currentLine = 1;
 
 	for (const change of changes) {
-		const count = change.value.length;
+		const count = change.count;
 		if (change.added) {
 			currentLine += count;
 			continue;

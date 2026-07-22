@@ -27,6 +27,7 @@ pub mod ast;
 pub mod block;
 pub mod clipboard;
 pub mod crash_handler;
+pub mod diff;
 pub mod fd;
 pub mod glob;
 pub mod glob_util;
@@ -53,6 +54,7 @@ pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
 pub(crate) mod utils;
+pub mod vectors;
 pub mod workspace;
 
 #[cfg(target_os = "windows")]

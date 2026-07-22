@@ -68,6 +68,28 @@ export interface StructuredSubagentIsolationControls {
 	apply?: boolean;
 }
 
+/** Model-facing isolation controls accepted by task and eval adapters. */
+export interface StructuredSubagentIsolationInput {
+	isolated?: boolean;
+	apply?: boolean;
+	merge?: boolean;
+}
+
+/** Translate model-facing isolation flags into the shared executor policy. */
+export function toStructuredSubagentIsolationControls(
+	input: StructuredSubagentIsolationInput,
+): StructuredSubagentIsolationControls | undefined {
+	const requested = input.isolated !== undefined ? input.isolated : undefined;
+	const apply = input.apply !== undefined ? input.apply : undefined;
+	const merge = input.merge === false ? "patch" : undefined;
+	if (requested === undefined && apply === undefined && merge === undefined) return undefined;
+	return {
+		...(requested !== undefined ? { requested } : {}),
+		...(merge !== undefined ? { merge } : {}),
+		...(apply !== undefined ? { apply } : {}),
+	};
+}
+
 /** Identity and presentation metadata supplied by the calling surface. */
 export interface StructuredSubagentIdentity {
 	/** A previously reserved output/registry id. */
@@ -243,6 +265,9 @@ export async function resolveEffectiveSubagentPolicy(
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
+	if (request.isolation?.apply !== undefined && request.isolation.requested !== true) {
+		throw new StructuredSubagentError("preflight", "Subagent `apply` control requires `isolated: true`.");
+	}
 	assertDepthAndSpawnAllowed(request, agentName);
 
 	const discovery = await discoverAgents(request.session.cwd);
