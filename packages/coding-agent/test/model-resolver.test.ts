@@ -1611,6 +1611,43 @@ describe("resolveModelFromString", () => {
 		expect(result?.provider).toBe("example");
 		expect(result?.id).toBe("runtime:auto");
 	});
+
+	test("routes legacy ollama :cloud selectors to Ollama Cloud", () => {
+		const localAlias = buildModel({
+			id: "kimi-k2.7-code:cloud",
+			name: "kimi-k2.7-code:cloud",
+			api: "ollama-chat",
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		});
+		const cloudModel = buildModel({
+			id: "kimi-k2.7-code",
+			name: "kimi-k2.7-code",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		});
+
+		const result = resolveModelFromString("ollama/kimi-k2.7-code:cloud", [localAlias, cloudModel]);
+
+		expect(result?.provider).toBe("ollama-cloud");
+		expect(result?.id).toBe("kimi-k2.7-code");
+		expect(result?.baseUrl).toBe("https://ollama.com");
+		expect(parseModelPattern("ollama/kimi-k2.7-code:cloud", [localAlias, cloudModel]).model?.provider).toBe(
+			"ollama-cloud",
+		);
+		expect(resolveModelFromString("ollama/kimi-k2.7-code:cloud", [localAlias])?.provider).toBe("ollama");
+	});
 });
 
 describe("expandRoleAlias", () => {

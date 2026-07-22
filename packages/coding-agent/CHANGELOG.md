@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed legacy `ollama/<model>:cloud` selectors from `ollama launch omp` resolving to the local Ollama provider and failing against an unavailable localhost endpoint; they now route to the matching `ollama-cloud` model when it is available.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

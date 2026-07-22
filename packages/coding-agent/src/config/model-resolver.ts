@@ -414,6 +414,21 @@ export function resolveProviderModelReference(
 	}
 
 	const index = getProviderModelIndex(availableModels);
+	// `ollama launch omp` historically emits `ollama/<id>:cloud` selectors.
+	// The `:cloud` suffix is transport metadata, not part of the Ollama Cloud
+	// model id; resolve it before an identically named local discovery entry can
+	// capture the request and send it to localhost.
+	if (normalizedProvider === "ollama" && normalizedModelId.endsWith(":cloud")) {
+		const cloudModelId = normalizedModelId.slice(0, -":cloud".length);
+		const cloud = index.get(`ollama-cloud\u0000${cloudModelId}`);
+		if (cloud === null) {
+			return undefined;
+		}
+		if (cloud !== undefined) {
+			return cloud;
+		}
+	}
+
 	const exact = index.get(`${normalizedProvider}\u0000${normalizedModelId}`);
 	if (exact === null) {
 		return undefined; // ambiguous
@@ -1243,6 +1258,11 @@ export function resolveModelFromString(
 	available: Model<Api>[],
 	matchPreferences?: ModelMatchPreferences,
 ): Model<Api> | undefined {
+	const legacyOllamaCloud = /^ollama\/(.+):cloud$/i.exec(value.trim());
+	if (legacyOllamaCloud?.[1]) {
+		const cloud = resolveProviderModelReference("ollama", `${legacyOllamaCloud[1]}:cloud`, available);
+		if (cloud) return cloud;
+	}
 	const exact = available.find(model => `${model.provider}/${model.id}` === value);
 	if (exact) return exact;
 	const parsed = parseModelString(value, {
