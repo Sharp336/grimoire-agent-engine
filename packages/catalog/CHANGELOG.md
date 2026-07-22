@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.0.8] - 2026-07-22
+
 ### Added
 
 - Added Qoder's authenticated nine-model catalog, including ten context-window aliases that route to their base model with the selected 400K or 1M window.
