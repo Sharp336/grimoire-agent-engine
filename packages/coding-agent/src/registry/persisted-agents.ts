@@ -97,6 +97,7 @@ export function registerPersistedConsultation(
 		generatedTitle?: string;
 		displayTitle?: string;
 		state?: PersistedConsultationState;
+		parked?: boolean;
 	},
 ): void {
 	const id = consultationAgentId(options.ownerId, options.consultationId);
@@ -108,7 +109,7 @@ export function registerPersistedConsultation(
 	const displayTitle = options.displayTitle ?? options.state?.displayTitle ?? generatedTitle ?? prior?.displayTitle;
 	const titles = titlesFor(registry);
 	titles.set(id, { generatedTitle, displayTitle });
-	const status = options.state?.currentStatus === "running" ? "running" : "parked";
+	const status = options.parked || options.state?.currentStatus !== "running" ? "parked" : "running";
 	if (existing?.sessionFile === options.sessionFile) {
 		registry.setStatus(id, status);
 		refreshConsultationDisplayNames(registry, options.ownerId);
@@ -300,6 +301,7 @@ async function registerPersistedTranscriptsFromDir(
 						latestTurn,
 						currentStatus: currentTurn?.terminal?.status ?? currentTurn?.turn.status ?? "running",
 					},
+					parked: true,
 				});
 				const ownerSession = registry.get(ownerId)?.session;
 				if (!title.generatedTitle && ownerSession) {

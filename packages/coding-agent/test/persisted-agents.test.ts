@@ -151,7 +151,7 @@ describe("persisted consultation discovery", () => {
 		await registerPersistedSubagents(registry, parentFile);
 		expect(registry.get("Main/consult:root")).toMatchObject({
 			kind: "consultation",
-			status: "running",
+			status: "parked",
 			parentId: "Main",
 		});
 		expect(registry.get("Sub/consult:nested")).toMatchObject({
