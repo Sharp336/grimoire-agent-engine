@@ -320,6 +320,7 @@ import {
 } from "../thinking";
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
+import { getApproveForMeReviewer } from "../tools/approve-for-me";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -4628,6 +4629,9 @@ export class AgentSession {
 			this.#resetStreamingEditState();
 			// TTSR: Reset buffer on turn start
 			this.#ttsrManager?.resetBuffer();
+			// Reset the approve-for-me circuit breaker at each new turn so denial
+			// counters don't accumulate across unrelated user prompts.
+			getApproveForMeReviewer().resetCircuitBreaker(this.sessionManager.getSessionId());
 		}
 
 		// TTSR: Increment message count on turn end (for repeat-after-gap tracking)
@@ -7250,11 +7254,13 @@ export class AgentSession {
 	 * the bridge exposes `requestPermission`. No-ops for all other cases.
 	 *
 	 * When the user has explicitly opted into `yolo` / auto-approve behavior (via
-	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`),
-	 * skips the gate unless the per-tool policy explicitly requires a prompt or
-	 * deny. The schema default is also `yolo`, so an explicit configuration or
-	 * explicit session flag is required: default-config ACP sessions keep the
-	 * client-side permission gate.
+	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`
+	 * or `approve-for-me`), skips the gate unless the per-tool policy explicitly
+	 * requires a prompt or deny. The schema default is also `yolo`, so an
+	 * explicit configuration or explicit session flag is required:
+	 * default-config ACP sessions keep the client-side permission gate. In
+	 * `approve-for-me` mode the LLM reviewer handles exec-tier approvals, so
+	 * the ACP gate would double-prompt.
 	 */
 	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
 		const bridge = this.#clientBridge;
@@ -7356,9 +7362,10 @@ export class AgentSession {
 	}
 
 	#isExplicitAutoApproveMode(): boolean {
+		const mode = this.settings.get("tools.approvalMode");
 		return (
 			this.#autoApprove ||
-			(this.settings.isConfigured("tools.approvalMode") && this.settings.get("tools.approvalMode") === "yolo")
+			(this.settings.isConfigured("tools.approvalMode") && (mode === "yolo" || mode === "approve-for-me"))
 		);
 	}
 
