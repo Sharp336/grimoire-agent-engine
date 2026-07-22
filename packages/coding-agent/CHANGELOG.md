@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored `SSH_AUTH_SOCK` from the enclosing tmux server for Bash-tool commands when a GUI or broker launch omits it, so existing SSH-agent identities remain available without interactive passphrase prompts.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

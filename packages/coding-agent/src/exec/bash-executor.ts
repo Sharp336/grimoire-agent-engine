@@ -267,12 +267,39 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 	};
 }
 
+const SSH_AUTH_SOCK = "SSH_AUTH_SOCK";
+
+/**
+ * Restores an SSH-agent socket exported by the enclosing tmux server when the
+ * coding-agent host itself was launched without that environment variable.
+ *
+ * tmux holds the environment from the interactive shell that started it, so
+ * this covers GUI/broker launches that lose SSH_AUTH_SOCK while keeping the
+ * fallback scoped to the current user's default tmux server.
+ */
+async function resolveTmuxSshAgentEnv(): Promise<Record<string, string>> {
+	if (Bun.env[SSH_AUTH_SOCK] || process.platform === "win32") return {};
+
+	const tmux = Bun.which("tmux");
+	if (!tmux) return {};
+
+	const result = await Bun.$`${tmux} show-environment -g ${SSH_AUTH_SOCK}`.quiet().nothrow();
+	const value = result
+		.text()
+		.trim()
+		.match(new RegExp(`^${SSH_AUTH_SOCK}=(.+)$`))?.[1];
+	return value?.startsWith("/") ? { [SSH_AUTH_SOCK]: value } : {};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
 	const shellConfig =
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
-	const { shell, args, env: shellEnv, prefix } = shellConfig;
+	const { shell, args, env: configuredShellEnv, prefix } = shellConfig;
+	const shellEnv = configuredShellEnv[SSH_AUTH_SOCK]
+		? configuredShellEnv
+		: { ...configuredShellEnv, ...(await resolveTmuxSshAgentEnv()) };
 	const bashShell = isBashShell(shell);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 

@@ -197,6 +197,47 @@ describe("executeBash", () => {
 		expect(result.output.trim()).toBe("hello");
 	});
 
+	it("inherits an SSH agent socket from tmux when the host omits it", async () => {
+		if (process.platform === "win32") return;
+
+		const originalPath = Bun.env.PATH;
+		const originalSocket = Bun.env.SSH_AUTH_SOCK;
+		const binDir = path.join(tempDir, "bin");
+		const socket = "/tmp/omp-test-ssh-agent.sock";
+		fs.mkdirSync(binDir);
+		fs.writeFileSync(
+			path.join(binDir, "tmux"),
+			`#!/bin/sh
+printf '%s\\n' 'SSH_AUTH_SOCK=${socket}'
+`,
+			{ mode: 0o755 },
+		);
+
+		try {
+			Bun.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+			delete Bun.env.SSH_AUTH_SOCK;
+			vi.spyOn(Bun, "which").mockReturnValue(path.join(binDir, "tmux"));
+			vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+				shell: "/bin/bash",
+				args: ["-c"],
+				env: { PATH: Bun.env.PATH, HOME: tempDir, SHELL: "/bin/bash" },
+				prefix: undefined,
+			});
+
+			const result = await executeBash('printf "%s" "$SSH_AUTH_SOCK"', {
+				cwd: tempDir,
+				sessionKey: `ssh-agent-${Date.now()}`,
+				timeout: 5000,
+			});
+			expect(result.output).toBe(socket);
+		} finally {
+			if (originalPath === undefined) delete Bun.env.PATH;
+			else Bun.env.PATH = originalPath;
+			if (originalSocket === undefined) delete Bun.env.SSH_AUTH_SOCK;
+			else Bun.env.SSH_AUTH_SOCK = originalSocket;
+		}
+	});
+
 	it("applies non-interactive environment defaults", async () => {
 		const result = await executeBash('echo "$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
 			cwd: tempDir,
