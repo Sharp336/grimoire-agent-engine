@@ -7,7 +7,7 @@ import { $env, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
-import { getQoderCommonHeaders, wrapQoderSseFetch } from "../registry/oauth/qoder";
+import { getQoderCommonHeaders, QODER_PRIVATE_DATA_POLICY, wrapQoderSseFetch } from "../registry/oauth/qoder";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -1381,6 +1381,8 @@ const streamOpenAICompletionsOnce = (
 export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
 	withEmptyCompletionRetry(model, context, options, streamOpenAICompletionsOnce);
 
+const QODER_ENFORCED_HEADERS = { "Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY };
+
 function createRequestSetup(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1406,6 +1408,7 @@ function createRequestSetup(
 				: model.provider === "kimi-code"
 					? getKimiCommonHeaders
 					: undefined,
+		enforcedHeaders: model.provider === "qoder" ? QODER_ENFORCED_HEADERS : undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});

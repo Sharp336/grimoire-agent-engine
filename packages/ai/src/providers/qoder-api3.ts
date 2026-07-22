@@ -21,6 +21,7 @@
 
 import { randomUUID } from "node:crypto";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ProviderHttpError } from "../error";
 import { OPENAPI_BASE, QODER_CLI_VERSION, repairQoderSseBody } from "../registry/oauth/qoder";
 import {
 	getQoderMachineId,
@@ -46,7 +47,11 @@ import { type AssistantMessageEventStream, createAssistantMessageEventStream } f
 import { toolWireSchema } from "../utils/schema/wire";
 import { convertMessages, parseChunkUsage } from "./openai-completions";
 
-/** api3 inference endpoint host (the WASM prepares the full path per request). */
+/**
+ * api3 inference endpoint host (the WASM prepares the full path per request).
+ * Trusted-configuration debug seam — see the note in `registry/oauth/qoder.ts`;
+ * the signed request carries credentials, so never point it at an untrusted host.
+ */
 export const QODER_API3_BASE = process.env.QODER_API3_BASE?.trim() || "https://api3.qoder.sh";
 
 /** Output cap sent as `parameters.max_tokens` when the caller sets none. */
@@ -518,6 +523,10 @@ async function processApi3Stream(
 	};
 
 	const handleDataPayload = (payload: string): void => {
+		// Terminal parser errors (sentinel quota failure, malformed body) are
+		// sticky: later frames — including a finish_reason — must not overwrite
+		// them, so once errorMessage is set the remaining stream is inert.
+		if (state.errorMessage !== undefined) return;
 		const trimmed = payload.trim();
 		if (trimmed === "[DONE]") {
 			state.sawDone = true;
@@ -538,6 +547,19 @@ async function processApi3Stream(
 		const bodyText = envelope.body;
 		if (bodyText === "[DONE]") {
 			state.sawDone = true;
+			return;
+		}
+		// Sentinel frames the reference client skips on this SSE family:
+		// quota/notification noise. EXCEED_QUOTA is a real account-state
+		// failure, so it maps to a quota-specific error instead of a raw parse
+		// failure that would kill an otherwise healthy turn.
+		const bodyTrimmed = bodyText.trim();
+		if (bodyTrimmed === "[NOT_EXCEED_QUOTA]" || bodyTrimmed.startsWith("[NOTIFICATIONS]#")) {
+			return;
+		}
+		if (bodyTrimmed.startsWith("[EXCEED_QUOTA]")) {
+			state.stopReason = "error";
+			state.errorMessage = "Qoder api3 quota exceeded";
 			return;
 		}
 		let chunk: unknown;
@@ -642,7 +664,13 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 					},
 					signal: signal ?? null,
 				});
-				if (!response.ok) throw new Error(`Qoder userinfo failed (${response.status})`);
+				if (!response.ok) {
+					// Preserve the HTTP status on the thrown error so auth retry can
+					// rotate on 401/403 without parsing the message string.
+					throw new ProviderHttpError(`Qoder userinfo failed (${response.status})`, response.status, {
+						headers: response.headers,
+					});
+				}
 				const info: unknown = await response.json();
 				if (!isRecord(info) || typeof info.id !== "string" || info.id.length === 0) {
 					throw new Error("Qoder userinfo returned no account id");
@@ -849,12 +877,12 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			if (state.stopReason === "stop" && state.toolBlocks.size > 0) {
 				state.stopReason = "toolUse";
 			}
-			// The api3 contract terminates every successful stream with a `[DONE]`
-			// envelope after a finish_reason chunk; EOF before either means the
-			// stream was truncated, not complete.
+			// The api3 contract terminates every successful stream with BOTH a
+			// finish_reason chunk and a `[DONE]` envelope; either marker alone is
+			// truncation/error. Sticky sentinel quota errors already set stopReason
+			// to error and are left alone here.
 			if (
-				!state.sawDone &&
-				!state.sawFinishReason &&
+				(!state.sawDone || !state.sawFinishReason) &&
 				state.stopReason !== "error" &&
 				state.stopReason !== "aborted"
 			) {
@@ -876,6 +904,9 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted =
 				options?.signal?.aborted === true || (error instanceof DOMException && error.name === "AbortError");
+			if (error instanceof ProviderHttpError) {
+				output.errorStatus = error.status;
+			}
 			emitTerminalError(aborted ? "aborted" : "error", message);
 		} finally {
 			lease.release();
@@ -897,20 +928,22 @@ export function createQoderApi3Transport(deps: QoderApi3TransportDeps): QoderApi
 
 /**
  * Derive the api3 route from a catalog-built model: `requestModelId` carries
- * the base wire key (aliases sign with the base id), the row's own window
- * rides `parameters.context_length`, and the base row's window stays on
- * `model_config.max_input_tokens`. The catalog-built model's resolved compat
- * drives pi-ai's message/usage serialization as-is.
+ * the base wire key (aliases sign with the base id and the base bundled
+ * display name), the row's own window rides `parameters.context_length`, and
+ * the base row's window stays on `model_config.max_input_tokens`. The
+ * catalog-built model's resolved compat drives pi-ai's message/usage
+ * serialization as-is.
  */
 export function buildApi3Route(model: Model<"openai-completions">): QoderApi3ModelRoute {
 	const wireId = model.requestModelId ?? model.id;
 	const contextWindow = model.contextWindow ?? API3_DEFAULT_CONTEXT_WINDOW;
+	const base = resolveBaseModel(wireId);
 	const thinking = model.thinking;
 	return {
 		wireId,
-		displayName: model.name,
+		displayName: base?.name ?? model.name,
 		contextWindow,
-		maxInputTokens: resolveBaseContextWindow(wireId, contextWindow),
+		maxInputTokens: base?.contextWindow ?? contextWindow,
 		isReasoning: model.reasoning,
 		isVl: model.input.includes("image"),
 		efforts: thinking?.efforts.map(String) ?? [],
@@ -921,15 +954,15 @@ export function buildApi3Route(model: Model<"openai-completions">): QoderApi3Mod
 }
 
 /**
- * The base row's context window, from the bundled catalog. Falls back to the
- * row's own window when the base id is not bundled (custom user models).
+ * The base wire model's bundled catalog row. Falls back to undefined when the
+ * base id is not bundled (custom user models), so callers keep their own
+ * display name / window.
  */
-function resolveBaseContextWindow(wireId: string, fallback: number): number {
+function resolveBaseModel(wireId: string): Model<"openai-completions"> | undefined {
 	try {
-		const base = getBundledModel<"openai-completions">("qoder", wireId) as Model<"openai-completions"> | undefined;
-		return base?.contextWindow ?? fallback;
+		return getBundledModel<"openai-completions">("qoder", wireId) as Model<"openai-completions"> | undefined;
 	} catch {
-		return fallback;
+		return undefined;
 	}
 }
 

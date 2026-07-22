@@ -65,4 +65,68 @@ describe("Qoder WASM locator", () => {
 		fs.writeFileSync(unknown, UNKNOWN_MODULE_BYTES);
 		expect(locateKnownGoodQoderWasm([unknown])).toBe(false);
 	});
+
+	test("extracts a payload whose marker straddles the 8 MiB scan boundary", () => {
+		// The scanner reads 8 MiB windows with a marker-length overlap so a
+		// marker split across two windows is still found, and the payload read
+		// starts at the right absolute offset whichever window carried the
+		// marker. Pad a comment block so `="AGFzbQ` starts four bytes before
+		// the boundary: the first window ends mid-marker and the payload runs
+		// past it.
+		const SCAN_CHUNK = 8 * 1024 * 1024;
+		const payload = UNKNOWN_MODULE_BYTES;
+		const base64 = payload.toString("base64");
+		const markerStart = SCAN_CHUNK - 4;
+		const pad = markerStart - "/*".length - "*/var agB".length;
+		const content = `/*${"x".repeat(pad)}*/var agB="${base64}";`;
+		expect(content.indexOf('="AGFzbQ')).toBe(markerStart);
+		expect(markerStart + '="AGFzbQ'.length).toBeGreaterThan(SCAN_CHUNK);
+		const straddling = path.join(tempDir, "qoder-worker-runtime.mjs");
+		fs.writeFileSync(straddling, content);
+		const extracted = extractQoderEmbeddedPayload(straddling);
+		expect(extracted).not.toBeNull();
+		expect(Buffer.compare(extracted as Buffer, payload)).toBe(0);
+	});
+
+	test("gives up on a payload whose base64 exceeds the 1 MiB hunt bound", () => {
+		// The closing-quote hunt is bounded by MAX_PAYLOAD_BASE64_BYTES (1
+		// MiB); a payload section longer than that must yield null — never an
+		// unbounded read or a partial decode — and must not be accepted.
+		const MAX_BASE64 = 1024 * 1024;
+		const oversize = `var agB="AGFzbQ${"A".repeat(MAX_BASE64)}";`;
+		const file = path.join(tempDir, "qoder-worker-runtime.mjs");
+		fs.writeFileSync(file, oversize);
+		expect(extractQoderEmbeddedPayload(file)).toBeNull();
+		expect(locateKnownGoodQoderWasm([file])).toBe(false);
+	});
+
+	test("extracts the newest qodercli candidate and fails closed on its unknown hash", () => {
+		// A qodercli bin dir holds one file per version; the locator must
+		// extract the embedded payload from the file carrying one, find
+		// nothing in the garbage siblings, and — walking the whole candidate
+		// list — still fail closed: magic in the newest candidate never
+		// satisfies the hash gate.
+		// Seam note: the version comparator and directory enumeration are
+		// module-private, and no-arg discovery also scans ~/.qoder (machine
+		// state), so newest-first ordering itself has no hermetic seam; it is
+		// not asserted here.
+		const binDir = path.join(tempDir, "bin", "qodercli");
+		fs.mkdirSync(binDir, { recursive: true });
+		const payload = UNKNOWN_MODULE_BYTES;
+		for (const name of ["qodercli-1.8.0", "qodercli-1.9.0"]) {
+			fs.writeFileSync(path.join(binDir, name), "definitely not a wasm module");
+		}
+		const newest = path.join(binDir, "qodercli-1.10.0");
+		fs.writeFileSync(newest, `var agB="${payload.toString("base64")}";`);
+		const candidates: [string, string, string] = [
+			newest,
+			path.join(binDir, "qodercli-1.9.0"),
+			path.join(binDir, "qodercli-1.8.0"),
+		];
+		const extracted = extractQoderEmbeddedPayload(candidates[0]);
+		expect(extracted).not.toBeNull();
+		expect(Buffer.compare(extracted as Buffer, payload)).toBe(0);
+		expect(extractQoderEmbeddedPayload(candidates[1])).toBeNull();
+		expect(locateKnownGoodQoderWasm(candidates)).toBe(false);
+	});
 });

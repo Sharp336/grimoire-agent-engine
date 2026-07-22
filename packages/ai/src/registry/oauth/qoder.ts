@@ -8,6 +8,11 @@ import type { OAuthController, OAuthCredentials } from "./types";
 /** Qoder CLI version advertised in `Cosy-Version` and the token `User-Agent`. */
 export const QODER_CLI_VERSION = "1.1.2";
 const CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
+// QODER_*_BASE are trusted-configuration debug seams that can redirect
+// credentialed traffic (login, refresh, userinfo). Process env is trusted — an
+// attacker who controls it already has stronger vectors (proxy vars, preload
+// flags) — so they are intentionally not allowlisted; never point them at an
+// untrusted host.
 const WEB_BASE = process.env.QODER_WEB_BASE?.trim() || "https://qoder.com";
 /** OpenAPI host: device-token flow, and `/api/v1/userinfo` for the api3 identity chain. */
 export const OPENAPI_BASE = process.env.QODER_OPENAPI_BASE?.trim() || "https://openapi.qoder.sh";
@@ -21,6 +26,10 @@ export const QODER_PRIVATE_DATA_POLICY = "disagree";
 
 const b64url = (buffer: Buffer) => buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 function parseExpires(value: unknown): number {
 	if (typeof value === "number") return (value < 1e12 ? value * 1000 : value) - SKEW_MS;
 	if (typeof value === "string") {
@@ -31,16 +40,77 @@ function parseExpires(value: unknown): number {
 	return Date.now() + 30 * 60_000 - SKEW_MS;
 }
 
-function credentialsFromTokenResponse(
-	body: { token?: unknown; refresh_token?: unknown; expires_at?: unknown },
-	refresh: string,
-): OAuthCredentials | undefined {
-	if (typeof body.token !== "string" || body.token.trim() === "") return undefined;
+type QoderTokenBody = {
+	token?: unknown;
+	device_token?: unknown;
+	refresh_token?: unknown;
+	expires_at?: unknown;
+};
+
+/** Prefer explicit `device_token` when present; retain `token` compatibility. */
+function accessFromTokenResponse(body: QoderTokenBody): string | undefined {
+	return nonEmptyString(body.device_token) ?? nonEmptyString(body.token);
+}
+
+function credentialsFromTokenResponse(body: QoderTokenBody, refreshFallback: string): OAuthCredentials | undefined {
+	const access = accessFromTokenResponse(body);
+	if (!access) return undefined;
+	const refresh = nonEmptyString(body.refresh_token) ?? nonEmptyString(refreshFallback);
+	if (!refresh) return undefined;
 	return {
-		access: body.token,
-		refresh: typeof body.refresh_token === "string" ? body.refresh_token : refresh,
+		access,
+		refresh,
 		expires: parseExpires(body.expires_at),
 	};
+}
+
+async function fetchQoderAccountId(access: string, fetchImpl: FetchImpl, signal?: AbortSignal): Promise<string> {
+	let response: Response;
+	try {
+		const timeoutSignal = AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS);
+		response = await fetchImpl(`${OPENAPI_BASE}/api/v1/userinfo`, {
+			method: "GET",
+			headers: {
+				Authorization: `Bearer ${access}`,
+				Accept: "application/json",
+			},
+			signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
+		});
+	} catch (cause) {
+		if (signal?.aborted) throw new AIError.LoginCancelledError();
+		throw new AIError.OAuthError("Qoder userinfo request failed", {
+			kind: "validation",
+			provider: "qoder",
+			cause,
+		});
+	}
+	if (!response.ok) {
+		throw new AIError.OAuthError(`Qoder userinfo failed (${response.status})`, {
+			kind: "validation",
+			provider: "qoder",
+			status: response.status,
+		});
+	}
+
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch (cause) {
+		throw new AIError.OAuthError("Qoder userinfo returned invalid JSON", {
+			kind: "validation",
+			provider: "qoder",
+			cause,
+		});
+	}
+	const accountId =
+		body && typeof body === "object" && "id" in body ? nonEmptyString((body as { id?: unknown }).id) : undefined;
+	if (!accountId) {
+		throw new AIError.OAuthError("Qoder userinfo returned no account id", {
+			kind: "validation",
+			provider: "qoder",
+		});
+	}
+	return accountId;
 }
 
 export async function loginQoder(ctrl: OAuthController): Promise<OAuthCredentials> {
@@ -80,12 +150,15 @@ export async function loginQoder(ctrl: OAuthController): Promise<OAuthCredential
 				// deadline or caller cancellation.
 				return { status: "pending" } as const;
 			}
-			if (response.status === 404) return { status: "pending" } as const;
+			// 202 Accepted and 404 Not Found both mean "still pending" for Qoder's
+			// device-token poll. Check before `response.ok` — 202 is a 2xx and would
+			// otherwise fall through into JSON parsing.
+			if (response.status === 202 || response.status === 404) return { status: "pending" } as const;
 			if (!response.ok) return { status: "failed", message: `Qoder login failed (${response.status})` } as const;
 
-			let body: { token?: unknown; refresh_token?: unknown; expires_at?: unknown };
+			let body: QoderTokenBody;
 			try {
-				body = (await response.json()) as typeof body;
+				body = (await response.json()) as QoderTokenBody;
 			} catch (cause) {
 				throw new AIError.OAuthError("Qoder login returned invalid JSON", {
 					kind: "validation",
@@ -93,8 +166,28 @@ export async function loginQoder(ctrl: OAuthController): Promise<OAuthCredential
 					cause,
 				});
 			}
-			const credentials = credentialsFromTokenResponse(body, "");
-			return credentials ? ({ status: "complete", value: credentials } as const) : ({ status: "pending" } as const);
+			const access = accessFromTokenResponse(body);
+			if (!access) return { status: "pending" } as const;
+			const refresh = nonEmptyString(body.refresh_token);
+			if (!refresh) {
+				// Browser login must finish with a refreshable credential. Persisting a
+				// token-only result would advertise refreshability the registered hook
+				// cannot honor — fail validation instead of looping forever.
+				throw new AIError.OAuthError("Qoder login returned no refresh_token", {
+					kind: "validation",
+					provider: "qoder",
+				});
+			}
+			const accountId = await fetchQoderAccountId(access, fetchImpl, ctrl.signal);
+			return {
+				status: "complete",
+				value: {
+					access,
+					refresh,
+					expires: parseExpires(body.expires_at),
+					accountId,
+				},
+			} as const;
 		},
 	});
 }
@@ -133,9 +226,9 @@ export async function refreshQoderToken(refresh: string, fetchOverride?: FetchIm
 		});
 	}
 
-	let body: { token?: unknown; refresh_token?: unknown; expires_at?: unknown };
+	let body: QoderTokenBody;
 	try {
-		body = (await response.json()) as typeof body;
+		body = (await response.json()) as QoderTokenBody;
 	} catch (cause) {
 		throw new AIError.OAuthError("Qoder token refresh returned invalid JSON", {
 			kind: "validation",
@@ -225,7 +318,8 @@ export function repairQoderSseBody(body: ReadableStream<Uint8Array>): ReadableSt
 export function wrapQoderSseFetch(fetchImpl: FetchImpl = fetch): FetchImpl {
 	return async (input, init) => {
 		const response = await fetchImpl(input, init);
-		if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+		const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+		if (!response.ok || !response.body || !contentType.includes("text/event-stream")) {
 			return response;
 		}
 		return new Response(repairQoderSseBody(response.body), {
