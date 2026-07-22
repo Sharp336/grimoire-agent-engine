@@ -140,9 +140,11 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// Deferred discovery mounts MCP under xd:// and activates write as its transport.
 			const deadline = Date.now() + 12_000;
 			let deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			while (!deviceNames.includes(MCP_TOOL_NAME) && Date.now() < deadline) {
+			let activeToolNames = session.getActiveToolNames();
+			while ((!deviceNames.includes(MCP_TOOL_NAME) || !activeToolNames.includes("write")) && Date.now() < deadline) {
 				await Bun.sleep(50);
 				deviceNames = session.getXdevToolEntries().map(entry => entry.name);
+				activeToolNames = session.getActiveToolNames();
 			}
 
 			expect(session.getActiveToolNames()).toContain("read");
