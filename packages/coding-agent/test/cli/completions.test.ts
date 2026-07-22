@@ -212,7 +212,7 @@ describe("omp completions (integration / drift)", () => {
 		expect(stdout).toContain("{-r,--resume}");
 		// Real enum option sets flow through unchanged.
 		expect(stdout).toContain(":value:(off minimal low medium high xhigh max auto)");
-		expect(stdout).toContain(":value:(always-ask write yolo)");
+		expect(stdout).toContain(":value:(always-ask approve-for-me write yolo)");
 		// Real subcommands present; dynamic callbacks wired.
 		expect(stdout).toContain("_omp_cmd_commit");
 		expect(stdout).toContain("'completions:");
