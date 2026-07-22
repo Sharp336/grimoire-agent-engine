@@ -187,6 +187,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					// Circuit breaker: after N consecutive or M recent denials, abort
 					// the entire turn — the agent is stuck in a denial loop.
 					if (reviewer.shouldInterruptTurn(sessionId)) {
+						context?.abort?.();
 						throw new Error(
 							`Tool "${this.tool.name}" denied by auto-review: ${decision.rationale}\n` +
 								`Do not attempt the same action via workaround. Find a safer alternative or ask the user.\n` +

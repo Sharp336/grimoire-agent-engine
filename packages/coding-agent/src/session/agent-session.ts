@@ -320,6 +320,7 @@ import {
 } from "../thinking";
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
+import { getApproveForMeReviewer } from "../tools/approve-for-me";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -4628,6 +4629,9 @@ export class AgentSession {
 			this.#resetStreamingEditState();
 			// TTSR: Reset buffer on turn start
 			this.#ttsrManager?.resetBuffer();
+			// Reset the approve-for-me circuit breaker at each new turn so denial
+			// counters don't accumulate across unrelated user prompts.
+			getApproveForMeReviewer().resetCircuitBreaker(this.sessionManager.getSessionId());
 		}
 
 		// TTSR: Increment message count on turn end (for repeat-after-gap tracking)

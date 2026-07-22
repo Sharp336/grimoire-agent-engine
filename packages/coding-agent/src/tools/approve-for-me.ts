@@ -103,7 +103,13 @@ export class ApproveForMeReviewer {
 
 		const cacheKey = this.#cacheKey(tool.name, args);
 		const cached = session.cache.get(cacheKey);
-		if (cached) return cached;
+		if (cached) {
+			// Record the allow so it resets the consecutive-denial counter and
+			// occupies the recent window — prevents a stale streak from tripping
+			// the breaker after an intervening cached approval.
+			this.#recordReview(session, false);
+			return cached;
+		}
 
 		// Fail closed when args are truncated — a security decision must cover
 		// the complete action, not a prefix of it.
@@ -194,13 +200,16 @@ export class ApproveForMeReviewer {
 			const entries = context?.sessionManager?.getEntries?.();
 			if (!entries) return "(no recent user messages)";
 			const userTexts: string[] = [];
-			for (const entry of entries) {
+			// Iterate from the end so we get the most recent user messages,
+			// not the oldest ones. The current prompt authorizes the tool call.
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const entry = entries[i];
 				if (entry.type !== "message") continue;
 				const msg = entry.message as { role?: string; content?: unknown };
 				if (msg.role !== "user") continue;
 				const content = msg.content;
 				if (typeof content === "string") {
-					userTexts.push(content);
+					userTexts.unshift(content);
 				} else if (Array.isArray(content)) {
 					for (const part of content) {
 						if (
@@ -209,7 +218,7 @@ export class ApproveForMeReviewer {
 							part.type === "text" &&
 							typeof part.text === "string"
 						) {
-							userTexts.push(part.text);
+							userTexts.unshift(part.text);
 						}
 					}
 				}
