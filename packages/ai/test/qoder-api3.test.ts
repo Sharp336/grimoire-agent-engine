@@ -24,6 +24,7 @@ import type {
 	Context,
 	FetchImpl,
 	Model,
+	RawSseEvent,
 	SimpleStreamOptions,
 	Tool,
 } from "@oh-my-pi/pi-ai/types";
@@ -189,7 +190,7 @@ function fakeBridge(): { bridge: QoderWasmBridge; state: FakeBridgeState } {
 			const prepared: QoderPreparedRequest = {
 				url: `${endpoint}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`,
 				headers: {
-					Authorization: "COSY fake-signature",
+					Authorization: `COSY fake-signature-${state.prepares.length}`,
 					"Cosy-Data-Policy": QODER_PRIVATE_DATA_POLICY,
 					"X-Model-Key": modelKey ?? "",
 					"X-Model-Source": modelSource ?? "",
@@ -266,12 +267,12 @@ function fakeApi3Fetch(respond: () => Response, userinfo?: () => Response): Fake
 // whose `body` string is itself a JSON chat.completion.chunk)
 // ---------------------------------------------------------------------------
 
-function envelope(body: string): string {
+function envelope(body: string, statusCodeValue = 200): string {
 	return JSON.stringify({
 		headers: {},
 		body,
-		statusCode: "OK",
-		statusCodeValue: 200,
+		statusCode: statusCodeValue >= 400 ? "ERROR" : "OK",
+		statusCodeValue,
 	});
 }
 
@@ -830,6 +831,25 @@ describe("createQoderApi3Transport", () => {
 		// live credential's context was never freed by the late resolution.
 		expect(freed).toEqual(["uid-old"]);
 	});
+
+	it("re-signs each transient inference retry without rebuilding the payload", async () => {
+		let attempts = 0;
+		const { result, bridgeState, fetches } = await runApi3Turn("qmodel_preview", () => {
+			attempts += 1;
+			if (attempts === 1) {
+				return new Response("busy", { status: 503, headers: { "Retry-After": "0" } });
+			}
+			return sseResponse(HAPPY_SSE);
+		});
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(fetches.inferRequests).toHaveLength(2);
+		expect(bridgeState.prepares).toHaveLength(2);
+		expect(fetches.inferRequests[0]?.headers.get("Authorization")).not.toBe(
+			fetches.inferRequests[1]?.headers.get("Authorization"),
+		);
+		expect(bridgeState.prepares[0]?.bodyJson).toBe(bridgeState.prepares[1]?.bodyJson);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -945,6 +965,32 @@ describe("api3 failure contracts", () => {
 			// Status must ride the structured field, not rely on message parsing.
 			expect(result.errorStatus).not.toBeUndefined();
 		}
+	});
+
+	it("preserves in-stream envelope status for OAuth retry", async () => {
+		for (const status of [401, 403]) {
+			const errorSse = `data: ${envelope(JSON.stringify({ code: "AUTH", message: "Signature invalid" }), status)}`;
+			const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(errorSse));
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(status);
+			expect(result.errorMessage).toContain("Signature invalid");
+			expect(events.map(event => event.type)).toEqual(["start", "error"]);
+		}
+	});
+
+	it("forwards every repaired frame to a diagnostic observer without trusting it", async () => {
+		const observed: RawSseEvent[] = [];
+		const { result } = await runApi3Turn("qmodel_preview", () => sseResponse(HAPPY_SSE), {
+			onSseEvent(event) {
+				observed.push(event);
+				throw new Error("diagnostic observer failure");
+			},
+		});
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(observed).toHaveLength(8);
+		expect(observed.some(event => event.event === "finish")).toBe(true);
+		expect(observed.some(event => event.data.includes("[DONE]"))).toBe(true);
 	});
 });
 
@@ -1237,6 +1283,53 @@ describe("api3 context cache", () => {
 		// Freed exactly once, after the last of the two turns released (the free
 		// microtask is queued by release() before the stream's result settles).
 		expect(freed).toEqual(["uid-a"]);
+	});
+
+	it("isolates a shared context build from one caller abort", async () => {
+		const { bridge } = fakeBridge();
+		const userinfoStarted = Promise.withResolvers<void>();
+		const userinfoGate = Promise.withResolvers<void>();
+		let userinfoCalls = 0;
+		const fetchImpl: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+			if (url.includes("/api/v1/userinfo")) {
+				userinfoCalls += 1;
+				userinfoStarted.resolve();
+				await userinfoGate.promise;
+				return new Response(JSON.stringify({ id: "uid-shared" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return sseResponse(HAPPY_SSE);
+		};
+		const transport = makeTransport(bridge);
+		const controller = new AbortController();
+		const first = collectTurn(transport, "qmodel_preview", {
+			apiKey: "shared-token",
+			fetch: fetchImpl,
+			signal: controller.signal,
+		});
+		await userinfoStarted.promise;
+		const second = collectTurn(transport, "qmodel_preview", { apiKey: "shared-token", fetch: fetchImpl });
+		controller.abort();
+		const firstResult = await Promise.race([
+			first,
+			Bun.sleep(250).then(() => {
+				throw new Error("aborted caller waited for shared userinfo");
+			}),
+		]);
+		expect(firstResult.result.stopReason).toBe("aborted");
+
+		userinfoGate.resolve();
+		const secondResult = await second;
+		expect(secondResult.result.stopReason).toBe("toolUse");
+		const thirdResult = await collectTurn(transport, "qmodel_preview", {
+			apiKey: "shared-token",
+			fetch: fetchImpl,
+		});
+		expect(thirdResult.result.stopReason).toBe("toolUse");
+		expect(userinfoCalls).toBe(1);
 	});
 });
 
