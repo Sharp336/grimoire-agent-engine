@@ -513,15 +513,26 @@ await Bun.sleep(60_000);
 	const DELAYED_BANNER_ADAPTER = `
 const port = Number(process.argv[2]);
 await Bun.sleep(150);
+const buffers = new WeakMap();
 const server = Bun.listen({ hostname: "127.0.0.1", port, socket: {
-	open(){},
+	open(s){ buffers.set(s, Buffer.alloc(0)); },
 	data(s, data){
-		const text = Buffer.from(data).toString();
-		const m = /Content-Length: (\\d+)\\r\\n\\r\\n([\\s\\S]*)/.exec(text);
-		if (!m) return;
-		const req = JSON.parse(m[2].slice(0, Number(m[1])));
-		const resp = JSON.stringify({ seq: 1, type: "response", request_seq: req.seq, success: true, command: req.command, body: { supportsConfigurationDoneRequest: true } });
-		s.write(\`Content-Length: \${Buffer.byteLength(resp)}\\r\\n\\r\\n\${resp}\`);
+		let buffered = Buffer.concat([buffers.get(s) ?? Buffer.alloc(0), Buffer.from(data)]);
+		while (buffered.length > 0) {
+			const headerEnd = buffered.indexOf("\\r\\n\\r\\n");
+			if (headerEnd < 0) { buffers.set(s, buffered); return; }
+			const header = buffered.subarray(0, headerEnd).toString();
+			const m = /Content-Length: (\\d+)/i.exec(header);
+			if (!m) { buffers.delete(s); return; }
+			const bodyStart = headerEnd + 4;
+			const bodyEnd = bodyStart + Number(m[1]);
+			if (buffered.length < bodyEnd) { buffers.set(s, buffered); return; }
+			const req = JSON.parse(buffered.subarray(bodyStart, bodyEnd).toString());
+			buffered = buffered.subarray(bodyEnd);
+			const resp = JSON.stringify({ seq: 1, type: "response", request_seq: req.seq, success: true, command: req.command, body: { supportsConfigurationDoneRequest: true } });
+			s.write(\`Content-Length: \${Buffer.byteLength(resp)}\\r\\n\\r\\n\${resp}\`);
+		}
+		buffers.delete(s);
 	},
 	close(){}, error(){},
 }});
