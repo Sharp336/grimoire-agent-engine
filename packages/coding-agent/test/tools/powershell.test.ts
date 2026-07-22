@@ -286,6 +286,28 @@ suite("PowerShellTool (persistent host)", () => {
 		for (const n of [1, 1000, 2000]) expect([...lines].some(l => l.includes(`boom-${n}`))).toBe(true);
 		expect(text).toContain("done-marker");
 	});
+
+	test("a pre-aborted signal is rejected before the host ever runs the command", async () => {
+		const tool = await loadPowerShellTool(fakeSession("ps-preaborted-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		// Establish the session's pooled host first so acquisition is warm —
+		// isolates this test to the throwIfAborted() re-check, not host spawn.
+		await tool.execute("warm", { command: "'warm-ok'" });
+
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			tool.execute("aborted", { command: "$global:__preabort_marker = 'ran'" }, controller.signal),
+		).rejects.toThrow(/abort/i);
+
+		// The command text must never have reached the runspace.
+		const result = await tool.execute("verify", {
+			command: "if ($global:__preabort_marker) { 'ran' } else { 'never-ran' }",
+		});
+		expect(textOf(result).trim()).toBe("never-ran");
+	});
 });
 
 // Ungated: these need neither pwsh nor a live host.

@@ -252,6 +252,25 @@ impl HostCore {
 		}
 		// One pipeline at a time on the shared runspace.
 		let _guard = self.exec_lock.lock().await;
+		// The AbortSignal may already be aborted by the time we get the lock
+		// (e.g. the caller cancelled while a cold host was still spawning, or
+		// while queued behind another pipeline on this shared runspace).
+		// Bail out here, before any exec/Pending state is created and before
+		// the frame reaches the sidecar — otherwise a fast or destructive
+		// command would start despite the cancelled tool call. `wait()`
+		// resolves immediately once `aborted()` is true, so this costs no
+		// extra delay.
+		if cancel.aborted() {
+			let reason = cancel.wait().await;
+			let timed_out = matches!(reason, task::AbortReason::Timeout);
+			return Ok(PsRunResult {
+				exit_code: None,
+				had_errors: false,
+				cancelled: !timed_out,
+				timed_out,
+				exec_id: 0,
+			});
+		}
 		// Ids start at 1: `current_id == 0` is the "nothing in flight" sentinel
 		// read by abort(), hence the double increment.
 		let id = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
@@ -1368,6 +1387,47 @@ mod tests {
 		// Only the pipeline was stopped; the runspace survives.
 		let (out, _) = run_cmd(&host, "'alive'", task::CancelToken::default()).await;
 		assert_eq!(out, "alive", "runspace survives a signal abort");
+
+		host.dispose().await.expect("host disposes");
+	}
+
+	/// If the caller's `AbortSignal` is already aborted by the time `exec()`
+	/// reaches the native layer (e.g. cancelled while a cold host was still
+	/// spawning), the exec frame must never reach the sidecar: no pipeline
+	/// should run, and the result must report cancellation immediately.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn aborted_before_exec_never_publishes_the_frame() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		// Abort BEFORE exec() is ever called -- not racing it mid-flight.
+		let mut cancel = task::CancelToken::default();
+		let aborter = cancel.emplace_abort_token();
+		aborter.abort(task::AbortReason::Signal);
+
+		let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(super::CHUNK_QUEUE_CHUNKS);
+		let res = host
+			.core
+			.exec("$global:__marker = 'ran'".to_string(), None, None, 200, cancel, chunk_tx)
+			.await
+			.expect("pre-aborted exec still resolves");
+		assert!(res.cancelled, "pre-aborted call reports cancelled");
+		assert!(!res.timed_out, "signal abort is not attributed to timeout");
+		assert!(chunk_rx.recv().await.is_none(), "no output chunk was ever produced");
+
+		// The command text must never have reached the runspace.
+		let (out, _) = run_cmd(
+			&host,
+			"if ($global:__marker) { 'ran' } else { 'never-ran' }",
+			task::CancelToken::default(),
+		)
+		.await;
+		assert_eq!(out, "never-ran", "the exec frame was never sent to the sidecar");
 
 		host.dispose().await.expect("host disposes");
 	}

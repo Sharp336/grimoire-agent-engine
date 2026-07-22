@@ -24,7 +24,7 @@ import {
 import { resolveToCwd } from "./path-utils";
 import { acquirePsHost, disposePsHostSession, spawnEphemeralPsHost } from "./pshost-manager";
 import { capPreviewLines, DEFAULT_TERMINAL_PREVIEW_LINES, previewWindowRows, replaceTabs } from "./render-utils";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -174,16 +174,26 @@ export class PowerShellTool implements AgentTool<typeof powershellSchema, PowerS
 		const pid = host.pid;
 		let result: PsRunResult;
 		try {
+			// Acquiring a host (spawning a cold one, or waiting behind another
+			// call on the shared runspace) can take a while; re-check here so a
+			// call cancelled during acquisition never reaches host.run() at all.
+			// (host.run()/PsHost.exec() also checks this immediately before
+			// publishing the exec frame, as defense in depth.)
+			throwIfAborted(signal);
 			result = await host.run(
 				{ command, cwd: resolvedCwd, width, timeoutMs: timeoutSec * 1000, signal },
 				(_err, chunk) => sink.push(chunk),
 			);
 		} catch (err) {
-			// run() rejects only when the host died mid-command (crash,
-			// [Environment]::Exit, forced kill). Drop the session pool entry
-			// now rather than releasing a corpse — otherwise the next default
-			// call has to trip over the dead host before the pool's alive
-			// check evicts it.
+			// The pre-run throwIfAborted() above throws ToolAbortError, not a
+			// host-death rejection — never dispose a healthy pool entry or wrap
+			// it as a crash for that case.
+			if (err instanceof ToolAbortError) throw err;
+			// run() otherwise rejects only when the host died mid-command
+			// (crash, [Environment]::Exit, forced kill). Drop the session pool
+			// entry now rather than releasing a corpse — otherwise the next
+			// default call has to trip over the dead host before the pool's
+			// alive check evicts it.
 			if (hostMode !== "ephemeral") await disposePsHostSession(sessionKey);
 			// Chunks already streamed to `sink` before the crash are otherwise
 			// lost: the rethrown message carried only the native rejection
