@@ -362,9 +362,12 @@ function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
 
 /**
  * Qoder's curated seed is the authoritative catalog — the provider has no
- * unauthenticated discovery. Previous bundled snapshots can resurrect pruned
- * api3-only base ids (and their context aliases) via the fallback merge, so
- * keep exactly the rows the current seed produces.
+ * unauthenticated discovery. Previous bundled snapshots predate seed changes
+ * (retired ids, or the api3-only families added once the WASM-signed api3
+ * transport landed) and can resurrect stale wire ids via the fallback merge,
+ * so keep exactly the rows the current seed produces. The six api3-only
+ * families are curated here; runtime availability gating (auth-WASM
+ * detection) lives in the coding-agent, not in the bundle.
  */
 function dropPrunedQoderWireIds(models: readonly ModelSpec[]): ModelSpec[] {
 	const curated = new Set(buildQoderStaticSeed().map(model => model.id));
