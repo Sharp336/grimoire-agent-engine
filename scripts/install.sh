@@ -232,6 +232,12 @@ install_binary() {
         *)         echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
 
+    if [ "$PLATFORM" = "linux" ]; then
+        if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+            PLATFORM="linux-musl"
+        fi
+    fi
+
     BINARY="omp-${PLATFORM}-${ARCH}"
     # Get release tag
     if [ -n "$REF" ]; then
