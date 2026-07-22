@@ -45,6 +45,7 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(settings.get("tier.openai")).toBe("priority");
 		expect(settings.get("tier.anthropic")).toBe("priority");
 		expect(settings.get("tier.google")).toBe("priority");
+		expect(settings.get("tier.qoder")).toBe("priority");
 	});
 
 	it("scopes openai-only/claude-only to a single family", async () => {
@@ -52,6 +53,7 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(openai.get("tier.openai")).toBe("priority");
 		expect(openai.get("tier.anthropic")).toBe("none");
 		expect(openai.get("tier.google")).toBe("none");
+		expect(openai.get("tier.qoder")).toBe("none");
 
 		const claude = await loadWith({ serviceTier: "claude-only" });
 		expect(claude.get("tier.anthropic")).toBe("priority");

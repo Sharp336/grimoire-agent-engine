@@ -532,7 +532,18 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
-	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
+	// Replace-mode overlays own the wire id: omitting requestModelId clears a
+	// bundled alias rewrite (registerProvider drops the row; merge must match).
+	// Merge/patch modes still treat undefined as "leave the base value alone".
+	if (transport === "replace") {
+		if (patch.requestModelId !== undefined) {
+			result.requestModelId = patch.requestModelId;
+		} else {
+			delete result.requestModelId;
+		}
+	} else if (patch.requestModelId !== undefined) {
+		result.requestModelId = patch.requestModelId;
+	}
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
@@ -661,10 +672,19 @@ function applyStandaloneCustomModelPolicies(model: CustomModelOverlay): CustomMo
 	return { ...model, contextWindow: 1_000_000 };
 }
 
+function resolveCustomModelReference(modelId: string, provider: string): Model<Api> | undefined {
+	const reference = resolveModelReference(modelId, getBundledModelReferenceIndex());
+	if (!reference) return undefined;
+	if (reference.provider === provider) return reference;
+	// Qoder references carry provider-specific compat/windows; keep them local.
+	if (reference.provider === "qoder") return undefined;
+	return reference;
+}
+
 function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
 	const resolvedModel = options.useDefaults ? applyStandaloneCustomModelPolicies(model) : model;
 	const reference = options.useDefaults
-		? resolveModelReference(resolvedModel.id, getBundledModelReferenceIndex())
+		? resolveCustomModelReference(resolvedModel.id, resolvedModel.provider)
 		: undefined;
 	const cost =
 		resolvedModel.cost ??
@@ -672,14 +692,6 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
-	// requestModelId rewrites the wire id, so inherit it only from an exact
-	// provider/id match — cross-provider and fuzzy references must not reroute.
-	const exactReference =
-		reference &&
-		reference.provider === resolvedModel.provider &&
-		reference.id.trim().toLowerCase() === resolvedModel.id.trim().toLowerCase()
-			? reference
-			: undefined;
 	return buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
@@ -693,7 +705,10 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		cost,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
-		requestModelId: resolvedModel.requestModelId ?? exactReference?.requestModelId,
+		// requestModelId is overlay-owned: omitting it must not revive a bundled
+		// alias wire rewrite via reference lookup (replace-mode merge clears the
+		// same way). Same-provider aliases set requestModelId explicitly.
+		requestModelId: resolvedModel.requestModelId,
 		headers: resolvedModel.headers,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
@@ -1097,7 +1112,9 @@ export class ModelRegistry {
 		return mergeByModelKey(builtInModels, customModels, (existingModel, customModel) => {
 			if (!existingModel) return finalizeCustomModel(customModel, { useDefaults: true });
 			// Same-id custom definitions replace bundled transport behavior, so the
-			// patch is applied with the `replace` transport policy.
+			// patch is applied with the `replace` transport policy. Omitted
+			// requestModelId clears any bundled alias wire rewrite — same as
+			// registerProvider dropping the row and finalizing the overlay alone.
 			return applyModelPatch(
 				{
 					...existingModel,

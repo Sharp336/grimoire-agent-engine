@@ -27,7 +27,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	let authStorage: AuthStorage;
 	let registry: ModelRegistry;
 
-	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth", "ext://other-runtime"];
 
 	// Stub transport: reject every request so refresh("online") drives the full
 	// online discovery path with deterministic, instant failures instead of real
@@ -237,8 +237,13 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(aliasAfterRefresh?.requestModelId).toBe("foo");
 	});
 
-	test("registerProvider inherits requestModelId from an exact bundled reference when the override omits it", async () => {
+	test("replace-mode overlays clear omitted requestModelId instead of keeping a bundled alias wire rewrite", async () => {
 		const providerName = "qoder";
+		// Bundled qoder/ultimate-1m rewrites to "ultimate". Redefining it as a
+		// real model (omit requestModelId) must send the local id on both the
+		// immediate registerProvider path and after refresh merge.
+		expect(registry.find(providerName, "ultimate-1m")?.requestModelId).toBe("ultimate");
+
 		registry.registerProvider(
 			providerName,
 			{
@@ -269,19 +274,23 @@ describe("ModelRegistry runtime provider registration", () => {
 			"ext://runtime",
 		);
 
-		// The override re-declares the retained bundled alias id, so the finalized
-		// model keeps the local id while the wire id stays the upstream base model.
 		const alias = registry.find(providerName, "ultimate-1m");
 		expect(alias).toBeDefined();
 		expect(alias?.id).toBe("ultimate-1m");
-		expect(alias?.requestModelId).toBe("ultimate");
+		expect(alias?.requestModelId).toBeUndefined();
 
-		// A fuzzy reference match must not reroute the wire id.
+		// Fuzzy ids must not pick up a Qoder alias wire rewrite either.
 		const proxied = registry.find(providerName, "vendor/ultimate-1m");
 		expect(proxied).toBeDefined();
-		expect(proxied?.id).toBe("vendor/ultimate-1m");
 		expect(proxied?.requestModelId).toBeUndefined();
 
+		await registry.refresh("offline");
+		const aliasAfterRefresh = registry.find(providerName, "ultimate-1m");
+		expect(aliasAfterRefresh?.id).toBe("ultimate-1m");
+		expect(aliasAfterRefresh?.requestModelId).toBeUndefined();
+	});
+
+	test("Qoder reference metadata does not leak into unrelated providers with colliding ids", async () => {
 		registry.registerProvider(
 			"other-provider",
 			{
@@ -295,21 +304,52 @@ describe("ModelRegistry runtime provider registration", () => {
 						reasoning: false,
 						input: ["text"],
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						contextWindow: 1_000_000,
-						maxTokens: 32_768,
+						contextWindow: 128_000,
+						maxTokens: 8_192,
 					},
 				],
 			},
 			"ext://other-runtime",
 		);
+
 		const crossProvider = registry.find("other-provider", "ultimate-1m");
 		expect(crossProvider).toBeDefined();
 		expect(crossProvider?.requestModelId).toBeUndefined();
+		expect(crossProvider?.contextWindow).toBe(128_000);
+		expect(crossProvider?.maxTokens).toBe(8_192);
+		const compat = crossProvider?.compatConfig as { extraBody?: Record<string, unknown> } | undefined;
+		expect(compat?.extraBody?.context_length).toBeUndefined();
 
-		await registry.refresh("offline");
-		const aliasAfterRefresh = registry.find(providerName, "ultimate-1m");
-		expect(aliasAfterRefresh?.id).toBe("ultimate-1m");
-		expect(aliasAfterRefresh?.requestModelId).toBe("ultimate");
+		// Same-provider Qoder overrides still resolve against the Qoder seed.
+		registry.registerProvider(
+			"qoder",
+			{
+				baseUrl: "https://api2-v2.qoder.sh/model/v1",
+				apiKey: "QODER_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "ultimate-1m",
+						name: "Ultimate Override",
+						reasoning: true,
+						input: ["text", "image"],
+						contextWindow: 1_000_000,
+						maxTokens: 32_768,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						// Omit compat so the same-provider Qoder reference still
+						// supplies its transport-specific policy.
+					},
+				],
+			},
+			"ext://runtime",
+		);
+		const sameProvider = registry.find("qoder", "ultimate-1m");
+		expect(sameProvider).toBeDefined();
+		expect(sameProvider?.name).toBe("Ultimate Override");
+		expect(sameProvider?.contextWindow).toBe(1_000_000);
+		expect(sameProvider?.maxTokens).toBe(32_768);
+		const qoderCompat = sameProvider?.compatConfig as { extraBody?: Record<string, unknown> } | undefined;
+		expect(qoderCompat?.extraBody?.context_length).toBe(1_000_000);
 	});
 
 	test("registerProvider applies authHeader overrides to existing provider models across refresh", async () => {

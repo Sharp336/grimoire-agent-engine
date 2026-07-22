@@ -515,6 +515,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					runtime.settings?.get("tier.openai") ?? "none",
 					runtime.settings?.get("tier.anthropic") ?? "none",
 					runtime.settings?.get("tier.google") ?? "none",
+					runtime.settings?.get("tier.qoder") ?? "none",
 				);
 		if (!json && flagTier) writeStdout(`${chalk.dim(`service tier: ${flagTier}`)}\n`);
 		const reports: BenchModelReport[] = [];

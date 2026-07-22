@@ -15,7 +15,7 @@
  * packages/ai/test/qoder-wasm-locator.test.ts.
  */
 import { hasQoderWasmBridge as detectQoderWasmBridge } from "@oh-my-pi/pi-ai/oauth/qoder-wasm";
-import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { type Api, isQoderApi3Model, type Model } from "@oh-my-pi/pi-ai/types";
 
 /** Gate-local test override: `undefined` = real detection via the pi-ai bridge. */
 let availabilityForTests: boolean | undefined;
@@ -47,19 +47,6 @@ export function setQoderWasmBridgeAvailabilityForTests(available: boolean | unde
  * here).
  */
 export function dropUnavailableQoderApi3Models(models: Model<Api>[]): Model<Api>[] {
-	let gated = false;
-	for (const model of models) {
-		if (model.provider !== "qoder") continue;
-		const compat = model.compat;
-		if (typeof compat === "object" && compat !== null && "api3" in compat && compat.api3 === true) {
-			gated = true;
-			break;
-		}
-	}
-	if (!gated || hasQoderWasmBridge()) return models;
-	return models.filter(model => {
-		if (model.provider !== "qoder") return true;
-		const compat = model.compat;
-		return !(typeof compat === "object" && compat !== null && "api3" in compat && compat.api3 === true);
-	});
+	if (!models.some(isQoderApi3Model) || hasQoderWasmBridge()) return models;
+	return models.filter(model => !isQoderApi3Model(model));
 }
