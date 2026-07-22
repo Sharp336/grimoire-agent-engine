@@ -5,6 +5,7 @@
 ### Added
 
 - Added Qoder's authenticated nine-model catalog, including ten context-window aliases that route to their base model with the selected 400K or 1M window.
+- Restored Qoder's six api3-only families (`cmodel`, `qmodel_preview`, `qmodel_latest`, `kmodel_latest`, `gm51model`, `dfmodel`) plus their twelve context aliases, flagged `compat.api3` so dispatch routes them to the WASM-signed transport; the catalog is back to fifteen base models and 37 rows.
 
 ### Fixed
 

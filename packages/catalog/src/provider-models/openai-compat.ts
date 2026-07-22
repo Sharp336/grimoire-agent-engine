@@ -1389,6 +1389,8 @@ interface QoderCuratedModel {
 	input: ("text" | "image")[];
 	thinking?: ThinkingConfig;
 	aliasContexts?: readonly QoderAliasContext[];
+	/** Served only by Qoder's WASM-signed api3 transport; gated out of the effective model list when the auth WASM is unavailable. */
+	api3?: boolean;
 }
 
 const QODER_EFFORT_LADDER_FIVE: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
@@ -1401,10 +1403,14 @@ const QODER_STANDARD_ALIASES: readonly QoderAliasContext[] = [
 ];
 
 // Qoder's model list is behind a signed endpoint, so this offline seed is the
-// source of truth for the picker. `auto` is Qoder's server-side router. Only
-// base ids proven to work through the legacy api2-v2 OpenAI transport are
-// listed; api3-only families (cmodel, qmodel_preview, qmodel_latest,
-// kmodel_latest, gm51model, dfmodel) fail closed there and are omitted.
+// source of truth for the picker. `auto` is Qoder's server-side router. Nine
+// base ids are served by the legacy api2-v2 OpenAI transport; the six
+// api3-only families (cmodel, qmodel_preview, qmodel_latest, kmodel_latest,
+// gm51model, dfmodel) require Qoder's WASM-signed api3 transport and are
+// marked `api3: true` — the coding-agent gates them out of the effective
+// model list when the user's installed auth WASM is unavailable, falling back
+// to the legacy nine-model surface. Effort ladders are the pinned static
+// defaults recovered from `qodercli --list-models`.
 export const QODER_CURATED_MODELS: readonly QoderCuratedModel[] = [
 	{ id: "auto", name: "Qoder (Auto)", contextWindow: 180_000, reasoning: false, input: ["text", "image"] },
 	{
@@ -1452,12 +1458,73 @@ export const QODER_CURATED_MODELS: readonly QoderCuratedModel[] = [
 		input: ["text", "image"],
 		aliasContexts: QODER_STANDARD_ALIASES,
 	},
+	// api3-only families: served exclusively through Qoder's WASM-signed api3
+	// transport. Static ladders are the pinned pre-prune defaults.
+	{
+		id: "cmodel",
+		name: "Cantus",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_FIVE, defaultLevel: Effort.High },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "qmodel_preview",
+		name: "Qwen3.8-Max-Preview",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: [Effort.High], defaultLevel: Effort.High, requiresEffort: true },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "qmodel_latest",
+		name: "Qwen3.7-Max",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "kmodel_latest",
+		name: "Kimi-K3",
+		contextWindow: 200_000,
+		reasoning: false,
+		input: ["text", "image"],
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "gm51model",
+		name: "GLM-5.2",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
+	{
+		id: "dfmodel",
+		name: "DeepSeek-V4-Flash",
+		contextWindow: 200_000,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: { mode: "effort", efforts: QODER_EFFORT_LADDER_HIGH_MAX, defaultLevel: Effort.Max },
+		aliasContexts: QODER_STANDARD_ALIASES,
+		api3: true,
+	},
 ];
 
 export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
 	const resolvedBaseUrl = baseUrl ?? QODER_DEFAULT_MODEL_BASE_URL;
-	const baseCompat = () => ({
+	const baseCompat = (model: QoderCuratedModel) => ({
 		supportsStore: false as const,
+		...(model.api3 === true ? { api3: true } : {}),
 	});
 	const bases: ModelSpec<"openai-completions">[] = QODER_CURATED_MODELS.map(model => ({
 		id: model.id,
@@ -1468,7 +1535,7 @@ export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-comple
 		reasoning: model.reasoning,
 		input: model.input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		compat: baseCompat(),
+		compat: baseCompat(model),
 		contextWindow: model.contextWindow,
 		maxTokens: 32_768,
 		...(model.thinking ? { thinking: model.thinking } : {}),
@@ -1487,7 +1554,7 @@ export function buildQoderStaticSeed(baseUrl?: string): ModelSpec<"openai-comple
 				input: model.input,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				compat: {
-					...baseCompat(),
+					...baseCompat(model),
 					extraBody: { context_length: alias.contextWindow },
 				},
 				contextWindow: alias.contextWindow,

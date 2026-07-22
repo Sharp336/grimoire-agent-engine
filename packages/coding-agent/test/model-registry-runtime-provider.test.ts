@@ -11,7 +11,13 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import {
+	dropUnavailableQoderApi3Models,
+	setQoderWasmBridgeAvailabilityForTests,
+} from "@oh-my-pi/pi-coding-agent/config/qoder-api3-availability";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -806,5 +812,150 @@ describe("ModelRegistry runtime provider registration", () => {
 		registry.syncExtensionSources([]);
 		expect(getCustomApi("custom-oauth-api")).toBeUndefined();
 		expect(getOAuthProviders().some(provider => provider.id === "oauth-provider")).toBe(false);
+	});
+});
+
+describe("Qoder api3 availability gate", () => {
+	const API3_BASE_IDS = ["cmodel", "qmodel_preview", "qmodel_latest", "kmodel_latest", "gm51model", "dfmodel"];
+	const API3_IDS = API3_BASE_IDS.flatMap(id => [id, `${id}-400k`, `${id}-1m`]);
+	const LEGACY_COUNT = 19; // 9 bases + 10 context aliases
+	const FULL_COUNT = 37; // 15 bases + 22 context aliases
+
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	const offlineFetch: FetchImpl = () => Promise.reject(new Error("network disabled in qoder api3 gate test"));
+
+	function qoderRows(registry: ModelRegistry): Model<Api>[] {
+		return registry.getAll().filter(model => model.provider === "qoder");
+	}
+
+	function createRegistry(): ModelRegistry {
+		return new ModelRegistry(authStorage, path.join(tempDir, "models.json"), { fetch: offlineFetch });
+	}
+
+	beforeEach(async () => {
+		tempDir = path.join(os.tmpdir(), `pi-test-qoder-api3-gate-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+	});
+
+	afterEach(() => {
+		setQoderWasmBridgeAvailabilityForTests(undefined);
+		authStorage.close();
+		if (tempDir && fs.existsSync(tempDir)) {
+			removeSyncWithRetries(tempDir);
+		}
+	});
+
+	test("drops every api3 row when the auth WASM is unavailable, across load and refresh", async () => {
+		setQoderWasmBridgeAvailabilityForTests(false);
+		const registry = createRegistry();
+
+		const ids = new Set(qoderRows(registry).map(model => model.id));
+		expect(ids.size).toBe(LEGACY_COUNT);
+		for (const id of API3_IDS) {
+			expect(ids.has(id), `qoder/${id} must be gated out`).toBe(false);
+			expect(registry.find("qoder", id), `qoder/${id} must not resolve`).toBeUndefined();
+		}
+		expect(registry.find("qoder", "auto")).toBeDefined();
+		expect(registry.find("qoder", "ultimate-1m")).toBeDefined();
+
+		await registry.refresh("offline");
+		expect(qoderRows(registry)).toHaveLength(LEGACY_COUNT);
+		await registry.refreshProvider("qoder", "offline");
+		expect(qoderRows(registry)).toHaveLength(LEGACY_COUNT);
+		expect(registry.find("qoder", "dfmodel-1m")).toBeUndefined();
+	});
+
+	test("keeps every api3 row when the auth WASM is available", async () => {
+		setQoderWasmBridgeAvailabilityForTests(true);
+		const registry = createRegistry();
+
+		expect(qoderRows(registry)).toHaveLength(FULL_COUNT);
+		for (const id of API3_IDS) {
+			const model = registry.find("qoder", id);
+			expect(model, `qoder/${id} must be present`).toBeDefined();
+			const compat = model?.compat;
+			expect(
+				typeof compat === "object" && compat !== null && "api3" in compat && compat.api3 === true,
+				`qoder/${id} must carry the resolved api3 flag`,
+			).toBe(true);
+		}
+		const alias = registry.find("qoder", "dfmodel-1m");
+		expect(alias?.requestModelId).toBe("dfmodel");
+		expect(alias?.contextWindow).toBe(1_000_000);
+
+		await registry.refresh("offline");
+		expect(qoderRows(registry)).toHaveLength(FULL_COUNT);
+	});
+
+	test("re-evaluates the gate on each refresh cycle", async () => {
+		setQoderWasmBridgeAvailabilityForTests(false);
+		const registry = createRegistry();
+		expect(qoderRows(registry)).toHaveLength(LEGACY_COUNT);
+
+		setQoderWasmBridgeAvailabilityForTests(true);
+		await registry.refresh("offline");
+		expect(qoderRows(registry)).toHaveLength(FULL_COUNT);
+		expect(registry.find("qoder", "cmodel")).toBeDefined();
+
+		setQoderWasmBridgeAvailabilityForTests(false);
+		await registry.refresh("offline");
+		expect(qoderRows(registry)).toHaveLength(LEGACY_COUNT);
+		expect(registry.find("qoder", "cmodel")).toBeUndefined();
+	});
+});
+
+describe("dropUnavailableQoderApi3Models", () => {
+	function qoderSpec(id: string, api3: boolean): Model<Api> {
+		return buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "qoder",
+			baseUrl: "https://api2-v2.qoder.sh/model/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_768,
+			compat: { supportsStore: false, ...(api3 ? { api3: true } : {}) },
+		});
+	}
+
+	afterEach(() => {
+		setQoderWasmBridgeAvailabilityForTests(undefined);
+	});
+
+	test("is identity when no api3 rows are present, whatever the availability", () => {
+		const models = [qoderSpec("auto", false), qoderSpec("ultimate", false)];
+		setQoderWasmBridgeAvailabilityForTests(false);
+		expect(dropUnavailableQoderApi3Models(models)).toBe(models);
+		setQoderWasmBridgeAvailabilityForTests(true);
+		expect(dropUnavailableQoderApi3Models(models)).toBe(models);
+	});
+
+	test("drops only qoder api3 rows when unavailable; other providers pass through", () => {
+		const other = buildModel({
+			id: "api3-named-decoy",
+			name: "api3-named-decoy",
+			api: "openai-completions",
+			provider: "not-qoder",
+			baseUrl: "https://example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8192,
+			compat: { api3: true },
+		});
+		const models = [qoderSpec("auto", false), qoderSpec("dfmodel", true), qoderSpec("dfmodel-1m", true), other];
+		setQoderWasmBridgeAvailabilityForTests(false);
+		expect(dropUnavailableQoderApi3Models(models).map(model => `${model.provider}/${model.id}`)).toEqual([
+			"qoder/auto",
+			"not-qoder/api3-named-decoy",
+		]);
+		setQoderWasmBridgeAvailabilityForTests(true);
+		expect(dropUnavailableQoderApi3Models(models)).toBe(models);
 	});
 });

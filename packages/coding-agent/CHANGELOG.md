@@ -5,6 +5,7 @@
 ### Added
 
 - Added extension-model `requestModelId` support so provider plugins can expose local model aliases while preserving the upstream wire model id.
+- Added the Qoder api3 availability gate: models flagged `compat.api3` drop out of the effective registry when the user's installed qodercli auth WASM cannot be located and hash-verified, leaving the legacy nine-family surface.
 
 ### Fixed
 

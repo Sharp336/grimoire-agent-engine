@@ -31,6 +31,7 @@ import {
 	getVariantAliasSources,
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
+import { dropUnavailableQoderApi3Models } from "./qoder-api3-availability";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -1053,7 +1054,9 @@ export class ModelRegistry {
 		// Custom/config providers bypass the model-manager merge point —
 		// collapse effort-tier variants here so X/X-thinking twins fold.
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		this.#models = dropUnavailableQoderApi3Models(
+			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 	}
 
@@ -1486,7 +1489,9 @@ export class ModelRegistry {
 		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		this.#models = dropUnavailableQoderApi3Models(
+			this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides)),
+		);
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2350,12 +2355,14 @@ export class ModelRegistry {
 			if (config.oauth?.modifyModels) {
 				const credential = this.authStorage.getOAuthCredential(providerName);
 				if (credential) {
-					this.#models = config.oauth.modifyModels(withRuntimeTransportOverride, credential);
+					this.#models = dropUnavailableQoderApi3Models(
+						config.oauth.modifyModels(withRuntimeTransportOverride, credential),
+					);
 					return;
 				}
 			}
 
-			this.#models = withRuntimeTransportOverride;
+			this.#models = dropUnavailableQoderApi3Models(withRuntimeTransportOverride);
 			return;
 		}
 
