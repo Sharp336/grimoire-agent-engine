@@ -12,6 +12,7 @@ import type { ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, resolveApproval } from "../../tools/approval";
+import { runApproveForMeReview } from "../../tools/approve-for-me";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
@@ -159,7 +160,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				});
 			}
 
-			const resolveApproval = async (approved: boolean, reason?: string) => {
+			const resolveApprovalFn = async (approved: boolean, reason?: string) => {
 				if (!hasApprovalHandlers) return;
 				await this.runner.emit({
 					type: "tool_approval_resolved",
@@ -171,34 +172,50 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				});
 			};
 
-			// Check if UI is available
-			if (!this.runner.hasUI()) {
-				const reason = "no interactive UI available";
-				await resolveApproval(false, reason);
-				throw new Error(
-					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-						`Options:\n` +
-						`  1. Set tools.approvalMode: yolo in /settings\n` +
-						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
-						`  3. Use an interactive UI to approve the tool call`,
+			// "approve-for-me" mode: route to the LLM reviewer instead of the human prompt.
+			if (approvalMode === "approve-for-me") {
+				const decision = await runApproveForMeReview(this.tool, params, approvalCheck.reason, context);
+				const approved = decision.outcome === "allow";
+				await resolveApprovalFn(
+					approved,
+					approved ? `auto-approved: ${decision.rationale}` : `auto-denied: ${decision.rationale}`,
 				);
-			}
+				if (!approved) {
+					throw new Error(
+						`Tool "${this.tool.name}" denied by auto-review: ${decision.rationale}\n` +
+							`Do not attempt the same action via workaround. Find a safer alternative or ask the user.`,
+					);
+				}
+			} else {
+				// Human approval path
+				if (!this.runner.hasUI()) {
+					const reason = "no interactive UI available";
+					await resolveApprovalFn(false, reason);
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Options:\n` +
+							`  1. Set tools.approvalMode: yolo in /settings\n` +
+							`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
+							`  3. Use an interactive UI to approve the tool call`,
+					);
+				}
 
-			const uiContext = this.runner.getUIContext();
-			let choice: string | undefined;
-			try {
-				choice = await uiContext.select(formatApprovalPrompt(this.tool, params, approvalCheck.reason), [
-					"Approve",
-					"Deny",
-				]);
-			} catch (err) {
-				await resolveApproval(false, err instanceof Error ? err.message : "approval aborted");
-				throw err;
-			}
-			const approved = choice === "Approve";
-			await resolveApproval(approved, approved ? undefined : "denied by user");
-			if (!approved) {
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				const uiContext = this.runner.getUIContext();
+				let choice: string | undefined;
+				try {
+					choice = await uiContext.select(formatApprovalPrompt(this.tool, params, approvalCheck.reason), [
+						"Approve",
+						"Deny",
+					]);
+				} catch (err) {
+					await resolveApprovalFn(false, err instanceof Error ? err.message : "approval aborted");
+					throw err;
+				}
+				const approved = choice === "Approve";
+				await resolveApprovalFn(approved, approved ? undefined : "denied by user");
+				if (!approved) {
+					throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				}
 			}
 		}
 

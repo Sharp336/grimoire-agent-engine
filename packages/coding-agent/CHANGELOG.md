@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added "approve-for-me" approval mode: a separate LLM reviewer (the `tiny`/`smol` role) evaluates each exec-tier tool call and auto-approves or denies it, reducing interruptions while blocking risky actions. Fails closed to deny on timeout, parse failure, or model error. Includes a session cache for repeated allow decisions and a circuit breaker (3 consecutive or 10 in last 50 denials → interrupt turn). Set via `tools.approvalMode: approve-for-me` or `--approval-mode=approve-for-me`.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

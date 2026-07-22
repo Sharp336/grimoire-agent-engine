@@ -11,9 +11,9 @@ import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-age
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
-export type ApprovalMode = "always-ask" | "write" | "yolo";
+export type ApprovalMode = "always-ask" | "approve-for-me" | "write" | "yolo";
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
+export type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
@@ -33,6 +33,7 @@ const TIER_RANK: Record<ToolTier, number> = {
 
 const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 	"always-ask": "read",
+	"approve-for-me": "write",
 	write: "write",
 	yolo: "exec",
 };

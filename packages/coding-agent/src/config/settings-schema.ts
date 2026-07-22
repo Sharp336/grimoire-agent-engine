@@ -3428,24 +3428,31 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Default tool approval mode (interaction tab, but governs the tool wrapper).
-	//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-	//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-	//   "yolo"       — auto-approves every tier.
+	//   "always-ask"    — auto-approves read-tier tools only; prompts for write/exec.
+	//   "approve-for-me" — auto-approves read+write; exec-tier calls go to an LLM reviewer.
+	//   "write"         — auto-approves read and write-tier tools; prompts for exec.
+	//   "yolo"          — auto-approves every tier.
 	"tools.approvalMode": {
 		type: "enum",
-		values: ["always-ask", "write", "yolo"] as const,
+		values: ["always-ask", "approve-for-me", "write", "yolo"] as const,
 		default: "yolo",
 		ui: {
 			tab: "interaction",
 			group: "Approvals",
 			label: "Tool Approval",
 			description:
-				"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+				"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Approve for me' uses an AI reviewer to auto-approve or deny exec-tier calls. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 			options: [
 				{
 					value: "always-ask",
 					label: "Always ask",
 					description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+				},
+				{
+					value: "approve-for-me",
+					label: "Approve for me",
+					description:
+						"An AI reviewer evaluates each tool call that needs approval and auto-approves or denies it. Reduces interruptions while blocking risky actions. Falls back to deny on timeout or uncertainty.",
 				},
 				{
 					value: "write",
