@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -19,6 +20,25 @@ function expectModel(id: string): ModelSpec<"openai-completions"> {
 	expect(model, `qoder/${id} missing from seed`).toBeDefined();
 	return model as ModelSpec<"openai-completions">;
 }
+
+const ORIGINAL_QODER_ENV = {
+	QODER_OAUTH_TOKEN: Bun.env.QODER_OAUTH_TOKEN,
+	QODER_PERSONAL_ACCESS_TOKEN: Bun.env.QODER_PERSONAL_ACCESS_TOKEN,
+} as const;
+
+function restoreQoderEnvVar(name: keyof typeof ORIGINAL_QODER_ENV): void {
+	const value = ORIGINAL_QODER_ENV[name];
+	if (value === undefined) {
+		delete Bun.env[name];
+		return;
+	}
+	Bun.env[name] = value;
+}
+
+afterEach(() => {
+	restoreQoderEnvVar("QODER_OAUTH_TOKEN");
+	restoreQoderEnvVar("QODER_PERSONAL_ACCESS_TOKEN");
+});
 
 describe("Qoder curated seed", () => {
 	it("has 15 base rows, 22 context aliases, and 37 unique ids", () => {
@@ -195,9 +215,18 @@ describe("Qoder curated seed", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "qoder");
 		expect(descriptor).toBeDefined();
 		expect(descriptor?.defaultModel).toBe("auto");
-		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["QODER_OAUTH_TOKEN"]);
+		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["QODER_OAUTH_TOKEN", "QODER_PERSONAL_ACCESS_TOKEN"]);
 		expect(descriptor?.catalogDiscovery?.oauthProvider).toBe("qoder");
 		expect(DEFAULT_MODEL_PER_PROVIDER.qoder).toBe("auto");
+	});
+
+	it("resolves Qoder OAuth and documented PAT env fallbacks", () => {
+		delete Bun.env.QODER_OAUTH_TOKEN;
+		Bun.env.QODER_PERSONAL_ACCESS_TOKEN = "qoder-pat-test-key";
+		expect(getEnvApiKey("qoder")).toBe("qoder-pat-test-key");
+
+		Bun.env.QODER_OAUTH_TOKEN = "qoder-oauth-test-key";
+		expect(getEnvApiKey("qoder")).toBe("qoder-oauth-test-key");
 	});
 
 	it("exposes the offline seed without dynamic discovery", () => {

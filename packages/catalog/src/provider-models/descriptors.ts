@@ -338,7 +338,7 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "qoder",
 		defaultModel: "auto",
-		envVars: ["QODER_OAUTH_TOKEN"],
+		envVars: ["QODER_OAUTH_TOKEN", "QODER_PERSONAL_ACCESS_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => qoderModelManagerOptions(config),
 		catalogDiscovery: { label: "Qoder", oauthProvider: "qoder" },
 	},
