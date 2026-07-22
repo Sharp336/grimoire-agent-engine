@@ -3,10 +3,11 @@
  * 1. resolveApproval: "approve-for-me" auto-approves read+write tiers, prompts for exec
  *    (same tier gate as "write" — the reviewer only runs on the prompt path).
  * 2. ApproveForMeReviewer: fail-closed deny when no settings/registry/model.
- * 3. Circuit breaker: 3 consecutive denials → shouldInterruptTurn() = true.
- * 4. Circuit breaker: 10 in last 50 → shouldInterruptTurn() = true.
- * 5. resetCircuitBreaker clears the counters.
+ * 3. Policy enforcement: outcome is derived from risk+auth, never trusted from model.
+ * 4. Circuit breaker: 3 consecutive denials → shouldInterruptTurn(sessionId) = true.
+ * 5. resetCircuitBreaker clears per-session counters.
  * 6. Cache: a returned "allow" decision is reused on the next identical call (no model call).
+ * 7. Truncation: args exceeding the review context → fail-closed deny.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -15,7 +16,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { type ApprovalSubject, resolveApproval } from "../approval";
-import { ApproveForMeReviewer, MAX_CONSECUTIVE_DENIALS, MAX_RECENT_DENIALS } from "../approve-for-me";
+import { ApproveForMeReviewer, MAX_CONSECUTIVE_DENIALS } from "../approve-for-me";
 
 function makeModel(provider: string, id: string): Model<Api> {
 	return {
@@ -96,22 +97,9 @@ const readTool: ApprovalSubject = {
 	approval: { tier: "read" },
 };
 
-function allowDecision(rationale = "safe action"): Record<string, unknown> {
-	return {
-		risk_level: "low",
-		user_authorization: "medium",
-		outcome: "allow",
-		rationale,
-	};
-}
-
-function denyDecision(rationale = "risky action"): Record<string, unknown> {
-	return {
-		risk_level: "critical",
-		user_authorization: "unknown",
-		outcome: "deny",
-		rationale,
-	};
+/** Model returns risk+auth only (no outcome — system derives it). */
+function modelResponse(risk: string, auth: string, rationale = "review"): Record<string, unknown> {
+	return { risk_level: risk, user_authorization: auth, rationale };
 }
 
 describe("resolveApproval — approve-for-me mode", () => {
@@ -194,44 +182,82 @@ describe("ApproveForMeReviewer — fail-closed", () => {
 		expect(decision.outcome).toBe("deny");
 		expect(decision.rationale).toContain("no structured response");
 	});
+
+	it("fails closed when args are truncated (exceed review context)", async () => {
+		const reviewer = new ApproveForMeReviewer();
+		const tool = { name: "bash" } as unknown as AgentTool;
+		const context = makeContext({});
+		// Create args > 4000 chars to trigger truncation
+		const longArgs = { command: "echo " + "x".repeat(5000) };
+		const decision = await reviewer.review(tool, longArgs, undefined, context as never);
+		expect(decision.outcome).toBe("deny");
+		expect(decision.rationale).toContain("truncated");
+	});
 });
 
-describe("ApproveForMeReviewer — allow/deny from model", () => {
+describe("ApproveForMeReviewer — policy enforcement", () => {
 	afterEach(() => vi.restoreAllMocks());
 
-	it("returns an allow when the model approves via tool call", async () => {
+	it("derives allow for low risk regardless of model outcome", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: allowDecision("safe read") } }),
+			assistant({ toolCall: { name: "respond", arguments: modelResponse("low", "unknown", "safe") } }),
 		);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "read" } as unknown as AgentTool;
 		const context = makeContext({});
 		const decision = await reviewer.review(tool, {}, undefined, context as never);
 		expect(decision.outcome).toBe("allow");
-		expect(decision.rationale).toBe("safe read");
+		expect(decision.risk_level).toBe("low");
 	});
 
-	it("returns a deny when the model denies via tool call", async () => {
+	it("derives deny for critical risk even if model somehow says allow", async () => {
+		// Model returns risk_level: "critical" — system MUST deny regardless
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: denyDecision("rm -rf") } }),
+			assistant({
+				toolCall: {
+					name: "respond",
+					arguments: { risk_level: "critical", user_authorization: "high", rationale: "looks ok" },
+				},
+			}),
 		);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "bash" } as unknown as AgentTool;
 		const context = makeContext({});
 		const decision = await reviewer.review(tool, { command: "rm -rf /" }, undefined, context as never);
 		expect(decision.outcome).toBe("deny");
-		expect(decision.rationale).toBe("rm -rf");
+		expect(decision.risk_level).toBe("critical");
 	});
 
-	it("parses a JSON text fallback when the model skips the tool", async () => {
-		const json = JSON.stringify(allowDecision("json fallback"));
+	it("derives deny for high risk with unknown authorization", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			assistant({ toolCall: { name: "respond", arguments: modelResponse("high", "unknown", "risky") } }),
+		);
+		const reviewer = new ApproveForMeReviewer();
+		const tool = { name: "bash" } as unknown as AgentTool;
+		const context = makeContext({});
+		const decision = await reviewer.review(tool, { command: "git push --force" }, undefined, context as never);
+		expect(decision.outcome).toBe("deny");
+	});
+
+	it("derives allow for high risk with medium authorization", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			assistant({ toolCall: { name: "respond", arguments: modelResponse("high", "medium", "authorized") } }),
+		);
+		const reviewer = new ApproveForMeReviewer();
+		const tool = { name: "bash" } as unknown as AgentTool;
+		const context = makeContext({});
+		const decision = await reviewer.review(tool, { command: "git push" }, undefined, context as never);
+		expect(decision.outcome).toBe("allow");
+	});
+
+	it("parses JSON text fallback when the model skips the tool", async () => {
+		const json = JSON.stringify(modelResponse("low", "medium", "json fallback"));
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: json }));
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "read" } as unknown as AgentTool;
 		const context = makeContext({});
 		const decision = await reviewer.review(tool, {}, undefined, context as never);
 		expect(decision.outcome).toBe("allow");
-		expect(decision.rationale).toBe("json fallback");
 	});
 });
 
@@ -241,7 +267,9 @@ describe("ApproveForMeReviewer — session cache", () => {
 	it("caches an allow decision and skips the model on the second identical call", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(assistant({ toolCall: { name: "respond", arguments: allowDecision("safe") } }));
+			.mockResolvedValue(
+				assistant({ toolCall: { name: "respond", arguments: modelResponse("low", "medium", "safe") } }),
+			);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "read" } as unknown as AgentTool;
 		const context = makeContext({});
@@ -255,7 +283,9 @@ describe("ApproveForMeReviewer — session cache", () => {
 	it("does not cache deny decisions", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
-			.mockResolvedValue(assistant({ toolCall: { name: "respond", arguments: denyDecision("bad") } }));
+			.mockResolvedValue(
+				assistant({ toolCall: { name: "respond", arguments: modelResponse("critical", "unknown", "bad") } }),
+			);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "bash" } as unknown as AgentTool;
 		const context = makeContext({});
@@ -269,25 +299,26 @@ describe("ApproveForMeReviewer — session cache", () => {
 
 describe("ApproveForMeReviewer — circuit breaker", () => {
 	afterEach(() => vi.restoreAllMocks());
+	const SID = "test-session";
 
 	it("trips after MAX_CONSECUTIVE_DENIALS consecutive denials", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: denyDecision("no") } }),
+			assistant({ toolCall: { name: "respond", arguments: modelResponse("critical", "unknown", "no") } }),
 		);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "bash" } as unknown as AgentTool;
 		const context = makeContext({});
 
-		expect(reviewer.shouldInterruptTurn()).toBe(false);
+		expect(reviewer.shouldInterruptTurn(SID)).toBe(false);
 		for (let i = 0; i < MAX_CONSECUTIVE_DENIALS; i++) {
 			await reviewer.review(tool, { i }, undefined, context as never);
 		}
-		expect(reviewer.shouldInterruptTurn()).toBe(true);
+		expect(reviewer.shouldInterruptTurn(SID)).toBe(true);
 	});
 
 	it("resets the consecutive counter on an allow", async () => {
-		const deny = assistant({ toolCall: { name: "respond", arguments: denyDecision("no") } });
-		const allow = assistant({ toolCall: { name: "respond", arguments: allowDecision("ok") } });
+		const deny = assistant({ toolCall: { name: "respond", arguments: modelResponse("critical", "unknown", "no") } });
+		const allow = assistant({ toolCall: { name: "respond", arguments: modelResponse("low", "medium", "ok") } });
 		vi.spyOn(ai, "completeSimple")
 			.mockResolvedValueOnce(deny)
 			.mockResolvedValueOnce(deny)
@@ -299,47 +330,12 @@ describe("ApproveForMeReviewer — circuit breaker", () => {
 		await reviewer.review(tool, { a: 1 }, undefined, context as never);
 		await reviewer.review(tool, { a: 2 }, undefined, context as never);
 		await reviewer.review(tool, { a: 3 }, undefined, context as never);
-		expect(reviewer.shouldInterruptTurn()).toBe(false);
-	});
-
-	it("trips after MAX_RECENT_DENIALS in the last DENIAL_WINDOW reviews", async () => {
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: denyDecision("no") } }),
-		);
-		const reviewer = new ApproveForMeReviewer();
-		const tool = { name: "bash" } as unknown as AgentTool;
-		const context = makeContext({});
-
-		// Interleave allows to avoid the consecutive counter tripping first
-		const allow = assistant({ toolCall: { name: "respond", arguments: allowDecision("ok") } });
-		const deny = assistant({ toolCall: { name: "respond", arguments: denyDecision("no") } });
-		const mock = vi.spyOn(ai, "completeSimple");
-		mock.mockReset();
-		for (let i = 0; i < MAX_RECENT_DENIALS; i++) {
-			mock.mockResolvedValueOnce(deny);
-			if (i < MAX_RECENT_DENIALS - 1) mock.mockResolvedValueOnce(allow);
-		}
-
-		// Call: deny, allow, deny, allow, ... until MAX_RECENT_DENIALS denials
-		// We need MAX_RECENT_DENIALS denials in the window, interleaved with allows
-		// so the consecutive counter never reaches MAX_CONSECUTIVE_DENIALS.
-		let denials = 0;
-		let calls = 0;
-		while (denials < MAX_RECENT_DENIALS) {
-			await reviewer.review(tool, { deny: calls++ }, undefined, context as never);
-			denials++;
-			if (denials < MAX_RECENT_DENIALS) {
-				// interleave an allow to reset consecutive
-				mock.mockResolvedValueOnce(allow);
-				await reviewer.review(tool, { allow: calls++ }, undefined, context as never);
-			}
-		}
-		expect(reviewer.shouldInterruptTurn()).toBe(true);
+		expect(reviewer.shouldInterruptTurn(SID)).toBe(false);
 	});
 
 	it("resetCircuitBreaker clears all counters", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: denyDecision("no") } }),
+			assistant({ toolCall: { name: "respond", arguments: modelResponse("critical", "unknown", "no") } }),
 		);
 		const reviewer = new ApproveForMeReviewer();
 		const tool = { name: "bash" } as unknown as AgentTool;
@@ -348,8 +344,8 @@ describe("ApproveForMeReviewer — circuit breaker", () => {
 		for (let i = 0; i < MAX_CONSECUTIVE_DENIALS; i++) {
 			await reviewer.review(tool, { i }, undefined, context as never);
 		}
-		expect(reviewer.shouldInterruptTurn()).toBe(true);
-		reviewer.resetCircuitBreaker();
-		expect(reviewer.shouldInterruptTurn()).toBe(false);
+		expect(reviewer.shouldInterruptTurn(SID)).toBe(true);
+		reviewer.resetCircuitBreaker(SID);
+		expect(reviewer.shouldInterruptTurn(SID)).toBe(false);
 	});
 });

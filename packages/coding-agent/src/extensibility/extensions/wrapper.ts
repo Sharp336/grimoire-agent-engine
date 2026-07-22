@@ -12,7 +12,7 @@ import type { ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, resolveApproval } from "../../tools/approval";
-import { runApproveForMeReview } from "../../tools/approve-for-me";
+import { getApproveForMeReviewer } from "../../tools/approve-for-me";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
@@ -172,22 +172,35 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				});
 			};
 
-			// "approve-for-me" mode: route to the LLM reviewer instead of the human prompt.
-			if (approvalMode === "approve-for-me") {
-				const decision = await runApproveForMeReview(this.tool, params, approvalCheck.reason, context);
+			// "approve-for-me" mode: route mode-derived exec prompts to the LLM
+			// reviewer instead of the human prompt. Explicit per-tool "prompt"
+			// policies and tool-demanded overrides stay on the human path.
+			if (approvalMode === "approve-for-me" && !explicitPrompt) {
+				const reviewer = getApproveForMeReviewer();
+				const decision = await reviewer.review(this.tool, params, approvalCheck.reason, context);
 				const approved = decision.outcome === "allow";
 				await resolveApprovalFn(
 					approved,
 					approved ? `auto-approved: ${decision.rationale}` : `auto-denied: ${decision.rationale}`,
 				);
 				if (!approved) {
+					// Circuit breaker: after N consecutive or M recent denials, abort
+					// the entire turn — the agent is stuck in a denial loop.
+					if (reviewer.shouldInterruptTurn(sessionId)) {
+						throw new Error(
+							`Tool "${this.tool.name}" denied by auto-review: ${decision.rationale}\n` +
+								`Do not attempt the same action via workaround. Find a safer alternative or ask the user.\n` +
+								`Auto-review circuit breaker tripped: too many denials this turn. Stopping.`,
+						);
+					}
 					throw new Error(
 						`Tool "${this.tool.name}" denied by auto-review: ${decision.rationale}\n` +
 							`Do not attempt the same action via workaround. Find a safer alternative or ask the user.`,
 					);
 				}
 			} else {
-				// Human approval path
+				// Human approval path (also used for explicit per-tool "prompt"
+				// policies and tool-demanded overrides in approve-for-me mode).
 				if (!this.runner.hasUI()) {
 					const reason = "no interactive UI available";
 					await resolveApprovalFn(false, reason);

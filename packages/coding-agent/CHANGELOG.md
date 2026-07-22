@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added "approve-for-me" approval mode: a separate LLM reviewer (the `tiny`/`smol` role) evaluates each exec-tier tool call and auto-approves or denies it, reducing interruptions while blocking risky actions. Fails closed to deny on timeout, parse failure, or model error. Includes a session cache for repeated allow decisions and a circuit breaker (3 consecutive or 10 in last 50 denials → interrupt turn). Set via `tools.approvalMode: approve-for-me` or `--approval-mode=approve-for-me`.
+- Added "approve-for-me" approval mode: a separate LLM reviewer (the `tiny`/`smol` role) evaluates each exec-tier tool call and auto-approves or denies it, reducing interruptions while blocking risky actions. The reviewer's outcome is derived from the validated risk level + user authorization per a fail-closed policy (never trusting the model's own `outcome` field). Includes a per-session cache for repeated allow decisions and a circuit breaker (3 consecutive or 10 in last 50 denials → interrupt turn). Fails closed to deny on timeout, parse failure, model error, or truncated arguments. Recent user messages from the session transcript are supplied so the reviewer can assess user authorization. Set via `tools.approvalMode: approve-for-me` or `--approval-mode=approve-for-me`.
 
 ## [17.0.7] - 2026-07-21
 

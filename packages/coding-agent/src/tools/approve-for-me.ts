@@ -5,14 +5,20 @@
  *
  * Fail-closed: timeout, parse failure, or model error → deny.
  * Circuit breaker: 3 consecutive denials or 10 in the last 50 → interrupt turn.
+ *
+ * The reviewer's `outcome` is **never trusted** — it is derived from the
+ * validated `risk_level` + `user_authorization` pair per the policy rules.
+ * A model that returns `{ risk: "critical", outcome: "allow" }` is denied.
  */
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type Api, completeSimple, type Message, type Model, type Tool, type ToolCall } from "@oh-my-pi/pi-ai";
+import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { truncateForPrompt } from "./approval";
 import policy from "./approve-for-me-policy.md" with { type: "text" };
+import systemPromptText from "./approve-for-me-system.md" with { type: "text" };
 
 export interface ReviewDecision {
 	risk_level: "low" | "medium" | "high" | "critical";
@@ -37,23 +43,54 @@ const reviewTool: Tool = {
 		properties: {
 			risk_level: { type: "string", enum: ["low", "medium", "high", "critical"] },
 			user_authorization: { type: "string", enum: ["high", "medium", "low", "unknown"] },
-			outcome: { type: "string", enum: ["allow", "deny"] },
 			rationale: { type: "string" },
 		},
-		required: ["risk_level", "user_authorization", "outcome", "rationale"],
+		required: ["risk_level", "user_authorization", "rationale"],
 	} as Record<string, unknown>,
 	strict: false,
 };
 
-/** Session-scoped reviewer with per-session cache + circuit breaker. */
+/** Per-session state: cache + circuit breaker counters. */
+interface SessionState {
+	consecutiveDenials: number;
+	recentDenials: boolean[];
+	cache: Map<string, ReviewDecision>;
+}
+
+/**
+ * Derive the outcome from the validated risk level and user authorization,
+ * per the policy rules. The model's `outcome` field is **never used** —
+ * only `risk_level` and `user_authorization` are trusted.
+ *
+ * - low/medium risk → allow
+ * - high risk → allow only with medium+ authorization; otherwise deny
+ * - critical risk → always deny
+ */
+function deriveOutcome(
+	risk: ReviewDecision["risk_level"],
+	auth: ReviewDecision["user_authorization"],
+): "allow" | "deny" {
+	if (risk === "critical") return "deny";
+	if (risk === "high" && (auth === "low" || auth === "unknown")) return "deny";
+	return "allow";
+}
+
+/** Reviewer with per-session cache and circuit breaker state. */
 export class ApproveForMeReviewer {
-	#consecutiveDenials = 0;
-	#recentDenials: boolean[] = [];
-	#cache = new Map<string, ReviewDecision>();
+	#sessions = new Map<string, SessionState>();
+
+	#getSession(id: string): SessionState {
+		let s = this.#sessions.get(id);
+		if (!s) {
+			s = { consecutiveDenials: 0, recentDenials: [], cache: new Map() };
+			this.#sessions.set(id, s);
+		}
+		return s;
+	}
 
 	/**
 	 * Review a tool call. Returns the decision, or a fail-closed deny on any
-	 * error (timeout, parse failure, model unavailable).
+	 * error (timeout, parse failure, model unavailable, truncated args).
 	 */
 	async review(
 		tool: AgentTool,
@@ -61,21 +98,49 @@ export class ApproveForMeReviewer {
 		reason: string | undefined,
 		context: AgentToolContext | undefined,
 	): Promise<ReviewDecision> {
+		const sessionId = context?.sessionManager?.getSessionId() ?? "";
+		const session = this.#getSession(sessionId);
+
 		const cacheKey = this.#cacheKey(tool.name, args);
-		const cached = this.#cache.get(cacheKey);
+		const cached = session.cache.get(cacheKey);
 		if (cached) return cached;
 
+		// Fail closed when args are truncated — a security decision must cover
+		// the complete action, not a prefix of it.
+		let argsStr: string;
 		try {
-			const prompt = this.#buildPrompt(tool, args, reason);
-			const result = await this.#callModel(prompt, context);
+			argsStr = JSON.stringify(args, null, 2);
+		} catch {
+			argsStr = String(args);
+		}
+		const truncated = truncateForPrompt(argsStr, ARGS_TRUNCATE_CHARS);
+		if (truncated !== argsStr) {
+			session.consecutiveDenials = session.consecutiveDenials + 1;
+			session.recentDenials.push(true);
+			if (session.recentDenials.length > DENIAL_WINDOW) session.recentDenials.shift();
+			return {
+				risk_level: "high",
+				user_authorization: "unknown",
+				outcome: "deny",
+				rationale:
+					"Auto-review denied: tool arguments exceed the review context window. A security decision cannot be made on a truncated action.",
+			};
+		}
+
+		try {
+			const recentUserMessages = this.#extractRecentUserMessages(context);
+			const promptText = this.#buildPrompt(tool, argsStr, reason, recentUserMessages);
+			const result = await this.#callModel(promptText, context);
 			const decision = this.#parseDecision(result);
-			if (decision.outcome === "allow") {
-				this.#cache.set(cacheKey, decision);
+			const outcome = deriveOutcome(decision.risk_level, decision.user_authorization);
+			const finalDecision: ReviewDecision = { ...decision, outcome };
+			if (outcome === "allow") {
+				session.cache.set(cacheKey, finalDecision);
 			}
-			this.#recordReview(decision.outcome === "deny");
-			return decision;
+			this.#recordReview(session, outcome === "deny");
+			return finalDecision;
 		} catch (err) {
-			this.#recordReview(true);
+			this.#recordReview(session, true);
 			return {
 				risk_level: "high",
 				user_authorization: "unknown",
@@ -86,24 +151,27 @@ export class ApproveForMeReviewer {
 	}
 
 	/** Circuit breaker: after N consecutive denials or M in last K, interrupt. */
-	shouldInterruptTurn(): boolean {
+	shouldInterruptTurn(sessionId: string): boolean {
+		const s = this.#sessions.get(sessionId);
+		if (!s) return false;
 		return (
-			this.#consecutiveDenials >= MAX_CONSECUTIVE_DENIALS ||
-			this.#recentDenials.filter(Boolean).length >= MAX_RECENT_DENIALS
+			s.consecutiveDenials >= MAX_CONSECUTIVE_DENIALS || s.recentDenials.filter(Boolean).length >= MAX_RECENT_DENIALS
 		);
 	}
 
-	/** Clear the circuit breaker (e.g. on a new turn). */
-	resetCircuitBreaker(): void {
-		this.#consecutiveDenials = 0;
-		this.#recentDenials = [];
+	/** Clear the circuit breaker for a session (e.g. on a new turn). */
+	resetCircuitBreaker(sessionId: string): void {
+		const s = this.#sessions.get(sessionId);
+		if (!s) return;
+		s.consecutiveDenials = 0;
+		s.recentDenials = [];
 	}
 
-	#recordReview(denied: boolean): void {
-		this.#consecutiveDenials = denied ? this.#consecutiveDenials + 1 : 0;
-		this.#recentDenials.push(denied);
-		if (this.#recentDenials.length > DENIAL_WINDOW) {
-			this.#recentDenials.shift();
+	#recordReview(session: SessionState, denied: boolean): void {
+		session.consecutiveDenials = denied ? session.consecutiveDenials + 1 : 0;
+		session.recentDenials.push(denied);
+		if (session.recentDenials.length > DENIAL_WINDOW) {
+			session.recentDenials.shift();
 		}
 	}
 
@@ -115,22 +183,55 @@ export class ApproveForMeReviewer {
 		}
 	}
 
-	#buildPrompt(tool: AgentTool, args: unknown, reason: string | undefined): string {
-		const lines: string[] = [policy, "", "## Planned Action", `Tool: ${tool.name}`];
-		if (reason) lines.push(`Approval reason: ${reason}`);
-
-		let argsStr: string;
+	/**
+	 * Extract up to 5 recent user messages from the session transcript so the
+	 * reviewer can assess whether the user authorized the proposed action.
+	 * Returns a string summary, or "(no recent user messages)" when the
+	 * session is unavailable or has no user messages.
+	 */
+	#extractRecentUserMessages(context: AgentToolContext | undefined): string {
 		try {
-			argsStr = JSON.stringify(args, null, 2);
+			const entries = context?.sessionManager?.getEntries?.();
+			if (!entries) return "(no recent user messages)";
+			const userTexts: string[] = [];
+			for (const entry of entries) {
+				if (entry.type !== "message") continue;
+				const msg = entry.message as { role?: string; content?: unknown };
+				if (msg.role !== "user") continue;
+				const content = msg.content;
+				if (typeof content === "string") {
+					userTexts.push(content);
+				} else if (Array.isArray(content)) {
+					for (const part of content) {
+						if (
+							typeof part === "object" &&
+							part !== null &&
+							part.type === "text" &&
+							typeof part.text === "string"
+						) {
+							userTexts.push(part.text);
+						}
+					}
+				}
+				if (userTexts.length >= 5) break;
+			}
+			if (userTexts.length === 0) return "(no recent user messages)";
+			return userTexts.map((t, i) => `[${i + 1}] ${truncateForPrompt(t, 500)}`).join("\n");
 		} catch {
-			argsStr = String(args);
+			return "(no recent user messages)";
 		}
-		lines.push(`Arguments:\n${truncateForPrompt(argsStr, ARGS_TRUNCATE_CHARS)}`);
-		lines.push("", 'Return your decision by calling the "respond" tool with the JSON fields.');
-		return lines.join("\n");
 	}
 
-	async #callModel(prompt: string, context: AgentToolContext | undefined): Promise<unknown> {
+	#buildPrompt(tool: AgentTool, argsStr: string, reason: string | undefined, recentUserMessages: string): string {
+		return prompt.render(policy, {
+			tool_name: tool.name,
+			approval_reason: reason ?? "",
+			arguments: argsStr,
+			recent_user_messages: recentUserMessages,
+		});
+	}
+
+	async #callModel(promptText: string, context: AgentToolContext | undefined): Promise<unknown> {
 		const settings = context?.settings as Settings | undefined;
 		const registry = context?.modelRegistry as ModelRegistry | undefined;
 		if (!settings || !registry) {
@@ -149,14 +250,12 @@ export class ApproveForMeReviewer {
 			throw new Error(`no API key for auto-review model ${model.provider}/${model.id}`);
 		}
 
-		const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
+		const messages: Message[] = [{ role: "user", content: promptText, timestamp: Date.now() }];
 
 		const response = await completeSimple(
 			model,
 			{
-				systemPrompt: [
-					"You are a safety reviewer for an AI coding agent. Evaluate the proposed tool call and return a decision.",
-				],
+				systemPrompt: [systemPromptText],
 				messages,
 				tools: [reviewTool],
 			},
@@ -194,7 +293,7 @@ export class ApproveForMeReviewer {
 		throw new Error("auto-review returned no structured response");
 	}
 
-	#parseDecision(raw: unknown): ReviewDecision {
+	#parseDecision(raw: unknown): Omit<ReviewDecision, "outcome"> {
 		if (typeof raw !== "object" || raw === null) {
 			throw new Error("auto-review response is not an object");
 		}
@@ -202,29 +301,26 @@ export class ApproveForMeReviewer {
 		const {
 			risk_level: risk,
 			user_authorization: auth,
-			outcome,
 			rationale,
 		} = obj as {
 			risk_level: unknown;
 			user_authorization: unknown;
-			outcome: unknown;
 			rationale: unknown;
 		};
 
 		if (
 			(risk === "low" || risk === "medium" || risk === "high" || risk === "critical") &&
 			(auth === "high" || auth === "medium" || auth === "low" || auth === "unknown") &&
-			(outcome === "allow" || outcome === "deny") &&
 			typeof rationale === "string"
 		) {
-			return { risk_level: risk, user_authorization: auth, outcome, rationale };
+			return { risk_level: risk, user_authorization: auth, rationale };
 		}
 
 		throw new Error("auto-review response does not match expected schema");
 	}
 }
 
-/** Singleton reviewer per process — session cache is instance-scoped. */
+/** Singleton reviewer per process — per-session state is keyed by session ID. */
 let reviewerInstance: ApproveForMeReviewer | undefined;
 
 export function getApproveForMeReviewer(): ApproveForMeReviewer {
