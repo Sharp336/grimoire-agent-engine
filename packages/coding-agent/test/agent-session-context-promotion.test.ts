@@ -25,6 +25,32 @@ describe("AgentSession context promotion", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry.registerProvider("openai-codex", {
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "test-codex-small",
+					name: "Test Codex Small",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 32_000,
+					contextPromotionTarget: "openai-codex/test-codex-large",
+				},
+				{
+					id: "test-codex-large",
+					name: "Test Codex Large",
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 256_000,
+					maxTokens: 64_000,
+				},
+			],
+		});
 	});
 
 	afterAll(() => {
@@ -133,13 +159,15 @@ describe("AgentSession context promotion", () => {
 		await session.waitForIdle();
 	}
 
-	it("promotes to a larger-context model on overflow and clears codex websocket session state", async () => {
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
-		}
+	function promotionModels(): { sourceModel: Model; targetModel: Model } {
+		const sourceModel = modelRegistry.find("openai-codex", "test-codex-small");
+		const targetModel = modelRegistry.find("openai-codex", "test-codex-large");
+		if (!sourceModel || !targetModel) throw new Error("Expected deterministic Codex promotion models");
+		return { sourceModel, targetModel };
+	}
 
+	it("promotes to a larger-context model on overflow and clears codex websocket session state", async () => {
+		const { sourceModel: sparkModel, targetModel: codexModel } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"contextPromotion.enabled": true,
@@ -179,12 +207,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("promotes on 413 payload-too-large overflow errors", async () => {
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
-		}
-
+		const { sourceModel: sparkModel, targetModel: codexModel } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"contextPromotion.enabled": true,
@@ -219,7 +242,7 @@ describe("AgentSession context promotion", () => {
 		expect(session.model?.id).toBe(codexModel.id);
 	});
 	it("clears codex provider session state on manual setModel switch away from codex", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
+		const { targetModel: codexModel } = promotionModels();
 		const nonCodexModel = modelRegistry.getAll().find(model => model.api !== "openai-codex-responses");
 		if (!codexModel || !nonCodexModel) {
 			throw new Error("Expected codex and non-codex models to exist");
@@ -256,7 +279,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state on manual temporary switch into codex", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
+		const { targetModel: codexModel } = promotionModels();
 		const nonCodexModel = modelRegistry.getAll().find(model => model.api !== "openai-codex-responses");
 		if (!codexModel || !nonCodexModel) {
 			throw new Error("Expected codex and non-codex models to exist");
@@ -293,11 +316,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state when branching rewrites history", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
-		if (!codexModel) {
-			throw new Error("Expected codex model to exist");
-		}
-
+		const { targetModel: codexModel } = promotionModels();
 		const agent = new Agent({
 			initialState: {
 				model: codexModel,
@@ -334,11 +353,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state when tree navigation rewrites history", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
-		if (!codexModel) {
-			throw new Error("Expected codex model to exist");
-		}
-
+		const { targetModel: codexModel } = promotionModels();
 		const agent = new Agent({
 			initialState: {
 				model: codexModel,
@@ -375,11 +390,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("does not promote when promotion is disabled", async () => {
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		if (!sparkModel) {
-			throw new Error("Expected codex spark model to exist");
-		}
-
+		const { sourceModel: sparkModel } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"contextPromotion.enabled": false,
@@ -419,11 +430,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("does not promote by default", async () => {
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		if (!sparkModel) {
-			throw new Error("Expected codex spark model to exist");
-		}
-
+		const { sourceModel: sparkModel } = promotionModels();
 		const agent = new Agent({
 			initialState: {
 				model: sparkModel,
@@ -451,10 +458,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("falls back to LLM compaction when snapcompact cannot run during overflow recovery", async () => {
-		const model = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		if (!model) {
-			throw new Error("Expected codex spark model to exist");
-		}
+		const { sourceModel: model } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.strategy": "snapcompact",
@@ -512,12 +516,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("promotes to a larger-context model on response.incomplete (length stop)", async () => {
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
-		}
-
+		const { sourceModel: sparkModel, targetModel: codexModel } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"contextPromotion.enabled": true,
@@ -553,12 +552,7 @@ describe("AgentSession context promotion", () => {
 		// Switching from a small-context model to a larger one and then receiving a
 		// stale length-stop event for the previous model must NOT trigger promotion
 		// or compaction on the new model — same guard as the overflow path.
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
-		}
-
+		const { sourceModel: sparkModel, targetModel: codexModel } = promotionModels();
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"contextPromotion.enabled": true,

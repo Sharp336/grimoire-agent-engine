@@ -2177,11 +2177,37 @@ describe("AgentSession TTSR resume gate", () => {
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.registerProvider("openai-codex", {
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "test-codex-small",
+					name: "Test Codex Small",
+					reasoning: true,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 32_000,
+					contextPromotionTarget: "openai-codex/test-codex-large",
+				},
+				{
+					id: "test-codex-large",
+					name: "Test Codex Large",
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 256_000,
+					maxTokens: 64_000,
+				},
+			],
+		});
 
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
+		const sparkModel = modelRegistry.find("openai-codex", "test-codex-small");
+		const codexModel = modelRegistry.find("openai-codex", "test-codex-large");
 		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
+			throw new Error("Expected deterministic Codex promotion models");
 		}
 
 		let streamCallCount = 0;
