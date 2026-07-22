@@ -9,7 +9,6 @@
 
 ### Fixed
 
-- Pruned six Qoder base models (`cmodel`, `qmodel_preview`, `qmodel_latest`, `kmodel_latest`, `gm51model`, `dfmodel`) and their context aliases from the curated catalog. These families require Qoder's api3 WASM transport and fail closed on the implemented legacy api2-v2 OpenAI endpoint, so advertising them guaranteed an empty completion. The catalog now lists only the nine base models proven live through api2-v2 (auto, ultimate, performance, efficient, lite, qmodel, kmodel, dmodel, mmodel) plus their ten retained context aliases.
 - Added MiniMax M3 model with reasoning and multi-modal support
 - Added Gemini 3.5 Flash Lite model across multiple providers
 - Added Gemini 3.6 Flash model across multiple providers with thinking support

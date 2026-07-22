@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- Fixed Qoder login polling aborting on transient request failures, refresh failures hiding `invalid_grant` details, stale 1.1.1 client attribution, and `/fast` tests missing the non-Kimi negative path.
+- Fixed Qoder login polling on transient failures, preserved `invalid_grant` refresh details, refreshed client attribution, covered `/fast` non-Kimi routing, and hardened api3 against stalled identity lookup, oversized output limits, and malformed or truncated envelopes.
 
 ## [17.0.6] - 2026-07-20
 
