@@ -82,6 +82,8 @@ export interface PlanReviewOverlayCallbacks {
 	onPick: (label: string) => void;
 	/** Invoked on Esc / cancel. */
 	onCancel: () => void;
+	/** Invoked with the current full plan text when the copy hotkey is pressed. */
+	onCopyPlan?: (content: string) => void | Promise<void>;
 	/** Invoked when the external-editor key is pressed (overlay stays open). */
 	onExternalEditor?: () => void;
 	/** Invoked when the external-editor key edits the active annotation draft. */
@@ -136,6 +138,8 @@ export class PlanReviewOverlay implements Component {
 	#tocCursor = 0;
 	#sidebarShown = false;
 	#pendingScrollToToc = false;
+	/** Last meaningful relative body position, retained while a frame cannot scroll. */
+	#scrollProgress = 0;
 
 	// Click hit-testing, rebuilt every render. Keys are 0-based rendered-line
 	// indices (== screen rows, since the fullscreen overlay paints from row 0).
@@ -148,6 +152,14 @@ export class PlanReviewOverlay implements Component {
 	 *  motion mouse reports and cleared when the pointer leaves the option rows. */
 	#hoveredOption: number | undefined;
 
+	// Once a choice fires, the promise-based caller resolves but keeps this
+	// overlay mounted while it runs slow async approval work (e.g. context
+	// compaction). Lock input and switch to a "submitting" indicator so the
+	// overlay stops looking interactive and repeat Enter/Esc are not silently
+	// swallowed with zero feedback (#5926).
+	#committed = false;
+	/** Label of the committed choice, shown while the async approval settles. */
+	#committedLabel: string | undefined;
 	#annotating = false;
 	#input: Input;
 
@@ -194,6 +206,7 @@ export class PlanReviewOverlay implements Component {
 	setPlanContent(planContent: string): void {
 		this.#setSections(planContent);
 		this.#scrollView.scrollToTop();
+		this.#scrollProgress = 0;
 		this.#tocCursor = 0;
 		// A wholesale external-editor swap supersedes prior in-overlay deletions.
 		this.#deleted = [];
@@ -278,11 +291,14 @@ export class PlanReviewOverlay implements Component {
 	#confirmSelection(): void {
 		const index = this.#selectedIndex;
 		if (index >= 0 && index < this.#options.length && !this.#disabled.has(index)) {
+			this.#committed = true;
+			this.#committedLabel = this.#options[index]!;
 			this.callbacks.onPick(this.#options[index]!);
 		}
 	}
 
 	handleInput(keyData: string): void {
+		if (this.#committed) return;
 		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
 		if (this.#annotating) {
 			if (this.callbacks.onAnnotationExternalEditor && matchesAppExternalEditor(keyData)) {
@@ -295,11 +311,16 @@ export class PlanReviewOverlay implements Component {
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
+			this.#committed = true;
 			this.callbacks.onCancel();
 			return;
 		}
 		if (this.callbacks.onExternalEditor && matchesAppExternalEditor(keyData)) {
 			this.callbacks.onExternalEditor();
+			return;
+		}
+		if (this.callbacks.onCopyPlan && keyData === "c") {
+			void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
 			return;
 		}
 		if (matchesKey(keyData, "tab") || keyData === "\t") {
@@ -337,6 +358,7 @@ export class PlanReviewOverlay implements Component {
 			if (event.wheel !== null) {
 				// Scroll wheel: three rows per notch.
 				this.#scrollView.scroll(event.wheel * 3);
+				this.#captureScrollProgress();
 				return true;
 			}
 			if (event.release) return true;
@@ -394,8 +416,8 @@ export class PlanReviewOverlay implements Component {
 		// Left/right always drive the slider. The sidebar sits beside the body
 		// (above this row), not the slider, so stealing left for it would strand
 		// the operator unable to step the model tier back — reach the ToC via Tab.
-		const isLeft = matchesKey(data, "left") || (this.#slider !== undefined && data === "h");
-		const isRight = matchesKey(data, "right") || (this.#slider !== undefined && data === "l");
+		const isLeft = matchesKey(data, "left") || (this.#slider !== undefined && matchesKey(data, "h"));
+		const isRight = matchesKey(data, "right") || (this.#slider !== undefined && matchesKey(data, "l"));
 		if (isLeft) {
 			this.#moveSlider(-1);
 			return;
@@ -404,12 +426,12 @@ export class PlanReviewOverlay implements Component {
 			this.#moveSlider(1);
 			return;
 		}
-		if (matchesSelectUp(data) || data === "k") {
+		if (matchesSelectUp(data) || matchesKey(data, "k")) {
 			if (this.#selectedIndex === this.#firstEnabledIndex()) this.#setFocus("body");
 			else this.#moveSelection(-1);
 			return;
 		}
-		if (matchesSelectDown(data) || data === "j") {
+		if (matchesSelectDown(data) || matchesKey(data, "j")) {
 			this.#moveSelection(1);
 			return;
 		}
@@ -421,13 +443,13 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#handleBody(data: string): void {
-		if (matchesKey(data, "left") || data === "h") {
+		if (matchesKey(data, "left") || matchesKey(data, "h")) {
 			if (this.#sidebarShown) this.#setFocus("toc");
 			return;
 		}
 		if (
 			matchesKey(data, "right") ||
-			data === "l" ||
+			matchesKey(data, "l") ||
 			matchesKey(data, "enter") ||
 			matchesKey(data, "return") ||
 			data === "\n"
@@ -438,14 +460,22 @@ export class PlanReviewOverlay implements Component {
 		// Vertical nav flows between regions at the edges: scrolling off the bottom
 		// drops into the actions ("next step"); scrolling off the top steps back up
 		// to the ToC.
-		if (matchesSelectUp(data) || data === "k") {
-			if (this.#scrollView.getScrollOffset() <= 0 && this.#sidebarShown) this.#setFocus("toc");
-			else this.#scrollView.scroll(-1);
+		if (matchesSelectUp(data) || matchesKey(data, "k")) {
+			if (this.#scrollView.getScrollOffset() <= 0 && this.#sidebarShown) {
+				this.#setFocus("toc");
+			} else {
+				this.#scrollView.scroll(-1);
+				this.#captureScrollProgress();
+			}
 			return;
 		}
-		if (matchesSelectDown(data) || data === "j") {
-			if (this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset()) this.#setFocus("actions");
-			else this.#scrollView.scroll(1);
+		if (matchesSelectDown(data) || matchesKey(data, "j")) {
+			if (this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset()) {
+				this.#setFocus("actions");
+			} else {
+				this.#scrollView.scroll(1);
+				this.#captureScrollProgress();
+			}
 			return;
 		}
 		this.#handleBodyScroll(data);
@@ -458,17 +488,27 @@ export class PlanReviewOverlay implements Component {
 	 * before this runs, so here it only ever sees the paging/fast keys.
 	 */
 	#handleBodyScroll(data: string): void {
-		if (this.#scrollView.handleScrollKey(data)) return;
-		if (data === "g") this.#scrollView.scrollToTop();
-		else if (data === "G") this.#scrollView.scrollToBottom();
+		if (this.#scrollView.handleScrollKey(data)) {
+			if (matchesKey(data, "home")) this.#scrollProgress = 0;
+			else if (matchesKey(data, "end")) this.#scrollProgress = 1;
+			else this.#captureScrollProgress();
+			return;
+		}
+		if (data === "g") {
+			this.#scrollView.scrollToTop();
+			this.#scrollProgress = 0;
+		} else if (data === "G") {
+			this.#scrollView.scrollToBottom();
+			this.#scrollProgress = 1;
+		}
 	}
 
 	#handleToc(data: string): void {
-		if (matchesSelectUp(data) || data === "k") {
+		if (matchesSelectUp(data) || matchesKey(data, "k")) {
 			this.#moveTocCursor(-1);
 			return;
 		}
-		if (matchesSelectDown(data) || data === "j") {
+		if (matchesSelectDown(data) || matchesKey(data, "j")) {
 			// Past the last section, fall through to the actions ("next step").
 			if (this.#tocCursor >= this.#toc.length - 1) this.#setFocus("actions");
 			else this.#moveTocCursor(1);
@@ -476,7 +516,7 @@ export class PlanReviewOverlay implements Component {
 		}
 		if (
 			matchesKey(data, "right") ||
-			data === "l" ||
+			matchesKey(data, "l") ||
 			matchesKey(data, "enter") ||
 			matchesKey(data, "return") ||
 			data === "\n"
@@ -511,7 +551,10 @@ export class PlanReviewOverlay implements Component {
 		const sectionIndex = this.#toc[this.#tocCursor];
 		if (sectionIndex === undefined) return;
 		const offset = this.#sectionOffsets[sectionIndex];
-		if (offset !== undefined) this.#scrollView.setScrollOffset(offset);
+		if (offset !== undefined) {
+			this.#scrollView.setScrollOffset(offset);
+			this.#captureScrollProgress();
+		}
 	}
 
 	/** Greatest ToC position whose section starts at or above the scroll offset. */
@@ -677,10 +720,28 @@ export class PlanReviewOverlay implements Component {
 				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends");
 				break;
 		}
+		if (this.callbacks.onCopyPlan) parts.push("c copy");
 		parts.push("tab regions");
 		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
 		parts.push(this.#helpSuffix);
 		return parts.join(sep);
+	}
+
+	/**
+	 * Retain relative progress across reflow frames. A non-scrollable intermediate
+	 * frame has no meaningful offset, so it must not erase the last scroll position.
+	 */
+	#captureScrollProgress(): void {
+		const maxOffset = this.#scrollView.getMaxScrollOffset();
+		if (maxOffset > 0) this.#scrollProgress = this.#scrollView.getScrollOffset() / maxOffset;
+	}
+
+	#layoutBody(lines: readonly string[], height: number): void {
+		this.#captureScrollProgress();
+		this.#scrollView.setLines(lines);
+		this.#scrollView.setHeight(height);
+		const maxOffset = this.#scrollView.getMaxScrollOffset();
+		if (maxOffset > 0) this.#scrollView.setScrollOffset(Math.round(this.#scrollProgress * maxOffset));
 	}
 
 	/** Build the concatenated body lines and record each section's start row. */
@@ -789,10 +850,14 @@ export class PlanReviewOverlay implements Component {
 		const innerWidth = Math.max(1, width - 4);
 		const bodyContentWidth = sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 
-		const sliderLines = this.#renderSliderLines();
-		const optionLines = this.#renderOptionLines();
+		const committed = this.#committed;
+		const sliderLines = committed ? [] : this.#renderSliderLines();
+		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
-		const footerLines = this.#renderFooterLines(innerWidth);
+		const footerLines = committed
+			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
+			: this.#renderFooterLines(innerWidth);
 
 		// Chrome rows: top border, two dividers, bottom border, plus the
 		// prompt/slider/option/footer rows between them.
@@ -800,8 +865,7 @@ export class PlanReviewOverlay implements Component {
 		const regionRows = Math.max(MIN_BODY_ROWS, termHeight - chrome);
 
 		const bodyLines = this.#buildBody(bodyContentWidth);
-		this.#scrollView.setLines(bodyLines);
-		this.#scrollView.setHeight(regionRows);
+		this.#layoutBody(bodyLines, regionRows);
 		if (this.#pendingScrollToToc) {
 			this.#pendingScrollToToc = false;
 			this.#scrubBodyToToc();
@@ -836,7 +900,7 @@ export class PlanReviewOverlay implements Component {
 		for (const line of promptLines) out.push(row(line, width));
 		for (const line of sliderLines) out.push(row(line, width));
 		for (let i = 0; i < optionLines.length; i++) {
-			this.#optionClickRows.set(out.length, i);
+			if (!committed) this.#optionClickRows.set(out.length, i);
 			out.push(row(optionLines[i]!, width));
 		}
 		out.push(divider(width));

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
@@ -13,8 +13,28 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { type } from "arktype";
 
-async function createMagicKeywordSession(root: string): Promise<{
+const mockTaskTool: AgentTool = {
+	name: "task",
+	label: "Task",
+	description: "Mock task tool",
+	parameters: type({}),
+	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+};
+
+const mockEvalTool: AgentTool = {
+	name: "eval",
+	label: "Eval",
+	description: "Mock eval tool",
+	parameters: type({}),
+	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+};
+
+async function createMagicKeywordSession(
+	root: string,
+	tools: AgentTool[] = [mockTaskTool, mockEvalTool],
+): Promise<{
 	session: AgentSession;
 	settings: Settings;
 	authStorage: AuthStorage;
@@ -25,7 +45,7 @@ async function createMagicKeywordSession(root: string): Promise<{
 		initialState: {
 			model,
 			systemPrompt: ["Test"],
-			tools: [],
+			tools,
 			messages: [],
 			thinkingLevel: Effort.High,
 		},
@@ -101,6 +121,48 @@ describe("AgentSession magic keyword settings", () => {
 			"orchestrate-notice",
 			"workflow-notice",
 		]);
+	});
+
+	it("renders the eval-specific workflowz notice", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		created.settings.set("task.batch", false);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).toContain("Author the orchestration in the `eval` tool");
+		expect(notice).toContain("Every eval call has:");
+		expect(notice).toContain("`parallel(thunks)`");
+		expect(notice).toContain("**Python (`eval`, Python backend):**");
+		expect(notice).toContain("**JavaScript (`eval`, JavaScript backend):**");
+	});
+
+	it("skips workflowz notice when the task tool is inactive", async () => {
+		const created = await createMagicKeywordSession(root, []);
+		session = created.session;
+		authStorage = created.authStorage;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
+	});
+
+	it("skips workflowz notice when the eval tool is inactive", async () => {
+		const created = await createMagicKeywordSession(root, [mockTaskTool]);
+		session = created.session;
+		authStorage = created.authStorage;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
 	});
 
 	it("does not use a disabled ultrathink keyword to force auto thinking", async () => {

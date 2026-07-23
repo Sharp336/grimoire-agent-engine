@@ -67,6 +67,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 	const clearPinnedError = vi.fn();
 	const statusContainer = {
 		clear: vi.fn(),
+		disposeChildren: vi.fn(),
 		addChild: vi.fn(),
 	};
 
@@ -109,6 +110,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		streamingMessage,
 		chatContainer,
 		proseOnlyThinking: true,
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		flushCompactionQueue: vi.fn(async () => {}),
 		showPinnedError,
@@ -283,7 +285,7 @@ describe("EventController working loader reconciliation", () => {
 		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
 
 		expect(loader?.stop).toHaveBeenCalledTimes(1);
-		expect(ctx.statusContainer.clear).toHaveBeenCalledTimes(1);
+		expect(ctx.statusContainer.disposeChildren).toHaveBeenCalledTimes(1);
 		expect(ctx.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
 	});

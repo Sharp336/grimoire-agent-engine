@@ -64,6 +64,10 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		recallMaxQueryChars: 800,
 		recallPromptPreamble: "preamble",
 		debug: false,
+		requestTimeoutMs: 30_000,
+		reflectTimeoutMs: 120_000,
+		recallTimeoutMs: 30_000,
+		retainTimeoutMs: 60_000,
 		mentalModelsEnabled: false,
 		mentalModelAutoSeed: false,
 		mentalModelRefreshIntervalMs: 5 * 60 * 1000,
@@ -154,6 +158,7 @@ function makeMnemopiConfig(
 interface RegisterMnemopiStateOptions {
 	cwd?: string;
 	sessionId?: string;
+	entries?: () => unknown[];
 }
 
 function registerMnemopiState(
@@ -168,7 +173,7 @@ function registerMnemopiState(
 		session: {
 			sessionId,
 			sessionManager: {
-				getEntries: () => [],
+				getEntries: options.entries ?? (() => []),
 				getCwd: () => options.cwd ?? "/tmp",
 			} as never,
 			emitNotice: () => {},
@@ -457,9 +462,9 @@ describe("Mnemopi backend lifecycle", () => {
 		}));
 		const state = registerMnemopiState(makeMnemopiConfig({ retainEveryNTurns: 2 }), {
 			cwd: "/work/project-alpha",
+			entries: () => entries,
 		});
 		state.lastRetainedTurn = 2;
-		(state.session.sessionManager as { getEntries: () => unknown[] }).getEntries = () => entries;
 		const retainSpy = vi.spyOn(state, "retainMessages").mockResolvedValue();
 
 		await state.maybeRetainOnAgentEnd([{ role: "user", content: [{ type: "text", text: "turn 4" }] }] as never);
@@ -470,6 +475,86 @@ describe("Mnemopi backend lifecycle", () => {
 			{ role: "user", content: "turn 4" },
 		]);
 		expect(state.lastRetainedTurn).toBe(4);
+	});
+
+	it("does not re-store retained turns during consolidation or after resume", async () => {
+		const entries = Array.from({ length: 6 }, (_, index) => ({
+			type: "message",
+			message: { role: "user", content: `turn ${index + 1}` },
+		}));
+		let visibleTurns = 2;
+		const config = makeMnemopiConfig({ retainEveryNTurns: 2 });
+		const state = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries.slice(0, visibleTurns),
+		});
+
+		await state.maybeRetainOnAgentEnd([] as never);
+		visibleTurns = 4;
+		await state.maybeRetainOnAgentEnd([] as never);
+		await state.forceRetainCurrentSession();
+		await state.dispose({ consolidate: false });
+
+		visibleTurns = 6;
+		const resumed = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries.slice(0, visibleTurns),
+		});
+		await resumed.forceRetainCurrentSession();
+
+		const rows = resumed.memory.beam.db
+			.prepare<{ content: string; retainedThroughUserTurn: number }, [string]>(`
+				SELECT
+					content,
+					CAST(json_extract(metadata_json, '$.retained_through_user_turn') AS INTEGER)
+						AS retainedThroughUserTurn
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+				ORDER BY rowid
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows.map(row => row.content.match(/turn \d+/g))).toEqual([
+			["turn 1", "turn 2"],
+			["turn 3", "turn 4"],
+			["turn 5", "turn 6"],
+		]);
+		expect(rows.map(row => row.retainedThroughUserTurn)).toEqual([2, 4, 6]);
+	});
+
+	it("does not over-count legacy cumulative resumed rows when restoring the cursor", async () => {
+		const entries = Array.from({ length: 8 }, (_, index) => ({
+			type: "message",
+			message: { role: "user", content: `turn ${index + 1}` },
+		}));
+		const config = makeMnemopiConfig({ retainEveryNTurns: 2 });
+		const seed = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const turn = (index: number) => ({ role: "user", content: `turn ${index}` });
+		// Legacy pre-fix bank: two incremental rows plus a cumulative row written
+		// by a resumed session whose in-memory cursor had reset to zero. None of
+		// them carry retained_through_user_turn metadata.
+		await seed.retainMessages([turn(1), turn(2)], `${TEST_SESSION_ID}-1`);
+		await seed.retainMessages([turn(3), turn(4)], `${TEST_SESSION_ID}-2`);
+		await seed.retainMessages([turn(1), turn(2), turn(3), turn(4), turn(5), turn(6)], `${TEST_SESSION_ID}-3`);
+		await seed.dispose({ consolidate: false });
+
+		const resumed = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries,
+		});
+		await resumed.maybeRetainOnAgentEnd([] as never);
+
+		const rows = resumed.memory.beam.db
+			.prepare<{ content: string }, [string]>(`
+				SELECT content
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+				ORDER BY rowid
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows).toHaveLength(4);
+		expect(rows.at(-1)?.content.match(/turn \d+/g)).toEqual(["turn 7", "turn 8"]);
 	});
 
 	it("retains the full transcript but extracts and embeds clean projections", async () => {
@@ -530,7 +615,7 @@ describe("Mnemopi backend lifecycle", () => {
 		await childState?.dispose();
 	});
 
-	it("flushes extractions, sleeps, and closes every owned bank on session shutdown (#2320)", async () => {
+	it("flushes extractions and closes every owned bank on session shutdown (#2320)", async () => {
 		const config = makeMnemopiConfig({
 			scoping: "per-project-tagged",
 			bank: "project-alpha",
@@ -554,7 +639,7 @@ describe("Mnemopi backend lifecycle", () => {
 		const perBank = ownedMemories.map(memory => ({
 			memory,
 			flush: vi.spyOn(memory, "flushExtractions"),
-			sleep: vi.spyOn(memory, "sleepAllSessions"),
+			sleep: vi.spyOn(memory, "sleep"),
 			close: vi.spyOn(memory, "close"),
 		}));
 
@@ -563,14 +648,11 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(retainSpy).toHaveBeenCalledTimes(1);
 		for (const bank of perBank) {
 			expect(bank.flush).toHaveBeenCalledTimes(1);
-			expect(bank.sleep).toHaveBeenCalledTimes(1);
-			expect(bank.sleep).toHaveBeenCalledWith(false);
+			expect(bank.sleep).not.toHaveBeenCalled();
 			expect(bank.close).toHaveBeenCalledTimes(1);
 			const flushedAt = bank.flush.mock.invocationCallOrder[0];
-			const sleptAt = bank.sleep.mock.invocationCallOrder[0];
 			const closedAt = bank.close.mock.invocationCallOrder[0];
-			expect(flushedAt).toBeLessThan(sleptAt);
-			expect(sleptAt).toBeLessThan(closedAt);
+			expect(flushedAt).toBeLessThan(closedAt);
 			expect(retainSpy.mock.invocationCallOrder[0]).toBeLessThan(closedAt);
 		}
 		// State already consumed its owned resources; the afterEach hook would
@@ -614,21 +696,66 @@ describe("Mnemopi backend lifecycle", () => {
 		registeredMnemopiState = undefined;
 	});
 
-	it("dispose with no timeoutMs awaits consolidate to completion (#3641 — preserves #2320 contract)", async () => {
+	it("dispose with no timeoutMs retains, flushes, and closes without sleeping (#3641)", async () => {
 		const state = registerMnemopiState();
 		const retainMemory = state.getScopedRetainTarget().memory;
 		const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
-		const sleepSpy = vi.spyOn(retainMemory, "sleepAllSessions");
+		const sleepSpy = vi.spyOn(retainMemory, "sleep");
 		const closeSpy = vi.spyOn(retainMemory, "close");
 
 		await state.dispose();
 
-		// Unbounded dispose still runs the full consolidate-then-close pipeline,
-		// matching the #2320 contract for non-shutdown callers (state replacement
-		// during `mnemopiBackend.start`, etc.).
+		// Unbounded dispose still runs the consolidate-then-close pipeline, but
+		// skips the synchronous bank sleep so the interactive shutdown path stays
+		// fast (#3641). Full consolidation remains reachable via `/memory enqueue`.
 		expect(flushSpy).toHaveBeenCalledTimes(1);
-		expect(sleepSpy).toHaveBeenCalledTimes(1);
+		expect(sleepSpy).not.toHaveBeenCalled();
 		expect(closeSpy).toHaveBeenCalledTimes(1);
+
+		registeredMnemopiState = undefined;
+	});
+
+	it("dispose retains the current session without scheduling LLM fact extraction", async () => {
+		const state = registerMnemopiState();
+		const retainSpy = vi.spyOn(state, "forceRetainCurrentSession").mockResolvedValue();
+
+		await state.dispose();
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy).toHaveBeenCalledWith({ extract: false });
+
+		registeredMnemopiState = undefined;
+	});
+
+	it("consolidate({ sleep: false }) retains and flushes without sleeping the bank", async () => {
+		const state = registerMnemopiState();
+		const retainMemory = state.getScopedRetainTarget().memory;
+		vi.spyOn(state, "forceRetainCurrentSession").mockResolvedValue();
+		vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+		const sleepAllSessionsSpy = vi.spyOn(retainMemory, "sleepAllSessions");
+		const sleepSpy = vi.spyOn(retainMemory, "sleep");
+
+		await state.consolidate({ sleep: false });
+
+		expect(sleepAllSessionsSpy).not.toHaveBeenCalled();
+		expect(sleepSpy).not.toHaveBeenCalled();
+
+		registeredMnemopiState = undefined;
+	});
+
+	it("consolidate({ full: true }) runs the full cross-session sleepAllSessions", async () => {
+		const state = registerMnemopiState();
+		const retainMemory = state.getScopedRetainTarget().memory;
+		vi.spyOn(state, "forceRetainCurrentSession").mockResolvedValue();
+		vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+		const sleepAllSessionsSpy = vi.spyOn(retainMemory, "sleepAllSessions");
+		const sleepSpy = vi.spyOn(retainMemory, "sleep");
+
+		await state.consolidate({ full: true });
+
+		expect(sleepAllSessionsSpy).toHaveBeenCalledTimes(1);
+		expect(sleepAllSessionsSpy).toHaveBeenCalledWith(false);
+		expect(sleepSpy).not.toHaveBeenCalled();
 
 		registeredMnemopiState = undefined;
 	});

@@ -102,14 +102,18 @@
           }
         }
 
-        // Sort children by timestamp
-        function sortChildren(node) {
+        // Sort children by timestamp. Use an explicit stack so valid, deep
+        // conversation chains do not exhaust the browser call stack.
+        const sortStack = [...roots];
+        while (sortStack.length > 0) {
+          const node = sortStack.pop();
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
           );
-          node.children.forEach(sortChildren);
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            sortStack.push(node.children[i]);
+          }
         }
-        roots.forEach(sortChildren);
 
         return roots;
       }
@@ -157,17 +161,27 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Mark which subtrees contain the active leaf
+        // Mark which subtrees contain the active leaf. Use iterative post-order
+        // traversal so valid, deep conversation chains do not exhaust the
+        // browser call stack.
         const containsActive = new Map();
-        function markActive(node) {
+        const allNodes = [];
+        const activeStack = [...roots];
+        while (activeStack.length > 0) {
+          const node = activeStack.pop();
+          allNodes.push(node);
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            activeStack.push(node.children[i]);
+          }
+        }
+        for (let i = allNodes.length - 1; i >= 0; i--) {
+          const node = allNodes[i];
           let has = activePathIds.has(node.entry.id);
           for (const child of node.children) {
-            if (markActive(child)) has = true;
+            if (containsActive.get(child)) has = true;
           }
           containsActive.set(node, has);
-          return has;
         }
-        roots.forEach(markActive);
 
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
@@ -1082,6 +1096,8 @@
                   <div class="thinking-text">${escapeHtml(thinking)}</div>
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
+              } else if (block.type === 'image') {
+                html += `<div class="message-images"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
               }
             }
             for (const block of msg.content) {
@@ -1386,7 +1402,7 @@
           },
           // Text content: escape HTML tags
           text(token) {
-            return escapeHtmlTags(escapeHtml(token.text));
+            return token.tokens ? this.parser.parseInline(token.tokens) : escapeHtmlTags(escapeHtml(token.text));
           },
           // Inline code: escape HTML
           codespan(token) {

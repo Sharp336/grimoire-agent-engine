@@ -40,6 +40,18 @@ interface FinalizableBlock {
 	 * commits until the block finalizes.
 	 */
 	getTranscriptBlockSettledRows?(): number;
+	/**
+	 * Whether the block is a displaceable snapshot (todo/poll card) kept
+	 * unfinalized only so a follow-up matching call can retract it. Paired
+	 * with {@link seal}: once any of its rows enters native scrollback the
+	 * container seals it — rows on the tape are immutable, so retraction is
+	 * no longer possible, and an unfinalized block would otherwise pin the
+	 * live-region seam open for the rest of the turn (every row committed
+	 * below it audit-exempt, mass-recommitted when it finally finalizes).
+	 */
+	isDisplaceableBlock?(): boolean;
+	/** Finalize a displaceable snapshot in place (settle animation, freeze bytes). */
+	seal?(): void;
 }
 
 function isBlockFinalized(child: Component): boolean {
@@ -58,6 +70,16 @@ function getBlockSettledRows(child: Component): number {
 	if (!fn) return 0;
 	const value = fn.call(child);
 	return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+/** Seal a displaceable snapshot whose rows entered native scrollback (see {@link FinalizableBlock.isDisplaceableBlock}). */
+function sealCommittedSnapshot(child: Component): void {
+	const block = child as Component & FinalizableBlock;
+	if (block.isDisplaceableBlock?.()) block.seal?.();
+}
+
+function setBlockCommittedRows(child: Component, rows: number): void {
+	(child as Component & Partial<NativeScrollbackCommittedRows>).setNativeScrollbackCommittedRows?.(rows);
 }
 
 // A "plain blank" row is empty or whitespace-only with no ANSI bytes. It marks
@@ -145,6 +167,7 @@ export class TranscriptContainer
 	// final: the leading finalized blocks plus the first live block's declared
 	// settled rows. TUI commits rows to native scrollback only above it.
 	#nativeScrollbackLiveRegionStart: number | undefined;
+	#nativeScrollbackLiveRegionPinned = false;
 	// Persistent assembled transcript rows. Rows before the stable floor are
 	// byte-identical to the previous render; rows at/after it were re-pushed.
 	#lines: string[] = [];
@@ -169,10 +192,32 @@ export class TranscriptContainer
 	override clear(): void {
 		this.#generation++;
 		super.clear();
+		this.#committedRows = 0;
 	}
 
-	setNativeScrollbackCommittedRows(rows: number): void {
+	override setNativeScrollbackCommittedRows(rows: number): void {
 		this.#committedRows = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+		for (let i = 0; i < this.children.length; i++) {
+			const child = this.children[i]!;
+			const segment = this.#segments[i];
+			if (segment === undefined || segment.component !== child) continue;
+			const committedContribution = Math.min(
+				segment.contribution.length,
+				Math.max(0, this.#committedRows - segment.startRow - segment.sep),
+			);
+			if (committedContribution === 0) {
+				setBlockCommittedRows(child, 0);
+				continue;
+			}
+			// Transcript assembly strips plain blank edges from each block. Map the
+			// committed contribution back into the child's raw render coordinates so
+			// nested containers can split the prefix against their exact child rows.
+			let leadingTrimmedRows = 0;
+			while (leadingTrimmedRows < segment.rawRef.length && isPlainBlank(segment.rawRef[leadingTrimmedRows]!)) {
+				leadingTrimmedRows++;
+			}
+			setBlockCommittedRows(child, Math.min(segment.rawRef.length, leadingTrimmedRows + committedContribution));
+		}
 	}
 
 	getRenderStablePrefixRows(): number {
@@ -183,6 +228,11 @@ export class TranscriptContainer
 
 	getNativeScrollbackLiveRegionStart(): number | undefined {
 		return this.#nativeScrollbackLiveRegionStart;
+	}
+
+	/** Propagates viewport pinning from the first still-mutating transcript block. */
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return this.#nativeScrollbackLiveRegionPinned;
 	}
 
 	/**
@@ -272,8 +322,25 @@ export class TranscriptContainer
 	override render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		this.#nativeScrollbackLiveRegionStart = undefined;
+		this.#nativeScrollbackLiveRegionPinned = false;
 
 		const count = this.children.length;
+
+		// Seal displaceable snapshots whose rows are already on the tape (per the
+		// previous frame's segments — the geometry the committed count was
+		// computed against): immutable history can no longer be retracted, and
+		// left unfinalized such a block would pin the live-region seam open below
+		// it. Runs before the live-block scan so the seam unpins in this same
+		// frame, and every frame so a block that BECAME displaceable after its
+		// pending-preview rows committed (late result on a scrolled-off call) is
+		// caught too.
+		for (let i = 0; i < count && i < this.#segments.length; i++) {
+			const previous = this.#segments[i];
+			if (previous === undefined) continue;
+			if (previous.startRow >= this.#committedRows) break;
+			if (previous.rowCount === 0 || previous.component !== this.children[i]) continue;
+			sealCommittedSnapshot(previous.component);
+		}
 
 		// The commit boundary stops at the earliest still-mutating block. A
 		// block that has not finalized must gate it: out-of-band inserts
@@ -287,6 +354,10 @@ export class TranscriptContainer
 			if (!isBlockFinalized(this.children[i]!)) {
 				liveStartIndex = i;
 				hasLiveBlock = true;
+				this.#nativeScrollbackLiveRegionPinned =
+					(
+						this.children[i] as Component & Partial<NativeScrollbackLiveRegion>
+					).isNativeScrollbackLiveRegionPinned?.() === true;
 				break;
 			}
 		}

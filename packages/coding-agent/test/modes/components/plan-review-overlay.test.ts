@@ -75,7 +75,7 @@ describe("PlanReviewOverlay", () => {
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
 	});
 
-	it("moves the option cursor with up/down and confirms the new target", () => {
+	it("moves the option cursor with down and confirms the new target", () => {
 		const onPick = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			"plan",
@@ -85,11 +85,42 @@ describe("PlanReviewOverlay", () => {
 		overlay.handleInput(DOWN);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and compact context");
+	});
 
-		onPick.mockClear();
+	it("confirms the up-moved target from a lower start", () => {
+		const onPick = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, initialIndex: 1 },
+			{ onPick, onCancel: vi.fn() },
+		);
 		overlay.handleInput(UP);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+	});
+
+	it("locks input and shows a submitting indicator after a pick, ignoring repeat keys", () => {
+		const onPick = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick, onCancel },
+		);
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+
+		const committed = stripVTControlCharacters(overlay.render(80).join("\n"));
+		expect(committed).toContain("Approve and execute — submitting…");
+
+		// The async approval window keeps the overlay mounted; further keys must
+		// not fire a second callback or move the cursor (#5926).
+		overlay.handleInput(DOWN);
+		overlay.handleInput(ENTER);
+		overlay.handleInput("\x1b");
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("skips disabled options and never confirms them", () => {
@@ -180,6 +211,93 @@ describe("PlanReviewOverlay", () => {
 		expect(backToTop).not.toContain("para 199");
 	});
 
+	it("preserves scroll progress across a transient non-scrollable render", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(40);
+			render(overlay);
+			overlay.handleInput("G");
+			const bottom = render(overlay);
+			expect(bottom).toContain("L399");
+			expect(bottom).not.toContain("L000");
+
+			setRows(1000);
+			render(overlay);
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L399");
+			expect(restored).not.toContain("L000");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("honors Home while a transient render is non-scrollable", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(40);
+			render(overlay);
+			overlay.handleInput("G");
+			setRows(1000);
+			render(overlay);
+			overlay.handleInput("\x1b[H");
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L000");
+			expect(restored).not.toContain("L399");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("honors End while a transient render is non-scrollable", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(1000);
+			render(overlay);
+			overlay.handleInput("\x1b[F");
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L399");
+			expect(restored).not.toContain("L000");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("swaps the displayed plan and resets scroll on setPlanContent", () => {
 		const longPlan = Array.from({ length: 200 }, (_, i) => `para ${i}`).join("\n\n");
 		const overlay = new PlanReviewOverlay(
@@ -193,6 +311,22 @@ describe("PlanReviewOverlay", () => {
 		expect(out).toContain("Fresh plan");
 		expect(out).toContain("brand new body");
 		expect(out).not.toContain("para 199");
+	});
+
+	it("copies the current plan content on c and advertises the hotkey when available", () => {
+		const onCopyPlan = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Original plan\n\nold body",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan },
+		);
+
+		overlay.setPlanContent("# Edited plan\n\nnew body");
+		expect(render(overlay)).toContain("c copy");
+		overlay.handleInput("c");
+
+		expect(onCopyPlan).toHaveBeenCalledTimes(1);
+		expect(onCopyPlan).toHaveBeenCalledWith("# Edited plan\n\nnew body\n");
 	});
 
 	// Plan with ≥2 headings + nesting, wide enough for the sidebar at width 80.
@@ -320,6 +454,25 @@ describe("PlanReviewOverlay", () => {
 		const restored = render(overlay);
 		expect(restored).toContain("Goal");
 		expect(restored).toContain("goal body");
+	});
+
+	it("copies the edited plan after deleting a section in the overlay", () => {
+		const onCopyPlan = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // -> toc (Overview)
+		overlay.handleInput(DOWN); // -> Goal
+		overlay.handleInput("d");
+		overlay.handleInput("c");
+
+		expect(onCopyPlan).toHaveBeenCalledTimes(1);
+		expect(onCopyPlan).toHaveBeenCalledWith(
+			"# Overview\n\nintro body\n\n## Steps\n\nstep body\n\n# Risks\n\nrisk body\n",
+		);
 	});
 
 	it("annotates a section and emits feedback for the Refine loop", () => {
@@ -532,14 +685,14 @@ describe("PlanReviewOverlay", () => {
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
 		expect(optionLineRaw(overlay, "Approve and keep context")).toContain(selectedBg);
 
+		// Pointer onto the top border (a non-option row) drops the highlight.
+		overlay.handleInput("\x1b[<35;6;1M");
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+
 		// Hover is visual only: the keyboard cursor stays on index 0, so Enter still
 		// confirms the first option rather than the hovered one.
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
-
-		// Pointer onto the top border (a non-option row) drops the highlight.
-		overlay.handleInput("\x1b[<35;6;1M");
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
 	});
 
 	it("never hovers a disabled option", () => {

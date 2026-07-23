@@ -1,14 +1,20 @@
-import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import type { ModelSpec } from "../types";
-import { discoveryFetch, isRecord } from "../utils";
-import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { parseKnownModel, semverEqual } from "../identity/classify";
+import type { FetchImpl, ModelSpec } from "../types";
+import { discoveryFetch } from "../utils";
+import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
-const DEFAULT_CODEX_CLIENT_VERSION = "0.99.0";
-const NPM_CODEX_LATEST_URL = "https://registry.npmjs.org/@openai%2Fcodex/latest";
+/**
+ * GPT-5.6 luna/sol/terra hard context capacity. OpenAI's Codex model registry
+ * declares context_window = max_context_window = 372000 (#5705), but Codex
+ * discovery under-reports it — omitting the field for some accounts and
+ * actively returning 272000 for others (#6259). Applied as a floor for these
+ * SKUs so the reported/absent value never regresses the real window.
+ */
+const GPT_5_6_CONTEXT_WINDOW = 372_000;
 const CODEX_REMOTE_COMPACTION = {
 	enabled: true,
 	api: "openai-codex-responses",
@@ -27,9 +33,10 @@ const codexModelEntrySchema = type({
 	"default_reasoning_level?": "unknown",
 	"supported_reasoning_levels?": "unknown",
 	"input_modalities?": "unknown",
-	"supported_in_api?": "unknown",
+	"visibility?": "unknown",
 	"priority?": "unknown",
 	"prefer_websockets?": "unknown",
+	"use_responses_lite?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -62,9 +69,7 @@ export interface CodexModelDiscoveryOptions {
 	/** Abort signal for network request cancellation. */
 	signal?: AbortSignal;
 	/** Optional fetch implementation override for tests. */
-	fetchFn?: typeof fetch;
-	/** Optional registry fetch implementation override for client version lookup. */
-	registryFetchFn?: typeof fetch;
+	fetchFn?: FetchImpl;
 }
 
 /**
@@ -85,12 +90,8 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);
-	const headers = buildCodexHeaders(options);
-	const clientVersion = await resolveCodexClientVersion(
-		options.clientVersion,
-		options.registryFetchFn ?? fetchFn,
-		options.signal,
-	);
+	const clientVersion = normalizeClientVersion(options.clientVersion) ?? CODEX_CLIENT_VERSION;
+	const headers = buildCodexHeaders(options, clientVersion);
 
 	let sawSuccessfulResponse = false;
 	for (const path of paths) {
@@ -155,7 +156,7 @@ function buildModelsUrl(baseUrl: string, path: string, clientVersion: string | u
 	return url.toString();
 }
 
-function buildCodexHeaders(options: CodexModelDiscoveryOptions): Headers {
+function buildCodexHeaders(options: CodexModelDiscoveryOptions, clientVersion: string): Headers {
 	const headers = new Headers(options.headers);
 	headers.set("Authorization", `Bearer ${options.accessToken}`);
 	if (options.accountId && options.accountId.trim().length > 0) {
@@ -163,40 +164,9 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions): Headers {
 	}
 	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
+	headers.set(OPENAI_HEADERS.VERSION, clientVersion);
 	headers.set("accept", "application/json");
 	return headers;
-}
-
-async function resolveCodexClientVersion(
-	clientVersion: string | undefined,
-	fetchFn: FetchImpl,
-	signal: AbortSignal | undefined,
-): Promise<string> {
-	const normalizedClientVersion = normalizeClientVersion(clientVersion);
-	if (normalizedClientVersion) {
-		return normalizedClientVersion;
-	}
-	try {
-		const response = await fetchFn(NPM_CODEX_LATEST_URL, {
-			method: "GET",
-			headers: { Accept: "application/json" },
-			signal,
-		});
-		if (!response.ok) {
-			return DEFAULT_CODEX_CLIENT_VERSION;
-		}
-		const payload: unknown = await response.json();
-		if (!isRecord(payload)) {
-			return DEFAULT_CODEX_CLIENT_VERSION;
-		}
-		const npmVersion = normalizeClientVersion(payload.version);
-		return npmVersion ?? DEFAULT_CODEX_CLIENT_VERSION;
-	} catch (error) {
-		if (isAbortError(error)) {
-			throw error;
-		}
-		return DEFAULT_CODEX_CLIENT_VERSION;
-	}
 }
 
 function normalizeClientVersion(value: unknown): string | undefined {
@@ -208,10 +178,6 @@ function normalizeClientVersion(value: unknown): string | undefined {
 		return undefined;
 	}
 	return trimmed;
-}
-
-function isAbortError(error: unknown): error is Error {
-	return error instanceof Error && error.name === "AbortError";
 }
 
 function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"openai-codex-responses">[] | null {
@@ -251,17 +217,29 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 		return null;
 	}
 
-	const supportedInApi = toBoolean(payload.supported_in_api);
-	if (supportedInApi === false) {
+	const visibility = toNonEmptyString(payload.visibility)?.toLowerCase();
+	if (visibility === "hide" || visibility === "hidden") {
 		return null;
 	}
 
 	const name = toNonEmptyString(payload.display_name) ?? slug;
-	const contextWindow = toPositiveInt(payload.context_window) ?? DEFAULT_CONTEXT_WINDOW;
+	// GPT-5.6 luna/sol/terra have a 372000 hard window, but Codex discovery
+	// under-reports it: for some accounts the field is omitted, for others it is
+	// actively returned as 272000 (#6259). Treat GPT_5_6_CONTEXT_WINDOW as a
+	// floor for these SKUs so neither the omission nor the active under-report
+	// regresses the real capacity; other models honor the reported value with
+	// the generic 272000 fallback.
+	const parsed = parseKnownModel(slug);
+	const isGpt56 = parsed.family === "openai" && semverEqual(parsed.version, "5.6");
+	const reportedContextWindow = toPositiveInt(payload.context_window);
+	const contextWindow = isGpt56
+		? Math.max(GPT_5_6_CONTEXT_WINDOW, reportedContextWindow ?? 0)
+		: (reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW);
 	const maxTokens = Math.min(DEFAULT_MAX_TOKENS, contextWindow);
 	const reasoning = supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels);
 	const input = normalizeInputModalities(payload.input_modalities);
 	const preferWebsockets = toBoolean(payload.prefer_websockets) === true;
+	const useResponsesLite = toBoolean(payload.use_responses_lite) === true;
 	const priority = toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER;
 
 	return {
@@ -279,6 +257,7 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 			contextWindow,
 			maxTokens,
 			...(preferWebsockets ? { preferWebsockets: true } : {}),
+			...(useResponsesLite ? { useResponsesLite: true } : {}),
 			...(priority !== Number.MAX_SAFE_INTEGER ? { priority } : {}),
 		},
 	};

@@ -53,6 +53,19 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
 	return result;
 }
 
+/** Filters process env for child shells without launch-cwd `.env.local` values. */
+export function filterChildShellEnv(
+	env: Record<string, string | undefined>,
+	cwd: string = process.cwd(),
+): Record<string, string> {
+	const result = filterProcessEnv(env);
+	const launchLocalEnv = parseEnvFile(path.join(cwd, ".env.local"));
+	for (const key in launchLocalEnv) {
+		if (result[key] === launchLocalEnv[key]) delete result[key];
+	}
+	return result;
+}
+
 /**
  * Parses a .env file synchronously and extracts key-value string pairs.
  * Ignores lines that are empty or start with '#'. Trims whitespace.
@@ -191,6 +204,30 @@ export function isTerminalHeadless(): boolean {
 export function setTerminalHeadless(headless: boolean): boolean {
 	const previous = terminalHeadless;
 	terminalHeadless = headless;
+	return previous;
+}
+
+let interactiveHost = false;
+
+/**
+ * True when this process runs an interactive coding-agent host — the only
+ * context where the operator can browse the Agent Hub and focus a live
+ * subagent's session (`SessionFocusController`), so a subagent's session title
+ * can become operator-visible. Off by default (print/RPC/ACP/eval/SDK/`bun
+ * test` never render a focusable session tree); the interactive entrypoint
+ * flips it on with {@link setInteractiveHost}.
+ */
+export function isInteractiveHost(): boolean {
+	return interactiveHost;
+}
+
+/**
+ * Set the interactive-host flag and return the previous value so callers can
+ * restore exact prior state. See {@link isInteractiveHost}.
+ */
+export function setInteractiveHost(interactive: boolean): boolean {
+	const previous = interactiveHost;
+	interactiveHost = interactive;
 	return previous;
 }
 
