@@ -45,27 +45,31 @@ export interface TranslationFile {
  * i18n 管理器
  */
 class I18nManager {
-	private dict: TranslationFile = {};
-	private lang: string = "en";
-	private lanDir: string;
-	private useBundled: boolean;
-	private initialized = false;
+	#dict: TranslationFile = {};
+	#lang: string = "en";
+	#lanDir: string;
+	#useBundled: boolean;
+	#initialized = false;
 
 	constructor(lanDir?: string) {
-		this.useBundled = lanDir === undefined;
-		this.lanDir = lanDir ?? path.join(os.homedir(), ".omp", "lang");
+		this.#useBundled = lanDir === undefined;
+		this.#lanDir = lanDir ?? path.join(os.homedir(), ".omp", "lang");
 	}
 
 	/**
 	 * 重置实例（用于测试）
 	 */
 	reset(lanDir?: string): void {
-		this.dict = {};
-		this.lang = "en";
-		this.initialized = false;
+		this.#dict = {};
+		this.#lang = "en";
+		this.#initialized = false;
 		if (lanDir) {
-			this.lanDir = lanDir;
-			this.useBundled = false;
+			this.#lanDir = lanDir;
+			this.#useBundled = false;
+		} else {
+			// 恢复默认值
+			this.#lanDir = path.join(os.homedir(), ".omp", "lang");
+			this.#useBundled = true;
 		}
 	}
 
@@ -73,19 +77,19 @@ class I18nManager {
 	 * 初始化 i18n 系统
 	 */
 	async init(): Promise<void> {
-		if (this.initialized) return;
+		if (this.#initialized) return;
 
-		this.lang = await this.detectLanguage();
-		await this.loadTranslation(this.lang, this.dict);
+		this.#lang = await this.#detectLanguage();
+		await this.#loadTranslation(this.#lang, this.#dict);
 
-		this.initialized = true;
+		this.#initialized = true;
 	}
 
 	/**
 	 * 检测语言设置
 	 * 优先读取 OMP_LANG 环境变量，其次从 config.yml 读取 i18n.language
 	 */
-	private async detectLanguage(): Promise<string> {
+	async #detectLanguage(): Promise<string> {
 		// 环境变量优先
 		if (process.env.OMP_LANG) {
 			return process.env.OMP_LANG;
@@ -118,19 +122,19 @@ class I18nManager {
 	 * 加载翻译文件
 	 * 先加载包内 bundled 翻译，再用用户目录覆盖
 	 */
-	private async loadTranslation(lang: string, target: TranslationFile): Promise<void> {
+	async #loadTranslation(lang: string, target: TranslationFile): Promise<void> {
 		// 1. 加载包内 bundled 翻译（仅默认路径时）
-		if (this.useBundled) {
-			await this.loadTranslationFromDir(lang, BUNDLED_LAN_DIR, target);
+		if (this.#useBundled) {
+			await this.#loadTranslationFromDir(lang, BUNDLED_LAN_DIR, target);
 		}
 		// 2. 加载用户目录翻译
-		await this.loadTranslationFromDir(lang, this.lanDir, target);
+		await this.#loadTranslationFromDir(lang, this.#lanDir, target);
 	}
 
 	/**
 	 * 从指定目录加载翻译文件
 	 */
-	private async loadTranslationFromDir(lang: string, dir: string, target: TranslationFile): Promise<void> {
+	async #loadTranslationFromDir(lang: string, dir: string, target: TranslationFile): Promise<void> {
 		try {
 			const files = await fs.readdir(dir);
 			const langFiles = files.filter(f => f.startsWith(`${lang}-`) && f.endsWith(".json"));
@@ -140,7 +144,7 @@ class I18nManager {
 					const filePath = path.join(dir, file);
 					const content = await fs.readFile(filePath, "utf-8");
 					const parsed = JSON.parse(content) as TranslationFile;
-					this.mergeTranslations(target, parsed);
+					this.#mergeTranslations(target, parsed);
 				} catch (error) {
 					logger.warn(`Failed to load translation file: ${file}`, { error });
 				}
@@ -156,7 +160,7 @@ class I18nManager {
 	/**
 	 * 合并翻译
 	 */
-	private mergeTranslations(target: TranslationFile, source: TranslationFile): void {
+	#mergeTranslations(target: TranslationFile, source: TranslationFile): void {
 		for (const [key, value] of Object.entries(source)) {
 			if (key === "meta") {
 				target.meta = value as TranslationMeta;
@@ -166,7 +170,7 @@ class I18nManager {
 				if (!target[key] || typeof target[key] !== "object") {
 					target[key] = {};
 				}
-				this.mergeTranslations(target[key] as TranslationDict, value as TranslationDict);
+				this.#mergeTranslations(target[key] as TranslationDict, value as TranslationDict);
 			}
 		}
 	}
@@ -179,32 +183,32 @@ class I18nManager {
 	 * @param params 插值参数
 	 */
 	t(key: string, fallback?: string, params?: Record<string, unknown>): string {
-		if (!this.initialized) {
+		if (!this.#initialized) {
 			// 同步访问时使用未初始化的状态，返回 key
 			return fallback || key;
 		}
 
 		// 先尝试直接查找扁平 key
-		let value = this.dict[key];
+		let value = this.#dict[key];
 		if (value !== undefined && typeof value === "string") {
-			return params ? this.interpolate(value, params) : value;
+			return params ? this.#interpolate(value, params) : value;
 		}
 
 		// 再尝试嵌套查找
-		value = this.getNestedValue(this.dict, key);
+		value = this.#getNestedValue(this.#dict, key);
 		if (value !== undefined && typeof value === "string") {
-			return params ? this.interpolate(value, params) : value;
+			return params ? this.#interpolate(value, params) : value;
 		}
 
 		// 返回用户提供的 fallback 或 key 本身
 		const result = fallback || key;
-		return params ? this.interpolate(result, params) : result;
+		return params ? this.#interpolate(result, params) : result;
 	}
 
 	/**
 	 * 获取嵌套值
 	 */
-	private getNestedValue(obj: unknown, key: string): string | TranslationDict | undefined {
+	#getNestedValue(obj: unknown, key: string): string | TranslationDict | undefined {
 		const keys = key.split(".");
 		let current: unknown = obj;
 
@@ -221,7 +225,7 @@ class I18nManager {
 	 * 插值替换
 	 * 支持 {key} 格式
 	 */
-	private interpolate(template: string, params: Record<string, unknown>): string {
+	#interpolate(template: string, params: Record<string, unknown>): string {
 		return template.replace(/\{(\w+)\}/g, (match, key) => {
 			return params[key] !== undefined ? String(params[key]) : match;
 		});
@@ -231,18 +235,18 @@ class I18nManager {
 	 * 获取当前语言
 	 */
 	getLanguage(): string {
-		return this.lang;
+		return this.#lang;
 	}
 
 	/**
 	 * 设置语言（用于运行时切换，需要重新加载）
 	 */
 	async setLanguage(lang: string): Promise<void> {
-		this.lang = lang;
-		this.dict = {};
-		this.initialized = false;
-		await this.loadTranslation(lang, this.dict);
-		this.initialized = true;
+		this.#lang = lang;
+		this.#dict = {};
+		this.#initialized = false;
+		await this.#loadTranslation(lang, this.#dict);
+		this.#initialized = true;
 
 		// Clear all caches so UI reflects new language
 		(await import("../modes/components/settings-defs")).invalidateSettingDefsCache();
@@ -253,19 +257,19 @@ class I18nManager {
 	 * 检查翻译是否存在
 	 */
 	has(key: string): boolean {
-		if (!this.initialized) return false;
+		if (!this.#initialized) return false;
 		// 先检查扁平 key
-		if (this.dict[key] !== undefined) return true;
+		if (this.#dict[key] !== undefined) return true;
 		// 再检查嵌套 key
-		return this.getNestedValue(this.dict, key) !== undefined;
+		return this.#getNestedValue(this.#dict, key) !== undefined;
 	}
 
 	/**
 	 * 获取翻译元数据
 	 */
 	getMeta(): TranslationMeta | undefined {
-		if (!this.initialized) return undefined;
-		return this.dict.meta;
+		if (!this.#initialized) return undefined;
+		return this.#dict.meta;
 	}
 }
 

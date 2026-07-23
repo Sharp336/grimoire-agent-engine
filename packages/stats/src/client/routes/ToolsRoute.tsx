@@ -6,6 +6,7 @@ import { formatRangeTick, rangeMeta } from "../components/range-meta";
 import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildToolRows, type ToolRowView } from "../data/view-models";
+import { useTranslation } from "../i18n";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -17,6 +18,7 @@ export interface ToolsRouteProps {
 }
 
 export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
+	const { locale } = useTranslation();
 	const {
 		data: stats,
 		error,
@@ -31,10 +33,10 @@ export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
 			<AsyncBoundary loading={loading} error={error} data={stats} emptyText="No tool calls recorded for this range.">
 				{stats && (
 					<>
-						<ToolsSummaryPanel byTool={stats.byTool} />
+						<ToolsSummaryPanel byTool={stats.byTool} locale={locale} />
 						<ToolCallsChart series={stats.series} timeRange={range} />
-						<ToolsTable byTool={stats.byTool} />
-						<ToolModelPanel byToolModel={stats.byToolModel} />
+						<ToolsTable byTool={stats.byTool} locale={locale} />
+						<ToolModelPanel byToolModel={stats.byToolModel} locale={locale} />
 					</>
 				)}
 			</AsyncBoundary>
@@ -46,7 +48,7 @@ export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
 // Summary metrics
 // ---------------------------------------------------------------------------
 
-function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
+function ToolsSummaryPanel({ byTool, locale }: { byTool: ToolUsageStats[]; locale: string }) {
 	const totals = useMemo(() => {
 		let calls = 0;
 		let errors = 0;
@@ -97,19 +99,19 @@ function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 				<div className="stats-metric-secondary-grid">
 					<div className="stats-metric-card secondary">
 						<div className="stats-metric-label">Attributed Tokens</div>
-						<div className="stats-metric-value">{formatCompact(Math.round(totals.tokens))}</div>
+						<div className="stats-metric-value">{formatCompact(Math.round(totals.tokens), locale)}</div>
 					</div>
 					<div className="stats-metric-card secondary">
 						<div className="stats-metric-label">Attributed Output</div>
-						<div className="stats-metric-value">{formatCompact(Math.round(totals.output))}</div>
+						<div className="stats-metric-value">{formatCompact(Math.round(totals.output), locale)}</div>
 					</div>
 					<div className="stats-metric-card secondary">
 						<div className="stats-metric-label">Result Text</div>
-						<div className="stats-metric-value">{formatCompact(totals.resultChars)} chars</div>
+						<div className="stats-metric-value">{formatCompact(totals.resultChars, locale)} chars</div>
 					</div>
 					<div className="stats-metric-card secondary">
 						<div className="stats-metric-label">Call Arguments</div>
-						<div className="stats-metric-value">{formatCompact(totals.argsChars)} chars</div>
+						<div className="stats-metric-value">{formatCompact(totals.argsChars, locale)} chars</div>
 					</div>
 				</div>
 			</div>
@@ -241,7 +243,7 @@ function errorPillVariant(errorRate: number): "danger" | "warning" | "success" {
 	return errorRate > 0.1 ? "danger" : errorRate > 0 ? "warning" : "success";
 }
 
-function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
+function ToolsTable({ byTool, locale }: { byTool: ToolUsageStats[]; locale: string }) {
 	const rows = useMemo(() => buildToolRows(byTool), [byTool]);
 
 	const columns = useMemo(
@@ -286,7 +288,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<span className="font-mono" title="Invoking turns' total tokens, split across each turn's calls">
-						{formatCompact(Math.round(item.totalTokensShare))}
+						{formatCompact(Math.round(item.totalTokensShare), locale)}
 					</span>
 				),
 			},
@@ -302,7 +304,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<span className="font-mono" title="Characters of tool-result text fed back into context">
-						{formatCompact(item.resultChars)}
+						{formatCompact(item.resultChars, locale)}
 					</span>
 				),
 			},
@@ -315,36 +317,43 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 				),
 			},
 		],
-		[],
+		[locale],
 	);
 
-	const renderMobileCard = (item: ToolRowView) => (
-		<div className="stats-mobile-card">
-			<div className="stats-mobile-card-header mb-2">
-				<div className="stats-font-semibold stats-text-primary font-mono">{item.tool}</div>
-				<StatusPill variant={errorPillVariant(item.errorRate)}>{formatPercent(item.errorRate)} Err</StatusPill>
-			</div>
-			<div className="stats-mobile-card-grid">
-				<div>
-					<div className="stats-mobile-card-label">Calls</div>
-					<div className="stats-mobile-card-value font-mono">{formatInteger(item.calls)}</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">Attr. Tokens</div>
-					<div className="stats-mobile-card-value font-mono">
-						{formatCompact(Math.round(item.totalTokensShare))}
+	const renderMobileCard = useMemo(
+		() =>
+			(item: ToolRowView) =>
+				(
+					<div className="stats-mobile-card">
+						<div className="stats-mobile-card-header mb-2">
+							<div className="stats-font-semibold stats-text-primary font-mono">{item.tool}</div>
+							<StatusPill variant={errorPillVariant(item.errorRate)}>
+								{formatPercent(item.errorRate)} Err
+							</StatusPill>
+						</div>
+						<div className="stats-mobile-card-grid">
+							<div>
+								<div className="stats-mobile-card-label">Calls</div>
+								<div className="stats-mobile-card-value font-mono">{formatInteger(item.calls)}</div>
+							</div>
+							<div>
+								<div className="stats-mobile-card-label">Attr. Tokens</div>
+								<div className="stats-mobile-card-value font-mono">
+									{formatCompact(Math.round(item.totalTokensShare), locale)}
+								</div>
+							</div>
+							<div>
+								<div className="stats-mobile-card-label">Attr. Cost</div>
+								<div className="stats-mobile-card-value font-mono">{formatCost(item.costShare)}</div>
+							</div>
+							<div>
+								<div className="stats-mobile-card-label">Result Text</div>
+								<div className="stats-mobile-card-value font-mono">{formatCompact(item.resultChars, locale)}</div>
+							</div>
+						</div>
 					</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">Attr. Cost</div>
-					<div className="stats-mobile-card-value font-mono">{formatCost(item.costShare)}</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">Result Text</div>
-					<div className="stats-mobile-card-value font-mono">{formatCompact(item.resultChars)}</div>
-				</div>
-			</div>
-		</div>
+				),
+		[locale],
 	);
 
 	return (
@@ -364,7 +373,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 // Per-(tool, model) breakdown
 // ---------------------------------------------------------------------------
 
-function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
+function ToolModelPanel({ byToolModel, locale }: { byToolModel: ToolModelStats[]; locale: string }) {
 	const [tool, setTool] = useState<string | null>(null);
 
 	const tools = useMemo(() => [...new Set(byToolModel.map(row => row.tool))].sort(), [byToolModel]);
@@ -417,7 +426,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				header: "Attr. Tokens",
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
-					<span className="font-mono">{formatCompact(Math.round(item.totalTokensShare))}</span>
+					<span className="font-mono">{formatCompact(Math.round(item.totalTokensShare), locale)}</span>
 				),
 			},
 			{
@@ -429,7 +438,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				),
 			},
 		],
-		[],
+		[locale],
 	);
 
 	return (

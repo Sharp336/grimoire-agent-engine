@@ -286,7 +286,7 @@ export class WelcomeComponent implements Component {
 		// Left column - centered content
 		const leftLines = [
 			"",
-			this.#centerText(theme.bold(interceptWelcomeString("welcome.back")), leftCol),
+			this.#centerText(theme.bold(interceptWelcomeString("back")), leftCol),
 			"",
 			...logoColored.map(l => this.#centerText(l, leftCol)),
 			"",

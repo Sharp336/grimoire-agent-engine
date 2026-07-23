@@ -18,7 +18,7 @@ export interface AgentTokenShareProps {
 	stats: AgentTypeStats[];
 }
 
-export function AgentTokenShare({ stats }: AgentTokenShareProps) {
+export function AgentTokenShare({ stats, locale }: AgentTokenShareProps & { locale: string }) {
 	const view = useMemo(() => buildAgentTokenShare(stats), [stats]);
 
 	if (view.totalTokens === 0) {
@@ -55,7 +55,7 @@ export function AgentTokenShare({ stats }: AgentTokenShareProps) {
 							</span>
 						</div>
 						<div className="flex items-center gap-3 whitespace-nowrap">
-							<span className="stats-text-secondary">{formatCompact(seg.tokens)} tok</span>
+							<span className="stats-text-secondary">{formatCompact(seg.tokens, locale)} tok</span>
 							<span className="stats-font-semibold stats-text-primary tabular-nums">
 								{formatPercent(seg.share)}
 							</span>

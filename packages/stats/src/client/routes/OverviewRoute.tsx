@@ -6,6 +6,7 @@ import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
 import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useTranslation } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -18,6 +19,7 @@ export interface OverviewRouteProps {
 }
 
 export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
+	const { locale } = useTranslation();
 	const {
 		data: overview,
 		error: overviewError,
@@ -230,7 +232,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				subtitle="Uncached input + cache reads + cache writes + output, grouped by agent type"
 			>
 				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
-					{overview && <AgentTokenShare stats={overview.byAgentType} />}
+					{overview && <AgentTokenShare stats={overview.byAgentType} locale={locale} />}
 				</AsyncBoundary>
 			</Panel>
 

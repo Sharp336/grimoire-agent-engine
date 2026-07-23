@@ -311,13 +311,6 @@ export async function runCli(argv: string[]): Promise<void> {
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
 		}
 
-		// Initialize i18n system after profile is set
-		await i18n.init();
-		// Invalidate settings cache so labels are re-generated with translations
-		(await import("./modes/components/settings-defs")).invalidateSettingDefsCache();
-		// Invalidate tips cache so translated tips are picked up
-		(await import("./modes/components/welcome")).invalidateTipsCache();
-
 		if (extracted.aliasName !== undefined) {
 			const profile = extracted.profile ?? getActiveProfile();
 			if (!profile) {
@@ -355,6 +348,13 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
+
+	// Initialize i18n system after profile is set and worker dispatch
+	await i18n.init();
+	// Invalidate settings cache so labels are re-generated with translations
+	(await import("./modes/components/settings-defs")).invalidateSettingDefsCache();
+	// Invalidate tips cache so translated tips are picked up
+	(await import("./modes/components/welcome")).invalidateTipsCache();
 
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing

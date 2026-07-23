@@ -4,14 +4,14 @@ export function formatInteger(value: number): string {
 	return value.toLocaleString();
 }
 
-export function formatCompact(value: number): string {
-	return value.toLocaleString(undefined, { notation: "compact" });
+export function formatCompact(value: number, locale?: string): string {
+	return value.toLocaleString(locale, { notation: "compact" });
 }
 
-export function formatCost(value: number, digits?: number): string {
+export function formatCost(value: number, digits?: number, locale?: string): string {
 	if (value === 0) return "$0";
 	const fractionDigits = digits !== undefined ? digits : value > 0 && value < 0.01 ? 4 : 2;
-	return `$${value.toLocaleString(undefined, {
+	return `$${value.toLocaleString(locale, {
 		minimumFractionDigits: fractionDigits,
 		maximumFractionDigits: fractionDigits,
 	})}`;

@@ -20,6 +20,8 @@ describe("settings i18n integration", () => {
 		} else {
 			delete process.env.OMP_LANG;
 		}
+		// Restore the i18n singleton to its default state to prevent test pollution
+		i18n.reset();
 		await fs.promises.rm(tempDir, { recursive: true, force: true });
 	});
 

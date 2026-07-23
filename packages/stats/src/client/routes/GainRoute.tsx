@@ -5,6 +5,7 @@ import { buildSharedPlugins, buildSharedScales, CHART_THEMES, lineDatasetStyle }
 import { formatBytes, formatCompact, formatInteger, formatPercent } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import type { GainDashboardStats, GainSourceTotals, GainTimeSeriesPoint, TimeRange } from "../types";
+import { useTranslation } from "../i18n";
 import { AsyncBoundary, Panel } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
@@ -15,6 +16,7 @@ export interface GainRouteProps {
 }
 
 export function GainRoute({ active, range, refreshTrigger }: GainRouteProps) {
+	const { locale } = useTranslation();
 	const [project, setProject] = useState<string | null>(null);
 
 	const {
@@ -32,9 +34,9 @@ export function GainRoute({ active, range, refreshTrigger }: GainRouteProps) {
 				{stats && (
 					<>
 						<GainProjectSelector projects={stats.projects} selected={project} onChange={setProject} />
-						<GainOverallPanel overall={stats.overall} />
-						<GainBySourcePanel bySource={stats.bySource} />
-						<GainTimeSeriesPanel timeSeries={stats.timeSeries} />
+						<GainOverallPanel overall={stats.overall} locale={locale} />
+						<GainBySourcePanel bySource={stats.bySource} locale={locale} />
+						<GainTimeSeriesPanel timeSeries={stats.timeSeries} locale={locale} />
 					</>
 				)}
 			</AsyncBoundary>
@@ -82,13 +84,13 @@ function GainProjectSelector({
 // Overall metrics panel
 // ---------------------------------------------------------------------------
 
-function GainOverallPanel({ overall }: { overall: GainSourceTotals }) {
+function GainOverallPanel({ overall, locale }: { overall: GainSourceTotals; locale: string }) {
 	return (
 		<Panel title="Overall Gain" subtitle="Aggregate snapcompact savings">
 			<div className="stats-metric-primary-grid">
 				<div className="stats-metric-card primary">
 					<div className="stats-metric-label">Saved Tokens</div>
-					<div className="stats-metric-value">{formatCompact(overall.savedTokens)}</div>
+					<div className="stats-metric-value">{formatCompact(overall.savedTokens, locale)}</div>
 				</div>
 				<div className="stats-metric-card primary">
 					<div className="stats-metric-label">Saved Bytes</div>
@@ -113,7 +115,7 @@ function GainOverallPanel({ overall }: { overall: GainSourceTotals }) {
 // By-source breakdown panel
 // ---------------------------------------------------------------------------
 
-function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals }) {
+function SourceCard({ title, totals, locale }: { title: string; totals: GainSourceTotals; locale: string }) {
 	return (
 		<div className="stats-metric-card secondary" style={{ flex: 1 }}>
 			<div className="stats-metric-label" style={{ fontWeight: 600, marginBottom: 8 }}>
@@ -123,7 +125,7 @@ function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals
 				<div>
 					<div className="stats-metric-label">Saved Tokens</div>
 					<div className="stats-metric-value" style={{ fontSize: "1rem" }}>
-						{formatCompact(totals.savedTokens)}
+						{formatCompact(totals.savedTokens, locale)}
 					</div>
 				</div>
 				<div>
@@ -149,11 +151,11 @@ function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals
 	);
 }
 
-function GainBySourcePanel({ bySource }: { bySource: GainDashboardStats["bySource"] }) {
+function GainBySourcePanel({ bySource, locale }: { bySource: GainDashboardStats["bySource"]; locale: string }) {
 	return (
 		<Panel title="By Source" subtitle="Savings breakdown per subsystem">
 			<div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-				<SourceCard title="Snapcompact" totals={bySource.snapcompact} />
+				<SourceCard title="Snapcompact" totals={bySource.snapcompact} locale={locale} />
 			</div>
 		</Panel>
 	);
@@ -167,7 +169,7 @@ const GAIN_COLORS = {
 	snapcompact: "rgb(34, 197, 94)",
 } as const;
 
-function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[] }) {
+function GainTimeSeriesPanel({ timeSeries, locale }: { timeSeries: GainTimeSeriesPoint[]; locale: string }) {
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 
@@ -191,7 +193,7 @@ function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[]
 
 		const { sharedScaleBase, yScale } = buildSharedScales({
 			chartTheme,
-			formatY: n => formatCompact(n),
+			formatY: n => formatCompact(n, locale),
 		});
 
 		const chartOptions = {
@@ -201,7 +203,7 @@ function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[]
 				chartTheme,
 				showLegend: true,
 				defaultLabel: "Tokens Saved",
-				formatValue: formatCompact,
+				formatValue: n => formatCompact(n, locale),
 			}),
 			scales: {
 				x: { ...sharedScaleBase, stacked: true },
@@ -210,7 +212,7 @@ function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[]
 		};
 
 		return { data: chartData, options: chartOptions };
-	}, [timeSeries, chartTheme]);
+	}, [timeSeries, chartTheme, locale]);
 
 	return (
 		<Panel title="Savings Over Time" subtitle="Daily token savings">

@@ -15,10 +15,17 @@ export interface ErrorsRouteProps {
 	onRequestClick: (id: number) => void;
 }
 
-export function ErrorsRoute({ active, refreshTrigger, onRequestClick }: ErrorsRouteProps) {
+export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: ErrorsRouteProps) {
 	const { t, locale } = useTranslation();
 	const [page, setPage] = useState(1);
 	const [modelFilter, setModelFilter] = useState<string | null>(null);
+
+	// Reset pagination when range changes to avoid stale page indices
+	const [prevRange, setPrevRange] = useState(range);
+	if (range !== prevRange) {
+		setPrevRange(range);
+		setPage(1);
+	}
 
 	const offset = (page - 1) * PAGE_SIZE;
 
@@ -31,7 +38,7 @@ export function ErrorsRoute({ active, refreshTrigger, onRequestClick }: ErrorsRo
 		error,
 		loading,
 	} = useResource(
-		["recent-errors-dense", refreshTrigger, page, modelFilter],
+		["recent-errors-dense", range, refreshTrigger, page, modelFilter],
 		signal => getRecentErrors(PAGE_SIZE, offset, modelFilter ?? undefined, signal),
 		{
 			pollMs: 30000,

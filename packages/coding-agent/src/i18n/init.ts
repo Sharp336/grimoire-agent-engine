@@ -5,6 +5,7 @@
  * 此模块会立即执行初始化逻辑
  */
 
+import { logger } from "@oh-my-pi/pi-utils";
 import { i18n } from "./index";
 
 // 立即初始化 i18n 系统
@@ -14,9 +15,9 @@ i18n.init();
 if (process.env.NODE_ENV === "development") {
 	const lang = i18n.getLanguage();
 	const meta = i18n.getMeta();
-	console.log(`[i18n] Initialized with language: ${lang}`);
+	logger.debug(`[i18n] Initialized with language: ${lang}`);
 	if (meta) {
-		console.log(`[i18n] Translation version: ${meta.version || "unknown"}`);
-		console.log(`[i18n] Translation completeness: ${meta.completeness || 0}%`);
+		logger.debug(`[i18n] Translation version: ${meta.version || "unknown"}`);
+		logger.debug(`[i18n] Translation completeness: ${meta.completeness || 0}%`);
 	}
 }

@@ -16,6 +16,7 @@ import {
 import { formatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
+import { useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -27,6 +28,7 @@ export interface CostsRouteProps {
 }
 
 export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
+	const { locale } = useTranslation();
 	const {
 		data: costStats,
 		error,
@@ -41,8 +43,8 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 			<AsyncBoundary loading={loading} error={error} data={costStats}>
 				{costStats && (
 					<>
-						<CostOverviewPanel costSeries={costStats.costSeries} />
-						<CostTrendPanel costSeries={costStats.costSeries} />
+						<CostOverviewPanel costSeries={costStats.costSeries} locale={locale} />
+						<CostTrendPanel costSeries={costStats.costSeries} locale={locale} />
 					</>
 				)}
 			</AsyncBoundary>
@@ -50,16 +52,16 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 	);
 }
 
-function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+function CostOverviewPanel({ costSeries, locale }: { costSeries: CostTimeSeriesPoint[]; locale: string }) {
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
-		{ label: "Total Cost", value: formatCost(summary.totalCost) },
-		{ label: "Average / Day", value: formatCost(summary.avgDailyCost) },
+		{ label: "Total Cost", value: formatCost(summary.totalCost, undefined, locale) },
+		{ label: "Average / Day", value: formatCost(summary.avgDailyCost, undefined, locale) },
 		{
 			label: "Top Model",
 			value: summary.topModelName || "—",
-			sub: summary.topModelName ? formatCost(summary.topModelCost) : undefined,
+			sub: summary.topModelName ? formatCost(summary.topModelCost, undefined, locale) : undefined,
 		},
 	];
 
@@ -114,7 +116,7 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 	};
 }
 
-function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+function CostTrendPanel({ costSeries, locale }: { costSeries: CostTimeSeriesPoint[]; locale: string }) {
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -144,21 +146,21 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 			chartTheme,
 			showLegend: byModel,
 			defaultLabel: "Cost",
-			formatValue: v => `$${v.toFixed(2)}`,
+			formatValue: v => formatCost(v, 2, locale),
 			footer: items => {
 				if (!byModel || items.length < 2) return undefined;
 				const total = items.reduce((sum, item) => sum + (item.parsed.y ?? 0), 0);
-				return `Total: $${total.toFixed(2)}`;
+				return `Total: ${formatCost(total, 2, locale)}`;
 			},
 		});
-	}, [chartTheme, byModel]);
+	}, [chartTheme, byModel, locale]);
 
 	const { sharedScaleBase, yScale } = useMemo(() => {
 		return buildSharedScales({
 			chartTheme,
-			formatY: v => `$${Math.round(v)}`,
+			formatY: v => formatCost(v, 0, locale),
 		});
-	}, [chartTheme]);
+	}, [chartTheme, locale]);
 
 	const barLabelPlugin = useMemo(() => {
 		return makeBarLabelPlugin(BAR_LABEL_COLORS[theme]);
