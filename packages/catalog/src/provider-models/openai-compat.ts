@@ -1908,6 +1908,36 @@ export function friendliModelManagerOptions(
 						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
 						const interleaved = raw.interleaved === "reasoning_content";
 
+						const reasoningOptions = Array.isArray(raw.reasoning_options) ? raw.reasoning_options : [];
+						const effortOption = reasoningOptions.find(
+							(o): o is { type: string; values: string[] } =>
+								typeof o === "object" && o !== null && (o as { type?: unknown }).type === "effort",
+						);
+						const friendliEffortValues = effortOption?.values ?? [];
+						const thinking: ThinkingConfig | undefined =
+							reasoning && friendliEffortValues.length > 0
+								? {
+										mode: "effort" as const,
+										efforts: friendliEffortValues
+											.map((v): Effort | undefined => {
+												switch (v) {
+													case "low":
+														return Effort.Low;
+													case "medium":
+														return Effort.Medium;
+													case "high":
+														return Effort.High;
+													case "default":
+														return Effort.Minimal;
+													default:
+														return undefined;
+												}
+											})
+											.filter((e): e is Effort => e !== undefined),
+										effortMap: { [Effort.Minimal]: "default" },
+									}
+								: undefined;
+
 						const baseModel = mapWithBundledReference(entry, defaults, reference);
 
 						return {
@@ -1918,6 +1948,7 @@ export function friendliModelManagerOptions(
 							contextWindow,
 							maxTokens,
 							...(supportsTools === false ? { supportsTools } : {}),
+							...(thinking ? { thinking } : {}),
 							...(interleaved
 								? { compat: { ...baseModel.compat, reasoningContentField: "reasoning_content" } }
 								: {}),
