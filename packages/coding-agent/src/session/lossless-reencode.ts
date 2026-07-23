@@ -120,10 +120,9 @@ export function planLosslessReencodes(messages: readonly Message[]): LosslessRee
 			const block = message.content[blockIndex];
 			if (block.type !== "text") continue;
 			const originalBytes = Buffer.byteLength(block.text, "utf8");
+			if (originalBytes > MAX_LOSSLESS_REENCODE_BYTES) continue;
 			const originalTokens = countTokens(block.text);
-			if (originalBytes > MAX_LOSSLESS_REENCODE_BYTES || originalTokens < MIN_LOSSLESS_REENCODE_TOKENS) {
-				continue;
-			}
+			if (originalTokens < MIN_LOSSLESS_REENCODE_TOKENS) continue;
 			const encoded = encodeLosslessJsonTable(block.text);
 			if (!encoded) continue;
 			const marker = `[lossless-reencode v1 schema+csv; original=${originalBytes}B]`;

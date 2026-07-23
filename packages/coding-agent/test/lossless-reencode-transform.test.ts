@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { countTokens } from "@oh-my-pi/pi-agent-core";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as agentCore from "@oh-my-pi/pi-agent-core";
 import type { Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -116,9 +116,23 @@ describe("lossless request-time transform", () => {
 		expect(result.messages[2]).toBe(over);
 	});
 
+	it("skips oversized blocks before tokenizing", () => {
+		const oversized = "x".repeat(50 * 1024 + 1);
+		const context: Context = {
+			messages: [userMessage(), toolResult("oversized", oversized), toolResult("tail", "tail")],
+		};
+		const countTokensSpy = spyOn(agentCore, "countTokens");
+		try {
+			expect(transformLosslessToolResults(context)).toBe(context);
+			expect(countTokensSpy).not.toHaveBeenCalled();
+		} finally {
+			countTokensSpy.mockRestore();
+		}
+	});
+
 	it("requires the marked replacement to save at least 10% of estimated tokens", () => {
 		const text = highEntropyJson();
-		expect(countTokens(text)).toBeGreaterThanOrEqual(3000);
+		expect(agentCore.countTokens(text)).toBeGreaterThanOrEqual(3000);
 		expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(50 * 1024);
 		const candidate = toolResult("candidate", text);
 		const context: Context = {
@@ -149,7 +163,9 @@ describe("lossless request-time transform", () => {
 		expect(Buffer.byteLength(replacement, "utf8")).toBeLessThanOrEqual(
 			originalBytes * LOSSLESS_REENCODE_SAVINGS_MARGIN,
 		);
-		expect(countTokens(replacement)).toBeGreaterThan(countTokens(text) * LOSSLESS_REENCODE_SAVINGS_MARGIN);
+		expect(agentCore.countTokens(replacement)).toBeGreaterThan(
+			agentCore.countTokens(text) * LOSSLESS_REENCODE_SAVINGS_MARGIN,
+		);
 
 		const candidate = toolResult("candidate", text);
 		const context: Context = {
@@ -223,7 +239,7 @@ describe("lossless request-time transform", () => {
 
 	it("deterministically removes a compacted result from downstream snapcompact eligibility", async () => {
 		const original = structuredJson();
-		expect(countTokens(original)).toBeGreaterThanOrEqual(3000);
+		expect(agentCore.countTokens(original)).toBeGreaterThanOrEqual(3000);
 		const context: Context = {
 			messages: [userMessage(), toolResult("candidate", original), toolResult("tail", "tail")],
 		};
@@ -238,7 +254,7 @@ describe("lossless request-time transform", () => {
 
 		const reencoded = transformLosslessToolResults(context);
 		const compactedText = encodedText(reencoded.messages[1]);
-		expect(countTokens(compactedText)).toBeLessThan(3000);
+		expect(agentCore.countTokens(compactedText)).toBeLessThan(3000);
 		const combined = await snapcompact.transform(reencoded, makeVisionModel());
 
 		expect(combined).toBe(reencoded);
