@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	buildApi3Route,
@@ -454,6 +454,7 @@ describe("buildQoderApi3Body", () => {
 		expect(body.system).toBe("You are terse.");
 		const messages = body.messages as Record<string, unknown>[];
 		expect(Array.isArray(messages)).toBe(true);
+		expect(messages.every(message => message.role !== "system" && message.role !== "developer")).toBe(true);
 		const user = messages.find(message => message.role === "user");
 		expect(user?.content).toBe("Reply exactly with OK.");
 
@@ -1134,6 +1135,31 @@ describe("api3 stream termination", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Qoder api3 returned a malformed SSE envelope");
 	});
+
+	it("treats a non-object outer envelope as terminal despite later success frames", async () => {
+		const malformedThenFinish = [
+			"data: []",
+			`data: ${chunkEnvelope({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] })}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { result } = await runApi3Turn("qmodel_preview", () => sseResponse(malformedThenFinish));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Qoder api3 returned a malformed SSE envelope");
+	});
+
+	it("maps finish_reason end to a normal stop done result", async () => {
+		const endFinish = [
+			`data: ${chunkEnvelope({ choices: [{ delta: { content: "OK" }, index: 0 }] })}`,
+			`data: ${chunkEnvelope({
+				choices: [{ delta: {}, finish_reason: "end", index: 0 }],
+			})}`,
+			`data: ${envelope("[DONE]")}`,
+		].join("\n\n");
+		const { events, result } = await runApi3Turn("qmodel_preview", () => sseResponse(endFinish));
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(events.map(event => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1415,14 +1441,14 @@ describe("api3 context cache", () => {
 
 const noBridgeChildScript = `
 import { streamQoderApi3 } from ${JSON.stringify(
-	pathToFileURL(join(import.meta.dir, "../src/providers/qoder-api3.ts")).href,
+	pathToFileURL(path.join(import.meta.dir, "../src/providers/qoder-api3.ts")).href,
 )};
 const model = { api: "openai-completions", provider: "qoder", id: "dmodel", name: "DeepSeek-V4-Pro" };
 const context = {
 	systemPrompt: ["You are terse."],
 	messages: [{ role: "user", content: "Reply exactly with OK.", timestamp: 1 }],
 };
-const stream = streamQoderApi3(model, context, { apiKey: "token" });
+const stream = streamQoderApi3(model, context, { apiKey: "unused" });
 const events = [];
 for await (const event of stream) events.push(event.type);
 const result = await stream.result();
@@ -1430,21 +1456,20 @@ process.stdout.write(JSON.stringify({ events, stopReason: result.stopReason, err
 `;
 
 describe("streamQoderApi3 dispatch", () => {
-	it("fails closed with an honest error stream when no auth WASM is available", async () => {
-		// Every WASM candidate unresolvable: nonexistent explicit override,
+	it("fails closed when no usable auth WASM is available", async () => {
 		// sandboxed HOME (hides ~/.qoder), sandboxed XDG cache (hides the
 		// verified-module cache). Runs in a child so the sandbox never touches
 		// this process's environment.
-		const sandbox = mkdtempSync(join(tmpdir(), "qoder-no-wasm-"));
+		const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-no-wasm-"));
 		try {
 			const child = Bun.spawn([process.execPath, "--eval", noBridgeChildScript], {
-				cwd: join(import.meta.dir, ".."),
+				cwd: path.join(import.meta.dir, ".."),
 				env: {
 					...process.env,
 					HOME: sandbox,
-					XDG_CACHE_HOME: join(sandbox, "xdg-cache"),
-					QODER_HOME: join(sandbox, "qoder-home"),
-					QODER_WASM_PATH: join(sandbox, "missing.wasm"),
+					XDG_CACHE_HOME: path.join(sandbox, "xdg-cache"),
+					QODER_HOME: path.join(sandbox, "qoder-home"),
+					QODER_WASM_PATH: path.join(sandbox, "missing.wasm"),
 				},
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1460,7 +1485,7 @@ describe("streamQoderApi3 dispatch", () => {
 			expect(outcome.stopReason).toBe("error");
 			expect(outcome.errorMessage).toContain("qodercli");
 		} finally {
-			rmSync(sandbox, { recursive: true, force: true });
+			fs.rmSync(sandbox, { recursive: true, force: true });
 		}
 	});
 });

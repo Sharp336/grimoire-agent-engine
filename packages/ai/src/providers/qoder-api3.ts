@@ -202,7 +202,13 @@ export interface QoderApi3BodyArgs {
  */
 export function buildQoderApi3Body(args: QoderApi3BodyArgs): Record<string, unknown> {
 	const { route, context, options } = args;
-	const messages = convertMessages(route.openaiModel, context, route.openaiModel.compat);
+	// Top-level `system` is the api3 contract field; omit systemPrompt here so
+	// convertMessages does not also prepend the same instructions into messages.
+	const messages = convertMessages(
+		route.openaiModel,
+		{ ...context, systemPrompt: undefined },
+		route.openaiModel.compat,
+	);
 	const system = context.systemPrompt !== undefined ? context.systemPrompt.join("\n\n") : "";
 	const promptText = lastUserText(context);
 	const effort = resolveApi3Effort(route, options);
@@ -285,6 +291,7 @@ function mapFinishReason(reason: string): {
 } {
 	switch (reason) {
 		case "stop":
+		case "end":
 		case "end_turn":
 			return { stopReason: "stop" };
 		case "length":
@@ -551,7 +558,11 @@ async function processApi3Stream(
 			state.errorMessage = "Qoder api3 returned a malformed SSE envelope";
 			return;
 		}
-		if (!isRecord(envelope)) return;
+		if (!isRecord(envelope)) {
+			state.stopReason = "error";
+			state.errorMessage = "Qoder api3 returned a malformed SSE envelope";
+			return;
+		}
 		// Terminal metrics frame ({firstTokenDuration,totalDuration,serverDuration}).
 		if (typeof envelope.totalDuration === "number" || typeof envelope.firstTokenDuration === "number") {
 			return;
