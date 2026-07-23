@@ -51,7 +51,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 					maxTokens: 8192,
 				},
 				{
-					id: "runtime-reasoning-model",
+					id: "runtime-deliberative-model",
 					name: "Runtime Reasoning Model",
 					reasoning: true,
 					input: ["text"],
@@ -248,7 +248,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("resolves deferred suffixed bare configured roles after extension providers register", async () => {
 		const settings = Settings.isolated();
-		settings.setModelRole("task", "runtime-provider/runtime-reasoning-model");
+		settings.setModelRole("task", "runtime-provider/runtime-deliberative-model");
 		const authStorage = await AuthStorage.create(path.join(tempDir, "cli-auth.db"));
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "cli-models.yml"));
@@ -286,7 +286,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 			try {
 				expect(session.model?.provider).toBe("runtime-provider");
-				expect(session.model?.id).toBe("runtime-reasoning-model");
+				expect(session.model?.id).toBe("runtime-deliberative-model");
 				expect(session.thinkingLevel).toBe(Effort.High);
 				expect(modelFallbackMessage).toBeUndefined();
 			} finally {
@@ -355,7 +355,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("uses a configured suffixed role fallback when its primary model is unavailable", async () => {
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
-				slow: ["missing-provider/missing-fallback", "runtime-provider/runtime-reasoning-model"],
+				slow: ["missing-provider/missing-fallback", "runtime-provider/runtime-deliberative-model"],
 			},
 		});
 		settings.setModelRole("slow", "missing-provider/missing-model");
@@ -397,7 +397,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 			try {
 				expect(session.model?.provider).toBe("runtime-provider");
-				expect(session.model?.id).toBe("runtime-reasoning-model");
+				expect(session.model?.id).toBe("runtime-deliberative-model");
 				// `low` differs from the fallback model's default (`high`), so this
 				// proves the suffix is inherited rather than the model default applied.
 				expect(session.thinkingLevel).toBe(Effort.Low);
@@ -412,7 +412,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("preserves deferred bare role fallback chains", async () => {
 		const settings = Settings.isolated();
-		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-reasoning-model");
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-deliberative-model");
 
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...(await buildSessionOptions("task")),
@@ -425,7 +425,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
 			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-reasoning-model",
+				"runtime-provider/runtime-deliberative-model",
 			]);
 			expect(modelFallbackMessage).toBeUndefined();
 		} finally {
@@ -435,7 +435,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("installs fallback chain for remaining deferred subagent modelPattern candidates", async () => {
 		const { session } = await createAgentSession({
-			...(await buildSessionOptions(["runtime-provider/runtime-model", "runtime-provider/runtime-reasoning-model"])),
+			...(await buildSessionOptions([
+				"runtime-provider/runtime-model",
+				"runtime-provider/runtime-deliberative-model",
+			])),
 			modelPatternFallbackRole: "subagent:deferred",
 		});
 
@@ -444,7 +447,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
 			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-reasoning-model",
+				"runtime-provider/runtime-deliberative-model",
 			]);
 		} finally {
 			await session.dispose();
@@ -454,15 +457,15 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	test("installs an inherited fallback chain for a deferred singleton modelPattern", async () => {
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
-				default: ["runtime-provider/runtime-reasoning-model"],
+				default: ["runtime-provider/runtime-deliberative-model"],
 			},
 		});
-		settings.setModelRole("default", "runtime-provider/runtime-reasoning-model");
+		settings.setModelRole("default", "runtime-provider/runtime-deliberative-model");
 		const { session } = await createAgentSession({
 			...(await buildSessionOptions("runtime-provider/runtime-model")),
 			settings,
 			modelPatternFallbackRole: "subagent:deferred-default",
-			modelPatternDefaultFallbackChain: ["runtime-provider/runtime-reasoning-model"],
+			modelPatternDefaultFallbackChain: ["runtime-provider/runtime-deliberative-model"],
 		});
 
 		try {
@@ -470,7 +473,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
 			expect(session.settings.get("retry.fallbackChains")["subagent:deferred-default"]).toEqual([
-				"runtime-provider/runtime-reasoning-model",
+				"runtime-provider/runtime-deliberative-model",
 			]);
 		} finally {
 			await session.dispose();
@@ -479,7 +482,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("splits deferred comma-delimited modelPattern and installs fallback chain", async () => {
 		const { session } = await createAgentSession({
-			...(await buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-reasoning-model")),
+			...(await buildSessionOptions("runtime-provider/runtime-model,runtime-provider/runtime-deliberative-model")),
 			modelPatternFallbackRole: "subagent:deferred",
 		});
 
@@ -488,7 +491,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.id).toBe("runtime-model");
 			expect(session.settings.getModelRole("subagent:deferred")).toBe("runtime-provider/runtime-model");
 			expect(session.settings.get("retry.fallbackChains")["subagent:deferred"]).toEqual([
-				"runtime-provider/runtime-reasoning-model",
+				"runtime-provider/runtime-deliberative-model",
 			]);
 		} finally {
 			await session.dispose();
@@ -497,16 +500,16 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {
 		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
-		settings.setModelRole("smol", "runtime-provider/runtime-reasoning-model");
+		settings.setModelRole("smol", "runtime-provider/runtime-deliberative-model");
 		settings.setModelRole("default", "@smol:high");
 
 		const { session } = await createAgentSession({
-			...(await buildSessionOptions("runtime-provider/runtime-reasoning-model")),
+			...(await buildSessionOptions("runtime-provider/runtime-deliberative-model")),
 			settings,
 		});
 
 		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-reasoning-model");
+		expect(session.model?.id).toBe("runtime-deliberative-model");
 		expect(session.thinkingLevel).toBe("off");
 	});
 
@@ -514,12 +517,12 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const settings = Settings.isolated({ defaultThinkingLevel: "max" });
 
 		const { session } = await createAgentSession({
-			...(await buildSessionOptions("runtime-provider/runtime-reasoning-model")),
+			...(await buildSessionOptions("runtime-provider/runtime-deliberative-model")),
 			settings,
 		});
 
 		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-reasoning-model");
+		expect(session.model?.id).toBe("runtime-deliberative-model");
 		// The extension model has no explicit ladder; the inferred fallback tops
 		// out at xhigh, so the real max level clamps down.
 		expect(session.thinkingLevel).toBe(Effort.XHigh);
@@ -828,7 +831,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 					id: "smol-model",
 					parentId: "default-model",
 					timestamp,
-					model: "runtime-provider/runtime-reasoning-model:max",
+					model: "runtime-provider/runtime-deliberative-model:max",
 					role: "smol",
 				},
 			]
@@ -857,7 +860,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
-			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.model?.id).toBe("runtime-deliberative-model");
 			expect(session.thinkingLevel).toBe(Effort.XHigh);
 		} finally {
 			await session.dispose();
