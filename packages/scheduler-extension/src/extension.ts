@@ -1029,7 +1029,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			if (stale && liveCtx?.isIdle() === true) {
 				const id = st.currentTaskId;
 				const stalls = task ? (task.stalls = (task.stalls ?? 0) + 1) : 0;
-				if (task && stalls > cfg.maxAttempts) {
+				if (task && stalls >= cfg.maxAttempts) {
 					// A dispatched turn that never materializes this many times running is
 					// not a transient swallow — it's undeliverable (no model/API key, a
 					// rejecting pre-turn hook, a send that rejects async). Fail it instead
@@ -1805,6 +1805,21 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			const space = trimmed.search(/\s/);
 			const sub = (space === -1 ? trimmed : trimmed.slice(0, space)).toLowerCase();
 			const rest = space === -1 ? "" : trimmed.slice(space + 1).trim();
+			// state.json is corrupt/unreadable → saves are disabled (stateReadError),
+			// so accepting a mutating command would change only in-memory state and
+			// silently lose it on restart. Refuse those until the file is fixed;
+			// read-only commands (status/list/log/ledger/config/export) still work.
+			if (["add", "add-file", "remove", "retry", "clear", "start", "pause", "stop"].includes(sub)) {
+				getState(); // populate stateReadError if the persisted state can't be read
+				if (stateReadError) {
+					notify(
+						cctx,
+						"scheduler: state.json is unreadable/corrupt — refusing to modify the queue until it is fixed or deleted (see the session-start error).",
+						"error",
+					);
+					return;
+				}
+			}
 
 			switch (sub) {
 				case "add":

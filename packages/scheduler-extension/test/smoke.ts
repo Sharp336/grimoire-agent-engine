@@ -182,7 +182,6 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const tmpAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scheduler-smoke-"));
-const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = tmpAgentDir;
 // The pi-utils dir resolver caches at module load (before this line runs), so
 // re-sync it to the throwaway agent dir just set — otherwise getAgentDir() (used
@@ -1580,7 +1579,7 @@ for (let k = 0; k < 200 && task(readState(), "t102").status !== "failed"; k++) a
 		"failed",
 		"an undeliverable dispatch fails after maxAttempts consecutive stalls (no infinite refund loop)",
 	);
-	assert.ok((t102.stalls ?? 0) > 2, "the consecutive-stall counter drove the terminal failure");
+	assert.ok((t102.stalls ?? 0) >= 2, "the consecutive-stall counter (== maxAttempts) drove the terminal failure");
 }
 await sc.command("stop", ctxSc);
 
@@ -1611,12 +1610,6 @@ assert.equal(
 );
 await fy.command("stop", ctxFy);
 fs.rmSync(path.join(tmpAgentDir, "config.yaml"), { force: true });
-
-// Restore the agent-dir env + resolver so importing this module from the bun:test
-// process (smoke.test.ts) never leaks the throwaway dir into later test files.
-if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
-refreshDirsFromEnv();
 
 console.log("smoke: all assertions passed");
 console.log(`smoke: data dir was ${tmpAgentDir}`);
