@@ -2645,7 +2645,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd,
 				xdevTools: toolSession.xdevRegistry?.entries() ?? [],
-				xdevDocs: toolSession.xdevRegistry?.docsAll(settings.get("tools.xdevDocs")) ?? "",
+				xdevDocs:
+					toolSession.xdevRegistry?.docsAll(
+						settings.get("tools.xdevDocs"),
+						settings.get("tools.xdevInlineDevices"),
+					) ?? "",
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: session?.skills ?? skills,

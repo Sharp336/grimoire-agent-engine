@@ -219,10 +219,13 @@ describe("read and write route xd:// device URLs", () => {
 			if (!registry) throw new Error("expected xdev registry");
 			const mounted = registry.list();
 
-			const longDescription = "LEDE " + "y".repeat(XdevRegistry.EXTERNAL_DESCRIPTION_CAP * 3) + " TAIL";
+			const longDescription = `LEDE ${"y".repeat(XdevRegistry.EXTERNAL_DESCRIPTION_CAP * 3)} TAIL`;
 			const external = Object.create(mounted[0]!) as (typeof mounted)[number];
 			Object.defineProperty(external, "name", { value: "mcp_external_tool" });
 			Object.defineProperty(external, "description", { value: longDescription });
+			Object.defineProperty(external, "summary", {
+				value: `SUMMARY ${"z".repeat(XdevRegistry.EXTERNAL_DESCRIPTION_CAP * 3)} TAIL`,
+			});
 			registry.reconcile([external]);
 
 			const inlineDocs = registry.docsAll("inline");
@@ -235,12 +238,26 @@ describe("read and write route xd:// device URLs", () => {
 			expect(builtinsDocs).toContain("## ");
 			expect(builtinsDocs).not.toContain("## mcp_external_tool");
 			expect(builtinsDocs).toContain("- xd://mcp_external_tool —");
-
+			expect(builtinsDocs).not.toContain("TAIL");
 			const catalogDocs = registry.docsAll("catalog");
 			expect(catalogDocs).not.toContain(`## ${mounted[0]!.name}`);
 			expect(catalogDocs).toContain("- xd://");
 			expect(catalogDocs).toContain("- xd://mcp_external_tool —");
 			expect(registry.docs("mcp_external_tool")).toContain("TAIL");
+
+			const contextMode = Object.create(mounted[0]!) as (typeof mounted)[number];
+			Object.defineProperty(contextMode, "name", { value: "mcp__context_mode_ctx_execute" });
+			const unrelatedMcp = Object.create(mounted[0]!) as (typeof mounted)[number];
+			Object.defineProperty(unrelatedMcp, "name", { value: "mcp__other_server_execute" });
+			registry.reconcile([contextMode, unrelatedMcp]);
+
+			const allowlistedDocs = registry.docsAll("builtins", ["mcp__context_mode_*"]);
+			expect(allowlistedDocs).toContain("## mcp__context_mode_ctx_execute");
+			expect(allowlistedDocs).not.toContain("## mcp__other_server_execute");
+			expect(allowlistedDocs).toContain("- xd://mcp__other_server_execute —");
+
+			const catalogWithAllowlistDocs = registry.docsAll("catalog", ["mcp__context_mode_*"]);
+			expect(catalogWithAllowlistDocs).not.toContain("## mcp__context_mode_ctx_execute");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
