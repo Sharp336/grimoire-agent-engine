@@ -94,6 +94,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.kimi,
 		load: async () => new (await import("./providers/kimi")).KimiProvider(),
 	},
+	moonshot: {
+		id: "moonshot",
+		label: SEARCH_PROVIDER_LABELS.moonshot,
+		load: async () => new (await import("./providers/moonshot")).MoonshotProvider(),
+	},
 	parallel: {
 		id: "parallel",
 		label: SEARCH_PROVIDER_LABELS.parallel,

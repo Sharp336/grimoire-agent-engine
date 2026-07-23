@@ -45,6 +45,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description:
 			"Kimi Code search (requires a Kimi Code Console key via KIMI_SEARCH_API_KEY/MOONSHOT_SEARCH_API_KEY or /login kimi-code; not MOONSHOT_API_KEY)",
 	},
+	{
+		value: "moonshot",
+		label: "Moonshot",
+		description: "Moonshot Open Platform ($web_search built-in tool via standard MOONSHOT_API_KEY)",
+	},
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },

@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a distinct `moonshot` web search provider using Moonshot's built-in `$web_search` tool function over standard Open Platform credentials (`MOONSHOT_API_KEY` or stored `moonshot` auth) ([#5765](https://github.com/can1357/oh-my-pi/issues/5765)).
+
 ### Fixed
 
 - Fixed the setup wizard hiding the selected row on short terminals (e.g. 24x80): the provider sign-in, theme, and web-search lists now fit their windows to the visible height, and decorative chrome (sign-in hint, theme mock preview) yields to the list when space is tight.

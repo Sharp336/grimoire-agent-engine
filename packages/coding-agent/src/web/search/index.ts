@@ -159,6 +159,12 @@ async function executeSearch(
 	} catch {
 		geminiModel = undefined;
 	}
+	let moonshotModel: string | undefined;
+	try {
+		moonshotModel = settings.get("providers.webSearchMoonshotModel");
+	} catch {
+		moonshotModel = undefined;
+	}
 
 	const failures: Array<{ provider: Pick<SearchProvider, "id" | "label">; error: unknown }> = [];
 	let availableProviderCount = 0;
@@ -196,6 +202,7 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
+				moonshotModel,
 			});
 
 			if (!hasRenderableSearchContent(response)) {

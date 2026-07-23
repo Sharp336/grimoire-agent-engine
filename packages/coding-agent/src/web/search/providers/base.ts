@@ -56,6 +56,7 @@ export interface SearchParams {
 	sessionId?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	moonshotModel?: string;
 }
 
 /** Base class for web search providers. */
