@@ -1,6 +1,5 @@
 import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
-import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -58,6 +57,7 @@ import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { waitBeforeProviderRetry } from "../utils/rate-limit-rotation";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
@@ -2029,6 +2029,9 @@ const streamAnthropicOnce = (
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			// One latch for the whole stream so repeated no-sibling rate-limit
+			// stalls across provider retries log a single `rate_limit_stall`.
+			const rateLimitStallOnce = { warned: false };
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
 			);
@@ -2614,11 +2617,12 @@ const streamAnthropicOnce = (
 							? retryDelayFromHeaders(streamFailure.headers)
 							: undefined;
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
-					} else {
-						await scheduler.wait(delayMs, { signal: options?.signal });
-					}
+					// Rotation-aware wait: under `rateLimitRotation` a long transient-429
+					// sleep with a usable sibling throws the surfaced marker instead of
+					// sleeping; the outer catch finalizes it into the terminal error
+					// event the streamSimple auth driver rotates on. Delegates to
+					// providerRetryWait / scheduler.wait otherwise (byte-identical).
+					await waitBeforeProviderRetry(delayMs, options, streamFailure, rateLimitStallOnce);
 					output.content.length = 0;
 					output.model = model.id;
 					output.responseId = undefined;

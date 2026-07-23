@@ -710,6 +710,7 @@ const streamOpenAICompletionsOnce = (
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
+						rateLimitRotation: options?.rateLimitRotation,
 					});
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;

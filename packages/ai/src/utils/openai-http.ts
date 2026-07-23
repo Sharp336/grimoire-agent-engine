@@ -22,6 +22,11 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import {
+	createRateLimitSurfaceGate,
+	type RateLimitRotationOptions,
+	toSurfacedRateLimitError,
+} from "./rate-limit-rotation";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -44,6 +49,8 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
 	onSseEvent?: SseEventObserver;
+	/** Opt-in rate-limit rotation seam; see {@link RateLimitRotationOptions}. */
+	rateLimitRotation?: RateLimitRotationOptions;
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -62,6 +69,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const surfaceGate = init.rateLimitRotation ? createRateLimitSurfaceGate(init.rateLimitRotation) : undefined;
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
@@ -73,9 +81,14 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
 		timeout: false,
+		onBeforeSleep: surfaceGate?.onBeforeSleep,
 	});
 	if (!response.ok) {
-		throw await captureOpenAIHttpError(response);
+		const error = await captureOpenAIHttpError(response);
+		// Surfaced-for-rotation 429: rewrite through the single marker formatter so
+		// the auth-retry driver classifies it as a direct rotation. Budget-exhaustion
+		// and hint>cap terminal 429s keep their plain form (baseline behavior).
+		throw surfaceGate?.surfaced ? toSurfacedRateLimitError(error, surfaceGate.surfacedRetryAfterMs) : error;
 	}
 	if (!response.body) {
 		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {

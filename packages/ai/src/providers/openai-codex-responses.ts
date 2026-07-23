@@ -61,6 +61,11 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
+import {
+	createRateLimitSurfaceGate,
+	type RateLimitRotationOptions,
+	toSurfacedRateLimitError,
+} from "../utils/rate-limit-rotation";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -1557,6 +1562,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
+				options?.rateLimitRotation,
 			),
 		);
 	};
@@ -3744,6 +3750,7 @@ async function openCodexSseEventStream(
 	firstEventTimeoutMs: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	rateLimitRotation?: RateLimitRotationOptions,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -3777,6 +3784,12 @@ async function openCodexSseEventStream(
 			clearPreResponseTimeout = undefined;
 		}
 	};
+	// Mirror the OpenAI-wire seam (postOpenAIStream): when the request carries
+	// rotation options, build the surface gate and let it short-circuit a long
+	// transient 429 before fetchWithRetry burns the CODEX_RATE_LIMIT_BUDGET_MS
+	// sleep. With no rotation the gate is undefined and the sleep behavior is
+	// byte-identical to baseline.
+	const surfaceGate = rateLimitRotation ? createRateLimitSurfaceGate(rateLimitRotation) : undefined;
 	let response: Response;
 	try {
 		response = await fetchWithRetry(url, {
@@ -3794,6 +3807,7 @@ async function openCodexSseEventStream(
 			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 			fetch: fetchAttempt,
 			timeout: false,
+			onBeforeSleep: surfaceGate?.onBeforeSleep,
 		});
 	} finally {
 		clearPreResponseTimeout?.();
@@ -3807,7 +3821,11 @@ async function openCodexSseEventStream(
 			cfRay: response.headers.get("cf-ray") || null,
 		});
 	if (!response.ok) {
-		throw await CodexApiError.fromResponse(response);
+		const error = await CodexApiError.fromResponse(response);
+		// Surfaced-for-rotation 429: rewrite through the single marker formatter so
+		// the auth-retry driver classifies it as a direct rotation. Budget-exhausted
+		// and hint>cap terminal 429s keep their plain CodexApiError form (baseline).
+		throw surfaceGate?.surfaced ? toSurfacedRateLimitError(error, surfaceGate.surfacedRetryAfterMs) : error;
 	}
 	updateCodexSessionMetadataFromHeaders(state, response.headers);
 	if (!response.body) {

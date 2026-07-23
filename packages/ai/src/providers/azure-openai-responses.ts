@@ -174,6 +174,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
 						onSseEvent: rawSseObserver,
+						rateLimitRotation: options?.rateLimitRotation,
 					});
 					openaiStream = handle.events;
 					break;

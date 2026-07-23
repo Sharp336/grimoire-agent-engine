@@ -454,9 +454,10 @@ describe("anthropic provider retry delays", () => {
 
 		const result = await streamAnthropic(model, context, { client, providerRetryWait }).result();
 
-		// Header says 30s; the 2s exponential backoff must not undercut it.
+		// Header says 30s; the 2s exponential backoff must not undercut it. The
+		// third argument is the failure cause the rotation-aware wait threads through.
 		expect(attempt).toBe(2);
-		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
+		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined, expect.anything());
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "after backoff" }]);
 	});

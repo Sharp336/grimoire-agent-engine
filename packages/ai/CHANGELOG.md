@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in `rateLimitRotation` stream option: when a transport is about to sleep a long transient 429 (`RATE_LIMIT_EXCEEDED` body classification only) and a sibling credential exists, the failure is surfaced as a marker error that the auth-retry driver rotates on directly — with short unscoped persisted blocks (`AuthStorage.markRateLimited`), a cheap `AuthStorage.hasUsableSibling` availability probe, a rotation-aware `waitBeforeProviderRetry` for the Anthropic retry loop, and a bounded in-place stall fallback when rotation declines. `providerRetryWait` gains an optional `cause` argument.
+
 ### Fixed
 
 - Fixed GitHub Copilot OpenAI-compatible requests being rejected when the session's native OpenAI service tier was set to `priority` ([#5160](https://github.com/can1357/oh-my-pi/pull/5160) by [@audreyt](https://github.com/audreyt)).

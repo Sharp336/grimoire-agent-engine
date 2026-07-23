@@ -521,6 +521,7 @@ const streamOpenAIResponsesOnce = (
 								// retries; the first-event watchdog aborts `requestSignal`,
 								// so retries cannot extend the caller's deadline.
 								onSseEvent: rawSseObserver,
+								rateLimitRotation: options?.rateLimitRotation,
 							});
 							// Disarm the first-event watchdog as soon as headers arrive — a slow
 							// onResponse callback must not abort an already-connected stream.
