@@ -154,7 +154,7 @@ export const parseGlmModel = parser((modelId): GlmModel | null => {
 	return {
 		family: "glm",
 		variant: (match[3] as GlmVariant | undefined) ?? "base",
-		vision: match[2] === "v",
+		vision: match[2]?.toLowerCase() === "v",
 		version,
 	};
 });
