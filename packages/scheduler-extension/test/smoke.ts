@@ -89,6 +89,12 @@ interface MockCtx {
 	notifications: string[];
 	confirmCalls: number;
 	newSessionCalls: number;
+	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
+	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
+	clearTimer(timer: Timer): void;
+	setTimeoutCalls: number;
+	setIntervalCalls: number;
+	clearTimerCalls: number;
 }
 
 /**
@@ -101,6 +107,9 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		notifications: [],
 		confirmCalls: 0,
 		newSessionCalls: 0,
+		setTimeoutCalls: 0,
+		setIntervalCalls: 0,
+		clearTimerCalls: 0,
 		ui: {
 			notify(message) {
 				ctx.notifications.push(message);
@@ -121,6 +130,20 @@ function makeCtx(cwd: string, model: MockModel | null = { provider: "anthropic",
 		async newSession() {
 			ctx.newSessionCalls += 1;
 			return { cancelled: false };
+		},
+		setTimeout(callback, ms, ...args) {
+			ctx.setTimeoutCalls += 1;
+			return setTimeout(callback, ms, ...args);
+		},
+		setInterval(callback, ms, ...args) {
+			ctx.setIntervalCalls += 1;
+			const timer = setInterval(callback, ms, ...args);
+			timer.unref?.();
+			return timer;
+		},
+		clearTimer(timer) {
+			ctx.clearTimerCalls += 1;
+			clearTimeout(timer);
 		},
 	};
 	return ctx;
@@ -721,6 +744,13 @@ await w.emit("agent_end", { messages: [{ role: "assistant", content: [] }] }, ct
 assert.equal(task(readState(), "t80").status, "done", "recovered task completes");
 await sleep(50);
 await w.command("stop", ctxW);
+// The timer surface — dispatch (setTimeout), watchdog (setInterval), and teardown
+// (clearTimer) — must run through the runner's MANAGED timers, not raw globals, so
+// a throwing tick is contained instead of surfacing as a session-fatal
+// uncaughtException (issue #5664). This mock ctx counts every managed call.
+assert.ok(ctxW.setIntervalCalls >= 1, "watchdog armed via ctx.setInterval");
+assert.ok(ctxW.setTimeoutCalls >= 1, "dispatch armed via ctx.setTimeout");
+assert.ok(ctxW.clearTimerCalls >= 1, "timers torn down via ctx.clearTimer");
 
 // 19. export: the whole queue lands in a human-workable markdown file.
 await w.command("export", ctxW);

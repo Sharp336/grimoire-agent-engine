@@ -89,6 +89,7 @@ process; a sleeping laptop dispatches nothing.
 /scheduler clear               remove all pending tasks
 /scheduler export [path]       write the queue to markdown (default scheduler-queue.md)
 /scheduler log [n]             show the last n JSONL log entries (default 10)
+/scheduler ledger              show the per-prompt outcome table (hash · status · prompt · summary)
 /scheduler config              show the config file path and current values
 ```
 
@@ -318,9 +319,10 @@ Everything lives under `~/.omp/agent/scheduler/`
 
 | File | Contents |
 |---|---|
-| `state.json` | Queue, task statuses/attempts (and per-task `policyResets`), run mode, observed session-window start times (each tagged with its quota profile), in-flight task id, provider rate-limit hold (`rateLimitedUntil`). Written atomically on every change; survives restarts. |
+| `state.json` | Queue, task statuses/attempts (plus per-task `promptHash` and `policyResets`), run mode, observed session-window start times (each tagged with its quota profile), in-flight task id, provider rate-limit hold (`rateLimitedUntil`). Written atomically on every change; survives restarts. |
 | `config.json` | User-editable configuration (table above). |
-| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, error, duration), `blocked` (quota, rate limit, outage, or content-policy violation, with resume time), `context_reset` (poisoned-conversation purge, with method), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice`. `/scheduler log [n]` pretty-prints the tail. |
+| `task-log.jsonl` | Append-only log: one JSON object per event — `start`, `pause`, `stop`, `dispatch`, `end` (with status, `classification`, error, duration), `blocked` (quota, rate limit, outage, or content-policy violation, with resume time), `context_reset` (poisoned-conversation purge, with method), `resume_timer`, `window_start`, `recovered`, `retry_failed`, `notice`. Every `end` carries its `classification` (`rate_limit`/`outage`/`content_policy`/`user_abort`/`task_fault`/`stalled`/`shutdown`) so the log line alone explains why a turn ended and whether it cost an attempt. `/scheduler log [n]` pretty-prints the tail. |
+| `task-ledger.md` | Human-readable outcome table, one row per task keyed by `promptHash` (hash · status · prompt · code-generated summary). Regenerated from state after every pass/fail — zero LLM tokens. `/scheduler ledger` prints it and refreshes the file. |
 
 Deleting `state.json` resets the queue and window history; deleting
 `config.json` restores defaults on next load.
@@ -377,7 +379,9 @@ bun run test      # behavioral smoke test against a mocked ExtensionAPI
 The smoke test (`test/smoke.ts`) uses a throwaway `PI_CODING_AGENT_DIR`, so
 it never touches your real queue or config. It covers dispatch/settle flow,
 quota gating and window accounting, rate-limit holds, outage backoff,
-watchdog recovery, abort-pause, crash recovery, retry, and export.
+watchdog recovery, abort-pause, crash recovery, retry, export, content-policy
+context reset, batch parsing (verbatim + legacy JSON), self-describing `end`
+log classification, and routing timers through the managed context.
 
 ## License
 

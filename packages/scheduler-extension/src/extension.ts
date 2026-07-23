@@ -27,6 +27,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import CONTEXT_RESET_COMPACT_INSTRUCTION from "./prompts/context-reset-compact.md" with { type: "text" };
+import DEFAULT_PROMPT_PREAMBLE from "./prompts/prompt-preamble.md" with { type: "text" };
+import DEFAULT_RESUME_PREAMBLE from "./prompts/resume-preamble.md" with { type: "text" };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -250,16 +253,26 @@ interface CtxLike {
 	 */
 	newSession?(options?: unknown): Promise<unknown> | undefined;
 	compact?(instructionsOrOptions?: unknown): Promise<void> | undefined;
+	/**
+	 * Managed background timers (runner ManagedTimers / ExtensionContext). Unlike
+	 * raw globals, a throw inside the callback is contained and routed through the
+	 * extension error channel instead of escaping as a process-fatal
+	 * `uncaughtException` that would tear down the whole session (issue #5664);
+	 * handles are unref'd and auto-cleared on `session_shutdown`. Optional so a
+	 * host that predates them degrades to the guarded global-timer fallback.
+	 */
+	setTimeout?(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
+	setInterval?(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
+	clearTimer?(timer: Timer): void;
 }
 
 /**
- * Opaque handle returned by setTimeout (number under DOM typings, Timeout
- * object under Node/Bun); only ever passed back to clearTimeout.
+ * Timer handle. Managed timers (`ctx.setTimeout`/`ctx.setInterval`) and the
+ * global fallback both return a Bun `Timer`; only ever passed back to the
+ * matching clear (`ctx.clearTimer`, or `clearTimeout`/`clearInterval`).
  */
-type TimerHandle = number;
-
-/** Opaque handle returned by setInterval; only ever passed back to clearInterval. */
-type IntervalHandle = number;
+type TimerHandle = Timer;
+type IntervalHandle = Timer;
 
 // ---------------------------------------------------------------------------
 // Data dir + defaults
@@ -291,21 +304,6 @@ function logFile(): string {
 function ledgerFile(): string {
 	return path.join(dataDir(), "task-ledger.md");
 }
-
-const DEFAULT_PROMPT_PREAMBLE = [
-	"[scheduler] Unattended queued task — no human is watching this session.",
-	"Rules for this task:",
-	"- Never ask questions or wait for confirmation; make every decision autonomously.",
-	"- Do not narrate progress. Do not produce summaries unless the task explicitly asks for one.",
-	"- Keep all output terse: results, file paths, and errors only.",
-	"- End with a single final line noting any assumptions you made.",
-].join("\n");
-
-const DEFAULT_RESUME_PREAMBLE = [
-	"[scheduler] RESUME: this task was interrupted before completion (error, rate limit, or abort).",
-	"Continue exactly where you left off; do not repeat completed work.",
-	"Inspect the current state of files/artifacts to verify what is already done, then finish only the remainder.",
-].join("\n");
 
 /**
  * Default quota profiles: Anthropic Claude subscription auth is metered in
@@ -592,9 +590,10 @@ function fmtClock(epochMs: number): string {
  * Best-effort effective `tools.approvalMode` from persisted settings.
  *
  * settings.md § "Where settings live" / § "Precedence": project
- * `<cwd>/.omp/config.yml` (and legacy `settings.json`) overrides global
- * `~/.omp/agent/config.yml` (and legacy `settings.json`). Runtime flags
- * (`--yolo`, `--approval-mode`) are in-memory only and CANNOT be detected
+ * `<cwd>/.omp/config.{yml,yaml}` (and legacy `settings.json`) overrides global
+ * `~/.omp/agent/config.{yml,yaml}` (and legacy `settings.json`). The loader
+ * accepts both YAML extensions (MAIN_CONFIG_FILENAMES), so probe both. Runtime
+ * flags (`--yolo`, `--approval-mode`) are in-memory only and CANNOT be detected
  * here — callers must treat a non-yolo result as a warning, not a hard fact.
  * Returns null when no layer sets the key (schema default is `yolo`,
  * approval-mode.md § "Modes").
@@ -602,8 +601,10 @@ function fmtClock(epochMs: number): string {
 function detectApprovalMode(cwd: string): string | null {
 	const candidates = [
 		path.join(cwd, ".omp", "config.yml"),
+		path.join(cwd, ".omp", "config.yaml"),
 		path.join(cwd, ".omp", "settings.json"),
 		path.join(agentDir(), "config.yml"),
+		path.join(agentDir(), "config.yaml"),
 		path.join(agentDir(), "settings.json"),
 	];
 	for (const file of candidates) {
@@ -918,11 +919,37 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	 */
 	let pendingContextReset = false;
 
+	/**
+	 * Run a timer callback so a throw can never escape as a process-fatal
+	 * `uncaughtException`. Managed timers already isolate the callback inside the
+	 * runner; this only backstops the global-timer fallback used before a managed
+	 * context is available.
+	 */
+	function guardTick(fn: () => void): void {
+		try {
+			fn();
+		} catch (err) {
+			try {
+				logEvent({ event: "notice", detail: `timer callback error: ${String(err)}` });
+			} catch {}
+		}
+	}
 	function startTimer(ms: number, fn: () => void): TimerHandle {
-		return setTimeout(fn, ms) as unknown as TimerHandle;
+		const ctx = liveCtx;
+		// Prefer the runner's managed timer surface: a throw in `fn` (e.g. an I/O
+		// error while persisting state/logs from a dispatch tick) is contained and
+		// reported instead of taking down the omp session (issue #5664), and the
+		// handle is unref'd + auto-cleared on session_shutdown.
+		if (ctx?.setTimeout) return ctx.setTimeout(fn, ms);
+		const handle = setTimeout(() => guardTick(fn), ms);
+		handle.unref?.();
+		return handle;
 	}
 	function stopTimer(handle: TimerHandle | null): null {
-		clearTimeout(handle as TimerHandle); // spec no-op for null/stale handles
+		if (handle === null) return null;
+		// clearTimer / clearTimeout are spec no-ops for already-fired handles.
+		if (liveCtx?.clearTimer) liveCtx.clearTimer(handle);
+		else clearTimeout(handle);
 		return null;
 	}
 	function clearTimers(): void {
@@ -966,15 +993,22 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	}
 	function startWatchdog(): void {
 		if (watchdogTimer !== null) return;
-		const handle = setInterval(watchdogTick, cfg.watchdogIntervalMs);
+		const ctx = liveCtx;
+		// Same isolation rationale as startTimer: a throw in a watchdog tick must
+		// be contained by the runner, not crash the session (issue #5664).
+		if (ctx?.setInterval) {
+			watchdogTimer = ctx.setInterval(watchdogTick, cfg.watchdogIntervalMs);
+			return;
+		}
+		const handle = setInterval(() => guardTick(watchdogTick), cfg.watchdogIntervalMs);
 		handle.unref?.(); // Node/Bun: don't keep the host process alive for the watchdog
-		watchdogTimer = handle as unknown as IntervalHandle; // same opaque-handle convention as TimerHandle
+		watchdogTimer = handle;
 	}
 	function stopWatchdog(): void {
-		if (watchdogTimer !== null) {
-			clearInterval(watchdogTimer as IntervalHandle);
-			watchdogTimer = null;
-		}
+		if (watchdogTimer === null) return;
+		if (liveCtx?.clearTimer) liveCtx.clearTimer(watchdogTimer);
+		else clearInterval(watchdogTimer);
+		watchdogTimer = null;
 	}
 
 	// ---- persistence -------------------------------------------------------
@@ -1145,9 +1179,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 				await ctx.newSession();
 				method = "newSession";
 			} else if (typeof ctx?.compact === "function") {
-				await ctx.compact(
-					"Context reset after a content-policy rejection. Summarize prior work as a terse status only — omit verbatim code, commands, payloads, logs, and any security-sensitive content.",
-				);
+				await ctx.compact(CONTEXT_RESET_COMPACT_INSTRUCTION.trim());
 				method = "compact";
 			}
 		} catch (err) {
@@ -1569,7 +1601,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	// pi.registerCommand — authoring-extensions.md § "Registering commands".
 	pi.registerCommand("scheduler", {
 		description:
-			"Quota-aware prompt queue: add|add-file|list|status|start|pause|stop|remove|retry|clear|export|log|config",
+			"Quota-aware prompt queue: add|add-file|list|status|start|pause|stop|remove|retry|clear|export|log|ledger|config",
 		handler: async (args, ctx) => {
 			const cctx = ctx as unknown as CtxLike;
 			liveCtx = cctx;
