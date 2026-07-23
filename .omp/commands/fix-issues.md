@@ -38,15 +38,16 @@ Each subagent **MUST** follow this exact workflow:
 1. Read `issue://<N>` (or `issue://<owner>/<repo>/<N>` for cross-repo) — fetches the issue body plus comments; comments often carry the real repro and fix hints. Append `?comments=0` only if you explicitly want to skip them.
 2. `gh search prs` for the issue number to see if a fix is already in flight.
    - If a PR exists and looks reasonable → switch tracks: review that PR per `.omp/commands/review-prs.md` instead, and report back as `existing-pr`. Do **not** open a competing fix.
-3. Search open and closed issues for closely related reports using subsystem, symptom, and suspected root-cause terms—not only `#<N>`. Record reports that plausibly share the invariant, but do not treat them as confirmed until source-level investigation and reproduction support the link.
+3. Search open and closed issues for closely related reports using subsystem and symptom terms from the issue — not only `#<N>`. Record reports that plausibly share the invariant, but do not treat them as confirmed until source-level investigation and reproduction support the link.
 
 #### b. Diagnose & try to reproduce — **in the current cwd, on `main`**
 
 Reproduce **here first**, before touching any worktree. The point is to confirm the bug is real on current main before investing in a fix branch.
 
 1. Read the relevant source paths in this checkout. Trace the reported entry point through shared helpers, sibling call paths, and downstream consumers; inspect relevant state, concurrency, and lifecycle boundaries. For bugs involving persistence, path resolution, shared mutable state, cache, concurrency, lifecycle, retries, or cross-process/project boundaries, map the causal chain and responsible identity, ownership, or namespace key. Form a concrete hypothesis (one or two sentences) about the failure and its invariant. Do not guess when that boundary is ambiguous.
-2. Write a focused test file under the package the bug lives in. Naming: `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.) — unique, greppable, deletable.
-3. Run **only that test file**, not the suite. Confirm it fails for the reason in the issue.
+2. Search open and closed issues for closely related reports using the root cause identified in the hypothesis. Record reports that plausibly share the invariant; expand the fix scope to cover demonstrably same-invariant paths.
+3. Write a focused test file under the package the bug lives in. Naming: `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.) — unique, greppable, deletable.
+4. Run **only that test file**, not the suite. Confirm it fails for the reason in the issue.
 
 Outcomes:
 - **Reproduced** → continue to (c).
@@ -143,8 +144,6 @@ Group worktree paths by status (`fixed` first), so the user can `cd` and push th
 - Verify issue claims, review findings, and related-report links against source and focused reproduction before relying on them.
 - Treat every demonstrably same-invariant path as in scope; explicitly bound unrelated cleanup, speculative hardening, and refactors outside it.
 - Tests enforce verified behavior.
-- Make clean, maintained source-level root-cause fixes; do not ship stubs, mocks-as-product-code, or placeholders.
-- Do not push, open PRs, or comment on issues; the human handles delivery.
 
 ## Rules
 
@@ -154,4 +153,7 @@ Group worktree paths by status (`fixed` first), so the user can `cd` and push th
 - **MUST** symlink `target`, `node_modules`, and the native `*.node` binaries before any build/test runs in the worktree. **MUST NOT** symlink the whole `packages/natives/native/` directory that would shadow tracked source files.
 - **MUST** use conventional commits with `Fixes #<N>` in the body.
 - For bugs involving persistence, path resolution, shared mutable state, cache, concurrency, lifecycle, retries, or cross-process/project boundaries, **MUST** identify the causal chain and responsible identity, ownership, or namespace key; **MUST** add the smallest negative regression proving the unwanted side effect does not recur; and **MUST** add paired-context/isolation coverage when a shared resource can cross independent contexts or agents.
+- **MUST NOT** push, open PRs, or comment on issues; the human handles delivery.
+- **MUST NOT** ship stubs, mocks-as-product-code, or "TODO: implement" placeholders as a fix.
+- **MUST NOT** expand scope: fix the reported bug, not adjacent code smells.
 - If repro fails, delete the temporary test file from cwd before yielding — leave the original checkout clean.
