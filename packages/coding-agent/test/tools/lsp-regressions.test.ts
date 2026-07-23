@@ -315,6 +315,83 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("returns an already-starting client without creating a second client", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pending-client-");
+		const initialize = Promise.withResolvers<void>();
+		try {
+			const server = installFakeLsp(async (message, srv) => {
+				if (message.method === "initialize") {
+					await initialize.promise;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = {
+				command: "fake-pending-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			const startingClient = lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await server.waitFor(message => message.method === "initialize");
+			const existingClient = lspClient.getActiveOrPendingClient(config, tempDir.path());
+			let settled = false;
+			void existingClient.then(() => {
+				settled = true;
+			});
+			await Bun.sleep(0);
+			expect(settled).toBe(false);
+
+			initialize.resolve();
+			expect(await existingClient).toBe(await startingClient);
+			expect(server.received.filter(message => message.method === "initialize")).toHaveLength(1);
+		} finally {
+			initialize.resolve();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("stops waiting for a pending client on caller abort without cancelling its initialization", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pending-abort-");
+		const initialize = Promise.withResolvers<void>();
+		try {
+			const server = installFakeLsp(async (message, srv) => {
+				if (message.method === "initialize") {
+					await initialize.promise;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = {
+				command: "fake-abort-pending-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			const startingClient = lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await server.waitFor(message => message.method === "initialize");
+			const controller = new AbortController();
+			const waitingClient = lspClient.getActiveOrPendingClient(config, tempDir.path(), controller.signal);
+			controller.abort();
+			await expect(waitingClient).rejects.toThrow();
+
+			initialize.resolve();
+			expect(await startingClient).toBeDefined();
+			expect(server.received.filter(message => message.method === "initialize")).toHaveLength(1);
+		} finally {
+			initialize.resolve();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("advertises workspace folder support during LSP initialization", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-workspace-folders-");
 		try {

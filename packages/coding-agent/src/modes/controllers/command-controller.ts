@@ -1636,17 +1636,24 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 }
 
 function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
-	const absolute = limits
-		.map(limit => limit.window?.resetsAt)
-		.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > nowMs);
-	if (absolute.length === 0) return null;
-	const offsets = absolute.map(value => value - nowMs);
+	const windows = limits
+		.map(limit => limit.window)
+		.filter(
+			(window): window is NonNullable<UsageLimit["window"]> =>
+				window?.resetsAt !== undefined && Number.isFinite(window.resetsAt) && window.resetsAt > nowMs,
+		);
+	if (windows.length === 0) return null;
+	// Use the shared verb when every contributing window agrees (e.g. all "tick");
+	// mixed or absent labels fall back to the generic "resets".
+	const labels = new Set(windows.map(window => window.resetLabel ?? "resets"));
+	const verb = labels.size === 1 ? [...labels][0]! : "resets";
+	const offsets = windows.map(window => window.resetsAt! - nowMs);
 	const minReset = Math.min(...offsets);
 	const maxReset = Math.max(...offsets);
 	if (maxReset - minReset > 60_000) {
-		return `resets in ${formatDuration(minReset)}–${formatDuration(maxReset)}`;
+		return `${verb} in ${formatDuration(minReset)}–${formatDuration(maxReset)}`;
 	}
-	return `resets in ${formatDuration(minReset)}`;
+	return `${verb} in ${formatDuration(minReset)}`;
 }
 /**
  * Compact one-line quota summary for a single advisor's provider.

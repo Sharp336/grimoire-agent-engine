@@ -207,6 +207,8 @@ interface UiNumber extends UiBase {
 }
 
 interface UiString extends UiBase {
+	/** Mask the value in both the settings row and text editor. */
+	secret?: boolean;
 	/**
 	 * Submenu options.
 	 *  - Array  → submenu with these choices.
@@ -219,6 +221,7 @@ interface UiString extends UiBase {
 /** Wide ui shape exposed to consumers that walk the schema generically. */
 export type AnyUiMetadata = UiBase & {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
+	secret?: boolean;
 };
 
 interface BooleanDef {
@@ -2753,7 +2756,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"hindsight.apiToken": { type: "string", default: undefined },
+	"hindsight.apiToken": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight API Token",
+			description: "Bearer token for authenticated Hindsight servers",
+			condition: "hindsightActive",
+			secret: true,
+		},
+	},
 
 	"hindsight.bankId": {
 		type: "string",
@@ -3945,6 +3959,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.renderMarkdownResults": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Markdown Results",
+			description: "Render non-JSON MCP text results as Markdown in the transcript",
+		},
+	},
+
 	"mcp.notifications": {
 		type: "boolean",
 		default: false,
@@ -4086,6 +4111,18 @@ export const SETTINGS_SCHEMA = {
 					description: "git worktree if available, otherwise recursive copy",
 				},
 			],
+		},
+	},
+
+	"task.isolation.apply": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Apply Isolated Changes",
+			description:
+				"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
 		},
 	},
 
