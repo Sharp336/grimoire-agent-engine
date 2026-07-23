@@ -1017,6 +1017,13 @@ class RetryFallbackSucceededEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class CredentialRotatedEvent:
+    provider: str
+    model_id: str | None = None
+    type: Literal["credential_rotated"] = "credential_rotated"
+
+
+@dataclass(slots=True, frozen=True)
 class TtsrTriggeredEvent:
     rules: tuple[JsonObject, ...]
     type: Literal["ttsr_triggered"] = "ttsr_triggered"
@@ -1058,6 +1065,7 @@ RpcAgentEvent: TypeAlias = (
     | AutoRetryEndEvent
     | RetryFallbackAppliedEvent
     | RetryFallbackSucceededEvent
+    | CredentialRotatedEvent
     | TtsrTriggeredEvent
     | TodoReminderEvent
     | TodoAutoClearEvent
@@ -1657,6 +1665,11 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
     if event_type == "retry_fallback_succeeded":
         return RetryFallbackSucceededEvent(
             model=str(payload.get("model", "")), role=str(payload.get("role", ""))
+        )
+    if event_type == "credential_rotated":
+        return CredentialRotatedEvent(
+            provider=str(payload.get("provider", "")),
+            model_id=_optional_str(payload, "modelId"),
         )
     if event_type == "ttsr_triggered":
         return TtsrTriggeredEvent(

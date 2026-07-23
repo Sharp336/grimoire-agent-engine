@@ -27,6 +27,7 @@ from .protocol import (
     BranchResult,
     CancellationResult,
     CompactionResult,
+    CredentialRotatedEvent,
     ExtensionError,
     ExtensionUiRequest,
     ImageContent,
@@ -99,6 +100,7 @@ AutoRetryStartListener = Callable[[AutoRetryStartEvent], None]
 AutoRetryEndListener = Callable[[AutoRetryEndEvent], None]
 RetryFallbackAppliedListener = Callable[[RetryFallbackAppliedEvent], None]
 RetryFallbackSucceededListener = Callable[[RetryFallbackSucceededEvent], None]
+CredentialRotatedListener = Callable[[CredentialRotatedEvent], None]
 TtsrTriggeredListener = Callable[[TtsrTriggeredEvent], None]
 TodoReminderListener = Callable[[TodoReminderEvent], None]
 TodoAutoClearListener = Callable[[TodoAutoClearEvent], None]
@@ -660,6 +662,11 @@ class RpcClient:
         self, listener: RetryFallbackSucceededListener
     ) -> Callable[[], None]:
         return self._add_typed_event_listener("retry_fallback_succeeded", listener)
+
+    def on_credential_rotated(
+        self, listener: CredentialRotatedListener
+    ) -> Callable[[], None]:
+        return self._add_typed_event_listener("credential_rotated", listener)
 
     def on_ttsr_triggered(self, listener: TtsrTriggeredListener) -> Callable[[], None]:
         return self._add_typed_event_listener("ttsr_triggered", listener)

@@ -4,6 +4,7 @@ import unittest
 
 from omp_rpc import (
     AgentEndEvent,
+    CredentialRotatedEvent,
     ExtensionUiRequest,
     SessionState,
     TodoReminderEvent,
@@ -332,6 +333,32 @@ class ProtocolParsingTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_parse_credential_rotated_notification(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "credential_rotated",
+                "provider": "anthropic",
+                "modelId": "claude-sonnet-4-5",
+            }
+        )
+
+        self.assertIsInstance(notification, CredentialRotatedEvent)
+        self.assertEqual(notification.type, "credential_rotated")
+        self.assertEqual(notification.provider, "anthropic")
+        self.assertEqual(notification.model_id, "claude-sonnet-4-5")
+
+    def test_parse_credential_rotated_notification_without_model(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "credential_rotated",
+                "provider": "anthropic",
+            }
+        )
+
+        self.assertIsInstance(notification, CredentialRotatedEvent)
+        self.assertEqual(notification.provider, "anthropic")
+        self.assertIsNone(notification.model_id)
 
     def test_parse_notification_deep_clones_nested_messages(self) -> None:
         payload = {
