@@ -3,6 +3,8 @@
   "settings.autolearn.autoContinue.label": "停止时自动运行捕获",
   "settings.autolearn.enabled.description": "agent 停止后推动其捕获教训到记忆并创建/增强隔离管理技能",
   "settings.autolearn.enabled.label": "自动学习（实验性）",
+  "settings.hindsight.apiToken.description": "用于认证 Hindsight 服务器的 Bearer 令牌",
+  "settings.hindsight.apiToken.label": "Hindsight API 令牌",
   "settings.hindsight.apiUrl.description": "Hindsight 服务器地址",
   "settings.hindsight.apiUrl.label": "Hindsight API 地址",
   "settings.hindsight.autoRecall.description": "每个会话首轮自动回忆记忆",

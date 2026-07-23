@@ -103,5 +103,7 @@
   "settings.commands.enableOpencodeUser.label": "OpenCode User Commands",
   "settings.commands.enableOpencodeUser.description": "Load commands from ~/.config/opencode/commands/",
   "settings.commands.enableOpencodeProject.label": "OpenCode Project Commands",
-  "settings.commands.enableOpencodeProject.description": "Load commands from .opencode/commands/"
+  "settings.commands.enableOpencodeProject.description": "Load commands from .opencode/commands/",
+  "settings.title.refreshOnReplan.label": "Refresh Title on Replan",
+  "settings.title.refreshOnReplan.description": "Refresh generated session titles after todo init replans unless the title was set by the user"
 }
