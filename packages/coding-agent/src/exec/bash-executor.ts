@@ -21,6 +21,8 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
 	sessionKey?: string;
+	/** Terminate every process spawned by the command before resolving. */
+	terminateBackgroundProcessesOnExit?: boolean;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
@@ -41,12 +43,16 @@ export interface BashExecutorOptions {
 	) => Promise<string | undefined>;
 }
 
+export type BashTerminationReason = "completed" | "cancelled" | "timeout";
+
 export interface BashResult {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
 	/** True when the command was killed by its timeout deadline (not a user abort). */
 	timedOut?: boolean;
+	/** Structured termination kind; optional for backward-compatible mocks and SDK consumers. */
+	terminationReason?: BashTerminationReason;
 	truncated: boolean;
 	totalLines: number;
 	totalBytes: number;
@@ -311,6 +317,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		return {
 			exitCode: undefined,
 			cancelled: true,
+			terminationReason: "cancelled",
 			...(await sink.dump("Command cancelled")),
 		};
 	}
@@ -394,6 +401,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cwd: commandCwd,
 				env: commandEnv,
 				timeoutMs: nativeTimeoutMs,
+				terminateBackgroundProcessesOnExit: options?.terminateBackgroundProcessesOnExit,
 				signal: runAbortController.signal,
 			},
 			(err, chunk) => {
@@ -425,6 +433,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
+				terminationReason: winner.kind === "timeout" ? "timeout" : "cancelled",
 				...(await sink.dump(
 					winner.kind === "timeout" && deadlineTimeoutMs !== undefined
 						? `Command timed out after ${Math.round(deadlineTimeoutMs / 1000)} seconds`
@@ -450,6 +459,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				timedOut: true,
+				terminationReason: "timeout",
 				...(await sink.dump(annotation)),
 			};
 		}
@@ -463,6 +473,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				terminationReason: "cancelled",
 				...(await sink.dump("Command cancelled")),
 			};
 		}
@@ -491,6 +502,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
+			terminationReason: "completed",
 			workingDir: winner.result.workingDir,
 			...(await sink.dump()),
 		};
@@ -510,12 +522,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// `:async:` keys are per-job (jobId is unique), so the Shell would
 				// otherwise stay in the process-global map forever after completion.
 				shellSessions.delete(sessionKey);
-				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
-				// any `nohup`/`&` children (kill-on-drop). If the command left a live
-				// background job, retain the Shell so the process survives across
-				// turns; it is reaped once its last job exits and still dies with the
-				// harness. Skip on resetSession (cancel/error) — those tear down.
-				if (!resetSession && shellSession) {
+				if (!resetSession && shellSession && !options?.terminateBackgroundProcessesOnExit) {
+					// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
+					// any `nohup`/`&` children (kill-on-drop). Ordinary async Bash retains
+					// live jobs across turns; managed monitor sources terminate them in
+					// the native run before it resolves.
 					await retainShellWithLiveBackgroundJobs(shellSession);
 				}
 			}

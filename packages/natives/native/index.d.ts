@@ -1535,6 +1535,8 @@ export interface ShellRunOptions {
   env?: Record<string, string>
   /** Timeout in milliseconds before cancelling the command. */
   timeoutMs?: number
+  /** Terminate all processes spawned by the command before resolving. */
+  terminateBackgroundProcessesOnExit?: boolean
   /** Abort signal for cancelling the operation. */
   signal?: unknown
 }

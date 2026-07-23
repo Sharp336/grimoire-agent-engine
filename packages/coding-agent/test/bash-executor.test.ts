@@ -162,6 +162,7 @@ describe("executeBash", () => {
 		const result = await executeBash("exit 7", { cwd: tempDir, timeout: 5000 });
 		expect(result.exitCode).toBe(7);
 		expect(result.cancelled).toBe(false);
+		expect(result.terminationReason).toBe("completed");
 	});
 
 	it("honors cwd", async () => {
@@ -426,6 +427,7 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				ZDOTDIR: shellDir,
 			},
 			prefix: undefined,
 		});
@@ -557,6 +559,7 @@ exit 64
 		}
 		const result = await executeBash("sleep 10", { cwd: tempDir, timeout: 50 });
 		expect(result.cancelled).toBe(true);
+		expect(result.terminationReason).toBe("timeout");
 		expect(result.output).toContain("timed out");
 	});
 
@@ -593,6 +596,7 @@ exit 64
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
+		expect(result.terminationReason).toBe("cancelled");
 		expect(result.output).toContain("Command cancelled");
 	});
 
@@ -718,6 +722,7 @@ exit 64
 		});
 
 		expect(result.cancelled).toBe(true);
+		expect(result.terminationReason).toBe("timeout");
 		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
 		expect(nativeSignal).toBeDefined();

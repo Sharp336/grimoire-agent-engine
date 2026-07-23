@@ -2280,6 +2280,7 @@ export class AgentSession {
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
+			this.yieldQueue.scheduleIdleFlushIfNeeded();
 		}
 	}
 
@@ -4108,21 +4109,29 @@ export class AgentSession {
 	}
 
 	/**
-	 * True when a background async job owned by this agent is still running with
-	 * an unsuppressed delivery, or a finished job's delivery is still queued or
-	 * in flight. Either way the async-result follow-up will re-wake the loop, so
-	 * a settle observed now is a scheduling pause rather than a terminal stop:
-	 * stop-time passes (todo reminder, session_stop hooks) defer to the settle
-	 * reached once the session is fully idle. Suppressed deliveries
-	 * (acknowledged, or watched by an in-flight `hub` wait) never wake the loop,
-	 * so they don't count.
+	 * True when the live agent loop is streaming, a model-facing async message
+	 * is queued or scheduled for idle injection, or a finite background job owned
+	 * by this agent still has an unsuppressed terminal delivery. Any such path can
+	 * re-wake the loop, so a settle observed now is a scheduling pause rather than
+	 * a terminal stop. Persistent monitors do not count merely by remaining alive:
+	 * their queued events and eventual terminal deliveries are tracked separately.
+	 * Suppressed terminal deliveries (acknowledged, or watched by an in-flight
+	 * `hub` wait) never wake the loop, so they do not count.
 	 */
 	#hasPendingAsyncWake(): boolean {
+		if (
+			this.agent.state.isStreaming ||
+			this.yieldQueue.hasDeliverable("async-result") ||
+			this.yieldQueue.hasDeliverable("monitor-event") ||
+			this.yieldQueue.hasPendingIdleFlush()
+		) {
+			return true;
+		}
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
-			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
+			manager.getRunningJobs(ownerFilter).some(job => !job.persistent && !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter)
 		);
 	}
@@ -4924,6 +4933,7 @@ export class AgentSession {
 
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
+			this.yieldQueue.scheduleIdleFlushIfNeeded();
 			const settledMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
@@ -5190,10 +5200,10 @@ export class AgentSession {
 				}
 			}
 			// A pending async wake means this settle is a scheduling pause, not
-			// the terminal stop: the async-result delivery continues the loop and
-			// the real stop settles later. Defer the session_stop hook pass until
-			// the session is fully idle (the todo reminder above defers the same
-			// way inside #checkTodoCompletion).
+			// the terminal stop: async-result or monitor-event delivery continues
+			// the loop and the real stop settles later. Defer the session_stop hook
+			// pass until the session is fully idle (the todo reminder above defers
+			// the same way inside #checkTodoCompletion).
 			if (this.#hasPendingAsyncWake()) {
 				await emitAgentEndNotification({ willContinue: true });
 				return;

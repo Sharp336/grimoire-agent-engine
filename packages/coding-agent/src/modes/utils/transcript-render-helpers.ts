@@ -7,6 +7,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import type { AsyncJob } from "../../async/job-manager";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -31,10 +32,10 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 	const details = (
 		message as CustomMessage<{
 			jobId?: string;
-			type?: "bash" | "task";
+			type?: AsyncJob["type"];
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: AsyncJob["type"]; label?: string; durationMs?: number }>;
 		}>
 	).details;
 	const jobs =

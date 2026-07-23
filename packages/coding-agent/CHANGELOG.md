@@ -702,6 +702,7 @@
 
 ### Added
 
+- Added main-agent `monitor` jobs for bounded, rate-limited command-line and WebSocket events that wake the agent through the existing async yield path while preserving completion-only async Bash.
 - Added `invalidate` action to the usage command to clear cached usage reports
 - Added model-oriented keys and wildcard entries to `retry.fallbackChains`: a `provider/model-id` key attaches a fallback chain to that exact model, a `provider/*` key covers every current or future model of a provider, and a `provider/*` chain entry keeps the failing model's id while swapping the provider (`google-antigravity/x` → `google/x`) — so fallbacks survive role and model reassignments without config edits. Keys resolve by specificity: exact model, then provider wildcard, then role, then `default`.
 - Added fallback-chain editing to the /models Roles view: each role's `retry.fallbackChains` entries render as indented rows beneath it, `f` picks a fallback model to append, Enter on an entry replaces it, `x`/backspace removes it, and `[`/`]` (or shift+↑/↓) reorder the chain.

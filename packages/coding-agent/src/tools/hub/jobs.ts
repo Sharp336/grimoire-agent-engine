@@ -131,7 +131,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 
 interface TrackedJobLike {
 	id: string;
-	type: "bash" | "task";
+	type: "bash" | "task" | "monitor";
 	status: string;
 	label: string;
 	startTime: number;

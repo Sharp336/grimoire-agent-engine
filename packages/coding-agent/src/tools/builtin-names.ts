@@ -17,6 +17,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"rewind",
 	"task",
 	"hub",
+	"monitor",
 	"todo",
 	"web_search",
 	"write",

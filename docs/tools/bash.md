@@ -12,6 +12,7 @@
   - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
   - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
+  - `packages/coding-agent/src/tools/monitor.ts` — use when intermediate process output must wake the agent.
   - `packages/coding-agent/src/session/streaming-output.ts` — tail buffer, truncation, artifact spill.
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
   - `packages/coding-agent/src/config/settings-schema.ts` — default interceptor rules.
@@ -26,7 +27,7 @@
 | `timeout` | `number` | No | Timeout in seconds. Default `300`; clamped to `1..3600` by `clampTimeout("bash", ...)`. |
 | `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
 | `pty` | `boolean` | No | Request PTY mode. Default `false`. PTY is used only when `pty: true`, `PI_NO_PTY !== "1"`, and the tool context has a UI. |
-| `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not extend the effective `timeout`, so jobs are still killed after the clamped `1..3600` second budget. |
+| `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id; only terminal completion is delivered model-side. It does not extend the effective `timeout`, so jobs are still killed after the clamped `1..3600` second budget. |
 
 ## Outputs
 The tool returns a single `text` content block plus optional `details`.
@@ -43,10 +44,10 @@ The tool returns a single `text` content block plus optional `details`.
 - Success, background start (`async: true` or auto-background):
   - `content[0].text`: optional preview tail, timeout notice if any, then `Background job <id> started: <label>` with follow-up instructions.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
-- Background progress / completion:
-  - delivered through `onUpdate` / async job manager, not the initial return.
-  - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
-  - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit is recorded as a failed background job.
+- Background renderer progress / model completion:
+  - renderer progress may contain tail text while the managed run is active.
+  - model-facing delivery remains completion-only; ordinary async Bash never emits intermediate `monitor-event` messages.
+  - completion/failure carries final text and `details.async.state: "completed" | "failed"`. A non-zero exit is recorded as a failed background job.
 - Failure:
   - unfinished execution (`cancelled`, timeout, missing exit status), validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`.
 
@@ -93,6 +94,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
 5. Auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY, and an async job manager.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window.
+   - Use `monitor` instead when newline-delimited intermediate output must wake the agent while the command remains running.
 6. Intercepted command
    - No subprocess created.
    - Returns a `ToolError` pointing the model at `read`, `grep`, `glob`, `edit`, or `write`.
@@ -114,7 +116,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
   - Invalidates `github-cache` rows before execution when the command contains a mutating `gh issue`/`gh pr` subcommand, so later `issue://`/`pr://` reads see post-mutation state (`invalidateGithubCacheForBashCommand`).
 - User-visible prompts / interactive UI
   - PTY mode opens a TUI overlay titled `Console` and forwards input to the PTY.
-  - Background start messages note that the result is delivered automatically when complete and that the `hub` tool can wait on it until then.
+  - Background start messages note that the terminal result is delivered automatically and that the `hub` tool can wait on it; intermediate event streams belong to `monitor`, not async Bash.
 - Background work / cancellation
   - Async and auto-background jobs continue after the initial tool return.
   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
@@ -149,6 +151,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
 ## Notes
 - `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in isolated one-shot shells (see `shellSessionsInUse` in `bash-executor.ts`).
 - `command` URL expansions shell-escape replacements; `env` and `cwd` expansion use `noEscape: true` because they become environment values / filesystem paths, not shell text.
+- `async: true` changes when the final result is reported, not what output becomes an event stream. Use `monitor` for bounded, automatic intermediate event delivery.
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/config/settings-schema.ts`:
   - `cat|head|tail|less|more` -> `read`

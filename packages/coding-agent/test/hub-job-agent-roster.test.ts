@@ -1,10 +1,8 @@
 /**
- * The `job` tool's snapshot contract: `list` and empty-poll results must never
- * come back as empty text, and they must surface running subagents that have
- * no backing job (irc-woken/revived agents, spawns owned by another agent) so
- * the tool's picture matches the UI's running-agent count. Regression for the
- * QA report "job list returned no status output despite known running
- * background jobs and subagents".
+ * The `hub` jobs snapshot contract: job listings and empty wait results must
+ * never return empty text, and they must surface running subagents that have
+ * no backing job (message-woken/revived agents, spawns owned by another agent)
+ * so the tool's picture matches the UI's running-agent count.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
@@ -117,6 +115,28 @@ describe("hub jobs snapshot", () => {
 
 		expect((result.details as CoordinationDetails)?.jobs?.find(job => job.id === "AgentB")?.status).toBe("completed");
 		expect((result.details as CoordinationDetails)?.agents?.map(agent => agent.id)).toEqual(["AgentB"]);
+	});
+
+	test("monitor rows keep type and label while cancellation stays owner-scoped", async () => {
+		const manager = createManager();
+		const mainMonitor = manager.register("monitor", "main event feed", neverResolves, { ownerId: "Main" });
+		const otherMonitor = manager.register("monitor", "other event feed", neverResolves, { ownerId: "Other" });
+		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
+
+		const listed = await tool.execute("list", { op: "jobs" });
+		expect((listed.details as CoordinationDetails)?.jobs).toMatchObject([
+			{ id: mainMonitor, type: "monitor", label: "main event feed", status: "running" },
+		]);
+		expect((listed.details as CoordinationDetails)?.jobs?.some(job => job.id === otherMonitor)).toBe(false);
+
+		const cancelled = await tool.execute("cancel", { op: "cancel", ids: [mainMonitor, otherMonitor] });
+		expect((cancelled.details as CoordinationDetails)?.cancelled).toEqual([
+			{ id: mainMonitor, status: "cancelled" },
+			{ id: otherMonitor, status: "not_found" },
+		]);
+		expect(manager.getJob(mainMonitor)?.status).toBe("cancelled");
+		expect(manager.getJob(otherMonitor)?.status).toBe("running");
+		manager.cancel(otherMonitor, { ownerId: "Other" });
 	});
 });
 

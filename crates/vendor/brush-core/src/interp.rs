@@ -72,9 +72,10 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 /// than diffing the whole host process tree — which cannot distinguish the
 /// children of concurrent runs sharing one host process.
 ///
-/// Not called for reparented launches (`detach_reparent`): those deliberately
-/// escape the shell's descendant tree (e.g. `nohup cmd &`) and must survive
-/// teardown, so they are intentionally left unowned.
+/// Reparented launches (`detach_reparent`) are normally omitted so commands
+/// such as `nohup cmd &` survive teardown. Embedders can opt in through
+/// [`ExecutionParameters::set_observe_reparented_processes`] when they own the
+/// detached process lifetime.
 pub trait SpawnObserver: Send + Sync {
 	/// Reports a freshly spawned external child. `pgid` is the child's process
 	/// group id when known (always its own pid under `NewProcessGroup`).
@@ -105,6 +106,8 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Whether reparented launches should also be reported to `spawn_observer`.
+	observe_reparented_processes: bool,
 }
 
 impl ExecutionParameters {
@@ -148,6 +151,16 @@ impl ExecutionParameters {
 	/// Assigns a spawn-observer hook for this execution.
 	pub fn set_spawn_observer(&mut self, observer: Arc<dyn SpawnObserver>) {
 		self.spawn_observer = Some(observer);
+	}
+
+	/// Include reparented launches in spawn-observer notifications.
+	pub fn set_observe_reparented_processes(&mut self, observe: bool) {
+		self.observe_reparented_processes = observe;
+	}
+
+	/// Returns whether reparented launches are included in spawn notifications.
+	pub fn observe_reparented_processes(&self) -> bool {
+		self.observe_reparented_processes
 	}
 
 	/// Returns the active spawn-observer hook, if any.

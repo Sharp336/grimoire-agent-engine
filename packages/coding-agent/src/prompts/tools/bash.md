@@ -10,6 +10,7 @@ Use ONLY for: single binary call or short pipeline that COMPUTES a fact (`wc -l`
 - Multiple calls run concurrently; NEVER split order-dependent commands — chain with `&&` in one call (`;` only to continue past failure).
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths.
 {{#if asyncEnabled}}- `async: true` defers reporting for finite commands needing no later input.{{/if}}
+{{#if hasMonitor}}- Need intermediate process or network events while other work continues? Use `monitor`; ordinary async Bash is completion-only.{{/if}}
 </instruction>
 
 <critical>
