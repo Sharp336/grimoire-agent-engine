@@ -611,12 +611,14 @@ function fmtClock(epochMs: number): string {
  *
  * settings.md § "Where settings live" / § "Precedence": project
  * `<cwd>/.omp/config.{yml,yaml}` (and legacy `settings.json`) overrides global
- * `~/.omp/agent/config.{yml,yaml}` (and legacy `settings.json`). The loader
- * accepts both YAML extensions (MAIN_CONFIG_FILENAMES), so probe both. Runtime
- * flags (`--yolo`, `--approval-mode`) are in-memory only and CANNOT be detected
- * here — callers must treat a non-yolo result as a warning, not a hard fact.
- * Returns null when no layer sets the key (schema default is `yolo`,
- * approval-mode.md § "Modes").
+ * `~/.omp/agent/config.{yml,yaml}` (and legacy `settings.json`), and merges in
+ * project `.claude/settings*.json`. Runtime flags (`--yolo`, `--approval-mode`)
+ * are in-memory only and CANNOT be detected here — callers must treat a non-yolo
+ * result as a warning, not a hard fact. The extension can't see the host's
+ * fully-merged effective value or its provider precedence, so rather than guess
+ * which layer wins, this returns a non-yolo mode if ANY layer sets one: it never
+ * under-warns on an unattended run (a false warning is harmless; a missed one
+ * stalls). Returns null only when no layer sets the key (schema default `yolo`,
  */
 function detectApprovalMode(cwd: string): string | null {
 	const candidates = [
@@ -629,11 +631,14 @@ function detectApprovalMode(cwd: string): string | null {
 		path.join(agentDir(), "config.yaml"),
 		path.join(agentDir(), "settings.json"),
 	];
+	let firstMode: string | null = null;
 	for (const file of candidates) {
 		const mode = readApprovalModeFrom(file);
-		if (mode) return mode;
+		if (mode === null) continue;
+		firstMode ??= mode;
+		if (mode !== "yolo") return mode; // any non-yolo layer => surface the warning
 	}
-	return null;
+	return firstMode;
 }
 
 function readApprovalModeFrom(file: string): string | null {

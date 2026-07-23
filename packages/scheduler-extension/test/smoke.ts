@@ -1626,6 +1626,33 @@ export async function runSmoke(): Promise<void> {
 	await fy.command("stop", ctxFy);
 	fs.rmSync(path.join(tmpAgentDir, "config.yaml"), { force: true });
 
+	// 34. the preflight warns if ANY settings layer is non-yolo — an earlier yolo
+	// layer must not mask a later non-yolo one, since the extension can't know the
+	// host's merge precedence and must never under-warn on an unattended run.
+	{
+		fs.rmSync(configFile, { force: true });
+		fs.mkdirSync(path.join(tmpCwd, ".omp"), { recursive: true });
+		fs.mkdirSync(path.join(tmpCwd, ".claude"), { recursive: true });
+		fs.writeFileSync(path.join(tmpCwd, ".omp", "config.yml"), "tools:\n  approvalMode: yolo\n");
+		fs.writeFileSync(path.join(tmpCwd, ".claude", "settings.json"), '{ "tools": { "approvalMode": "write" } }');
+		const st = readState();
+		st.run = "stopped";
+		st.currentTaskId = null;
+		st.tasks = [];
+		st.windows = [];
+		st.nextTaskSeq = 105;
+		fs.writeFileSync(stateFile, JSON.stringify(st));
+	}
+	const pa = makeMockPi();
+	const ctxPa = makeCtx(tmpCwd, { provider: "openai", id: "gpt-5" });
+	schedulerExtension(pa.api);
+	await pa.emit("session_start", {}, ctxPa);
+	await pa.command("start", ctxPa);
+	assert.equal(ctxPa.confirmCalls, 1, "a non-yolo .claude layer still warns even though .omp/config.yml is yolo");
+	await pa.command("stop", ctxPa);
+	fs.rmSync(path.join(tmpCwd, ".omp"), { recursive: true, force: true });
+	fs.rmSync(path.join(tmpCwd, ".claude"), { recursive: true, force: true });
+
 	console.log("smoke: all assertions passed");
 	console.log(`smoke: data dir was ${tmpAgentDir}`);
 }
