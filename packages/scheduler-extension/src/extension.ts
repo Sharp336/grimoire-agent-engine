@@ -1491,15 +1491,21 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 			if (error) {
 				task.lastError = error;
 				if (forceFail) {
-					// A content-policy violation that survived maxContextResets purges:
-					// the prompt trips the classifier even in a clean context, so it is
-					// genuinely un-runnable — fail it rather than loop forever.
 					task.status = "failed";
-					notify(
-						null,
-						`scheduler: ${task.id} FAILED — content-policy violation persisted across ${task.policyResets ?? 0} context resets (${truncate(error, 80)}) — /scheduler retry ${task.id} to re-queue.`,
-						"error",
-					);
+					// Only the content-policy cap surfaces its verdict here; other forced
+					// failures (e.g. the watchdog's undeliverable-stall path) emit their
+					// own reason-specific notice at the call site, so a non-policy
+					// forced-fail must NOT also claim a content-policy violation.
+					if (classification === "content_policy") {
+						// A content-policy violation that survived maxContextResets purges:
+						// the prompt trips the classifier even in a clean context, so it is
+						// genuinely un-runnable — fail it rather than loop forever.
+						notify(
+							null,
+							`scheduler: ${task.id} FAILED — content-policy violation persisted across ${task.policyResets ?? 0} context resets (${truncate(error, 80)}) — /scheduler retry ${task.id} to re-queue.`,
+							"error",
+						);
+					}
 				} else if (refundAttempt) {
 					// Rate limits, outages, and content-policy resets are not the
 					// task's fault: refund the attempt so they never exhaust maxAttempts.

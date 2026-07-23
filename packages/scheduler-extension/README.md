@@ -264,7 +264,7 @@ wins:
 
 ```json
 "quotaProfiles": [
-	{ "match": "anthropic", "sessionHours": 5, "maxSessionsPer24h": 4 },
+	{ "match": "^anthropic$", "sessionHours": 5, "maxSessionsPer24h": 4 },
 	{ "match": ".*", "sessionHours": null, "maxSessionsPer24h": null }
 ]
 ```

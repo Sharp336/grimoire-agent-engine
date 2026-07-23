@@ -1595,6 +1595,14 @@ export async function runSmoke(): Promise<void> {
 			"an undeliverable dispatch fails after maxAttempts consecutive stalls (no infinite refund loop)",
 		);
 		assert.ok((t102.stalls ?? 0) >= 2, "the consecutive-stall counter (== maxAttempts) drove the terminal failure");
+		assert.ok(
+			ctxSc.notifications.some(n => /never started|watchdog recoveries/i.test(n)),
+			"the stall failure surfaces the undeliverable-dispatch reason",
+		);
+		assert.ok(
+			!ctxSc.notifications.some(n => /content-policy violation persisted/i.test(n)),
+			"a watchdog stall failure is NOT mislabeled as a content-policy reset",
+		);
 	}
 	await sc.command("stop", ctxSc);
 
