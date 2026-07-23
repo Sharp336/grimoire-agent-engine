@@ -689,6 +689,20 @@ impl PsHost {
 				let _ = process
 					.terminate_tree(true, 0, 5_000, core_cancel::CancelToken::default())
 					.await;
+			} else {
+				// The root exited within the grace window, but terminate_tree
+				// bails out immediately whenever the root isn't Running — it
+				// would never reap a background child the command left running
+				// when it returned (e.g. `Start-Process`/`ProcessStartInfo`
+				// with UseShellExecute, or any detached grandchild). Sweep the
+				// root's still-live direct children explicitly so ephemeral/
+				// session teardown fully releases side effects like file
+				// locks even when the sidecar itself shut down cleanly.
+				for child in process.children() {
+					let _ = child
+						.terminate_tree(false, 0, 5_000, core_cancel::CancelToken::default())
+						.await;
+				}
 			}
 		}
 		self.core.pending.lock().clear();
@@ -1577,5 +1591,67 @@ mod tests {
 		);
 
 		host.dispose().await.expect("host disposes");
+	}
+
+	/// A command can leave a detached background child running when it
+	/// returns (e.g. `Start-Process`/`ProcessStartInfo` without waiting).
+	/// `dispose()`'s `terminate_tree` call bails out immediately whenever the
+	/// root process isn't `Running` — so if the sidecar's own graceful `exit`
+	/// completes within the wait window (the common case: `Exit` just ends
+	/// the read loop, it never waits on unrelated children), that early
+	/// return previously skipped tree cleanup entirely and the background
+	/// child leaked forever. `dispose()` must reap it directly in that path.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dispose_reaps_a_background_child_even_when_the_root_exits_cleanly() {
+		if !pwsh_available() {
+			eprintln!("skipping pshost test: pwsh not found on PATH");
+			return;
+		}
+
+		let host = test_host();
+		host.start().await.expect("host starts");
+
+		let child_args = if cfg!(windows) {
+			"'ping.exe'; '-n'; '30'; '127.0.0.1'"
+		} else {
+			"'/bin/sleep'; '30'"
+		};
+		let spawn_cmd = format!(
+			"$args = @({child_args}); $psi = New-Object System.Diagnostics.ProcessStartInfo; \
+			 $psi.FileName = $args[0]; $psi.ArgumentList.Add($args[1]); if ($args.Count -gt 2) {{ \
+			 $psi.ArgumentList.Add($args[2]); $psi.ArgumentList.Add($args[3]) }}; \
+			 $psi.UseShellExecute = $false; $p = [System.Diagnostics.Process]::Start($psi); \
+			 \"child-pid:$($p.Id)\""
+		);
+		let (out, _) = run_cmd(&host, &spawn_cmd, task::CancelToken::default()).await;
+		let pid: i32 = out
+			.lines()
+			.find_map(|line| line.trim().strip_prefix("child-pid:"))
+			.and_then(|s| s.trim().parse().ok())
+			.unwrap_or_else(|| panic!("child pid printed: {out:?}"));
+
+		let is_running = |pid: i32| {
+			super::core_process::Process::from_pid(pid)
+				.is_some_and(|p| matches!(p.status(), super::core_process::ProcessStatus::Running))
+		};
+		assert!(is_running(pid), "background child is alive before dispose (pid {pid})");
+
+		host.dispose().await.expect("host disposes");
+
+		// terminate_tree's hard wave has its own internal wait; poll briefly
+		// rather than asserting instantaneously to avoid a flaky race against
+		// OS process-table teardown latency.
+		let mut reaped = false;
+		for _ in 0..20 {
+			if !is_running(pid) {
+				reaped = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		assert!(
+			reaped,
+			"dispose() must reap a background child even when the root exits cleanly (pid {pid})"
+		);
 	}
 }
